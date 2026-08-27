@@ -1044,8 +1044,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path === '/kiwi-captcha/siteverify')) {
     // e2e: the real SiteVerifyController against the record
     // + metadata persisted at issuance (the fixture's file-based storage
-    // stands in for the shared store).
-    $body = json_decode((string) file_get_contents('php://input'), true);
+    // stands in for the shared store). The wire body may arrive as JSON
+    // or as the raw application/x-www-form-urlencoded form (the provider
+    // contract): both are parsed here.
+    $rawBody = (string) file_get_contents('php://input');
+    $body = json_decode($rawBody, true);
+    if (!is_array($body)) {
+        parse_str($rawBody, $body);
+    }
     header('Content-Type: application/json');
     header('Cache-Control: no-store, private, max-age=0');
     $nonce = (string) (explode('.', (string) base64_decode((string) ($body['response'] ?? ''), true))[0] ?? '');
@@ -1071,6 +1077,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         $storage,
         null,
         $metadataStore,
+        null,
+        null,
+        2.0,
+        0,
+        null,
+        null,
+        null,
+        null,
+        null,
+        // Fixture-only: capture the actual first core VerifyOutcome plus
+        // the controller's verification context, so a failed siteverify
+        // logs the real error code (never the provider-collapsed
+        // invalid-input-response) and the surrounding context.
+        static function (\KiwiCaptcha\VerifyOutcome $outcome, array $context): void {
+            $GLOBALS['kiwi_last_siteverify_outcome'] = [
+                'code' => $outcome->isOk() ? 'ok' : $outcome->code(),
+                'context' => $context,
+            ];
+        },
     );
     // A successful verification consumes the record (single-use); the
     // fixture's file stands in for the shared retained-state store, so the
@@ -1108,31 +1133,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         @unlink(metadataFile($nonce));
     } else {
         // Diagnostic only (never through production responses): the
-        // controller maps internal failures to provider-compatible
-        // invalid-input-response, which hides the exact core verdict the
-        // test needs. Run the core verifier directly against the retained
-        // record and log the internal outcome code.
-        $diagStorage = new ArrayStorage();
-        $diagRecordArray = challengeRecordOf($nonce);
-        if ($diagRecordArray !== null) {
-            $diagRecord = \KiwiCaptcha\ChallengeRecord::fromArray($diagRecordArray);
-            $diagStorage->store($diagRecord);
-            // The diagnostic must mirror the SiteVerify verification
-            // context exactly, except for the provider error mapping:
-            // the expected scope is the fixture's server-side secret
-            // mapping ('login'), never the client-submitted action
-            // ('admin' in the forging test — using it would print a
-            // misleading wrong_scope), and the same exact request-binding
-            // expectation as the controller applies.
-            $diagOutcome = (new Verifier($diagStorage))->verify(
-                (string) ($body['response'] ?? ''),
-                $GLOBALS['kiwi_secret'],
-                'login',
-                (string) ($body['remoteip'] ?? '127.0.0.1'),
-                expectedRequestBinding: $diagRecord->requestBinding,
-            );
-            error_log(sprintf('kiwicaptcha-browser-fixture: siteverify internal outcome: %s (provider payload: %s)', $diagOutcome->isOk() ? 'ok' : $diagOutcome->code(), json_encode($payload)));
-        }
+        // controller's fixture-only observer captured the actual first
+        // core VerifyOutcome with the verification context before the
+        // provider conversion, logged verbatim. The public provider
+        // payload stays collapsed.
+        $recorded = $GLOBALS['kiwi_last_siteverify_outcome'] ?? null;
+        $diagnostic = $recorded !== null
+            ? sprintf('code=%s context=%s', $recorded['code'], json_encode($recorded['context']))
+            : 'no outcome recorded';
+        error_log(sprintf('kiwicaptcha-browser-fixture: siteverify internal outcome: %s (provider payload: %s)', $diagnostic, json_encode($payload)));
     }
     echo $response->getContent();
 

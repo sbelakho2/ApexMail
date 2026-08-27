@@ -128,8 +128,18 @@ final class ClientIpResolver
             self::MODE_SYMFONY_GLOBAL => \is_array(Request::getTrustedProxies()) ? Request::getTrustedProxies() : [],
             default => $this->trustedProxies,
         };
+        // The trusted-header policy: Kiwi's own mode trusts both
+        // forwarding header families from its configured peers;
+        // symfony_global inherits Symfony's header bitmask too, so a
+        // header family the application globally decided not to trust
+        // (for example XFF only, ignoring RFC Forwarded) is never
+        // honored by Kiwi either.
+        $headerMask = match ($this->mode) {
+            self::MODE_SYMFONY_GLOBAL => Request::getTrustedHeaderSet(),
+            default => Request::HEADER_X_FORWARDED_FOR | Request::HEADER_FORWARDED,
+        };
 
-        return self::resolveWithTrust($request, $trust, $this->rejectAmbiguousForwarding, $this->logger);
+        return self::resolveWithTrust($request, $trust, $headerMask, $this->rejectAmbiguousForwarding, $this->logger);
     }
 
     /**
@@ -139,7 +149,7 @@ final class ClientIpResolver
      *                                      is true and a trusted peer sends
      *                                      both forwarding headers
      */
-    private static function resolveWithTrust(Request $request, array $effectiveTrust, bool $rejectAmbiguousForwarding, ?LoggerInterface $logger): string
+    private static function resolveWithTrust(Request $request, array $effectiveTrust, int $headerMask, bool $rejectAmbiguousForwarding, ?LoggerInterface $logger): string
     {
         $peer = (string) $request->server->get('REMOTE_ADDR', '');
         if ($peer === '' || $effectiveTrust === [] || !IpUtils::checkIp($peer, $effectiveTrust)) {
@@ -149,8 +159,11 @@ final class ClientIpResolver
             return $peer;
         }
 
-        $hasXff = $request->headers->has('X-Forwarded-For');
-        $hasForwarded = $request->headers->has('Forwarded');
+        // A header family is considered only when the effective policy
+        // actually trusts it (symfony_global inherits Symfony's bitmask;
+        // the Kiwi-owned mode trusts both).
+        $hasXff = ($headerMask & Request::HEADER_X_FORWARDED_FOR) !== 0 && $request->headers->has('X-Forwarded-For');
+        $hasForwarded = ($headerMask & Request::HEADER_FORWARDED) !== 0 && $request->headers->has('Forwarded');
         if ($hasXff && $hasForwarded) {
             // Both headers from a trusted peer: the canonical IP is
             // ambiguous. The locally derived answer is the socket peer,
@@ -260,6 +273,21 @@ final class ClientIpResolver
             if ($closing === false) {
                 return null;
             }
+            // The suffix after the closing bracket must be exactly empty
+            // or ":<numeric-valid-port>" — any other trailing junk
+            // (for="[2001:db8::1]:notaport",
+            // for="[2001:db8::1]garbage") makes the whole node
+            // identifier malformed and is rejected.
+            $suffix = substr($candidate, $closing + 1);
+            if ($suffix !== '') {
+                if (!str_starts_with($suffix, ':')
+                    || !\ctype_digit(substr($suffix, 1))
+                    || (int) substr($suffix, 1) < 1
+                    || (int) substr($suffix, 1) > 65535
+                ) {
+                    return null;
+                }
+            }
             $candidate = substr($candidate, 1, $closing - 1);
         } elseif (substr_count($candidate, ':') === 1 && str_contains($candidate, ':')) {
             // IPv4 with a port: 192.0.2.10:4711 — the last colon splits
@@ -292,9 +320,14 @@ final class ClientIpResolver
         if ($packed === false) {
             return null;
         }
-        if (\strlen($packed) === 16 && str_starts_with($candidate, '::ffff:')) {
-            // IPv4-mapped IPv6 normalizes to the IPv4 form.
-            return substr($candidate, 7);
+        if (\strlen($packed) === 16 && substr($packed, 0, 12) === "\0\0\0\0\0\0\0\0\0\0\xff\xff") {
+            // IPv4-mapped IPv6 normalizes to the IPv4 form from the
+            // packed bytes (the same rule as the issuer's
+            // canonicalIpFamily), so equivalent textual spellings (case
+            // variants, compressed forms) cannot diverge between the
+            // proxy resolution and the downstream canonical IP
+            // machinery.
+            return (string) inet_ntop(substr($packed, 12));
         }
 
         return (string) inet_ntop($packed);

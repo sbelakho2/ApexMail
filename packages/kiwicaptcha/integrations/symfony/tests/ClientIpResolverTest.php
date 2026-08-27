@@ -260,4 +260,39 @@ final class ClientIpResolverTest extends TestCase
         }
         Request::setTrustedProxies([], -1);
     }
+    public function testSymfonyGlobalInheritsTheTrustedHeaderMaskToo(): void
+    {
+        // The application globally trusts 10.0.0.0/8 for X-Forwarded-For
+        // only (RFC Forwarded is deliberately not trusted): symfony_global
+        // must inherit both components, the proxy list and the header
+        // bitmask, so an attacker-controlled Forwarded header forwarded
+        // by the trusted proxy is ignored, and the canonical IP comes
+        // from the trusted XFF family only.
+        Request::setTrustedProxies(['10.0.0.0/8'], Request::HEADER_X_FORWARDED_FOR);
+        $resolver = new ClientIpResolver(ClientIpResolver::MODE_SYMFONY_GLOBAL, []);
+        $ip = $resolver->resolve($this->request('10.1.2.3', [
+            'X-Forwarded-For' => '198.51.100.9',
+            'Forwarded' => 'for=203.0.113.66',
+        ]));
+        self::assertSame('198.51.100.9', $ip, 'the untrusted Forwarded family is ignored: only the trusted XFF family decides');
+        Request::setTrustedProxies([], -1);
+    }
+
+    public function testBracketedIpv6SuffixJunkIsRejected(): void
+    {
+        // The complete node identifier must be well-formed: a suffix
+        // after the closing bracket that is neither empty nor a numeric
+        // port makes the identifier malformed — the canonical IP falls
+        // back to the socket peer.
+        Request::setTrustedProxies(['10.0.0.0/8'], Request::HEADER_X_FORWARDED_FOR | Request::HEADER_FORWARDED);
+        $resolver = new ClientIpResolver(ClientIpResolver::MODE_SYMFONY_TRUSTED_PROXIES, ['10.0.0.0/8']);
+        foreach (['for="[2001:db8::1]:notaport"', 'for="[2001:db8::1]garbage"'] as $identifier) {
+            $ip = $resolver->resolve($this->request('10.1.2.3', ['Forwarded' => $identifier]));
+            self::assertSame('10.1.2.3', $ip, 'the malformed identifier "'.$identifier.'" cannot spoof the client');
+        }
+        // The well-formed bracketed form with a numeric port still parses.
+        $ip = $resolver->resolve($this->request('10.1.2.3', ['Forwarded' => 'for="[2001:db8::1]:443"']));
+        self::assertSame('2001:db8::1', $ip);
+        Request::setTrustedProxies([], -1);
+    }
 }

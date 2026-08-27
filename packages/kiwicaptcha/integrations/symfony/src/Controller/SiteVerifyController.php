@@ -213,6 +213,16 @@ final class SiteVerifyController
          * turning request binding off.
          */
         private readonly ?string $defaultRequestBinding = null,
+        /**
+         * Fixture-only diagnostic observer (never wired in production):
+         * invoked with the actual first core VerifyOutcome plus the
+         * SiteVerify verification context before outcomeToCanonical()
+         * collapses it into provider vocabulary. The public provider
+         * response is never altered; this hook exists so the browser
+         * fixture can log the real error code instead of guessing from
+         * the reconstructed provider payload.
+         */
+        private readonly ?\Closure $verifyOutcomeObserver = null,
     ) {
         $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
         $this->recovery = $recovery ?? (new \KiwiCaptcha\ConsumedOutcomeRecovery($this->storage ?? new \KiwiCaptcha\Storage\ArrayStorage()));
@@ -910,6 +920,15 @@ final class SiteVerifyController
                     \KiwiCaptcha\RequestBindingExpectation::exact($canonicalBinding),
                 );
             });
+        if ($this->verifyOutcomeObserver !== null) {
+            ($this->verifyOutcomeObserver)($outcome, [
+                'expectedScope' => $expectedScope,
+                'remoteIp' => $remoteIp,
+                'canonicalBinding' => $canonicalBinding,
+                'idempotent' => $idempotent,
+                'operationIdentityPresent' => $operationFingerprint !== null,
+            ]);
+        }
         } catch (\InvalidArgumentException) {
             // Defensive boundary: the remoteip was validated above, so
             // the core's IP canonicalization cannot throw here. An

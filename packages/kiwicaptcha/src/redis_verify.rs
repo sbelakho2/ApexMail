@@ -1147,9 +1147,20 @@ impl RedisChallengeStore {
     pub fn claim_resume_derivation(&self, nonce: &str) -> redis::RedisResult<Option<String>> {
         let record_key = format!("{}{}", self.prefix, nonce);
         let claim_key = format!("{}resume-claim:{}", self.prefix, nonce);
+        // Fail closed: a distributed mutex owner must never fall back to
+        // a repeatable process identifier (two recoveries in one process
+        // could otherwise observe the same apparent owner across a lease
+        // expiry). Secure RNG failure -> no claim -> the recovery
+        // answers StorageUnavailable.
         let owner: String = security_random::<16>()
             .map(|token| token.iter().map(|b| format!("{b:02x}")).collect())
-            .unwrap_or_else(|_| format!("r{}", std::process::id()));
+            .map_err(|e| {
+                redis::RedisError::from((
+                    redis::ErrorKind::IoError,
+                    "resume claim owner generation failed",
+                    e.to_string(),
+                ))
+            })?;
         let mut conn = self.checkout()?;
         let script = redis::Script::new(
             r#"
@@ -1365,13 +1376,20 @@ impl RedisChallengeStore {
         let script = redis::Script::new(
             r#"
             -- The same in-place marker splice as COMMIT_RESULT_LUA, with
-            -- the claim clear: KEYS[1] = record, KEYS[2] = the resume
-            -- claim, ARGV[1] = valid, ARGV[2] = binding, ARGV[3] = the
-            -- claim owner.
+            -- the claim as a FENCING PRECONDITION: KEYS[1] = record,
+            -- KEYS[2] = the resume claim, ARGV[1] = valid, ARGV[2] =
+            -- binding, ARGV[3] = the claim owner. The caller must STILL
+            -- hold the claim (return 2 = ownership-lost) before the
+            -- protected mutation is written: a stale owner whose claim
+            -- expired mid-derive can never commit, so the claim is a
+            -- genuine fencing token, not just a delete-guard.
             local v = redis.call('GET', KEYS[1])
             if not v then return 0 end
             if not string.find(v, '"state":"consumed"', 1, true) then return 0 end
             if not string.find(v, '"consumed_result":null', 1, true) then return 0 end
+            if redis.call('GET', KEYS[2]) ~= ARGV[3] then
+                return 2
+            end
             local result
             if ARGV[2] ~= '' then
                 result = cjson.encode({valid = ARGV[1] == '1', binding = ARGV[2]})
@@ -1383,9 +1401,7 @@ impl RedisChallengeStore {
             local ttl = redis.call('TTL', KEYS[1])
             if ttl < 1 then ttl = 1 end
             redis.call('SET', KEYS[1], updated, 'EX', ttl)
-            if redis.call('GET', KEYS[2]) == ARGV[3] then
-                redis.call('DEL', KEYS[2])
-            end
+            redis.call('DEL', KEYS[2])
             return 1
             "#,
         );
@@ -1400,9 +1416,12 @@ impl RedisChallengeStore {
             if r == 1 && wait_replicas > 0 {
                 Self::wait_verified(c, wait_replicas, wait_timeout_ms)?;
             }
-            Ok(r)
+            // 2 = ownership-lost (the caller no longer holds the claim):
+            // the commit is refused before any write; Ok(false) lets the
+            // caller reread the retained state.
+            Ok(r == 1)
         })?;
-        Ok(stored == 1)
+        Ok(stored)
     }
 
     /// The causal replication fence, the PHP
@@ -2115,7 +2134,24 @@ impl ProductionVerifier {
         // 4. Stored result first: an already-completed record resolves
         //    through the identity-gated, replication-fenced stored-result
         //    path — the recovery never re-derives a committed outcome.
+        //    The supplied security context is never a dead parameter
+        //    here: the same replay-security hard invariants as normal
+        //    stored-result replay rerun first (authenticated shape incl.
+        //    revocation, signature and Argon ceilings; scope;
+        //    region/policy/issuer; exact request binding; minimum
+        //    duration), so a changed scope or transaction binding is
+        //    rejected even for an already-completed operation. The IP
+        //    binding is the documented recovery-policy exemption: the
+        //    same-operation retry may come from a different network path
+        //    (the committed outcome was durably recorded after the
+        //    original IP checks passed).
         if state.stored_result.is_some() {
+            if let Err(e) =
+                self.replay_security_check(&state.record, scope, now_ns, expected_request_binding)
+            {
+                return VerifyOutcome::Invalid(e);
+            }
+
             return self.resolve_consumed(state, Some(operation_identity));
         }
 
@@ -2190,11 +2226,18 @@ impl ProductionVerifier {
         }
 
         // 9. Re-derive the proof from the presented token and commit the
-        //    deterministic outcome, clearing the claim atomically with
-        //    the result write (best-effort like the ordinary commit: a
-        //    failed commit degrades the retry to ConsumeIndeterminate,
-        //    never to a replay; the verified wait covers the fresh
-        //    mutation when wait_replicas is configured).
+        //    deterministic outcome. The commit is a fenced mutation: the
+        //    claim must still be held (ownership-lost refuses before any
+        //    write), the result write clears the claim atomically, and
+        //    the verified replica wait covers the fresh mutation. A
+        //    failed commit or WAIT is never discarded before a Valid is
+        //    returned: the PHP recovery model rereads the retained
+        //    state and accepts a now-present deterministic result only
+        //    through the identity-gated, replication-fenced stored-result
+        //    path; otherwise the retry stays ConsumeIndeterminate (a
+        //    resultless recovery whose fresh mutation was not proven
+        //    durable cannot authorize anything, exactly like the
+        //    original consume whose WAIT failed).
         let hash = match derive_hash(&state.record, token.counter) {
             Ok(h) => h,
             Err(e) => return VerifyOutcome::Invalid(e),
@@ -2213,15 +2256,41 @@ impl ProductionVerifier {
             VerifyOutcome::Invalid(VerifyError::InsufficientWork)
         };
         let valid = matches!(outcome, VerifyOutcome::Valid { .. });
-        let _ = self.store.commit_result_clearing_claim(
+        let commit = self.store.commit_result_clearing_claim(
             &token.nonce,
             valid,
             state.record.request_binding.as_deref(),
             &claim_guard.owner,
         );
         claim_guard.release();
-
-        outcome
+        match commit {
+            Ok(true) => outcome,
+            Ok(false) => {
+                // Refused (ownership lost, or the record was no longer
+                // resultless): never the computed outcome — reread.
+                match self.store.consumed_state(&token.nonce) {
+                    Ok(Some(new_state)) if new_state.stored_result.is_some() => {
+                        self.resolve_consumed(new_state, Some(operation_identity))
+                    }
+                    _ => VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
+                }
+            }
+            Err(_) => {
+                // The commit or its verified WAIT failed: the recovered
+                // success was not proven durable. Reread; a retained
+                // result is accepted only behind the identity-gated,
+                // replication-fenced stored-result path (its fence fails
+                // closed to StorageUnavailable when the replicas cannot
+                // be reached); otherwise the retry stays indeterminate.
+                match self.store.consumed_state(&token.nonce) {
+                    Ok(Some(new_state)) if new_state.stored_result.is_some() => {
+                        self.resolve_consumed(new_state, Some(operation_identity))
+                    }
+                    Ok(_) => VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
+                    Err(_) => VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
+                }
+            }
+        }
     }
 
     /// Resolve the outcome of an already-consumed record — the retained

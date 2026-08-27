@@ -4516,3 +4516,225 @@ fn resume_releases_the_claim_on_an_early_return() {
         "the RAII guard must release the claim on the early return"
     );
 }
+#[test]
+fn resume_commit_wait_shortfall_never_returns_valid() {
+    // The audit's failover sequence: the recovery's commit lands but
+    // its verified WAIT shortfalls (standalone Redis acks nothing).
+    // The recovered success was NOT proven durable, so the resume
+    // must fail closed (the fence on the reread shortfalls too ->
+    // StorageUnavailable), never return Valid — a stale-replica
+    // promotion must not resurrect the challenge.
+    let Some(url) = redis_url() else { return };
+    let prefix = format!("kiwitest:resume-waitfail:{}:", std::process::id());
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let identity = "logical-op-resume-waitfail";
+    let token = encode_token(
+        &issued.record.nonce,
+        solve_for_test(&issued.record).expect("4-bit sha solves"),
+    );
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let plain = RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+    plain.store(&issued.record).unwrap();
+    assert!(plain
+        .consume_with_operation_identity(&issued.record.nonce, Some(identity))
+        .unwrap()
+        .is_some());
+
+    // The accepting verifier requires one acknowledged replica: the
+    // commit WAIT returns 0 acked.
+    let hardened =
+        RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone())
+            .with_wait(1, 100);
+    let verifier = ProductionVerifier::new(hardened, SECRET);
+    let outcome = verifier.resume_consumed_operation(
+        &token,
+        identity,
+        "login",
+        IP,
+        issued_at_ns + 1_000_000,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        !matches!(outcome, VerifyOutcome::Valid { .. }),
+        "a recovery whose commit WAIT shortfalled must never return Valid: {outcome:?}"
+    );
+    assert!(
+            matches!(
+                outcome,
+                VerifyOutcome::Invalid(VerifyError::StorageUnavailable)
+                    | VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate)
+            ),
+            "the failed barrier fails closed (fence shortfall -> StorageUnavailable, or the reread stays indeterminate): {outcome:?}"
+        );
+}
+
+#[test]
+fn resume_committed_result_fast_path_rejects_a_changed_context() {
+    // The supplied security context is never a dead parameter on the
+    // already-completed fast path: a changed scope or transaction
+    // binding rejects the stored Valid exactly like a fresh
+    // verification.
+    let Some(url) = redis_url() else { return };
+    let prefix = format!("kiwitest:resume-ctx:{}:", std::process::id());
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let identity = "logical-op-resume-ctx";
+    let token = encode_token(
+        &issued.record.nonce,
+        solve_for_test(&issued.record).expect("4-bit sha solves"),
+    );
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let store = RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+    store.store(&issued.record).unwrap();
+    assert!(store
+        .consume_with_operation_identity(&issued.record.nonce, Some(identity))
+        .unwrap()
+        .is_some());
+    store
+        .commit_result(
+            &issued.record.nonce,
+            true,
+            issued.record.request_binding.as_deref(),
+        )
+        .unwrap();
+
+    let verifier = ProductionVerifier::new(
+        RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone()),
+        SECRET,
+    );
+    // The changed scope: rejected even though the operation identity
+    // matches and a Valid is retained.
+    let wrong_scope = verifier.resume_consumed_operation(
+        &token,
+        identity,
+        "payment",
+        IP,
+        issued_at_ns + 1_000_000,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        matches!(wrong_scope, VerifyOutcome::Invalid(VerifyError::WrongScope)),
+        "a changed scope cannot consume the retained Valid: {wrong_scope:?}"
+    );
+    // The changed transaction binding: rejected under the exact
+    // expectation.
+    let wrong_binding = verifier.resume_consumed_operation(
+        &token,
+        identity,
+        "login",
+        IP,
+        issued_at_ns + 1_000_000,
+        RequestBindingExpectation::Exact(Some("txn-other")),
+    );
+    assert!(
+        matches!(
+            wrong_binding,
+            VerifyOutcome::Invalid(VerifyError::RequestBindingMismatch)
+        ),
+        "a changed transaction binding cannot consume the retained Valid: {wrong_binding:?}"
+    );
+    // The correct context still resolves the stored success.
+    let ok = verifier.resume_consumed_operation(
+        &token,
+        identity,
+        "login",
+        IP,
+        issued_at_ns + 1_000_000,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        matches!(
+            ok,
+            VerifyOutcome::Valid {
+                from_stored_result: true,
+                ..
+            }
+        ),
+        "the correct context resolves the retained Valid: {ok:?}"
+    );
+}
+
+#[test]
+fn resume_commit_requires_current_claim_ownership() {
+    // The claim is a fencing precondition: a commit whose caller no
+    // longer holds the claim is refused before any write, so a stale
+    // owner whose claim expired mid-derive can never mutate the
+    // record (the audit's stale-vs-new-owner scenario).
+    let Some(url) = redis_url() else { return };
+    let prefix = format!("kiwitest:resume-owner:{}:", std::process::id());
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let identity = "logical-op-resume-owner";
+
+    let store = RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+    store.store(&issued.record).unwrap();
+    assert!(store
+        .consume_with_operation_identity(&issued.record.nonce, Some(identity))
+        .unwrap()
+        .is_some());
+
+    // A new owner holds the claim (the old one's lease expired).
+    let new_owner = "new-owner-token";
+    let claim_key = format!("{}resume-claim:{}", prefix, issued.record.nonce);
+    let mut conn = redis::Client::open(url.clone()).unwrap();
+    redis::cmd("SET")
+        .arg(&claim_key)
+        .arg(new_owner)
+        .arg("EX")
+        .arg(60)
+        .query::<()>(&mut conn)
+        .unwrap();
+
+    // The stale owner's commit is refused before any write.
+    let committed = store
+        .commit_result_clearing_claim(&issued.record.nonce, true, None, "stale-owner")
+        .unwrap();
+    assert!(!committed, "the stale owner's commit must be refused");
+    let state = store.consumed_state(&issued.record.nonce).unwrap().unwrap();
+    assert!(
+        state.stored_result.is_none(),
+        "the refused commit performed no write"
+    );
+    assert!(
+        state.record.nonce == issued.record.nonce,
+        "the record stays resultless"
+    );
+
+    // The current owner's commit lands and clears the claim.
+    let committed = store
+        .commit_result_clearing_claim(&issued.record.nonce, true, None, new_owner)
+        .unwrap();
+    assert!(committed, "the current owner's commit lands");
+    let claim_now: Option<String> = redis::cmd("GET").arg(&claim_key).query(&mut conn).unwrap();
+    assert!(
+        claim_now.is_none(),
+        "the current owner's commit clears the claim"
+    );
+}
