@@ -92,7 +92,7 @@ stage_main() {
     ci_info "pruning :<sha> image tags beyond the newest $_keep per service"
     for _svc in $CANONICAL_SERVICES $EXTRA_IMAGES; do
         docker images "$_ns/$_svc" --format '{{.Tag}} {{.ID}}' 2>/dev/null \
-            | grep -E '^[0-9a-f]{7,40} ' | head -n -"$_keep" | while IFS=' ' read -r _tag _id; do
+            | grep -E '^[0-9a-f]{7,40} ' | grep -v "^${CI_SHA:-} " | head -n -"$_keep" | while IFS=' ' read -r _tag _id; do
                 [ -n "$_tag" ] || continue
                 ci_info "removing old sha tag $_svc:$_tag"
                 docker rmi "$_ns/$_svc:$_tag" >/dev/null 2>&1 || true
