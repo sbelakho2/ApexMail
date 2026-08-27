@@ -86,20 +86,18 @@ final class SiteVerifyController
     private const MAX_RESPONSE_BYTES = 8192;
 
     /**
-     * The hard bound on the `PENDING_SAME` wait. A waiter that reaches this
-     * bound without a stored result and without winning the atomic
-     * takeover is answered with the retryable provider `internal-error`;
-     * it never enters the verifier without holding the current owner
-     * token. The ordering invariant is strict and enforced at construction
-     * (waiter bound > the store's fixed owner lease) and at container
-     * compile time (waiter bound <= retained-state recovery retention).
-     * It requires
-     *
-     *   max verification runtime  <  fixed owner lease (60)
-     *                              <  this bound (90)
-     *                              <= recovery retention (>= 90)
+     * The per-request hard bound on the `PENDING_SAME` wait. A duplicate
+     * idempotency request polls for at most this long, then answers the
+     * retryable provider `internal-error` ("verification pending") — one
+     * HTTP request never occupies a worker for tens of seconds. The
+     * client/backend retries; once the owner's fixed lease expires (60s),
+     * a later retry's claim performs the atomic takeover. The semantic
+     * deadlines are unchanged: max verification runtime < owner lease
+     * (60) <= retained-state recovery retention (>= 90), and the waiter
+     * bound (< the lease) only caps request-slot occupancy, never the
+     * takeover horizon.
      */
-    public const IDEMPOTENCY_WAIT_SECS = 90.0;
+    public const IDEMPOTENCY_WAIT_SECS = 2.0;
 
     /**
      * Hard ceiling for the whole verification request body: 16 KiB covers
@@ -217,17 +215,21 @@ final class SiteVerifyController
     ) {
         $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
         $this->recovery = $recovery ?? (new \KiwiCaptcha\ConsumedOutcomeRecovery($this->storage ?? new \KiwiCaptcha\Storage\ArrayStorage()));
-        // The lease-ordering invariant is enforced at construction: the
-        // waiter bound must exceed the fixed owner lease (the store's
-        // configured lease, never derived from a token's remaining
-        // validity), otherwise the crash-recovery takeover is unreachable
-        // (a waiter would give up before the lease ever expires). The
-        // default ordering is lease (60) < waiter bound (90) <= recovery
-        // retention (>= 90), with the retained-state recovery retention
-        // enforced at container compile time.
-        if ($idempotencyStore !== null && $this->idempotencyWaitSecs <= $idempotencyStore->leaseSeconds()) {
+        // The lease-ordering invariant is enforced at construction. The
+        // waiter bound is the per-request occupancy cap and must be
+        // smaller than the fixed owner lease (the store's configured
+        // lease, never derived from a token's remaining validity): a
+        // duplicate answers the retryable pending error before the
+        // owner's lease can expire, and the atomic takeover is performed
+        // by a later retry after the lease expires (a bound at or above
+        // the lease would keep one HTTP request polling for the whole
+        // lease window). The semantic deadlines stay ordered: max
+        // verification runtime < owner lease (60) <= recovery retention
+        // (>= 90), with the retained-state recovery retention enforced
+        // at container compile time.
+        if ($idempotencyStore !== null && $this->idempotencyWaitSecs >= $idempotencyStore->leaseSeconds()) {
             throw new \LogicException(sprintf(
-                'KiwiCaptcha: the idempotency `PENDING_SAME` wait bound (%ss) must exceed the owner lease (%ss) — otherwise a crashed owner can never be taken over (the crash-recovery path is unreachable).',
+                'KiwiCaptcha: the idempotency `PENDING_SAME` per-request wait bound (%ss) must be SMALLER than the owner lease (%ss) - a duplicate request would otherwise sit in a polling loop for the whole lease window; the takeover must be a later retry job.',
                 $this->idempotencyWaitSecs,
                 $idempotencyStore->leaseSeconds(),
             ));

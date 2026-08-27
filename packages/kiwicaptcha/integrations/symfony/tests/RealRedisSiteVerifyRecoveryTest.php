@@ -184,12 +184,12 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $probe->del([$idemKey]);
 
         // A short fixed store lease (1s) keeps the takeover instant; the
-        // waiter bound (5s) exceeds it (the construction invariant).
+        // waiter bound (0.5s) stays below it (the per-request occupancy bound).
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);
 
         try {
-            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0);
+            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 0.5);
             $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -209,7 +209,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             usleep(2_500_000);
 
             // The same-key retry takes over and resumes the derivation.
-            $retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 0.5);
             $retryResponse = $retry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -223,7 +223,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
             // A same-UUID retry now returns the stored canonical bytes
             // (complete_same) — never a re-derivation.
-            $replay = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $replay = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 0.5);
             $replayResponse = $replay->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -256,7 +256,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $probe->del([$effectiveKey, $staticKey]);
 
         // A short fixed store lease (1s) keeps the takeover instant; the
-        // waiter bound (5s) exceeds it (the construction invariant).
+        // waiter bound (0.5s) stays below it (the per-request occupancy bound).
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
         $lost = $this->lostConsumeReplyStorage($storage);
 
@@ -269,7 +269,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         try {
             $ownerVerifier = new Verifier($lost);
             $ownerMonitor = new SecurityEpochMonitor($ownerVerifier, $policyRedis, 'test-ns', 1);
-            $owner = new SiteVerifyController($ownerVerifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0, 0, null, null, $ownerMonitor);
+            $owner = new SiteVerifyController($ownerVerifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 0.5, 0, null, null, $ownerMonitor);
             $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -294,7 +294,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             // takes over and resumes the derivation.
             $retryVerifier = new Verifier($storage);
             $retryMonitor = new SecurityEpochMonitor($retryVerifier, $policyRedis, 'test-ns', 1);
-            $retry = new SiteVerifyController($retryVerifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0, 0, null, null, $retryMonitor);
+            $retry = new SiteVerifyController($retryVerifier, self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 0.5, 0, null, null, $retryMonitor);
             $retryResponse = $retry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -338,7 +338,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $lost = $this->lostConsumeReplyStorage($storage);
 
         try {
-            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0);
+            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 0.5);
             $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $wrongToken, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -354,7 +354,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             self::assertNull($consumed->consumedResult, 'consumed_result must be null — the derivation never ran');
 
             usleep(2_500_000);
-            $retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 0.5);
             $retryResponse = $retry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $wrongToken, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -369,7 +369,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             self::assertSame(['invalid-input-response'], $stored['error-codes'] ?? null);
 
             // A same-UUID retry reproduces the identical canonical failure.
-            $again = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $again = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 0.5);
             $againResponse = $again->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $wrongToken, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -396,7 +396,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $lost = $this->lostConsumeReplyStorage($storage);
 
         try {
-            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0);
+            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 0.5);
             $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -410,7 +410,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             self::assertNull($consumed->consumedResult, 'precondition: nothing committed yet');
 
             usleep(2_500_000);
-            $retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 0.5);
             $retryResponse = $retry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -519,7 +519,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         // The retained-state horizon: the storage's ttl_margin_secs keeps
         // the consumed record readable past the signed expiry (the
         // recovery-window margin the container enforces at compile time).
-        $storage = new RedisStorage($probe, 'kiwicaptcha:', 0, 100, (int) SiteVerifyController::IDEMPOTENCY_WAIT_SECS);
+        $storage = new RedisStorage($probe, 'kiwicaptcha:', 0, 100, 90);
         [$token, , $nonce] = $this->issueSha($storage, ttlSecs: 5);
         $record = $storage->find($nonce);
         self::assertNotNull($record);
@@ -528,7 +528,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $idemKey = '{kiwicaptcha}:siteverify-idem:'.$backendId.':'.$uuid;
         $probe->del([$idemKey]);
         // A short fixed store lease (1s) keeps the takeover instant; the
-        // waiter bound (5s) exceeds it (the construction invariant).
+        // waiter bound (0.5s) stays below it (the per-request occupancy bound).
         $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
 
         // The owner's derivation crosses the signed expiry: the verifier
@@ -582,7 +582,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         };
 
         try {
-            $owner = new SiteVerifyController(new Verifier($storage, now: $ownerClock), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $crashingStore, null, 5.0);
+            $owner = new SiteVerifyController(new Verifier($storage, now: $ownerClock), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $crashingStore, null, 0.5);
             $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -608,7 +608,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             // The same-key retry takes over and resumes: the resultless
             // resume re-checks the signed expiry before deriving — the
             // deterministic Expired outcome, never a post-deadline Valid.
-            $retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 0.5);
             $retryResponse = $retry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -620,7 +620,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
             // A same-UUID retry reproduces the identical canonical
             // failure — the redemption can never become successful again.
-            $replay = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $replay = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 0.5);
             $replayResponse = $replay->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -649,7 +649,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $lost = $this->lostConsumeReplyStorage($storage);
 
         try {
-            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0);
+            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 0.5);
             $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidA,
             ]));
@@ -663,13 +663,13 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             // finalize). Then B's retry takes over B's own pending claim:
             // the identity gate refuses (the record carries A's identity)
             // and the resume never runs.
-            $bFirst = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $bFirst = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 0.5);
             $bFirstResponse = $bFirst->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
             ]));
             self::assertSame(503, $bFirstResponse->getStatusCode(), 'B cannot derive a consumed-without-result record');
             usleep(2_500_000);
-            $bRetry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $bRetry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 0.5);
             $bRetryResponse = $bRetry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
             ]));
@@ -678,7 +678,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
             // A's own retry still resumes the original success.
             usleep(2_500_000);
-            $aRetry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $aRetry = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 0.5);
             $aRetryResponse = $aRetry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidA,
             ]));
@@ -708,7 +708,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $lost = $this->lostConsumeReplyStorage($storage);
 
         try {
-            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [$secret1 => 'login'], $lost, null, null, $store, null, 5.0);
+            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [$secret1 => 'login'], $lost, null, null, $store, null, 0.5);
             $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => $secret1, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -723,13 +723,13 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             // retry takes over its own claim — the fingerprint binds the
             // backendId, so it differs from the record's identity (secret
             // 1's): never a resume.
-            $s2First = new SiteVerifyController(new Verifier($storage), self::SECRET, [$secret2 => 'login'], $storage, null, null, $store, null, 5.0);
+            $s2First = new SiteVerifyController(new Verifier($storage), self::SECRET, [$secret2 => 'login'], $storage, null, null, $store, null, 0.5);
             $s2FirstResponse = $s2First->siteverify($this->siteverifyRequest([
                 'secret' => $secret2, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
             self::assertSame(503, $s2FirstResponse->getStatusCode());
             usleep(2_500_000);
-            $s2Retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [$secret2 => 'login'], $storage, null, null, $store, null, 5.0);
+            $s2Retry = new SiteVerifyController(new Verifier($storage), self::SECRET, [$secret2 => 'login'], $storage, null, null, $store, null, 0.5);
             $s2RetryResponse = $s2Retry->siteverify($this->siteverifyRequest([
                 'secret' => $secret2, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -756,7 +756,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $lost = $this->lostConsumeReplyStorage($storage);
 
         try {
-            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0);
+            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 0.5);
             $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -767,7 +767,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             // Same UUID + changed remoteip: conflict at the claim layer —
             // the fingerprint includes the IP, so the entry is bound to
             // the original remoteip and the retry can never join.
-            $conflict = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $conflict = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 0.5);
             $conflictResponse = $conflict->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '203.0.113.9', 'idempotency_key' => $uuid,
             ]));
@@ -843,7 +843,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         };
 
         try {
-            $owner = new SiteVerifyController(new Verifier($lostNoKey), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostNoKey, null, null, $store, null, 5.0);
+            $owner = new SiteVerifyController(new Verifier($lostNoKey), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostNoKey, null, null, $store, null, 0.5);
             $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1',
             ]));
@@ -853,7 +853,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             // The keyed replay: fresh claim, the identity is null so the
             // gate refuses, and the ordinary verify stays
             // ConsumeIndeterminate — 503, never a resume.
-            $keyed = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $keyed = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 0.5);
             $keyedResponse = $keyed->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuidB,
             ]));
@@ -885,7 +885,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             $store = new RedisSiteVerifyIdempotencyStore($probe, 'kiwicaptcha', 1);
             $lost = $this->lostConsumeReplyStorage($storage);
 
-            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0);
+            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 0.5);
             $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -905,7 +905,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             $gate = new \BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate(1);
             $outsideLease = $gate->acquire();
             self::assertIsString($outsideLease);
-            $gated = new SiteVerifyController(new Verifier($storage, $gate), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $gated = new SiteVerifyController(new Verifier($storage, $gate), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 0.5);
             $gatedResponse = $gated->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -918,7 +918,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             // original success.
             usleep(2_500_000);
             $gate->release($outsideLease);
-            $retry = new SiteVerifyController(new Verifier($storage, $gate), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $retry = new SiteVerifyController(new Verifier($storage, $gate), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 0.5);
             $retryResponse = $retry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -946,7 +946,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $lost = $this->lostConsumeReplyStorage($storage);
 
         try {
-            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0);
+            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 0.5);
             $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -1012,7 +1012,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
                 }
             };
             usleep(2_500_000);
-            $retry = new SiteVerifyController(new Verifier($lostCommit), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostCommit, null, null, $store, null, 5.0);
+            $retry = new SiteVerifyController(new Verifier($lostCommit), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lostCommit, null, null, $store, null, 0.5);
             $retryResponse = $retry->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -1044,7 +1044,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
         $fingerprint = hash('sha256', $backendId."\0".$uuid."\0".hash('sha256', $token)."\0"."ip:127.0.0.1"."\0"."\0no-binding");
 
         try {
-            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 5.0);
+            $owner = new SiteVerifyController(new Verifier($lost), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $lost, null, null, $store, null, 0.5);
             $ownerResponse = $owner->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -1056,7 +1056,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
 
             usleep(2_500_000);
             // Attempt A: the takeover wins and resumes (commits).
-            $retryA = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $retryA = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 0.5);
             $retryAResponse = $retryA->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));
@@ -1070,7 +1070,7 @@ final class RealRedisSiteVerifyRecoveryTest extends TestCase
             $direct = (new Verifier($storage))->resumeConsumedOperation($token, self::SECRET, $fingerprint, 'login', '127.0.0.1');
             self::assertTrue($direct->isOk(), sprintf('the second verifier resolves the retained result, got %s', $direct->code()));
             self::assertSame($nonce, $direct->nonce());
-            $retryB = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 5.0);
+            $retryB = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, null, null, $store, null, 0.5);
             $retryBResponse = $retryB->siteverify($this->siteverifyRequest([
                 'secret' => self::SITEVERIFY_SECRET, 'response' => $token, 'remoteip' => '127.0.0.1', 'idempotency_key' => $uuid,
             ]));

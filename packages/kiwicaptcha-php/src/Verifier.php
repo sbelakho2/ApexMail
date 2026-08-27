@@ -312,15 +312,15 @@ final class Verifier
      *                                     request_binding must equal, enforced
      *                                     before the consume. An explicitly
      *                                     unbound record (request_binding
-     *                                     null, BindingMode::None) is
-     *                                     permitted regardless of the
-     *                                     expected binding; a record with a
-     *                                     different one is rejected with
-     *                                     RequestBindingMismatch. Null
-     *                                     (the default) under the exact
-     *                                     semantics refuses a bound
-     *                                     record that does not present
-     *                                     its binding; the legacy
+     *                                     null — distinct from the
+     *                                     IP-binding tag (BindingMode),
+     *                                     which is the client-IP anchor).
+     *                                     Under the exact default an
+     *                                     explicitly unbound record with
+     *                                     a presented expected binding
+     *                                     is RequestBindingMismatch, and
+     *                                     a bound record under null is
+     *                                     refused too. The legacy
      *                                     unenforced behavior is
      *                                     available only through the
      *                                     explicitly named

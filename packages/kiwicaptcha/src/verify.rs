@@ -656,11 +656,12 @@ pub(crate) fn check_argon2_ceilings(record: &ChallengeRecord) -> Result<(), Veri
 /// 11. Re-derive the SHA-256/Argon2id hash and check leading zero bits (the
 ///     actual PoW). The valid outcome's `nonce` field carries the consumed
 ///     canonical nonce (jti).
-/// Read the verifier's clock: the injected closure when one is supplied
-/// (deterministic tests, specialized applications), otherwise the real
-/// system clock in Unix seconds — the safe default that makes the
-/// mid-derive expiry check real for every integration that does not
-/// deliberately inject a clock.
+///
+/// Read the verifier's clock. An injected closure wins when one is
+/// supplied (deterministic tests, specialized applications); otherwise
+/// the real system clock in Unix seconds is used — the safe default
+/// that makes the mid-derive expiry check real for every integration
+/// that does not deliberately inject a clock.
 fn read_clock(ctx: &mut VerifyContext<'_>) -> u64 {
     match &mut ctx.now_unix {
         Some(clock) => clock(),

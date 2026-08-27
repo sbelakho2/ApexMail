@@ -181,9 +181,15 @@ end
 local function apply_feedback(s, event, scope)
     if event == 2 then            -- ChallengeIssued
         s.iss = s.iss + 1000
-    elseif event == 3 then        -- SolveSuccess: repay debt, tiny trust
+    elseif event == 3 then        -- SolveSuccess: repay the issued challenge
+        -- debt ONLY. A valid PoW proves the actor spent the required
+        -- resource, which the economic model explicitly permits bots to
+        -- do — it does not prove legitimacy. Trust credit (negative
+        -- risk) must come only from server/application-confirmed
+        -- outcomes (ProtectedActionSuccess, AuthenticationSuccess,
+        -- ConfirmedLegitimate): attacker-controllable evidence may add
+        -- risk or pay a specific debt, never subtract risk.
         s.iss = math.max(0, s.iss - 1000)
-        s.trust = s.trust + 150
     elseif event == 4 then        -- InvalidProof
         s.bad = s.bad + 1500
     elseif event == 5 then        -- MalformedToken

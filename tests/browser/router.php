@@ -1060,7 +1060,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
     if (is_file(metadataFile($nonce))) {
         $m = json_decode((string) file_get_contents(metadataFile($nonce)), true);
         $metadataStore->store($nonce, new \BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata($m['action'] ?? null, $m['cdata'] ?? null, null), 300);
-        @unlink(metadataFile($nonce));
+        // The metadata file is preserved until the logical transaction is
+        // actually consumed (a failed verification must not lose the
+        // persisted action/cdata — the production retained-state model).
     }
     $controller = new \BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController(
         new Verifier($storage),
@@ -1096,10 +1098,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         $rawBody,
     );
     $response = $controller->siteverify($request);
-    $decoded = SolutionToken::decode((string) ($body['response'] ?? ''));
-    $success = $decoded instanceof SolutionToken && (bool) $response->getStatusCode() === false ? false : ($response->getStatusCode() >= 200 && $response->getStatusCode() < 300);
+    // Provider-compatible SiteVerify semantics return validation failures
+    // as HTTP 200 with success:false — the fixture must gate its
+    // single-use state on the JSON payload, never the HTTP status.
+    $payload = json_decode((string) $response->getContent(), true);
+    $success = is_array($payload) && ($payload['success'] ?? false) === true;
     if ($success) {
         @unlink(recordFile($nonce));
+        @unlink(metadataFile($nonce));
+    } else {
+        // Diagnostic only (never through production responses): the
+        // controller maps internal failures to provider-compatible
+        // invalid-input-response, which hides the exact core verdict the
+        // test needs. Run the core verifier directly against the retained
+        // record and log the internal outcome code.
+        $diagStorage = new ArrayStorage();
+        $diagRecord = challengeRecordOf($nonce);
+        if ($diagRecord !== null) {
+            $diagStorage->store($diagRecord);
+            $diagOutcome = (new Verifier($diagStorage))->verify((string) ($body['response'] ?? ''), $GLOBALS['kiwi_secret'], (string) ($body['action'] ?? 'login'), (string) ($body['remoteip'] ?? '127.0.0.1'));
+            error_log(sprintf('kiwicaptcha-browser-fixture: siteverify internal outcome: %s (provider payload: %s)', $diagOutcome->isOk() ? 'ok' : $diagOutcome->code(), json_encode($payload)));
+        }
     }
     echo $response->getContent();
 
@@ -1118,15 +1137,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/verify') {
     $storage = new ArrayStorage();
     $record = \KiwiCaptcha\ChallengeRecord::fromArray(json_decode((string) file_get_contents(recordFile($nonce)), true));
     $storage->store($record);
-    @unlink(recordFile($nonce));
     $verifier = new Verifier($storage);
     $scope = (string) ($body['scope'] ?? 'login');
     // The exact-binding contract: a challenge minted bound to a
     // transaction must be redeemed against that same binding (the stored
     // proof's own transaction anchor — the production canonical binding
     // would come from the request's authoritative resolution; the
-    // fixture's verify endpoint uses the stored value).
+    // fixture's verify endpoint uses the stored value). The fixture
+    // record survives the attempt: it is removed only after a genuinely
+    // successful verification (a cheap failure must not destroy the
+    // retained state — the production model never deletes on request).
     $outcome = $verifier->verify((string) ($body['token'] ?? ''), $secret, $scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), expectedRequestBinding: $record->requestBinding);
+    if ($outcome->isOk()) {
+        @unlink(recordFile($nonce));
+    }
     echo json_encode(['ok' => $outcome->isOk(), 'code' => $outcome->code()]);
 
     return true;

@@ -1119,6 +1119,37 @@ impl RedisChallengeStore {
         }))
     }
 
+    /// Atomically claim the re-derivation ownership of a resultless
+    /// consumed record (the resume path): exactly one concurrent
+    /// same-operation recovery may derive + commit; the losers re-read
+    /// and resolve the winner's committed outcome. The claim is a
+    /// short-TTL marker keyed by the nonce; a claim on a record that is
+    /// NOT consumed-resultless (or an already-claimed one) returns false.
+    pub fn claim_resume_derivation(&self, nonce: &str) -> redis::RedisResult<bool> {
+        let record_key = format!("{}{}", self.prefix, nonce);
+        let claim_key = format!("{}resume-claim:{}", self.prefix, nonce);
+        let mut conn = self.checkout()?;
+        let script = redis::Script::new(
+            r#"
+            local existing = redis.call('GET', KEYS[1])
+            if not existing then
+                return 0
+            end
+            local rec = cjson.decode(existing)
+            if rec['state'] ~= 'consumed' or rec['consumed_result'] ~= nil then
+                return 0
+            end
+            if redis.call('SET', KEYS[2], '1', 'EX', 60, 'NX') then
+                return 1
+            end
+            return 0
+            "#,
+        );
+        let claimed: i64 = script.key(&record_key).key(&claim_key).invoke(&mut conn)?;
+
+        Ok(claimed == 1)
+    }
+
     /// The atomic delete-if-pending cleanup — ONE Lua script decides
     /// missing / deleted-pending / cancelled / consumed and performs the
     /// delete, closing the check-then-delete toctou: a record a concurrent
@@ -1884,23 +1915,37 @@ impl ProductionVerifier {
     }
 
     /// Resume an interrupted same-operation redemption — the PHP
-    /// `resumeConsumedOperation()` parity. The record is consumed
-    /// without a committed result (the original winner's commit failed,
-    /// or its response was lost); the exact constant-time match of the
-    /// presented operation identity with the recorded one is the sole
-    /// authorization to reconstruct. The binding expectation and the signed expiry are
-    /// re-checked (the expiry with the clock read before AND after the
-    /// re-derivation, so a resume crossing the deadline mid-derive is
-    /// Expired), then the proof is re-derived from the presented token
-    /// and committed deterministically: the retry sees a committed
-    /// outcome instead of ConsumeIndeterminate. No replay is possible:
-    /// the one-shot consume is the authorization boundary, and a
-    /// mismatched identity, a different binding or an absent record all
-    /// fail closed.
+    /// `resumeConsumedOperation()` parity, but never a weaker
+    /// verification mode than the operation it recovers. The recovery
+    /// carries the full security context (scope, client IP, request
+    /// binding, region, policy epoch, issuer and the verifier's
+    /// key/revocation state) and reruns the exact same cheap-phase
+    /// invariants as normal verification (check_authenticated_shape,
+    /// structural integrity, protocol gate, revoked/future kid,
+    /// signature, Argon ceilings; check_ttl, check_scope,
+    /// check_deployment_expectations, check_request_binding,
+    /// check_ip_binding, check_min_duration), so an emergency-revoked
+    /// key or a bumped policy epoch rejects the recovery exactly as it
+    /// rejects a fresh verification.
+    ///
+    /// The flow: decode → retained consumed state → constant-time
+    /// identity gate → a committed result already present resolves
+    /// through the identity-gated, replication-fenced stored-result path
+    /// (never a needless re-derivation) → the full cheap phase → the
+    /// atomic re-derivation claim (exactly one concurrent same-operation
+    /// recovery derives; the losers re-read the winner's committed
+    /// outcome) → the Argon admission gate (the same capacity control as
+    /// normal verification) → the expiry gate (clock read before and
+    /// after the derivation) → deterministic commit (the verified wait
+    /// covers the fresh mutation; a later stored-result replay of the
+    /// recovered success is replication-fenced by resolve_consumed).
     pub fn resume_consumed_operation(
         &self,
         token: &str,
         operation_identity: &str,
+        scope: &str,
+        client_ip: &str,
+        now_ns: u64,
         expected_request_binding: RequestBindingExpectation<'_>,
     ) -> VerifyOutcome {
         // 1. Token decode (the shared decoder bounds the counter).
@@ -1927,25 +1972,74 @@ impl ProductionVerifier {
             return VerifyOutcome::Invalid(VerifyError::AlreadyConsumed);
         }
 
-        // 4. The binding expectation (the same shared exact helper).
-        if let Err(e) = check_request_binding(
-            state.record.request_binding.as_deref(),
+        // 4. Stored result first: an already-completed record resolves
+        //    through the identity-gated, replication-fenced stored-result
+        //    path — the recovery never re-derives a committed outcome.
+        if state.stored_result.is_some() {
+            return self.resolve_consumed(state, Some(operation_identity));
+        }
+
+        // 5. The full cheap phase — the same invariants as normal
+        //    verification (authenticated shape incl. revocation,
+        //    signature and Argon ceilings; TTL; scope; region/policy/
+        //    issuer deployment expectations; request binding; IP
+        //    binding; minimum duration). Recovery is never a weaker
+        //    verification mode than the operation it recovers.
+        if let Err(e) = self.check_cheap(
+            &state.record,
+            scope,
+            client_ip,
+            now_ns,
             expected_request_binding,
         ) {
             return VerifyOutcome::Invalid(e);
         }
 
-        // 5. The signed expiry gate with the clock read before AND after
+        // 6. Atomic re-derivation ownership: exactly one concurrent
+        //    same-operation recovery derives; the losers re-read and
+        //    resolve the winner's committed outcome (never an
+        //    unsynchronized derive storm).
+        match self.store.claim_resume_derivation(&token.nonce) {
+            Ok(true) => {}
+            Ok(false) => {
+                return match self.store.consumed_state(&token.nonce) {
+                    Ok(Some(loser_state)) if loser_state.stored_result.is_some() => {
+                        self.resolve_consumed(loser_state, Some(operation_identity))
+                    }
+                    _ => VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
+                };
+            }
+            Err(_) => return VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
+        }
+
+        // 7. The Argon admission gate — the same capacity control as
+        //    normal verification (the recovery must not bypass the
+        //    memory-hard verification protections).
+        let _lease = if state.record.algorithm == PoWAlgorithm::Argon2id {
+            match &self.argon_gate {
+                Some(gate) => match gate.acquire(&state.record) {
+                    Ok(Some(lease)) => Some(lease),
+                    Ok(None) => return VerifyOutcome::Invalid(VerifyError::CapacityExceeded),
+                    Err(_) => return VerifyOutcome::Invalid(VerifyError::AdmissionUnavailable),
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        // 8. The signed expiry gate with the clock read before AND after
         //    the re-derivation.
         let receipt_now = (self.now_unix)();
         if receipt_now >= state.record.expires_at {
             return VerifyOutcome::Invalid(VerifyError::Expired);
         }
 
-        // 6. Re-derive the proof from the presented token and commit the
+        // 9. Re-derive the proof from the presented token and commit the
         //    deterministic outcome (best-effort, like the ordinary
         //    commit: a failed commit degrades the retry to
-        //    ConsumeIndeterminate, never to a replay).
+        //    ConsumeIndeterminate, never to a replay; the verified wait
+        //    covers the fresh mutation when wait_replicas is configured).
         let hash = match derive_hash(&state.record, token.counter) {
             Ok(h) => h,
             Err(e) => return VerifyOutcome::Invalid(e),
@@ -2583,6 +2677,9 @@ mod tests {
         let wrong = verifier.resume_consumed_operation(
             &token,
             "logical-op-someone-else",
+            "login",
+            IP,
+            issued_at_ns + 1_000_000,
             RequestBindingExpectation::Unenforced,
         );
         assert_eq!(
@@ -2595,6 +2692,9 @@ mod tests {
         let resumed = verifier.resume_consumed_operation(
             &token,
             identity,
+            "login",
+            IP,
+            issued_at_ns + 1_000_000,
             RequestBindingExpectation::Unenforced,
         );
         assert!(

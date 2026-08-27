@@ -187,12 +187,27 @@ final class KiwiHealthController
     }
 
     /**
-     * Max adaptive-profile memory in MiB: the risk ladder's largest
-     * per-verification memory is the fixed verification envelope
-     * (risk.argon_verification_memory_kib). The escalating 16/32/64 MiB
-     * argon profiles are gone, so the worst case is the single configured
-     * envelope, independent of the risk decision. Defaults to the classic
-     * argon64 65536 KiB ceiling when the knob is absent.
+     * Max accepted-record memory in MiB, the readiness budget's
+     * per-verification worst case. Two distinct ceilings must be kept
+     * separate.
+     *
+     * First, the new adaptive issuance envelope
+     * (risk.argon_verification_memory_kib, default 16384 KiB): the risk
+     * ladder issues Argon challenges at this fixed memory, escalating
+     * only the nonce-search target, the intended operational model.
+     *
+     * Second, the maximum accepted historical and cross-service record
+     * envelope (ChallengeProfile::argon64, 65536 KiB). The verifier's
+     * process ceilings still accept previously-issued or cross-service
+     * records up to this ceiling, so a concurrent verification of such
+     * a record can reach 64 MiB even though nothing new is issued
+     * there.
+     *
+     * The readiness budget conservatively uses the max of the two: a
+     * deployment is only declared healthy when its memory can cover the
+     * worst accepted record, not only the new-issuance envelope. When
+     * the configured envelope exceeds the classic argon64 ceiling (a
+     * raised knob), the configured value wins.
      */
     private function maxProfileMib(): int
     {
