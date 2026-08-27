@@ -1,89 +1,101 @@
-{# ── API Explorer Island (static SSR, zero JS) ────────────────── #}
-{# Interactive API explorer rendered as static HTML.               #}
-{# JS enhancement is layered on via data-api-explorer-* attributes.  #}
-<div data-api-explorer-root data-api-base="{{ config.extra.api_url }}" class="rounded-sm border border-surface-800 bg-surface-950 overflow-hidden shadow-premium-black/30">
-  <div class="grid gap-0 xl:grid-cols-[19rem_1fr]">
-    {# ── Endpoint Command Rail ── #}
-    <aside class="border-b border-surface-800 bg-surface-900 xl:border-b-0 xl:border-r">
-       <div class="border-b border-surface-800 px-4 py-4">
-        <p class="text-xs font-bold tracking-[0.22em] text-surface-500">Endpoint Lanes</p>
-        <p class="mt-2 text-sm text-surface-300">Pick a lane, tune payload, then inspect request and response examples.</p>
-        <p class="mt-2 text-xs text-surface-500 italic">Requests are submitted to the live sandbox endpoint — no email is ever delivered.</p>
-      </div>
-      <div class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-1 hide-scrollbar">
-        <button data-api-explorer-endpoint-button="0" role="tab" aria-selected="true" aria-controls="api-explorer-panel-0" id="api-console-tab-0" class="w-full min-w-0 border-b border-surface-800 px-4 py-4 text-left transition-all xl:border-l-2 xl:border-b xl:border-l-brand-500 bg-surface-800 text-white">
-          <span class="flex items-center gap-3">
-            <span class="font-mono text-xs font-bold px-1.5 py-0.5 rounded-sm bg-brand-600 text-white">POST</span>
-            <span class="text-xs font-bold tracking-[0.08em]">Send Email</span>
-          </span>
-          <span class="mt-2 block text-[11px] text-surface-300">Transactional send with idempotency safety</span>
-        </button>
-        <button data-api-explorer-endpoint-button="1" role="tab" aria-selected="false" aria-controls="api-explorer-panel-1" id="api-console-tab-1" class="w-full min-w-0 border-b border-surface-800 px-4 py-4 text-left transition-all xl:border-l-2 xl:border-l-transparent text-surface-300 hover:text-white hover:bg-surface-800">
-          <span class="flex items-center gap-3">
-            <span class="font-mono text-xs font-bold px-1.5 py-0.5 rounded-sm bg-surface-800 text-surface-400">GET</span>
-            <span class="text-xs font-bold tracking-[0.08em]">Messages</span>
-          </span>
-          <span class="mt-2 block text-[11px] text-surface-500">Delivery stream and lifecycle lookup</span>
-        </button>
-        <button data-api-explorer-endpoint-button="2" role="tab" aria-selected="false" aria-controls="api-explorer-panel-2" id="api-console-tab-2" class="w-full min-w-0 border-b border-surface-800 px-4 py-4 text-left transition-all xl:border-l-2 xl:border-l-transparent text-surface-300 hover:text-white hover:bg-surface-800">
-          <span class="flex items-center gap-3">
-            <span class="font-mono text-xs font-bold px-1.5 py-0.5 rounded-sm bg-surface-800 text-surface-400">GET</span>
-            <span class="text-xs font-bold tracking-[0.08em]">Domains</span>
-          </span>
-          <span class="mt-2 block text-[11px] text-surface-500">Identity posture and DNS verification status</span>
-        </button>
-        <button data-api-explorer-endpoint-button="3" role="tab" aria-selected="false" aria-controls="api-explorer-panel-3" id="api-console-tab-3" class="w-full min-w-0 border-b border-surface-800 px-4 py-4 text-left transition-all xl:border-l-2 xl:border-l-transparent text-surface-300 hover:text-white hover:bg-surface-800">
-          <span class="flex items-center gap-3">
-            <span class="font-mono text-xs font-bold px-1.5 py-0.5 rounded-sm bg-surface-800 text-surface-400">POST</span>
-            <span class="text-xs font-bold tracking-[0.08em]">Add Domain</span>
-          </span>
-          <span class="mt-2 block text-[11px] text-surface-500">Provision sender domain with onboarding checks</span>
-        </button>
-      </div>
-    </aside>
-
-    {# ── Unified Workbench ── #}
-    <section class="flex min-h-[34rem] flex-col bg-surface-950" role="tabpanel" id="api-explorer-panel-0" aria-labelledby="api-console-tab-0">
-      <div class="border-b border-surface-800 bg-surface-900 px-4 py-4 sm:px-6">
-        <div class="flex flex-col gap-3 lg:flex-row lg:items-center">
-          <div class="flex flex-wrap items-center gap-3">
-            <span data-api-explorer-method class="font-mono text-xs font-bold px-2 py-1 rounded-sm bg-brand-600 text-white">POST</span>
-            <span data-api-explorer-path class="max-w-full break-all font-mono text-xs text-surface-300 tracking-normal">/v1/messages</span>
-            <span class="rounded-sm border border-surface-700 px-2 py-1 text-xs font-bold tracking-[0.16em] text-surface-400">Sandbox</span>
-          </div>
-          <button data-api-explorer-send class="btn-primary w-full !px-6 !py-2 !text-xs !font-bold tracking-wide lg:ml-auto lg:w-auto">Send sandbox request</button>
-        </div>
-      </div>
-
-      <div class="grid flex-1 gap-0 xl:grid-cols-[1fr_1fr]">
-        <div data-api-explorer-request-editor class="border-b border-surface-800 bg-surface-950 p-4 sm:p-6 xl:border-b-0 xl:border-r">
-          <div class="mb-4 flex items-center justify-between gap-3">
-            <p class="text-xs font-bold tracking-[0.05em] text-surface-600">Request Composer</p>
-            <span class="text-xs tracking-[0.16em] text-surface-500">JSON payload</span>
-          </div>
-          <textarea data-api-explorer-request-body class="w-full min-h-[17rem] bg-surface-900 text-white font-mono text-xs rounded-sm p-4 border border-surface-800 focus:border-brand-500/50 focus:outline-none resize-y" rows="10" spellcheck="false">{
-  "from": "you@example.com",
-  "to": "user@test.com",
-  "subject": "Hello from ApexMail",
-  "html": "<h1>Welcome!</h1>"
-}</textarea>
-        </div>
-
-        <div class="bg-surface-950 p-4 sm:p-6">
-          <div class="mb-4 flex items-center justify-between gap-3">
-            <p class="text-xs font-bold tracking-[0.05em] text-surface-600">Response Inspector</p>
-            <span class="text-xs tracking-[0.16em] text-surface-500">Envelope + diagnostics</span>
-          </div>
-          <div data-api-explorer-response class="min-h-[17rem] rounded-sm border border-surface-800 bg-surface-900 p-4 font-mono text-[11px] text-surface-400">
-            <p class="italic">This is a static API explorer — no requests are submitted to a live server.</p>
-          </div>
-          <div class="mt-4 grid gap-3 sm:grid-cols-3 text-[11px]">
-            <div class="rounded-sm border border-surface-800 bg-surface-900 px-3 py-2 text-surface-400">Sandbox validation: typically &lt; 120ms (guidance, not an SLA)</div>
-            <div class="rounded-sm border border-surface-800 bg-surface-900 px-3 py-2 text-surface-400">Schema validation enabled</div>
-            <div class="rounded-sm border border-surface-800 bg-surface-900 px-3 py-2 text-surface-400">No delivery side effects</div>
-          </div>
-        </div>
-      </div>
-    </section>
+{# ── API Explorer Island (server-driven, zero JS) ─────────────── #}
+{# Each lane is a real HTML form POSTing to the Rust sandbox       #}
+{# executor at api.apexmail.ee, which runs the REAL v1 handlers    #}
+{# with a real sandbox-tenant API key and renders the result page.  #}
+<div class="rounded-sm border border-surface-800 bg-surface-950 overflow-hidden shadow-premium-black/30">
+  <div class="border-b border-surface-800 bg-surface-900 px-4 py-4">
+    <p class="text-xs font-bold tracking-[0.22em] text-surface-500">Endpoint Lanes</p>
+    <p class="mt-2 text-sm text-surface-300">Pick a lane, tune the JSON payload, then send — the request executes against the live sandbox API and the response page shows the real status, latency and body.</p>
+    <p class="mt-2 text-xs text-surface-500 italic">Send-lane recipients are limited to the reserved example.com domain; messages really queue, the worker really attempts delivery, and the full lifecycle is visible in the Messages lane.</p>
   </div>
+
+  {% set explorer_api = "https://api.apexmail.ee/explorer/exec" %}
+
+  {# ── Lane 1: POST /v1/messages ── #}
+  <section class="border-b border-surface-800 bg-surface-950">
+    <div class="flex flex-wrap items-center gap-3 px-4 py-4 sm:px-6">
+      <span class="font-mono text-xs font-bold px-2 py-1 rounded-sm bg-brand-600 text-white">POST</span>
+      <span class="font-mono text-xs text-surface-300 break-all">/v1/messages</span>
+      <span class="rounded-sm border border-surface-700 px-2 py-1 text-xs font-bold tracking-[0.16em] text-surface-400">Sandbox</span>
+    </div>
+    <form method="post" action="{{ explorer_api }}" class="grid gap-0 xl:grid-cols-[1fr_1fr] border-t border-surface-800">
+      <div class="border-b border-surface-800 xl:border-b-0 xl:border-r p-4 sm:p-6">
+        <p class="mb-3 text-xs font-bold tracking-[0.05em] text-surface-600">Request Composer <span class="ml-2 font-normal tracking-[0.16em] text-surface-500">JSON payload</span></p>
+        <textarea name="body" rows="10" spellcheck="false" class="w-full min-h-[14rem] bg-surface-900 text-white font-mono text-xs rounded-sm p-4 border border-surface-800 focus:border-brand-500/50 focus:outline-none resize-y">{
+  "from": "sandbox@example.com",
+  "to": "user@example.com",
+  "subject": "Hello from ApexMail",
+  "html": "&lt;h1&gt;Welcome!&lt;/h1&gt;"
+}</textarea>
+        <input type="hidden" name="lane" value="send">
+        <button type="submit" class="btn-primary mt-4 w-full !px-6 !py-2 !text-xs !font-bold tracking-wide xl:w-auto">Send sandbox request</button>
+      </div>
+      <div class="p-4 sm:p-6">
+        <p class="mb-3 text-xs font-bold tracking-[0.05em] text-surface-600">Response Inspector</p>
+        <div class="min-h-[14rem] rounded-sm border border-surface-800 bg-surface-900 p-4 font-mono text-[11px] text-surface-400">
+          <p class="italic">Press Send — the request executes against the live sandbox and this panel renders the real response on the result page.</p>
+        </div>
+        <div class="mt-4 grid gap-3 sm:grid-cols-3 text-[11px]">
+          <div class="rounded-sm border border-surface-800 bg-surface-900 px-3 py-2 text-surface-400">Real handlers, real queue</div>
+          <div class="rounded-sm border border-surface-800 bg-surface-900 px-3 py-2 text-surface-400">Real idempotency semantics</div>
+          <div class="rounded-sm border border-surface-800 bg-surface-900 px-3 py-2 text-surface-400">example.com recipients only</div>
+        </div>
+      </div>
+    </form>
+  </section>
+
+  {# ── Lane 2: GET /v1/messages ── #}
+  <section class="border-b border-surface-800 bg-surface-950">
+    <div class="flex flex-wrap items-center gap-3 px-4 py-4 sm:px-6">
+      <span class="font-mono text-xs font-bold px-2 py-1 rounded-sm bg-surface-800 text-surface-400">GET</span>
+      <span class="font-mono text-xs text-surface-300 break-all">/v1/messages?limit=20</span>
+      <span class="rounded-sm border border-surface-700 px-2 py-1 text-xs font-bold tracking-[0.16em] text-surface-400">Sandbox</span>
+    </div>
+    <form method="post" action="{{ explorer_api }}" class="flex flex-wrap items-center gap-4 border-t border-surface-800 px-4 py-4 sm:px-6">
+      <input type="hidden" name="lane" value="messages">
+      <input type="hidden" name="body" value="">
+      <p class="text-[11px] text-surface-500">Delivery stream and lifecycle lookup — the sandbox tenant's own messages, including everything you sent above.</p>
+      <button type="submit" class="btn-primary ml-auto shrink-0 !px-6 !py-2 !text-xs !font-bold tracking-wide">List messages</button>
+    </form>
+  </section>
+
+  {# ── Lane 3: GET /v1/domains ── #}
+  <section class="border-b border-surface-800 bg-surface-950">
+    <div class="flex flex-wrap items-center gap-3 px-4 py-4 sm:px-6">
+      <span class="font-mono text-xs font-bold px-2 py-1 rounded-sm bg-surface-800 text-surface-400">GET</span>
+      <span class="font-mono text-xs text-surface-300 break-all">/v1/domains</span>
+      <span class="rounded-sm border border-surface-700 px-2 py-1 text-xs font-bold tracking-[0.16em] text-surface-400">Sandbox</span>
+    </div>
+    <form method="post" action="{{ explorer_api }}" class="flex flex-wrap items-center gap-4 border-t border-surface-800 px-4 py-4 sm:px-6">
+      <input type="hidden" name="lane" value="domains">
+      <input type="hidden" name="body" value="">
+      <p class="text-[11px] text-surface-500">Identity posture and DNS verification status for the sandbox tenant's domains.</p>
+      <button type="submit" class="btn-primary ml-auto shrink-0 !px-6 !py-2 !text-xs !font-bold tracking-wide">List domains</button>
+    </form>
+  </section>
+
+  {# ── Lane 4: POST /v1/domains ── #}
+  <section class="bg-surface-950">
+    <div class="flex flex-wrap items-center gap-3 px-4 py-4 sm:px-6">
+      <span class="font-mono text-xs font-bold px-2 py-1 rounded-sm bg-brand-600 text-white">POST</span>
+      <span class="font-mono text-xs text-surface-300 break-all">/v1/domains</span>
+      <span class="rounded-sm border border-surface-700 px-2 py-1 text-xs font-bold tracking-[0.16em] text-surface-400">Sandbox</span>
+    </div>
+    <form method="post" action="{{ explorer_api }}" class="grid gap-0 xl:grid-cols-[1fr_1fr] border-t border-surface-800">
+      <div class="border-b border-surface-800 xl:border-b-0 xl:border-r p-4 sm:p-6">
+        <p class="mb-3 text-xs font-bold tracking-[0.05em] text-surface-600">Request Composer <span class="ml-2 font-normal tracking-[0.16em] text-surface-500">JSON payload</span></p>
+        <textarea name="body" rows="6" spellcheck="false" class="w-full min-h-[8rem] bg-surface-900 text-white font-mono text-xs rounded-sm p-4 border border-surface-800 focus:border-brand-500/50 focus:outline-none resize-y">{
+  "name": "shop.example.com"
+}</textarea>
+        <input type="hidden" name="lane" value="add_domain">
+        <button type="submit" class="btn-primary mt-4 w-full !px-6 !py-2 !text-xs !font-bold tracking-wide xl:w-auto">Provision domain</button>
+      </div>
+      <div class="p-4 sm:p-6">
+        <p class="mb-3 text-xs font-bold tracking-[0.05em] text-surface-600">Response Inspector</p>
+        <div class="min-h-[8rem] rounded-sm border border-surface-800 bg-surface-900 p-4 font-mono text-[11px] text-surface-400">
+          <p class="italic">Provisions a subdomain of example.com in the sandbox and returns the real creation response with DNS records.</p>
+        </div>
+      </div>
+    </form>
+  </section>
 </div>
