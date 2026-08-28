@@ -324,6 +324,31 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         );
         $redisRef = $this->resolveRedisClient((string) $storageRef, $config['redis_service'], $container);
 
+        // Hard distributed-resource semantics (the architectural
+        // invariant): a deployment claiming a global issuance limit or a
+        // bounded Argon admission ceiling must not silently fall back to
+        // a process-local limiter or gate, since the aggregate of N
+        // workers could otherwise approach N times the configured
+        // ceiling. In production the container refuses the combination
+        // unless the operator explicitly names the local fallback.
+        $environment = $this->environment($container);
+        if (!\in_array($environment, ['test', 'dev'], true)) {
+            if ($config['rate_limit_global'] > 0 && $redisRef === null && !$config['allow_local_global_limit_fallback']) {
+                throw new \LogicException(sprintf(
+                    'kiwi_captcha: rate_limit_global=%d is a deployment-wide limit, but no Redis client is wired — the limiter would silently fall back to a process-local or best-effort window, so the aggregate of N workers could approach N x %d. Wire redis_service (or a shared PSR-6 pool that is truly deployment-wide) or explicitly set allow_local_global_limit_fallback: true to accept the weaker semantics.',
+                    $config['rate_limit_global'],
+                    $config['rate_limit_global'],
+                ));
+            }
+            if ($config['argon2_max_concurrent_verifications'] > 0 && $redisRef === null && !$config['allow_local_argon_admission_fallback']) {
+                throw new \LogicException(sprintf(
+                    'kiwi_captcha: argon2_max_concurrent_verifications=%d is a deployment-wide Argon admission ceiling, but no Redis client is wired — the admission would silently fall back to the in-process gate, so the aggregate of N workers could approach N x %d concurrent Argon verifications. Wire redis_service or explicitly set allow_local_argon_admission_fallback: true to accept the weaker semantics.',
+                    $config['argon2_max_concurrent_verifications'],
+                    $config['argon2_max_concurrent_verifications'],
+                ));
+            }
+        }
+
         // The risk.redis knobs (wait_replicas / wait_timeout_ms /
         // ttl_margin_secs) harden the challenge storage when it is a
         // KiwiCaptcha\Storage\RedisStorage definition: WAIT for replica

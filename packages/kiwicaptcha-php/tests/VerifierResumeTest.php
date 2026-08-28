@@ -963,6 +963,151 @@ final class VerifierResumeTest extends TestCase
 
         return SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
     }
+
+    public function testCommittedResultRecoveryRerunsTheHardSecurityContext(): void
+    {
+        // The committed-result fast path must NOT be a weaker verification
+        // mode than the operation it recovers (the Rust mirror): the hard
+        // replay invariants rerun before the stored Valid. Rotating any
+        // immutable authorization/security context rejects the stored
+        // success; only the correct-context control resolves it. The
+        // current IP and the signed expiry stay deliberately exempt (the
+        // same-operation recovery contract).
+
+        // Wrong scope.
+        [$inner, $record, $token] = $this->issueAndSolve();
+        $identity = $this->identity('committed-ctx-scope');
+        $inner->consumeWithOperationIdentity($record->nonce, $identity);
+        self::assertTrue($inner->commitResult($record->nonce, true, $record->requestBinding));
+        $verifier = new Verifier($inner, now: static fn (): int => self::ISSUED_AT);
+        $outcome = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $identity, 'payment', self::CLIENT_IP, null);
+        self::assertSame(VerifyError::WrongScope, $outcome->error, 'a changed scope cannot consume the retained Valid');
+
+        // Wrong secret / bad signature (the secret-set path).
+        [$inner, $record, $token] = $this->issueAndSolve();
+        $identity = $this->identity('committed-ctx-secret');
+        $inner->consumeWithOperationIdentity($record->nonce, $identity);
+        self::assertTrue($inner->commitResult($record->nonce, true, $record->requestBinding));
+        $wrongSecret = new Verifier($inner, null, static fn (): int => self::ISSUED_AT, false, null, null, null, [1 => str_repeat('f', 32)]);
+        $outcome = $wrongSecret->resumeConsumedOperation($token, str_repeat('f', 32), $identity, 'login', self::CLIENT_IP, null);
+        self::assertSame(VerifyError::BadSignature, $outcome->error, 'a wrong signing secret cannot consume the retained Valid');
+
+        // Revoked kid.
+        [$inner, $record, $token] = $this->issueAndSolve();
+        $identity = $this->identity('committed-ctx-revoked');
+        $inner->consumeWithOperationIdentity($record->nonce, $identity);
+        self::assertTrue($inner->commitResult($record->nonce, true, $record->requestBinding));
+        $revoked = new Verifier($inner, null, static fn (): int => self::ISSUED_AT, false, null, null, null, [], [1]);
+        $outcome = $revoked->resumeConsumedOperation($token, Vectors::SECRET, $identity, 'login', self::CLIENT_IP, null);
+        self::assertSame(VerifyError::UnknownKid, $outcome->error, 'an emergency-revoked key cannot consume the retained Valid');
+
+        // Wrong issuer.
+        [$inner, $record, $token] = $this->issueAndSolve();
+        $identity = $this->identity('committed-ctx-issuer');
+        $inner->consumeWithOperationIdentity($record->nonce, $identity);
+        self::assertTrue($inner->commitResult($record->nonce, true, $record->requestBinding));
+        $wrongIssuer = new Verifier($inner, null, static fn (): int => self::ISSUED_AT, false, null, null, 'other-issuer');
+        $outcome = $wrongIssuer->resumeConsumedOperation($token, Vectors::SECRET, $identity, 'login', self::CLIENT_IP, null);
+        self::assertSame(VerifyError::WrongIssuer, $outcome->error, 'a wrong issuer cannot consume the retained Valid');
+
+        // Wrong region.
+        [$inner, $record, $token] = $this->issueAndSolveArgon(policyVersion: 1, region: 'eu');
+        $identity = $this->identity('committed-ctx-region');
+        $inner->consumeWithOperationIdentity($record->nonce, $identity);
+        self::assertTrue($inner->commitResult($record->nonce, true, $record->requestBinding));
+        $wrongRegion = new Verifier($inner, null, static fn (): int => self::ISSUED_AT, false, 'us');
+        $outcome = $wrongRegion->resumeConsumedOperation($token, Vectors::SECRET, $identity, 'login', self::CLIENT_IP, null);
+        self::assertSame(VerifyError::WrongRegion, $outcome->error, 'a wrong region cannot consume the retained Valid');
+
+        // Changed policy epoch.
+        [$inner, $record, $token] = $this->issueAndSolve();
+        $identity = $this->identity('committed-ctx-policy');
+        $inner->consumeWithOperationIdentity($record->nonce, $identity);
+        self::assertTrue($inner->commitResult($record->nonce, true, $record->requestBinding));
+        $bumpedPolicy = new Verifier($inner, null, static fn (): int => self::ISSUED_AT, false, null, 2);
+        $outcome = $bumpedPolicy->resumeConsumedOperation($token, Vectors::SECRET, $identity, 'login', self::CLIENT_IP, null);
+        self::assertSame(VerifyError::WrongPolicyVersion, $outcome->error, 'a bumped policy epoch cannot consume the retained Valid');
+
+        // Protocol-version acceptance: a legacy-v1 record (converted like
+        // the hardening suite) replayed under a verifier that does NOT
+        // accept v1 is rejected at the protocol gate, even though its
+        // result is committed. The Argon parameter ceilings are absolute
+        // constants that issuance cannot legitimately exceed; their
+        // re-run on this path is the same checkAuthenticatedShape call
+        // that rejects this record's protocol version.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: Vectors::SECRET, targetBits: 8, ttlSecs: 120, minDurationMs: 0), $storage, now: static fn (): int => self::ISSUED_AT);
+        $challenge = $issuer->issue('login', self::CLIENT_IP);
+        $record = $storage->find($challenge->nonce);
+        $ipHash = Issuer::hashIp(self::CLIENT_IP, Vectors::SECRET);
+        $payload = sprintf('%s|%s|%s|%d', $record->nonce, $record->scope, $ipHash, $record->issuedAt);
+        $challengeWire = base64_encode($payload).'.'.Issuer::signPayload($payload, Vectors::SECRET);
+        $v1 = new ChallengeRecord(
+            nonce: $record->nonce,
+            scope: $record->scope,
+            bindingTag: $ipHash,
+            issuedAt: $record->issuedAt,
+            expiresAt: $record->expiresAt,
+            algorithm: $record->algorithm,
+            mKib: $record->mKib,
+            t: $record->t,
+            p: $record->p,
+            targetBits: $record->targetBits,
+            salt: $record->salt,
+            prefix: $challengeWire,
+            challenge: $challengeWire,
+            minDurationMs: $record->minDurationMs,
+            issuedAtNs: $record->issuedAtNs,
+            protocolVersion: 1,
+            region: $record->region,
+            policyVersion: $record->policyVersion,
+            requestBinding: $record->requestBinding,
+            issuer: $record->issuer,
+            kid: $record->kid,
+        );
+        $storage->store($v1);
+        $v1Salt = base64_decode($v1->salt, true);
+        $v1Counter = 0;
+        do {
+            $hash = hash('sha256', $challengeWire.$v1Counter.$v1Salt, true);
+            $v1Counter++;
+        } while (Verifier::leadingZeroBits($hash) < $v1->targetBits);
+        --$v1Counter;
+        $v1Token = SolutionToken::create($v1->nonce, $v1Counter, 5000, [])->encode();
+        $identity = $this->identity('committed-ctx-v1');
+        $storage->consumeWithOperationIdentity($v1->nonce, $identity);
+        self::assertTrue($storage->commitResult($v1->nonce, true, $v1->requestBinding));
+        $outcome = (new Verifier($storage, now: static fn (): int => self::ISSUED_AT))->resumeConsumedOperation($v1Token, Vectors::SECRET, $identity, 'login', self::CLIENT_IP, null);
+        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'a legacy-v1 record cannot consume the retained Valid under a v2-only verifier');
+
+        // Minimum-duration hard failure: a record with a long
+        // server-measured floor, resumed immediately.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: Vectors::SECRET, targetBits: 8, ttlSecs: 120, minDurationMs: 60_000), $storage, now: static fn (): int => self::ISSUED_AT);
+        $challenge = $issuer->issue('login', self::CLIENT_IP);
+        $record = $storage->find($challenge->nonce);
+        $saltBytes = base64_decode($challenge->salt, true);
+        $counter = 0;
+        do {
+            $hash = hash('sha256', $challenge->prefix.$counter.$saltBytes, true);
+            $counter++;
+        } while (Verifier::leadingZeroBits($hash) < $challenge->targetBits);
+        --$counter;
+        $token = SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
+        $identity = $this->identity('committed-ctx-mindur');
+        $storage->consumeWithOperationIdentity($record->nonce, $identity);
+        self::assertTrue($storage->commitResult($record->nonce, true, $record->requestBinding));
+        $outcome = (new Verifier($storage, now: static fn (): int => self::ISSUED_AT))->resumeConsumedOperation($token, Vectors::SECRET, $identity, 'login', self::CLIENT_IP, null);
+        self::assertSame(VerifyError::TooFast, $outcome->error, 'the minimum-duration floor is a hard invariant for the retained Valid');
+
+        // Correct-context control: the stored success still resolves.
+        [$inner, $record, $token] = $this->issueAndSolve();
+        $identity = $this->identity('committed-ctx-control');
+        $inner->consumeWithOperationIdentity($record->nonce, $identity);
+        self::assertTrue($inner->commitResult($record->nonce, true, $record->requestBinding));
+        $outcome = (new Verifier($inner, now: static fn (): int => self::ISSUED_AT))->resumeConsumedOperation($token, Vectors::SECRET, $identity, 'login', self::CLIENT_IP, null);
+        self::assertTrue($outcome->isOk(), 'the correct context resolves the retained Valid');
+    }
 }
 
 /**
@@ -1083,5 +1228,3 @@ final class FailingCommitBarrierStorage implements \KiwiCaptcha\AtomicStorageInt
         }
     }
 }
-
-

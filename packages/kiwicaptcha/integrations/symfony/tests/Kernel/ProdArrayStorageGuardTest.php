@@ -52,7 +52,7 @@ final class ProdArrayStorageGuardTest extends TestCase
         $container->setParameter('kernel.environment', 'prod');
         $container->setDefinition('my.shared.storage', new Definition(RedisStorage::class, [new \stdClass()]));
         (new KiwiCaptchaExtension())->load(
-            [['secret_key' => str_repeat('a', 32), 'storage' => 'my.shared.storage', 'public_base_url' => 'https://captcha.example.com']],
+            [['secret_key' => str_repeat('a', 32), 'storage' => 'my.shared.storage', 'public_base_url' => 'https://captcha.example.com', 'allow_local_global_limit_fallback' => true, 'allow_local_argon_admission_fallback' => true]],
             $container,
         );
 
@@ -90,7 +90,7 @@ final class ProdArrayStorageGuardTest extends TestCase
         $container->setParameter('kernel.environment', 'prod');
         $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
         (new KiwiCaptchaExtension())->load(
-            [['secret_key' => str_repeat('a', 32), 'storage' => 'my.psr6.storage', 'allow_best_effort_storage' => true, 'public_base_url' => 'https://captcha.example.com']],
+            [['secret_key' => str_repeat('a', 32), 'storage' => 'my.psr6.storage', 'allow_best_effort_storage' => true, 'allow_local_global_limit_fallback' => true, 'allow_local_argon_admission_fallback' => true, 'public_base_url' => 'https://captcha.example.com']],
             $container,
         );
 
@@ -181,6 +181,8 @@ final class ProdArrayStorageGuardTest extends TestCase
                 'secret_key' => str_repeat('a', 32),
                 'storage' => 'my.psr6.storage',
                 'allow_best_effort_storage' => true,
+                'allow_local_global_limit_fallback' => true,
+                'allow_local_argon_admission_fallback' => true,
                 'risk' => ['redis' => ['ttl_margin_secs' => 90], 'scopes' => ['login' => ['id' => 1, 'post_solve_check' => false]], 'siteverify_secrets' => ['compat-secret-42' => 'login']],
             ]],
             $container,
@@ -193,5 +195,65 @@ final class ProdArrayStorageGuardTest extends TestCase
         $this->expectException(\LogicException::class);
         $this->expectExceptionMessage('ArrayStorage');
         $kernel->boot();
+    }
+    public function testProductionGlobalLimitRequiresDistributedBackend(): void
+    {
+        // The architectural invariant: a deployment-wide issuance limit
+        // must not silently fall back to a process-local window. In
+        // production (no Redis client, no PSR-6 pool) the container
+        // refuses, unless the operator explicitly names the fallback.
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('rate_limit_global');
+        (new KiwiCaptchaExtension())->load(
+            [[
+                'secret_key' => str_repeat('a', 32),
+                'storage' => 'my.psr6.storage',
+                'allow_best_effort_storage' => true,
+                'public_base_url' => 'https://captcha.example.com',
+            ]],
+            $container,
+        );
+    }
+
+    public function testProductionArgonAdmissionRequiresDistributedGate(): void
+    {
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('argon2_max_concurrent_verifications');
+        (new KiwiCaptchaExtension())->load(
+            [[
+                'secret_key' => str_repeat('a', 32),
+                'storage' => 'my.psr6.storage',
+                'allow_local_global_limit_fallback' => true,
+                'allow_best_effort_storage' => true,
+                'public_base_url' => 'https://captcha.example.com',
+            ]],
+            $container,
+        );
+    }
+
+    public function testProductionExplicitFallbackOptionsAreHonored(): void
+    {
+        // The named fallbacks accept the weaker semantics explicitly.
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
+        (new KiwiCaptchaExtension())->load(
+            [[
+                'secret_key' => str_repeat('a', 32),
+                'storage' => 'my.psr6.storage',
+                'allow_local_global_limit_fallback' => true,
+                'allow_local_argon_admission_fallback' => true,
+                'allow_best_effort_storage' => true,
+                'public_base_url' => 'https://captcha.example.com',
+            ]],
+            $container,
+        );
+        self::addToAssertionCount(1);
     }
 }

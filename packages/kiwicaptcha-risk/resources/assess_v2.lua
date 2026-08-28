@@ -237,9 +237,13 @@ end
 local function apply_feedback(s, event, scope)
     if event == 2 then            -- ChallengeIssued
         s.iss = s.iss + 1000
-    elseif event == 3 then        -- SolveSuccess: repay debt, tiny trust
+    elseif event == 3 then        -- SolveSuccess: repay the issued challenge
+        -- debt ONLY (trust-neutral, matching canonical risk-v1.lua). A
+        -- valid PoW proves expenditure, never legitimacy: trust credit may
+        -- come only from server/application-confirmed outcomes, so
+        -- attacker-controllable evidence can add risk or pay a specific
+        -- debt, never subtract risk.
         s.iss = math.max(0, s.iss - 1000)
-        s.trust = s.trust + 150
     elseif event == 4 then        -- InvalidProof
         s.bad = s.bad + 1500
     elseif event == 5 then        -- MalformedToken

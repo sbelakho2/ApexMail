@@ -556,6 +556,18 @@ final class SiteVerifyController
         try {
             $token = SolutionToken::decode($response);
         } catch (DecodeError) {
+            // Malformed-token risk feedback (best-effort, never altering
+            // the provider response): an authenticated backend sending a
+            // malformed Kiwi response token contributes the same
+            // MalformedToken evidence as the native path — the secret,
+            // expected scope and canonical remote IP are already
+            // established at this point. A feedback failure is swallowed:
+            // the deterministic idempotency/finalization behavior below
+            // is preserved.
+            try {
+                $this->riskGateway?->solveOutcome($expectedScope, $remoteIp, null, VerifyError::MalformedToken);
+            } catch (\Throwable) {
+            }
             // A malformed token is a deterministic failure: the claiming
             // request finalizes it so a same-key retry reproduces the
             // identical canonical response instead of leaving the entry

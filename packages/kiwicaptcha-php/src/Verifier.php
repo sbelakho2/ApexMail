@@ -867,10 +867,25 @@ final class Verifier
         }
 
         // Committed-result fast path: the deterministic outcome already
-        // stored by this logical operation (or a concurrent recovery of it)
-        // is returned unchanged, exactly the committed-outcome semantics of
-        // the ordinary verify path.
+        // stored by this logical operation (or a concurrent recovery of
+        // it) is returned unchanged, exactly the committed-outcome
+        // semantics of the ordinary verify path. The supplied security
+        // context is never a dead parameter here (the Rust mirror): the
+        // hard replay invariants rerun first — authenticated record
+        // shape (protocol gate, revoked/future kid, key resolution,
+        // signature, Argon ceilings), scope, exact request binding,
+        // deployment expectations (region, policy epoch, issuer) and
+        // the minimum-duration floor —
+        // so a changed scope, revoked key or bumped policy epoch rejects
+        // the stored Valid even for an already-completed operation. The
+        // current IP and the signed expiry stay deliberately exempt: the
+        // original redemption passed its IP check and committed before
+        // expiry, and a same-operation recovery may legitimately come from
+        // another backend network path.
         if ($consumed->consumedResult !== null) {
+            if (($failure = $this->replaySecurityCheck($consumed->record, $secretKey, $expectedScope, $expectation)) !== null) {
+                return VerifyOutcome::invalid($failure);
+            }
             // Failed-barrier replay guard: the committed result's writes
             // may have landed with their WAIT failing; accepting the
             // stored success read-only would return a success a promotion
