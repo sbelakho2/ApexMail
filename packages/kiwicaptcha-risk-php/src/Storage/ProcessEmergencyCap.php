@@ -5,9 +5,19 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Risk\Storage;
 
 /**
- * Per-process emergency cap: a single fixed-window limiter of
- * `processPerSecond` observations per second per process, enforced before
- * any state backend is touched.
+ * Long-lived-runtime-only pre-Redis shield: a single fixed-window limiter
+ * of `processPerSecond` observations per second per process, enforced
+ * before any state backend is touched.
+ *
+ * Runtime requirement: the window lives in this object's memory, so it
+ * provides temporal protection only inside a persistent worker
+ * (RoadRunner, Swoole, amphp) or a single CLI process. Under conventional
+ * PHP-FPM the service graph is rebuilt per request, so this cap is
+ * request-local: its queue never accumulates the previous request's
+ * admissions and it provides no temporal pre-Redis cap at all. The
+ * distributed Redis risk controls (source_fast/source_slow velocity,
+ * keyed rate limits) are unaffected and remain authoritative across
+ * workers in every deployment shape.
  *
  * This is a per-process admission cap, not a per-source limit: it bounds
  * how much work a single process may push at the state backend so a burst
@@ -17,7 +27,7 @@ namespace KiwiCaptcha\Risk\Storage;
  * the caller feeds back through SourceRateLimitHit).
  *
  * Timestamps live in an SplQueue as hrtime(true) nanoseconds (monotonic
- * clock — a wall-clock jump can never hold the window open or reopen it
+ * clock, so a wall-clock jump can never hold the window open or reopen it
  * early). Expired entries are dequeued from the front in O(1) amortized
  * time, so a saturated window never degrades into an O(n) scan; the
  * `$denied` bookkeeping was removed because it made the limiter

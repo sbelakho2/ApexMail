@@ -36,6 +36,11 @@
 //! `Valid` the next promotion could resurrect. This mirrors the PHP
 //! core's `resumeConsumedOperation()` exactly.
 //!
+//! The re-derivation claim is embedded in the same runtime envelope as
+//! `resume_owner` and `resume_until`, spliced by one single-key Lua script
+//! in both languages, so a PHP-held claim refuses a Rust claim and vice
+//! versa.
+//!
 //! The retained success is identity-gated: an already-consumed record with
 //! a committed valid outcome replays that success only for the logical
 //! operation that recorded it (the supplied operation identity must match
@@ -525,7 +530,8 @@ pub struct StoredConsumedResult {
 /// A stored value decoded at the storage layer: the [`ChallengeRecord`]
 /// plus the runtime envelope's `state` marker, the optional committed
 /// outcome and the recorded operation identity. The `state` /
-/// `consumed_result` / `operation_identity` fields are stripped from the
+/// `consumed_result` / `operation_identity` / `resume_owner` /
+/// `resume_until` fields are stripped from the
 /// JSON by [`decode_stored`] (they must never leak into the strict record
 /// parse); the transition flag comes from the Lua reply.
 struct StoredChallenge {
@@ -547,10 +553,14 @@ struct StoredChallenge {
 pub const MAX_STORED_RECORD_JSON_BYTES: usize = 128 * 1024;
 
 /// Decode a stored value that MAY carry the storage-level runtime fields
-/// `state` / `consumed_result` / `operation_identity`. The runtime fields
+/// `state` / `consumed_result` / `operation_identity` and the shared
+/// resume-claim fields `resume_owner` / `resume_until`. The runtime fields
 /// are stripped before the strict [`ChallengeRecord`] parse, so
 /// `deny_unknown_fields` stays effective: any other foreign key makes the
-/// whole value undecodable. A non-null `operation_identity` (a PHP-written
+/// whole value undecodable. The claim fields are the same runtime
+/// envelope that PHP writes (both languages embed the claim in the
+/// record), so a PHP-claimed record stays readable here. A non-null
+/// `operation_identity` (a PHP-written
 /// record whose identity-aware consume spliced a value in — the PHP core
 /// rejects malformed identities before the transition, so any stored value
 /// is at most 128 bytes of `[A-Za-z0-9_-]`) parses and is
@@ -581,6 +591,12 @@ fn decode_stored(raw: &str) -> Option<StoredChallenge> {
     obj.remove("state");
     obj.remove("consumed_result");
     obj.remove("operation_identity");
+    // The shared resume-claim fields: PHP and Rust write them into the
+    // envelope atomically with the claim, so the canonical record parse
+    // must never see them (a live claim must not make the record
+    // undecodable for the other language's recovery).
+    obj.remove("resume_owner");
+    obj.remove("resume_until");
     let record: ChallengeRecord = serde_json::from_value(value).ok()?;
     Some(StoredChallenge {
         record,
@@ -1128,26 +1144,28 @@ impl RedisChallengeStore {
 
     /// Atomically claim the re-derivation ownership of a resultless
     /// consumed record (the resume path): exactly one concurrent
-    /// same-operation recovery may derive + commit; the losers re-read
-    /// and resolve the winner's committed outcome. The claim is a
-    /// short-TTL marker keyed by the nonce; a claim on a record that is
-    /// NOT consumed-resultless (or an already-claimed one) returns false.
-    /// Atomically claim the re-derivation ownership of a resultless
-    /// consumed record (the resume path): exactly one concurrent
-    /// same-operation recovery may derive + commit; the losers re-read
-    /// and resolve the winner's committed outcome. The claim stores a
-    /// random owner token (compare-and-delete release, RAII-guarded on
-    /// every early return) under `resume-claim:<nonce>` with a short
-    /// TTL — a crash leaves only the short lease, which is exactly what
-    /// the TTL covers. The resultless check uses the RAW marker (the
-    /// same strategy as the rest of this storage layer, which never
-    /// re-encodes the record's JSON bytes): the envelope stores
-    /// `"consumed_result":null`, and cjson decodes a JSON null to
-    /// `cjson.null`, NOT Lua nil — a decoded-field comparison would
-    /// refuse every resultless record.
-    pub fn claim_resume_derivation(&self, nonce: &str) -> redis::RedisResult<Option<String>> {
+    /// same-operation recovery may derive and commit; the losers re-read
+    /// and resolve the winner's committed outcome. The claim lives inside
+    /// the record envelope as `resume_owner` and `resume_until`, spliced
+    /// before the closing brace, so the transition is a single-key splice
+    /// that a Redis Cluster deployment routes to one slot. A crash leaves
+    /// only the short lease given by `ttl_secs`: once `resume_until`
+    /// passes, a later retry may claim again. The resultless check uses
+    /// the raw marker, the same strategy as the rest of this storage
+    /// layer, which never re-encodes the record's JSON bytes. The
+    /// envelope stores `"consumed_result":null`, and a cjson decode maps
+    /// a JSON null to `cjson.null`, never Lua nil. A decoded-field
+    /// comparison would refuse every resultless record. Returns
+    /// `Some(owner)` when the claim was taken and `None` when the record
+    /// is missing, not consumed-resultless, or already claimed by a live
+    /// or unparseable owner. Mirrors the PHP
+    /// `RedisStorage::claimResumeDerivation()` exactly.
+    pub fn claim_resume_derivation(
+        &self,
+        nonce: &str,
+        ttl_secs: u64,
+    ) -> redis::RedisResult<Option<String>> {
         let record_key = format!("{}{}", self.prefix, nonce);
-        let claim_key = format!("{}resume-claim:{}", self.prefix, nonce);
         // Fail closed: a distributed mutex owner must never fall back to
         // a repeatable process identifier (two recoveries in one process
         // could otherwise observe the same apparent owner across a lease
@@ -1164,31 +1182,65 @@ impl RedisChallengeStore {
             })?;
         let mut conn = self.checkout()?;
         let script = redis::Script::new(
-            r#"
-            local existing = redis.call('GET', KEYS[1])
-            if not existing then
-                return nil
-            end
-            -- Raw-marker resultless check: the envelope stores
-            -- "consumed_result":null (cjson decodes a JSON null to
-            -- cjson.null, never Lua nil).
-            if not string.find(existing, '"state":"consumed"', 1, true) then
-                return nil
-            end
-            if not string.find(existing, '"consumed_result":null', 1, true) then
-                return nil
-            end
-            if redis.call('SET', KEYS[2], ARGV[1], 'EX', ARGV[2], 'NX') then
-                return ARGV[1]
-            end
-            return nil
-            "#,
+            r#"-- kiwicaptcha resume-derivation claim
+--
+-- The re-derivation claim for a resultless consumed record (the resume
+-- path): exactly one concurrent same-operation recovery may derive and
+-- commit; the losers re-read and resolve the winner's committed outcome.
+-- KEYS[1] = the record key only. ARGV[1] = the random owner token,
+-- ARGV[2] = the claim TTL in seconds. The claim lives INSIDE the record
+-- envelope: `"resume_owner":"<hex token>","resume_until":<epoch secs>`
+-- is spliced before the envelope's closing brace (the record key TTL is
+-- preserved), so this script touches exactly one key and is single-slot
+-- on a Redis Cluster. A crash leaves only the short lease: once
+-- resume_until passes, a later retry may claim again. The record checks
+-- use the RAW markers (the same strategy as the rest of this storage
+-- layer, which never re-encodes the record's JSON bytes): the envelope
+-- stores `"consumed_result":null`, and a cjson decode would map a JSON
+-- null to cjson.null, never Lua nil, refusing every resultless record.
+local v = redis.call("GET", KEYS[1])
+if not v then
+  return nil
+end
+if not string.find(v, '"state":"consumed"', 1, true) then
+  return nil
+end
+if not string.find(v, '"consumed_result":null', 1, true) then
+  return nil
+end
+-- Live-claim check: refuse while a live claim is held. An owner marker
+-- without a parseable expiry is treated as live (fail safe: never a
+-- second unsynchronized derivation).
+local untilStr = string.match(v, '"resume_until":(%d+)')
+if string.find(v, '"resume_owner":"', 1, true) then
+  local time = redis.call("TIME")
+  local now = tonumber(time[1])
+  if untilStr == nil or tonumber(untilStr) > now then
+    return nil
+  end
+  -- Expired claim: strip the stale fields before appending the fresh
+  -- ones. The fields always sit at the envelope's end (only this script
+  -- family writes them); a shape that cannot be stripped is refused as
+  -- still-claimed rather than duplicated.
+  local stripped, n = string.gsub(v, ',"resume_owner":"[^"]*","resume_until":%d+}$', '}')
+  if n ~= 1 then
+    return nil
+  end
+  v = stripped
+end
+local time = redis.call("TIME")
+local untilVal = tonumber(time[1]) + tonumber(ARGV[2])
+local ttl = redis.call("TTL", KEYS[1])
+if ttl < 1 then ttl = 1 end
+local updated = string.sub(v, 1, -2) .. ',"resume_owner":"' .. ARGV[1] .. '","resume_until":' .. untilVal .. '}'
+redis.call("SET", KEYS[1], updated, "EX", ttl)
+return ARGV[1]
+"#,
         );
         let claimed: Option<String> = script
             .key(&record_key)
-            .key(&claim_key)
             .arg(&owner)
-            .arg(CLAIM_TTL_SECS)
+            .arg(ttl_secs)
             .invoke(&mut conn)?;
 
         Ok(claimed)
@@ -1196,19 +1248,38 @@ impl RedisChallengeStore {
 
     /// Compare-and-delete the resume claim: only the claim's owner may
     /// release it (a stale owner after a crash + TTL expiry can never
-    /// delete a newer recovery's claim).
+    /// delete a newer recovery's claim). One key: the claim is embedded
+    /// in the record envelope, so the compare-and-clear runs over the
+    /// record key only, single-slot on a Redis Cluster. The record key
+    /// TTL is preserved. Returns true when the release cleared the
+    /// claim, false when the claim is missing or owned by another token.
     pub fn release_resume_derivation(&self, nonce: &str, owner: &str) -> redis::RedisResult<bool> {
-        let claim_key = format!("{}resume-claim:{}", self.prefix, nonce);
+        let record_key = format!("{}{}", self.prefix, nonce);
         let mut conn = self.checkout()?;
         let script = redis::Script::new(
-            r#"
-            if redis.call('GET', KEYS[1]) == ARGV[1] then
-                return redis.call('DEL', KEYS[1])
-            end
-            return 0
-            "#,
+            r#"-- kiwicaptcha resume-derivation claim release (compare-and-delete)
+--
+-- KEYS[1] = the record key only (the claim is embedded in the record
+-- envelope; ONE key, single-slot on a Redis Cluster). ARGV[1] = the
+-- owner token. The claim fields are cleared from the envelope only when
+-- they still hold exactly this owner: a stale owner after a crash and
+-- TTL expiry can never delete a newer recovery's claim. The record key
+-- TTL is preserved.
+local v = redis.call("GET", KEYS[1])
+if not v then
+  return 0
+end
+local updated, n = string.gsub(v, ',"resume_owner":"' .. ARGV[1] .. '","resume_until":%d+}$', '}')
+if n ~= 1 then
+  return 0
+end
+local ttl = redis.call("TTL", KEYS[1])
+if ttl < 1 then ttl = 1 end
+redis.call("SET", KEYS[1], updated, "EX", ttl)
+return 1
+"#,
         );
-        let released: i64 = script.key(&claim_key).arg(owner).invoke(&mut conn)?;
+        let released: i64 = script.key(&record_key).arg(owner).invoke(&mut conn)?;
 
         Ok(released == 1)
     }
@@ -1357,11 +1428,16 @@ impl RedisChallengeStore {
     }
 
     /// The resume-path commit that also clears the re-derivation claim
-    /// atomically with the result write: the commit Lua declares the
-    /// claim key and deletes it only when it still holds this owner's
-    /// token (a crashed + TTL-expired stale owner can never delete a
-    /// newer recovery's claim). The verified replica wait still applies
-    /// to the fresh mutation.
+    /// atomically with the result write: the claim is embedded in the
+    /// record envelope, so the commit Lua fences the write on a live
+    /// claim owned by this exact token and clears the claim fields in
+    /// the same single-key run. A crashed and TTL-expired stale owner
+    /// can never commit or delete a newer recovery's claim. Returns
+    /// `Ok(true)` only when the result was stored and the claim cleared;
+    /// `Ok(false)` when the record is not a resultless consumed record,
+    /// or when a refused fence on ownership-lost wrote nothing and lets
+    /// the caller reread the retained state. The verified replica wait
+    /// still applies to the fresh mutation.
     pub fn commit_result_clearing_claim(
         &self,
         nonce: &str,
@@ -1370,46 +1446,62 @@ impl RedisChallengeStore {
         claim_owner: &str,
     ) -> redis::RedisResult<bool> {
         let record_key = format!("{}{}", self.prefix, nonce);
-        let claim_key = format!("{}resume-claim:{}", self.prefix, nonce);
         let wait_replicas = self.wait_replicas;
         let wait_timeout_ms = self.wait_timeout_ms;
         let mut conn = self.checkout()?;
         let script = redis::Script::new(
-            r#"
-            -- The same in-place marker splice as COMMIT_RESULT_LUA, with
-            -- the claim as a FENCING PRECONDITION: KEYS[1] = record,
-            -- KEYS[2] = the resume claim, ARGV[1] = valid, ARGV[2] =
-            -- binding, ARGV[3] = the claim owner. The caller must STILL
-            -- hold the claim (return 2 = ownership-lost) before the
-            -- protected mutation is written: a stale owner whose claim
-            -- expired mid-derive can never commit, so the claim is a
-            -- genuine fencing token, not just a delete-guard.
-            local v = redis.call('GET', KEYS[1])
-            if not v then return 0 end
-            if not string.find(v, '"state":"consumed"', 1, true) then return 0 end
-            if not string.find(v, '"consumed_result":null', 1, true) then return 0 end
-            if redis.call('GET', KEYS[2]) ~= ARGV[3] then
-                return 2
-            end
-            local result
-            if ARGV[2] ~= '' then
-                result = cjson.encode({valid = ARGV[1] == '1', binding = ARGV[2]})
-            else
-                result = cjson.encode({valid = ARGV[1] == '1', binding = cjson.null})
-            end
-            local updated, n = string.gsub(v, '"consumed_result":null', '"consumed_result":' .. result, 1)
-            if n ~= 1 then return 0 end
-            local ttl = redis.call('TTL', KEYS[1])
-            if ttl < 1 then ttl = 1 end
-            redis.call('SET', KEYS[1], updated, 'EX', ttl)
-            redis.call('DEL', KEYS[2])
-            return 1
-            "#,
+            r#"-- kiwicaptcha commit result
+--
+-- The resume-path claim is a fencing precondition carried in ARGV[3]:
+-- the envelope must hold a live claim owned by exactly this token
+-- before the protected mutation is written. Ownership lost (missing,
+-- expired, or owned by a different token) returns 2 with no write, so
+-- a stale owner whose claim expired mid-derivation can never commit,
+-- and the successful write clears the claim fields in the same atomic
+-- transition. The claim is embedded in the record envelope, so this
+-- script touches exactly one key (single-slot on a Redis Cluster).
+-- The `"consumed_result":null` marker is replaced in place; only the
+-- small result object is encoded (valid a real JSON boolean, binding
+-- a string or null), never the record's own JSON bytes.
+local v = redis.call("GET", KEYS[1])
+if not v then
+  return 0
+end
+if not string.find(v, '"state":"consumed"', 1, true) then
+  return 0
+end
+if not string.find(v, '"consumed_result":null', 1, true) then
+  return 0
+end
+-- Fencing: a live claim owned by this exact token. The owner token is
+-- hex ([0-9a-f]), so it is safe inside the Lua pattern. The claim must
+-- be live: an expired claim no longer fences (the stale owner may not
+-- commit). An unparseable expiry refuses too (fail safe).
+local untilStr = string.match(v, '"resume_owner":"' .. ARGV[3] .. '","resume_until":(%d+)')
+local time = redis.call("TIME")
+local now = tonumber(time[1])
+if untilStr == nil or tonumber(untilStr) <= now then
+  return 2
+end
+local result
+if ARGV[2] ~= '' then
+    result = cjson.encode({valid = ARGV[1] == '1', binding = ARGV[2]})
+else
+    result = cjson.encode({valid = ARGV[1] == '1', binding = cjson.null})
+end
+local updated, n = string.gsub(v, '"consumed_result":null', '"consumed_result":' .. result, 1)
+if n ~= 1 then return 0 end
+local cleared, m = string.gsub(updated, ',"resume_owner":"' .. ARGV[3] .. '","resume_until":%d+}$', '}')
+if m ~= 1 then return 0 end
+local ttl = redis.call("TTL", KEYS[1])
+if ttl < 1 then ttl = 1 end
+redis.call("SET", KEYS[1], cleared, "EX", ttl)
+return 1
+"#,
         );
         let stored = Self::run_command(&mut conn, |c| {
             let r: i64 = script
                 .key(&record_key)
-                .key(&claim_key)
                 .arg(if valid { "1" } else { "0" })
                 .arg(binding.unwrap_or(""))
                 .arg(claim_owner)
@@ -1417,9 +1509,9 @@ impl RedisChallengeStore {
             if r == 1 && wait_replicas > 0 {
                 Self::wait_verified(c, wait_replicas, wait_timeout_ms)?;
             }
-            // 2 = ownership-lost (the caller no longer holds the claim):
-            // the commit is refused before any write; Ok(false) lets the
-            // caller reread the retained state.
+            // 2 = ownership-lost (the caller no longer holds a live
+            // claim): the commit is refused before any write; Ok(false)
+            // lets the caller reread the retained state.
             Ok(r == 1)
         })?;
         Ok(stored)
@@ -2200,7 +2292,10 @@ impl ProductionVerifier {
         //    the claim on every early return (expiry, derivation error,
         //    store failure) so the lock never blocks later retries; a
         //    process crash leaves only the short TTL lease.
-        let claim_owner = match self.store.claim_resume_derivation(&token.nonce) {
+        let claim_owner = match self
+            .store
+            .claim_resume_derivation(&token.nonce, CLAIM_TTL_SECS)
+        {
             Ok(Some(owner)) => owner,
             Ok(None) => {
                 return match self.store.consumed_state(&token.nonce) {
@@ -2265,14 +2360,14 @@ impl ProductionVerifier {
         );
         match commit {
             Ok(true) => {
-                // The script committed the result and deleted our
-                // claim: the guard is disarmed only here. On Ok(false)
-                // or Err the guard stays armed, so the Drop's
-                // compare-and-delete still releases our claim when it
-                // is still ours (an error before the Lua ran leaves the
-                // claim alive; an error after the script ran makes the
-                // compare-and-delete a harmless no-op; a moved owner is
-                // never touched).
+                // The script committed the result and cleared our
+                // claim from the envelope: the guard is disarmed only
+                // here. On Ok(false) or Err the guard stays armed, so
+                // the Drop's compare-and-clear still releases our claim
+                // when it is still ours (an error before the Lua ran
+                // leaves the claim alive; an error after the script ran
+                // makes the compare-and-clear a harmless no-op; a moved
+                // owner is never touched).
                 claim_guard.release();
                 outcome
             }
@@ -2344,9 +2439,10 @@ impl ProductionVerifier {
                     // second redemption — the causal fence is
                     // re-established before the acceptance; a shortfall
                     // fails closed to StorageUnavailable, never Valid.
-                    if let Err(_) = self
+                    if self
                         .store
                         .establish_replication_fence("the Rust retained-result acceptance")
+                        .is_err()
                     {
                         return VerifyOutcome::Invalid(VerifyError::StorageUnavailable);
                     }
@@ -3192,5 +3288,347 @@ mod tests {
             decode_stored(&deep).is_none(),
             "the storage decode must map a recursion-limit hit to None"
         );
+    }
+
+    // ── resume-claim envelope protocol ─────────────────────────────────
+
+    /// Issue, store and consume a record into the resultless consumed
+    /// state, the resume-claim precondition.
+    fn resultless_consumed(url: &str, prefix: &str) -> ChallengeRecord {
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        let store = RedisChallengeStore::new(
+            redis::Client::open(url.to_string()).unwrap(),
+            prefix.to_string(),
+        );
+        store.store(&issued.record).unwrap();
+        assert!(store.consume(&issued.record.nonce).unwrap().is_some());
+        issued.record
+    }
+
+    #[test]
+    fn resume_claim_refuses_missing_and_non_resultless_records() {
+        // The claim guards: a missing record, a pending record, and a
+        // record that already carries a committed outcome are all
+        // refused. The claim exists only for resultless consumed
+        // records.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:resume-claim-refuse:{}:", std::process::id());
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+
+        // Missing: no record, no claim.
+        assert!(store
+            .claim_resume_derivation("no-such-nonce", 60)
+            .unwrap()
+            .is_none());
+
+        // Pending: not consumed yet, no claim.
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        assert!(store
+            .claim_resume_derivation(&issued.record.nonce, 60)
+            .unwrap()
+            .is_none());
+
+        // Committed: no longer resultless, no claim.
+        let rec = resultless_consumed(&url, &prefix);
+        store.commit_result(&rec.nonce, true, None).unwrap();
+        assert!(store
+            .claim_resume_derivation(&rec.nonce, 60)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn resume_claim_is_refused_while_a_live_or_unparseable_claim_is_held() {
+        // Exactly one concurrent recovery may derive: a second claim on
+        // a record whose envelope already holds a live claim is refused.
+        // An owner marker without a parseable expiry is treated as live
+        // (fail safe: never a second unsynchronized derivation).
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:resume-claim-live:{}:", std::process::id());
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+        let rec = resultless_consumed(&url, &prefix);
+
+        let owner = store
+            .claim_resume_derivation(&rec.nonce, 60)
+            .unwrap()
+            .expect("the first claim is taken");
+        assert_eq!(owner.len(), 32, "the owner token is 16 random bytes in hex");
+        assert!(
+            store
+                .claim_resume_derivation(&rec.nonce, 60)
+                .unwrap()
+                .is_none(),
+            "a live claim refuses a second claim"
+        );
+
+        // An owner marker with no parseable expiry is treated as live.
+        let key = format!("{prefix}{}", rec.nonce);
+        let mut conn = redis::Client::open(url.clone()).unwrap();
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let bogus = format!("{},\"resume_owner\":\"cafe\"}}", &raw[..raw.len() - 1]);
+        redis::cmd("SET")
+            .arg(&key)
+            .arg(&bogus)
+            .query::<()>(&mut conn)
+            .unwrap();
+        assert!(
+            store
+                .claim_resume_derivation(&rec.nonce, 60)
+                .unwrap()
+                .is_none(),
+            "an unparseable owner marker is fail-safe live"
+        );
+    }
+
+    #[test]
+    fn resume_release_requires_the_exact_owner() {
+        // The compare-and-clear: only the claim's owner may release it,
+        // so a stale owner can never delete a newer recovery's claim.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:resume-release:{}:", std::process::id());
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+        let rec = resultless_consumed(&url, &prefix);
+
+        let owner = store
+            .claim_resume_derivation(&rec.nonce, 60)
+            .unwrap()
+            .expect("claim");
+        assert!(
+            !store
+                .release_resume_derivation(&rec.nonce, "wrong-owner")
+                .unwrap(),
+            "a different owner's release is refused"
+        );
+        assert!(
+            store
+                .claim_resume_derivation(&rec.nonce, 60)
+                .unwrap()
+                .is_none(),
+            "the claim is still live after the refused release"
+        );
+        assert!(
+            store.release_resume_derivation(&rec.nonce, &owner).unwrap(),
+            "the exact owner's release clears the claim"
+        );
+        assert!(
+            store
+                .claim_resume_derivation(&rec.nonce, 60)
+                .unwrap()
+                .is_some(),
+            "a released claim can be re-taken"
+        );
+    }
+
+    #[test]
+    fn resume_claim_takeover_after_the_lease_expires() {
+        // A crashed recovery leaves only the short lease: once
+        // resume_until passes, a later retry strips the expired claim
+        // and takes over. The envelope keeps exactly one owner marker.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:resume-claim-expire:{}:", std::process::id());
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+        let rec = resultless_consumed(&url, &prefix);
+
+        let owner = store
+            .claim_resume_derivation(&rec.nonce, 1)
+            .unwrap()
+            .expect("claim");
+        assert!(
+            store
+                .claim_resume_derivation(&rec.nonce, 60)
+                .unwrap()
+                .is_none(),
+            "the live lease refuses"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        let next = store
+            .claim_resume_derivation(&rec.nonce, 60)
+            .unwrap()
+            .expect("takeover");
+        assert_ne!(next, owner, "the takeover owner is a fresh token");
+
+        let key = format!("{prefix}{}", rec.nonce);
+        let mut conn = redis::Client::open(url.clone()).unwrap();
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        let owner_count = raw.matches("resume_owner").count();
+        assert_eq!(
+            owner_count, 1,
+            "the expired claim was stripped, not duplicated: {raw}"
+        );
+    }
+
+    #[test]
+    fn resume_commit_fences_on_a_live_claim_and_clears_the_fields() {
+        // The fencing commit: a stale owner (mismatched token) and an
+        // expired owner are refused before any write, and the current
+        // owner's commit splices the result and clears the claim fields
+        // in the same atomic run.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:resume-commit-fence:{}:", std::process::id());
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+        let rec = resultless_consumed(&url, &prefix);
+        let key = format!("{prefix}{}", rec.nonce);
+
+        let owner = store
+            .claim_resume_derivation(&rec.nonce, 60)
+            .unwrap()
+            .expect("claim");
+
+        // A mismatched owner's commit is refused (return 2) with no write.
+        assert!(
+            !store
+                .commit_result_clearing_claim(&rec.nonce, true, None, "stale-owner")
+                .unwrap(),
+            "a mismatched owner's commit is refused"
+        );
+        let state = store.consumed_state(&rec.nonce).unwrap().unwrap();
+        assert!(
+            state.stored_result.is_none(),
+            "the refused commit wrote nothing"
+        );
+        assert_eq!(state.record.nonce, rec.nonce);
+
+        // An expired owner's commit is refused too: the lease is gone.
+        assert!(
+            store.release_resume_derivation(&rec.nonce, &owner).unwrap(),
+            "release before taking the short lease"
+        );
+        let short = store
+            .claim_resume_derivation(&rec.nonce, 1)
+            .unwrap()
+            .expect("short claim");
+        std::thread::sleep(std::time::Duration::from_millis(1200));
+        assert!(
+            !store
+                .commit_result_clearing_claim(&rec.nonce, true, None, &short)
+                .unwrap(),
+            "an expired owner's commit is refused"
+        );
+        assert!(
+            store
+                .consumed_state(&rec.nonce)
+                .unwrap()
+                .unwrap()
+                .stored_result
+                .is_none(),
+            "the expired owner's commit wrote nothing"
+        );
+
+        // The current owner's commit lands, splices the result and
+        // clears the claim fields in the same run.
+        let current = store
+            .claim_resume_derivation(&rec.nonce, 60)
+            .unwrap()
+            .expect("fresh claim");
+        assert!(
+            store
+                .commit_result_clearing_claim(&rec.nonce, true, Some("txn-1"), &current)
+                .unwrap(),
+            "the current owner's commit lands"
+        );
+        let state = store.consumed_state(&rec.nonce).unwrap().unwrap();
+        let result = state.stored_result.expect("the commit landed");
+        assert!(result.valid);
+        assert_eq!(result.binding.as_deref(), Some("txn-1"));
+        let mut conn = redis::Client::open(url.clone()).unwrap();
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        assert!(
+            !raw.contains("resume_owner"),
+            "the commit clears the claim fields: {raw}"
+        );
+        assert!(
+            !raw.contains("resume_until"),
+            "the commit clears the claim fields: {raw}"
+        );
+        assert!(
+            raw.contains("\"consumed_result\":{\"valid\":true"),
+            "the commit spliced the result: {raw}"
+        );
+    }
+
+    #[test]
+    fn a_claimed_envelope_still_decodes_via_decode_stored() {
+        // The shared protocol: PHP and Rust write the claim into the
+        // record envelope, so a claimed record must stay readable. The
+        // runtime fields (state, consumed_result, operation_identity,
+        // resume_owner, resume_until) are stripped before the strict
+        // record parse.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:resume-claim-decode:{}:", std::process::id());
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        let identity = "logical-op-claim-decode";
+        store.store(&issued.record).unwrap();
+        assert!(store
+            .consume_with_operation_identity(&issued.record.nonce, Some(identity))
+            .unwrap()
+            .is_some());
+        store
+            .claim_resume_derivation(&issued.record.nonce, 60)
+            .unwrap()
+            .expect("claim");
+
+        let found = store
+            .find(&issued.record.nonce)
+            .unwrap()
+            .expect("the claimed envelope still decodes");
+        assert_eq!(found.nonce, issued.record.nonce);
+        assert_eq!(
+            found.issued_at_ns, issued.record.issued_at_ns,
+            "the record fields are intact"
+        );
+        let state = store.consumed_state(&issued.record.nonce).unwrap().unwrap();
+        assert_eq!(
+            state.operation_identity.as_deref(),
+            Some(identity),
+            "the identity survives the claim"
+        );
+        assert!(state.stored_result.is_none(), "still resultless");
+
+        let key = format!("{prefix}{}", issued.record.nonce);
+        let mut conn = redis::Client::open(url.clone()).unwrap();
+        let raw: String = redis::cmd("GET").arg(&key).query(&mut conn).unwrap();
+        assert!(
+            raw.contains("\"resume_owner\":\""),
+            "the raw envelope carries the live claim: {raw}"
+        );
+        let decoded = decode_stored(&raw).expect("decode_stored strips the claim fields");
+        assert_eq!(decoded.record.nonce, issued.record.nonce);
+        assert_eq!(decoded.state.as_deref(), Some("consumed"));
+        assert_eq!(decoded.operation_identity.as_deref(), Some(identity));
     }
 }

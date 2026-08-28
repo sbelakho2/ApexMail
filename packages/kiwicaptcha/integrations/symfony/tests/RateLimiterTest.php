@@ -6,6 +6,8 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
+use BelConsulting\KiwiCaptchaBundle\Security\RateLimitStorageException;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FailingSaveCachePool;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
@@ -691,6 +693,186 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         $clock = 10_060.0;
         self::assertSame(1, $shared->check('198.51.100.2'), 'PSR-6: the exact-cutoff global hit is pruned');
         self::assertSame(-1, $shared->check('198.51.100.3'));
+    }
+
+    // ── Fail-closed PSR-6 writes and epoch GC ─────────────────────────────
+
+    /**
+     * Seed one sliding-window hit into the pool under the given cache key
+     * (the shape the limiter itself writes: ['t' => list<float>]).
+     */
+    private static function seedWindow(FailingSaveCachePool $pool, string $key, float $ts): void
+    {
+        $item = $pool->getItem($key);
+        $item->set(['t' => [$ts]]);
+        $pool->save($item);
+    }
+
+    private static function rateLimitCacheKey(string $ip, string $pepper = 'pepper'): string
+    {
+        $key = hash_hmac('sha256', \KiwiCaptcha\Issuer::canonicalIpFamily($ip), $pepper);
+
+        return 'kr_'.substr($key, 0, 60);
+    }
+
+    private static function rotatedRateLimitCacheKey(string $ip, int $epoch, string $pepper = 'pepper'): string
+    {
+        $identity = \KiwiCaptcha\Issuer::canonicalIpFamily($ip);
+        $key = hash_hmac('sha256', 'kiwi-rate-v2|'.$epoch.'|'.$identity, $pepper);
+
+        return 'kr_'.substr($key, 0, 60);
+    }
+
+    public function testPsr6AdmitWithFailingSaveThrows(): void
+    {
+        // PSR-6 permits save() === false without raising: the admit must
+        // fail closed (RateLimitStorageException) instead of returning
+        // allow with the accounting silently missing.
+        $pool = new FailingSaveCachePool();
+        $limiter = new IssuanceRateLimiter(3, 60, $pool, null, 'pepper');
+
+        $this->expectException(RateLimitStorageException::class);
+        $this->expectExceptionMessage('save returned false');
+        $limiter->check('198.51.100.7');
+    }
+
+    public function testRotatedPsr6AdmitWithFailingGlobalSaveThrows(): void
+    {
+        // Only the deployment-global item fails to save: the per-client
+        // current-epoch item lands first (partial charging), then the
+        // global save reports false and the admit still fails closed.
+        $pool = new FailingSaveCachePool(['kr_global']);
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(
+            maxChallenges: 3,
+            windowSecs: 60,
+            pool: $pool,
+            now: static function () use (&$clock): float {
+                return $clock;
+            },
+            pepper: 'pepper',
+            globalMax: 2,
+            rateLimitRotationSecs: 60,
+        );
+
+        try {
+            $limiter->check('198.51.100.7');
+            self::fail('the failed global save must throw RateLimitStorageException');
+        } catch (RateLimitStorageException $e) {
+            self::assertStringContainsString('save returned false', $e->getMessage());
+        }
+        self::assertSame(2, $pool->saveCalls, 'both required saves were attempted: the client item landed, then the global item failed — partial charging is conservative');
+    }
+
+    public function testPsr6DenyPathsNeverCallSave(): void
+    {
+        $clock = 10_000.0;
+        $now = static function () use (&$clock): float {
+            return $clock;
+        };
+        $dummyKey = 'kr_'.str_repeat('a', 60);
+
+        // Per-client deny (plain): the seeded hit fills the cap.
+        $pool = new FailingSaveCachePool(['kr_global']);
+        $limiter = new IssuanceRateLimiter(1, 60, $pool, $now, 'pepper');
+        self::seedWindow($pool, self::rateLimitCacheKey('198.51.100.7'), 10_000.0);
+        $pool->saveCalls = 0;
+        self::assertSame(0, $limiter->check('198.51.100.7'), 'per-client deny');
+        self::assertSame(0, $pool->saveCalls, 'a per-client deny must never call save');
+
+        // Global deny (plain): the seeded kr_global hit fills the cap.
+        $pool = new FailingSaveCachePool([$dummyKey]);
+        $limiter = new IssuanceRateLimiter(100, 60, $pool, $now, 'pepper', null, 1);
+        self::seedWindow($pool, 'kr_global', 10_000.0);
+        $pool->saveCalls = 0;
+        self::assertSame(-1, $limiter->check('198.51.100.8'), 'global deny');
+        self::assertSame(0, $pool->saveCalls, 'a global deny must never call save');
+
+        // Per-client deny (rotated): the seeded current-epoch hit fills
+        // the cap; the previous-epoch bucket stays empty.
+        $pool = new FailingSaveCachePool(['kr_global']);
+        $limiter = new IssuanceRateLimiter(1, 60, $pool, $now, 'pepper', null, 0, '', 60);
+        self::seedWindow($pool, self::rotatedRateLimitCacheKey('198.51.100.9', 166), 10_000.0);
+        $pool->saveCalls = 0;
+        self::assertSame(0, $limiter->check('198.51.100.9'), 'rotated per-client deny');
+        self::assertSame(0, $pool->saveCalls, 'a rotated deny must never call save');
+
+        // Global deny (rotated): the seeded kr_global hit fills the cap.
+        $pool = new FailingSaveCachePool([$dummyKey]);
+        $limiter = new IssuanceRateLimiter(100, 60, $pool, $now, 'pepper', null, 1, '', 60);
+        self::seedWindow($pool, 'kr_global', 10_000.0);
+        $pool->saveCalls = 0;
+        self::assertSame(-1, $limiter->check('198.51.100.10'), 'rotated global deny');
+        self::assertSame(0, $pool->saveCalls, 'a rotated global deny must never call save');
+    }
+
+    public function testPsr6FailingSaveAnswers503ServiceUnavailable(): void
+    {
+        // The controller boundary: the limiter exception must surface as
+        // the same private structured 503 the Redis outage paths answer,
+        // never a raw 500 and never an allow.
+        $pool = new FailingSaveCachePool();
+        $controller = $this->controller(new IssuanceRateLimiter(3, 60, $pool));
+
+        $response = $controller->challenge(JsonRequest::create(
+            '/kiwi-captcha/challenge',
+            'POST',
+            [],
+            [],
+            [],
+            ['REMOTE_ADDR' => '198.51.100.7'],
+            json_encode(['scope' => 'login'], JSON_THROW_ON_ERROR),
+        ));
+        self::assertSame(503, $response->getStatusCode());
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame('SERVICE_UNAVAILABLE', $body['error']['code'], 'a failed rate-limit write must answer the same structured 503 as a Redis outage');
+    }
+
+    public function testRotatedObjectMemoryStateGarbageCollectsStaleEpochs(): void
+    {
+        // Long-lived-runtime hygiene: the rotated object-memory state is
+        // grouped by epoch and lazily garbage-collected, so the map never
+        // grows with historical admitted traffic. Rotation equals the
+        // window (allowed): at 10000/60 the epoch is 166.
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(
+            maxChallenges: 2,
+            windowSecs: 60,
+            now: static function () use (&$clock): float {
+                return $clock;
+            },
+            pepper: 'pepper',
+            globalMax: 0,
+            rateLimitRotationSecs: 60,
+        );
+        $prop = new \ReflectionProperty(IssuanceRateLimiter::class, 'hitsByEpoch');
+        $epochs = static fn (): array => array_map('intval', array_keys($prop->getValue($limiter)));
+
+        self::assertSame(1, $limiter->check('198.51.100.7'), 'admit in epoch 166');
+        self::assertSame([166], $epochs());
+
+        // Advance into epoch 167 without a check: the GC is lazy, so the
+        // 166 bucket is still present.
+        $clock = 10_020.0;
+        self::assertSame([166], $epochs(), 'GC runs lazily on the next check, never eagerly');
+        self::assertSame(1, $limiter->check('198.51.100.7'), 'admit in epoch 167');
+        $sorted = $epochs();
+        sort($sorted);
+        self::assertSame([166, 167], $sorted, 'current and previous epochs coexist after the boundary');
+
+        // Cross-epoch correctness: the previous-epoch hit still counts
+        // against the per-client cap inside the window.
+        $clock = 10_021.0;
+        self::assertSame(0, $limiter->check('198.51.100.7'), 'the epoch-166 hit still counts inside the window');
+
+        // Jump two epochs ahead without a check: the stale buckets are
+        // still there (lazy), then one check at epoch 169 drops both.
+        $clock = 10_140.0;
+        $sorted = $epochs();
+        sort($sorted);
+        self::assertSame([166, 167], $sorted, 'stale buckets survive until the next check (lazy GC)');
+        self::assertSame(1, $limiter->check('198.51.100.7'), 'the check at epoch 169 admits after the GC');
+        self::assertSame([169], $epochs(), 'no epoch older than current - 1 remains (166 and 167 were dropped)');
     }
 
     // ── Redis backend (atomic, cross-worker) ──────────────────────────────

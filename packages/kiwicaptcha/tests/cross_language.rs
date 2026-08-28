@@ -2,6 +2,16 @@
 //! record env var), solves it with the Rust solver, and verifies it with
 //! verify_solution. Skips (returns) when the env var is unset so local
 //! `cargo test` stays hermetic.
+//!
+//! # Shared runtime envelope protocol
+//!
+//! The runtime envelope carried on every stored record is `state`,
+//! `consumed_result`, `operation_identity`, `resume_owner`,
+//! `resume_until`. The resume-derivation claim is single-key and
+//! envelope-embedded: both languages splice `resume_owner` and
+//! `resume_until` into the record itself with one Lua script. A claim
+//! held by one language refuses the other, and the loser's recovery
+//! resolves the winner's committed outcome.
 
 use kiwicaptcha::verify::{
     solve_for_test, verify_solution, RequestBindingExpectation, VerifyContext, VerifyError,
@@ -166,13 +176,21 @@ fn rust_issues_record_for_php() {
 
 /// Four-way real-Redis runtime-state interoperability: PHP and
 /// Rust must operate on the same Redis records with the same runtime
-/// envelope (state marker + consumed_result + operation_identity). Runs
+/// envelope (state marker + consumed_result + operation_identity +
+/// resume_owner + resume_until). The resume-derivation claim is
+/// single-key and envelope-embedded in both languages, so a claim held
+/// by one language refuses the other. Runs
 /// only when a Redis URL is provided and the PHP core's autoloader is
 /// reachable from this crate.
 ///
 /// Directions covered:
 ///  - PHP issue/store -> Rust consume/verify (success + replay)
 ///  - Rust issue/store -> PHP consume/verify (success + replay)
+///  - PHP claim (short TTL) -> Rust claim refused -> expiry takeover ->
+///    Rust claim -> PHP claim refused -> PHP release -> Rust claim +
+///    commit, read back from PHP with the claim fields gone
+///  - PHP claim + commitResultResume -> Rust re-reads the committed
+///    result with the claim fields gone
 #[test]
 #[cfg(feature = "redis")]
 fn redis_runtime_state_interop_with_php() {
@@ -182,7 +200,7 @@ fn redis_runtime_state_interop_with_php() {
     };
     let php_autoload = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../kiwicaptcha-php/vendor/autoload.php"
+        "/../kiwicaptcha-php/vendor/autoload.php"
     );
     if !std::path::Path::new(php_autoload).exists() {
         eprintln!("PHP core autoloader not found — interop test skipped");
@@ -336,6 +354,185 @@ echo 'ok';
         rust_nonce.as_bytes(),
     )
     .expect("PHP replay must read the Rust-committed boolean");
+
+    // 5. The shared resume-claim protocol, PHP side first: a PHP claim
+    //    (short 2s lease) embeds resume_owner / resume_until in the
+    //    record envelope, and the Rust claim on the same record is
+    //    refused (live cross-refusal in the Rust direction).
+    let claim_record = issue_record_for_interop();
+    let claim_nonce = claim_record.nonce.clone();
+    store
+        .store(&claim_record)
+        .expect("Rust must store the claim record");
+    assert!(
+        store
+            .consume(&claim_nonce)
+            .expect("Rust must consume the claim record")
+            .expect("claim record found")
+            .first
+    );
+    let php_claim = r#"
+$client = new \Predis\Client(getenv('KC_INTEROP_REDIS'), ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
+$storage = new KiwiCaptcha\Storage\RedisStorage($client, getenv('KC_INTEROP_PREFIX'));
+$nonce = trim(stream_get_contents(STDIN));
+$owner = $storage->claimResumeDerivation($nonce, 2);
+if ($owner === null) { fwrite(STDERR, 'PHP must take the short-lease claim'); exit(8); }
+echo $owner;
+"#;
+    let php_owner = php_script_with_input(
+        &php_bin,
+        php_autoload,
+        &url,
+        &prefix,
+        php_claim,
+        claim_nonce.as_bytes(),
+    )
+    .expect("PHP must claim the record");
+    assert_eq!(php_owner.trim().len(), 32, "PHP claim owner is hex");
+    assert!(
+        store
+            .claim_resume_derivation(&claim_nonce, 60)
+            .expect("Rust claim must run")
+            .is_none(),
+        "Rust must refuse a claim while the PHP claim is live"
+    );
+
+    // 6. Wait past the PHP lease: a crashed PHP recovery never
+    //    released, but once resume_until passes the Rust recovery may
+    //    take over the same record. Poll with a deadline instead of
+    //    sleeping a fixed 3s: the 2s lease leaves only a 1s margin and
+    //    a fixed sleep is flaky under CI load (the lease is measured by
+    //    the Redis server clock). Retry every 250ms until the claim is
+    //    taken or the 15s deadline passes.
+    let claim_deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let mut rust_owner = None;
+    while std::time::Instant::now() < claim_deadline {
+        if let Ok(Some(owner)) = store.claim_resume_derivation(&claim_nonce, 60) {
+            rust_owner = Some(owner);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    let rust_owner = rust_owner.expect("Rust must take over the record once the PHP lease expires");
+
+    // 7. Cross-refusal the other direction: the PHP claim on the
+    //    Rust-held record is refused, and PHP releases the Rust claim.
+    let php_cross_refuse = r#"
+$client = new \Predis\Client(getenv('KC_INTEROP_REDIS'), ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
+$storage = new KiwiCaptcha\Storage\RedisStorage($client, getenv('KC_INTEROP_PREFIX'));
+$nonce = trim(fgets(STDIN));
+$owner = trim(fgets(STDIN));
+if ($storage->claimResumeDerivation($nonce, 2) !== null) { fwrite(STDERR, 'PHP claim must be refused while the Rust claim is live'); exit(9); }
+if (!$storage->releaseResumeDerivation($nonce, $owner)) { fwrite(STDERR, 'PHP must release the Rust claim'); exit(10); }
+echo 'ok';
+"#;
+    php_script_with_input(
+        &php_bin,
+        php_autoload,
+        &url,
+        &prefix,
+        php_cross_refuse,
+        format!("{}\n{}", claim_nonce, rust_owner).as_bytes(),
+    )
+    .expect("PHP must observe the Rust claim and release it");
+
+    // 8. Single-owner under mixed attempts: after the PHP release, the
+    //    Rust recovery claims again and commits through the fenced
+    //    single-key commit, which clears the claim fields atomically.
+    let rust_owner_2 = store
+        .claim_resume_derivation(&claim_nonce, 60)
+        .expect("the re-claim must run")
+        .expect("Rust must re-claim after the PHP release");
+    assert!(
+        store
+            .commit_result_clearing_claim(&claim_nonce, true, None, &rust_owner_2)
+            .expect("the fenced commit must run"),
+        "Rust must commit its recovered result"
+    );
+
+    // 9. PHP re-reads the committed outcome, cannot claim the record
+    //    anymore (it is no longer resultless), and the raw envelope no
+    //    longer carries the claim fields.
+    let php_read_back = r#"
+$client = new \Predis\Client(getenv('KC_INTEROP_REDIS'), ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
+$storage = new KiwiCaptcha\Storage\RedisStorage($client, getenv('KC_INTEROP_PREFIX'));
+$nonce = trim(stream_get_contents(STDIN));
+$consumed = $storage->consumedState($nonce);
+if ($consumed === null || $consumed->consumedResult === null || !$consumed->consumedResult->valid) { fwrite(STDERR, 'PHP must read the Rust-committed result'); exit(11); }
+if ($storage->claimResumeDerivation($nonce, 2) !== null) { fwrite(STDERR, 'PHP claim must be refused on a committed record'); exit(12); }
+$raw = $client->get(getenv('KC_INTEROP_PREFIX') . $nonce);
+if (str_contains($raw, 'resume_owner')) { fwrite(STDERR, 'the claim fields must be gone from the raw envelope'); exit(13); }
+echo 'ok';
+"#;
+    php_script_with_input(
+        &php_bin,
+        php_autoload,
+        &url,
+        &prefix,
+        php_read_back,
+        claim_nonce.as_bytes(),
+    )
+    .expect("PHP must read the committed outcome with the claim cleared");
+
+    // 10. The PHP claim + commitResultResume direction: PHP claims,
+    //     derives and commits through its fenced commit; Rust then
+    //     re-reads the same record and sees the committed result with
+    //     the claim fields stripped from the raw envelope.
+    let php_commit_record = issue_record_for_interop();
+    let php_commit_nonce = php_commit_record.nonce.clone();
+    store
+        .store(&php_commit_record)
+        .expect("Rust must store the PHP-commit record");
+    assert!(
+        store
+            .consume(&php_commit_nonce)
+            .expect("Rust must consume the PHP-commit record")
+            .expect("PHP-commit record found")
+            .first
+    );
+    let php_claim_and_commit = r#"
+$client = new \Predis\Client(getenv('KC_INTEROP_REDIS'), ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
+$storage = new KiwiCaptcha\Storage\RedisStorage($client, getenv('KC_INTEROP_PREFIX'));
+$nonce = trim(stream_get_contents(STDIN));
+$owner = $storage->claimResumeDerivation($nonce, 2);
+if ($owner === null) { fwrite(STDERR, 'PHP must claim the commit record'); exit(14); }
+if (!$storage->commitResultResume($nonce, true, null, $owner)) { fwrite(STDERR, 'PHP commitResultResume must land'); exit(15); }
+echo 'ok';
+"#;
+    php_script_with_input(
+        &php_bin,
+        php_autoload,
+        &url,
+        &prefix,
+        php_claim_and_commit,
+        php_commit_nonce.as_bytes(),
+    )
+    .expect("PHP must claim and commit its recovered result");
+
+    // 11. Rust re-reads the PHP-committed outcome: the committed result
+    //     is readable and the claim fields are gone from the raw JSON.
+    let state = store
+        .consumed_state(&php_commit_nonce)
+        .expect("Rust must read the PHP-committed record")
+        .expect("the PHP-committed record is retained");
+    let result = state
+        .stored_result
+        .expect("Rust must read the PHP-committed result");
+    assert!(
+        result.valid,
+        "the PHP-committed valid=true result is readable in Rust"
+    );
+    let mut conn = client
+        .get_connection()
+        .expect("a Redis connection for the raw read");
+    let raw: String = redis::cmd("GET")
+        .arg(format!("{prefix}{php_commit_nonce}"))
+        .query(&mut conn)
+        .expect("raw read of the PHP-committed record");
+    assert!(
+        !raw.contains("resume_owner"),
+        "the PHP commit cleared the claim fields from the raw envelope"
+    );
 }
 
 #[cfg(feature = "redis")]

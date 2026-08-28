@@ -32,16 +32,34 @@ use Psr\Cache\CacheItemPoolInterface;
  *     best-effort: concurrent requests racing the read-modify-write may
  *     briefly exceed the cap (N workers can admit up to ~N x cap in a
  *     race). It is a soft bound, never an exact distributed gate.
- *  3. In-memory (per-process): single-worker fallback. The global window is
- *     exact within the process (a hard per-process gate); N workers share
- *     no memory, so the deployment aggregate can approach N x cap.
+ *  3. Object memory (long-lived runtime only): the fallback when no pool
+ *     is configured. The windows live in this object's fields, so they are
+ *     exact for one persistent worker process (RoadRunner, Swoole, amphp
+ *     or a single CLI process); N workers share no memory, so the
+ *     deployment aggregate can approach N x cap. Under conventional
+ *     PHP-FPM every request constructs a fresh limiter, so this mode is
+ *     request-local: the windows provide no temporal limiting across
+ *     requests at all.
+ *
+ * Lifecycle model: Redis is the exact distributed backend. A shared PSR-6
+ * pool (`rate_limit_cache`) is the only no-Redis mode that survives across
+ * requests, giving a cross-request best-effort window (never an exact
+ * distributed gate: concurrent requests racing the non-atomic
+ * read-modify-write may briefly exceed the cap). The object-memory mode is
+ * long-lived-runtime-only: it provides temporal limiting only inside a
+ * persistent worker or a single CLI process. Under conventional PHP-FPM
+ * the services are rebuilt per request, so the object-memory windows are
+ * per-request and provide no temporal limiting across requests;
+ * production temporal limiting without Redis requires a genuinely
+ * persistent or shared PSR-6 pool.
  *
  * Degradation ladder for the deployment-global cap: exact distributed
- * (Redis) -> shared best-effort (PSR-6) -> per-process exact (in-memory).
- * The global cap is enforced on ALL backends: without Redis the limiter
- * keeps a real global window (the shared `kr_global` item when a pool is
- * configured, the process-local list otherwise) instead of disabling the
- * cap. `allow_local_global_limit_fallback` therefore means "per-process /
+ * (Redis) -> shared best-effort (PSR-6) -> object-memory exact for one
+ * persistent worker. The global cap is enforced on ALL backends: without
+ * Redis the limiter keeps a real global window (the shared `kr_global`
+ * item when a pool is configured, the process-local list otherwise)
+ * instead of disabling the cap. `allow_local_global_limit_fallback`
+ * therefore means "long-lived-runtime-only object window / shared
  * best-effort window", never "no global cap at all".
  *
  * Transactional fallback decisions: on the non-Redis backends each request
@@ -50,14 +68,14 @@ use Psr\Cache\CacheItemPoolInterface;
  * and commit both hits. A denial therefore never consumes the caller's
  * own allowance (a victim refused during global saturation keeps their
  * personal window untouched) and can never reset a window (pruning is
- * idempotent: the next read re-prunes with a newer clock). The in-memory
- * decision is exact; a generic PSR-6 pool cannot make the two item writes
- * atomic across workers, so inter-worker races on the read-modify-write
- * remain the documented best-effort weakness (the per-request semantics
- * stay transactional).
+ * idempotent: the next read re-prunes with a newer clock). The object-
+ * memory decision is exact; a generic PSR-6 pool cannot make the two item
+ * writes atomic across workers, so inter-worker races on the
+ * read-modify-write remain the documented best-effort weakness (the
+ * per-request semantics stay transactional).
  *
  * Privacy: raw client IPs are never stored. Every key (Redis, PSR-6 and
- * in-memory) is a peppered HMAC of the IP, `hash_hmac('sha256', $ip,
+ * object memory) is a peppered HMAC of the IP, `hash_hmac('sha256', $ip,
  * $pepper)`, where the pepper defaults to the bundle secret key
  * (`rate_limit_pepper` overrides it). The same HMAC is used by all backends
  * so they agree on the same identity.
@@ -196,6 +214,17 @@ LUA;
 
     /** @var array<string, list<float>> sliding-window hit timestamps, per process */
     private array $hits = [];
+
+    /**
+     * Rotated object-memory state: epoch -> identity-key -> hit timestamps.
+     * Only the current and the previous epoch can intersect the sliding
+     * window (the constructor enforces rotationSecs >= windowSecs), so every
+     * older epoch bucket is lazily garbage-collected on the next rotated
+     * check, keeping this map bounded in long-lived runtimes.
+     *
+     * @var array<int, array<string, list<float>>>
+     */
+    private array $hitsByEpoch = [];
 
     /** @var list<float> deployment-global sliding-window hit timestamps, per process */
     private array $globalHits = [];
@@ -554,19 +583,35 @@ LUA;
     }
 
     /**
-     * Transactional combined fallback decision (epoch-rotated, in-memory):
-     * the previous- and current-epoch pseudonym windows are read, pruned
-     * and merged, then the deployment-global window is read and pruned, in
-     * ONE pass per request. Same deny-writes-nothing semantics as
-     * {@see self::checkLocal()}: a global-saturation denial never consumes
-     * the client's allowance in either epoch, and no denial can reset any
-     * window. New hits are written to the current epoch only; the global
-     * window is shared and never rotated.
+     * Transactional combined fallback decision (epoch-rotated, object
+     * memory): the previous- and current-epoch pseudonym windows are read,
+     * pruned and merged, then the deployment-global window is read and
+     * pruned, in ONE pass per request. Same deny-writes-nothing semantics
+     * as {@see self::checkLocal()}: a global-saturation denial never
+     * consumes the client's allowance in either epoch, and no denial can
+     * reset any window. New hits are written to the current epoch only;
+     * the global window is shared and never rotated.
      */
     private function checkLocalTwoEpoch(string $identityPrev, string $identityCur): int
     {
         $now = $this->now();
-        $hits = $this->pruneTwo($this->hits[$identityPrev] ?? [], $this->hits[$identityCur] ?? [], $now);
+        // Lazy epoch GC: only the current and the previous epoch can
+        // intersect the sliding window (rotationSecs >= windowSecs is
+        // enforced in the constructor), so every bucket from an epoch
+        // older than (current - 1) is dropped on this check. In a
+        // long-lived runtime the map therefore never grows with
+        // historical admitted traffic.
+        $epoch = (int) floor($now / $this->rateLimitRotationSecs);
+        foreach (array_keys($this->hitsByEpoch) as $storedEpoch) {
+            if ($storedEpoch < $epoch - 1) {
+                unset($this->hitsByEpoch[$storedEpoch]);
+            }
+        }
+        $hits = $this->pruneTwo(
+            $this->hitsByEpoch[$epoch - 1][$identityPrev] ?? [],
+            $this->hitsByEpoch[$epoch][$identityCur] ?? [],
+            $now,
+        );
 
         if (\count($hits) >= $this->maxChallenges) {
             return 0;
@@ -580,7 +625,7 @@ LUA;
             }
         }
 
-        $this->hits[$identityCur][] = $now;
+        $this->hitsByEpoch[$epoch][$identityCur][] = $now;
         $globalHits[] = $now;
         $this->globalHits = $globalHits;
 
@@ -660,13 +705,29 @@ LUA;
      * Persist a window's hit timestamps into one cache item (shared by
      * every admit path) with the item TTL one second past the window.
      *
+     * Fail closed: PSR-6 permits save() to return false without throwing,
+     * and a silent false would let an admit decision stand with its
+     * accounting never persisted. Any save returning false on an admit
+     * path raises {@see RateLimitStorageException}; the challenge
+     * controller converts it to the same structured 503 as a Redis
+     * outage, so an admit is never reported allowed after a failed
+     * backend write. Deny paths write nothing and never reach this
+     * method. Partial charging (one of two required items saved, then
+     * this exception) is acceptable and conservative: the next read
+     * re-prunes with a newer clock, so the leftover hit can never be
+     * double-counted.
+     *
      * @param list<float> $hits
+     *
+     * @throws RateLimitStorageException when the pool reports the save failed
      */
     private function saveWindow(\Psr\Cache\CacheItemInterface $item, array $hits): void
     {
         $item->set(['t' => $hits]);
         $item->expiresAfter($this->windowSecs + 1);
-        $this->pool->save($item);
+        if ($this->pool->save($item) === false) {
+            throw new RateLimitStorageException('PSR-6 rate-limit window save returned false; refusing the admit');
+        }
     }
 
     /**
