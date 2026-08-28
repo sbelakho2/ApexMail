@@ -40,9 +40,15 @@ pub const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS tenants (
     id          VARCHAR(26) PRIMARY KEY,
     name        TEXT        NOT NULL,
-    slug        TEXT        NOT NULL UNIQUE,
+    slug        TEXT        UNIQUE,
     plan        TEXT        NOT NULL DEFAULT 'free',
     status      TEXT        NOT NULL DEFAULT 'active',
+    -- settings/metadata match the canonical chain (migration 052/064): the
+    -- api-server writes settings JSONB and metadata JSONB NOT NULL on every
+    -- tenant insert; a SCHEMA without them broke the DB-backed test suite
+    -- the moment CI_TEST_DB=ephemeral started applying this bootstrap.
+    settings    JSONB,
+    metadata    JSONB       NOT NULL DEFAULT '{}'::jsonb,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -498,6 +504,17 @@ mod tests {
             SCHEMA.contains("UNIQUE(tenant_id, email)")
                 || SCHEMA.contains("UNIQUE (tenant_id, email)"),
             "suppressions must enforce UNIQUE(tenant_id, email) like migration 088"
+        );
+        // The ephemeral CI database is provisioned from THIS constant; the
+        // api-server writes settings + metadata on every tenant insert, so a
+        // bootstrap missing either column broke the whole DB-backed suite.
+        assert!(
+            tenants_block.contains("settings    JSONB"),
+            "SCHEMA tenants must carry the canonical settings JSONB column"
+        );
+        assert!(
+            tenants_block.contains("metadata    JSONB"),
+            "SCHEMA tenants must carry the canonical metadata JSONB column"
         );
     }
 }
