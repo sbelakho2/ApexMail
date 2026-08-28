@@ -28,6 +28,20 @@ pub fn ceil_day_count(duration_ms: i64) -> i64 {
     }
 }
 
+/// Compute the FLOOR number of days for a duration given in milliseconds.
+///
+/// Elapsed time must floor (a half-day elapsed has not consumed a whole
+/// day yet); ceil-ing BOTH elapsed and period length discarded up to a full
+/// day of remaining time on mid-period plan changes — a systematic
+/// customer-unfavorable bias.
+pub fn floor_day_count(duration_ms: i64) -> i64 {
+    if duration_ms <= 0 {
+        0
+    } else {
+        duration_ms / MILLISECONDS_PER_DAY
+    }
+}
+
 /// Calculate the prorated amount for a given total price, remaining days and
 /// total days in the billing period.
 ///
@@ -134,6 +148,29 @@ pub fn build_proration_explanation(
 mod tests {
     use super::*;
 
+    #[test]
+    fn floor_day_count_rounds_down_and_never_discards_elapsed_time() {
+        assert_eq!(floor_day_count(MILLISECONDS_PER_DAY - 1), 0);
+        assert_eq!(floor_day_count(MILLISECONDS_PER_DAY), 1);
+        // 15.5 days elapsed is 15 WHOLE days consumed — not 16. Together
+        // with ceil(days_in_period) this credits the full fractional
+        // remainder instead of discarding it.
+        assert_eq!(
+            floor_day_count(15 * MILLISECONDS_PER_DAY + MILLISECONDS_PER_DAY / 2),
+            15
+        );
+    }
+
+    #[test]
+    fn mid_period_upgrade_keeps_the_fractional_remainder() {
+        // 30-day period, 15.5 days elapsed at the upgrade instant.
+        let days_in_period = ceil_day_count(30 * MILLISECONDS_PER_DAY);
+        let days_elapsed = floor_day_count(15 * MILLISECONDS_PER_DAY + MILLISECONDS_PER_DAY / 2);
+        assert_eq!(days_elapsed, 15);
+        // The pre-fix pairing (ceil/ceil) yielded 30 - 16 = 14 remaining —
+        // silently billing the customer for half a day they had not used.
+        assert_eq!((days_in_period - days_elapsed).max(0), 15);
+    }
     #[test]
     fn ceil_day_count_rounds_up() {
         // A duration of 1 ms less than a full day should still count as 1 day.

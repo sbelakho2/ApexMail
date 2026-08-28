@@ -95,6 +95,35 @@ async fn apply_migrations(database_url: &str) -> Result<()> {
         "applied migrations after run: {after} ({} new)",
         after - before
     );
+
+    // Partition runway: the high-volume tables are RANGE-partitioned with a
+    // static partition horizon (050/058 created partitions to 2027-12 /
+    // 2030-Q1) and nothing else calls create_future_partitions() at runtime.
+    // Once the horizon passes, every insert lands in the *_default partition
+    // and future ATTACHes need an exclusive full scan of it. Extending the
+    // horizon on every deploy keeps it ahead forever. Absence of the
+    // function (pre-050 databases mid-upgrade) is a notice, not an error —
+    // the migration that creates it is the same one that partitions the
+    // tables, so by the time it exists the extension is meaningful.
+    // Same NULL-decoding shape as `applied_count`. Note to_regprocedure, not
+    // to_regclass: functions are not relations, and to_regclass on a function
+    // name returns NULL even when the function exists.
+    let runway: Option<Option<String>> =
+        sqlx::query_scalar("SELECT to_regprocedure('public.create_future_partitions()')::text")
+            .fetch_optional(&pool)
+            .await
+            .context("failed to check for create_future_partitions")?;
+    match runway.flatten() {
+        Some(_) => {
+            sqlx::query("SELECT create_future_partitions()")
+                .execute(&pool)
+                .await
+                .context("failed to extend the partition runway")?;
+            println!("migrator: partition runway extended");
+        }
+        None => println!("migrator: create_future_partitions absent — runway not extended"),
+    }
+
     pool.close().await;
     Ok(())
 }
@@ -159,21 +188,24 @@ mod tests {
         );
     }
 
-    /// The deploy gate relies on the migrator covering the full chain — in
-    /// particular the 101-108 batch that previously ran in NO deploy path.
-    /// Update the floor when the chain grows; this only guards against the
-    /// macro silently pointing at the wrong (empty/partial) directory.
+    /// The deploy gate relies on the migrator covering the full chain. The
+    /// chain must be CONTIGUOUS from 1 to the latest version with no gaps: a
+    /// gap means the macro pointed at a partial directory (or a file was
+    /// misnamed), and sqlx would happily apply a chain that silently skips
+    /// migrations. Deriving the expected range from the embedded set itself
+    /// keeps this correct as the chain grows — no floor constant to forget.
     #[test]
     fn migration_chain_is_complete() {
-        let latest = MIGRATIONS
-            .migrations
+        let versions: Vec<i64> = MIGRATIONS.migrations.iter().map(|m| m.version).collect();
+        let latest = versions
             .iter()
-            .map(|m| m.version)
+            .copied()
             .max()
             .expect("non-empty migration set");
-        assert!(
-            latest >= 108,
-            "expected migrations up to >= 108, latest is {latest}"
+        let expected: Vec<i64> = (1..=latest).collect();
+        assert_eq!(
+            versions, expected,
+            "migration versions must be contiguous 1..={latest} with no gaps"
         );
     }
 

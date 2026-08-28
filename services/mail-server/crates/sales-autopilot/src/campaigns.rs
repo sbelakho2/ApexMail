@@ -566,7 +566,7 @@ impl CampaignManager {
                  WHERE r.campaign_id = $1 AND c.tenant_id = $2 AND r.sent_at IS NULL \
                  AND NOT EXISTS (\
                      SELECT 1 FROM sales_unsubscribes u \
-                     WHERE u.tenant_id = c.tenant_id AND u.email = r.email\
+                     WHERE u.tenant_id = c.tenant_id AND LOWER(u.email) = LOWER(r.email)\
                  ) \
                  AND NOT EXISTS (\
                      SELECT 1 FROM suppressions s \
@@ -677,15 +677,15 @@ impl CampaignManager {
                 COUNT(*) FILTER (WHERE r.sent_at IS NOT NULL), \
                 COUNT(*) FILTER (WHERE r.sent_at IS NULL AND EXISTS (\
                     SELECT 1 FROM sales_unsubscribes u \
-                    WHERE u.tenant_id = c.tenant_id AND u.email = r.email)), \
+                    WHERE u.tenant_id = c.tenant_id AND LOWER(u.email) = LOWER(r.email))), \
                 COUNT(*) FILTER (WHERE r.sent_at IS NULL AND NOT EXISTS (\
                     SELECT 1 FROM sales_unsubscribes u \
-                    WHERE u.tenant_id = c.tenant_id AND u.email = r.email) AND EXISTS (\
+                    WHERE u.tenant_id = c.tenant_id AND LOWER(u.email) = LOWER(r.email)) AND EXISTS (\
                     SELECT 1 FROM suppressions s \
                     WHERE s.tenant_id = c.tenant_id AND LOWER(s.email) = LOWER(r.email))), \
                 COUNT(*) FILTER (WHERE r.sent_at IS NULL AND NOT EXISTS (\
                     SELECT 1 FROM sales_unsubscribes u \
-                    WHERE u.tenant_id = c.tenant_id AND u.email = r.email) AND NOT EXISTS (\
+                    WHERE u.tenant_id = c.tenant_id AND LOWER(u.email) = LOWER(r.email)) AND NOT EXISTS (\
                     SELECT 1 FROM suppressions s \
                     WHERE s.tenant_id = c.tenant_id AND LOWER(s.email) = LOWER(r.email)) \
                     AND (\
@@ -696,7 +696,7 @@ impl CampaignManager {
                     ) >= $3), \
                 COUNT(*) FILTER (WHERE r.sent_at IS NULL AND NOT EXISTS (\
                     SELECT 1 FROM sales_unsubscribes u \
-                    WHERE u.tenant_id = c.tenant_id AND u.email = r.email) AND NOT EXISTS (\
+                    WHERE u.tenant_id = c.tenant_id AND LOWER(u.email) = LOWER(r.email)) AND NOT EXISTS (\
                     SELECT 1 FROM suppressions s \
                     WHERE s.tenant_id = c.tenant_id AND LOWER(s.email) = LOWER(r.email)) \
                     AND (\

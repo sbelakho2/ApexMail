@@ -384,3 +384,35 @@ From a workstation, `make verify` runs the endpoint/port checks against the
 live host and `deploy/scripts/verify-deployment.sh` re-checks cache coherence
 of the legal pages; `tools/run-compose-smoke.sh full` is the pre-merge
 compose-stack equivalent.
+
+## Alerting / notification receivers
+
+The monitoring stack (prometheus + alertmanager, deployed with the
+`monitoring` compose profile) evaluates the rules in
+`deploy/alerting-rules.yml` and routes every firing alert through
+`deploy/alertmanager.yml.tmpl` (rendered at container start by
+`deploy/scripts/render-alertmanager-config.sh`). **Operators MUST set at
+least ONE external receiver env var** — the template's only always-on
+destination is the *internal* `http://observability:4400/alerts` webhook,
+which is useless precisely when the platform itself is failing.
+
+Receiver env vars (any **one** of these is sufficient):
+
+| Receiver | Env var(s) | Notes |
+|---|---|---|
+| PagerDuty | `PAGERDUTY_ROUTING_KEY` | Critical route |
+| OpsGenie | `OPSGENIE_API_KEY` | Critical route (P1) |
+| Slack | `SLACK_WEBHOOK_PATH` and `SLACK_WEBHOOK_PATH_LOW` | Path after `https://hooks.slack.com/services/` (high/low channels) |
+| Email | `SMTP_HOST` (a real relay — **not** the dead `127.0.0.1` compose default) + `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `ALERT_EMAIL_CRITICAL`, `ALERT_EMAIL_WARNING` | Warning + critical routes |
+
+If none of them is configured, the render script does not fail the deploy,
+but it stamps a `NO EXTERNAL ALERT DELIVERY CHANNEL IS CONFIGURED` banner
+into the rendered alertmanager config *and* the container logs — search the
+alertmanager logs for it after every bootstrap. You can pre-flight the
+wiring anywhere the template is mounted with:
+
+```sh
+docker compose exec alertmanager \
+    sh /usr/local/bin/render-alertmanager-config.sh --check
+```
+

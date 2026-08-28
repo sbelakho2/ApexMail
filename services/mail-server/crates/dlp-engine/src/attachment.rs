@@ -240,9 +240,12 @@ fn decode_zip_part(compression: u16, bytes: &[u8], max_bytes: u64) -> Result<Opt
             Ok(Some(bytes.to_vec()))
         }
         8 => {
-            // Bound the reader so the deflater cannot expand beyond the cap.
-            let limited = std::io::Read::take(bytes, max_bytes.saturating_add(1));
-            let mut decoder = DeflateDecoder::new(limited);
+            // Bound the DECODER OUTPUT, not the compressed input: `take`
+            // on the input still lets a few KB of deflate expand to GBs
+            // inside `read_to_end` before any post-hoc length check runs.
+            // Reading at most `max_bytes + 1` decompressed bytes makes the
+            // over-limit detection and the allocation bound the same event.
+            let mut decoder = DeflateDecoder::new(bytes).take(max_bytes.saturating_add(1));
             let mut decoded = Vec::new();
             if decoder.read_to_end(&mut decoded).is_err() {
                 return Ok(None);
@@ -300,6 +303,15 @@ fn extract_xml_text_content(xml: &str, out: &mut String) {
 
 /// Maximum decompressed size for any single PDF FlateDecode stream.
 const MAX_PDF_STREAM_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Maximum number of FlateDecode streams examined per PDF. Legitimate PDFs
+/// have tens of streams; thousands of tiny streams is a resource-exhaustion
+/// shape, so the walk stops here and reports it.
+const MAX_PDF_STREAMS_EXAMINED: usize = 256;
+
+/// Process-wide count of PDFs whose stream count exceeded
+/// [`MAX_PDF_STREAMS_EXAMINED`] — observable metric for operators.
+pub static PDF_STREAM_CAP_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Risk floor applied when a text-bearing attachment yields no extractable
 /// text:contents are unverified, so policy — not a silent Allow — decides.
@@ -368,6 +380,17 @@ fn find_pdf_streams(data: &[u8]) -> Vec<&[u8]> {
     let mut streams = Vec::new();
     let mut pos = 0;
     while let Some(rel) = find_subslice(&data[pos..], b"stream") {
+        // Resource-exhaustion guard: each collected stream costs an inflate
+        // later; a PDF with thousands of streams is a DoS shape. Stop at the
+        // cap, count it, and let text extraction proceed on what we have.
+        if streams.len() >= MAX_PDF_STREAMS_EXAMINED {
+            PDF_STREAM_CAP_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                cap = MAX_PDF_STREAMS_EXAMINED,
+                "PDF stream examination capped (possible resource-exhaustion shape)"
+            );
+            break;
+        }
         let stream_kw = pos + rel;
         // The dictionary precedes the stream keyword; look back for the
         // object start to inspect the filter.
@@ -411,14 +434,21 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 
 /// Inflate a PDF FlateDecode stream (zlib format) with a hard output cap.
 fn inflate_pdf_stream(bytes: &[u8]) -> Option<Vec<u8>> {
+    inflate_with_cap(bytes, MAX_PDF_STREAM_BYTES)
+}
+
+/// Inflate a zlib stream, bounding the decoder OUTPUT at `max` bytes.
+/// The `take` must wrap the decoder, not the input: bounding the input
+/// lets a small compressed stream expand to GBs inside `read_to_end`
+/// before the post-hoc length check ever runs.
+fn inflate_with_cap(bytes: &[u8], max: u64) -> Option<Vec<u8>> {
     use flate2::read::ZlibDecoder;
     use std::io::Read;
 
-    let limited = std::io::Read::take(bytes, MAX_PDF_STREAM_BYTES.saturating_add(1));
-    let mut decoder = ZlibDecoder::new(limited);
+    let mut decoder = ZlibDecoder::new(bytes).take(max.saturating_add(1));
     let mut out = Vec::new();
     decoder.read_to_end(&mut out).ok()?;
-    if out.len() as u64 > MAX_PDF_STREAM_BYTES {
+    if out.len() as u64 > max {
         return None; // decompression bomb — refuse
     }
     Some(out)
@@ -952,6 +982,90 @@ mod tests {
         let img = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10];
         let result = engine.scan_attachment(&img, Some("photo.jpg"), None);
         assert_eq!(result.dlp_verdict.action, DlpAction::Allow);
+    }
+
+    /// Compress `data` with raw deflate (ZIP method 8).
+    fn deflate(data: &[u8]) -> Vec<u8> {
+        use flate2::write::DeflateEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let mut enc = DeflateEncoder::new(Vec::new(), Compression::best());
+        enc.write_all(data).expect("deflate write");
+        enc.finish().expect("deflate finish")
+    }
+
+    /// Compress `data` as a zlib stream (PDF FlateDecode).
+    fn zlib(data: &[u8]) -> Vec<u8> {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+        let mut enc = ZlibEncoder::new(Vec::new(), Compression::best());
+        enc.write_all(data).expect("zlib write");
+        enc.finish().expect("zlib finish")
+    }
+
+    #[test]
+    fn test_zip_bomb_flagged_not_treated_as_unsupported() {
+        // Fail-first: `take` bounded the COMPRESSED input, not the decoder
+        // OUTPUT. With a compressed size above the cap the input was
+        // truncated mid-stream, the decode failed, and a decompression
+        // bomb was silently reported as "unsupported compression"
+        // (Ok(None)) instead of a bomb (Err(())).
+        let bomb = deflate(&vec![0u8; 8 * 1024 * 1024]); // ~8KB -> 8MB
+        assert!(bomb.len() as u64 > 1024, "fixture must exceed the cap");
+        let result = decode_zip_part(8, &bomb, 1024);
+        assert!(
+            matches!(result, Err(())),
+            "bomb must be flagged as Err(()), got {:?}",
+            result.map(|_| "data")
+        );
+    }
+
+    #[test]
+    fn test_zip_small_legit_part_passes() {
+        let original = b"plain text content for the DLP scan".to_vec();
+        let compressed = deflate(&original);
+        let result = decode_zip_part(8, &compressed, 1024 * 1024);
+        assert_eq!(result, Ok(Some(original)));
+    }
+
+    #[test]
+    fn test_pdf_stream_bomb_rejected_quickly() {
+        // An 8MB-expanding stream with a 20MB cap is legitimately allowed,
+        // but the decode must stop at the OUTPUT cap; assert both a small
+        // stream passes and a >cap stream is refused.
+        let small = zlib(b"BT (hello) Tj ET".repeat(64).as_slice());
+        assert!(inflate_pdf_stream(&small).is_some());
+        let bomb = zlib(&vec![0u8; (MAX_PDF_STREAM_BYTES + 1024 * 1024) as usize]);
+        assert!(inflate_pdf_stream(&bomb).is_none());
+    }
+
+    #[test]
+    fn test_pdf_stream_examination_capped() {
+        // Fail-first: stream examination was unbounded — thousands of tiny
+        // streams each paid an inflate. The walk must stop at the cap and
+        // bump the observable counter.
+        let payload = zlib(b"BT (x) Tj ET");
+        let mut pdf = Vec::new();
+        pdf.extend_from_slice(b"%PDF-1.4\n");
+        for _ in 0..300 {
+            pdf.extend_from_slice(b"<< /Filter /FlateDecode /Length ");
+            pdf.extend_from_slice(payload.len().to_string().as_bytes());
+            pdf.extend_from_slice(b" >>\nstream\n");
+            pdf.extend_from_slice(&payload);
+            pdf.extend_from_slice(b"\nendstream\n");
+        }
+        let before = PDF_STREAM_CAP_HITS.load(std::sync::atomic::Ordering::Relaxed);
+        let streams = find_pdf_streams(&pdf);
+        assert_eq!(
+            streams.len(),
+            MAX_PDF_STREAMS_EXAMINED,
+            "stream walk must stop at the cap"
+        );
+        assert!(
+            PDF_STREAM_CAP_HITS.load(std::sync::atomic::Ordering::Relaxed) > before,
+            "hitting the cap must be observable in the metric"
+        );
     }
 
     #[test]

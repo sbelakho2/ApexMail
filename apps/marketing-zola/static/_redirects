@@ -7,9 +7,15 @@
 /app                 https://app.apexmail.ee            302
 /signup              https://app.apexmail.ee/signup     302
 
-# Status is served by the live incident-management surface.
-/status              https://status.apexmail.ee         302
-/status/*            https://status.apexmail.ee         302
+# NOTE — /status is NOT redirected. Localized static status pages exist
+# at /status/, /de/status/, /fr/status/, /es/status/ (content/status/)
+# and the footer links to {{ lp }}/status/ in every locale. The former
+# `/status` + `/status/*` → status.apexmail.ee rules stole those URLs on
+# Netlify/Cloudflare Pages and sent footer traffic off-site, while the
+# nginx vhost (apps/marketing-zola/nginx.conf) served the pages — the
+# story now matches on every host: the static page is the localized
+# index, and it (plus the footer's live-status link,
+# config.extra.status_url) points at status.apexmail.ee for live data.
 
 # Inbox Placement page moved from /docs/ to top-level (2026-05-11)
 /docs/inbox-placement  /inbox-placement/  302

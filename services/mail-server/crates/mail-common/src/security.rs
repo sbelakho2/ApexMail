@@ -10,7 +10,8 @@
 //! - **Atomic rate limiting**:Uses `AtomicU64` counters per time bucket
 //! instead of mutex-guarded counters.
 
-use std::collections::{BTreeMap, HashSet};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 
@@ -309,6 +310,12 @@ pub struct SecurityCorrelator {
     rate_count: AtomicU64,
     /// Last composite alert timestamp by IP (sharded)
     last_alerts: DashMap<String, DateTime<Utc>>,
+    /// Eviction index: lazy min-heap of `(event_count, ip)` pushed on every
+    /// ingest. Entries can go stale when counts drift (trim/purge), so the
+    /// evictor pops-and-revalidates against the live map — finding the
+    /// lowest-activity IP is O(log n) amortized instead of the O(n)
+    /// min_by_key scan the correlator used to run per novel IP at capacity.
+    eviction_index: parking_lot::Mutex<BinaryHeap<Reverse<(usize, String)>>>,
 }
 
 /// Composite alert produced by the correlator when multiple systems flag the same IP.
@@ -350,6 +357,7 @@ impl SecurityCorrelator {
             rate_epoch: AtomicU64::new(0),
             rate_count: AtomicU64::new(0),
             last_alerts: DashMap::new(),
+            eviction_index: parking_lot::Mutex::new(BinaryHeap::new()),
         }
     }
 
@@ -370,6 +378,7 @@ impl SecurityCorrelator {
             rate_epoch: AtomicU64::new(0),
             rate_count: AtomicU64::new(0),
             last_alerts: DashMap::new(),
+            eviction_index: parking_lot::Mutex::new(BinaryHeap::new()),
         }
     }
 
@@ -393,6 +402,7 @@ impl SecurityCorrelator {
             rate_epoch: AtomicU64::new(0),
             rate_count: AtomicU64::new(0),
             last_alerts: DashMap::new(),
+            eviction_index: parking_lot::Mutex::new(BinaryHeap::new()),
         }
     }
 
@@ -446,60 +456,76 @@ impl SecurityCorrelator {
             return None;
         }
 
-        // Anti-OOM: don't track more IPs than configured — evict lowest-priority IP first
+        // Anti-OOM: don't track more IPs than configured — evict the
+        // lowest-activity IP first (O(log n) via the lazy eviction index).
         if !self.ip_events.contains_key(&ip) && self.ip_events.len() >= self.max_tracked_ips {
-            // Try to evict the IP with the fewest events (lowest threat activity)
-            let evict_ip: Option<String> = self
-                .ip_events
-                .iter()
-                .min_by_key(|entry| entry.value().len())
-                .map(|entry| entry.key().clone());
-
-            if let Some(target) = evict_ip {
-                self.ip_events.remove(&target);
-                self.last_alerts.remove(&target);
-                CORRELATOR_DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
-                warn!(
-                    ip = %target,
-                    new_ip = %ip,
-                    tracked = self.ip_events.len(),
-                    dropped = CORRELATOR_DROPPED_EVENTS.load(Ordering::Relaxed),
-                    "Security correlator IP limit reached — evicted lowest-activity IP to make room"
-                );
-            } else {
-                CORRELATOR_DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
-                warn!(
-                    ip = %ip,
-                    dropped = CORRELATOR_DROPPED_EVENTS.load(Ordering::Relaxed),
-                    "Security correlator IP limit reached — no evictable IPs found, dropping event"
-                );
-                return None;
+            match self.evict_lowest_activity_ip() {
+                Some(target) => {
+                    self.ip_events.remove(&target);
+                    self.last_alerts.remove(&target);
+                    CORRELATOR_DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        ip = %target,
+                        new_ip = %ip,
+                        tracked = self.ip_events.len(),
+                        dropped = CORRELATOR_DROPPED_EVENTS.load(Ordering::Relaxed),
+                        "Security correlator IP limit reached — evicted lowest-activity IP to make room"
+                    );
+                }
+                None => {
+                    CORRELATOR_DROPPED_EVENTS.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        ip = %ip,
+                        dropped = CORRELATOR_DROPPED_EVENTS.load(Ordering::Relaxed),
+                        "Security correlator IP limit reached — no evictable IPs found, dropping event"
+                    );
+                    return None;
+                }
             }
         }
 
         // Scoped entry lock - only this IP is locked
-        let mut entry = self.ip_events.entry(ip.clone()).or_default();
-        let events = entry.value_mut();
-        events.push(event);
+        let final_len = {
+            let mut entry = self.ip_events.entry(ip.clone()).or_default();
+            let events = entry.value_mut();
+            events.push(event);
 
-        // Trim to max_events_per_ip
-        if events.len() > self.max_events_per_ip {
-            let drain_count = events.len() - self.max_events_per_ip;
-            events.drain(..drain_count);
-        }
+            // Trim to max_events_per_ip
+            if events.len() > self.max_events_per_ip {
+                let drain_count = events.len() - self.max_events_per_ip;
+                events.drain(..drain_count);
+            }
 
-        // Correlation is windowed to avoid stale cross-talk across unrelated sessions.
-        let cutoff = Utc::now() - chrono::Duration::seconds(self.correlation_window_secs);
-        events.retain(|e| e.timestamp > cutoff);
+            // Correlation is windowed to avoid stale cross-talk across
+            // unrelated sessions.
+            let cutoff = Utc::now() - chrono::Duration::seconds(self.correlation_window_secs);
+            events.retain(|e| e.timestamp > cutoff);
+            events.len()
+        };
+        // Keep the eviction index current for this IP. The index is lazy:
+        // entries whose counts later drift (trim/purge/eviction) are
+        // revalidated against the live map when eviction runs.
+        self.eviction_index
+            .lock()
+            .push(Reverse((final_len, ip.clone())));
 
         // Check correlation:how many distinct systems have flagged this IP?
-        let relevant: Vec<&SecurityEvent> = events
-            .iter()
-            .filter(|e| {
-                e.risk_score >= 2.0
-                    || !matches!(e.action, SecurityAction::Allow | SecurityAction::Audit)
+        // (Owned copies: the entry guard above is already released; a short
+        // read guard is enough to snapshot the relevant events.)
+        let relevant: Vec<SecurityEvent> = self
+            .ip_events
+            .get(&ip)
+            .map(|events| {
+                events
+                    .iter()
+                    .filter(|e| {
+                        e.risk_score >= 2.0
+                            || !matches!(e.action, SecurityAction::Allow | SecurityAction::Audit)
+                    })
+                    .cloned()
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
 
         let mut systems_set: HashSet<SecuritySystem> = HashSet::new();
         for ev in &relevant {
@@ -563,6 +589,57 @@ impl SecurityCorrelator {
         } else {
             None
         }
+    }
+
+    /// Pop the IP with the fewest events out of the lazy eviction index.
+    ///
+    /// Heap entries are `(event_count_at_push, ip)`; counts drift when the
+    /// live vecs are trimmed or purged, so a popped entry is revalidated
+    /// against the map: a stale entry is re-filed with its corrected count
+    /// (strictly closer to the live value) and the search continues. The
+    /// iteration budget bounds the work under concurrent drift; on
+    /// exhaustion the O(n) scan is the fallback so eviction can never
+    /// fail while IPs remain tracked.
+    fn evict_lowest_activity_ip(&self) -> Option<String> {
+        let mut budget = self.ip_events.len().saturating_mul(2) + 16;
+        loop {
+            if budget == 0 {
+                break;
+            }
+            budget -= 1;
+            // Pop the minimum under a short lock; the map is only touched
+            // with the index lock released (lock order: index never waits
+            // on a map shard while a shard holder waits on the index).
+            let candidate = {
+                let mut index = self.eviction_index.lock();
+                match index.peek().cloned() {
+                    Some(Reverse((count, ip))) => {
+                        index.pop();
+                        Some((count, ip))
+                    }
+                    None => None,
+                }
+            };
+            let Some((count, ip)) = candidate else {
+                break;
+            };
+            match self.ip_events.get(&ip) {
+                Some(events) if events.len() == count => return Some(ip),
+                Some(events) => {
+                    let corrected = events.len();
+                    drop(events);
+                    self.eviction_index.lock().push(Reverse((corrected, ip)));
+                }
+                None => {
+                    // The IP is no longer tracked; its index entry is
+                    // garbage — skip it.
+                }
+            }
+        }
+        self.ip_events
+            .iter()
+            .min_by_key(|entry| entry.value().len())
+            .map(|entry| entry.key().clone())
     }
 
     /// Purge events older than `max_age_secs` for all tracked IPs.
@@ -840,6 +917,66 @@ mod tests {
     // =========================================================================
     // INTEGRATION TESTS
     // =========================================================================
+
+    #[test]
+    fn eviction_at_capacity_removes_lowest_activity_ip() {
+        // Regression pin for the O(log n) eviction index: at capacity a
+        // novel IP must displace the lowest-activity tracked IP, exactly
+        // like the O(n) min_by_key scan it replaces.
+        let correlator = SecurityCorrelator::with_limits(50, 3, 1_000_000);
+        for (ip, n) in [("10.0.0.1", 1), ("10.0.0.2", 3), ("10.0.0.3", 5)] {
+            for _ in 0..n {
+                correlator.ingest(event(
+                    SecuritySystem::Waf,
+                    SecurityAction::Monitor,
+                    "src_ip",
+                    ip,
+                    3.0,
+                ));
+            }
+        }
+        assert_eq!(correlator.tracked_ip_count(), 3);
+
+        // Novel IP at capacity: "10.0.0.1" (1 event) is the evictee.
+        correlator.ingest(event(
+            SecuritySystem::Ids,
+            SecurityAction::Monitor,
+            "src_ip",
+            "10.0.0.4",
+            3.0,
+        ));
+        assert_eq!(correlator.tracked_ip_count(), 3, "capacity must hold");
+        assert!(correlator.ip_events.contains_key("10.0.0.4"));
+        assert!(
+            !correlator.ip_events.contains_key("10.0.0.1"),
+            "the lowest-activity IP is evicted"
+        );
+        assert!(correlator.ip_events.contains_key("10.0.0.2"));
+        assert!(correlator.ip_events.contains_key("10.0.0.3"));
+
+        // Stale-index tolerance: the heap carries entries whose counts
+        // drifted (one push per ingest) plus an injected wildly-stale one;
+        // eviction revalidates each against the live map and still makes
+        // room for a novel IP.
+        correlator
+            .eviction_index
+            .lock()
+            .push(Reverse((999, "10.0.0.2".to_string())));
+        correlator.ingest(event(
+            SecuritySystem::Ids,
+            SecurityAction::Monitor,
+            "src_ip",
+            "10.0.0.5",
+            3.0,
+        ));
+        assert_eq!(
+            correlator.tracked_ip_count(),
+            3,
+            "room is still made despite stale index entries"
+        );
+        assert!(correlator.ip_events.contains_key("10.0.0.5"));
+        assert!(!correlator.ip_events.contains_key("10.0.0.4"));
+    }
 
     #[test]
     fn integration_multi_system_correlation() {

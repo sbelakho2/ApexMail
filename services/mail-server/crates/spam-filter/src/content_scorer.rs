@@ -1298,17 +1298,23 @@ pub fn normalize_leet_speak(text: &str) -> String {
             // Strip zero-width characters
             continue;
         }
+        // Digit and homoglyph substitutions only. Deliberately NOT
+        // mapped: 'q'→'g' (not a leet convention — it rewrote every
+        // "quick" into "guick" and broke phrase matching), and the global
+        // '!'→'i' / '|'→'l' rewrites, which mangled ordinary prose
+        // ("act now!" → "act nowi") far more often than they decoded
+        // obfuscation ('1' already covers the leet-i shape).
         let replacement = match c {
             '0' | 'Ø' | 'ø' => 'o',
-            '1' | '|' | 'ℓ' => 'l',
+            '1' | 'ℓ' => 'l',
             '3' | 'є' | 'ε' => 'e',
             '4' | '@' | 'Λ' => 'a',
             '5' | '$' => 's',
             '6' | 'б' => 'g',
             '7' | '+' => 't',
             '8' | 'ß' => 'b',
-            '9' | 'q' => 'g',
-            '!' | 'í' | 'ì' | 'ï' => 'i',
+            '9' => 'g',
+            'í' | 'ì' | 'ï' => 'i',
             'Ρ' | 'ρ' => 'p', // Greek rho
             'Ν' | 'ν' => 'n', // Greek nu
             'Κ' | 'κ' => 'k', // Greek kappa
@@ -1464,6 +1470,35 @@ pub fn score_content(body: &str) -> ContentScore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_leet_speak_no_prose_mangling() {
+        // Fail-first: 'q'→'g' is not a leet convention and the global
+        // '!'→'i' / '|'→'l' rewrites mangled ordinary prose ("quick loan"
+        // became "guick loan" and stopped matching the spam phrase).
+        assert_eq!(normalize_leet_speak("quick"), "quick");
+        assert_eq!(normalize_leet_speak("quick!"), "quick!");
+        assert_eq!(normalize_leet_speak("a|b"), "a|b");
+        // Digit/homoglyph mappings are kept.
+        assert_eq!(normalize_leet_speak("qu1ck l0an"), "qulck loan");
+        assert_eq!(normalize_leet_speak("v1@gr4"), "vlagra");
+    }
+
+    #[test]
+    fn test_quick_loan_phrase_matches_after_normalization() {
+        // Fail-first: with 'q'→'g' active, "quick l0an approval" only ever
+        // normalized to "guick loan approval" and the FINANCIAL_QUICK_LOAN
+        // phrase never matched via the normalized pass.
+        let result = score_content("quick l0an approval guaranteed!");
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.id == "FINANCIAL_QUICK_LOAN"),
+            "quick loan phrase must match through leet normalization: {:?}",
+            result.findings
+        );
+    }
 
     #[test]
     fn test_spam_phrase_detection() {

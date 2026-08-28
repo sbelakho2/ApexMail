@@ -646,4 +646,51 @@ mod tests {
         let token = codec1.encode(&data).expect("encode");
         assert!(codec2.decode(&token).is_none());
     }
+
+    /// A field whose declared length exceeds the remaining buffer must be
+    /// REJECTED (`None`), never decoded as garbage / out-of-bounds data.
+    #[test]
+    fn decode_rejects_field_length_exceeding_remaining_buffer() {
+        // v2 (u16-BE length prefix): declares a 255-byte tenant_id but only
+        // 3 bytes remain.
+        let mut buf = vec![2u8, 0x00, 0xFF];
+        buf.extend_from_slice(b"abc");
+        assert!(deserialize_tracking_data(&buf).is_none());
+
+        // v1 (u8 length prefix): declares a 16-byte tenant_id but only 1
+        // byte remains.
+        assert!(deserialize_tracking_data(&[1u8, 0x10, b'a']).is_none());
+
+        // Truncated length PREFIX itself: a u16 prefix needs 2 bytes but
+        // only 1 remains.
+        assert!(deserialize_tracking_data(&[2u8, 0x00]).is_none());
+
+        // Same for a trailing v3 originalUrl field: header claims more URL
+        // bytes than the buffer holds.
+        let mut buf = vec![3u8];
+        for field in ["ten", "msg", "usr", ""] {
+            buf.extend_from_slice(&(field.len() as u16).to_be_bytes());
+            buf.extend_from_slice(field.as_bytes());
+        }
+        buf.extend_from_slice(&0x00FFu16.to_be_bytes()); // 255-byte URL…
+        buf.extend_from_slice(b"x"); // …but only 1 byte remains
+        assert!(deserialize_tracking_data(&buf).is_none());
+    }
+
+    /// Boundary: a field that exactly fills the buffer must decode fine —
+    /// the rejection above must not over-trigger.
+    #[test]
+    fn decode_accepts_fields_that_exactly_fill_buffer() {
+        let mut buf = vec![2u8];
+        for field in ["ten", "msg", "usr", ""] {
+            buf.extend_from_slice(&(field.len() as u16).to_be_bytes());
+            buf.extend_from_slice(field.as_bytes());
+        }
+        let data = deserialize_tracking_data(&buf).expect("exact-fill must decode");
+        assert_eq!(data.tenant_id, "ten");
+        assert_eq!(data.message_id, "msg");
+        assert_eq!(data.recipient, "usr");
+        assert_eq!(data.link_id, None);
+        assert!(data.original_url.is_none());
+    }
 }

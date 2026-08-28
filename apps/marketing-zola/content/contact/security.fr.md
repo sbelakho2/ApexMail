@@ -21,7 +21,14 @@ ApexMail fournit de la documentation de sécurité aux prospects et clients Ente
 
 ## Formulaire de demande de questionnaire de sécurité
 
+<div id="enquiry-submitted" class="form-banner form-banner--success" role="status">
+  <p><strong>Merci — votre demande a bien été reçue.</strong> Notre équipe l'examine et répond sous 2 jours ouvrés.</p>
+</div>
+<div id="enquiry-error" class="form-banner form-banner--error" role="alert">
+  <p><strong>Votre demande n'a pas pu être acceptée.</strong> Vérifiez les champs obligatoires (une adresse e-mail professionnelle valide est requise) puis réessayez.</p>
+</div>
 <form id="security-questionnaire-form" class="space-y-6 max-w-2xl" method="POST" action="https://api.apexmail.ee/v1/contact/security">
+  <input type="hidden" name="page_language" value="fr" />
   <div>
     <label for="work-email-sec" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Email professionnel <span class="text-red-500">*</span></label>
     <input type="email" id="work-email-sec" name="work_email" required
@@ -76,6 +83,7 @@ ApexMail fournit de la documentation de sécurité aux prospects et clients Ente
       <svg class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
     </button>
   </div>
+  <p class="form-privacy-note">En envoyant ce formulaire, vous acceptez notre <a href="/fr/privacy/">politique de confidentialité</a>. Nous utilisons ces informations uniquement pour répondre à votre demande (RGPD art. 13).</p>
 </form>
 
 ## Contact direct

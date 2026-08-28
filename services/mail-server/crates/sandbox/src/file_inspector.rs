@@ -757,37 +757,195 @@ fn zip_central_directory_encrypted(data: &[u8]) -> bool {
 }
 
 /// Check if a RAR file is password-protected.
-/// RAR encryption is indicated in the file header flags.
+///
+/// Parses the real archive headers instead of scanning raw bytes:
+/// - RAR 4.x: `MHD_PASSWORD` (0x0080) in the MAIN_HEAD flags means the
+///   archive headers themselves are encrypted; `LHD_PASSWORD` (0x0004) in
+///   a FILE_HEAD means that file's data is encrypted.
+/// - RAR 5.x: header type 4 is the archive-encryption header (HEAD_CRYPT),
+///   and per-file encryption is an extra-area record of type 3 (FHE_CRYPT).
+///
+/// The previous implementation scanned bytes 7..200 for any 0x04 byte —
+/// statistically guaranteed in compressed data — and tested `data[9] & 0x04`
+/// against HEAD_TYPE (which never carries the flag), flagging nearly every
+/// plain RAR while missing real header encryption.
 pub fn is_rar_encrypted(data: &[u8]) -> bool {
-    // RAR signature:Rar!\x1a\x07\x00 (RAR 4.x) or Rar!\x1a\x07\x01\x00 (RAR 5.x)
-    if data.len() < 14 {
+    const RAR4_MARKER: [u8; 7] = [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00];
+    const RAR5_MARKER: [u8; 8] = [0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00];
+
+    if data.starts_with(&RAR4_MARKER) {
+        return rar4_encrypted(data);
+    }
+    if data.starts_with(&RAR5_MARKER) {
+        return rar5_encrypted(data);
+    }
+    false
+}
+
+/// Upper bound on RAR4 block headers walked (anti DoS on crafted files).
+const MAX_RAR4_BLOCK_WALK: usize = 1024;
+/// Upper bound on RAR5 header records walked (anti DoS on crafted files).
+const MAX_RAR5_BLOCK_WALK: usize = 256;
+/// Upper bound on RAR5 extra-area records inspected per header.
+const MAX_RAR5_EXTRA_RECORDS: usize = 64;
+
+/// RAR 4.x: walk the block chain starting after the 7-byte marker.
+/// Block header layout: HEAD_CRC(2) HEAD_TYPE(1) HEAD_FLAGS(2) HEAD_SIZE(2).
+fn rar4_encrypted(data: &[u8]) -> bool {
+    const MAIN_HEAD: usize = 7;
+    if data.len() < MAIN_HEAD + 7 {
         return false;
     }
+    // MAIN_HEAD: HEAD_TYPE must be 0x73; flags carry MHD_PASSWORD (0x0080).
+    if data[MAIN_HEAD + 2] != 0x73 {
+        return false;
+    }
+    let flags = u16::from_le_bytes([data[MAIN_HEAD + 3], data[MAIN_HEAD + 4]]);
+    if flags & 0x0080 != 0 {
+        return true; // headers (and filenames) are password-encrypted
+    }
+    let main_size = u16::from_le_bytes([data[MAIN_HEAD + 5], data[MAIN_HEAD + 6]]) as usize;
 
-    // Check for RAR5 encrypted archive flag (byte 11, bit 0x0004)
-    if data.len() > 12 {
-        // RAR5:Archive header at offset 7 has flags
-        // Check for common encryption indicators
-        // RAR5 uses different structure, but commonly has encryption flag
-        if data[0..4] == [0x52, 0x61, 0x72, 0x21] {
-            // "Rar!"
-            // Look for HEAD_CRYPT header type or encryption flag
-            // This is simplified - full parsing would be more complex
-            for i in 7..data.len().min(200) {
-                // HEAD_TYPE = 4 for encryption header
-                if data[i] == 0x04 && i + 3 < data.len() {
+    let mut pos = MAIN_HEAD.saturating_add(main_size);
+    for _ in 0..MAX_RAR4_BLOCK_WALK {
+        if pos + 7 > data.len() {
+            break;
+        }
+        let head_type = data[pos + 2];
+        let block_flags = u16::from_le_bytes([data[pos + 3], data[pos + 4]]);
+        let block_size = u16::from_le_bytes([data[pos + 5], data[pos + 6]]) as usize;
+        if block_size < 7 {
+            break; // malformed — not evidence of encryption
+        }
+        // FILE_HEAD with LHD_PASSWORD: file data is encrypted.
+        if head_type == 0x74 && block_flags & 0x0004 != 0 {
+            return true;
+        }
+        if head_type == 0x7b {
+            break; // ENDARC
+        }
+        // File blocks carry a packed-data area of PACK_SIZE (u32 at +7).
+        let advance = if head_type == 0x74 && pos + 11 <= data.len() {
+            let pack_size =
+                u32::from_le_bytes([data[pos + 7], data[pos + 8], data[pos + 9], data[pos + 10]])
+                    as usize;
+            block_size.saturating_add(pack_size)
+        } else {
+            block_size
+        };
+        pos = pos.saturating_add(advance);
+    }
+    false
+}
+
+/// RAR 5.x vint (7 bits per byte, little-endian, at most 8 bytes).
+fn rar5_read_vint(data: &[u8], pos: usize) -> Option<(u64, usize)> {
+    let mut value: u64 = 0;
+    let mut shift = 0u32;
+    for i in 0..8 {
+        let b = *data.get(pos + i)?;
+        value |= u64::from(b & 0x7f) << shift;
+        if b & 0x80 == 0 {
+            return Some((value, i + 1));
+        }
+        shift += 7;
+    }
+    None // malformed vint
+}
+
+/// RAR 5.x: walk the header records after the 8-byte signature.
+/// Layout: CRC32(4) HeaderSize(vint) HeaderType(vint) HeaderFlags(vint)
+/// [ExtraAreaSize(vint) if flag 0x01] [DataSize(vint) if flag 0x02].
+fn rar5_encrypted(data: &[u8]) -> bool {
+    let mut pos = 8usize;
+    for _ in 0..MAX_RAR5_BLOCK_WALK {
+        if pos + 5 > data.len() {
+            break;
+        }
+        let block_start = pos;
+        pos += 4; // CRC32
+        let Some((header_size, n)) = rar5_read_vint(data, pos) else {
+            break;
+        };
+        pos += n;
+        // HeaderSize includes the CRC and the size field itself.
+        if header_size < 5 || block_start.saturating_add(header_size as usize) > data.len() {
+            break; // malformed — not evidence of encryption
+        }
+        let Some((header_type, n)) = rar5_read_vint(data, pos) else {
+            break;
+        };
+        pos += n;
+        let Some((header_flags, n)) = rar5_read_vint(data, pos) else {
+            break;
+        };
+        pos += n;
+
+        let mut extra_size: u64 = 0;
+        let mut data_size: u64 = 0;
+        if header_flags & 0x0001 != 0 {
+            let Some((v, n)) = rar5_read_vint(data, pos) else {
+                break;
+            };
+            extra_size = v;
+            pos += n;
+        }
+        if header_flags & 0x0002 != 0 {
+            let Some((v, n)) = rar5_read_vint(data, pos) else {
+                break;
+            };
+            data_size = v;
+            pos += n;
+        }
+
+        match header_type {
+            // HEAD_CRYPT: archive-level encryption (password on headers).
+            4 => return true,
+            // File (2) / service (3) headers: per-file encryption is an
+            // extra-area record of type 3 (FHE_CRYPT).
+            2 | 3 => {
+                if extra_size > 0 && rar5_extra_has_crypt(data, pos, extra_size as usize) {
                     return true;
                 }
             }
+            // 5 = end of archive
+            5 => break,
+            _ => {}
         }
-    }
 
-    // RAR4:Check for encrypted header flag (bit 2 in archive header flags)
-    // Archive header is typically at offset 7
-    if data.len() > 12 && data[9] & 0x04 != 0 {
-        return true;
+        pos = block_start.saturating_add(header_size as usize);
+        pos = pos.saturating_add(data_size as usize);
     }
+    false
+}
 
+/// Walk a RAR 5.0 extra area (records of Size(vint) + Type(vint) + data)
+/// looking for the file-encryption record type 3 (FHE_CRYPT).
+fn rar5_extra_has_crypt(data: &[u8], extra_start: usize, extra_size: usize) -> bool {
+    let extra_end = extra_start.saturating_add(extra_size);
+    if extra_end > data.len() {
+        return false;
+    }
+    let mut pos = extra_start;
+    for _ in 0..MAX_RAR5_EXTRA_RECORDS {
+        if pos >= extra_end {
+            break;
+        }
+        let Some((rec_size, n)) = rar5_read_vint(data, pos) else {
+            break;
+        };
+        let rec_start = pos;
+        if (rec_size as usize) < n + 1 || rec_start.saturating_add(rec_size as usize) > extra_end {
+            break; // malformed record
+        }
+        let Some((rec_type, _)) = rar5_read_vint(data, rec_start + n) else {
+            break;
+        };
+        if rec_type == 3 {
+            return true; // FHE_CRYPT
+        }
+        pos = rec_start.saturating_add(rec_size as usize);
+    }
     false
 }
 
@@ -915,6 +1073,190 @@ fn inspect_pdf(data: &[u8]) -> Vec<InspectionFinding> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── RAR fixtures ────────────────────────────────────────────────────────
+
+    /// Minimal RAR4 archive: 7-byte marker + MAIN_HEAD(0x73) + optional
+    /// FILE_HEAD(0x74) + ENDARC(0x7b), per the RAR 4.x block layout:
+    /// HEAD_CRC(2) HEAD_TYPE(1) HEAD_FLAGS(2) HEAD_SIZE(2) ...
+    fn make_rar4(main_flags: u16, file_flags: Option<u16>) -> Vec<u8> {
+        let mut out = vec![0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00];
+        // MAIN_HEAD (13 bytes): crc, type=0x73, flags, size=13, highpos, pos
+        out.extend_from_slice(&[0x00, 0x00]);
+        out.push(0x73);
+        out.extend_from_slice(&main_flags.to_le_bytes());
+        out.extend_from_slice(&13u16.to_le_bytes());
+        out.extend_from_slice(&[0, 0]);
+        out.extend_from_slice(&[0, 0, 0, 0]);
+        if let Some(fflags) = file_flags {
+            // FILE_HEAD (33 bytes incl. 1-char name)
+            out.extend_from_slice(&[0x00, 0x00]);
+            out.push(0x74);
+            out.extend_from_slice(&fflags.to_le_bytes());
+            out.extend_from_slice(&33u16.to_le_bytes());
+            out.extend_from_slice(&0u32.to_le_bytes()); // PACK_SIZE
+            out.extend_from_slice(&0u32.to_le_bytes()); // UNP_SIZE
+            out.extend_from_slice(&[0x01]); // HOST_OS
+            out.extend_from_slice(&0u32.to_le_bytes()); // FILE_CRC
+            out.extend_from_slice(&0u32.to_le_bytes()); // FTIME
+            out.push(0x14); // UNP_VER
+            out.push(0x30); // METHOD (store)
+            out.extend_from_slice(&1u16.to_le_bytes()); // NAME_SIZE
+            out.extend_from_slice(&0u32.to_le_bytes()); // ATTR
+            out.extend_from_slice(b"a");
+        }
+        // ENDARC (7 bytes)
+        out.extend_from_slice(&[0x00, 0x00]);
+        out.push(0x7b);
+        out.extend_from_slice(&0u16.to_le_bytes());
+        out.extend_from_slice(&7u16.to_le_bytes());
+        out
+    }
+
+    /// LEB128-style RAR5 vint.
+    fn rar5_vint_bytes(mut v: u64) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            let b = (v & 0x7f) as u8;
+            v >>= 7;
+            if v == 0 {
+                out.push(b);
+                break;
+            }
+            out.push(b | 0x80);
+        }
+        out
+    }
+
+    /// One RAR5 header block: CRC32(4) + HeaderSize(vint) + Type(vint) +
+    /// Flags(vint) + [ExtraSize(vint)] + [DataSize(vint)] + extra + data.
+    /// HeaderSize counts the whole header including the CRC and the size
+    /// field itself (per the RAR 5.0 spec).
+    fn make_rar5_block(
+        header_type: u64,
+        header_flags: u64,
+        extra_area: &[u8],
+        data_area: &[u8],
+    ) -> Vec<u8> {
+        let type_v = rar5_vint_bytes(header_type);
+        let flags_v = rar5_vint_bytes(header_flags);
+        let extra_size_v = if header_flags & 0x0001 != 0 {
+            rar5_vint_bytes(extra_area.len() as u64)
+        } else {
+            Vec::new()
+        };
+        let data_size_v = if header_flags & 0x0002 != 0 {
+            rar5_vint_bytes(data_area.len() as u64)
+        } else {
+            Vec::new()
+        };
+        // +1 for the single-byte size vint (sizes here are < 128)
+        let header_size = 4
+            + 1
+            + type_v.len()
+            + flags_v.len()
+            + extra_size_v.len()
+            + data_size_v.len()
+            + extra_area.len();
+        let mut out = Vec::new();
+        out.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // CRC placeholder
+        out.extend_from_slice(&rar5_vint_bytes(header_size as u64));
+        out.extend_from_slice(&type_v);
+        out.extend_from_slice(&flags_v);
+        out.extend_from_slice(&extra_size_v);
+        out.extend_from_slice(&data_size_v);
+        out.extend_from_slice(extra_area);
+        out.extend_from_slice(data_area);
+        out
+    }
+
+    /// A RAR5 extra-area record: Size(vint) Type(vint) payload.
+    fn make_rar5_extra_record(rec_type: u64, payload: &[u8]) -> Vec<u8> {
+        let size = 1 + rar5_vint_bytes(rec_type).len() + payload.len();
+        let mut out = rar5_vint_bytes(size as u64);
+        out.extend_from_slice(&rar5_vint_bytes(rec_type));
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn make_rar5(blocks: &[Vec<u8>]) -> Vec<u8> {
+        let mut out = vec![0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00];
+        for b in blocks {
+            out.extend_from_slice(b);
+        }
+        out
+    }
+
+    #[test]
+    fn test_rar4_plain_archive_not_flagged() {
+        // Fail-first: the old check `data[9] & 0x04` tested HEAD_TYPE
+        // (0x73, which always has bit 2 set) — EVERY RAR4 was "encrypted".
+        assert!(
+            !is_rar_encrypted(&make_rar4(0x0000, None)),
+            "plain RAR4 must not be flagged"
+        );
+        assert!(
+            !is_rar_encrypted(&make_rar4(0x0000, Some(0x0000))),
+            "RAR4 with unencrypted file entry must not be flagged"
+        );
+    }
+
+    #[test]
+    fn test_rar4_header_encrypted_flagged() {
+        // MHD_PASSWORD (0x0080) in the main header flags.
+        assert!(is_rar_encrypted(&make_rar4(0x0080, None)));
+    }
+
+    #[test]
+    fn test_rar4_file_encrypted_flagged() {
+        // LHD_PASSWORD (0x0004) in a file header.
+        assert!(is_rar_encrypted(&make_rar4(0x0000, Some(0x0004))));
+    }
+
+    #[test]
+    fn test_rar5_with_0x04_bytes_not_flagged() {
+        // Fail-first: the old check scanned bytes 7..200 for ANY 0x04
+        // byte, so a perfectly plain RAR5 whose compressed data contains
+        // 0x04 (statistically guaranteed) was flagged as encrypted.
+        let file = make_rar5_block(2, 0x0002, &[], &[0x04, 0x04, 0x04, 0x04]);
+        let rar = make_rar5(&[
+            make_rar5_block(1, 0x0000, &[], &[]), // main archive header
+            file,
+            make_rar5_block(5, 0x0000, &[], &[]), // end of archive
+        ]);
+        assert!(
+            !is_rar_encrypted(&rar),
+            "plain RAR5 containing 0x04 bytes must not be flagged"
+        );
+    }
+
+    #[test]
+    fn test_rar5_archive_encryption_header_flagged() {
+        // RAR5 header type 4 = archive encryption (HEAD_CRYPT).
+        let rar = make_rar5(&[
+            make_rar5_block(1, 0x0000, &[], &[]),
+            make_rar5_block(4, 0x0000, &[], &[]),
+            make_rar5_block(5, 0x0000, &[], &[]),
+        ]);
+        assert!(is_rar_encrypted(&rar), "HEAD_CRYPT archive must be flagged");
+    }
+
+    #[test]
+    fn test_rar5_file_extra_crypt_flagged() {
+        // RAR5 per-file encryption lives in the extra area as record
+        // type 3 (FHE_CRYPT). Fixture deliberately avoids 0x04 bytes so
+        // only real header parsing can find it.
+        let extra = make_rar5_extra_record(3, &[0x01, 0x02]);
+        let rar = make_rar5(&[
+            make_rar5_block(1, 0x0000, &[], &[]),
+            make_rar5_block(2, 0x0001, &extra, &[]), // file header + extra
+            make_rar5_block(5, 0x0000, &[], &[]),
+        ]);
+        assert!(
+            is_rar_encrypted(&rar),
+            "FHE_CRYPT extra record must be flagged"
+        );
+    }
 
     /// Build a minimal (store-method) ZIP with one entry and controlled
     /// general-purpose flags for the local header and central directory.

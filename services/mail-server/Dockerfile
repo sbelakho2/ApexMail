@@ -112,7 +112,7 @@ RUN useradd -m -u 10001 -s /sbin/nologin apexmail
 
 LABEL org.opencontainers.image.title="apexmail-mail-server" \
     org.opencontainers.image.description="ApexMail mail server services" \
-    org.opencontainers.image.source="https://github.com/apexmail" \
+    org.opencontainers.image.source="https://github.com/Bel-Consulting-OU/ApexMail" \
     org.opencontainers.image.licenses="PROPRIETARY"
 
 # =============================================================================

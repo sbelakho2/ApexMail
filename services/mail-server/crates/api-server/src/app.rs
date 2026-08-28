@@ -556,6 +556,18 @@ pub fn build_app(state: AppState) -> Router {
         // system-tenant gate as the JSON admin surface: a customer session
         // (any non-system tenant) is rejected before the handler runs.
         .merge(routes::web::admin_router(state.clone()))
+        // CP session gate (CRITICAL): human operator sessions must present
+        // the dedicated `apexmail_cp_session` cookie (admin/owner role +
+        // MFA enabled, idle + absolute timeouts, per-request status
+        // recheck, cp_access_log audit trail) on EVERY control-plane
+        // route. Layered INSIDE `require_system_tenant_middleware` so the
+        // tenant gate stays the first, cheapest rejection; machine
+        // credentials (static CP key / system API keys) pass through the
+        // gate as non-user identities.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::middleware::cp_auth::require_cp_auth,
+        ))
         .layer(axum::middleware::from_fn(
             auth::require_system_tenant_middleware,
         ));
@@ -1390,9 +1402,68 @@ fn branded_not_found(config: &Config, host: Option<&str>) -> Response {
 #[cfg(test)]
 pub(crate) mod test_support {
     use super::*;
+    use crate::state::AppStateInner;
+    use std::sync::Arc;
 
     pub(crate) fn test_config() -> Config {
         crate::app::tests::test_config_impl()
+    }
+
+    /// A real AppState over a caller-provided pool (per-test fixture DBs),
+    /// with Redis from TEST_REDIS_URL when reachable and a dead-port pool
+    /// otherwise — handlers that hard-require Redis gate themselves in
+    /// their tests. Shared by handler-level tests across route modules.
+    pub(crate) async fn test_state_over(db: sqlx::PgPool) -> AppState {
+        test_state_over_with_config(db, test_config()).await
+    }
+
+    /// [`test_state_over`] with a caller-supplied Config (e.g. a real RSA
+    /// signing pair for JWT round-trips).
+    pub(crate) async fn test_state_over_with_config(db: sqlx::PgPool, config: Config) -> AppState {
+        static INSTALL: std::sync::Once = std::sync::Once::new();
+        INSTALL.call_once(|| {
+            let _ = metrics_exporter_prometheus::PrometheusBuilder::new().install_recorder();
+            std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
+            std::env::set_var("AWS_ACCESS_KEY_ID", "test");
+            std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
+        });
+        let redis_url = std::env::var("TEST_REDIS_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "redis://127.0.0.1:1".into());
+        let redis = deadpool_redis::Config::from_url(&redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("lazy redis pool");
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_sesv2::config::Region::new("us-east-1"))
+            .load()
+            .await;
+        let ses_provider = Arc::new(crate::ses_provider::SesIpProvider::new(
+            aws_sdk_sesv2::Client::new(&aws_config),
+            db.clone(),
+            "apexmail".into(),
+            "us-east-1".into(),
+        ));
+        AppStateInner::with_ddos_protector(
+            db.clone(),
+            apexmail_db::pool::PoolPair {
+                rw: db.clone(),
+                ro: db,
+            },
+            redis,
+            config,
+            reqwest::Client::new(),
+            (*ses_provider).clone(),
+            None,
+            Arc::new(
+                ddos_protection::DdosProtector::new(ddos_protection::ProtectorConfig::default())
+                    .await
+                    .expect("ddos protector"),
+            ),
+            None,
+            None,
+            crate::resilience::ResilientClient::new_from_config(&test_config()),
+        )
     }
 }
 
@@ -1638,6 +1709,12 @@ mod tests {
             control_plane_api_key: None,
             sales_autopilot_base_url: "http://localhost:3010".into(),
             internal_service_token: None,
+            cp_auth: crate::config::CpAuthConfig {
+                allowed_ips: vec![],
+                session_secret: "test-cp-session-secret-1234567890".into(),
+                session_idle_timeout_secs: 900,
+                session_absolute_timeout_secs: 14400,
+            },
             tracking_secret_key: "test-tracking-secret-123456789012".into(),
             billing_company_iban: "EE381010220123456789".into(),
             billing_company_phone: "+3721234567".into(),
@@ -3358,6 +3435,431 @@ mod tests {
             !(status == StatusCode::UNAUTHORIZED && body.contains("control-plane")),
             "admin request must be rejected by require_auth (which populates \
              AuthUser), not by the system-tenant gate — got {status} with body: {body}"
+        );
+    }
+
+    // ─── Control-plane session gate (middleware::cp_auth) ──────
+
+    /// Full-app fixture for CP-gate tests: canonical-shape DB, a real RSA
+    /// signing keypair (require_auth must actually decode the minted
+    /// am_session), reachable Redis (token blacklist), and the cp_access_log
+    /// table the gate audits into. Soft-skips without TEST_DATABASE_URL or
+    /// an reachable TEST_REDIS_URL (workspace convention).
+    async fn cp_gate_app(
+        test_name: &str,
+    ) -> Option<(Router, sqlx::PgPool, Config, deadpool_redis::Pool)> {
+        let pool = crate::test_db::canonical_pool(test_name).await?;
+        let redis_url = std::env::var("TEST_REDIS_URL").ok()?;
+        let redis = deadpool_redis::Config::from_url(&redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .ok()?;
+        let mut conn = redis.get().await.ok()?;
+        let ping: Result<String, _> = redis::cmd("PING").query_async(&mut *conn).await;
+        if ping.is_err() {
+            eprintln!("skipping {test_name}: TEST_REDIS_URL unreachable");
+            return None;
+        }
+
+        sqlx::raw_sql(
+            "CREATE TABLE IF NOT EXISTS cp_access_log (
+                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                 email VARCHAR(320),
+                 path VARCHAR(1024) NOT NULL,
+                 status_code INTEGER NOT NULL,
+                 outcome VARCHAR(64) NOT NULL,
+                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+             )",
+        )
+        .execute(&pool)
+        .await
+        .expect("cp_access_log fixture DDL must apply");
+
+        // Real RSA keypair so the login form can sign an am_session that
+        // require_auth actually decodes. The DKIM keygen is this crate's
+        // existing test RSA source; the public half is re-derived as an
+        // SPKI PEM for jsonwebtoken (avoiding the rand 0.9 / rsa 0.9 RNG
+        // trait mismatch on direct keygen).
+        use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey, LineEnding};
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair().expect("test RSA keypair");
+        let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(key_pair.private_key_pem.as_str())
+            .expect("valid PKCS8 private key");
+        let jwt_private_key_pem = key_pair.private_key_pem.to_string();
+        let jwt_public_key_pem = private_key
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .expect("public PEM")
+            .to_string();
+
+        let mut config = test_config_impl();
+        config.jwt_private_key_pem = jwt_private_key_pem;
+        config.jwt_public_key_pem = jwt_public_key_pem;
+
+        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_sesv2::config::Region::new("us-east-1"))
+            .load()
+            .await;
+        let ses_provider = Arc::new(crate::ses_provider::SesIpProvider::new(
+            aws_sdk_sesv2::Client::new(&aws_config),
+            pool.clone(),
+            "apexmail".into(),
+            "us-east-1".into(),
+        ));
+        let state = AppStateInner::with_ddos_protector(
+            pool.clone(),
+            apexmail_db::pool::PoolPair {
+                rw: pool.clone(),
+                ro: pool.clone(),
+            },
+            redis.clone(),
+            config.clone(),
+            reqwest::Client::new(),
+            (*ses_provider).clone(),
+            None,
+            Arc::new(
+                DdosProtector::new(ProtectorConfig::default())
+                    .await
+                    .expect("ddos protector"),
+            ),
+            None,
+            None,
+            ResilientClient::new_from_config(&config),
+        );
+        Some((build_app(state), pool, config, redis))
+    }
+
+    /// Seed a system-tenant operator and return (user_id, email, password).
+    async fn cp_gate_seed_operator(
+        db: &sqlx::PgPool,
+        mfa_enabled: bool,
+    ) -> (String, String, String) {
+        let email = format!("cp-gate-{}@apexmail.ee", uuid::Uuid::new_v4().simple());
+        let password = "Sup3r#SecurePass".to_string();
+        let hash = bcrypt::hash(&password, bcrypt::DEFAULT_COST).expect("bcrypt hash");
+        let user_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, mfa_enabled, metadata, created_at, updated_at)
+             VALUES ($1, 'system', $2, 'CP Op', $3, 'owner', 'active', true, $4, '{}'::jsonb, NOW(), NOW())",
+        )
+        .bind(user_id)
+        .bind(&email)
+        .bind(&hash)
+        .bind(mfa_enabled)
+        .execute(db)
+        .await
+        .expect("seed cp operator");
+        (user_id.to_string(), email, password)
+    }
+
+    /// Collect every Set-Cookie value from a response (login returns several).
+    fn all_set_cookies(response: &Response) -> Vec<String> {
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok().map(str::to_string))
+            .collect()
+    }
+
+    fn cookie_value<'a>(cookies: &'a [String], name: &str) -> Option<&'a str> {
+        cookies.iter().find_map(|cookie| {
+            cookie
+                .split(';')
+                .next()?
+                .strip_prefix(&format!("{name}="))
+                .filter(|value| !value.is_empty())
+        })
+    }
+
+    /// A CP session cookie minted out-of-band (the same shape form_cp_login
+    /// issues after the fix).
+    fn mint_cp_cookie(config: &Config, user_id: &str, email: &str, mfa_enabled: bool) -> String {
+        let now = chrono::Utc::now().timestamp();
+        let claims = crate::middleware::cp_auth::CpSessionClaims {
+            sub: user_id.to_string(),
+            tenant_id: "system".into(),
+            email: email.to_string(),
+            role: "owner".into(),
+            mfa_enabled,
+            iat: now,
+            last_active: now,
+            exp: now + 3600,
+        };
+        let token = crate::middleware::cp_auth::create_cp_session_token(
+            &claims,
+            &config.cp_auth.session_secret,
+        );
+        format!("apexmail_cp_session={token}")
+    }
+
+    /// CP login through the real form endpoint; returns the response's
+    /// Set-Cookie header values.
+    async fn cp_gate_login(
+        app: &Router,
+        config: &Config,
+        email: &str,
+        password: &str,
+    ) -> Vec<String> {
+        let csrf = ui_foundation::csrf::generate_csrf_token(&config.csrf_secret);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/web/cp/login")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header(HOST, "admin.apexmail.ee")
+                    .body(Body::from(format!(
+                        "email={}&password={}&_csrf={csrf}",
+                        urlencode(email),
+                        urlencode(password),
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .expect("cp login dispatch");
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        all_set_cookies(&response)
+    }
+
+    fn urlencode(value: &str) -> String {
+        url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
+    }
+
+    /// CRITICAL gate regression: an operator WITHOUT MFA must not be able to
+    /// drive control-plane routes with the plain am_session the CP login
+    /// form mints — the session gate (role + MFA enforcement) must reject
+    /// them even though the tenant is `system`.
+    #[tokio::test]
+    async fn cp_gate_blocks_non_mfa_operator_sessions_from_admin_routes() {
+        let Some((app, db, config, _redis)) = cp_gate_app("cp_gate_blocks_non_mfa").await else {
+            return;
+        };
+        let (_user_id, email, password) = cp_gate_seed_operator(&db, false).await;
+        let cookies = cp_gate_login(&app, &config, &email, &password).await;
+        let am_session = cookie_value(&cookies, "am_session")
+            .expect("cp login must still mint the am_session cookie")
+            .to_string();
+
+        // Session-cookie writes need the double-submit CSRF pair.
+        let csrf = ui_foundation::csrf::generate_csrf_token(&config.csrf_secret);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/web/admin/tenants")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header(
+                        "cookie",
+                        format!("am_session={am_session}; csrf_token={csrf}"),
+                    )
+                    .header("x-csrf-token", &csrf)
+                    .body(Body::from(format!(
+                        "_csrf={csrf}&name=Evil+Co&domain=evil.example&plan=free"
+                    )))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                response.status(),
+                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+            ),
+            "a non-MFA operator session must be blocked by the CP gate, got {}",
+            response.status()
+        );
+    }
+
+    /// The CP login form must mint the dedicated CP session cookie with the
+    /// operator's MFA state baked into the signed claims (not just the
+    /// generic am_session JWT).
+    #[tokio::test]
+    async fn cp_login_mints_mfa_backed_cp_session_cookie() {
+        let Some((app, db, config, _redis)) = cp_gate_app("cp_login_cp_cookie").await else {
+            return;
+        };
+        let (user_id, email, password) = cp_gate_seed_operator(&db, false).await;
+        let cookies = cp_gate_login(&app, &config, &email, &password).await;
+
+        let token = cookie_value(&cookies, "apexmail_cp_session")
+            .expect("cp login must set apexmail_cp_session")
+            .to_string();
+        let parts: Vec<&str> = token.splitn(2, '.').collect();
+        assert_eq!(parts.len(), 2, "CP session token is payload.signature");
+        // The signed payload carries the user id and their REAL mfa state.
+        let payload = base64::Engine::decode(
+            &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+            parts[0].as_bytes(),
+        )
+        .expect("payload base64");
+        let claims: serde_json::Value = serde_json::from_slice(&payload).expect("payload json");
+        assert_eq!(claims["sub"].as_str(), Some(user_id.as_str()));
+        assert_eq!(claims["role"].as_str(), Some("owner"));
+        assert_eq!(
+            claims["mfa_enabled"].as_bool(),
+            Some(false),
+            "non-MFA operator's CP cookie must carry mfa_enabled=false so the \
+             gate rejects it"
+        );
+
+        // And the token verifies against the configured CP secret.
+        let verify = crate::middleware::cp_auth::verify_cp_session_token_for_tests(
+            &token,
+            &config.cp_auth.session_secret,
+        );
+        assert!(verify.is_ok(), "cp session token must be HMAC-verifiable");
+    }
+
+    /// Every CP gate decision lands in cp_access_log (separate, append-only
+    /// audit trail for control-plane access).
+    #[tokio::test]
+    async fn cp_access_attempts_are_audited() {
+        let Some((app, db, config, _redis)) = cp_gate_app("cp_access_audit").await else {
+            return;
+        };
+        let (_user_id, email, password) = cp_gate_seed_operator(&db, false).await;
+        let cookies = cp_gate_login(&app, &config, &email, &password).await;
+        let am_session = cookie_value(&cookies, "am_session").unwrap().to_string();
+
+        let csrf = ui_foundation::csrf::generate_csrf_token(&config.csrf_secret);
+        let _ = app
+            .clone()
+            .oneshot(
+                Request::post("/web/admin/tenants")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header(
+                        "cookie",
+                        format!("am_session={am_session}; csrf_token={csrf}"),
+                    )
+                    .header("x-csrf-token", &csrf)
+                    .body(Body::from(format!("_csrf={csrf}&name=X&domain=x.example")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        let logged: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM cp_access_log WHERE path = '/web/admin/tenants'",
+        )
+        .fetch_one(&db)
+        .await
+        .expect("cp_access_log readable");
+        assert!(
+            logged >= 1,
+            "the gate decision must be written to cp_access_log"
+        );
+    }
+
+    /// An MFA-enabled operator holding a valid CP session passes the gate
+    /// and receives the refreshed session cookie (sliding idle window).
+    #[tokio::test]
+    async fn cp_gate_admits_mfa_operator_with_valid_cp_session() {
+        let Some((app, db, config, _redis)) = cp_gate_app("cp_gate_admits_mfa").await else {
+            return;
+        };
+        let (user_id, email, _password) = cp_gate_seed_operator(&db, true).await;
+        // The MFA operator is mid-flow (their password step redirects to
+        // the TOTP challenge), so sign the am_session directly — the same
+        // claims shape session_cookie_for_user produces.
+        let now = chrono::Utc::now().timestamp();
+        let claims = crate::middleware::auth::JwtClaims {
+            sub: user_id.clone(),
+            tenant_id: "system".into(),
+            scopes: vec!["*".into()],
+            exp: now + 3600,
+            iat: now,
+            jti: uuid::Uuid::new_v4().to_string(),
+            typ: Some("session".into()),
+        };
+        let encoding_key =
+            jsonwebtoken::EncodingKey::from_rsa_pem(config.jwt_private_key_pem.as_bytes())
+                .expect("encoding key");
+        let am_session = jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+            &claims,
+            &encoding_key,
+        )
+        .expect("sign am_session");
+        let cp_cookie = mint_cp_cookie(&config, &user_id, &email, true);
+
+        let csrf = ui_foundation::csrf::generate_csrf_token(&config.csrf_secret);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/web/admin/tenants")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header(
+                        "cookie",
+                        format!("am_session={am_session}; csrf_token={csrf}; {cp_cookie}"),
+                    )
+                    .header("x-csrf-token", &csrf)
+                    .body(Body::from(format!("_csrf={csrf}&name=X&domain=x.example")))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "an MFA'd operator with a valid CP session must reach the handler"
+        );
+        let refreshed = all_set_cookies(&response);
+        assert!(
+            cookie_value(&refreshed, "apexmail_cp_session").is_some(),
+            "the gate must slide the CP session cookie on activity"
+        );
+    }
+    /// A cursor that decodes to something OTHER than a timestamp must be
+    /// a 400 — the messages list used to bind the decoded string into a
+    /// `::timestamp` cast and surface the database's parse failure as a
+    /// 500.
+    #[tokio::test]
+    async fn malformed_message_cursor_returns_400_not_500() {
+        let Some((app, db, config, _redis)) = cp_gate_app("cursor_400").await else {
+            return;
+        };
+        let (user_id, _email, _password) = cp_gate_seed_operator(&db, true).await;
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, created_at)
+             VALUES ($1, 'system', 'a@apexmail.ee', '[\"b@example.com\"]'::jsonb, 's', NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .execute(&db)
+        .await
+        .expect("seed message");
+
+        let now = chrono::Utc::now().timestamp();
+        let claims = crate::middleware::auth::JwtClaims {
+            sub: user_id,
+            tenant_id: "system".into(),
+            scopes: vec!["messages:read".into()],
+            exp: now + 3600,
+            iat: now,
+            jti: uuid::Uuid::new_v4().to_string(),
+            typ: Some("session".into()),
+        };
+        let am_session = jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_rsa_pem(config.jwt_private_key_pem.as_bytes())
+                .expect("encoding key"),
+        )
+        .expect("sign am_session");
+
+        use base64::Engine;
+        let garbage_cursor = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode("definitely-not-a-timestamp".as_bytes());
+        let response = app
+            .oneshot(
+                Request::get(format!("/v1/messages?cursor={garbage_cursor}"))
+                    .header("cookie", format!("am_session={am_session}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::BAD_REQUEST,
+            "a malformed cursor is a client error, not a database 500"
         );
     }
 }

@@ -34,21 +34,45 @@ pub fn haversine_distance(a: &GeoPoint, b: &GeoPoint) -> f64 {
     EARTH_RADIUS_KM * c
 }
 
+/// Minimum gap between events before travel is evaluated. Mobile networks
+/// routinely bounce a session between points-of-presence within the same
+/// minute, and clock skew between collectors produces the same shape;
+/// sub-two-minute "travel" is measurement noise, not motion.
+const MIN_TRAVEL_GAP_SECS: f64 = 120.0;
+
+/// Minimum distance before travel is evaluated. GeoIP resolves to PoP /
+/// city granularity, so two lookups of the same user seconds apart can be
+/// tens of km apart; under 100 km is jitter, not travel.
+const MIN_TRAVEL_DISTANCE_KM: f64 = 100.0;
+
 /// Check if travel between two points in the given time is physically impossible
 /// Returns (is_impossible, required_speed_kmh, distance_km)
+///
+/// Tolerance rules (all skip, i.e. report not-impossible):
+/// - `elapsed <= 0`: clock skew between event collectors, not travel.
+/// - `elapsed < MIN_TRAVEL_GAP_SECS`: PoP bounces / same-minute noise.
+/// - `distance < MIN_TRAVEL_DISTANCE_KM`: GeoIP resolution jitter.
 pub fn check_impossible_travel(
     from: &GeoPoint,
     to: &GeoPoint,
     elapsed_secs: f64,
     max_speed_kmh: f64,
 ) -> (bool, f64, f64) {
+    let distance_km = haversine_distance(from, to);
+
     if elapsed_secs <= 0.0 {
-        // Same timestamp or backwards — suspicious if different location
-        let dist = haversine_distance(from, to);
-        return (dist > 1.0, f64::INFINITY, dist);
+        // Backwards or identical timestamps are clock skew between
+        // collectors. Reporting "infinite speed" here turned skew into
+        // account-blocking impossible-travel findings.
+        return (false, 0.0, distance_km);
+    }
+    if elapsed_secs < MIN_TRAVEL_GAP_SECS {
+        return (false, 0.0, distance_km);
+    }
+    if distance_km < MIN_TRAVEL_DISTANCE_KM {
+        return (false, 0.0, distance_km);
     }
 
-    let distance_km = haversine_distance(from, to);
     let elapsed_hours = elapsed_secs / 3600.0;
     let required_speed = distance_km / elapsed_hours;
 
@@ -145,7 +169,10 @@ mod tests {
     }
 
     #[test]
-    fn test_zero_elapsed_different_location() {
+    fn test_zero_elapsed_different_location_is_skipped() {
+        // Same/backwards timestamps are collector clock skew, not travel.
+        // Treating them as "infinite speed" blocked accounts on telemetry
+        // jitter alone.
         let a = GeoPoint {
             lat: 40.7128,
             lon: -74.006,
@@ -155,7 +182,10 @@ mod tests {
             lon: 139.6503,
         };
         let (impossible, _, _) = check_impossible_travel(&a, &b, 0.0, 900.0);
-        assert!(impossible, "Same timestamp, different city = impossible");
+        assert!(
+            !impossible,
+            "zero/negative elapsed must be skipped as clock skew"
+        );
     }
 
     #[test]
@@ -170,6 +200,63 @@ mod tests {
         };
         let (impossible, _, _) = check_impossible_travel(&a, &b, 0.0, 900.0);
         assert!(!impossible, "Same timestamp, same location = ok");
+    }
+
+    #[test]
+    fn test_short_gap_not_impossible() {
+        // Fail-first: 30s / 500km was reported as impossible travel.
+        // Sub-two-minute gaps are mobile-network PoP bounces and clock
+        // skew, not travel — they must not fire.
+        let a = GeoPoint {
+            lat: 40.7128,
+            lon: -74.006,
+        };
+        let b = GeoPoint {
+            lat: 44.9,
+            lon: -70.2,
+        }; // ~500 km away
+        let dist = haversine_distance(&a, &b);
+        assert!((dist - 500.0).abs() < 60.0, "fixture distance: {dist}");
+        let (impossible, _, _) = check_impossible_travel(&a, &b, 30.0, 500.0);
+        assert!(!impossible, "30s/500km must be skipped as jitter/skew");
+    }
+
+    #[test]
+    fn test_short_distance_not_impossible() {
+        // GeoIP PoP jitter: two resolutions of the same user can be ~50km
+        // apart within seconds — under 100 km never counts as travel.
+        let a = GeoPoint {
+            lat: 40.7128,
+            lon: -74.006,
+        };
+        let b = GeoPoint {
+            lat: 40.9,
+            lon: -74.3,
+        }; // ~40 km
+        let (impossible, _, _) = check_impossible_travel(&a, &b, 5.0, 500.0);
+        assert!(!impossible, "<100km must be skipped as GeoIP jitter");
+    }
+
+    #[test]
+    fn test_long_haul_impossible_travel_still_fires() {
+        // 8000 km in 30 min ≈ 16000 km/h — genuinely impossible.
+        let a = GeoPoint {
+            lat: 40.7128,
+            lon: -74.006,
+        }; // NYC
+        let b = GeoPoint {
+            lat: 48.8566,
+            lon: 2.3522,
+        }; // Paris ~5837km; use Tokyo for 8000+
+        let c = GeoPoint {
+            lat: 35.6762,
+            lon: 139.6503,
+        }; // Tokyo
+        let dist = haversine_distance(&a, &c);
+        assert!(dist > 8000.0, "NYC-Tokyo fixture: {dist}");
+        let (impossible, speed, _) = check_impossible_travel(&a, &c, 1800.0, 500.0);
+        assert!(impossible, "8000km/30min must fire (speed {speed:.0} km/h)");
+        let _ = b;
     }
 
     #[test]

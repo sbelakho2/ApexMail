@@ -1,5 +1,4 @@
 -- Seed email accounts managed by the platform
-BEGIN;
 CREATE TABLE IF NOT EXISTS seed_accounts (
     id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     provider_id             UUID NOT NULL REFERENCES seed_providers(id),
@@ -15,4 +14,3 @@ CREATE TABLE IF NOT EXISTS seed_accounts (
 );
 CREATE INDEX IF NOT EXISTS idx_seed_accounts_provider ON seed_accounts (provider_id);
 CREATE INDEX IF NOT EXISTS idx_seed_accounts_active ON seed_accounts (is_active) WHERE is_active = true;
-COMMIT;

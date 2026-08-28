@@ -110,6 +110,8 @@ pub struct Config {
     pub control_plane_api_key: Option<String>,
     pub sales_autopilot_base_url: String,
     pub internal_service_token: Option<String>,
+    /// Control-plane session hardening (`middleware::cp_auth`).
+    pub cp_auth: CpAuthConfig,
 
     // ── Tracking / SSE ──────────────────────────────────────
     /// Shared HMAC secret with the tracking-service, used to issue short-lived
@@ -351,6 +353,73 @@ fn is_local_base_url(base_url: &str) -> bool {
         .and_then(|url| url.host_str().map(str::to_string))
         .map(|host| matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1"))
         .unwrap_or(false)
+}
+
+/// Control-plane session hardening knobs, consumed by
+/// `middleware::cp_auth` (the `require_cp_auth` gate on the admin route
+/// group).
+///
+/// Defaults are safe: an EMPTY allowlist means every network is allowed —
+/// the MFA-enabled + admin/owner-role session requirements are enforced
+/// regardless of the allowlist. The session secret defaults to a generated
+/// ephemeral value in development and is REQUIRED in production.
+#[derive(Debug, Clone)]
+pub struct CpAuthConfig {
+    /// CIDR/IP allowlist for control-plane requests (CSV via
+    /// `CP_ALLOWED_IPS`). Empty = all networks allowed.
+    pub allowed_ips: Vec<String>,
+    /// HMAC key signing `apexmail_cp_session` cookies
+    /// (`CP_SESSION_SECRET`).
+    pub session_secret: String,
+    /// Idle timeout in seconds (`CP_SESSION_IDLE_TIMEOUT_SECS`): a CP
+    /// session with no activity for this long is rejected.
+    pub session_idle_timeout_secs: u64,
+    /// Absolute lifetime ceiling in seconds
+    /// (`CP_SESSION_ABSOLUTE_TIMEOUT_SECS`), regardless of activity.
+    pub session_absolute_timeout_secs: u64,
+}
+
+impl Default for CpAuthConfig {
+    fn default() -> Self {
+        Self {
+            allowed_ips: Vec::new(),
+            session_secret: generated_dev_secret("cp-session-secret"),
+            session_idle_timeout_secs: 900,
+            session_absolute_timeout_secs: 14400,
+        }
+    }
+}
+
+impl CpAuthConfig {
+    fn from_env() -> Result<Self, ConfigError> {
+        let config = Self {
+            allowed_ips: parse_csv(&env_or("CP_ALLOWED_IPS", "")),
+            session_secret: env::var("CP_SESSION_SECRET")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| generated_dev_secret("cp-session-secret")),
+            session_idle_timeout_secs: parse_u64(
+                "CP_SESSION_IDLE_TIMEOUT_SECS",
+                &env_or("CP_SESSION_IDLE_TIMEOUT_SECS", "900"),
+            )?,
+            session_absolute_timeout_secs: parse_u64(
+                "CP_SESSION_ABSOLUTE_TIMEOUT_SECS",
+                &env_or("CP_SESSION_ABSOLUTE_TIMEOUT_SECS", "14400"),
+            )?,
+        };
+        if config.session_idle_timeout_secs == 0
+            || config.session_idle_timeout_secs >= config.session_absolute_timeout_secs
+        {
+            return Err(ConfigError::Invalid {
+                var: "CP_SESSION_IDLE_TIMEOUT_SECS".into(),
+                reason: format!(
+                    "must be > 0 and strictly less than CP_SESSION_ABSOLUTE_TIMEOUT_SECS ({})",
+                    config.session_absolute_timeout_secs,
+                ),
+            });
+        }
+        Ok(config)
+    }
 }
 
 fn default_cors_origins(environment: Environment, base_url: &str) -> Vec<String> {
@@ -884,6 +953,7 @@ impl Config {
             internal_service_token: env::var("INTERNAL_SERVICE_TOKEN")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            cp_auth: CpAuthConfig::from_env()?,
 
             tracking_secret_key: tracking_secret_key_env
                 .clone()
@@ -948,11 +1018,15 @@ impl Config {
 
         // Production security checks
         if config.environment.is_production() {
+            let cp_session_secret_env = env::var("CP_SESSION_SECRET")
+                .ok()
+                .filter(|value| !value.trim().is_empty());
             for (name, value) in [
                 ("SESSION_SECRET", session_secret_env.as_deref()),
                 ("IMPERSONATION_SECRET", impersonation_secret_env.as_deref()),
                 ("CSRF_SECRET", csrf_secret_env.as_deref()),
                 ("TRACKING_SECRET_KEY", tracking_secret_key_env.as_deref()),
+                ("CP_SESSION_SECRET", cp_session_secret_env.as_deref()),
             ] {
                 if value.is_none() {
                     return Err(ConfigError::MissingVar(name.to_string()));
@@ -1113,6 +1187,15 @@ impl Config {
             &self.csrf_secret,
             32,
             &["dev-csrf-secret-change-me"],
+        )?;
+        // CP sessions gate platform administration; an ephemeral dev secret
+        // must never sign them in production. (Timeout ordering is enforced
+        // by CpAuthConfig::from_env for every environment.)
+        validate_secret(
+            "CP_SESSION_SECRET",
+            &self.cp_auth.session_secret,
+            32,
+            &["dev-cp-session-secret-change-me-32ch"],
         )?;
         if self.db_password.is_empty() {
             return Err(ConfigError::SecurityCheck(
@@ -1330,6 +1413,7 @@ pub(crate) mod tests {
             control_plane_api_key: Some("test-control-plane-api-key-1234567890".into()),
             sales_autopilot_base_url: "http://localhost:3010".into(),
             internal_service_token: None,
+            cp_auth: Default::default(),
             tracking_secret_key: "test-tracking-secret-123456789012abcd".into(),
             billing_company_iban: "EE381010220123456789".into(),
             billing_company_phone: "+3721234567".into(),
@@ -1474,6 +1558,7 @@ pub(crate) mod tests {
             control_plane_api_key: None,
             sales_autopilot_base_url: "http://localhost:3010".into(),
             internal_service_token: None,
+            cp_auth: Default::default(),
             tracking_secret_key: "test-tracking-secret-123456789012".into(),
             billing_company_iban: "EE381010220123456789".into(),
             billing_company_phone: "+3721234567".into(),

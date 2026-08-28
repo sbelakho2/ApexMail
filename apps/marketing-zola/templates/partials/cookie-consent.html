@@ -12,10 +12,11 @@
 {# the same flip when it serves these pages directly. No script is   #}
 {# involved on any path.                                             #}
 {#                                                                   #}
-{# Links are GET navigations (not cross-origin POST forms) because   #}
-{# the marketing vhost's CSP pins form-action 'self' — a form to     #}
-{# api.apexmail.ee would be blocked by the browser. Plain <a>        #}
-{# navigations are not restricted by form-action.                    #}
+{# Links are GET navigations (not POST forms) by design: a consent     #}
+{# choice is an idempotent state change with no body to submit, and a  #}
+{# plain <a> works from any context. (The marketing CSP's form-action  #}
+{# does allow https://api.apexmail.ee for the lead/calculator forms,   #}
+{# but a GET link remains the honest shape for this endpoint.)         #}
 {# ───────────────────────────────────────────────────────────────── #}
 
 {% set consent_choices = config.extra.cookie_consent_choices | default(value=[]) %}
@@ -63,7 +64,7 @@
   aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["cookie_consent"] %}{{ i18n_data[l]["a11y"]["cookie_consent"] }}{% else %}Cookie consent{% endif %}"
   data-consent-state="pending"
   data-consent-endpoint="{{ config.extra.api_url | default(value='https://api.apexmail.ee') }}/consent"
-  data-cookie-consent-cookie-name="{{ config.extra.cookie_consent_cookie_name | default(value='apexmail_cookie_consent') }}"
+  data-cookie-consent-cookie-name="{{ config.extra.cookie_consent_cookie_name | default(value='apexmail_consent') }}"
   data-analytics-enabled="{{ config.extra.analytics_enabled | default(value=false) }}"
   class="cookie-consent-banner"
 >

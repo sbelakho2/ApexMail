@@ -1,7 +1,6 @@
 -- Enterprise contract and billing support tables migrated from the legacy TS billing app.
 -- This adds the live backing tables required by the Rust enterprise and billing services.
 
-BEGIN;
 
 CREATE SEQUENCE IF NOT EXISTS contract_number_seq START WITH 1;
 
@@ -428,4 +427,3 @@ BEGIN
     END IF;
 END $$;
 
-COMMIT;

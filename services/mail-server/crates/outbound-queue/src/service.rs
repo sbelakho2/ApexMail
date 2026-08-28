@@ -17,6 +17,16 @@ use mail_proto::generated::{
 
 const MAX_BULK_EMAILS: usize = 1_000;
 
+/// Audit-6: the attempts budget shared by BOTH enqueue paths.
+///
+/// `send_email_now` previously hardcoded `max_attempts: 1` while reporting
+/// `success: true` for what was only an ENQUEUE — so any transient error
+/// (throttle, 4xx greylist, connection blip) permanently failed the
+/// message on its very first attempt. "Immediate" is expressed by the
+/// priority bump (100), not by a 1-attempt budget; the now-path now gets
+/// the queue's standard retry headroom (the same 5 `queue_email` uses).
+const QUEUE_MAX_ATTEMPTS: u32 = 5;
+
 /// Outbound gRPC service
 pub struct OutboundServiceImpl {
     queue: Arc<EmailQueue>,
@@ -25,6 +35,53 @@ pub struct OutboundServiceImpl {
 impl OutboundServiceImpl {
     pub fn new(queue: Arc<EmailQueue>) -> Self {
         Self { queue }
+    }
+
+    /// Audit-6: the immediate-send row. Extracted from `send_email_now` so
+    /// the attempts budget is pinnable by a test: the now-path previously
+    /// hardcoded `max_attempts: 1` while reporting `success: true` for a
+    /// bare enqueue, so any transient error permanently failed the message
+    /// on its first attempt.
+    fn immediate_queued_email(req: &SendEmailRequest) -> QueuedEmail {
+        QueuedEmail {
+            id: Uuid::new_v4(),
+            from_address: req.from.clone(),
+            to_addresses: req.to.clone(),
+            subject: req.subject.clone(),
+            text_body: Some(req.text_body.clone()), // #118:Preserve empty string
+            html_body: if req.html_body.is_empty() {
+                None
+            } else {
+                Some(req.html_body.clone())
+            },
+            headers: serde_json::Value::Object(
+                req.headers
+                    .iter()
+                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                    .collect(),
+            ),
+            status: EmailStatus::Pending,
+            attempts: 0,
+            // Audit-6: the standard attempts budget, NOT 1 — see
+            // QUEUE_MAX_ATTEMPTS. The priority bump below is what makes the
+            // send jump the queue; transient errors still get the standard
+            // retry headroom before dead-lettering.
+            max_attempts: QUEUE_MAX_ATTEMPTS,
+            last_error: None,
+            next_retry_at: None,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            sent_at: None,
+            campaign_id: None,
+            sequence_id: None,
+            contact_id: None,
+            priority: 100, // High priority for immediate sends
+            tenant_id: if req.tenant_id.is_empty() {
+                None
+            } else {
+                Some(req.tenant_id.clone())
+            },
+        }
     }
 }
 
@@ -64,7 +121,7 @@ impl OutboundService for OutboundServiceImpl {
             ),
             status: EmailStatus::Pending,
             attempts: 0,
-            max_attempts: 5,
+            max_attempts: QUEUE_MAX_ATTEMPTS,
             last_error: None,
             next_retry_at: None,
             created_at: chrono::Utc::now(),
@@ -114,42 +171,9 @@ impl OutboundService for OutboundServiceImpl {
             "Sending email immediately"
         );
 
-        // Create a queued email with high priority
-        let email = QueuedEmail {
-            id: Uuid::new_v4(),
-            from_address: req.from.clone(),
-            to_addresses: req.to.clone(),
-            subject: req.subject,
-            text_body: Some(req.text_body), // #118:Preserve empty string
-            html_body: if req.html_body.is_empty() {
-                None
-            } else {
-                Some(req.html_body)
-            },
-            headers: serde_json::Value::Object(
-                req.headers
-                    .into_iter()
-                    .map(|(k, v)| (k, serde_json::Value::String(v)))
-                    .collect(),
-            ),
-            status: EmailStatus::Pending,
-            attempts: 0,
-            max_attempts: 1, // Immediate send - no retries
-            last_error: None,
-            next_retry_at: None,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-            sent_at: None,
-            campaign_id: None,
-            sequence_id: None,
-            contact_id: None,
-            priority: 100, // High priority for immediate sends
-            tenant_id: if req.tenant_id.is_empty() {
-                None
-            } else {
-                Some(req.tenant_id)
-            },
-        };
+        // Create a queued email with high priority (Audit-6: standard
+        // attempts budget — see immediate_queued_email).
+        let email = Self::immediate_queued_email(&req);
 
         match self.queue.enqueue(email.clone()).await {
             Ok(id) => {
@@ -383,5 +407,40 @@ impl OutboundService for OutboundServiceImpl {
                 Err(Status::internal(e.to_string()))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn send_email_request() -> SendEmailRequest {
+        SendEmailRequest {
+            from: "sender@example.com".into(),
+            to: vec!["recipient@example.com".into()],
+            subject: "Hello".into(),
+            text_body: "Hello".into(),
+            html_body: String::new(),
+            attachments: vec![],
+            headers: Default::default(),
+            tenant_id: "tenant-1".into(),
+        }
+    }
+
+    /// Audit-6: `send_email_now` reports `success: true` for what is only
+    /// an ENQUEUE, so the queued row must carry the queue's STANDARD
+    /// attempts budget — with `max_attempts: 1` (the old hardcoded value),
+    /// the first transient error (throttle, greylist, connection blip)
+    /// permanently failed an "immediately sent" message.
+    #[test]
+    fn immediate_send_path_uses_the_standard_attempts_budget() {
+        let email = OutboundServiceImpl::immediate_queued_email(&send_email_request());
+        assert_eq!(
+            email.max_attempts, QUEUE_MAX_ATTEMPTS,
+            "the now-path must share queue_email's attempts budget"
+        );
+        assert_eq!(QUEUE_MAX_ATTEMPTS, 5, "the queue's standard budget is 5");
+        // "Immediate" is expressed by priority, not by a 1-attempt budget.
+        assert_eq!(email.priority, 100);
     }
 }

@@ -203,19 +203,21 @@ async fn redis_rate_limit(state: &AppState, key: &str) -> bool {
     count <= RATE_LIMIT_PER_MINUTE
 }
 
-fn client_ip(req_headers: &axum::http::HeaderMap) -> String {
-    req_headers
-        .get("x-forwarded-for")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .map(|s| s.trim().to_string())
-        .or_else(|| {
-            req_headers
-                .get("x-real-ip")
-                .and_then(|v| v.to_str().ok())
-                .map(|s| s.to_string())
-        })
-        .unwrap_or_else(|| "unknown".to_string())
+/// Rate-limit bucket key for a sandbox request. Delegates to the shared
+/// trusted-proxy walk (`extract_public_client_ip`): X-Forwarded-For is
+/// only honoured when the DIRECT peer is a configured trusted proxy, and
+/// then only the rightmost untrusted entry — the raw first-XFF read let
+/// any caller pick an arbitrary bucket identity.
+fn client_ip(
+    req_headers: &axum::http::HeaderMap,
+    socket_ip: std::net::IpAddr,
+    trusted_proxies: &[String],
+) -> String {
+    crate::middleware::rate_limiter::extract_public_client_ip(
+        req_headers,
+        socket_ip,
+        trusted_proxies,
+    )
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -319,10 +321,20 @@ pub struct ExplorerForm {
 
 pub async fn exec(
     State(state): State<AppState>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
     headers: axum::http::HeaderMap,
     Form(form): Form<ExplorerForm>,
 ) -> Response {
-    if !rate_limit(&state, &client_ip(&headers)).await {
+    // Untrusted direct peer: the socket address IS the client. (Without
+    // ConnectInfo — e.g. an exotic service wrapper — bucket on "unknown"
+    // rather than trusting headers.)
+    let bucket_ip = match connect_info {
+        Some(axum::extract::ConnectInfo(addr)) => {
+            client_ip(&headers, addr.ip(), &state.config.trusted_proxies)
+        }
+        None => "unknown".to_string(),
+    };
+    if !rate_limit(&state, &bucket_ip).await {
         return error_page(
             StatusCode::TOO_MANY_REQUESTS,
             "Too many sandbox requests — try again in a minute.",
@@ -672,6 +684,47 @@ fn _header_guard(n: HeaderName) -> HeaderValue {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn client_ip_ignores_forwarded_for_from_untrusted_peers() {
+        // A spoofed X-Forwarded-For from a directly-connected (untrusted)
+        // peer must NOT choose the rate-limit bucket: the socket address
+        // is the only honest signal when the peer is not a configured
+        // proxy.
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            axum::http::HeaderValue::from_static("6.6.6.6, 7.7.7.7"),
+        );
+        let bucket = client_ip(
+            &headers,
+            "203.0.113.9:44321"
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+                .ip(),
+            &[],
+        );
+        assert_eq!(
+            bucket, "203.0.113.9",
+            "spoofed XFF must not pick the bucket"
+        );
+
+        // From a TRUSTED proxy, the rightmost untrusted XFF entry wins.
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            axum::http::HeaderValue::from_static("6.6.6.6, 198.51.100.7"),
+        );
+        let bucket = client_ip(
+            &headers,
+            "10.0.0.2:44321"
+                .parse::<std::net::SocketAddr>()
+                .unwrap()
+                .ip(),
+            &["10.0.0.0/8".to_string()],
+        );
+        assert_eq!(bucket, "198.51.100.7");
+    }
 
     #[test]
     fn recipient_policy_accepts_only_example_com() {

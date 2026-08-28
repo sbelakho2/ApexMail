@@ -68,6 +68,25 @@ pub enum ProcessorError {
         message: String,
     },
 
+    /// AWS SES send failure carrying the retry disposition decided at the
+    /// transport SOURCE, where the typed SDK error (modeled exception code /
+    /// HTTP status) is still available — mirroring the `Smtp { code }`
+    /// pattern so the processor never has to substring-match a flattened
+    /// `Transport("SES send failed: …")` string.
+    ///
+    /// `permanent: true` (400/Validation/MailboxDoesNotExist/MessageRejected
+    /// class) takes the hard-bounce path: recipient suppressed, never
+    /// retried. `permanent: false` (5xx / network) retries with the standard
+    /// exponential backoff. Throttle-class errors keep the distinct
+    /// [`ProcessorError::RateLimited`] variant.
+    #[error("ses error: {message}")]
+    Ses {
+        /// Retry disposition decided from the typed SDK error.
+        permanent: bool,
+        /// SDK error message (already classified; not re-parsed downstream).
+        message: String,
+    },
+
     /// DKIM signing error.
     #[error("dkim error: {0}")]
     Dkim(String),

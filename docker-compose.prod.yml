@@ -9,6 +9,25 @@
 # - Required secrets validation
 # - Replicas for stateless services
 #
+# ── About the mutable `:latest` image pins ──────────────────────────────────
+# Every service below pins `ghcr.io/.../<service>:latest`. This is DELIBERATE
+# (see deploy/DEPLOYMENT.md "Tag strategy": CI publishes :<short-sha> AND
+# :latest per merge to main; compose resolves :latest so deploys need no
+# render step). The mutability is mitigated end-to-end by the CI pipeline:
+#   * ci/stages/images.sh builds each image, tags it :<sha> AND :latest,
+#     runs the trivy gate on the :<sha> pin, and records an image-digests.txt
+#     manifest (sha256 of every image ID, itself signed via
+#     SHA256SUMS.images).
+#   * ci/stages/deploy.sh REFUSES to bring up any service whose local image
+#     digest no longer matches that manifest (rebuilt/retagged/removed
+#     out-of-band between the images and deploy stages).
+#   * ci/stages/verify.sh rolls back to the previous :<sha> pins when
+#     post-deploy probes fail.
+# TODO(audit): render immutable digest pins (`image: ghcr.io/...@sha256:...`)
+# from the images-stage manifest into this file at deploy time so the
+# running stack is provably byte-identical to what CI gated — until then,
+# the digest-verify in ci/stages/deploy.sh is the tamper guard.
+#
 # Audit O — shared log rotation anchor: attach `logging: *default-logging` to
 # every service defined in this overlay so no container can grow an
 # unbounded json-file log on the host.
@@ -95,7 +114,41 @@ services:
       - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./deploy/nginx/proxy-headers.conf:/etc/nginx/proxy-headers.conf:ro
       - ${TLS_CERT_DIR:-./deploy/nginx/ssl}:/etc/nginx/ssl:ro
+      # certbot_webroot is mounted read-only: nginx only needs to READ the
+      # `reload-requested` sentinel the certbot renewal loop drops there
+      # after installing a renewed certificate (see the command below).
       - certbot_webroot:/var/www/certbot:ro
+    # Audit fix (docker socket removal): certbot used to `docker exec` a
+    # reload into this container via the mounted engine socket. Instead, this
+    # command starts nginx in the background and runs a 60s loop that tails
+    # the /var/www/certbot/reload-requested sentinel (mtime-compared, because
+    # the volume is read-only here) and runs `nginx -s reload` when certbot
+    # renewed the TLS material — no socket, no new infrastructure.
+    # If the nginx master dies the loop exits non-zero so restart_policy /
+    # restart: unless-stopped replaces the container.
+    command:
+      - /bin/sh
+      - -c
+      - |
+        nginx -g 'daemon off;' &
+        _nginxd=$$!
+        _last=0
+        while :; do
+          if [ -f /var/www/certbot/reload-requested ]; then
+            _mtime=$$(stat -c %Y /var/www/certbot/reload-requested 2>/dev/null || echo 0)
+            if [ "$$_mtime" -gt "$$_last" ]; then
+              if nginx -s reload; then
+                _last=$$_mtime
+                echo "[nginx] TLS reload sentinel handled — nginx reloaded with renewed certificate"
+              else
+                echo "[nginx] WARN: nginx -s reload after cert renewal failed; retrying on next loop"
+              fi
+            fi
+          fi
+          kill -0 "$$_nginxd" 2>/dev/null || { echo "[nginx] master process died — exiting"; exit 1; }
+          sleep 60 &
+          wait $$!
+        done
     logging:
       driver: json-file
       options:
@@ -129,13 +182,15 @@ services:
       - certbot_webroot:/var/www/certbot
       - ${TLS_CERT_DIR:-./deploy/nginx/ssl}:/etc/letsencrypt:rw
       - ./deploy/scripts/certbot-renew-loop.sh:/usr/local/bin/certbot-renew-loop.sh:ro
-      # Audit D — the renewal loop reloads nginx and restarts mta/imap-server
-      # after a successful renewal; without the docker socket mounted that
-      # logic could never run and renewed certs sat unused until the next
-      # deploy. Read-only socket: the container can talk to the engine but
-      # cannot modify it. (The script still degrades to a WARN + reload-flag
-      # when the socket is unavailable.)
-      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # Audit fix: the docker socket mount (/var/run/docker.sock) is GONE.
+      # A root container with the engine socket is host-root-equivalent, and
+      # the script only needed it to reload/restart sibling containers after
+      # a renewal. The renewal loop now drops a `reload-requested` sentinel
+      # into the shared certbot_webroot volume, which the nginx container's
+      # watcher loop (its command:) picks up within 60s and turns into
+      # `nginx -s reload`. mta/imap-server still load certs at startup — the
+      # loop logs the restart command for an operator (see
+      # deploy/scripts/certbot-renew-loop.sh).
     entrypoint: ["/bin/sh", "/usr/local/bin/certbot-renew-loop.sh"]
     networks:
       - apexmail_frontend
@@ -155,6 +210,15 @@ services:
     secrets:
       - internal_service_token
       - redis_password
+
+  # Grafana runs behind the `monitoring` compose profile (deployed with
+  # --profile monitoring — see ci/stages/deploy.sh / deploy/scripts/deploy.sh).
+  grafana:
+    environment:
+      # Audit fix: NO default admin password in production. ${VAR:?...} makes
+      # compose fail fast with this exact message when the env var is unset;
+      # the dev base file's "changeme" default can never reach production.
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in production (Grafana admin login) — add it to .env}
 
   postgres:
     # Production: Do NOT expose database port to host
@@ -1042,6 +1106,69 @@ services:
         reservations:
           memory: 64M
 
+  # ===========================================================================
+  # CLICKHOUSE BACKUP (nightly, encrypted — mirrors postgres-backup)
+  # ===========================================================================
+  # Audit fix: scripts/clickhouse-backup.sh existed but NOTHING invoked it.
+  # The scheduler (deploy/hardening/scripts/clickhouse-backup-encrypt.sh)
+  # runs it nightly, tars each backup directory, encrypts it with the SAME
+  # AES-256-CBC + PBKDF2 envelope + verification-before-delete contract as
+  # postgres-backup, and mirrors offsite when BACKUP_TARGET is set.
+  # CONSISTENCY: per-table point-in-time dumps (each SELECT is atomic) but
+  # NOT a cross-table snapshot — acceptable for the append-only OLAP data;
+  # native BACKUP/RESTORE is the upgrade path (see the script header).
+  clickhouse-backup:
+    build:
+      context: ./deploy/hardening
+      dockerfile: Dockerfile.clickhouse-backup
+    image: ${GHCR_NS:-ghcr.io/sbelakho2/apexmail}/clickhouse-backup:latest
+    restart: unless-stopped
+    # Health = scheduler loop alive AND an encrypted backup within 25h.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pgrep -f clickhouse-backup-encrypt.sh >/dev/null && test -n "$$(find /backups -name '*.tar.enc' -mmin -1500 2>/dev/null)"
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/usr/local/bin/clickhouse-backup-encrypt.sh"]
+    volumes:
+      - ./deploy/hardening/scripts/clickhouse-backup-encrypt.sh:/usr/local/bin/clickhouse-backup-encrypt.sh:ro
+      - ./scripts/clickhouse-backup.sh:/usr/local/bin/clickhouse-backup.sh:ro
+      - clickhouse_backups:/backups
+    environment:
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: "8123"
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
+      CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
+      BACKUP_DIR: /backups
+      SCHEDULE: "@daily"
+      BACKUP_RETENTION_DAYS: ${CLICKHOUSE_BACKUP_KEEP_DAYS:-14}
+      BACKUP_KEEP_DAYS: ${CLICKHOUSE_BACKUP_KEEP_DAYS:-14}
+      BACKUP_KEEP_COUNT: ${CLICKHOUSE_BACKUP_KEEP_COUNT:-14}
+      # Same secret as postgres-backup (one key, verified restores).
+      BACKUP_ENCRYPTION_KEY_FILE: /run/secrets/backup_encryption_key
+      # Optional offsite mirror (rsync over ssh; mount the key to /root/.ssh
+      # when set — same caveat as postgres-backup on the no-egress network).
+      BACKUP_TARGET: ${BACKUP_TARGET:-}
+    networks:
+      - apexmail_data_internal
+    secrets:
+      - clickhouse_password
+      - backup_encryption_key
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
+
   clickhouse:
     ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     environment:
@@ -1075,6 +1202,7 @@ services:
 volumes:
   certbot_webroot:
   postgres_backups:
+  clickhouse_backups:
 
 # Audit J — apexmail_data_internal is a plain bridge in the base (dev) file;
 # in production it has no egress path (no gateway/NAT), so the data plane

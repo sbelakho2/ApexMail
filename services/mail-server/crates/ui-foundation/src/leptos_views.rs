@@ -1045,58 +1045,365 @@ pub fn web_campaign_preview_page(html_body: &str) -> String {
     )
 }
 
-/// Allow only structural markup in previews: strip <script>/<style> blocks,
-/// event-handler attributes, and form controls so a hostile draft cannot
-/// execute anything (defense in depth on top of the `script-src 'none'` CSP,
-/// which already blocks all script execution).
+/// Allowlist sanitizer for preview HTML: parse tags and keep ONLY the safe
+/// element/attribute set. Everything else — unknown elements (`<script>`,
+/// `<style>`, `<iframe>`, `<object>`, `<meta>`, `<base>`, `<form>`, …),
+/// script/style bodies, comments, doctypes, and every attribute outside
+/// href/src/alt/title/colspan/rowspan — is dropped regardless of what
+/// whitespace (or `/`) separates the attributes. `href`/`src` values must be
+/// absolute http(s) URLs; anything else (including `javascript:` and
+/// scheme-obfuscated variants) drops the attribute. This is defense in depth
+/// on top of the `script-src 'none'` CSP, which already blocks execution.
 pub fn sanitize_preview_html(input: &str) -> String {
-    let lower = input.to_ascii_lowercase();
-    let mut without_scripts = String::with_capacity(input.len());
-    let mut cursor = 0usize;
-    while let Some(start) = lower[cursor..].find("<script") {
-        without_scripts.push_str(&input[cursor..cursor + start]);
-        match lower[cursor + start..].find("</script>") {
-            Some(end_offset) => cursor = cursor + start + end_offset + "</script>".len(),
-            None => {
-                cursor = input.len();
-                break;
+    Sanitizer::new(input).run()
+}
+
+/// Elements that may appear in sanitized preview output. Everything not on
+/// this list is stripped (tag AND, for script/style, the body).
+const PREVIEW_ALLOWED_ELEMENTS: &[&str] = &[
+    "p",
+    "br",
+    "b",
+    "i",
+    "em",
+    "strong",
+    "u",
+    "a",
+    "ul",
+    "ol",
+    "li",
+    "h1",
+    "h2",
+    "h3",
+    "h4",
+    "h5",
+    "h6",
+    "blockquote",
+    "pre",
+    "code",
+    "span",
+    "div",
+    "table",
+    "thead",
+    "tbody",
+    "tr",
+    "td",
+    "th",
+    "img",
+];
+
+/// Elements whose (empty) content model means a closing tag is never valid.
+const PREVIEW_VOID_ELEMENTS: &[&str] = &["br", "img"];
+
+/// Elements whose entire body is dropped along with the tags: script/style
+/// bodies are code, not text, and must never leak into a preview.
+const PREVIEW_DROP_CONTENT_ELEMENTS: &[&str] = &["script", "style"];
+
+/// Attributes preserved on allowed elements. Everything else (event handlers,
+/// styling, forms, metadata) is dropped.
+const PREVIEW_ALLOWED_ATTRIBUTES: &[&str] = &["href", "src", "alt", "title", "colspan", "rowspan"];
+
+/// Attributes carrying a URL: restricted to absolute http/https so no
+/// scheme (`javascript:`, `data:`, `vbscript:`) can survive.
+const PREVIEW_URL_ATTRIBUTES: &[&str] = &["href", "src"];
+
+fn preview_attr_url_is_safe(value: &str) -> bool {
+    let lowered = value.trim_start().to_ascii_lowercase();
+    lowered.starts_with("http://") || lowered.starts_with("https://")
+}
+
+/// Hand-rolled, dependency-free HTML tag scanner. Operating on raw bytes is
+/// safe here: every delimiter we branch on (`<`, `>`, `/`, `=`, quotes,
+/// whitespace) is ASCII, and multi-byte UTF-8 sequences never contain ASCII
+/// bytes, so slicing at ASCII boundaries cannot split a code point.
+struct Sanitizer<'a> {
+    input: &'a str,
+    bytes: &'a [u8],
+    pos: usize,
+    out: String,
+}
+
+impl<'a> Sanitizer<'a> {
+    fn new(input: &'a str) -> Self {
+        Self {
+            input,
+            bytes: input.as_bytes(),
+            pos: 0,
+            out: String::with_capacity(input.len()),
+        }
+    }
+
+    fn run(mut self) -> String {
+        while self.pos < self.bytes.len() {
+            match self.peek() {
+                Some(b'<') => self.handle_tag_start(),
+                _ => {
+                    let start = self.pos;
+                    while self.pos < self.bytes.len() && self.peek() != Some(b'<') {
+                        self.pos += 1;
+                    }
+                    self.out.push_str(&self.input[start..self.pos]);
+                }
+            }
+        }
+        self.out
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
+    }
+
+    fn peek_at(&self, offset: usize) -> Option<u8> {
+        self.bytes.get(self.pos + offset).copied()
+    }
+
+    fn skip_html_whitespace(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r' | b'\x0c')) {
+            self.pos += 1;
+        }
+    }
+
+    fn handle_tag_start(&mut self) {
+        debug_assert_eq!(self.peek(), Some(b'<'));
+        match self.peek_at(1) {
+            // `</name …>` closing tag.
+            Some(b'/') => self.handle_closing_tag(),
+            // `<!-- … -->` comment or `<! …>` bogus markup (doctype et al.).
+            Some(b'!') => self.skip_bang_markup(),
+            // `<? …>` processing instruction — dropped entirely.
+            Some(b'?') => self.skip_until_gt(),
+            Some(byte) if byte.is_ascii_alphabetic() => self.handle_opening_tag(),
+            // A lone `<` that starts no tag (e.g. "a < b"): escape it so it
+            // can never combine with later input into markup.
+            _ => {
+                self.out.push_str("&lt;");
+                self.pos += 1;
             }
         }
     }
-    without_scripts.push_str(&input[cursor.min(input.len())..]);
-    // Strip inline event-handler attributes (on*=) wherever they appear.
-    let out = without_scripts;
-    let mut cleaned = String::with_capacity(out.len());
-    let mut chars = out.chars().peekable();
-    while let Some(c) = chars.next() {
-        cleaned.push(c);
-        if c == '<' {
-            let mut tag = String::new();
-            while let Some(&nc) = chars.peek() {
-                chars.next();
-                if nc == '>' {
-                    break;
-                }
-                tag.push(nc);
-            }
-            let mut safe_tag = String::with_capacity(tag.len());
-            for (i, word) in tag.split(' ').enumerate() {
-                let lowered = word.to_ascii_lowercase();
-                if i > 0 && lowered.starts_with("on") && lowered.contains('=') {
-                    continue; // drop event-handler attributes
-                }
-                if i == 0 {
-                    safe_tag.push_str(word);
-                } else {
-                    safe_tag.push(' ');
-                    safe_tag.push_str(word);
-                }
-            }
-            cleaned.push_str(&safe_tag);
-            cleaned.push('>');
+
+    /// Read an ASCII tag name starting at `self.pos`; returns None when the
+    /// current byte is not a letter.
+    fn read_tag_name(&mut self) -> Option<String> {
+        let start = self.pos;
+        while matches!(self.peek(), Some(byte) if byte.is_ascii_alphanumeric()) {
+            self.pos += 1;
+        }
+        if self.pos == start {
+            return None;
+        }
+        Some(self.input[start..self.pos].to_ascii_lowercase())
+    }
+
+    fn handle_opening_tag(&mut self) {
+        self.pos += 1; // consume '<'
+        let Some(name) = self.read_tag_name() else {
+            // Not a real tag after all — escape the '<' and continue from
+            // the next byte.
+            self.out.push_str("&lt;");
+            return;
+        };
+
+        if PREVIEW_DROP_CONTENT_ELEMENTS.contains(&name.as_str()) {
+            self.skip_until_gt();
+            self.skip_element_body(&name);
+            return;
+        }
+
+        if !PREVIEW_ALLOWED_ELEMENTS.contains(&name.as_str()) {
+            // Unknown/disallowed element: drop the tag, keep scanning (any
+            // inner text stays — it is inert once the tags are gone).
+            self.skip_until_gt();
+            return;
+        }
+
+        // Allowed element: re-emit the tag with filtered attributes.
+        self.out.push('<');
+        self.out.push_str(&name);
+        self.emit_filtered_attributes();
+        self.out.push('>');
+    }
+
+    fn handle_closing_tag(&mut self) {
+        self.pos += 2; // consume '</'
+        let Some(name) = self.read_tag_name() else {
+            return; // bogus `</ …>`: drop silently
+        };
+        self.skip_until_gt();
+        if PREVIEW_ALLOWED_ELEMENTS.contains(&name.as_str())
+            && !PREVIEW_VOID_ELEMENTS.contains(&name.as_str())
+        {
+            self.out.push_str("</");
+            self.out.push_str(&name);
+            self.out.push('>');
         }
     }
-    cleaned
+
+    /// Skip a comment (`<!-- … -->`) or doctype/declaration (`<! … >`).
+    fn skip_bang_markup(&mut self) {
+        if self.input[self.pos..].starts_with("<!--") {
+            self.pos += 4;
+            while self.pos < self.bytes.len() {
+                if self.input[self.pos..].starts_with("-->") {
+                    self.pos += 3;
+                    return;
+                }
+                self.pos += 1;
+            }
+        } else {
+            self.skip_until_gt();
+        }
+    }
+
+    /// Advance past the rest of the current tag (through `>`). Unterminated
+    /// tags stop at end of input.
+    fn skip_until_gt(&mut self) {
+        while let Some(byte) = self.peek() {
+            self.pos += 1;
+            match byte {
+                b'>' => return,
+                b'"' | b'\'' => self.skip_quoted(byte),
+                _ => {}
+            }
+        }
+    }
+
+    fn skip_quoted(&mut self, quote: u8) {
+        while let Some(byte) = self.peek() {
+            self.pos += 1;
+            if byte == quote {
+                return;
+            }
+        }
+    }
+
+    /// Drop everything up to and including `</{name}>` (case-insensitive).
+    fn skip_element_body(&mut self, name: &str) {
+        let closing = format!("</{name}");
+        while self.pos < self.bytes.len() {
+            if self.peek() == Some(b'<') && self.input[self.pos..].starts_with(&closing) {
+                // Match only when the name terminates (next byte is `>`,
+                // whitespace, or `/`), not a prefix like `</scriptx>`.
+                let after = self.input[(self.pos + closing.len())..].chars().next();
+                if matches!(after, Some('>') | Some('/') | None)
+                    || after.is_some_and(char::is_whitespace)
+                {
+                    self.pos += closing.len();
+                    self.skip_until_gt();
+                    return;
+                }
+            }
+            self.pos += 1;
+        }
+    }
+
+    /// Parse the attribute list of an allowed element and re-emit only the
+    /// allowlisted, URL-validated attributes. Handles unquoted,
+    /// single-quoted, and double-quoted values and `/`-separated attributes.
+    fn emit_filtered_attributes(&mut self) {
+        loop {
+            self.skip_html_whitespace();
+            match self.peek() {
+                None => return, // unterminated tag: emit what we have
+                Some(b'>') => {
+                    self.pos += 1;
+                    return;
+                }
+                Some(b'/') => {
+                    self.pos += 1;
+                    // `/>` ends the tag; a stray `/` is just a separator.
+                    continue;
+                }
+                _ => {}
+            }
+
+            let attr_start = self.pos;
+            while self.peek().is_some_and(|byte| {
+                !byte.is_ascii_whitespace() && byte != b'=' && byte != b'>' && byte != b'/'
+            }) {
+                self.pos += 1;
+            }
+            if self.pos == attr_start {
+                // Not an attribute name (e.g. a stray `=`): skip one byte to
+                // guarantee progress.
+                self.pos += 1;
+                continue;
+            }
+            let attr_name = self.input[attr_start..self.pos].to_ascii_lowercase();
+
+            // Optional `= value` (value may be unquoted, '…', or "…").
+            let mut value: Option<String> = None;
+            self.skip_html_whitespace();
+            if self.peek() == Some(b'=') {
+                self.pos += 1;
+                self.skip_html_whitespace();
+                value = Some(self.read_attribute_value());
+            }
+
+            if PREVIEW_ALLOWED_ATTRIBUTES.contains(&attr_name.as_str()) {
+                let value = value.unwrap_or_default();
+                if PREVIEW_URL_ATTRIBUTES.contains(&attr_name.as_str())
+                    && !preview_attr_url_is_safe(&value)
+                {
+                    continue; // unsafe/relative URL: drop the attribute
+                }
+                self.out.push(' ');
+                self.out.push_str(&attr_name);
+                self.out.push_str("=\"");
+                self.out.push_str(&escape_attribute_value(&value));
+                self.out.push('"');
+            }
+        }
+    }
+
+    fn read_attribute_value(&mut self) -> String {
+        match self.peek() {
+            Some(b'"') => {
+                self.pos += 1;
+                let start = self.pos;
+                while self.peek().is_some_and(|byte| byte != b'"') {
+                    self.pos += 1;
+                }
+                let value = self.input[start..self.pos].to_string();
+                if self.peek() == Some(b'"') {
+                    self.pos += 1;
+                }
+                value
+            }
+            Some(b'\'') => {
+                self.pos += 1;
+                let start = self.pos;
+                while self.peek().is_some_and(|byte| byte != b'\'') {
+                    self.pos += 1;
+                }
+                let value = self.input[start..self.pos].to_string();
+                if self.peek() == Some(b'\'') {
+                    self.pos += 1;
+                }
+                value
+            }
+            // Unquoted value: runs to whitespace or `>` (HTML also ends it
+            // there — `/` is a legitimate part of unquoted URLs).
+            _ => {
+                let start = self.pos;
+                while self
+                    .peek()
+                    .is_some_and(|byte| !byte.is_ascii_whitespace() && byte != b'>')
+                {
+                    self.pos += 1;
+                }
+                self.input[start..self.pos].to_string()
+            }
+        }
+    }
+}
+
+fn escape_attribute_value(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Pixel-identical reproduction of the web new-campaign page contract.
@@ -4210,7 +4517,16 @@ pub fn web_confirm_page(
     signature_valid: bool,
 ) -> String {
     let (title, description) = confirm_intent_copy(intent);
-    let safe_return = if return_to.starts_with('/') && !return_to.starts_with("//") {
+    // Same-origin paths only. Backslashes are rejected because WHATWG
+    // URL parsing normalises `\` to `/` in special schemes: a form
+    // carrying "/\evil.com" posts it back as "//evil.com", a
+    // protocol-relative hop to the attacker. Control characters can
+    // smuggle headers.
+    let safe_return = if return_to.starts_with('/')
+        && !return_to.starts_with("//")
+        && !return_to.contains('\\')
+        && !return_to.chars().any(char::is_control)
+    {
         return_to
     } else {
         "/"
@@ -4336,8 +4652,15 @@ pub fn web_login_page(csrf_token: &str) -> String {
 pub fn web_login_mfa_challenge_page(csrf_token: &str, email: &str, return_to: &str) -> String {
     let csrf = csrf_hidden_input(csrf_token);
     // Only same-origin paths survive (defense in depth: the router already
-    // vets return_to, and form_mfa_verify re-vets it on POST).
-    let safe_return_to = if return_to.starts_with('/') && !return_to.starts_with("//") {
+    // vets return_to, and form_mfa_verify re-vets it on POST). Backslashes
+    // are rejected like everywhere else: WHATWG URL parsing normalises
+    // `\` to `/` in special schemes, so "/\evil.com" round-trips as
+    // "//evil.com"; control characters can smuggle headers.
+    let safe_return_to = if return_to.starts_with('/')
+        && !return_to.starts_with("//")
+        && !return_to.contains('\\')
+        && !return_to.chars().any(char::is_control)
+    {
         return_to
     } else {
         "/dashboard"
@@ -4488,6 +4811,53 @@ mod tests {
         assert!(html.contains("Growth"));
         assert!(html.contains("Scale"));
         assert!(html.contains("Enterprise"));
+    }
+
+    /// Backslash return_to values are open redirects: WHATWG URL parsing
+    /// normalises `\` to `/` in special schemes, so a form carrying
+    /// "/\evil.com" posts it back as "//evil.com". Both SSR pages must
+    /// vet them exactly like the routers do.
+    #[test]
+    fn confirm_page_rejects_backslash_and_control_return_to() {
+        let html = web_confirm_page("delete-campaign", "c_1", "/\\evil.com", "sig", true);
+        assert!(
+            !html.contains("evil.com"),
+            "backslash return_to leaked into the confirm page"
+        );
+        // The hidden input and the Cancel link fall back to "/".
+        assert!(html.contains("name=\"return_to\" value=\"/\""));
+        assert!(html.contains("href=\"/\""));
+
+        let ctl = web_confirm_page(
+            "delete-campaign",
+            "c_1",
+            "/ok\r\nSet-Cookie: x=1",
+            "sig",
+            true,
+        );
+        assert!(!ctl.contains("Set-Cookie"));
+
+        // Honest paths survive intact (query strings included).
+        let ok = web_confirm_page("delete-campaign", "c_1", "/campaigns?page=2", "sig", true);
+        assert!(ok.contains("name=\"return_to\" value=\"/campaigns?page=2\""));
+    }
+
+    /// Same vetting on the MFA challenge page's return_to (it round-trips
+    /// into the verify POST and the "different account" flow).
+    #[test]
+    fn mfa_challenge_page_rejects_backslash_and_control_return_to() {
+        let html = web_login_mfa_challenge_page("t", "ada@example.com", "/\\evil.com");
+        assert!(
+            !html.contains("evil.com"),
+            "backslash return_to leaked into the MFA page"
+        );
+        assert!(html.contains("name=\"return_to\" value=\"/dashboard\""));
+
+        let ctl = web_login_mfa_challenge_page("t", "ada@example.com", "/dash\tboard\r\nX: y");
+        assert!(!ctl.contains("X: y"));
+
+        let ok = web_login_mfa_challenge_page("t", "ada@example.com", "/billing?tab=plans");
+        assert!(ok.contains("name=\"return_to\" value=\"/billing?tab=plans\""));
     }
 
     /// Fabricated KPIs must never present as live data.
@@ -5645,5 +6015,170 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ─── Preview sanitizer (strict allowlist) ────────────────
+
+    #[test]
+    fn sanitizer_neutralizes_slash_separated_event_handler() {
+        // The old space-split kept `<img src=x/onerror=alert(1)>` intact:
+        // the whole `src=x/onerror=alert(1)` ran was one space-free "word".
+        let out = sanitize_preview_html("<img src=x/onerror=alert(1)>");
+        assert!(!out.contains("onerror"), "output was: {out}");
+        assert!(!out.contains("alert"), "output was: {out}");
+    }
+
+    #[test]
+    fn sanitizer_neutralizes_javascript_urls() {
+        for payload in [
+            r#"<a href="javascript:alert(1)">click</a>"#,
+            r#"<a href='JAVASCRIPT:alert(1)'>click</a>"#,
+            "<a href=javascript:alert(1)>click</a>",
+            r#"<a href=" java\tscript:alert(1)">click</a>"#,
+        ] {
+            let out = sanitize_preview_html(payload);
+            assert!(
+                !out.to_ascii_lowercase().contains("javascript:"),
+                "payload {payload:?} survived as: {out}"
+            );
+            assert!(
+                !out.to_ascii_lowercase().contains("alert"),
+                "payload {payload:?} survived as: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitizer_dumps_style_iframe_object_meta_base_and_form() {
+        let out = sanitize_preview_html(
+            "<style>body { background: red }</style><iframe src=\"https://evil.example\"></iframe>\
+             <object data=\"https://evil.example\"></object>\
+             <meta http-equiv=\"refresh\" content=\"0;url=https://evil.example\">\
+             <base href=\"https://evil.example/\"><form action=\"https://evil.example\"><input type=submit></form>",
+        );
+        for forbidden in [
+            "<style", "<iframe", "<object", "<meta", "<base", "<form", "<input",
+        ] {
+            assert!(!out.contains(forbidden), "{forbidden} survived: {out}");
+        }
+        assert!(
+            !out.contains("background: red"),
+            "style body content must be dropped, got: {out}"
+        );
+    }
+
+    #[test]
+    fn sanitizer_strips_event_handlers_regardless_of_separator() {
+        for payload in [
+            "<b onclick=alert(1)>bold</b>",
+            "<b\tonclick=alert(1)>bold</b>",
+            "<b\nonclick=alert(1)>bold</b>",
+            "<b\ronclick=alert(1)>bold</b>",
+            "<b onclick =alert(1)>bold</b>",
+            "<img src=\"https://e.example/x.png\"\tonerror=\"alert(1)\">",
+        ] {
+            let out = sanitize_preview_html(payload);
+            assert!(
+                !out.to_ascii_lowercase().contains("onclick")
+                    && !out.to_ascii_lowercase().contains("onerror"),
+                "handler survived in {out:?} (payload {payload:?})"
+            );
+            assert!(
+                !out.to_ascii_lowercase().contains("alert"),
+                "handler payload survived in {out:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sanitizer_preserves_allowed_markup_and_safe_urls() {
+        let src = "<h1>Title</h1><p>Paragraph with <b>bold</b>, <i>italic</i>, \
+                   <em>em</em>, <strong>strong</strong>, and <u>underline</u>.</p>\
+                   <ul><li>one</li><li>two</li></ul><ol><li>first</li></ol>\
+                   <blockquote>quoted</blockquote><pre><code>let x = 1;</code></pre>\
+                   <span>span</span><div>div</div>\
+                   <table><thead><tr><th colspan=\"2\">h</th></tr></thead>\
+                   <tbody><tr><td>a</td><td rowspan=\"2\">b</td></tr></tbody></table>\
+                   <a href=\"https://example.com/page\" title=\"ok\">link</a>\
+                   <img src=\"https://example.com/i.png\" alt=\"pic\">\
+                   <a href=\"http://example.com/plain\">plain</a><br>";
+        let out = sanitize_preview_html(src);
+        for fragment in [
+            "<h1>",
+            "<p>",
+            "<b>bold</b>",
+            "<i>italic</i>",
+            "<em>em</em>",
+            "<strong>strong</strong>",
+            "<u>underline</u>",
+            "<ul>",
+            "<ol>",
+            "<li>one</li>",
+            "<blockquote>quoted</blockquote>",
+            "<pre>",
+            "<code>",
+            "<span>span</span>",
+            "<div>div</div>",
+            "<table>",
+            "<thead>",
+            "<tbody>",
+            "<tr>",
+            "<th colspan=\"2\">",
+            "<td>",
+            "<a href=\"https://example.com/page\" title=\"ok\">link</a>",
+            "<img src=\"https://example.com/i.png\" alt=\"pic\">",
+            "<br>",
+        ] {
+            assert!(out.contains(fragment), "missing {fragment:?} in: {out}");
+        }
+    }
+
+    #[test]
+    fn sanitizer_keeps_only_allowlisted_attributes() {
+        let out = sanitize_preview_html(
+            r#"<a href="https://example.com" class="link" id="x" target="_blank" rel="noopener" style="color:red">link</a>"#,
+        );
+        assert!(out.contains("href=\"https://example.com\""), "got: {out}");
+        for dropped in ["class=", "id=", "target=", "rel=", "style="] {
+            assert!(!out.contains(dropped), "{dropped} survived: {out}");
+        }
+    }
+
+    #[test]
+    fn sanitizer_drops_script_and_style_content() {
+        let out = sanitize_preview_html(
+            "before<script type=\"text/javascript\">var x = 'steal';</script>middle\
+             <style>body{display:none}</style>after",
+        );
+        assert!(!out.contains("steal"), "script body survived: {out}");
+        assert!(!out.contains("display:none"), "style body survived: {out}");
+        assert!(out.contains("before") && out.contains("middle") && out.contains("after"));
+    }
+
+    #[test]
+    fn sanitizer_drops_comments_and_bogus_markup() {
+        let out =
+            sanitize_preview_html("<!-- hidden comment --><!DOCTYPE html><?php echo 1; ?>text");
+        assert!(!out.contains("hidden comment"), "comment survived: {out}");
+        assert!(!out.contains("DOCTYPE"), "doctype survived: {out}");
+        assert!(
+            !out.contains("php"),
+            "processing instruction survived: {out}"
+        );
+        assert!(out.contains("text"));
+    }
+
+    #[test]
+    fn sanitizer_case_insensitive_and_unterminated_tags_dropped() {
+        let out = sanitize_preview_html("<IMG SRC=x ONERROR=alert(1)><SCRIPT>alert(1)</SCRIPT>");
+        assert!(!out.to_ascii_lowercase().contains("onerror"), "got: {out}");
+        assert!(!out.contains("SCRIPT"), "got: {out}");
+        assert!(!out.contains("alert"), "got: {out}");
+        // An unterminated tag must not swallow the rest of the document.
+        let out = sanitize_preview_html("<b><i>kept</i>");
+        assert!(
+            out.contains("kept"),
+            "unterminated tag swallowed text: {out}"
+        );
     }
 }

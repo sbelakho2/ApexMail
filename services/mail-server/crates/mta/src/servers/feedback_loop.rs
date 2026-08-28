@@ -22,7 +22,7 @@ use tracing::{debug, error, info, warn};
 use trust_dns_resolver::{Resolver, TokioResolver};
 use uuid::Uuid;
 
-use super::bounce::{append_data_line, connection_allowed, ConnGuard, MAX_RCPT_PER_TRANSACTION};
+use super::bounce::{append_data_line, try_admit_connection, ConnGuard, MAX_RCPT_PER_TRANSACTION};
 use super::util::{
     is_mail_from_arg, is_rcpt_to_arg, is_strict_end_of_data, line_content_bytes, line_lossy,
     log_session_summary, log_smtp_reject, metric_message, read_line_capped, split_verb,
@@ -94,6 +94,26 @@ const TRUSTED_FBL_SENDERS: &[&str] = &[
     "validity.com",
 ];
 
+/// Outcome of the FBL source rDNS/FCrDNS verification for one client IP.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FblSourceCheck {
+    /// PTR matches a trusted FBL sender domain and forward-confirms.
+    Trusted,
+    /// Determinate negative: no PTR, no trusted-domain match, or the FCrDNS
+    /// forward lookup does not return the original IP.
+    Untrusted,
+    /// The resolver itself failed transiently — callers tempfail (451) and
+    /// the outcome is never cached.
+    Transient,
+}
+
+/// Only DETERMINATE outcomes belong in the rDNS cache: a transient resolver
+/// failure cached as `Untrusted` dropped every complaint from that sender
+/// for a full cache TTL during a DNS blip.
+fn fbl_source_cacheable(check: &FblSourceCheck) -> bool {
+    !matches!(check, FblSourceCheck::Transient)
+}
+
 /// FBL processing server.
 pub struct FeedbackLoopServer {
     config: FeedbackConfig,
@@ -102,7 +122,7 @@ pub struct FeedbackLoopServer {
     hostname: String,
     trusted_domains: HashSet<String>,
     /// #149:Bounded rDNS cache with 10-minute TTL (replaces unbounded DashMap).
-    rdns_cache: Cache<IpAddr, bool>,
+    rdns_cache: Cache<IpAddr, FblSourceCheck>,
     /// Active connections per IP — enforces `max_connections_per_ip`.
     connections: Arc<DashMap<IpAddr, u32>>,
     shutdown: Arc<Notify>,
@@ -169,34 +189,69 @@ impl FeedbackLoopServer {
         let session_id = Uuid::new_v4().to_string();
         let started = std::time::Instant::now();
 
-        // Verify source via rDNS
-        if !self.verify_fbl_source(ip).await {
-            let mut s = BufStream::new(socket);
-            log_smtp_reject("fbl", ip, &session_id, "554 5.7.1 Unverified FBL source");
-            let _ = write_reply(
-                &mut s,
-                "fbl",
-                ip,
-                &session_id,
-                "554 5.7.1 Unverified FBL source\r\n",
-            )
-            .await;
-            log_session_summary(
-                "fbl",
-                ip,
-                &session_id,
-                false,
-                false,
-                0,
-                started.elapsed().as_millis(),
-                "unverified_source",
-            );
-            return;
+        // Verify source via rDNS. A TRANSIENT resolver failure tempfails
+        // (451) and is never cached: caching it as "untrusted" for a full
+        // cache TTL dropped every complaint from that sender during a DNS
+        // blip.
+        match self.verify_fbl_source(ip).await {
+            FblSourceCheck::Trusted => {}
+            FblSourceCheck::Untrusted => {
+                let mut s = BufStream::new(socket);
+                log_smtp_reject("fbl", ip, &session_id, "554 5.7.1 Unverified FBL source");
+                let _ = write_reply(
+                    &mut s,
+                    "fbl",
+                    ip,
+                    &session_id,
+                    "554 5.7.1 Unverified FBL source\r\n",
+                )
+                .await;
+                log_session_summary(
+                    "fbl",
+                    ip,
+                    &session_id,
+                    false,
+                    false,
+                    0,
+                    started.elapsed().as_millis(),
+                    "unverified_source",
+                );
+                return;
+            }
+            FblSourceCheck::Transient => {
+                let mut s = BufStream::new(socket);
+                log_smtp_reject(
+                    "fbl",
+                    ip,
+                    &session_id,
+                    "451 4.3.0 Temporary failure verifying FBL source",
+                );
+                let _ = write_reply(
+                    &mut s,
+                    "fbl",
+                    ip,
+                    &session_id,
+                    "451 4.3.0 Temporary failure verifying FBL source\r\n",
+                )
+                .await;
+                log_session_summary(
+                    "fbl",
+                    ip,
+                    &session_id,
+                    false,
+                    false,
+                    0,
+                    started.elapsed().as_millis(),
+                    "transient_source",
+                );
+                return;
+            }
         }
 
-        // Enforce the per-IP connection cap.
-        let active = self.connections.get(&ip).map(|e| *e).unwrap_or(0);
-        if !connection_allowed(active, self.config.max_connections_per_ip) {
+        // Enforce the per-IP connection cap. The check and the slot
+        // increment are one atomic step (same admission helper as the
+        // other servers) — concurrent connects cannot overshoot the cap.
+        if !try_admit_connection(&self.connections, ip, self.config.max_connections_per_ip) {
             let mut s = BufStream::new(socket);
             log_smtp_reject(
                 "fbl",
@@ -224,7 +279,6 @@ impl FeedbackLoopServer {
             );
             return;
         }
-        *self.connections.entry(ip).or_insert(0) += 1;
         let _conn_guard = ConnGuard {
             conns: self.connections.clone(),
             ip,
@@ -626,7 +680,7 @@ impl FeedbackLoopServer {
 
     // ── rDNS verification ──────────────────────────────────────────────────────
 
-    async fn verify_fbl_source(&self, ip: IpAddr) -> bool {
+    async fn verify_fbl_source(&self, ip: IpAddr) -> FblSourceCheck {
         // Check cache
         if let Some(cached) = self.rdns_cache.get(&ip) {
             return cached;
@@ -672,26 +726,41 @@ impl FeedbackLoopServer {
                             if !confirmed {
                                 debug!(ip = %ip, hostname = %hostname, "FCrDNS failed: forward lookup doesn't match IP");
                             }
-                            confirmed
+                            if confirmed {
+                                FblSourceCheck::Trusted
+                            } else {
+                                FblSourceCheck::Untrusted
+                            }
                         }
+                        // A failing FORWARD lookup is as transient as a
+                        // failing PTR lookup — tempfail, never a permanent
+                        // untrusted verdict.
                         Err(e) => {
                             debug!(ip = %ip, hostname = %hostname, error = %e, "FCrDNS forward lookup failed");
-                            false
+                            FblSourceCheck::Transient
                         }
                     }
                 } else {
                     debug!(ip = %ip, "rDNS lookup didn't match trusted FBL senders");
-                    false
+                    FblSourceCheck::Untrusted
                 }
             }
             Err(e) => {
                 debug!(ip = %ip, error = %e, "rDNS lookup failed");
-                false
+                FblSourceCheck::Transient
             }
         };
 
-        self.rdns_cache.insert(ip, result);
-        result
+        // Only DETERMINATE outcomes are cached: a transient resolver failure
+        // must never poison the cache into dropping that sender's complaints
+        // for a full TTL.
+        match result {
+            cacheable if fbl_source_cacheable(&cacheable) => {
+                self.rdns_cache.insert(ip, cacheable);
+                cacheable
+            }
+            transient => transient,
+        }
     }
 
     // ── complaint processing ───────────────────────────────────────────────────
@@ -828,12 +897,13 @@ impl FeedbackLoopServer {
         });
 
         if let Ok(mut conn) = self.redis.get().await {
-            redis::cmd("LPUSH")
-                .arg("mta:webhook_queue")
-                .arg(payload.to_string())
-                .query_async::<i64>(&mut *conn) // LPUSH returns list length
-                .await
-                .ok();
+            // LPUSH + LTRIM: a dead consumer must not grow the list (and
+            // Redis memory) without bound.
+            if let Err(e) =
+                super::util::push_webhook_bounded(&mut *conn, &payload.to_string()).await
+            {
+                debug!(error = %e, "Failed to push complaint webhook to Redis queue");
+            }
         }
 
         info!(
@@ -1171,6 +1241,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn transient_fbl_source_outcomes_are_not_cacheable() {
+        // A resolver outage (PTR or forward lookup failure) must never be
+        // cached as an Untrusted verdict: for a full cache TTL that dropped
+        // every complaint from the affected sender. Only determinate
+        // outcomes may enter the rDNS cache.
+        assert!(!fbl_source_cacheable(&FblSourceCheck::Transient));
+        assert!(fbl_source_cacheable(&FblSourceCheck::Trusted));
+        assert!(fbl_source_cacheable(&FblSourceCheck::Untrusted));
+    }
+
+    #[test]
     fn test_parse_arf_report_basic() {
         let report = "\
 Feedback-Type: abuse\r\n\
@@ -1344,7 +1425,12 @@ Original-Message-ID: <original@example.com>\r\n";
             "fbl.test".into(),
             &[],
         ));
-        server.rdns_cache.insert(LOOPBACK, rdns_ok);
+        let verdict = if rdns_ok {
+            FblSourceCheck::Trusted
+        } else {
+            FblSourceCheck::Untrusted
+        };
+        server.rdns_cache.insert(LOOPBACK, verdict);
         server
     }
 
@@ -1589,7 +1675,7 @@ Original-Message-ID: <original@example.com>\r\n";
             "fbl.test".into(),
             &[],
         ));
-        small.rdns_cache.insert(LOOPBACK, true);
+        small.rdns_cache.insert(LOOPBACK, FblSourceCheck::Trusted);
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -1634,5 +1720,19 @@ Original-Message-ID: <original@example.com>\r\n";
             .await
             .expect("session task must finish")
             .expect("session task must not panic");
+    }
+
+    #[test]
+    fn webhook_push_is_trimmed_to_a_bounded_length() {
+        // The `mta:webhook_queue` Redis list must be trimmed after every
+        // LPUSH: with a dead consumer an unbounded list grows Redis memory
+        // without limit. Pinned against the compiled-in source (needles
+        // concat!-built so the test cannot match its own text).
+        let source = include_str!("feedback_loop.rs");
+        let trim_needle = std::concat!("LT", "RIM");
+        assert!(
+            source.contains(trim_needle),
+            "the webhook push path must trim the queue to a bounded length"
+        );
     }
 }

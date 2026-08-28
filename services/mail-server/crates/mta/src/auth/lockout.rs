@@ -186,6 +186,10 @@ impl FailStore for SharedMemoryFailStore {
 pub struct AuthFailTracker {
     per_account: Cache<(IpAddr, String), u32>,
     per_ip: Cache<IpAddr, u32>,
+    /// Serializes the in-memory counter increments (moka has no atomic
+    /// RMW; see `bump_memory_counters`). Never contended on the hot auth
+    /// path — only on failure recording.
+    counters_lock: Mutex<()>,
     store: Option<std::sync::Arc<dyn FailStore>>,
 }
 
@@ -206,6 +210,7 @@ impl AuthFailTracker {
                 .max_capacity(50_000)
                 .time_to_live(FAILURE_WINDOW)
                 .build(),
+            counters_lock: Mutex::new(()),
             store: None,
         }
     }
@@ -293,12 +298,7 @@ impl AuthFailTracker {
     /// unknown account) against both the per-account and per-IP keys.
     pub async fn record_failure(&self, ip: IpAddr, account: &str) {
         let account = normalize_account(account);
-        self.per_ip
-            .insert(ip, 1 + self.per_ip.get(&ip).unwrap_or(0));
-        self.per_account.insert(
-            (ip, account.clone()),
-            1 + self.per_account.get(&(ip, account.clone())).unwrap_or(0),
-        );
+        self.bump_memory_counters(ip, &account);
         if let Some(store) = self.store.as_ref() {
             for key in [Self::ip_key(ip), Self::account_key(ip, &account)] {
                 if let Err(error) = store.incr(&key, FAILURE_WINDOW).await {
@@ -309,6 +309,26 @@ impl AuthFailTracker {
                 }
             }
         }
+    }
+
+    /// In-memory counter increment for one failed attempt. moka's Cache has
+    /// no atomic read-modify-write, so the increment runs under
+    /// `counters_lock`: a bare get-then-insert raced across worker threads
+    /// and undercounted concurrent failures (N simultaneous failures could
+    /// register fewer than N, keeping the tracker below the lockout
+    /// threshold). Auth failures are low-rate, so the tiny critical section
+    /// is cheaper than restructuring the TTL caches.
+    fn bump_memory_counters(&self, ip: IpAddr, account: &str) {
+        let _guard = self.counters_lock.lock().unwrap();
+        self.per_ip
+            .insert(ip, 1 + self.per_ip.get(&ip).unwrap_or(0));
+        self.per_account.insert(
+            (ip, account.to_string()),
+            1 + self
+                .per_account
+                .get(&(ip, account.to_string()))
+                .unwrap_or(0),
+        );
     }
 
     /// Clear both counters after a successful authentication.
@@ -385,6 +405,37 @@ mod tests {
             tracker.record_failure(ip(1), "alice@example.com").await;
         }
         assert!(tracker.is_locked(ip(1), "alice@example.com").await);
+    }
+
+    #[test]
+    fn concurrent_memory_counter_bumps_are_all_counted() {
+        // 8 threads released by a barrier each record one failure for the
+        // same (ip, account): all 8 must register in the in-memory
+        // counters. The old get-then-insert raced across worker threads,
+        // undercounting concurrent failures below the lockout threshold.
+        let tracker = AuthFailTracker::new();
+        let addr = ip(1);
+        let account = "alice@example.com";
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        std::thread::scope(|scope| {
+            for _ in 0..8 {
+                let tracker = &tracker;
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    tracker.bump_memory_counters(addr, account);
+                });
+            }
+        });
+        assert_eq!(
+            tracker
+                .per_account
+                .get(&(addr, account.to_string()))
+                .unwrap(),
+            8,
+            "every concurrent failure must be counted"
+        );
+        assert_eq!(tracker.per_ip.get(&addr).unwrap(), 8);
     }
 
     #[tokio::test]

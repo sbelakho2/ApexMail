@@ -1,6 +1,12 @@
 {% import "macros.html" as macros %}
 {# ── I18n data loaded into template context ── #}
-{# Uses the dedicated data/i18n.json for structured translations.          #}
+{# data/i18n.json is the SINGLE merged catalog: it carries every key for #}
+{# every locale (en fallbacks are inline in the templates). The former  #}
+{# data/i18n_{de,fr,es}_additions.json side-files were never loaded by  #}
+{# any template (audit finding) and contained only keys already present #}
+{# in i18n.json with identical values — they were deleted rather than  #}
+{# wired, so there is exactly one source of truth. New translations    #}
+{# go straight into i18n.json.                                         #}
 {# templates reference this as: {% if i18n_data and i18n_data[l]... %}.    #}
 {# l is the active language code (e.g. "en", "de"), always defined here.   #}
 {# set_global so the macros::t() macro (macros.html) and all included      #}
@@ -25,7 +31,6 @@
      ~70% smaller and universally supported; the TTFs remain as fallback
      sources in the font-family stacks only. #}
   {% set inter_font_url = get_url(path="fonts/InterVariable.woff2", cachebust=true) %}
-  {% set mono_font_url = get_url(path="fonts/JetBrainsMono-Variable.woff2", cachebust=true) %}
   {% set fraunces_font_url = get_url(path="fonts/Fraunces-Variable.woff2", cachebust=true) %}
   {% set styles_css_url = get_url(path="css/styles.css", cachebust=true) %}
   {% set no_js_css_url = get_url(path="css/no-js.css", cachebust=true) %}
@@ -80,7 +85,15 @@
   <meta name="twitter:creator" content="{{ config.extra.twitter_handle }}" />
   <link rel="icon" href="/icon.svg" type="image/svg+xml" />
   <link rel="manifest" href="/manifest.json" />
+  {# Font preloads — body + display faces only. Inter (body text) and
+     Fraunces (display headings) are above-the-fold critical on every
+     page, so both are preloaded. JetBrainsMono is deliberately NOT
+     preloaded: it only styles code snippets/API-console samples on a
+     minority of pages, so a site-wide preload would push ~100KB that
+     most page views never render — it loads normally via the CSS
+     @font-face in styles.css when actually used. #}
   <link rel="preload" href="{{ inter_font_url }}" as="font" type="font/woff2" crossorigin />
+  <link rel="preload" href="{{ fraunces_font_url }}" as="font" type="font/woff2" crossorigin />
   {% set giallo_css_url = get_url(path="giallo.css", cachebust=true) %}
   <link rel="stylesheet" href="{{ styles_css_url }}" />
   <link rel="stylesheet" href="{{ no_js_css_url }}" />

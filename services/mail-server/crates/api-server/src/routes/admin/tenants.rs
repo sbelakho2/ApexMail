@@ -137,6 +137,11 @@ pub struct UpdateTenantRequest {
     pub status: Option<String>,
 }
 
+/// Tenant lifecycle statuses the generic editor may write. The suspend
+/// action path and the billing subscription override keep their own
+/// (different) allowlists — this one guards the direct PATCH field.
+const TENANT_ALLOWED_STATUSES: [&str; 3] = ["active", "suspended", "pending"];
+
 fn validate_generic_tenant_update(body: &UpdateTenantRequest) -> Result<(), ApiError> {
     // Tenant plan changes are entitlement-bearing. They must go through the
     // dedicated billing admin override endpoint, which validates the plan and
@@ -146,6 +151,16 @@ fn validate_generic_tenant_update(body: &UpdateTenantRequest) -> Result<(), ApiE
         return Err(ApiError::Validation(vec![
             "plan updates must use the audited billing plan-override endpoint".to_string(),
         ]));
+    }
+    // The status field is allowlisted exactly like the action path: an
+    // arbitrary string must never reach the UPDATE verbatim.
+    if let Some(status) = body.status.as_deref() {
+        if !TENANT_ALLOWED_STATUSES.contains(&status) {
+            return Err(ApiError::Validation(vec![format!(
+                "invalid status '{status}': must be one of {}",
+                TENANT_ALLOWED_STATUSES.join(", "),
+            )]));
+        }
     }
 
     Ok(())
@@ -159,6 +174,7 @@ async fn list_tenants(
     Query(params): Query<ListTenantsQuery>,
 ) -> Result<Json<Vec<TenantRow>>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
 
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
@@ -181,6 +197,9 @@ async fn update_tenant(
     Json(body): Json<UpdateTenantRequest>,
 ) -> Result<StatusCode, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    // Per-handler system-tenant double-check (the router-level gate is
+    // defense in depth; every admin handler re-asserts it like audit.rs).
+    crate::middleware::auth::require_system_tenant(&auth)?;
     validate_generic_tenant_update(&body)?;
     let id = body.id;
 
@@ -207,13 +226,16 @@ async fn update_tenant(
         return Ok(StatusCode::OK);
     }
 
-    // Direct field updates
+    // Direct field updates — audited like every other control-plane
+    // mutation (the action path above always was).
+    let mut changed = false;
     if let Some(name) = &body.name {
         sqlx::query("UPDATE tenants SET name = $1, updated_at = NOW() WHERE id = $2")
             .bind(name)
             .bind(&id)
             .execute(&state.db)
             .await?;
+        changed = true;
     }
     if let Some(status) = &body.status {
         sqlx::query("UPDATE tenants SET status = $1, updated_at = NOW() WHERE id = $2")
@@ -221,6 +243,10 @@ async fn update_tenant(
             .bind(&id)
             .execute(&state.db)
             .await?;
+        changed = true;
+    }
+    if changed {
+        log_tenant_audit(&state, "tenant_edited", Some(&id)).await;
     }
 
     Ok(StatusCode::OK)
@@ -254,6 +280,7 @@ async fn delete_tenant(
     Json(body): Json<DeleteTenantRequest>,
 ) -> Result<StatusCode, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
+    crate::middleware::auth::require_system_tenant(&auth)?;
     validate_delete_confirmation(&body.id, &body.confirmation)?;
     let deleted = delete_tenant_records(&state.db, &body.id).await?;
 
@@ -342,5 +369,175 @@ mod tests {
 
         validate_generic_tenant_update(&request)
             .expect("non-entitlement tenant fields should remain available");
+    }
+
+    #[test]
+    fn generic_tenant_update_rejects_statuses_outside_the_allowlist() {
+        for bogus in ["superuser-backdoor", "ACTIVE", "", "deleted"] {
+            let request = UpdateTenantRequest {
+                id: "tenant_123".into(),
+                action: None,
+                name: None,
+                plan: None,
+                status: Some(bogus.into()),
+            };
+            assert!(
+                validate_generic_tenant_update(&request).is_err(),
+                "status {bogus:?} must be rejected, not written verbatim"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_tenant_update_accepts_allowlisted_statuses() {
+        for allowed in ["active", "suspended", "pending"] {
+            let request = UpdateTenantRequest {
+                id: "tenant_123".into(),
+                action: None,
+                name: None,
+                plan: None,
+                status: Some(allowed.into()),
+            };
+            validate_generic_tenant_update(&request)
+                .unwrap_or_else(|error| panic!("status {allowed:?} should be accepted: {error:?}"));
+        }
+    }
+
+    /// Handler-level regression: direct name/status edits must (a) stay
+    /// system-tenant-gated per handler, (b) only write allowlisted
+    /// statuses, and (c) land in the audit trail like every other
+    /// control-plane mutation.
+    #[tokio::test]
+    async fn update_tenant_whitelists_status_gates_tenant_and_audits() {
+        let Some(pool) = crate::test_db::canonical_pool("admin_tenants_patch").await else {
+            eprintln!("skipping update_tenant_whitelists_status_gates_tenant_and_audits: no TEST_DATABASE_URL");
+            return;
+        };
+        sqlx::raw_sql(
+            "CREATE TABLE IF NOT EXISTS audit_logs (
+                id TEXT PRIMARY KEY,
+                tenant_id TEXT,
+                user_id TEXT,
+                session_id TEXT,
+                action TEXT NOT NULL,
+                resource TEXT NOT NULL,
+                resource_id TEXT,
+                details JSONB NOT NULL DEFAULT '{}'::jsonb,
+                ip_address TEXT,
+                user_agent TEXT,
+                outcome TEXT NOT NULL,
+                error_message TEXT,
+                timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                hash TEXT NOT NULL,
+                previous_hash TEXT,
+                signature TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("audit_logs fixture DDL must apply");
+        sqlx::raw_sql(
+            "CREATE TABLE IF NOT EXISTS audit_chain_head (
+                chain_id    TEXT        PRIMARY KEY,
+                head_hash   TEXT        NOT NULL,
+                prev_hash   TEXT,
+                head_seq    BIGINT      NOT NULL DEFAULT 1,
+                updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("audit_chain_head fixture DDL must apply");
+        let tenant_id = format!("tpatch{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, 'Patch Co', $2, 'free', 'active')",
+        )
+        .bind(&tenant_id)
+        .bind(format!("slug-{tenant_id}"))
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+
+        // (a) A customer-tenant caller — even holding the wildcard scope —
+        // is refused by the per-handler gate.
+        let customer = AuthUser {
+            tenant_id: "01HCUSTOMERTENANT0abcdefgh".into(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+        let response = update_tenant(
+            State(state.clone()),
+            customer,
+            Json(UpdateTenantRequest {
+                id: tenant_id.clone(),
+                action: None,
+                name: Some("Hostile Rename".into()),
+                plan: None,
+                status: None,
+            }),
+        )
+        .await;
+        assert!(response.is_err(), "customer sessions must be refused");
+
+        // (b) A system operator cannot write an arbitrary status.
+        let system_operator = AuthUser {
+            tenant_id: "system".into(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+        let response = update_tenant(
+            State(state.clone()),
+            system_operator.clone(),
+            Json(UpdateTenantRequest {
+                id: tenant_id.clone(),
+                action: None,
+                name: None,
+                plan: None,
+                status: Some("entropy-bypass".into()),
+            }),
+        )
+        .await;
+        assert!(
+            response.is_err(),
+            "an allowlist-external status must be rejected, not stored"
+        );
+
+        // (c) A legitimate direct edit applies AND is audited.
+        update_tenant(
+            State(state.clone()),
+            system_operator,
+            Json(UpdateTenantRequest {
+                id: tenant_id.clone(),
+                action: None,
+                name: Some("Renamed Co".into()),
+                plan: None,
+                status: Some("suspended".into()),
+            }),
+        )
+        .await
+        .expect("allowlisted direct edit must succeed");
+        let (name, status): (String, String) =
+            sqlx::query_as("SELECT name, status FROM tenants WHERE id = $1")
+                .bind(&tenant_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(name, "Renamed Co");
+        assert_eq!(status, "suspended");
+        let audited: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_logs WHERE resource = 'tenant' AND resource_id = $1",
+        )
+        .bind(&tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(audited >= 1, "direct name/status edits must be audited");
     }
 }

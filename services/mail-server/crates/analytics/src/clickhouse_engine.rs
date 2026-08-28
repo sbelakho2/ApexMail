@@ -65,6 +65,20 @@ struct AggregationRow {
     count: u64,
 }
 
+/// Deliverability counts per event type. The output columns must match
+/// [`AggregationRow`]: `event_type` is aliased to `dimension`, mirroring
+/// `aggregate_by_dimension`.
+const DELIVERABILITY_QUERY: &str = r#"
+            SELECT
+                event_type AS dimension,
+                count() AS count
+            FROM events
+            WHERE tenant_id = ?
+              AND timestamp >= toDateTime64(?, 3)
+              AND timestamp < toDateTime64(?, 3)
+            GROUP BY dimension
+        "#;
+
 /// Funnel stage result row.
 #[derive(Debug, Row, Deserialize)]
 struct FunnelRow {
@@ -549,20 +563,9 @@ impl ClickHouseEngine {
         start: DateTime<Utc>,
         end: DateTime<Utc>,
     ) -> anyhow::Result<DeliverabilityMetrics> {
-        let query = r#"
-            SELECT
-                event_type,
-                count() AS count
-            FROM events
-            WHERE tenant_id = ?
-              AND timestamp >= toDateTime64(?, 3)
-              AND timestamp < toDateTime64(?, 3)
-            GROUP BY event_type
-        "#;
-
         let rows = self
             .client
-            .query(query)
+            .query(DELIVERABILITY_QUERY)
             .bind(tenant_id)
             .bind(start.timestamp_millis() as f64 / 1000.0)
             .bind(end.timestamp_millis() as f64 / 1000.0)
@@ -805,6 +808,31 @@ pub struct StorageStats {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The deliverability query's SELECT/GROUP BY must alias `event_type` to
+    /// `dimension` so its column shape matches the [`AggregationRow`] contract
+    /// (the same pattern `aggregate_by_dimension` uses). RowBinary decoding is
+    /// positional in clickhouse 0.12, so a mismatch is silent today — but any
+    /// by-name decoding (crate upgrade, `RowBinaryWithNamesAndTypes`) fails to
+    /// find the `dimension` column and kills the whole deliverability surface.
+    #[test]
+    fn deliverability_query_matches_aggregation_row_shape() {
+        // First selected expression must be `event_type AS dimension`.
+        let select = DELIVERABILITY_QUERY
+            .split("SELECT")
+            .nth(1)
+            .and_then(|rest| rest.split("FROM").next())
+            .expect("deliverability query has SELECT ... FROM");
+        assert!(
+            select.contains("event_type AS dimension"),
+            "deliverability query must alias event_type AS dimension, got:{select}"
+        );
+        // And it must group by the alias, mirroring aggregate_by_dimension.
+        assert!(
+            DELIVERABILITY_QUERY.contains("GROUP BY dimension"),
+            "deliverability query must GROUP BY dimension, got:{DELIVERABILITY_QUERY}"
+        );
+    }
 
     // Integration tests require a running ClickHouse instance
     // Run with:docker run -d -p 8123:8123 clickhouse/clickhouse-server

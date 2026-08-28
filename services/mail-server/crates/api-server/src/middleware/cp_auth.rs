@@ -36,6 +36,9 @@ pub struct CpAuthUser {
 }
 
 fn validate_cidr_allowed(client_ip: IpAddr, allowed_ips: &[String]) -> bool {
+    // An EMPTY allowlist is the explicit "every network" policy: the MFA and
+    // admin/owner-role session requirements below are enforced regardless,
+    // so the gate never silently degrades to fully-open by misconfiguration.
     if allowed_ips.is_empty() {
         return true;
     }
@@ -48,17 +51,16 @@ fn validate_cidr_allowed(client_ip: IpAddr, allowed_ips: &[String]) -> bool {
     })
 }
 
-pub(crate) fn is_cp_route(path: &str) -> bool {
-    path.starts_with("/cp/") || path.starts_with("/v1/admin/")
-}
-
 pub fn create_cp_session_token(claims: &CpSessionClaims, secret: &str) -> String {
-    let payload = serde_json::to_string(claims).expect("CpSessionClaims serialization should not fail");
-    let payload_b64 =
-        base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, payload.as_bytes());
+    let payload =
+        serde_json::to_string(claims).expect("CpSessionClaims serialization should not fail");
+    let payload_b64 = base64::Engine::encode(
+        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
+        payload.as_bytes(),
+    );
 
-    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
-        .expect("HMAC-SHA256 key should be valid");
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC-SHA256 key should be valid");
     mac.update(payload_b64.as_bytes());
     let sig = mac.finalize().into_bytes();
     let sig_b64 = base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, sig);
@@ -69,15 +71,15 @@ pub fn create_cp_session_token(claims: &CpSessionClaims, secret: &str) -> String
 fn verify_cp_session_token(token: &str, secret: &str) -> Result<CpSessionClaims, ApiError> {
     let parts: Vec<&str> = token.rsplitn(2, '.').collect();
     if parts.len() != 2 {
-        return Err(ApiError::Unauthorized("invalid CP session token format".into()));
+        return Err(ApiError::Unauthorized(
+            "invalid CP session token format".into(),
+        ));
     }
     let (sig_str, payload_str) = (parts[0], parts[1]);
 
-    let sig_bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::URL_SAFE_NO_PAD,
-        sig_str,
-    )
-    .map_err(|_| ApiError::Unauthorized("invalid CP session signature encoding".into()))?;
+    let sig_bytes =
+        base64::Engine::decode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, sig_str)
+            .map_err(|_| ApiError::Unauthorized("invalid CP session signature encoding".into()))?;
 
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
         .map_err(|_| ApiError::Internal("HMAC key error".into()))?;
@@ -103,6 +105,49 @@ pub(crate) fn build_cp_session_cookie(token: &str, max_age_secs: i64, secure: bo
     )
 }
 
+/// Test-visible alias for the private verifier (app-level CP gate tests
+/// confirm login-minted tokens verify against the configured secret).
+#[cfg(test)]
+pub(crate) fn verify_cp_session_token_for_tests(
+    token: &str,
+    secret: &str,
+) -> Result<CpSessionClaims, ApiError> {
+    verify_cp_session_token(token, secret)
+}
+
+/// Mint a fresh `apexmail_cp_session` cookie for an operator (the exact
+/// claims shape [`require_cp_auth`] validates). The operator's REAL
+/// `mfa_enabled` state is baked into the signed payload: a non-MFA
+/// operator receives a structurally valid cookie the gate then refuses —
+/// enforcement lives server-side, never in the login form.
+pub(crate) fn issue_cp_session_cookie(
+    cp_config: &crate::config::CpAuthConfig,
+    user_id: &str,
+    tenant_id: &str,
+    email: &str,
+    role: &str,
+    mfa_enabled: bool,
+    secure: bool,
+) -> String {
+    let now = Utc::now().timestamp();
+    let claims = CpSessionClaims {
+        sub: user_id.to_string(),
+        tenant_id: tenant_id.to_string(),
+        email: email.to_string(),
+        role: role.to_string(),
+        mfa_enabled,
+        iat: now,
+        last_active: now,
+        exp: now + cp_config.session_absolute_timeout_secs as i64,
+    };
+    let token = create_cp_session_token(&claims, &cp_config.session_secret);
+    build_cp_session_cookie(
+        &token,
+        cp_config.session_absolute_timeout_secs as i64,
+        secure,
+    )
+}
+
 pub(crate) fn build_clear_cp_session_cookie(secure: bool) -> String {
     format!(
         "{CP_SESSION_COOKIE_NAME}=; HttpOnly; Path=/; Max-Age=0; SameSite=Strict{}",
@@ -115,13 +160,14 @@ pub async fn refresh_cp_session_activity(
     existing: &CpSessionClaims,
 ) -> Result<(String, CpSessionClaims), ApiError> {
     let now = Utc::now().timestamp();
-    let absolute_expiry = existing.iat + state.config.cp_session_absolute_timeout_secs as i64;
+    let absolute_expiry = existing.iat + state.config.cp_auth.session_absolute_timeout_secs as i64;
 
     if now >= absolute_expiry || now >= existing.exp {
         return Err(ApiError::Unauthorized("CP session expired".into()));
     }
 
-    let idle_deadline = existing.last_active + state.config.cp_session_idle_timeout_secs as i64;
+    let idle_deadline =
+        existing.last_active + state.config.cp_auth.session_idle_timeout_secs as i64;
     if now > idle_deadline {
         return Err(ApiError::Unauthorized("CP session idle timeout".into()));
     }
@@ -137,7 +183,7 @@ pub async fn refresh_cp_session_activity(
         exp: absolute_expiry,
     };
 
-    let token = create_cp_session_token(&updated, &state.config.cp_session_secret);
+    let token = create_cp_session_token(&updated, &state.config.cp_auth.session_secret);
     Ok((token, updated))
 }
 
@@ -150,12 +196,44 @@ pub async fn require_cp_auth(
     let path = req.uri().path().to_string();
 
     // ── IP allowlist enforcement ────────────────────────────
-    if !state.config.cp_allowed_ips.is_empty() {
+    if !state.config.cp_auth.allowed_ips.is_empty() {
         if let Some(axum::extract::ConnectInfo(addr)) = connect_info {
-            if !validate_cidr_allowed(addr.ip(), &state.config.cp_allowed_ips) {
-                log_cp_access(&state, None, &path, StatusCode::FORBIDDEN.as_u16(), "cp_ip_denied").await;
-                return Err(ApiError::Forbidden("access denied from this network".into()));
+            if !validate_cidr_allowed(addr.ip(), &state.config.cp_auth.allowed_ips) {
+                log_cp_access(
+                    &state,
+                    None,
+                    &path,
+                    StatusCode::FORBIDDEN.as_u16(),
+                    "cp_ip_denied",
+                )
+                .await;
+                return Err(ApiError::Forbidden(
+                    "access denied from this network".into(),
+                ));
             }
+        }
+    }
+
+    // ── Machine credentials pass without a CP session ───────
+    // The static control-plane key and system-tenant API keys authenticate
+    // as NON-user identities (no user_id): they are deliberately issued
+    // operator credentials for automation, not browser sessions, so the
+    // CP-session regime — which exists to keep human operator sessions
+    // MFA-backed and time-bounded — does not apply. Every user-session
+    // identity (am_session cookie or bearer JWT) MUST present the CP
+    // cookie below. `require_system_tenant_middleware` runs before this
+    // gate on the admin router, so only system-tenant callers reach here.
+    if let Some(auth_user) = req.extensions().get::<crate::middleware::auth::AuthUser>() {
+        if auth_user.user_id.is_none() && auth_user.tenant_id == "system" {
+            log_cp_access(
+                &state,
+                auth_user.api_key_id.as_deref(),
+                &path,
+                StatusCode::OK.as_u16(),
+                "cp_machine_key",
+            )
+            .await;
+            return Ok(next.run(req).await);
         }
     }
 
@@ -164,65 +242,128 @@ pub async fn require_cp_auth(
     let token = match extract_cookie(&headers, CP_SESSION_COOKIE_NAME) {
         Some(t) if !t.is_empty() => t,
         _ => {
-            log_cp_access(&state, None, &path, StatusCode::UNAUTHORIZED.as_u16(), "cp_missing_session").await;
-            return Err(ApiError::Unauthorized("control-plane authentication required".into()));
+            log_cp_access(
+                &state,
+                None,
+                &path,
+                StatusCode::UNAUTHORIZED.as_u16(),
+                "cp_missing_session",
+            )
+            .await;
+            return Err(ApiError::Unauthorized(
+                "control-plane authentication required".into(),
+            ));
         }
     };
 
     // ── Verify token ────────────────────────────────────────
-    let claims = match verify_cp_session_token(&token, &state.config.cp_session_secret) {
+    let claims = match verify_cp_session_token(&token, &state.config.cp_auth.session_secret) {
         Ok(c) => c,
         Err(e) => {
-            log_cp_access(&state, None, &path, StatusCode::UNAUTHORIZED.as_u16(), "cp_invalid_token").await;
+            log_cp_access(
+                &state,
+                None,
+                &path,
+                StatusCode::UNAUTHORIZED.as_u16(),
+                "cp_invalid_token",
+            )
+            .await;
             return Err(e);
         }
     };
 
     // ── Validate role ───────────────────────────────────────
     if !matches!(claims.role.as_str(), "admin" | "owner") {
-        log_cp_access(&state, Some(&claims.email), &path, StatusCode::FORBIDDEN.as_u16(), "cp_insufficient_role").await;
-        return Err(ApiError::Forbidden("admin or owner role required for control plane".into()));
+        log_cp_access(
+            &state,
+            Some(&claims.email),
+            &path,
+            StatusCode::FORBIDDEN.as_u16(),
+            "cp_insufficient_role",
+        )
+        .await;
+        return Err(ApiError::Forbidden(
+            "admin or owner role required for control plane".into(),
+        ));
     }
 
     // ── Enforce MFA ─────────────────────────────────────────
     if !claims.mfa_enabled {
-        log_cp_access(&state, Some(&claims.email), &path, StatusCode::FORBIDDEN.as_u16(), "cp_mfa_required").await;
-        return Err(ApiError::Forbidden("MFA is required for control-plane access".into()));
+        log_cp_access(
+            &state,
+            Some(&claims.email),
+            &path,
+            StatusCode::FORBIDDEN.as_u16(),
+            "cp_mfa_required",
+        )
+        .await;
+        return Err(ApiError::Forbidden(
+            "MFA is required for control-plane access".into(),
+        ));
     }
 
     // ── Validate timeouts ───────────────────────────────────
     let now = Utc::now().timestamp();
     if now >= claims.exp {
-        log_cp_access(&state, Some(&claims.email), &path, StatusCode::UNAUTHORIZED.as_u16(), "cp_session_expired").await;
+        log_cp_access(
+            &state,
+            Some(&claims.email),
+            &path,
+            StatusCode::UNAUTHORIZED.as_u16(),
+            "cp_session_expired",
+        )
+        .await;
         return Err(ApiError::Unauthorized("CP session expired".into()));
     }
 
-    let idle_deadline = claims.last_active + state.config.cp_session_idle_timeout_secs as i64;
+    let idle_deadline = claims.last_active + state.config.cp_auth.session_idle_timeout_secs as i64;
     if now > idle_deadline {
-        log_cp_access(&state, Some(&claims.email), &path, StatusCode::UNAUTHORIZED.as_u16(), "cp_session_idle").await;
-        return Err(ApiError::Unauthorized("CP session idle timeout — please log in again".into()));
+        log_cp_access(
+            &state,
+            Some(&claims.email),
+            &path,
+            StatusCode::UNAUTHORIZED.as_u16(),
+            "cp_session_idle",
+        )
+        .await;
+        return Err(ApiError::Unauthorized(
+            "CP session idle timeout — please log in again".into(),
+        ));
     }
 
     // ── Verify user still exists and is active ──────────────
-    let user_status: Option<(String,)> = sqlx::query_as(
-        "SELECT status FROM users WHERE id = $1::uuid AND tenant_id = $2"
-    )
-    .bind(&claims.sub)
-    .bind(&claims.tenant_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| {
-        tracing::error!(error = %e, "CP auth user status check failed");
-        ApiError::Internal("authentication error".into())
-    })?;
+    let user_status: Option<(String,)> =
+        sqlx::query_as("SELECT status FROM users WHERE id = $1::uuid AND tenant_id = $2")
+            .bind(&claims.sub)
+            .bind(&claims.tenant_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "CP auth user status check failed");
+                ApiError::Internal("authentication error".into())
+            })?;
 
     match user_status {
         None => {
-            log_cp_access(&state, Some(&claims.email), &path, StatusCode::UNAUTHORIZED.as_u16(), "cp_user_missing").await;
+            log_cp_access(
+                &state,
+                Some(&claims.email),
+                &path,
+                StatusCode::UNAUTHORIZED.as_u16(),
+                "cp_user_missing",
+            )
+            .await;
             return Err(ApiError::Unauthorized("user no longer exists".into()));
         }
         Some((status,)) if status != "active" => {
-            log_cp_access(&state, Some(&claims.email), &path, StatusCode::FORBIDDEN.as_u16(), "cp_user_inactive").await;
+            log_cp_access(
+                &state,
+                Some(&claims.email),
+                &path,
+                StatusCode::FORBIDDEN.as_u16(),
+                "cp_user_inactive",
+            )
+            .await;
             return Err(ApiError::Forbidden(format!("account is {status}")));
         }
         _ => {}
@@ -244,13 +385,20 @@ pub async fn require_cp_auth(
     parts.extensions.insert(updated_claims);
     req = axum::http::Request::from_parts(parts, body);
 
-    log_cp_access(&state, Some(&cp_user.email), &path, StatusCode::OK.as_u16(), "cp_access").await;
+    log_cp_access(
+        &state,
+        Some(&cp_user.email),
+        &path,
+        StatusCode::OK.as_u16(),
+        "cp_access",
+    )
+    .await;
 
     let mut response = next.run(req).await;
 
     let cookie = build_cp_session_cookie(
         &new_token,
-        state.config.cp_session_absolute_timeout_secs as i64,
+        state.config.cp_auth.session_absolute_timeout_secs as i64,
         state.config.environment.is_production(),
     );
     response
@@ -271,7 +419,7 @@ async fn log_cp_access(
         if e.contains('@') {
             mail_common::pii::redact_email(e).to_string()
         } else {
-            format!("id#{}", &e.chars().take(8).collect::<String>())
+            format!("id#{}", e.chars().take(8).collect::<String>())
         }
     });
 
@@ -386,9 +534,274 @@ mod tests {
     fn test_cidr_validation() {
         let allowed = vec!["10.0.0.0/8".into(), "127.0.0.1/32".into()];
 
-        assert!(validate_cidr_allowed("127.0.0.1".parse().unwrap(), &allowed));
+        assert!(validate_cidr_allowed(
+            "127.0.0.1".parse().unwrap(),
+            &allowed
+        ));
         assert!(validate_cidr_allowed("10.5.5.5".parse().unwrap(), &allowed));
-        assert!(!validate_cidr_allowed("192.168.1.1".parse().unwrap(), &allowed));
-        assert!(validate_cidr_allowed("127.0.0.1".parse().unwrap(), &[]));
+        assert!(!validate_cidr_allowed(
+            "192.168.1.1".parse().unwrap(),
+            &allowed
+        ));
+        // Empty allowlist is the explicit allow-every-network policy (MFA +
+        // role enforcement is independent of it).
+        assert!(validate_cidr_allowed("192.168.1.1".parse().unwrap(), &[]));
+    }
+
+    // ─── Middleware behaviour (DB-gated; soft-skip without infra) ───
+
+    mod middleware_tests {
+        use super::*;
+        use axum::body::Body;
+        use axum::http::Request;
+        use std::sync::Arc;
+        use tower::ServiceExt;
+
+        /// AppState over a canonical fixture pool with the CP knobs the
+        /// individual test needs. Returns None (soft skip) without
+        /// TEST_DATABASE_URL or an reachable TEST_REDIS_URL — the gate's
+        /// per-request user recheck and audit insert need both.
+        async fn gate_state(
+            test_name: &str,
+            allowed_ips: Vec<String>,
+        ) -> Option<(AppState, sqlx::PgPool)> {
+            let pool = crate::test_db::canonical_pool(test_name).await?;
+            let redis_url = std::env::var("TEST_REDIS_URL").ok()?;
+            let redis = deadpool_redis::Config::from_url(&redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .ok()?;
+            let mut conn = redis.get().await.ok()?;
+            let ping: Result<String, _> = deadpool_redis::redis::cmd("PING")
+                .query_async(&mut *conn)
+                .await;
+            if ping.is_err() {
+                eprintln!("skipping {test_name}: TEST_REDIS_URL unreachable");
+                return None;
+            }
+
+            sqlx::raw_sql(
+                "CREATE TABLE IF NOT EXISTS cp_access_log (
+                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                     email VARCHAR(320),
+                     path VARCHAR(1024) NOT NULL,
+                     status_code INTEGER NOT NULL,
+                     outcome VARCHAR(64) NOT NULL,
+                     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                 )",
+            )
+            .execute(&pool)
+            .await
+            .expect("cp_access_log fixture DDL must apply");
+
+            let mut config = crate::app::test_support::test_config();
+            config.cp_auth.allowed_ips = allowed_ips;
+            let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .region(aws_sdk_sesv2::config::Region::new("us-east-1"))
+                .load()
+                .await;
+            let ses_provider = Arc::new(crate::ses_provider::SesIpProvider::new(
+                aws_sdk_sesv2::Client::new(&aws_config),
+                pool.clone(),
+                "apexmail".into(),
+                "us-east-1".into(),
+            ));
+            let state =
+                crate::state::AppStateInner::with_ddos_protector(
+                    pool.clone(),
+                    apexmail_db::pool::PoolPair {
+                        rw: pool.clone(),
+                        ro: pool.clone(),
+                    },
+                    redis,
+                    config,
+                    reqwest::Client::new(),
+                    (*ses_provider).clone(),
+                    None,
+                    Arc::new(
+                        ddos_protection::DdosProtector::new(
+                            ddos_protection::ProtectorConfig::default(),
+                        )
+                        .await
+                        .expect("ddos protector"),
+                    ),
+                    None,
+                    None,
+                    crate::resilience::ResilientClient::new_from_config(
+                        &crate::app::test_support::test_config(),
+                    ),
+                );
+            Some((state, pool))
+        }
+
+        /// Minimal router carrying ONLY the gate + a probe handler.
+        fn gate_router(state: AppState) -> axum::Router {
+            axum::Router::new()
+                .route("/v1/admin/probe", axum::routing::get(|| async { "ok" }))
+                .layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    require_cp_auth,
+                ))
+                .with_state(state)
+        }
+
+        async fn seed_operator(db: &sqlx::PgPool, mfa_enabled: bool) -> (String, String) {
+            let email = format!("cp-mw-{}@apexmail.ee", uuid::Uuid::new_v4().simple());
+            let user_id = uuid::Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                    email_verified, mfa_enabled, metadata, created_at, updated_at)
+                 VALUES ($1, 'system', $2, 'Op', 'x', 'admin', 'active', true, $3, '{}'::jsonb, NOW(), NOW())",
+            )
+            .bind(user_id)
+            .bind(&email)
+            .bind(mfa_enabled)
+            .execute(db)
+            .await
+            .expect("seed operator");
+            (user_id.to_string(), email)
+        }
+
+        fn cp_cookie_header(
+            state: &AppState,
+            user_id: &str,
+            email: &str,
+            mfa_enabled: bool,
+        ) -> String {
+            let now = Utc::now().timestamp();
+            let claims = CpSessionClaims {
+                sub: user_id.to_string(),
+                tenant_id: "system".into(),
+                email: email.to_string(),
+                role: "admin".into(),
+                mfa_enabled,
+                iat: now,
+                last_active: now,
+                exp: now + 3600,
+            };
+            let token = create_cp_session_token(&claims, &state.config.cp_auth.session_secret);
+            format!("{CP_SESSION_COOKIE_NAME}={token}")
+        }
+
+        #[tokio::test]
+        async fn ip_outside_allowlist_is_forbidden_even_with_valid_session() {
+            let Some((state, db)) =
+                gate_state("cp_ip_outside_allowlist", vec!["10.0.0.0/8".to_string()]).await
+            else {
+                return;
+            };
+            let (user_id, email) = seed_operator(&db, true).await;
+            let cookie = cp_cookie_header(&state, &user_id, &email, true);
+            let app = gate_router(state.clone());
+
+            let request = Request::get("/v1/admin/probe")
+                .header("cookie", &cookie)
+                // The gate reads the peer address from ConnectInfo (inserted
+                // by into_make_service_with_connect_info in production).
+                .extension(axum::extract::ConnectInfo(
+                    "192.168.1.50:40000"
+                        .parse::<std::net::SocketAddr>()
+                        .unwrap(),
+                ))
+                .body(Body::empty())
+                .unwrap();
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+            // The denial is auditable.
+            let outcome: Option<String> = sqlx::query_scalar(
+                "SELECT outcome FROM cp_access_log WHERE path = '/v1/admin/probe' LIMIT 1",
+            )
+            .fetch_optional(&db)
+            .await
+            .unwrap()
+            .flatten();
+            assert_eq!(outcome.as_deref(), Some("cp_ip_denied"));
+        }
+
+        #[tokio::test]
+        async fn machine_credentials_bypass_the_session_requirement() {
+            let Some((state, _db)) = gate_state("cp_machine_bypass", vec![]).await else {
+                return;
+            };
+            let app = gate_router(state.clone());
+
+            let mut request = Request::get("/v1/admin/probe").body(Body::empty()).unwrap();
+            request
+                .extensions_mut()
+                .insert(crate::middleware::auth::AuthUser {
+                    tenant_id: "system".into(),
+                    user_id: None,
+                    api_key_id: Some("static-cp-key".into()),
+                    session_id: None,
+                    scopes: vec!["*".into()],
+                });
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "static-key/system API-key identities are deliberate machine \
+                 credentials, not browser sessions"
+            );
+        }
+
+        #[tokio::test]
+        async fn idle_timeout_rejects_stale_cp_sessions() {
+            let Some((state, db)) = gate_state("cp_idle_timeout", vec![]).await else {
+                return;
+            };
+            let (user_id, email) = seed_operator(&db, true).await;
+            // last_active far in the past: beyond the 900s idle window.
+            let stale = Utc::now().timestamp() - 10_000;
+            let claims = CpSessionClaims {
+                sub: user_id.clone(),
+                tenant_id: "system".into(),
+                email,
+                role: "admin".into(),
+                mfa_enabled: true,
+                iat: stale,
+                last_active: stale,
+                exp: Utc::now().timestamp() + 3600,
+            };
+            let token = create_cp_session_token(&claims, &state.config.cp_auth.session_secret);
+            let app = gate_router(state);
+
+            let response = app
+                .oneshot(
+                    Request::get("/v1/admin/probe")
+                        .header("cookie", format!("{CP_SESSION_COOKIE_NAME}={token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+
+        #[tokio::test]
+        async fn inactive_operator_session_is_rejected_on_recheck() {
+            let Some((state, db)) = gate_state("cp_inactive_recheck", vec![]).await else {
+                return;
+            };
+            let (user_id, email) = seed_operator(&db, true).await;
+            // Deactivate AFTER minting: the per-request recheck must catch it.
+            sqlx::query("UPDATE users SET status = 'suspended' WHERE id = $1::uuid")
+                .bind(&user_id)
+                .execute(&db)
+                .await
+                .expect("suspend operator");
+            let cookie = cp_cookie_header(&state, &user_id, &email, true);
+            let app = gate_router(state);
+
+            let response = app
+                .oneshot(
+                    Request::get("/v1/admin/probe")
+                        .header("cookie", &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
     }
 }

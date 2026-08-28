@@ -1,6 +1,5 @@
 -- Track consecutive IMAP failures so the placement scheduler can auto-disable
 -- seed accounts after `seed_account_failure_threshold` strikes.
-BEGIN;
 
 ALTER TABLE seed_accounts
     ADD COLUMN IF NOT EXISTS consecutive_failures INTEGER NOT NULL DEFAULT 0;
@@ -15,4 +14,3 @@ CREATE INDEX IF NOT EXISTS idx_seed_accounts_health_check
     ON seed_accounts (last_checked_at NULLS FIRST)
     WHERE is_active = true;
 
-COMMIT;

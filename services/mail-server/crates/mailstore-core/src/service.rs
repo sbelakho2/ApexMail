@@ -9,6 +9,7 @@ use mail_parser::{Address, Message, MessageParser};
 use nonzero_ext::nonzero;
 use rand::rngs::OsRng;
 use rand::TryRngCore;
+use sha2::Digest;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, LazyLock};
@@ -51,7 +52,26 @@ pub struct MailstoreServiceImpl {
     /// map is reset (memory stays bounded, attackers lose their budget too,
     /// legitimate accounts rebuild burst within a second).
     rate_limiters: std::sync::Mutex<HashMap<String, Arc<PerAccountLimiter>>>,
+    /// L14(a): per-account mailbox-list cache. `resolve_account_mailbox`
+    /// used to run `get_account` + `list_mailboxes` (ALL of the account's
+    /// mailboxes) on EVERY RPC just to map a name to an id. Entries expire
+    /// after a short TTL and are invalidated on create/delete, so the only
+    /// observable staleness is a briefly-outdated name→id view.
+    mailbox_cache: std::sync::Mutex<HashMap<Uuid, CachedMailboxList>>,
+    /// TTL for [`Self::mailbox_cache`] entries (injectable for tests).
+    mailbox_cache_ttl: std::time::Duration,
 }
+
+/// One cached account mailbox list (L14(a)).
+struct CachedMailboxList {
+    mailboxes: Arc<Vec<StoredMailbox>>,
+    expires_at: std::time::Instant,
+}
+
+/// Default mailbox-cache TTL: short enough that a just-created mailbox is
+/// visible almost immediately even without invalidation, long enough to
+/// absorb the per-RPC listing storm.
+const MAILBOX_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3);
 
 type PerAccountLimiter = GovRateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
@@ -81,6 +101,40 @@ fn dummy_verify_password(password: &[u8]) {
     if let Ok(parsed) = PasswordHash::new(&DUMMY_PASSWORD_HASH) {
         let _ = Argon2::default().verify_password(password, &parsed);
     }
+}
+
+/// SHA-256 hex digest of `bytes` (L14(c): replaces the MD5 blob_hash —
+/// 64 lowercase hex chars; the field is a string so width is unaffected).
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", sha2::Sha256::digest(bytes))
+}
+
+// ── L8: SEARCH HEADER wire convention ───────────────────────────────────────
+//
+// The proto's SearchMessagesRequest carries a single `query` string and the
+// proto cannot change here, so an IMAP `SEARCH HEADER <field> <value>` is
+// encoded as `header:<field>\x01<value>`. The separator is the first \x01
+// (a control character clients cannot inject into the FIELD position), and
+// the convention only triggers when BOTH the prefix and the separator are
+// present — a genuine fulltext query that happens to start with "header:"
+// still searches as fulltext. The imap-server crate builds these queries
+// with the same convention (see its `header_search_query`).
+
+/// Query prefix marking a header-field search.
+pub const HEADER_QUERY_PREFIX: &str = "header:";
+/// Field/value separator inside a header-search query.
+pub const HEADER_QUERY_SEPARATOR: char = '\x01';
+
+/// Build a header-field search query (imap-server side of the convention).
+pub fn header_search_query(field: &str, value: &str) -> String {
+    format!("{HEADER_QUERY_PREFIX}{field}{HEADER_QUERY_SEPARATOR}{value}")
+}
+
+/// Parse a header-field search query; `None` for ordinary fulltext queries.
+pub fn parse_header_query(query: &str) -> Option<(&str, &str)> {
+    let rest = query.strip_prefix(HEADER_QUERY_PREFIX)?;
+    let (field, value) = rest.split_once(HEADER_QUERY_SEPARATOR)?;
+    Some((field, value))
 }
 
 // ── IMAP flag <-> labels column mapping (G) ────────────────────────────────
@@ -290,6 +344,18 @@ fn header_value(headers: &serde_json::Value, name: &str) -> Option<String> {
         })
 }
 
+/// Parse an RFC 5322 `Date:` header value into a Unix timestamp.
+///
+/// The stored headers JSON has already unfolded continuation lines
+/// (see [`normalize_header_value`]), so the value parses with chrono's
+/// RFC 2822 parser. Returns `None` when absent or unparseable; callers
+/// fall back to the internal (store) date.
+fn parse_rfc5322_date(headers: &serde_json::Value) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc2822(&header_value(headers, "Date")?)
+        .ok()
+        .map(|dt| dt.timestamp())
+}
+
 /// Map a storage-layer error to a gRPC status, distinguishing quota
 /// exhaustion (`ResourceExhausted`) from internal failures.
 fn map_storage_error(context: &str, e: anyhow::Error) -> Status {
@@ -302,10 +368,38 @@ fn map_storage_error(context: &str, e: anyhow::Error) -> Status {
 
 impl MailstoreServiceImpl {
     pub fn new(storage: Arc<MessageStorage>) -> Self {
+        Self::new_with_mailbox_cache_ttl(storage, MAILBOX_CACHE_TTL)
+    }
+
+    /// Test constructor with an injectable mailbox-cache TTL.
+    fn new_with_mailbox_cache_ttl(
+        storage: Arc<MessageStorage>,
+        mailbox_cache_ttl: std::time::Duration,
+    ) -> Self {
         Self {
             storage,
             rate_limiters: std::sync::Mutex::new(HashMap::new()),
+            mailbox_cache: std::sync::Mutex::new(HashMap::new()),
+            mailbox_cache_ttl,
         }
+    }
+
+    /// Drop the cached mailbox list for an account (L14(a) invalidation on
+    /// create/delete — RENAME is create+move+delete through these RPCs).
+    fn invalidate_mailbox_cache(&self, account_id: &Uuid) {
+        self.mailbox_cache.lock().unwrap().remove(account_id);
+    }
+
+    /// Insert a mailbox list into the cache (exposed so tests can prime it).
+    fn cache_mailboxes(&self, account_id: Uuid, mailboxes: Vec<StoredMailbox>) {
+        let mut cache = self.mailbox_cache.lock().unwrap();
+        cache.insert(
+            account_id,
+            CachedMailboxList {
+                mailboxes: Arc::new(mailboxes),
+                expires_at: std::time::Instant::now() + self.mailbox_cache_ttl,
+            },
+        );
     }
 
     /// O-4.2:Check the per-account rate limit. Each key (account id or, for
@@ -349,7 +443,7 @@ impl MailstoreServiceImpl {
             account_id: message.account_id.to_string(),
             mailbox: mailbox_name.to_string(),
             uid: Self::message_uid(message),
-            blob_hash: format!("{:x}", md5::compute(message.message_id.as_bytes())),
+            blob_hash: sha256_hex(message.message_id.as_bytes()),
             size: message.raw_size.max(0) as u64,
             envelope: Some(EmailEnvelope {
                 from: message.from_address.clone(),
@@ -368,12 +462,18 @@ impl MailstoreServiceImpl {
                     .iter()
                     .map(|addr| addr.address.clone())
                     .collect(),
-                reply_to: String::default(),
+                // RFC 3501 §7.4.2: Reply-To defaults to From when the message
+                // carries no Reply-To header; the header wins when present.
+                reply_to: header_value(&message.headers, "Reply-To")
+                    .unwrap_or_else(|| message.from_address.clone()),
                 subject: message.subject.clone(),
                 message_id: message.message_id.clone(),
-                in_reply_to: String::default(),
+                in_reply_to: header_value(&message.headers, "In-Reply-To").unwrap_or_default(),
                 references: vec![],
-                date: message.date.timestamp(),
+                // RFC 3501 ENVELOPE `date` is the RFC 5322 Date header, not
+                // the internal (arrival/store) date. Fall back to the store
+                // date when the header is absent or unparseable.
+                date: parse_rfc5322_date(&message.headers).unwrap_or(message.date.timestamp()),
             }),
             flags: Some(MessageFlags {
                 seen: message.is_read,
@@ -444,6 +544,12 @@ impl MailstoreServiceImpl {
         limit.clamp(1, max)
     }
 
+    /// L14(a): resolve a mailbox name to its id via the per-account cache.
+    /// On a cache hit neither `get_account` nor `list_mailboxes` runs — the
+    /// entry proves the account existed and carries the name→id mapping.
+    /// On a miss the account existence check and the full mailbox list are
+    /// loaded once and cached for the TTL.
+    #[allow(clippy::result_large_err)]
     async fn resolve_account_mailbox(
         &self,
         account_id_raw: &str,
@@ -451,6 +557,28 @@ impl MailstoreServiceImpl {
     ) -> Result<(Uuid, StoredMailbox), Status> {
         let account_id = Uuid::parse_str(account_id_raw.trim())
             .map_err(|e| Status::invalid_argument(format!("Invalid account_id: {}", e)))?;
+
+        let normalized = mailbox_name.trim();
+        let now = std::time::Instant::now();
+        {
+            let mut cache = self.mailbox_cache.lock().unwrap();
+            if let Some(entry) = cache.get(&account_id) {
+                if entry.expires_at > now {
+                    if let Some(mailbox) = entry
+                        .mailboxes
+                        .iter()
+                        .find(|m| m.name.eq_ignore_ascii_case(normalized))
+                    {
+                        return Ok((account_id, mailbox.clone()));
+                    }
+                    // Cached list is authoritative until the TTL expires: a
+                    // name miss is a real miss (fresh entries are inserted on
+                    // create/delete via invalidation).
+                    return Err(Status::not_found("Mailbox not found"));
+                }
+                cache.remove(&account_id);
+            }
+        }
 
         let account = self
             .storage
@@ -468,7 +596,8 @@ impl MailstoreServiceImpl {
             .await
             .map_err(|e| Status::internal(format!("Failed to list mailboxes: {}", e)))?;
 
-        let normalized = mailbox_name.trim();
+        self.cache_mailboxes(account_id, mailboxes.clone());
+
         let mailbox = mailboxes
             .into_iter()
             .find(|m| m.name.eq_ignore_ascii_case(normalized))
@@ -495,8 +624,18 @@ impl MailstoreService for MailstoreServiceImpl {
             .resolve_account_mailbox(&req.account_id, &req.mailbox)
             .await?;
 
-        let internal_date = chrono::DateTime::<chrono::Utc>::from_timestamp(req.internal_date, 0)
-            .unwrap_or_else(chrono::Utc::now);
+        // `internal_date == 0` is the proto's "unset" sentinel and means NOW.
+        // `from_timestamp(0)` would otherwise succeed and stamp 1970-01-01.
+        // No caller legitimately sends epoch 0 (the SMTP delivery path sends
+        // `Utc::now()`; the IMAP layer sends now when the APPEND date-time is
+        // omitted), so mapping 0 → now is safe here as a second line of
+        // defense.
+        let internal_date = if req.internal_date == 0 {
+            chrono::Utc::now()
+        } else {
+            chrono::DateTime::<chrono::Utc>::from_timestamp(req.internal_date, 0)
+                .unwrap_or_else(chrono::Utc::now)
+        };
 
         let flags = req.flags.unwrap_or_default();
         let metadata = parse_message_metadata(&req.raw_message);
@@ -539,7 +678,7 @@ impl MailstoreService for MailstoreServiceImpl {
             .await
             .map_err(|e| map_storage_error("Failed to store message", e))?;
 
-        let blob_hash = format!("{:x}", md5::compute(&req.raw_message));
+        let blob_hash = sha256_hex(&req.raw_message);
         let message_id = stored.id.to_string();
         let uid = uid.max(0) as u64;
 
@@ -659,10 +798,22 @@ impl MailstoreService for MailstoreServiceImpl {
         let limit = Self::clamp_limit(if req.limit > 0 { req.limit as i64 } else { 100 }, 100_000);
         let offset = if req.offset > 0 { req.offset as i64 } else { 0 };
 
-        let (messages, total) = self
-            .storage
-            .search_messages(&account_id, &mailbox.id, &req.query, limit, offset)
-            .await
+        // L8: `SEARCH HEADER <field> <value>` arrives via the header-query
+        // convention and filters on the stored headers JSONB (field NAME
+        // honored, substring value match) instead of the subject/body
+        // fulltext index. Headers are not encrypted at rest, so this also
+        // works on encrypted stores.
+        let search_result = if let Some((field, value)) = parse_header_query(&req.query) {
+            self.storage
+                .search_by_header(&account_id, &mailbox.id, field, value, limit, offset)
+                .await
+        } else {
+            self.storage
+                .search_messages(&account_id, &mailbox.id, &req.query, limit, offset)
+                .await
+        };
+
+        let (messages, total) = search_result
             .map_err(|e| Status::internal(format!("Failed to search messages: {}", e)))?;
 
         let metas = messages
@@ -685,6 +836,13 @@ impl MailstoreService for MailstoreServiceImpl {
         self.check_rate_limit(&request.get_ref().account_id)?;
         let req = request.into_inner();
 
+        // L14(b): an unknown FlagOperation must be rejected up front. The old
+        // `unwrap_or(FlagOperation::Set)` silently coerced it to a DESTRUCTIVE
+        // overwrite of every flag on the matching messages.
+        let operation = FlagOperation::try_from(req.operation).map_err(|_| {
+            Status::invalid_argument(format!("unknown flag operation: {}", req.operation))
+        })?;
+
         let (account_id, mailbox) = self
             .resolve_account_mailbox(&req.account_id, &req.mailbox)
             .await?;
@@ -700,7 +858,6 @@ impl MailstoreService for MailstoreServiceImpl {
         }
 
         let update_flags = req.flags.unwrap_or_default();
-        let operation = FlagOperation::try_from(req.operation).unwrap_or(FlagOperation::Set);
 
         // F: the whole operation is one SQL statement — the boolean flags
         // and the label-backed flags merge inside the database, so two
@@ -805,15 +962,18 @@ impl MailstoreService for MailstoreServiceImpl {
             .await
             .map_err(|e| Status::internal(format!("Failed to load messages: {}", e)))?;
 
+        // L10: one transaction for the whole batch — a failure at message k
+        // rolls back the moves of 1..k-1 instead of leaving a partial move.
+        let ids: Vec<Uuid> = messages.iter().map(|m| m.id).collect();
+        let new_uids = self
+            .storage
+            .move_messages_batch(&ids, &dest_mailbox.id)
+            .await
+            .map_err(|e| map_storage_error("Failed to move messages", e))?;
+
         let mut uid_mapping = HashMap::new();
-        for message in messages {
-            let old_uid = message.uid.max(0) as u64;
-            let new_uid = self
-                .storage
-                .move_message(&message.id, &dest_mailbox.id)
-                .await
-                .map_err(|e| Status::internal(format!("Failed to move message: {}", e)))?;
-            uid_mapping.insert(old_uid, new_uid.max(0) as u64);
+        for (message, new_uid) in messages.iter().zip(new_uids) {
+            uid_mapping.insert(message.uid.max(0) as u64, new_uid.max(0) as u64);
         }
 
         info!(
@@ -854,28 +1014,37 @@ impl MailstoreService for MailstoreServiceImpl {
             .await
             .map_err(|e| Status::internal(format!("Failed to load messages: {}", e)))?;
 
-        let mut uid_mapping = HashMap::new();
-        for message in messages {
-            let old_uid = message.uid.max(0) as u64;
-            let now = chrono::Utc::now();
-            let mut cloned = message.clone();
-            cloned.id = Uuid::new_v4();
-            cloned.mailbox_id = dest_mailbox.id;
-            cloned.uid = 0;
-            cloned.created_at = now;
-            cloned.updated_at = now;
-            // Migration 102: a user-initiated COPY must materialize a NEW
-            // row (fresh UID for COPYUID) even when the destination already
-            // holds this Message-ID — previously it aliased the existing
-            // row and "vanished" when that row was expunged.
-            cloned.dedup_exempt = true;
+        let now = chrono::Utc::now();
+        let clones: Vec<StoredMessage> = messages
+            .iter()
+            .map(|message| {
+                let mut cloned = message.clone();
+                cloned.id = Uuid::new_v4();
+                cloned.mailbox_id = dest_mailbox.id;
+                cloned.uid = 0;
+                cloned.created_at = now;
+                cloned.updated_at = now;
+                // Migration 102: a user-initiated COPY must materialize a NEW
+                // row (fresh UID for COPYUID) even when the destination already
+                // holds this Message-ID — previously it aliased the existing
+                // row and "vanished" when that row was expunged.
+                cloned.dedup_exempt = true;
+                cloned
+            })
+            .collect();
 
-            let (_, new_uid) = self
-                .storage
-                .store_message(&cloned)
-                .await
-                .map_err(|e| map_storage_error("Failed to copy message", e))?;
-            uid_mapping.insert(old_uid, new_uid.max(0) as u64);
+        // L10: one transaction for the whole batch — a failure at message k
+        // (e.g. the account quota exhausts mid-copy) rolls back the copies of
+        // 1..k-1 instead of returning a partial COPY.
+        let stored = self
+            .storage
+            .store_messages_batch(&clones)
+            .await
+            .map_err(|e| map_storage_error("Failed to copy message", e))?;
+
+        let mut uid_mapping = HashMap::new();
+        for (message, (_, new_uid)) in messages.iter().zip(stored) {
+            uid_mapping.insert(message.uid.max(0) as u64, new_uid.max(0) as u64);
         }
 
         info!(
@@ -931,6 +1100,9 @@ impl MailstoreService for MailstoreServiceImpl {
                 }
             })?;
 
+        // L14(a): the cached list (if any) is now stale.
+        self.invalidate_mailbox_cache(&account_id);
+
         info!(
             account_id = %req.account_id,
             name = %req.name,
@@ -975,6 +1147,9 @@ impl MailstoreService for MailstoreServiceImpl {
                     Status::internal(format!("Failed to delete mailbox: {}", message))
                 }
             })?;
+
+        // L14(a): the cached list (if any) is now stale.
+        self.invalidate_mailbox_cache(&account_id);
 
         if !deleted {
             return Err(Status::not_found("Mailbox not found"));
@@ -1796,5 +1971,733 @@ mod tests {
         };
         let labels = proto_flag_labels(&proto);
         assert_eq!(labels, vec!["Keyword".to_string()]);
+    }
+
+    // ── L3: APPEND without date-time stores "now", not 1970 ────────────────
+
+    #[tokio::test]
+    async fn store_message_without_internal_date_uses_now() {
+        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: TEST_DATABASE_URL unreachable");
+            return;
+        };
+        let storage = Arc::new(MessageStorage::new(pool.clone()));
+        if let Err(e) = storage.initialize().await {
+            eprintln!("skipping: migrator could not run ({e})");
+            return;
+        }
+        let svc = MailstoreServiceImpl::new(storage);
+
+        let email = format!("appenddate-{}@example.com", Uuid::new_v4());
+        let account = svc
+            .storage
+            .create_account(&email, "not-a-real-hash", None)
+            .await
+            .unwrap();
+        let mailboxes = svc.storage.list_mailboxes(&account.id).await.unwrap();
+        let inbox = mailboxes
+            .iter()
+            .find(|m| m.mailbox_type == MailboxType::Inbox)
+            .unwrap()
+            .clone();
+
+        // No date-time: proto internal_date = 0 must mean "now".
+        let before = chrono::Utc::now().timestamp();
+        let stored = svc
+            .store_message(Request::new(StoreMessageRequest {
+                account_id: account.id.to_string(),
+                mailbox: inbox.name.clone(),
+                raw_message: b"From: a@example.com\r\nSubject: t\r\n\r\nb"
+                    .to_vec()
+                    .into(),
+                flags: None,
+                internal_date: 0,
+                dedup_exempt: true,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let after = chrono::Utc::now().timestamp();
+
+        let fetched = svc
+            .get_message(Request::new(GetMessageRequest {
+                account_id: account.id.to_string(),
+                mailbox: inbox.name.clone(),
+                uid: stored.uid,
+                include_body: false,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let internal_date = fetched.meta.expect("meta").internal_date;
+        assert!(
+            internal_date >= before && internal_date <= after,
+            "omitted date must store ~now, got {} (window {}..={})",
+            internal_date,
+            before,
+            after
+        );
+
+        // Explicit date-time: stored exactly.
+        let explicit: i64 = 1_600_000_000;
+        let stored2 = svc
+            .store_message(Request::new(StoreMessageRequest {
+                account_id: account.id.to_string(),
+                mailbox: inbox.name.clone(),
+                raw_message: b"From: a@example.com\r\nSubject: t2\r\n\r\nb"
+                    .to_vec()
+                    .into(),
+                flags: None,
+                internal_date: explicit,
+                dedup_exempt: true,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        let fetched2 = svc
+            .get_message(Request::new(GetMessageRequest {
+                account_id: account.id.to_string(),
+                mailbox: inbox.name.clone(),
+                uid: stored2.uid,
+                include_body: false,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            fetched2.meta.expect("meta").internal_date,
+            explicit,
+            "explicit date must be stored verbatim"
+        );
+
+        for table in ["mail_messages", "mail_mailboxes"] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE account_id = $1"))
+                .bind(account.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("DELETE FROM mail_accounts WHERE id = $1")
+            .bind(account.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    // ── L4: ENVELOPE date from the Date header; Reply-To defaults to From ──
+
+    #[test]
+    fn envelope_date_uses_rfc5322_date_header_not_internal_date() {
+        let mut message = sample_meta_message(
+            "From: sender@example.com\r\n\
+             Subject: dated\r\n\
+             Date: Tue, 01 Jan 2030 12:00:00 +0000\r\n\
+             \r\nbody",
+        );
+        // Internal/store date distinct from the header date.
+        message.date = chrono::Utc::now();
+
+        let meta = MailstoreServiceImpl::message_to_meta(&message, "INBOX");
+        let env = meta.envelope.expect("envelope");
+        let expected = chrono::DateTime::parse_from_rfc2822("Tue, 01 Jan 2030 12:00:00 +0000")
+            .unwrap()
+            .timestamp();
+        assert_eq!(
+            env.date, expected,
+            "ENVELOPE date must come from the Date header"
+        );
+        // INTERNALDATE still reflects the store date.
+        assert_eq!(meta.internal_date, message.date.timestamp());
+    }
+
+    #[test]
+    fn envelope_date_falls_back_to_internal_date_without_header() {
+        let mut message = sample_meta_message("From: s@example.com\r\nSubject: x\r\n\r\nb");
+        message.date = chrono::Utc::now();
+        let meta = MailstoreServiceImpl::message_to_meta(&message, "INBOX");
+        let env = meta.envelope.expect("envelope");
+        assert_eq!(env.date, message.date.timestamp());
+    }
+
+    #[test]
+    fn envelope_reply_to_defaults_to_from_when_absent() {
+        let message = sample_meta_message("From: sender@example.com\r\nSubject: r\r\n\r\nb");
+        let meta = MailstoreServiceImpl::message_to_meta(&message, "INBOX");
+        let env = meta.envelope.expect("envelope");
+        assert_eq!(
+            env.reply_to, env.from,
+            "missing Reply-To must default to From"
+        );
+    }
+
+    #[test]
+    fn envelope_reply_to_uses_header_when_present() {
+        let message = sample_meta_message(
+            "From: sender@example.com\r\nReply-To: replies@example.com\r\nSubject: r\r\n\r\nb",
+        );
+        let meta = MailstoreServiceImpl::message_to_meta(&message, "INBOX");
+        let env = meta.envelope.expect("envelope");
+        assert_eq!(env.reply_to, "replies@example.com");
+    }
+
+    #[test]
+    fn envelope_in_reply_to_comes_from_headers() {
+        let message = sample_meta_message(
+            "From: s@example.com\r\nIn-Reply-To: <parent@example.com>\r\nSubject: r\r\n\r\nb",
+        );
+        let meta = MailstoreServiceImpl::message_to_meta(&message, "INBOX");
+        let env = meta.envelope.expect("envelope");
+        assert_eq!(env.in_reply_to, "<parent@example.com>");
+    }
+
+    /// Build a StoredMessage by parsing raw headers into the headers JSONB,
+    /// mirroring what store_message persists.
+    fn sample_meta_message(raw: &str) -> StoredMessage {
+        let parsed = mail_parser::MessageParser::new()
+            .parse(raw)
+            .expect("parses");
+        StoredMessage {
+            id: Uuid::new_v4(),
+            account_id: Uuid::new_v4(),
+            mailbox_id: Uuid::new_v4(),
+            uid: 1,
+            message_id: "<m@example.com>".to_string(),
+            from_address: "sender@example.com".to_string(),
+            from_name: None,
+            to_addresses: vec![],
+            cc_addresses: vec![],
+            bcc_addresses: vec![],
+            subject: parsed.subject().unwrap_or_default().to_string(),
+            date: chrono::Utc::now(),
+            text_body: None,
+            html_body: None,
+            raw_message: Some(raw.as_bytes().to_vec()),
+            raw_size: raw.len() as i64,
+            is_read: false,
+            is_starred: false,
+            is_deleted: false,
+            is_spam: false,
+            labels: vec![],
+            dedup_exempt: false,
+            headers: extract_headers_json(&parsed),
+            attachments: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    // ── L14(b): unknown FlagOperation must be rejected, not coerced to Set ──
+
+    #[tokio::test]
+    async fn set_flags_rejects_unknown_operation_without_touching_db() {
+        // Lazy pool: if the handler reached the storage layer it would fail
+        // with a connection `internal` error instead of `invalid_argument`.
+        let pool = PgPool::connect_lazy("postgres://localhost/apexmail_test").unwrap();
+        let svc = MailstoreServiceImpl::new(Arc::new(MessageStorage::new(pool)));
+
+        let err = svc
+            .set_flags(Request::new(SetFlagsRequest {
+                account_id: "11111111-1111-1111-1111-111111111111".to_string(),
+                mailbox: "INBOX".to_string(),
+                uids: vec![1],
+                flags: None,
+                operation: 99,
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("operation"));
+    }
+
+    // ── L14(c): blob_hash is SHA-256, not MD5 ──────────────────────────────
+
+    #[test]
+    fn blob_hash_is_sha256_hex_digest() {
+        let message = sample_meta_message("From: s@example.com\r\nSubject: h\r\n\r\nb");
+        let meta = MailstoreServiceImpl::message_to_meta(&message, "INBOX");
+        assert_eq!(meta.blob_hash.len(), 64, "SHA-256 hex digest");
+        assert!(
+            meta.blob_hash.chars().all(|c| c.is_ascii_hexdigit()),
+            "hex only, got {}",
+            meta.blob_hash
+        );
+
+        // Distinct message ids hash distinctly.
+        let mut other = sample_meta_message("From: s@example.com\r\nSubject: h\r\n\r\nb");
+        other.message_id = "<other@example.com>".to_string();
+        let meta2 = MailstoreServiceImpl::message_to_meta(&other, "INBOX");
+        assert_ne!(meta.blob_hash, meta2.blob_hash);
+
+        // The store path's response hash uses SHA-256 over the raw message.
+        let expected = format!(
+            "{:x}",
+            sha2::Sha256::digest(b"From: s@example.com\r\nSubject: h\r\n\r\nb")
+        );
+        assert_eq!(meta2.blob_hash.len(), expected.len());
+        assert_ne!(expected.len(), 32, "not an MD5 digest");
+    }
+
+    // ── L14(c) store path: StoreMessageResponse.blob_hash is SHA-256 ───────
+
+    #[test]
+    fn store_response_blob_hash_uses_sha256_over_raw() {
+        use sha2::Digest;
+        let raw = b"raw-bytes";
+        let digest = format!("{:x}", sha2::Sha256::digest(raw));
+        assert_eq!(digest.len(), 64);
+        // Pin the helper used by the RPC handler.
+        assert_eq!(sha256_hex(raw), digest);
+    }
+
+    // ── L8: header query wire convention ───────────────────────────────────
+
+    #[test]
+    fn header_query_convention_round_trips_and_stays_selective() {
+        let q = header_search_query("Message-ID", "<abc@x>");
+        assert!(q.starts_with("header:"));
+        assert_eq!(parse_header_query(&q), Some(("Message-ID", "<abc@x>")));
+        // Ordinary fulltext queries are NOT parsed as header searches —
+        // even one that happens to start with the prefix (no separator).
+        assert_eq!(parse_header_query("hello world"), None);
+        assert_eq!(parse_header_query("header:without-separator"), None);
+        // The FIRST separator splits: a value containing \x01 cannot
+        // re-inject a field.
+        let q = header_search_query("X", "a\x01b");
+        assert_eq!(parse_header_query(&q), Some(("X", "a\x01b")));
+    }
+
+    // ── L14(a): per-account mailbox cache ──────────────────────────────────
+
+    fn cached_test_mailbox(account_id: Uuid, name: &str) -> StoredMailbox {
+        StoredMailbox {
+            id: Uuid::new_v4(),
+            account_id,
+            name: name.to_string(),
+            parent_id: None,
+            mailbox_type: MailboxType::Inbox,
+            total_messages: 0,
+            unread_messages: 0,
+            uidnext: 1,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn lazy_svc(cache_ttl: std::time::Duration) -> MailstoreServiceImpl {
+        // Lazy pool to a definitely-unreachable DB (port 1 is closed): any
+        // cache MISS that reaches storage fails with a connection error, so
+        // an Ok proves the cache was hit without any query (the storage layer
+        // has no mock trait to count through, so behavior is pinned instead).
+        let pool = PgPool::connect_lazy("postgres://127.0.0.1:1/apexmail_test").unwrap();
+        MailstoreServiceImpl::new_with_mailbox_cache_ttl(
+            Arc::new(MessageStorage::new(pool)),
+            cache_ttl,
+        )
+    }
+
+    #[tokio::test]
+    async fn mailbox_cache_hit_resolves_without_querying() {
+        let svc = lazy_svc(std::time::Duration::from_secs(60));
+        let account_id = Uuid::new_v4();
+        svc.cache_mailboxes(account_id, vec![cached_test_mailbox(account_id, "INBOX")]);
+
+        let resolved = svc
+            .resolve_account_mailbox(&account_id.to_string(), "inbox")
+            .await
+            .expect("cache hit must resolve without touching the DB");
+        assert_eq!(resolved.0, account_id);
+        assert_eq!(resolved.1.name, "INBOX");
+
+        // A name not in the cached list is a miss, also without querying.
+        let err = svc
+            .resolve_account_mailbox(&account_id.to_string(), "Nope")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn mailbox_cache_expires_after_ttl() {
+        let svc = lazy_svc(std::time::Duration::from_millis(10));
+        let account_id = Uuid::new_v4();
+        svc.cache_mailboxes(account_id, vec![cached_test_mailbox(account_id, "INBOX")]);
+        tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        // Expired: the resolve must fall through to storage, which cannot
+        // connect on the lazy pool.
+        let err = svc
+            .resolve_account_mailbox(&account_id.to_string(), "INBOX")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Internal);
+    }
+
+    #[tokio::test]
+    async fn mailbox_cache_invalidation_forces_refresh() {
+        let svc = lazy_svc(std::time::Duration::from_secs(60));
+        let account_id = Uuid::new_v4();
+        svc.cache_mailboxes(account_id, vec![cached_test_mailbox(account_id, "INBOX")]);
+        svc.invalidate_mailbox_cache(&account_id);
+        let err = svc
+            .resolve_account_mailbox(&account_id.to_string(), "INBOX")
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Internal);
+    }
+
+    // ── L10: COPY/MOVE as a single transaction (DB-gated) ──────────────────
+
+    #[tokio::test]
+    async fn copy_failure_mid_batch_rolls_back_earlier_copies() {
+        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: TEST_DATABASE_URL unreachable");
+            return;
+        };
+        let storage = Arc::new(MessageStorage::new(pool.clone()));
+        if let Err(e) = storage.initialize().await {
+            eprintln!("skipping: migrator could not run ({e})");
+            return;
+        }
+        let svc = MailstoreServiceImpl::new(storage);
+
+        let email = format!("copyrb-{}@example.com", Uuid::new_v4());
+        let account = svc
+            .storage
+            .create_account(&email, "not-a-real-hash", None)
+            .await
+            .unwrap();
+        let mailboxes = svc.storage.list_mailboxes(&account.id).await.unwrap();
+        let inbox = mailboxes
+            .iter()
+            .find(|m| m.mailbox_type == MailboxType::Inbox)
+            .unwrap()
+            .clone();
+        let archive = mailboxes
+            .iter()
+            .find(|m| m.mailbox_type == MailboxType::Archive)
+            .unwrap()
+            .clone();
+
+        // Two messages, each raw_size = N. Then set quota_bytes so exactly
+        // ONE copy fits: the second store inside the batch exceeds the byte
+        // quota, and the single transaction must roll the first copy back.
+        let mut uids = Vec::new();
+        let mut sizes = Vec::new();
+        for i in 0..2 {
+            let raw = format!(
+                "From: s@example.com\r\nSubject: rb{}\r\nMessage-ID: <rb-{}-{}@x>\r\n\r\n{}",
+                i,
+                i,
+                Uuid::new_v4(),
+                "p".repeat(4096)
+            );
+            let stored = svc
+                .store_message(Request::new(StoreMessageRequest {
+                    account_id: account.id.to_string(),
+                    mailbox: inbox.name.clone(),
+                    raw_message: raw.clone().into_bytes().into(),
+                    flags: None,
+                    internal_date: 0,
+                    dedup_exempt: true,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            uids.push(stored.uid);
+            sizes.push(raw.len() as i64);
+        }
+
+        let used_bytes: i64 =
+            sqlx::query_scalar("SELECT used_bytes FROM mail_accounts WHERE id = $1")
+                .bind(account.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        // Room for one copy plus a small margin, NOT two.
+        let quota = used_bytes + sizes[0] + sizes[0] / 2;
+        sqlx::query("UPDATE mail_accounts SET quota_bytes = $2 WHERE id = $1")
+            .bind(account.id)
+            .bind(quota)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // COPY both: must fail (quota) — and roll back the FIRST copy too.
+        let err = svc
+            .copy_message(Request::new(CopyMessageRequest {
+                account_id: account.id.to_string(),
+                source_mailbox: inbox.name.clone(),
+                dest_mailbox: archive.name.clone(),
+                uids: uids.clone(),
+            }))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), tonic::Code::ResourceExhausted);
+
+        let archive_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM mail_messages WHERE mailbox_id = $1")
+                .bind(archive.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(archive_rows, 0, "partial COPY must be rolled back");
+
+        // Restore unlimited quota: the same COPY now succeeds atomically.
+        sqlx::query("UPDATE mail_accounts SET quota_bytes = 0 WHERE id = $1")
+            .bind(account.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        svc.copy_message(Request::new(CopyMessageRequest {
+            account_id: account.id.to_string(),
+            source_mailbox: inbox.name.clone(),
+            dest_mailbox: archive.name.clone(),
+            uids,
+        }))
+        .await
+        .unwrap();
+        let archive_rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM mail_messages WHERE mailbox_id = $1")
+                .bind(archive.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(archive_rows, 2);
+
+        for table in ["mail_messages", "mail_mailboxes"] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE account_id = $1"))
+                .bind(account.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("DELETE FROM mail_accounts WHERE id = $1")
+            .bind(account.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn move_batch_maps_every_uid_atomically() {
+        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: TEST_DATABASE_URL unreachable");
+            return;
+        };
+        let storage = Arc::new(MessageStorage::new(pool.clone()));
+        if let Err(e) = storage.initialize().await {
+            eprintln!("skipping: migrator could not run ({e})");
+            return;
+        }
+        let svc = MailstoreServiceImpl::new(storage);
+
+        let email = format!("mvb-{}@example.com", Uuid::new_v4());
+        let account = svc
+            .storage
+            .create_account(&email, "not-a-real-hash", None)
+            .await
+            .unwrap();
+        let mailboxes = svc.storage.list_mailboxes(&account.id).await.unwrap();
+        let inbox = mailboxes
+            .iter()
+            .find(|m| m.mailbox_type == MailboxType::Inbox)
+            .unwrap()
+            .clone();
+        let archive = mailboxes
+            .iter()
+            .find(|m| m.mailbox_type == MailboxType::Archive)
+            .unwrap()
+            .clone();
+
+        let mut uids = Vec::new();
+        for i in 0..3 {
+            let stored = svc
+                .store_message(Request::new(StoreMessageRequest {
+                    account_id: account.id.to_string(),
+                    mailbox: inbox.name.clone(),
+                    raw_message: format!(
+                        "From: s@example.com\r\nSubject: mv{}\r\nMessage-ID: <mv-{}-{}@x>\r\n\r\nb",
+                        i,
+                        i,
+                        Uuid::new_v4()
+                    )
+                    .into_bytes()
+                    .into(),
+                    flags: None,
+                    internal_date: 0,
+                    dedup_exempt: true,
+                }))
+                .await
+                .unwrap()
+                .into_inner();
+            uids.push(stored.uid);
+        }
+
+        let moved = svc
+            .move_message(Request::new(MoveMessageRequest {
+                account_id: account.id.to_string(),
+                source_mailbox: inbox.name.clone(),
+                dest_mailbox: archive.name.clone(),
+                uids: uids.clone(),
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(moved.uid_mapping.len(), 3);
+        for uid in &uids {
+            assert!(moved.uid_mapping.contains_key(uid));
+        }
+
+        let in_inbox: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM mail_messages WHERE mailbox_id = $1")
+                .bind(inbox.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let in_archive: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM mail_messages WHERE mailbox_id = $1")
+                .bind(archive.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(in_inbox, 0);
+        assert_eq!(in_archive, 3);
+
+        for table in ["mail_messages", "mail_mailboxes"] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE account_id = $1"))
+                .bind(account.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("DELETE FROM mail_accounts WHERE id = $1")
+            .bind(account.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    // ── L8 end-to-end: SEARCH HEADER through the RPC (DB-gated) ────────────
+
+    #[tokio::test]
+    async fn search_rpc_header_convention_honors_field_name() {
+        let Ok(url) = std::env::var("TEST_DATABASE_URL") else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let Ok(pool) = sqlx::PgPool::connect(&url).await else {
+            eprintln!("skipping: TEST_DATABASE_URL unreachable");
+            return;
+        };
+        let storage = Arc::new(MessageStorage::new(pool.clone()));
+        if let Err(e) = storage.initialize().await {
+            eprintln!("skipping: migrator could not run ({e})");
+            return;
+        }
+        let svc = MailstoreServiceImpl::new(storage);
+
+        let email = format!("rpcsearch-{}@example.com", Uuid::new_v4());
+        let account = svc
+            .storage
+            .create_account(&email, "not-a-real-hash", None)
+            .await
+            .unwrap();
+        let mailboxes = svc.storage.list_mailboxes(&account.id).await.unwrap();
+        let inbox = mailboxes
+            .iter()
+            .find(|m| m.mailbox_type == MailboxType::Inbox)
+            .unwrap()
+            .clone();
+
+        let target_mid = format!("<rpc-target-{}@x>", Uuid::new_v4());
+        svc.store_message(Request::new(StoreMessageRequest {
+            account_id: account.id.to_string(),
+            mailbox: inbox.name.clone(),
+            raw_message: format!(
+                "From: s@example.com\r\nSubject: unrelated\r\nMessage-ID: {target_mid}\r\n\r\nb"
+            )
+            .into_bytes()
+            .into(),
+            flags: None,
+            internal_date: 0,
+            dedup_exempt: true,
+        }))
+        .await
+        .unwrap();
+        // Second message: subject matches the needle, header does not.
+        svc.store_message(Request::new(StoreMessageRequest {
+            account_id: account.id.to_string(),
+            mailbox: inbox.name.clone(),
+            raw_message: format!(
+                "From: s@example.com\r\nSubject: {target_mid}\r\nMessage-ID: <other-{}@x>\r\n\r\nb",
+                Uuid::new_v4()
+            )
+            .into_bytes()
+            .into(),
+            flags: None,
+            internal_date: 0,
+            dedup_exempt: true,
+        }))
+        .await
+        .unwrap();
+
+        let resp = svc
+            .search_messages(Request::new(SearchMessagesRequest {
+                account_id: account.id.to_string(),
+                mailbox: inbox.name.clone(),
+                query: header_search_query("Message-ID", &target_mid),
+                limit: 100,
+                offset: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(
+            resp.messages.len(),
+            1,
+            "subject hit must not satisfy HEADER"
+        );
+        assert_eq!(
+            resp.messages[0].envelope.as_ref().unwrap().message_id,
+            target_mid
+        );
+
+        // Non-matching value finds nothing.
+        let resp = svc
+            .search_messages(Request::new(SearchMessagesRequest {
+                account_id: account.id.to_string(),
+                mailbox: inbox.name.clone(),
+                query: header_search_query("Message-ID", "does-not-exist-anywhere"),
+                limit: 100,
+                offset: 0,
+            }))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(resp.messages.is_empty());
+
+        for table in ["mail_messages", "mail_mailboxes"] {
+            sqlx::query(&format!("DELETE FROM {table} WHERE account_id = $1"))
+                .bind(account.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        sqlx::query("DELETE FROM mail_accounts WHERE id = $1")
+            .bind(account.id)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }

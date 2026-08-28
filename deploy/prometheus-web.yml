@@ -1,29 +1,36 @@
 # =============================================================================
-# Prometheus Web Configuration (audit P — now LIVE, previously dead)
+# Prometheus Web Configuration — TEMPLATE (audit P, hardened)
 # =============================================================================
-# Provides HTTP basic authentication for the Prometheus web interface and API.
-# This file is mounted into the prometheus service and passed via
-# --web.config.file in docker-compose.yml — the snippet below is ACTIVE
-# configuration read by Prometheus at startup (comments are ignored).
+# This file is a documented TEMPLATE. It is mounted read-only at
+# /etc/prometheus/web.yml.tmpl; at container start
+# deploy/scripts/render-prometheus-web-config.sh writes the LIVE config to
+# /tmp/prometheus-web.yml (passed via --web.config.file in
+# docker-compose.yml) and execs the server.
 #
-# ENABLING AUTH (three coordinated steps — do not just uncomment):
-#   1. Generate a bcrypt hash for your password:
-#        htpasswd -nbBC 10 admin <your-password> | cut -d: -f2
-#      and fill it into basic_auth_users below.
-#   2. Update the Grafana datasource credentials
-#      (deploy/grafana/provisioning/datasources/prometheus.yml — add
-#      basicAuth/user/password) or dashboards stop collecting.
-#   3. Update anything probing http://localhost:9090 (healthchecks in
-#      docker-compose.yml use --web.config-unaffected /-/ready paths, but
-#      external scrapers of the UI/API need the credentials).
+# ENABLING BASIC AUTH — set ONE of these in .env (no file editing needed):
+#   PROMETHEUS_WEB_PASSWORD_HASH   (preferred — pre-generated bcrypt)
+#     htpasswd -nbBC 10 admin "$PROMETHEUS_WEB_PASSWORD" | cut -d: -f2
+#   PROMETHEUS_WEB_PASSWORD        (plaintext; hashed in-container only when
+#                                   a bcrypt tool exists — the stock
+#                                   prom/prometheus image has none, so the
+#                                   HASH form is the reliable one)
+# Optional: PROMETHEUS_WEB_USER (default: admin)
+#
+# The rendered config is exactly:
+#   basic_auth_users:
+#     admin: $2y$10$...   # bcrypt hash
+#
+# After enabling auth, update the Grafana datasource credentials
+# (deploy/grafana/provisioning/datasources/prometheus.yml — add
+# basicAuth/user/password) or dashboards stop collecting.
+#
+# With NEITHER variable set the UI/API is UNAUTHENTICATED and refusing
+# remote exposure relies on BINDING ONLY: the compose files publish 9090
+# exclusively on 127.0.0.1. Never publish 9090 off-loopback without a
+# password.
 #
 # TLS configuration (optional) for the Prometheus web interface:
 #   tls_server_config:
 #     cert_file: /etc/prometheus/certs/tls.crt
 #     key_file: /etc/prometheus/certs/tls.key
 # =============================================================================
-
-# Basic authentication for Prometheus web UI and API — disabled by default.
-# See the steps above before enabling.
-# basic_auth_users:
-#   admin: $2y$10$...  # bcrypt hash of your password

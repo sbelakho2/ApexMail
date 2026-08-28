@@ -1,9 +1,7 @@
 //! Tenants repository.
 
-use sqlx::PgPool;
-use uuid::Uuid;
-
 use crate::types::Tenant;
+use sqlx::PgPool;
 
 /// Repository for tenant operations.
 pub struct TenantsRepo;
@@ -21,7 +19,7 @@ impl TenantsRepo {
              VALUES ($1, $2, $3, $4, 'active', NOW(), NOW()) \
              RETURNING id, name, slug, plan, status, created_at, updated_at",
         )
-        .bind(Uuid::new_v4())
+        .bind(apexmail_lib::id::generate_id("", 26))
         .bind(name)
         .bind(slug)
         .bind(plan)
@@ -30,7 +28,7 @@ impl TenantsRepo {
     }
 
     /// Find a tenant by ID.
-    pub async fn find_by_id(pool: &PgPool, id: Uuid) -> Result<Option<Tenant>, sqlx::Error> {
+    pub async fn find_by_id(pool: &PgPool, id: &str) -> Result<Option<Tenant>, sqlx::Error> {
         sqlx::query_as::<_, Tenant>(
             "SELECT id, name, slug, plan, status, created_at, updated_at FROM tenants WHERE id = $1"
         )
@@ -52,7 +50,7 @@ impl TenantsRepo {
     /// Update tenant details.
     pub async fn update(
         pool: &PgPool,
-        id: Uuid,
+        id: &str,
         name: &str,
         plan: &str,
         status: &str,
@@ -75,12 +73,11 @@ impl TenantsRepo {
 mod tests {
     use crate::types::Tenant;
     use chrono::Utc;
-    use uuid::Uuid;
 
     #[test]
     fn test_tenant_mock() {
         let t = Tenant {
-            id: Uuid::new_v4(),
+            id: apexmail_lib::id::generate_id("", 26),
             name: "Acme Inc".into(),
             slug: "acme-inc".into(),
             plan: "pro".into(),

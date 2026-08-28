@@ -42,7 +42,12 @@ pub fn router(state: Arc<AppState>) -> Router {
             require_service_token,
         ))
         .layer(DefaultBodyLimit::max(2 * 1024 * 1024)) // 2 MB
-        .layer(TimeoutLayer::new(Duration::from_secs(30)))
+        // HTTP-level cap. The sandbox work itself runs on a blocking thread
+        // (see `render_handler`), so this layer can actually fire and release
+        // the async worker instead of being stuck behind CPU-bound code.
+        .layer(TimeoutLayer::new(Duration::from_secs(
+            state.config.server.request_timeout_secs,
+        )))
         .with_state(state)
 }
 
@@ -119,7 +124,35 @@ async fn render_handler(
         missing_field_fallback: req.missing_field_fallback.clone(),
     };
 
-    match state.sandbox.execute(&req.source, &opts) {
+    // The sandbox execute is CPU-bound (regex scans, html5ever parse,
+    // minify). Running it inline on the async worker starves the runtime:
+    // the TimeoutLayer cannot fire while a future is stuck inside a poll,
+    // so one slow render used to hang the whole request (and worker) until
+    // the sandbox finished. `spawn_blocking` moves it off the worker — the
+    // future yields Pending, the 30s HTTP timeout can fire (408), and the
+    // worker keeps serving other requests.
+    let sandbox = state.sandbox.clone();
+    let blocking_source = req.source.clone();
+    let blocking_opts = opts.clone();
+    let result = match tokio::task::spawn_blocking(move || {
+        sandbox.execute(&blocking_source, &blocking_opts)
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(join_err) => {
+            tracing::error!(error = %join_err, "render blocking task panicked");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "RENDER_TASK_FAILED",
+                    "message": "render task failed unexpectedly",
+                })),
+            );
+        }
+    };
+
+    match result {
         Ok(result) => {
             let plaintext = if opts.generate_plaintext {
                 Some(html_to_plaintext(&result.html))
@@ -127,8 +160,10 @@ async fn render_handler(
                 None
             };
 
+            // Subject-bound resolution also strips CR/LF/NUL (header
+            // injection hardening — see the transpiler's subject variant).
             let subject = opts.subject.as_ref().map(|s| {
-                transpiler::resolve_placeholders_plain_reported(
+                transpiler::resolve_placeholders_subject_reported(
                     s,
                     &opts.props,
                     opts.missing_field_fallback.as_deref().unwrap_or(""),
@@ -219,6 +254,7 @@ mod tests {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 9080,
+                request_timeout_secs: 30,
             },
             sandbox: SandboxConfig {
                 timeout_ms: 5000,
@@ -276,5 +312,88 @@ mod tests {
             module: "fs".into(),
         };
         assert_eq!(err.code().to_string(), "FORBIDDEN_MODULE");
+    }
+
+    /// A CPU-bound render that outruns the HTTP timeout must produce a 408
+    /// (tower-http 0.5 `TimeoutLayer`) instead of hanging the request on a
+    /// blocked async worker, and the runtime must stay responsive while the
+    /// render is stuck.
+    ///
+    /// The sandbox's own 60s timeout deliberately cannot fire here (it only
+    /// checks between phases), so the only thing that can bound this request
+    /// is the HTTP layer — which requires the sandbox work to run off the
+    /// async worker (`spawn_blocking`).
+    #[tokio::test]
+    async fn render_handler_slow_render_times_out_and_runtime_stays_responsive() {
+        use tower::ServiceExt;
+
+        let config = RendererConfig {
+            db: DatabaseConfig {
+                url: "postgres://localhost/test".to_string(),
+                max_connections: 5,
+            },
+            server: ServerConfig {
+                host: "127.0.0.1".to_string(),
+                port: 9080,
+                request_timeout_secs: 1,
+            },
+            sandbox: SandboxConfig {
+                timeout_ms: 60_000, // sandbox's own checks must NOT fire first
+                max_memory_bytes: 64 * 1024 * 1024,
+                max_source_length: 512 * 1024,
+                max_output_length: 2 * 1024 * 1024,
+            },
+            cache: CacheConfig {
+                max_entries: 100,
+                ttl_secs: 60,
+            },
+        };
+        let pool = sqlx::PgPool::connect_lazy("postgres://localhost/test").unwrap();
+        let state = Arc::new(AppState {
+            db: pool,
+            sandbox: Sandbox::new(config.sandbox.clone()),
+            cache: TemplateCache::new(config.cache.max_entries, config.cache.ttl_secs),
+            config,
+            service_token: "test-key".into(),
+        });
+        let app = router(state);
+
+        // ~120KB of alternating <pre> regions (12 bytes each): minification's
+        // per-region scan is quadratic, so this legitimately burns CPU well
+        // past the 1s HTTP cap while staying a perfectly legal template.
+        let source = "<pre>a</pre>".repeat(10_000);
+        assert!(source.len() < 512 * 1024);
+
+        let body = serde_json::json!({ "source": source, "minify": true });
+        let render_req = Request::builder()
+            .method("POST")
+            .uri("/render")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let health_req = Request::builder()
+            .uri("/health")
+            .body(Body::empty())
+            .unwrap();
+
+        let (render_outcome, health_outcome) = tokio::join!(
+            tokio::time::timeout(Duration::from_secs(5), app.clone().oneshot(render_req)),
+            tokio::time::timeout(Duration::from_millis(2_000), app.oneshot(health_req)),
+        );
+
+        let health_resp = health_outcome
+            .expect("/health must stay responsive while a render is stuck")
+            .unwrap(); // Router's error type is Infallible
+        assert_eq!(health_resp.status(), StatusCode::OK);
+
+        let resp = render_outcome
+            .expect("render request must resolve via the HTTP timeout, not hang")
+            .expect("render oneshot must not error");
+        assert_eq!(
+            resp.status(),
+            StatusCode::REQUEST_TIMEOUT,
+            "slow render must be cut off by the HTTP timeout layer"
+        );
     }
 }

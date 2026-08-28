@@ -13,7 +13,14 @@ Für Enterprise-Beschaffung, Sicherheitsprüfung oder Private-Cloud-Planung fül
 
 ## Vertriebsanfrage-Formular
 
+<div id="enquiry-submitted" class="form-banner form-banner--success" role="status">
+  <p><strong>Vielen Dank — Ihre Eingabe wurde übermittelt.</strong> Unser Team prüft die Anfrage und antwortet innerhalb von 2 Werktagen.</p>
+</div>
+<div id="enquiry-error" class="form-banner form-banner--error" role="alert">
+  <p><strong>Ihre Eingabe konnte nicht entgegengenommen werden.</strong> Bitte prüfen Sie die Pflichtfelder (eine gültige geschäftliche E-Mail-Adresse ist erforderlich) und versuchen Sie es erneut.</p>
+</div>
 <form id="sales-contact-form" class="space-y-6 max-w-2xl" method="POST" action="https://api.apexmail.ee/v1/contact/sales">
+  <input type="hidden" name="page_language" value="de" />
   <div>
     <label for="company" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Unternehmen <span class="text-red-500">*</span></label>
     <input type="text" id="company" name="company" required
@@ -166,6 +173,7 @@ Für Enterprise-Beschaffung, Sicherheitsprüfung oder Private-Cloud-Planung fül
       <svg class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
     </button>
   </div>
+  <p class="form-privacy-note">Mit dem Absenden dieses Formulars akzeptieren Sie unsere <a href="/de/privacy/">Datenschutzerklärung</a>. Wir verwenden Ihre Angaben ausschließlich zur Beantwortung Ihrer Anfrage (DSGVO Art. 13).</p>
 </form>
 
 ## Wie es weitergeht

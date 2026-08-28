@@ -1,6 +1,6 @@
-//! Redis-backed distributed rate limiter using sorted sets and Lua scripting.
+//! Redis-backed distributed rate limiter using a token bucket in Lua.
 //!
-//! Provides a sliding window rate limiter that shares state across all pods
+//! Provides a token bucket rate limiter that shares state across all pods
 //! via Redis. Falls back to in-memory governor-based limiting when Redis
 //! is unreachable, with automatic recovery when Redis comes back online.
 //!
@@ -9,7 +9,7 @@
 //! ```text
 //! ┌──────────────┐     ┌───────────────────┐     ┌─────────────┐
 //! │  check() /   │ ──▶ │  RedisLimiter      │ ──▶ │  Redis       │
-//! │  check_n()   │     │  (Lua script)      │     │  (SortedSet) │
+//! │  check_n()   │     │  (Lua script)      │     │  (HASH)      │
 //! └──────────────┘     └───────────────────┘     └─────────────┘
 //!                             │  fallback
 //!                             ▼
@@ -19,16 +19,18 @@
 //!                      └──────────────┘
 //! ```
 //!
-//! ## Lua Script (Sliding Window)
+//! ## Lua Script (Token Bucket)
 //!
-//! The script uses Redis Sorted Sets to track request timestamps within a
-//! sliding time window. Expired entries are removed on each check via
-//! `ZREMRANGEBYSCORE`, and the current count is compared against the limit.
+//! The bucket starts with `burst` tokens and refills continuously at
+//! `rps` tokens per second. Each check is an atomic TAKE: at most `burst`
+//! requests pass instantaneously and at most `rps` requests/second are
+//! sustained. All timing uses `redis.call('TIME')` so instances with
+//! skewed clocks cannot corrupt the shared bucket (no caller clock is
+//! sent or trusted).
 
 #![cfg(feature = "redis")]
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
@@ -44,81 +46,167 @@ const FALLBACK_WARN_INTERVAL: Duration = Duration::from_secs(60);
 const DEFAULT_WINDOW_SECS: u64 = 1;
 
 /// Environment variable dividing the fallback budget across the expected
-/// number of pods sharing the limit (default `1` — no division).
+/// number of pods sharing the limit.
 ///
 /// When Redis is unreachable each pod falls back to an independent
 /// in-memory limiter. With N pods each enforcing the FULL limit, the fleet
 /// effectively allows N× the configured rate. Setting this to the expected
-/// pod count divides the fallback limit accordingly (fail-open ratio).
+/// pod count divides the fallback limit (both burst and sustained rate)
+/// accordingly.
+///
+/// When UNSET the budget is divided by 2 (fix #2): a default of 1 meant N
+/// pods each held the full budget, admitting N× the configured limit.
+/// The conservative default of 2 halves the damage of a Redis outage on a
+/// single-pod deployment while still bounding multi-pod over-admission to
+/// 2× instead of N×.
 pub const FALLBACK_PODS_ENV: &str = "RATE_LIMIT_FALLBACK_PODS";
 
-/// Lua script implementing the atomic sliding-window check.
+/// Default fallback budget divisor when `RATE_LIMIT_FALLBACK_PODS` is unset.
+pub const DEFAULT_FALLBACK_SHARES: u64 = 2;
+
+/// Lua script implementing the atomic token-bucket TAKE (fixes #1 and #4).
+///
+/// Semantics enforced IN LUA (not derivable from a sliding window):
+/// - the bucket starts full at `capacity` (= `effective_burst()`) tokens;
+/// - tokens refill CONTINUOUSLY at `refill_per_sec` (= `requests_per_second`)
+///   tokens/second, clamped at capacity;
+/// - each check atomically takes `cost` tokens: at most `burst` requests
+///   pass instantaneously, at most `rps` are sustained per second;
+/// - `remaining` returned to the caller is the ACTUAL token count.
+///
+/// All timestamps come from `redis.call('TIME')` — the caller's app clock
+/// is never used, so cross-instance clock skew cannot corrupt the bucket.
+///
+/// Precision: tokens are stored as integer "micro-tokens" (1 token =
+/// 10^6 micro-tokens). Because 1 token/s = 10^6 micro-tokens / 10^6 µs,
+/// the per-microsecond refill rate equals `refill_per_sec`, so elapsed
+/// micro-seconds × refill rate gives micro-tokens directly.
 ///
 /// Built ONCE per limiter (fix K1): `redis::Script::new` computes the
 /// script SHA-1 hash on every construction, so re-creating it per check
 /// burned CPU on the hot path. `Script` is cheap to reuse (`invoke`
 /// clones internally).
-const SLIDING_WINDOW_SCRIPT: &str = r#"
-            local window = tonumber(ARGV[1])
-            local max_requests = tonumber(ARGV[2])
-            local now = tonumber(ARGV[3])
-            local cost = tonumber(ARGV[4])
-            local window_start = now - window
+const TOKEN_BUCKET_SCRIPT: &str = r#"
+            local time = redis.call('TIME')
+            local now_us = tonumber(time[1]) * 1000000 + tonumber(time[2])
 
-            -- Remove expired entries outside the current window
-            redis.call('ZREMRANGEBYSCORE', KEYS[1], 0, window_start)
+            local capacity = tonumber(ARGV[1])
+            local refill_per_sec = tonumber(ARGV[2])
+            local cost = tonumber(ARGV[3])
 
-            -- Count current entries in the window
-            local current = redis.call('ZCARD', KEYS[1])
+            local SCALE = 1000000
+            local capacity_ut = capacity * SCALE
 
-            if current + cost > max_requests then
-                -- Denied: get the oldest entry's timestamp for retry-after calc
-                local oldest = redis.call('ZRANGE', KEYS[1], 0, 0, 'WITHSCORES')
-                local retry_after = 0
-                if oldest[2] then
-                    retry_after = window - (now - tonumber(oldest[2]))
-                end
-                return {0, retry_after, current}
+            local bucket = redis.call('HMGET', KEYS[1], 'ut', 'ts')
+            local tokens_ut = tonumber(bucket[1]) or capacity_ut
+            local ts_us = tonumber(bucket[2]) or now_us
+            if ts_us > now_us then
+                -- Future timestamp (skewed writer / manual seeding):
+                -- clamp to now so elapsed never goes negative.
+                ts_us = now_us
             end
 
-            -- Allowed: add one member per unit of cost so ZCARD always equals
-            -- the real request count.  TIME gives microsecond precision; the
-            -- per-script loop index disambiguates members added within the
-            -- same TIME snapshot (a batch of cost>1 must create cost members).
-            local time_arr = redis.call('TIME')
-            local member_base = now .. ':' .. time_arr[1] .. '.' .. time_arr[2]
-            for i = 1, cost do
-                redis.call('ZADD', KEYS[1], now, member_base .. ':' .. i)
-            end
-            redis.call('EXPIRE', KEYS[1], window)
+            -- Continuous refill, clamped at capacity.
+            tokens_ut = math.min(capacity_ut, tokens_ut + (now_us - ts_us) * refill_per_sec)
 
-            return {1, 0, current + cost}
+            local allowed = 0
+            local retry_after_us = 0
+            local cost_ut = cost * SCALE
+            if tokens_ut >= cost_ut then
+                tokens_ut = tokens_ut - cost_ut
+                allowed = 1
+            elseif refill_per_sec > 0 then
+                -- Micro-seconds until `cost` tokens are available:
+                -- deficit micro-tokens / (refill micro-tokens per micro-second).
+                retry_after_us = math.ceil((cost_ut - tokens_ut) / refill_per_sec)
+            else
+                retry_after_us = SCALE
+            end
+
+            redis.call('HSET', KEYS[1], 'ut', tokens_ut, 'ts', now_us)
+            -- Expire once the bucket could have refilled from empty to
+            -- full, plus a 60s buffer so idle buckets are reclaimed.
+            local ttl = 60
+            if refill_per_sec > 0 then
+                ttl = math.ceil(capacity / refill_per_sec) + 60
+            end
+            redis.call('EXPIRE', KEYS[1], ttl)
+
+            local remaining = math.floor(tokens_ut / SCALE)
+            return {allowed, retry_after_us, remaining}
+            "#;
+
+/// Lua script implementing a read-only token-bucket peek (fix K2: peek
+/// must never mutate state). Computes the same refill as
+/// [`TOKEN_BUCKET_SCRIPT`] but writes nothing; returns the remaining
+/// whole tokens and the µs until one token is available.
+const TOKEN_PEEK_SCRIPT: &str = r#"
+            local time = redis.call('TIME')
+            local now_us = tonumber(time[1]) * 1000000 + tonumber(time[2])
+
+            local capacity = tonumber(ARGV[1])
+            local refill_per_sec = tonumber(ARGV[2])
+
+            local SCALE = 1000000
+            local capacity_ut = capacity * SCALE
+
+            local bucket = redis.call('HMGET', KEYS[1], 'ut', 'ts')
+            if not bucket[1] then
+                return {capacity, 0}
+            end
+            local tokens_ut = tonumber(bucket[1]) or capacity_ut
+            local ts_us = tonumber(bucket[2]) or now_us
+            if ts_us > now_us then
+                ts_us = now_us
+            end
+
+            tokens_ut = math.min(capacity_ut, tokens_ut + (now_us - ts_us) * refill_per_sec)
+
+            local retry_after_us = 0
+            if tokens_ut < SCALE and refill_per_sec > 0 then
+                retry_after_us = math.ceil((SCALE - tokens_ut) / refill_per_sec)
+            end
+            return {math.floor(tokens_ut / SCALE), retry_after_us}
             "#;
 
 /// Redis-backed distributed rate limiter with automatic in-memory fallback.
 ///
-/// Uses a Lua script with Redis Sorted Sets for atomic sliding window
-/// rate limiting that is consistent across all application pods.
+/// Uses a Lua token bucket in Redis for atomic, cross-pod-consistent rate
+/// limiting: `burst` tokens available immediately, continuous refill at
+/// `rps` tokens/second.
 pub struct RedisLimiter {
-    /// Redis connection manager, wrapped for `&mut self` access.
-    cm: Option<Arc<Mutex<redis::aio::ConnectionManager>>>,
+    /// Redis connection manager.
+    ///
+    /// Fix #3: `ConnectionManager` is `Clone` and internally multiplexed —
+    /// concurrent checks each clone it and run the Lua script in parallel;
+    /// the script itself is the atomicity boundary. The previous
+    /// `Arc<Mutex<ConnectionManager>>` serialized every check behind one
+    /// lock, defeating the multiplexed connection.
+    cm: Option<redis::aio::ConnectionManager>,
     /// Key prefix for Redis keys (e.g., `"ratelimit:"`).
     key_prefix: String,
-    /// Sliding window size in seconds.
+    /// Sliding window size in seconds (legacy parameter, retained for API
+    /// compatibility; the token bucket derives its own key TTL from
+    /// capacity/refill rate).
+    #[allow(dead_code)]
     window_secs: u64,
     /// Maximum requests allowed per window.
     max_requests: u64,
+    /// Sustained refill rate (tokens per second).
+    refill_per_sec: u64,
     /// In-memory fallback limiter used when Redis is unreachable.
     fallback: GovernorLimiter,
     /// The original rate configuration (used to rebuild the fallback when
     /// the pod-share divisor changes).
     base_config: RateLimitConfig,
     /// Expected number of pods sharing the limit; the fallback limiter's
-    /// budget is divided by this so a Redis outage does not multiply the
-    /// effective fleet-wide limit (default 1).
+    /// budget (burst AND sustained rate) is divided by this so a Redis
+    /// outage does not multiply the effective fleet-wide limit.
     fallback_shares: u64,
-    /// Pre-built sliding window script (SHA-1 computed once).
+    /// Pre-built token bucket script (SHA-1 computed once).
     script: redis::Script,
+    /// Pre-built read-only peek script (SHA-1 computed once).
+    peek_script: redis::Script,
     /// Whether we are currently operating in fallback mode.
     in_fallback: AtomicBool,
     /// Timestamp of the last fallback warning (debounce).
@@ -129,23 +217,26 @@ impl RedisLimiter {
     /// Create a new Redis-backed rate limiter.
     ///
     /// The limiter uses `RateLimitConfig` for rate parameters:
-    /// - `requests_per_second` → window size of 1 second
-    /// - `effective_burst()` → max requests per window
+    /// - `effective_burst()` → token bucket capacity (instantaneous burst)
+    /// - `requests_per_second` → continuous refill rate (sustained limit)
     ///
     /// The in-memory fallback budget is divided by the value of the
-    /// `RATE_LIMIT_FALLBACK_PODS` environment variable (default 1) so a
-    /// Redis outage does not multiply the effective limit across pods.
+    /// `RATE_LIMIT_FALLBACK_PODS` environment variable (default: divide
+    /// by 2) so a Redis outage does not multiply the effective limit
+    /// across pods.
     pub fn new(config: &RateLimitConfig, cm: redis::aio::ConnectionManager) -> Self {
         let shares = fallback_shares_from_env();
         Self {
-            cm: Some(Arc::new(Mutex::new(cm))),
+            cm: Some(cm),
             key_prefix: "ratelimit:".to_string(),
             window_secs: DEFAULT_WINDOW_SECS,
             max_requests: config.effective_burst().get() as u64,
+            refill_per_sec: config.requests_per_second.get() as u64,
             fallback: GovernorLimiter::new(&divided_config(config, shares)),
             base_config: config.clone(),
             fallback_shares: shares,
-            script: redis::Script::new(SLIDING_WINDOW_SCRIPT),
+            script: redis::Script::new(TOKEN_BUCKET_SCRIPT),
+            peek_script: redis::Script::new(TOKEN_PEEK_SCRIPT),
             in_fallback: AtomicBool::new(false),
             last_warn: Mutex::new(tokio::time::Instant::now()),
         }
@@ -189,10 +280,12 @@ impl RedisLimiter {
             key_prefix: "ratelimit:".to_string(),
             window_secs: DEFAULT_WINDOW_SECS,
             max_requests: config.effective_burst().get() as u64,
+            refill_per_sec: config.requests_per_second.get() as u64,
             fallback: GovernorLimiter::new(&divided_config(config, shares)),
             base_config: config.clone(),
             fallback_shares: shares,
-            script: redis::Script::new(SLIDING_WINDOW_SCRIPT),
+            script: redis::Script::new(TOKEN_BUCKET_SCRIPT),
+            peek_script: redis::Script::new(TOKEN_PEEK_SCRIPT),
             in_fallback: AtomicBool::new(true),
             last_warn: Mutex::new(tokio::time::Instant::now()),
         }
@@ -210,14 +303,16 @@ impl RedisLimiter {
         window_secs: u64,
     ) -> Self {
         Self {
-            cm: Some(Arc::new(Mutex::new(conn))),
+            cm: Some(conn),
             key_prefix: key_prefix.to_string(),
             window_secs,
             max_requests: config.effective_burst().get() as u64,
+            refill_per_sec: config.requests_per_second.get() as u64,
             fallback: GovernorLimiter::new(config),
             base_config: config.clone(),
             fallback_shares: 1,
-            script: redis::Script::new(SLIDING_WINDOW_SCRIPT),
+            script: redis::Script::new(TOKEN_BUCKET_SCRIPT),
+            peek_script: redis::Script::new(TOKEN_PEEK_SCRIPT),
             in_fallback: AtomicBool::new(false),
             last_warn: Mutex::new(tokio::time::Instant::now()),
         }
@@ -267,8 +362,9 @@ impl RedisLimiter {
 
     /// Read-only check without consuming capacity.
     ///
-    /// Uses `ZCOUNT` instead of the Lua script to avoid modifying the
-    /// sorted set. This is useful for health checks or monitoring.
+    /// Uses a read-only Lua peek (no writes) so the token bucket state is
+    /// never mutated by a peek. This is useful for health checks or
+    /// monitoring.
     ///
     /// Optionally scoped to a `tenant_id` to prevent key collisions between tenants.
     pub async fn peek(&self) -> Decision {
@@ -277,12 +373,13 @@ impl RedisLimiter {
 
     /// Read-only check without consuming capacity, scoped to a specific tenant.
     ///
-    /// Uses `ZCOUNT` instead of the Lua script to avoid modifying the
-    /// sorted set. This is useful for health checks or monitoring.
+    /// Uses a read-only Lua peek (no writes) so the token bucket state is
+    /// never mutated by a peek. This is useful for health checks or
+    /// monitoring.
     pub async fn peek_for_tenant(&self, tenant_id: Option<&str>) -> Decision {
         let key_scope = tenant_id.unwrap_or("default");
         let cm = match &self.cm {
-            Some(cm) => cm,
+            Some(cm) => cm.clone(),
             // RS-054: When Redis is unavailable, fail-open (allow) instead of
             // consuming tokens from the in-memory fallback, which causes over-limiting.
             // Peek is read-only and should not modify state.
@@ -297,41 +394,37 @@ impl RedisLimiter {
         };
 
         let key = format!("{}{}", self.key_prefix, key_scope);
-        let mut cm_guard = cm.lock().await;
+        let mut conn = cm;
 
-        let now = unix_epoch_secs();
-        let window_start = now.saturating_sub(self.window_secs);
-
-        match redis::cmd("ZCOUNT")
-            .arg(&key)
-            .arg(window_start)
-            .arg("+inf")
-            .query_async::<u64>(&mut *cm_guard)
+        match self
+            .peek_script
+            .key(key)
+            .arg(self.max_requests as i64)
+            .arg(self.refill_per_sec as i64)
+            .invoke_async::<Vec<i64>>(&mut conn)
             .await
         {
-            Ok(count) => {
+            Ok(result) => {
                 // If we were in fallback mode, we've recovered
                 if self.in_fallback.swap(false, Ordering::Relaxed) {
                     warn!("Redis rate limiter recovered, switching back from fallback");
                 }
 
-                if count >= self.max_requests {
+                let remaining = result.first().copied().unwrap_or(self.max_requests as i64) as u64;
+                let retry_after_us = result.get(1).copied().unwrap_or(0) as u64;
+                if remaining == 0 {
                     Decision::Denied {
-                        retry_after: Duration::from_secs(1),
+                        retry_after: Duration::from_micros(retry_after_us)
+                            .max(Duration::from_millis(1)),
                     }
                 } else {
-                    Decision::Allowed {
-                        remaining: self.max_requests.saturating_sub(count),
-                    }
+                    Decision::Allowed { remaining }
                 }
             }
             Err(err) => {
-                // Fix K2: peek must NOT consume capacity. The previous error
-                // path called `fallback.check_n(1)`, mutating in-memory
-                // state on a READ-ONLY operation (over-limiting clients
-                // whenever Redis blipped during a peek). Fail open instead,
-                // mirroring the no-Redis case above; only the fallback MODE
-                // flag is updated.
+                // Fix K2: peek must NOT consume capacity. The error path
+                // fails open (read-only, no state mutation); only the
+                // fallback MODE flag is updated.
                 debug!(%err, "Redis peek error — failing open (read-only, no state mutation)");
                 self.enter_fallback().await;
                 Decision::Allowed {
@@ -354,10 +447,10 @@ impl RedisLimiter {
         match &self.cm {
             Some(cm) => {
                 let key = format!("{}{}", self.key_prefix, key_scope);
-                let mut cm_guard = cm.lock().await;
+                let mut conn = cm.clone();
                 redis::cmd("DEL")
                     .arg(&key)
-                    .query_async::<()>(&mut *cm_guard)
+                    .query_async::<()>(&mut conn)
                     .await?;
                 Ok(())
             }
@@ -386,32 +479,33 @@ impl RedisLimiter {
         }
     }
 
-    /// Evaluate the Lua sliding window script against Redis.
+    /// Evaluate the Lua token-bucket script against Redis.
     async fn eval_script(&self, key: &str, cost: u32) -> Result<Decision, redis::RedisError> {
-        let mut cm_guard = self
+        // Fix #3: clone the multiplexed ConnectionManager — no lock; the
+        // Lua script is the atomicity boundary.
+        let mut conn = self
             .cm
             .as_ref()
             .expect("invariant: eval_script only called when cm is Some")
-            .lock()
-            .await;
-
-        let now = unix_epoch_secs();
+            .clone();
 
         // Fix K1: the script (and its SHA-1 hash) is pre-built at
         // construction; re-creating it per check burned CPU on the hot path.
+        // Fix #4: no caller clock is passed — the script uses redis TIME.
         let result: Vec<i64> = self
             .script
             .key(key)
-            .arg(self.window_secs as i64)
             .arg(self.max_requests as i64)
-            .arg(now as i64)
+            .arg(self.refill_per_sec as i64)
             .arg(cost as i64)
-            .invoke_async(&mut *cm_guard)
+            .invoke_async(&mut conn)
             .await?;
 
         let allowed = result.first().copied().unwrap_or(0) == 1;
-        let retry_after_secs = result.get(1).copied().unwrap_or(0) as u64;
-        let used = result.get(2).copied().unwrap_or(0) as u64;
+        let retry_after_us = result.get(1).copied().unwrap_or(0) as u64;
+        // Fix #1: remaining is the ACTUAL token count reported by the
+        // script, not `max - used` derived from a window count.
+        let remaining = result.get(2).copied().unwrap_or(0) as u64;
 
         if allowed {
             metrics::counter!(
@@ -420,9 +514,7 @@ impl RedisLimiter {
                 "decision" => "allowed"
             )
             .increment(cost as u64);
-            Ok(Decision::Allowed {
-                remaining: self.max_requests.saturating_sub(used),
-            })
+            Ok(Decision::Allowed { remaining })
         } else {
             metrics::counter!(
                 "rate_limiter_requests_total",
@@ -432,31 +524,31 @@ impl RedisLimiter {
             .increment(cost as u64);
             metrics::counter!("rate_limiter_blocked_total", "strategy" => "redis").increment(1);
             Ok(Decision::Denied {
-                retry_after: Duration::from_secs(retry_after_secs.max(1)),
+                retry_after: Duration::from_micros(retry_after_us).max(Duration::from_millis(1)),
             })
         }
     }
 }
 
-/// Get the current Unix epoch time in seconds.
-fn unix_epoch_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 /// Read the expected pod count for fallback budget sharing from the
-/// environment (default 1 — each pod enforces the full limit).
+/// environment.
+///
+/// Fix #2: when unset, the budget is divided by
+/// [`DEFAULT_FALLBACK_SHARES`] (2) — the previous default of 1 let N pods
+/// each hold the FULL budget, admitting N× the configured limit during a
+/// Redis outage.
 fn fallback_shares_from_env() -> u64 {
     std::env::var(FALLBACK_PODS_ENV)
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v > 0)
-        .unwrap_or(1)
+        .unwrap_or(DEFAULT_FALLBACK_SHARES)
 }
 
 /// Divide a rate config across `shares` pods (each dimension at least 1).
+///
+/// Both the sustained rate (`rps`) and the burst are divided so the
+/// fallback enforces `rps / shares` sustained — not the full burst rate.
 fn divided_config(config: &RateLimitConfig, shares: u64) -> RateLimitConfig {
     if shares <= 1 {
         return config.clone();
@@ -493,7 +585,9 @@ mod tests {
     #[tokio::test]
     async fn test_fallback_allows_within_limit() {
         let config = RateLimitConfig::new(10).with_burst(5);
-        let limiter = RedisLimiter::fallback_only(&config);
+        // Explicit single pod: the DEFAULT now divides the budget by 2
+        // (fix #2), which is pinned by test_fallback_shares_default_is_two.
+        let limiter = RedisLimiter::fallback_only(&config).with_fallback_shares(1);
 
         for _ in 0..5 {
             let decision = limiter.check().await;
@@ -595,16 +689,77 @@ mod tests {
         );
     }
 
+    /// Env-test mutex: `std::env::set_var` races when tests run on
+    /// multiple threads (same pattern as config.rs).
+    static ENV_TEST_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[tokio::test]
-    async fn test_fallback_shares_default_is_one() {
-        let config = RateLimitConfig::new(50).with_burst(5);
-        let limiter = RedisLimiter::fallback_only(&config);
-        assert_eq!(limiter.fallback_shares(), 1);
-        // No division: full burst available in fallback
-        for _ in 0..5 {
+    async fn test_fallback_shares_default_is_two_when_env_unset() {
+        // Fix #2: with RATE_LIMIT_FALLBACK_PODS unset the fallback budget
+        // must be divided conservatively by 2 — a default of 1 meant N pods
+        // each held the FULL budget, admitting N× the configured limit.
+        let limiter = {
+            let _guard = ENV_TEST_MUTEX.lock().unwrap();
+            if std::env::var(FALLBACK_PODS_ENV).is_ok() {
+                // Another test set it; avoid fighting over the environment.
+                eprintln!("skipping: {FALLBACK_PODS_ENV} set in environment");
+                return;
+            }
+            let config = RateLimitConfig::new(50).with_burst(5);
+            RedisLimiter::fallback_only(&config)
+        };
+        assert_eq!(
+            limiter.fallback_shares(),
+            2,
+            "default fallback division must be 2 (conservative)"
+        );
+        // 50 rps/burst 5 divided by 2 → per-pod burst ceil(5/2)=3.
+        for _ in 0..3 {
             assert!(limiter.check().await.is_allowed());
         }
         assert!(limiter.check().await.is_denied());
+    }
+
+    #[tokio::test]
+    async fn test_fallback_shares_env_override_respected() {
+        let limiter = {
+            let _guard = ENV_TEST_MUTEX.lock().unwrap();
+            let original = std::env::var(FALLBACK_PODS_ENV).ok();
+            std::env::set_var(FALLBACK_PODS_ENV, "8");
+            let config = RateLimitConfig::new(100).with_burst(16);
+            let limiter = RedisLimiter::fallback_only(&config);
+            match original {
+                Some(v) => std::env::set_var(FALLBACK_PODS_ENV, v),
+                None => std::env::remove_var(FALLBACK_PODS_ENV),
+            }
+            limiter
+        };
+        assert_eq!(limiter.fallback_shares(), 8);
+        // burst 16 / 8 pods = 2 per pod.
+        assert!(limiter.check().await.is_allowed());
+        assert!(limiter.check().await.is_allowed());
+        assert!(limiter.check().await.is_denied());
+    }
+
+    /// Fix #2: the division must apply to the SUSTAINED rate (rps), not
+    /// only the burst — otherwise the fallback still admits the full
+    /// configured rate per second on every pod.
+    #[test]
+    fn test_divided_config_divides_sustained_rate_not_just_burst() {
+        let config = RateLimitConfig::new(100).with_burst(10);
+        let divided = divided_config(&config, 4);
+        assert_eq!(divided.requests_per_second.get(), 25, "rps must be 100/4");
+        assert_eq!(
+            divided.effective_burst().get(),
+            3,
+            "burst must be ceil(10/4)"
+        );
+        assert_eq!(divided.jitter_ms, config.jitter_ms);
+
+        // shares <= 1 is a no-op.
+        let undivided = divided_config(&config, 1);
+        assert_eq!(undivided.requests_per_second.get(), 100);
+        assert_eq!(undivided.effective_burst().get(), 10);
     }
 
     // ── Fix K2:peek never mutates fallback state ───────────────────
@@ -612,7 +767,9 @@ mod tests {
     #[tokio::test]
     async fn test_peek_does_not_consume_capacity() {
         let config = RateLimitConfig::new(10).with_burst(2);
-        let limiter = RedisLimiter::fallback_only(&config);
+        // Single pod (no default ÷2 division): this test pins the K2 peek
+        // semantics, not the fallback budget split.
+        let limiter = RedisLimiter::fallback_only(&config).with_fallback_shares(1);
 
         // Consume one token
         assert!(limiter.check().await.is_allowed());
@@ -657,7 +814,7 @@ mod tests {
                 // Verify connectivity with a simple PING
                 let mut cm_clone = cm.clone();
                 let pong: Result<String, _> = redis::cmd("PING").query_async(&mut cm_clone).await;
-                if pong.map_or(false, |v| v == "PONG") {
+                if pong.is_ok_and(|v| v == "PONG") {
                     Some(cm)
                 } else {
                     None
@@ -820,7 +977,7 @@ mod tests {
             .await
             .expect("Redis not available. Start Redis or set REDIS_TEST_URL");
         let config = RateLimitConfig::new(100).with_burst(5);
-        let limiter = RedisLimiter::with_connection(&config, cm, "test:batchn:", 10);
+        let limiter = RedisLimiter::with_connection(&config, cm, "test:batchn:", 1);
 
         limiter.reset().await.unwrap();
 
@@ -835,6 +992,175 @@ mod tests {
 
         // Now at limit
         assert!(limiter.check().await.is_denied());
+
+        limiter.reset().await.unwrap();
+    }
+
+    /// Integration test (fix #1): the Redis limiter must be a TOKEN BUCKET —
+    /// `burst` tokens available immediately, continuous refill at `rps`
+    /// tokens/second. The previous sliding window enforced `burst` per
+    /// rolling second, so (rps=10, burst=100) admitted 100 req/s forever.
+    #[ignore]
+    #[tokio::test]
+    async fn test_redis_token_bucket_burst_and_sustained_rate() {
+        let cm = test_redis_connection()
+            .await
+            .expect("Redis not available. Start Redis or set REDIS_TEST_URL");
+        let config = RateLimitConfig::new(10).with_burst(100);
+        let limiter = RedisLimiter::with_connection(&config, cm, "test:tokenbucket:", 1);
+
+        limiter.reset().await.unwrap();
+
+        // remaining must report ACTUAL tokens after a take.
+        let d = limiter.check().await;
+        assert!(d.is_allowed());
+        assert_eq!(
+            d.remaining(),
+            99,
+            "Decision::remaining must report actual tokens (100 - 1)"
+        );
+
+        // Drain the rest of the burst: 99 more immediate checks pass.
+        for i in 0..99 {
+            assert!(
+                limiter.check().await.is_allowed(),
+                "immediate check {i} within burst must pass"
+            );
+        }
+        // The 101st check in the same instant must fail: burst exhausted,
+        // only the 10/s refill remains.
+        assert!(
+            limiter.check().await.is_denied(),
+            "101st immediate check must be denied (burst exhausted)"
+        );
+
+        // After ~1s idle, only ~rps tokens may be available (8..12
+        // tolerant window), NOT the full burst again (the old sliding
+        // window re-admitted all 100 here).
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        let mut available = 0;
+        for _ in 0..100 {
+            if limiter.check().await.is_allowed() {
+                available += 1;
+            } else {
+                break;
+            }
+        }
+        assert!(
+            (8..=12).contains(&available),
+            "after ~1s idle at rps=10 expected 8..12 tokens, got {available}"
+        );
+
+        limiter.reset().await.unwrap();
+    }
+
+    /// Integration test (fix #4): the Lua script must use `redis TIME`,
+    /// never the caller's app clock. A bucket whose stored timestamp is in
+    /// the future (skewed writer / manual seeding) must be clamped to now
+    /// (no negative elapsed time), and a far-past timestamp must refill to
+    /// at most capacity — never beyond it.
+    #[ignore]
+    #[tokio::test]
+    async fn test_redis_time_skew_tolerant() {
+        let mut cm = test_redis_connection()
+            .await
+            .expect("Redis not available. Start Redis or set REDIS_TEST_URL");
+        let config = RateLimitConfig::new(10).with_burst(50);
+        let limiter = RedisLimiter::with_connection(&config, cm.clone(), "test:skew:", 1);
+
+        limiter.reset().await.unwrap();
+
+        // ── Future timestamp (a writer whose clock ran ahead) ──
+        // Drain the bucket completely first.
+        for _ in 0..50 {
+            assert!(limiter.check().await.is_allowed());
+        }
+        assert!(limiter.check().await.is_denied());
+
+        // Force the stored timestamp far into the FUTURE. If the script
+        // trusted caller-supplied or unclamped timestamps, elapsed would go
+        // negative and tokens would be "un-spent" (over-admission).
+        let future_ts_us: i64 = (std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_micros()
+            + 3_600_000_000) as i64; // +1 hour, in µs
+        redis::cmd("HSET")
+            .arg("test:skew:default")
+            .arg("ts")
+            .arg(future_ts_us)
+            .query_async::<()>(&mut cm)
+            .await
+            .unwrap();
+        // Timestamp clamped to now → no phantom refill → still denied.
+        assert!(
+            limiter.check().await.is_denied(),
+            "future ts must be clamped; no phantom tokens may appear"
+        );
+
+        limiter.reset().await.unwrap();
+
+        // ── Far-past timestamp (a writer whose clock fell behind) ──
+        // Refill must be CLAMPED AT CAPACITY: the 101st token must not be
+        // admissible even though elapsed is enormous.
+        redis::cmd("HSET")
+            .arg("test:skew:default")
+            .arg("ut")
+            .arg(0i64)
+            .arg("ts")
+            .arg(1i64) // epoch+1µs — over 50 years of "elapsed"
+            .query_async::<()>(&mut cm)
+            .await
+            .unwrap();
+        for i in 0..50 {
+            assert!(
+                limiter.check().await.is_allowed(),
+                "refilled-to-capacity check {i} must pass"
+            );
+        }
+        assert!(
+            limiter.check().await.is_denied(),
+            "refill must clamp at capacity (50), not exceed it"
+        );
+
+        limiter.reset().await.unwrap();
+    }
+
+    /// Integration test (fix #3): concurrent checks must not serialize or
+    /// deadlock — the ConnectionManager is multiplexed and the Lua script
+    /// is the atomicity boundary (no connection-level mutex).
+    #[ignore]
+    #[tokio::test]
+    async fn test_redis_concurrent_checks_share_multiplexed_connection() {
+        use std::sync::Arc;
+        let cm = test_redis_connection()
+            .await
+            .expect("Redis not available. Start Redis or set REDIS_TEST_URL");
+        let config = RateLimitConfig::new(10).with_burst(200);
+        let limiter = Arc::new(RedisLimiter::with_connection(
+            &config,
+            cm,
+            "test:concurrent:",
+            1,
+        ));
+
+        limiter.reset().await.unwrap();
+
+        let mut handles = Vec::new();
+        for t in 0..50u32 {
+            let l = Arc::clone(&limiter);
+            handles.push(tokio::spawn(async move {
+                let d = l.check_n_for_tenant(Some(&format!("tenant-{t}")), 1).await;
+                d.is_allowed()
+            }));
+        }
+        let mut allowed = 0;
+        for h in handles {
+            if h.await.expect("task must not panic") {
+                allowed += 1;
+            }
+        }
+        assert_eq!(allowed, 50, "all concurrent checks must be allowed");
 
         limiter.reset().await.unwrap();
     }

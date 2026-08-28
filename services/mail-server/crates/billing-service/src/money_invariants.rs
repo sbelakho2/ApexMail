@@ -68,16 +68,16 @@ impl Rng {
 fn usd_display_string_round_trips_to_integer_cents() {
     let mut rng = Rng::new(0xB00);
     for _ in 0..2_000 {
-        let cents = (rng.next_u64() % 1_000_000_000_000) as i64; // < $10B, well inside f64 exact range for 2dp strings
+        let cents = (rng.next_u64() % 1_000_000_000_000) as i64; // < €10B, well inside f64 exact range for 2dp strings
         let rendered = cents_to_usd_string(cents);
-        let without_currency = rendered.trim_start_matches('$').to_string();
+        let without_currency = rendered.trim_start_matches('€').to_string();
         let parsed = without_currency
             .split('.')
             .map(str::to_string)
             .collect::<Vec<_>>();
         let rebuilt: i64 = match parsed.as_slice() {
             [whole, frac] => {
-                let whole: i64 = whole.parse().expect("whole dollars parse");
+                let whole: i64 = whole.parse().expect("whole euros parse");
                 assert_eq!(frac.len(), 2, "always exactly two fraction digits");
                 let frac: i64 = frac.parse().expect("cents fraction parses");
                 whole * 100 + frac

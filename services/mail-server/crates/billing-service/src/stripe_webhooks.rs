@@ -587,16 +587,26 @@ fn derive_invoice_totals(
     total: Option<i64>,
     amount_due: i64,
 ) -> (i64, i64, i64) {
-    let subtotal = subtotal.filter(|value| *value > 0);
-    let tax = tax.filter(|value| *value > 0);
-    let total = total.filter(|value| *value > 0);
+    // Explicit Stripe figures are authoritative INCLUDING their sign: credit
+    // invoices (customer credit / matrix proration exceeding the charge) are
+    // legitimately negative, and a 100%-discounted invoice legitimately has
+    // subtotal 0. Absence is already encoded by Option — Some(0) is a real
+    // Stripe-reported zero and must not be treated as missing data. The
+    // pre-fix `> 0` filters recorded both as zeros, overstating period
+    // revenue/VAT and hiding the applied credit from the local ledger.
     let amount_due = amount_due.max(0);
 
     let (subtotal, vat, total) = match (subtotal, total) {
         (Some(sub), Some(tot)) => {
+            let derived_vat = if tot < 0 {
+                // Credit invoice: the VAT reversal carries the invoice's sign.
+                tot - sub
+            } else {
+                (tot - sub).max(0)
+            };
             let vat = tax
                 .filter(|value| sub + value <= tot)
-                .unwrap_or((tot - sub).max(0));
+                .unwrap_or(derived_vat);
             (sub, vat, tot)
         }
         (Some(sub), None) => {
@@ -1307,6 +1317,13 @@ async fn insert_paid_invoice_from_stripe(
             status = 'paid',
             paid_at = COALESCE(invoices.paid_at, NOW()),
             updated_at = NOW()
+        -- Tenant guard mirrors the subscription handler's re-binding
+        -- protection: a local row already bound to a DIFFERENT tenant must
+        -- never be flipped to paid by an event resolved to this tenant —
+        -- without the WHERE, the DO UPDATE would mark tenant A's invoice
+        -- paid while silently discarding the EXCLUDED tenant attribution.
+        WHERE invoices.tenant_id IS NULL
+           OR invoices.tenant_id = EXCLUDED.tenant_id
         "#,
     )
     .bind(tenant_id)
@@ -2101,7 +2118,12 @@ impl SubscriptionStatus {
     fn can_transition_from(&self, current_status: &str) -> bool {
         match current_status {
             "incomplete" => matches!(self, Self::Active | Self::IncompleteExpired),
-            "incomplete_expired" => false,
+            // Reactivation (uncancel / support-side resume) revives a terminal
+            // subscription to a paying status. Only revival is admitted —
+            // terminal -> terminal stays impossible.
+            "incomplete_expired" | "canceled" => {
+                matches!(self, Self::Active | Self::Trialing | Self::PastDue)
+            }
             "trialing" => matches!(
                 self,
                 Self::Active | Self::PastDue | Self::Canceled | Self::Unpaid | Self::Paused
@@ -2112,7 +2134,6 @@ impl SubscriptionStatus {
             ),
             "past_due" => matches!(self, Self::Active | Self::Canceled | Self::Unpaid),
             "unpaid" => matches!(self, Self::Active | Self::Canceled),
-            "canceled" => false,
             "paused" => matches!(self, Self::Active | Self::Canceled),
             _ => false,
         }
@@ -2625,6 +2646,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reactivation_transitions_from_terminal_states_are_allowed() {
+        // Stripe genuinely emits customer.subscription.updated with
+        // status=active for an un-cancelled (cancel_at_period_end removed) or
+        // support-side reactivated subscription whose last observed status was
+        // canceled/incomplete_expired. Refusing the transition deadletters
+        // the event and strands a paying customer on the free plan.
+        assert!(SubscriptionStatus::Active.can_transition_from("canceled"));
+        assert!(SubscriptionStatus::Active.can_transition_from("incomplete_expired"));
+        assert!(SubscriptionStatus::Trialing.can_transition_from("canceled"));
+        // Terminal states must still never "transition" to other terminal
+        // states — only revival to a paying/entitled state is admitted.
+        assert!(!SubscriptionStatus::Canceled.can_transition_from("canceled"));
+        assert!(!SubscriptionStatus::Unpaid.can_transition_from("canceled"));
+    }
+
+    #[test]
     fn only_entitled_stripe_statuses_grant_the_paid_plan() {
         assert_eq!(
             SubscriptionStatus::Active.entitlement_plan_name("scale"),
@@ -2888,6 +2925,31 @@ mod tests {
     // ------------------------------------------------------------------
     // Fix A — invoice.paid must insert revenue when no local row exists.
     // ------------------------------------------------------------------
+
+    #[test]
+    fn derive_invoice_totals_preserves_signed_credit_invoices() {
+        // Stripe emits NEGATIVE invoices when customer credit / matrix
+        // proration exceeds the charge. Recording them as 0/0/0 overstates
+        // period revenue and hides the applied credit from the local ledger.
+        let (subtotal, vat, total) =
+            derive_invoice_totals(Some(-1_000), Some(-240), Some(-1_240), -1_240);
+        assert_eq!((subtotal, vat, total), (-1_000, -240, -1_240));
+        // VAT derivation mirrors the sign of the invoice for credits.
+        let (subtotal, vat, total) = derive_invoice_totals(Some(-1_000), None, Some(-1_240), 0);
+        assert_eq!((subtotal, vat, total), (-1_000, -240, -1_240));
+    }
+
+    #[test]
+    fn derive_invoice_totals_keeps_a_legitimate_zero_subtotal() {
+        // A 100%-discounted invoice legitimately has subtotal 0; replacing
+        // it with amount_due mislabels the row as charged.
+        let (subtotal, vat, total) = derive_invoice_totals(Some(0), Some(0), Some(0), 0);
+        assert_eq!((subtotal, vat, total), (0, 0, 0));
+        // The charge-relevant amount_due stays clamped at zero — nothing was
+        // due — but the explicit Stripe figures are preserved verbatim.
+        let (subtotal, _vat, total) = derive_invoice_totals(Some(0), None, Some(0), 5_000);
+        assert_eq!((subtotal, total), (0, 0));
+    }
 
     #[test]
     fn derive_invoice_totals_prefers_explicit_stripe_amounts() {

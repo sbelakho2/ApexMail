@@ -400,7 +400,7 @@ pub async fn generate_kmd_return(
     // on the invoice row at creation; fall back to the current billing
     // address only for pre-migration-101 rows (both stored values NULL).
     // Local alias for the rate-breakdown row shape (clippy::type_complexity).
-    type RateRow = (i64, i64, Option<String>, Option<i32>, Option<bool>);
+    type RateRow = (i64, i64, Option<String>, Option<i32>, Option<bool>, i64);
     let rate_rows: Vec<RateRow> = sqlx::query_as(
         r#"
         SELECT
@@ -408,9 +408,22 @@ pub async fn generate_kmd_return(
             COALESCE(SUM(i.vat_total), 0)::bigint,
             COALESCE(i.billing_country, ba.country, 'EE') AS country,
             i.vat_rate AS stored_vat_rate,
-            (ba.vat_number IS NOT NULL AND ba.vat_number <> '') AS has_vat_number
+            (ba.vat_number IS NOT NULL AND ba.vat_number <> '') AS has_vat_number,
+            COUNT(DISTINCT i.id)::bigint AS invoice_count
         FROM invoices i
-        LEFT JOIN billing_addresses ba ON ba.tenant_id = i.tenant_id
+        -- LATERAL picks exactly ONE address row per tenant (newest first):
+        -- a plain LEFT JOIN fans out when a tenant ever had two billing
+        -- addresses, counting each invoice once per row and overstating the
+        -- per-rate buckets relative to the header totals. Migration 116
+        -- added UNIQUE(tenant_id) for the future; this also holds for
+        -- historical multi-row databases.
+        LEFT JOIN LATERAL (
+            SELECT country, vat_number
+            FROM billing_addresses ba
+            WHERE ba.tenant_id = i.tenant_id
+            ORDER BY ba.updated_at DESC, ba.created_at DESC, ba.id
+            LIMIT 1
+        ) ba ON true
         WHERE i.issued_at >= $1
           AND i.issued_at < $2
           AND i.status IN ('paid', 'pending')
@@ -426,7 +439,7 @@ pub async fn generate_kmd_return(
     .map_err(|e| format!("Failed to query rate breakdown: {e}"))?;
 
     let mut rates: Vec<VatRateBucket> = Vec::new();
-    for (taxable, vat, country, stored_rate, has_vat_number) in &rate_rows {
+    for (taxable, vat, country, stored_rate, has_vat_number, invoice_count) in &rate_rows {
         // When a stored rate exists it wins over the current-address
         // derivation; `has_vat_number` only matters for legacy rows.
         let (vat_rate, reason) = effective_vat_bucket(
@@ -443,7 +456,9 @@ pub async fn generate_kmd_return(
         {
             bucket.taxable_amount_cents += taxable;
             bucket.vat_amount_cents += vat;
-            bucket.invoice_count += 1;
+            // Counts INVOICES (COUNT(DISTINCT i.id) per group), not grouped
+            // rows — several countries can share one rate bucket.
+            bucket.invoice_count += invoice_count;
         } else {
             rates.push(VatRateBucket {
                 rate: vat_rate,
@@ -510,7 +525,7 @@ pub async fn generate_kmd_return(
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn kmd_period_bounds_utc(
+pub(crate) fn kmd_period_bounds_utc(
     tax_year: i32,
     tax_month: u32,
 ) -> Result<(DateTime<Utc>, DateTime<Utc>), String> {

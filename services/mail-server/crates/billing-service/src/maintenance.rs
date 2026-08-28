@@ -462,6 +462,36 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
         }
     });
 
+    // ── Trial-expiry sweep (daily) ──────────────────────────────
+    // The ONLY writers of terminal subscription states are verified Stripe
+    // webhooks. If the webhook chain dies during a trial→paid transition
+    // (deadletter exhausts after 5 retries), a trialing row whose period
+    // ended keeps granting the paid entitlement forever. This sweep is the
+    // reconciler: any trialing subscription whose cycle ended more than a
+    // grace window ago (webhook retries span ~4h) is marked canceled and
+    // its tenant downgraded to free, with an audit trail.
+    let trial_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = interval_at(
+            Instant::now() + Duration::from_secs(5400),
+            DAILY_TASK_INTERVAL,
+        );
+        interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+        loop {
+            interval.tick().await;
+
+            match sweep_expired_trials(trial_state.as_ref()).await {
+                Ok(n) if n > 0 => info!(
+                    expired_trials = n,
+                    "Trial-expiry sweep downgraded stale trials"
+                ),
+                Ok(_) => {}
+                Err(e) => error!(error = %e, "Trial-expiry sweep failed"),
+            }
+        }
+    });
+
     // ── Derived usage sweep + reconciliation (daily, audit items 1a–2) ──
     // Derives emails_delivered / webhooks_delivered / dedicated_ip_hours /
     // storage_gb_hours / bandwidth_gb for the last closed day from the
@@ -638,21 +668,14 @@ async fn perform_month_end_closing(state: &AppState) -> Result<bool, String> {
     // ------------------------------------------------------------------
     // 2.  Build period boundaries ([period_start, period_end)).
     // ------------------------------------------------------------------
-    let period_start = chrono::NaiveDate::from_ymd_opt(target_year, target_month, 1)
-        .ok_or_else(|| format!("Invalid year/month: {target_year}/{target_month}"))?
-        .and_hms_opt(0, 0, 0)
-        .ok_or("Failed to build period start time")?
-        .and_utc();
-
-    let period_end = if target_month == 12 {
-        chrono::NaiveDate::from_ymd_opt(target_year + 1, 1, 1)
-    } else {
-        chrono::NaiveDate::from_ymd_opt(target_year, target_month + 1, 1)
-    }
-    .ok_or_else(|| format!("Invalid period end for {target_year}/{target_month}"))?
-    .and_hms_opt(0, 0, 0)
-    .ok_or("Failed to build period end time")?
-    .and_utc();
+    // KMD/Tallinn-midnight boundaries (21:00/22:00 UTC on the previous
+    // day): the closing record and the KMD VAT return MUST bucket invoices
+    // by the same instants, or the 2-3 UTC hours after local midnight land
+    // in different tax months between the two reports and the filed numbers
+    // never tie out. Reuse the KMD period bounds as the single source of
+    // truth (fail loudly on an ambiguous DST midnight rather than guessing).
+    let (period_start, period_end) =
+        crate::vat_kmd::kmd_period_bounds_utc(target_year, target_month)?;
 
     // ------------------------------------------------------------------
     // 3.  Count invoices that would be affected (dry-run check).
@@ -799,6 +822,73 @@ async fn perform_month_end_closing(state: &AppState) -> Result<bool, String> {
     );
 
     Ok(true)
+}
+
+/// Downgrade tenants whose trialing subscription ended without a terminal
+/// webhook (see the sweep task comment). Returns the number of tenants
+/// downgraded. Idempotent: rows already canceled no longer match.
+async fn sweep_expired_trials(state: &AppState) -> Result<u64, String> {
+    // Webhook retries span ~4 hours after the transition; allow 24h before
+    // the reconciler acts so a merely-delayed webhook is never raced.
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to begin trial sweep transaction: {e}"))?;
+
+    let stale: Vec<(String, String)> = sqlx::query_as(
+        r#"
+        SELECT DISTINCT s.tenant_id, s.stripe_subscription_id
+        FROM stripe_subscriptions s
+        JOIN tenants t ON t.id = s.tenant_id AND t.plan <> 'free'
+        WHERE s.status = 'trialing'
+          AND COALESCE(s.trial_end, s.billing_cycle_end) < NOW() - INTERVAL '24 hours'
+        "#,
+    )
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to query stale trials: {e}"))?;
+
+    if stale.is_empty() {
+        tx.commit().await.map_err(|e| e.to_string())?;
+        return Ok(0);
+    }
+
+    for (tenant_id, subscription_id) in &stale {
+        sqlx::query(
+            "UPDATE stripe_subscriptions SET status = 'canceled', updated_at = NOW()              WHERE stripe_subscription_id = $1 AND status = 'trialing'",
+        )
+        .bind(subscription_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to cancel stale trial {subscription_id}: {e}"))?;
+
+        sqlx::query("UPDATE tenants SET plan = 'free', updated_at = NOW() WHERE id = $1")
+            .bind(tenant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Failed to downgrade tenant {tenant_id}: {e}"))?;
+
+        append_audit_log(
+            &mut tx,
+            tenant_id,
+            "billing.trial_expired_sweep",
+            "stripe_subscription",
+            Some(subscription_id),
+            serde_json::json!({
+                "reason": "trialing subscription period ended without a terminal webhook",
+            }),
+            chrono::Utc::now(),
+        )
+        .await
+        .map_err(|e| format!("Failed to audit trial sweep for {tenant_id}: {e}"))?;
+    }
+
+    let count = stale.len() as u64;
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit trial sweep: {e}"))?;
+    Ok(count)
 }
 
 /// Check if the previous month's KMD return is due (past the 20th)

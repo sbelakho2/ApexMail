@@ -3162,12 +3162,12 @@ async fn admin_list_tenants(
                     s.status AS subscription_status,
                     s.current_period_end,
                     p.name AS plan_name,
-                    d.dunning_state,
+                    d.status AS dunning_state,
                     w.balance AS wallet_balance
                 FROM tenants t
                 LEFT JOIN stripe_subscriptions s ON t.id = s.tenant_id
                 LEFT JOIN plans p ON p.name = s.plan
-                LEFT JOIN dunning_states d ON t.id = d.tenant_id
+                LEFT JOIN dunning_records d ON t.id = d.tenant_id
                 LEFT JOIN wallets w ON t.id = w.tenant_id
                 WHERE s.status = $1
                 ORDER BY t.created_at DESC
@@ -3192,12 +3192,12 @@ async fn admin_list_tenants(
                     s.status AS subscription_status,
                     s.current_period_end,
                     p.name AS plan_name,
-                    d.dunning_state,
+                    d.status AS dunning_state,
                     w.balance AS wallet_balance
                 FROM tenants t
                 LEFT JOIN stripe_subscriptions s ON t.id = s.tenant_id
                 LEFT JOIN plans p ON p.name = s.plan
-                LEFT JOIN dunning_states d ON t.id = d.tenant_id
+                LEFT JOIN dunning_records d ON t.id = d.tenant_id
                 LEFT JOIN wallets w ON t.id = w.tenant_id
                 ORDER BY t.created_at DESC
                 LIMIT $1 OFFSET $2
@@ -4022,12 +4022,18 @@ async fn admin_get_dunning_report(
         SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.dunning_state), '[]'::json)
         FROM (
             SELECT
-                dunning_state,
-                COUNT(*) as tenant_count,
-                SUM(amount_owed) as total_owed
-            FROM dunning_states
-            WHERE dunning_state != 'healthy'
-            GROUP BY dunning_state
+                dr.status AS dunning_state,
+                COUNT(DISTINCT dr.tenant_id) as tenant_count,
+                COALESCE(SUM(owed.amount_owed), 0) as total_owed
+            FROM dunning_records dr
+            LEFT JOIN LATERAL (
+                SELECT COALESCE(SUM(i.total), 0) AS amount_owed
+                FROM invoices i
+                WHERE i.tenant_id = dr.tenant_id
+                  AND i.status NOT IN ('paid', 'void', 'uncollectible')
+            ) owed ON true
+            WHERE dr.status NOT IN ('payment_recovered')
+            GROUP BY dr.status
         ) report_row
         "#,
     )
@@ -4306,6 +4312,7 @@ mod tests {
             control_plane_api_key: None,
             sales_autopilot_base_url: "http://localhost:3010".into(),
             internal_service_token: None,
+            cp_auth: Default::default(),
             tracking_secret_key: "test-tracking-secret-123456789012".into(),
             billing_company_iban: "EE381010220123456789".into(),
             billing_company_phone: "+3721234567".into(),

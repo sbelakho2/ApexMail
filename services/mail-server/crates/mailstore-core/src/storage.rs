@@ -585,7 +585,34 @@ impl MessageStorage {
     ///         The UNIQUE index idx_mail_messages_dedup provides DB-level enforcement.
     pub async fn store_message(&self, message: &StoredMessage) -> Result<(Uuid, i64)> {
         let mut tx = self.pool.begin().await?;
+        let result = self.store_message_tx(&mut tx, message).await?;
+        tx.commit().await?;
+        Ok(result)
+    }
 
+    /// L10: store several messages in ONE transaction — a failure at message
+    /// k rolls back messages 1..k-1 (used by COPY, which must be all-or-nothing).
+    pub async fn store_messages_batch(
+        &self,
+        messages: &[StoredMessage],
+    ) -> Result<Vec<(Uuid, i64)>> {
+        let mut tx = self.pool.begin().await?;
+        let mut results = Vec::with_capacity(messages.len());
+        for message in messages {
+            results.push(self.store_message_tx(&mut tx, message).await?);
+        }
+        tx.commit().await?;
+        Ok(results)
+    }
+
+    /// The transactional core of a message insert (see [`Self::store_message`]).
+    /// Callers own the transaction: single inserts commit immediately; the
+    /// COPY batch wraps N calls in one transaction.
+    async fn store_message_tx(
+        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        message: &StoredMessage,
+    ) -> Result<(Uuid, i64)> {
         let mailbox_ok: Option<i32> = sqlx::query_scalar(
             r#"
             SELECT 1 FROM mail_mailboxes WHERE id = $1 AND account_id = $2
@@ -593,7 +620,7 @@ impl MessageStorage {
         )
         .bind(message.mailbox_id)
         .bind(message.account_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
 
         if mailbox_ok.is_none() {
@@ -612,7 +639,7 @@ impl MessageStorage {
         "#,
         )
         .bind(message.account_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?;
         if let Some((quota_bytes, used_bytes)) = quota {
             let incoming = message.raw_size.max(0);
@@ -623,14 +650,22 @@ impl MessageStorage {
 
         // N: enforce the message-count quota inside the same transaction (the
         // account row lock above serializes concurrent deliveries).
+        //
+        // L14(d): the count is derived from the per-mailbox `total_messages`
+        // counters (maintained transactionally by update_mailbox_counts_tx,
+        // which counts `is_deleted = false` rows) instead of a COUNT(*) over
+        // every mail_messages row of the account — an account has a handful
+        // of mailbox rows but potentially 100k message rows. The SUM is
+        // updated within each store transaction, so it cannot drift from the
+        // row count (see the equivalence test).
         let used_messages: i64 = sqlx::query_scalar(
             r#"
-            SELECT COUNT(*) FROM mail_messages
-            WHERE account_id = $1 AND is_deleted = false
+            SELECT COALESCE(SUM(total_messages), 0)::bigint FROM mail_mailboxes
+            WHERE account_id = $1
         "#,
         )
         .bind(message.account_id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
         if used_messages >= MAX_MESSAGES_PER_ACCOUNT {
             return Err(QuotaExceeded.into());
@@ -656,7 +691,7 @@ impl MessageStorage {
             .bind(message.account_id)
             .bind(message.mailbox_id)
             .bind(&message.message_id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await?;
 
             if let Some((existing_id, existing_uid)) = existing {
@@ -665,7 +700,6 @@ impl MessageStorage {
                     message_id = %message.message_id,
                     "Duplicate message detected, returning existing"
                 );
-                tx.commit().await?;
                 return Ok((existing_id, existing_uid));
             }
         }
@@ -686,7 +720,7 @@ impl MessageStorage {
         "#,
         )
         .bind(message.mailbox_id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
 
         // O‑4.3:Encrypt body content before storing if encryption is enabled,
@@ -730,15 +764,13 @@ impl MessageStorage {
         .bind(message.dedup_exempt)
         .bind(&message.headers)
         .bind(serde_json::to_value(&message.attachments)?)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut **tx)
         .await?;
 
-        self.update_mailbox_counts_tx(&mut tx, &message.mailbox_id)
+        self.update_mailbox_counts_tx(tx, &message.mailbox_id)
             .await?;
-        self.update_account_usage_tx(&mut tx, &message.account_id, message.raw_size)
+        self.update_account_usage_tx(tx, &message.account_id, message.raw_size)
             .await?;
-
-        tx.commit().await?;
 
         debug!(message_id = %id, "Message stored");
         Ok((id, uid))
@@ -958,6 +990,82 @@ impl MessageStorage {
         .bind(account_id)
         .bind(mailbox_id)
         .bind(q)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let messages = rows
+            .iter()
+            .map(|r| self.row_to_message(r))
+            .collect::<Result<Vec<_>>>()?;
+        Ok((messages, total))
+    }
+
+    /// Escape SQL LIKE/ILIKE metacharacters so a search value matches
+    /// literally (`%`/`_` in the user's value must not act as wildcards).
+    fn escape_like(value: &str) -> String {
+        value
+            .replace('\\', "\\\\")
+            .replace('%', "\\%")
+            .replace('_', "\\_")
+    }
+
+    /// L8: containment search over the stored `headers` JSONB.
+    ///
+    /// Matches messages where a header field named `field` (case-insensitive
+    /// key comparison, JSONB keys preserve original case) carries a value
+    /// containing `value` (case-insensitive substring). Unlike the fulltext
+    /// search this works on encrypted stores too — headers are never
+    /// encrypted — and never matches on subject/body alone, so an IMAP
+    /// `SEARCH HEADER` cannot be satisfied by an unrelated subject hit.
+    pub async fn search_by_header(
+        &self,
+        account_id: &Uuid,
+        mailbox_id: &Uuid,
+        field: &str,
+        value: &str,
+        limit: i64,
+        offset: i64,
+    ) -> Result<(Vec<StoredMessage>, i64)> {
+        let pattern = format!("%{}%", Self::escape_like(value));
+
+        let predicate = r#"
+            EXISTS (
+                SELECT 1 FROM jsonb_each(COALESCE(headers, '{}'::jsonb)) AS h(k, v)
+                WHERE lower(h.k) = lower($3) AND h.v::text ILIKE $4 ESCAPE '\'
+            )
+        "#;
+
+        let total: i64 = sqlx::query_scalar(&format!(
+            r#"
+            SELECT COUNT(*) FROM mail_messages
+            WHERE account_id = $1 AND mailbox_id = $2 AND is_deleted = false
+              AND {predicate}
+        "#
+        ))
+        .bind(account_id)
+        .bind(mailbox_id)
+        .bind(field)
+        .bind(&pattern)
+        .fetch_one(&self.pool)
+        .await?;
+
+        // SAFETY: MESSAGE_COLUMNS is a compile-time constant string, not user input.
+        let rows = sqlx::query(&format!(
+            r#"
+            SELECT {} FROM mail_messages
+            WHERE account_id = $1 AND mailbox_id = $2 AND is_deleted = false
+              AND {predicate}
+            ORDER BY uid DESC NULLS LAST, date DESC
+            LIMIT $5 OFFSET $6
+        "#,
+            MESSAGE_COLUMNS
+        ))
+        .bind(account_id)
+        .bind(mailbox_id)
+        .bind(field)
+        .bind(&pattern)
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.pool)
@@ -1220,6 +1328,85 @@ impl MessageStorage {
         tx.commit().await?;
 
         Ok(new_uid)
+    }
+
+    /// L10: move several messages to another mailbox in ONE transaction.
+    ///
+    /// A failure at message k rolls back the moves of 1..k-1 (the old
+    /// per-message loop left a partial move behind). Mailbox counters are
+    /// refreshed once at the end instead of once per message. Returns the new
+    /// UID for each moved row id, in the same order.
+    pub async fn move_messages_batch(
+        &self,
+        message_ids: &[Uuid],
+        target_mailbox_id: &Uuid,
+    ) -> Result<Vec<i64>> {
+        if message_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut tx = self.pool.begin().await?;
+
+        let mut old_mailbox_ids: Vec<Uuid> = Vec::new();
+        let mut new_uids = Vec::with_capacity(message_ids.len());
+        for id in message_ids {
+            let message = sqlx::query(
+                r#"
+                SELECT mailbox_id FROM mail_messages WHERE id = $1
+            "#,
+            )
+            .bind(id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some(message) = message else {
+                return Err(anyhow!("Message {} not found", id));
+            };
+            let old_mailbox_id: Uuid = message.get("mailbox_id");
+            if !old_mailbox_ids.contains(&old_mailbox_id) {
+                old_mailbox_ids.push(old_mailbox_id);
+            }
+
+            let new_uid: i64 = sqlx::query_scalar(
+                r#"
+                WITH next_uid AS (
+                    SELECT COALESCE(uidnext, 1) AS uid
+                    FROM mail_mailboxes
+                    WHERE id = $1
+                    FOR UPDATE
+                )
+                UPDATE mail_mailboxes
+                SET uidnext = (SELECT uid FROM next_uid) + 1,
+                    updated_at = NOW()
+                WHERE id = $1
+                RETURNING (SELECT uid FROM next_uid) AS uid
+            "#,
+            )
+            .bind(target_mailbox_id)
+            .fetch_one(&mut *tx)
+            .await?;
+
+            sqlx::query(
+                r#"
+                UPDATE mail_messages
+                SET mailbox_id = $2, uid = $3, updated_at = NOW()
+                WHERE id = $1
+            "#,
+            )
+            .bind(id)
+            .bind(target_mailbox_id)
+            .bind(new_uid)
+            .execute(&mut *tx)
+            .await?;
+            new_uids.push(new_uid);
+        }
+
+        for mailbox_id in old_mailbox_ids {
+            self.update_mailbox_counts_tx(&mut tx, &mailbox_id).await?;
+        }
+        self.update_mailbox_counts_tx(&mut tx, target_mailbox_id)
+            .await?;
+
+        tx.commit().await?;
+        Ok(new_uids)
     }
 
     /// Delete a message permanently
@@ -1861,5 +2048,165 @@ mod tests {
         for sql in [add, remove, set] {
             assert!(sql.contains("updated_at = NOW()"));
         }
+    }
+
+    // ── L8/L14: header search + cheap message-count quota (DB-gated) ───────
+
+    /// Header search must filter on the stored headers JSONB, honoring the
+    /// field NAME (case-insensitively) and matching the VALUE as a substring.
+    #[tokio::test]
+    async fn header_search_matches_field_and_value_not_subject() {
+        let Some(pool) = optional_pool().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let storage = MessageStorage::new(pool.clone());
+        if let Err(e) = storage.initialize().await {
+            eprintln!("skipping: migrator could not run ({e})");
+            return;
+        }
+        let email = format!("hdrsearch-{}@example.com", Uuid::new_v4());
+        let account = storage
+            .create_account(&email, "not-a-real-hash", None)
+            .await
+            .unwrap();
+        let mailboxes = storage.list_mailboxes(&account.id).await.unwrap();
+        let inbox = mailboxes
+            .iter()
+            .find(|m| m.mailbox_type == MailboxType::Inbox)
+            .unwrap();
+
+        // m1 carries the target Message-ID; m2 has a different one and a
+        // SUBJECT equal to the search needle (must NOT match a header search).
+        let m1 = sample_message(account.id, inbox.id, "<target-mid@example.com>");
+        let m2 = sample_message(account.id, inbox.id, "<other-mid@example.com>");
+        let mut m1 = m1.clone();
+        m1.headers = serde_json::json!({ "Message-ID": "<target-mid@example.com>" });
+        let mut m2 = m2;
+        m2.id = Uuid::new_v4();
+        m2.subject = "needle-in-subject".to_string();
+        m2.headers = serde_json::json!({ "Message-ID": "<other-mid@example.com>" });
+        storage.store_message(&m1).await.unwrap();
+        storage.store_message(&m2).await.unwrap();
+
+        let (hits, total) = storage
+            .search_by_header(&account.id, &inbox.id, "Message-ID", "target-mid", 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(total, 1, "only the message with the matching header");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].message_id, "<target-mid@example.com>");
+
+        // Subject content must not satisfy a header-field search.
+        let (hits, total) = storage
+            .search_by_header(
+                &account.id,
+                &inbox.id,
+                "Message-ID",
+                "needle-in-subject",
+                100,
+                0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(total, 0, "subject matches must not leak into HEADER search");
+        assert!(hits.is_empty());
+
+        // Field-name matching is case-insensitive.
+        let (_, total) = storage
+            .search_by_header(&account.id, &inbox.id, "message-id", "TARGET-MID", 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(total, 1, "value match is case-insensitive");
+
+        // ILIKE wildcards in the value are literal, not patterns.
+        let (_, total) = storage
+            .search_by_header(&account.id, &inbox.id, "Message-ID", "%", 100, 0)
+            .await
+            .unwrap();
+        assert_eq!(total, 0, "'%' in the value must not act as a wildcard");
+
+        sqlx::query("DELETE FROM mail_messages WHERE account_id = $1")
+            .bind(account.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM mail_mailboxes WHERE account_id = $1")
+            .bind(account.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM mail_accounts WHERE id = $1")
+            .bind(account.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+
+    /// L14(d): the message-count quota source (SUM of per-mailbox
+    /// total_messages) must agree with the literal COUNT over rows.
+    #[tokio::test]
+    async fn message_count_quota_source_agrees_with_row_count() {
+        let Some(pool) = optional_pool().await else {
+            eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
+            return;
+        };
+        let storage = MessageStorage::new(pool.clone());
+        if let Err(e) = storage.initialize().await {
+            eprintln!("skipping: migrator could not run ({e})");
+            return;
+        }
+        let email = format!("quotasum-{}@example.com", Uuid::new_v4());
+        let account = storage
+            .create_account(&email, "not-a-real-hash", None)
+            .await
+            .unwrap();
+        let mailboxes = storage.list_mailboxes(&account.id).await.unwrap();
+        let inbox = mailboxes
+            .iter()
+            .find(|m| m.mailbox_type == MailboxType::Inbox)
+            .unwrap();
+
+        for i in 0..3 {
+            let mut m = sample_message(
+                account.id,
+                inbox.id,
+                &format!("<qs-{}-{}@example.com>", i, Uuid::new_v4()),
+            );
+            m.id = Uuid::new_v4();
+            storage.store_message(&m).await.unwrap();
+        }
+
+        let row_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM mail_messages WHERE account_id = $1 AND is_deleted = false",
+        )
+        .bind(account.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mailbox_sum: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(total_messages), 0)::bigint FROM mail_mailboxes WHERE account_id = $1",
+        )
+        .bind(account.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(mailbox_sum, row_count, "quota source must be equivalent");
+
+        sqlx::query("DELETE FROM mail_messages WHERE account_id = $1")
+            .bind(account.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM mail_mailboxes WHERE account_id = $1")
+            .bind(account.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM mail_accounts WHERE id = $1")
+            .bind(account.id)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
 }

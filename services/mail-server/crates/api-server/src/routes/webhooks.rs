@@ -194,7 +194,11 @@ fn validate_webhook_url_with(url_str: &str, allow_localhost: bool) -> Result<(),
 /// Validate webhook URL format and security requirements.
 /// Requires HTTPS (or HTTP for loopback hosts when
 /// `APEXMAIL_ALLOW_LOCALHOST_WEBHOOKS=true` is explicitly set).
-fn validate_webhook_url(url_str: &str) -> Result<(), String> {
+///
+/// Shared by the JSON create/update handlers AND the zero-JS form twin
+/// (`/web/webhooks`) — the form must never run a weaker check than the
+/// API surface.
+pub(crate) fn validate_webhook_url(url_str: &str) -> Result<(), String> {
     validate_webhook_url_with(url_str, localhost_webhooks_allowed())
 }
 
@@ -247,6 +251,10 @@ fn webhook_delivery_client(
         .map_err(|e| format!("failed to build webhook client: {e}"))
 }
 
+/// Per-tenant webhook ceiling, enforced by BOTH the JSON create handler
+/// and the form twin.
+pub(crate) const MAX_WEBHOOKS_PER_TENANT: i64 = 25;
+
 // ─── Handlers ──────────────────────────────────────────────────
 
 async fn create_webhook(
@@ -278,7 +286,6 @@ async fn create_webhook(
         .fetch_one(&state.db)
         .await?;
 
-    const MAX_WEBHOOKS_PER_TENANT: i64 = 25;
     if count.0 >= MAX_WEBHOOKS_PER_TENANT {
         return Err(ApiError::Forbidden(format!(
             "webhook limit reached: maximum {} webhooks per tenant",

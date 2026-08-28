@@ -168,6 +168,13 @@ scrape_configs:
 
   # ── Blackbox HTTP API probes for critical user journeys ──
   # Probes key API endpoints to verify functional correctness beyond simple health checks.
+  # FIX (audit): the old `blackbox-http-email-send` job POSTed an
+  # UNAUTHENTICATED request to /v1/email/send and expected 2xx — permanently
+  # failing by construction (the route rejects unauthenticated sends with
+  # 401; no credentials plumbing exists for a canary). It is retargeted to
+  # the harmless /health endpoint (200 unauthenticated) and folded into this
+  # job; the real email-send journey stays covered by the authenticated
+  # E2E/synthetic suites, not by a blackbox POST.
   - job_name: 'blackbox-http-api-health'
     metrics_path: /probe
     params:
@@ -176,6 +183,7 @@ scrape_configs:
       - targets:
           - https://api.apexmail.ee/health/ready
           - https://api.apexmail.ee/health/live
+          - https://api.apexmail.ee/health
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target
@@ -197,19 +205,9 @@ scrape_configs:
         replacement: blackbox-exporter:9115
     scrape_interval: 60s
 
-  - job_name: 'blackbox-http-email-send'
-    metrics_path: /probe
-    params:
-      module: [http_api_email_send]
-    static_configs:
-      - targets:
-          - https://api.apexmail.ee/v1/email/send
-    relabel_configs:
-      - source_labels: [__address__]
-        target_label: __param_target
-      - target_label: __address__
-        replacement: blackbox-exporter:9115
-    scrape_interval: 120s
+  # NOTE: the `blackbox-http-email-send` job that used to live here was
+  # removed — see the comment on blackbox-http-api-health above (unauthed
+  # POST + 2xx expectation could never succeed).
 
   - job_name: 'blackbox-smtp'
     metrics_path: /probe
@@ -258,16 +256,12 @@ scrape_configs:
     metrics_path: '/metrics'
     scrape_interval: 30s
 
-  # ── ClickHouse Query Performance Metrics ──
-  - job_name: 'clickhouse-query'
-    static_configs:
-      - targets: ['clickhouse-exporter:9116']
-    metrics_path: '/metrics'
-    scrape_interval: 15s
-    metric_relabel_configs:
-      - source_labels: [__name__]
-        regex: 'clickhouse_query_(duration_seconds|read_bytes|read_rows|result_bytes|result_rows|memory_usage|cpu_usage)_(sum|count|bucket)'
-        action: keep
+  # NOTE (audit): the old `clickhouse-query` job was removed. It scraped the
+  # same clickhouse-exporter target as the `clickhouse` job above with a
+  # metric_relabel keep filter for `clickhouse_query_(duration_seconds|...)_
+  # (sum|count|bucket)` — series the in-house exporter never emits (it
+  # exposes flattened gauges only), so the filter dropped EVERY metric and
+  # the job was a duplicate, zero-series scrape.
 
 alerting:
   alertmanagers:

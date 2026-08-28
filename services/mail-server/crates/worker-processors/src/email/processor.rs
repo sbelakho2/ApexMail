@@ -77,6 +77,78 @@ const SUPPRESSED_UPDATE_SQL: &str = r#"
         error_message = $1,
         updated_at = NOW()
     WHERE id = $2::uuid
+      AND (metadata->>'lease_token') IS NOT DISTINCT FROM $4::text
+"#;
+
+/// Audit-3: per-recipient hard bounce — the same contract as
+/// [`SUPPRESSED_UPDATE_SQL`] / handle_success: the bounced recipient is
+/// removed from `metadata.pending_recipients` and the row only becomes
+/// terminal 'bounced' when the pending set empties. Previously the whole
+/// multi-recipient row was flipped 'bounced', abandoning the siblings still
+/// owed a delivery (FIX-8 made one queue row carry N recipients).
+const HARD_BOUNCE_UPDATE_SQL: &str = r#"
+    UPDATE email_queue
+    SET metadata = jsonb_set(
+            COALESCE(metadata, '{}'::jsonb),
+            '{pending_recipients}',
+            COALESCE(
+                metadata->'pending_recipients',
+                CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                     THEN to_jsonb(to_addresses) END,
+                CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                     THEN to_jsonb(ARRAY["to"]) END,
+                '[]'::jsonb
+            ) - $3::text
+        ),
+        status = CASE WHEN COALESCE(
+                metadata->'pending_recipients',
+                CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                     THEN to_jsonb(to_addresses) END,
+                CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                     THEN to_jsonb(ARRAY["to"]) END,
+                '[]'::jsonb
+            ) - $3::text = '[]'::jsonb
+            THEN 'bounced' ELSE status END,
+        error_message = $1,
+        updated_at = NOW()
+    WHERE id = $2::uuid
+      AND (metadata->>'lease_token') IS NOT DISTINCT FROM $4::text
+"#;
+
+/// Audit-3: per-recipient DLQ failure — the attempt budget of ONE recipient
+/// exhausting must not abandon the row's other recipients. The failed
+/// recipient leaves the pending set (its own delivery is dead-lettered by
+/// the caller's email_dlq insert); the row terminalizes to 'failed' only
+/// when the pending set empties, otherwise it returns to 'pending' so the
+/// siblings keep their deliveries.
+const DLQ_FAIL_UPDATE_SQL: &str = r#"
+    UPDATE email_queue
+    SET metadata = jsonb_set(
+            COALESCE(metadata, '{}'::jsonb),
+            '{pending_recipients}',
+            COALESCE(
+                metadata->'pending_recipients',
+                CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                     THEN to_jsonb(to_addresses) END,
+                CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                     THEN to_jsonb(ARRAY["to"]) END,
+                '[]'::jsonb
+            ) - $3::text
+        ),
+        status = CASE WHEN COALESCE(
+                metadata->'pending_recipients',
+                CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                     THEN to_jsonb(to_addresses) END,
+                CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                     THEN to_jsonb(ARRAY["to"]) END,
+                '[]'::jsonb
+            ) - $3::text = '[]'::jsonb
+            THEN 'failed' ELSE 'pending' END,
+        error_message = $1,
+        locked_until = NULL,
+        updated_at = NOW()
+    WHERE id = $2::uuid
+      AND (metadata->>'lease_token') IS NOT DISTINCT FROM $4::text
 "#;
 
 /// D: mirror of the SES notification handler's message transition
@@ -87,6 +159,274 @@ const SUPPRESSED_UPDATE_SQL: &str = r#"
 const MESSAGES_SENT_UPDATE_SQL: &str = r#"
     UPDATE messages SET status = 'sent', updated_at = NOW()
     WHERE id = $1::uuid AND tenant_id = $2 AND status = 'queued'
+"#;
+
+/// Audit-1: the ready-domain lookup for a queued job.
+///
+/// Warmup state comes from the REAL warmup tables: per-IP warmup lives on
+/// `dedicated_ips` (created by migration 003 with `warmup_started_at`, given
+/// the per-IP warmup model by migrations 071/093 — the same table
+/// `transport_router.rs` routes on), so the query returns the
+/// `warmup_started_at` timestamps of the tenant's dedicated IPs still in
+/// status 'warming' and the day/enabled derivation happens in Rust
+/// ([`derive_domain_warmup`]). A domain whose tenant has no warming
+/// dedicated IP (shared SES pool) derives warmup DISABLED — correct: the
+/// shared pool rides platform reputation, not the tenant's.
+///
+/// `ip_pool_addresses` (migration 093) also carries per-address warmup
+/// columns, but the table has no tenant binding (`ip_pools` are platform
+/// pools), so `dedicated_ips` is the per-tenant source of truth.
+const GET_DOMAIN_SQL: &str = r#"
+    SELECT
+        d.id::text AS id,
+        d.tenant_id AS tenant_id,
+        d.name AS domain,
+        d.dkim_selector AS dkim_selector,
+        d.dkim_public_key AS dkim_public_key,
+        d.dkim_private_key AS dkim_private_key,
+        NULL::text AS return_path,
+        w.warmup_starts AS warmup_starts
+    FROM domains d
+    LEFT JOIN LATERAL (
+        SELECT ARRAY(
+            SELECT di.warmup_started_at
+            FROM dedicated_ips di
+            WHERE di.tenant_id = d.tenant_id
+              AND di.status = 'warming'
+              AND di.warmup_started_at IS NOT NULL
+        ) AS warmup_starts
+    ) w ON true
+    WHERE d.id = $1::uuid AND d.tenant_id = $2
+      AND d.status = 'verified'
+      AND d.dkim_enabled = true
+      AND d.dkim_selector IS NOT NULL
+      AND d.dkim_public_key IS NOT NULL
+      AND d.dkim_private_key IS NOT NULL
+      AND d.dkim_private_key LIKE 'dkim:v1:%'
+      AND ($3::boolean = false OR d.ses_verified = true)
+"#;
+
+/// Audit-1: [`GET_DOMAIN_SQL`] row — the [`Domain`] columns plus the warmup
+/// source data (`warmup_started_at` of every warming dedicated IP).
+#[derive(Debug, sqlx::FromRow)]
+struct DomainWithWarmupRow {
+    id: String,
+    tenant_id: String,
+    domain: String,
+    dkim_selector: Option<String>,
+    dkim_public_key: Option<String>,
+    dkim_private_key: Option<String>,
+    return_path: Option<String>,
+    warmup_starts: Option<Vec<DateTime<Utc>>>,
+}
+
+/// Audit-1: derive the domain's effective warmup state from the
+/// `warmup_started_at` timestamps of the tenant's dedicated IPs that are
+/// still warming.
+///
+/// * no warming IP → `(false, 0)`: the domain sends on the shared pool and
+///   `check_warmup_limit` must not engage;
+/// * otherwise enabled, with the binding day = the SMALLEST whole-days
+///   elapsed across the warming IPs — the least-warmed IP is the constraint
+///   on the tenant's reputation;
+/// * day never goes negative (a just-started or clock-skewed future
+///   timestamp clamps to day 0).
+fn derive_domain_warmup(now: DateTime<Utc>, warmup_starts: &[DateTime<Utc>]) -> (bool, i32) {
+    let mut binding_day: Option<i32> = None;
+    for started_at in warmup_starts {
+        let elapsed_days = (now - started_at).num_days().clamp(0, i32::MAX as i64) as i32;
+        binding_day = Some(match binding_day {
+            Some(day) => day.min(elapsed_days),
+            None => elapsed_days,
+        });
+    }
+    match binding_day {
+        Some(day) => (true, day),
+        None => (false, 0),
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Audit-5: lease-token fencing for `email_queue`
+//
+// `email_queue` has NO lease_token column (migration 103 added one to
+// `queue_jobs`, the queue-provider's table, only) — but it does have a
+// `metadata` JSONB column, so the claim mints a fresh
+// `metadata.lease_token` (gen_random_uuid) on EVERY claim and every
+// post-claim row write predicates
+// `(metadata->>'lease_token') IS NOT DISTINCT FROM <claim's token>`.
+// This mirrors queue-provider's exact-lease fencing (provider.rs
+// complete/fail/dead_letter fence on `status = 'processing' AND
+// lease_token = $token`): a stale worker whose row was recovered and
+// re-claimed can no longer match the new owner's token, so its write is a
+// no-op (warned). The token is NOT fenced on `status = 'processing'`
+// because FIX-8 multi-recipient rows legitimately receive several writes
+// per claim and those writes themselves flip the row off 'processing'
+// (terminal 'sent' when the pending set empties, 'pending' on requeue);
+// the token equality alone is the exact stale-lease fence.
+//
+// `IS NOT DISTINCT FROM` (rather than `=`) keeps legacy rows without a
+// token writable by token-less writers (NULL never matches under `=`).
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// The claim: flips pending/expired-lease rows to 'processing' and mints a
+/// fresh `metadata.lease_token` for the new lease generation (see the
+/// Audit-5 block above). The returned `metadata` already carries the new
+/// token, so every expanded per-recipient job transports it.
+const FETCH_JOBS_SQL: &str = r#"
+            UPDATE email_queue
+            SET status = 'processing',
+                locked_until = $1,
+                updated_at = NOW(),
+                metadata = jsonb_set(
+                    COALESCE(metadata, '{}'::jsonb),
+                    '{lease_token}',
+                    to_jsonb(gen_random_uuid()::text)
+                )
+            WHERE id IN (
+                SELECT id
+                FROM email_queue
+                WHERE (
+                    status = 'pending'
+                    -- Reclaim rows orphaned in 'processing' by a crashed
+                    -- worker whose visibility lease has expired. The fresh
+                    -- lease_token mint above fences the crashed worker's
+                    -- late writes (Audit-5).
+                    OR (status = 'processing' AND locked_until < NOW())
+                )
+                  AND (scheduled_at IS NULL OR scheduled_at <= NOW())
+                ORDER BY priority DESC, created_at ASC
+                LIMIT $2
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING
+                id::text AS id,
+                COALESCE(message_id::text, id::text) as "messageId",
+                COALESCE(tenant_id, '') as "tenantId",
+                COALESCE(domain_id::text, '') as "domainId",
+                COALESCE("from", from_address) as "from",
+                COALESCE("to", to_addresses[1], '') as "to",
+                CASE
+                    WHEN metadata->'pending_recipients' IS NOT NULL
+                    THEN ARRAY(
+                        SELECT jsonb_array_elements_text(metadata->'pending_recipients')
+                    )
+                    ELSE to_addresses
+                END as "toAddresses",
+                subject, html, text, headers, attachments,
+                campaign_id::text as "campaignId", tags, metadata, scheduled_at as "scheduledAt",
+                attempt, created_at as "createdAt"
+"#;
+
+/// Audit-5: this claim's lease token, transported inside the job's
+/// `metadata` (minted by [`FETCH_JOBS_SQL`]). `None` for legacy rows
+/// claimed before the token existed.
+fn lease_token_of(job: &EmailJob) -> Option<&str> {
+    job.metadata
+        .as_ref()
+        .and_then(|m| m.get("lease_token"))
+        .and_then(|v| v.as_str())
+}
+
+/// Audit-5: true when a fenced UPDATE affected nothing — the row no longer
+/// carries this claim's token (recovered + re-claimed by another worker).
+/// The write is intentionally a no-op; callers warn and skip follow-up
+/// effects (events, suppression, DLQ rows) so a fenced-out worker cannot
+/// mutate the new owner's row.
+fn fenced_out(rows_affected: u64) -> bool {
+    rows_affected == 0
+}
+
+/// Audit-5: handle_success's row write — identical semantics to the
+/// pre-fence inline SQL, plus the lease-token fence.
+const HANDLE_SUCCESS_UPDATE_SQL: &str = r#"
+            UPDATE email_queue
+            SET metadata = jsonb_set(
+                    COALESCE(metadata, '{}'::jsonb),
+                    '{pending_recipients}',
+                    COALESCE(
+                        metadata->'pending_recipients',
+                        CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                             THEN to_jsonb(to_addresses) END,
+                        CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                             THEN to_jsonb(ARRAY["to"]) END,
+                        '[]'::jsonb
+                    ) - $3::text
+                ),
+                status = CASE WHEN COALESCE(
+                        metadata->'pending_recipients',
+                        CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                             THEN to_jsonb(to_addresses) END,
+                        CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                             THEN to_jsonb(ARRAY["to"]) END,
+                        '[]'::jsonb
+                    ) - $3::text = '[]'::jsonb
+                    THEN 'sent' ELSE status END,
+                sent_at = CASE WHEN COALESCE(
+                        metadata->'pending_recipients',
+                        CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                             THEN to_jsonb(to_addresses) END,
+                        CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                             THEN to_jsonb(ARRAY["to"]) END,
+                        '[]'::jsonb
+                    ) - $3::text = '[]'::jsonb
+                    THEN NOW() ELSE sent_at END,
+                smtp_message_id = $1,
+                updated_at = NOW()
+            WHERE id = $2::uuid
+              AND (metadata->>'lease_token') IS NOT DISTINCT FROM $4::text
+"#;
+
+/// Audit-5: handle_soft_bounce's requeue write, fenced on the lease token.
+const SOFT_BOUNCE_UPDATE_SQL: &str = r#"
+            UPDATE email_queue
+            SET status = CASE WHEN COALESCE(
+                        metadata->'pending_recipients',
+                        CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                             THEN to_jsonb(to_addresses) END,
+                        CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                             THEN to_jsonb(ARRAY["to"]) END,
+                        '[]'::jsonb
+                    ) = '[]'::jsonb
+                    THEN 'sent' ELSE 'pending' END,
+                attempt = $1,
+                scheduled_at = $2,
+                error_message = $3,
+                locked_until = NULL,
+                metadata = jsonb_set(
+                    COALESCE(metadata, '{}'::jsonb),
+                    '{pending_recipients}',
+                    COALESCE(
+                        metadata->'pending_recipients',
+                        CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                             THEN to_jsonb(to_addresses) END,
+                        CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                             THEN to_jsonb(ARRAY["to"]) END,
+                        '[]'::jsonb
+                    )
+                )
+            WHERE id = $4::uuid
+              AND (metadata->>'lease_token') IS NOT DISTINCT FROM $5::text
+"#;
+
+/// Audit-5: requeue (deferral) write, fenced on the lease token — a stale
+/// worker must not be able to defer a row the new owner is processing.
+const REQUEUE_JOB_UPDATE_SQL: &str = r#"
+            UPDATE email_queue
+            SET status = 'pending', scheduled_at = $1, locked_until = NULL,
+                metadata = jsonb_set(COALESCE(metadata, '{}'), '{requeue_reason}', $2::jsonb)
+            WHERE id = $3::uuid
+              AND (metadata->>'lease_token') IS NOT DISTINCT FROM $4::text
+"#;
+
+/// Audit-5: handle_permanent_job_failure's dead-letter write — previously
+/// fenced on `status = 'processing'` only; now exactly fenced on the claim
+/// token as well.
+const PERMANENT_FAILURE_UPDATE_SQL: &str = r#"
+            UPDATE email_queue
+             SET status = 'failed', error_message = $1, locked_until = NULL, updated_at = NOW()
+             WHERE id = $2::uuid AND status = 'processing'
+               AND (metadata->>'lease_token') IS NOT DISTINCT FROM $3::text
 "#;
 
 /// G.3c: duplicate-window reclaim bookkeeping — drop the recipient from the
@@ -120,6 +460,7 @@ const POSSIBLY_SENT_UPDATE_SQL: &str = r#"
             THEN 'sent' ELSE status END,
         updated_at = NOW()
     WHERE id = $1::uuid
+      AND (metadata->>'lease_token') IS NOT DISTINCT FROM $3::text
 "#;
 
 /// G.3c: send-idempotency marker key — one marker per (row, attempt,
@@ -127,6 +468,91 @@ const POSSIBLY_SENT_UPDATE_SQL: &str = r#"
 /// visibility lease so a crashed worker's reclaim hits the marker.
 fn send_marker_key(job: &EmailJob) -> String {
     format!("email:send:{}:{}:{}", job.id, job.attempt, job.to)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Audit-2: send-time admission control (token bucket)
+//
+// `SmtpConfig::rate_limit_per_second` and `SesConfig::max_send_rate` were
+// configured but read by NO send path, so nothing capped the send rate at
+// the moment of `transport.send()`. The admission gate below runs before
+// every send: a Redis token bucket keyed per TENANT (account ceiling) and
+// per DOMAIN (reputation), refilled from the configured rate. ONE atomic
+// Lua script performs the reserve across both buckets (all-or-nothing); on
+// exhaustion the caller defers the row via the existing requeue path
+// instead of sending. Redis unavailability fails OPEN (best-effort, same
+// posture as the G.3c send marker) — SES/SMTP still enforce their own
+// server-side throttling.
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Audit-2: the two admission buckets a send must reserve from — the
+/// tenant-wide ceiling and the sending domain's own bucket.
+fn send_admission_keys(job: &EmailJob) -> Vec<String> {
+    vec![
+        format!("rl:send:tenant:{}", job.tenant_id),
+        format!("rl:send:domain:{}", job.domain_id),
+    ]
+}
+
+/// Audit-2: atomic multi-bucket token-bucket reserve.
+///
+/// KEYS: the bucket hashes (tenant + domain). ARGV: [rate (tokens/sec),
+/// capacity, now_ms]. Each bucket starts full (capacity = one second of
+/// rate), refills continuously at `rate`, and persists `{tokens, ts}`.
+/// Returns 1 when EVERY bucket can afford one token (consuming one from
+/// each atomically), 0 otherwise — no partial consumption is possible.
+const SEND_ADMISSION_LUA: &str = r#"
+local rate = tonumber(ARGV[1])
+local capacity = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+local ready = {}
+for i = 1, #KEYS do
+    local vals = redis.call('HMGET', KEYS[i], 'tokens', 'ts')
+    local tokens = tonumber(vals[1])
+    local ts = tonumber(vals[2])
+    if tokens == nil or ts == nil then
+        tokens = capacity
+        ts = now
+    end
+    local elapsed_ms = math.max(0, now - ts)
+    tokens = math.min(capacity, tokens + (elapsed_ms / 1000.0) * rate)
+    if tokens < 1 then
+        return 0
+    end
+    ready[i] = {KEYS[i], tokens}
+end
+for i = 1, #ready do
+    redis.call('HSET', ready[i][1], 'tokens', ready[i][2] - 1, 'ts', now)
+    redis.call('PEXPIRE', ready[i][1], 3600000)
+end
+return 1
+"#;
+
+/// Audit-2: reserve one send from every admission bucket, atomically.
+/// `now_ms` is supplied by the caller (wall clock in production, injected
+/// in tests) so refill is deterministic and testable without sleeping.
+/// `Ok(true)` — admitted; `Ok(false)` — exhausted, defer the row;
+/// `Err` — Redis unavailable.
+async fn reserve_send_admission(
+    redis: &RedisPool,
+    keys: &[String],
+    rate_per_second: u32,
+    now_ms: i64,
+) -> Result<bool, String> {
+    let mut conn = redis.get().await.map_err(|e| e.to_string())?;
+    let script = redis::Script::new(SEND_ADMISSION_LUA);
+    let mut invocation = script.prepare_invoke();
+    for key in keys {
+        invocation.key(key);
+    }
+    let admitted: i32 = invocation
+        .arg(rate_per_second)
+        .arg(rate_per_second.max(1))
+        .arg(now_ms)
+        .invoke_async(&mut *conn)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(admitted == 1)
 }
 
 /// G.3c: try to claim the send slot (Redis SET NX EX). `Ok(true)` — we own
@@ -284,6 +710,15 @@ fn classify_send_failure(err: &ProcessorError) -> SendFailureClass {
             400..=499 => SendFailureClass::Soft,
             500..=599 => SendFailureClass::Hard,
             _ => SendFailureClass::Unknown,
+        };
+    }
+    // Audit-4: the SES transport classifies at the source (typed SDK error)
+    // and threads the disposition through the structured Ses variant.
+    if let ProcessorError::Ses { permanent, .. } = err {
+        return if *permanent {
+            SendFailureClass::Hard
+        } else {
+            SendFailureClass::Soft
         };
     }
     let err_str = err.to_string();
@@ -548,47 +983,11 @@ impl EmailProcessor {
         };
         let lock_until = Utc::now() + chrono::Duration::milliseconds(visibility_ms_i64);
 
-        let rows = sqlx::query_as::<_, QueuedEmailRow>(
-            r#"
-            UPDATE email_queue
-            SET status = 'processing', locked_until = $1, updated_at = NOW()
-            WHERE id IN (
-                SELECT id
-                FROM email_queue
-                WHERE (
-                    status = 'pending'
-                    -- Reclaim rows orphaned in 'processing' by a crashed
-                    -- worker whose visibility lease has expired.
-                    OR (status = 'processing' AND locked_until < NOW())
-                )
-                  AND (scheduled_at IS NULL OR scheduled_at <= NOW())
-                ORDER BY priority DESC, created_at ASC
-                LIMIT $2
-                FOR UPDATE SKIP LOCKED
-            )
-            RETURNING
-                id::text AS id,
-                COALESCE(message_id::text, id::text) as "messageId",
-                COALESCE(tenant_id, '') as "tenantId",
-                COALESCE(domain_id::text, '') as "domainId",
-                COALESCE("from", from_address) as "from",
-                COALESCE("to", to_addresses[1], '') as "to",
-                CASE
-                    WHEN metadata->'pending_recipients' IS NOT NULL
-                    THEN ARRAY(
-                        SELECT jsonb_array_elements_text(metadata->'pending_recipients')
-                    )
-                    ELSE to_addresses
-                END as "toAddresses",
-                subject, html, text, headers, attachments,
-                campaign_id::text as "campaignId", tags, metadata, scheduled_at as "scheduledAt",
-                attempt, created_at as "createdAt"
-            "#,
-        )
-        .bind(lock_until)
-        .bind(limit as i64)
-        .fetch_all(&self.db)
-        .await?;
+        let rows = sqlx::query_as::<_, QueuedEmailRow>(FETCH_JOBS_SQL)
+            .bind(lock_until)
+            .bind(limit as i64)
+            .fetch_all(&self.db)
+            .await?;
 
         // FIX-8: expand one queued row into one send unit PER recipient so
         // multi-recipient messages no longer drop recipients 2..N.
@@ -724,13 +1123,19 @@ impl EmailProcessor {
         let outcome = match &result {
             Ok(_) => SendOutcome::Success,
             // F-21: structured reply-code classification (must mirror
-            // `classify_send_failure`).
+            // `classify_send_failure`). Audit-4: SES source classification.
             Err(ProcessorError::Smtp {
                 code: 400..=499, ..
             }) => SendOutcome::SoftBounce,
             Err(ProcessorError::Smtp {
                 code: 500..=599, ..
             }) => SendOutcome::HardBounce,
+            Err(ProcessorError::Ses {
+                permanent: true, ..
+            }) => SendOutcome::HardBounce,
+            Err(ProcessorError::Ses {
+                permanent: false, ..
+            }) => SendOutcome::SoftBounce,
             Err(ProcessorError::Transport(msg)) if msg.contains("Soft bounce") => {
                 SendOutcome::SoftBounce
             }
@@ -776,6 +1181,23 @@ impl EmailProcessor {
 
         // Prepare email
         let email = self.prepare_email(job, &domain)?;
+
+        // Audit-2: send-time admission control — reserve one send from the
+        // tenant and domain token buckets (rate from
+        // `EmailConfig::send_rate_per_second`, previously dead config) BEFORE
+        // the transport. On exhaustion the row is deferred through the same
+        // requeue path as the warmup gate; the attempt is untouched, so the
+        // next claim re-evaluates admission.
+        if !self.check_send_admission(job).await? {
+            debug!(
+                job_id = %job.id,
+                tenant_id = %job.tenant_id,
+                domain_id = %job.domain_id,
+                "send admission exhausted — deferring row"
+            );
+            self.requeue_job(job, "send_rate_limited").await?;
+            return Ok(());
+        }
 
         // G.3c: send idempotency — claim the (row, attempt, recipient) send
         // slot before touching the transport. A reclaim whose previous
@@ -858,6 +1280,39 @@ impl EmailProcessor {
         outcome
     }
 
+    /// Audit-2: send-time admission gate — reserve one send from the tenant
+    /// and domain token buckets (refilled from
+    /// [`EmailConfig::send_rate_per_second`]) before any transport.send.
+    ///
+    /// * `Ok(false)` — exhausted: the caller defers the row via the existing
+    ///   requeue path instead of sending.
+    /// * `Err`/Redis unavailable — fails OPEN with a warning (best-effort,
+    ///   matching the G.3c send marker's posture; the transports still
+    ///   enforce their own server-side throttling).
+    /// * rate 0 — the gate is disabled entirely.
+    async fn check_send_admission(&self, job: &EmailJob) -> ProcessorResult<bool> {
+        let rate = self.config.send_rate_per_second();
+        if rate == 0 {
+            return Ok(true);
+        }
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        match reserve_send_admission(&self.redis, &send_admission_keys(job), rate, now_ms).await {
+            Ok(admitted) => Ok(admitted),
+            Err(e) => {
+                warn!(
+                    job_id = %job.id,
+                    tenant_id = %job.tenant_id,
+                    error = %e,
+                    "send admission bucket unavailable — proceeding (best-effort)"
+                );
+                Ok(true)
+            }
+        }
+    }
+
     /// Check warmup limits for a domain.
     ///
     /// # Security (O-16.8)
@@ -927,6 +1382,10 @@ impl EmailProcessor {
     ///
     /// Legacy jobs without a registered domain are permanently rejected: an
     /// unsigned fallback would turn a revoked or spoofed sender into delivery.
+    ///
+    /// Audit-1: warmup state is derived from the REAL per-tenant warmup data
+    /// (see [`GET_DOMAIN_SQL`]) instead of hardcoded `false/0` — the previous
+    /// constants made `check_warmup_limit` structurally dead.
     async fn get_domain(&self, job: &EmailJob) -> ProcessorResult<Domain> {
         if job.domain_id.is_empty() {
             return Err(ProcessorError::Job(
@@ -935,41 +1394,32 @@ impl EmailProcessor {
         }
 
         let requires_ses = self.config.transport_type == TransportType::Ses;
-        let domain = sqlx::query_as::<_, Domain>(
-            r#"
-            SELECT
-                id::text, tenant_id, name AS domain,
-                dkim_selector,
-                dkim_public_key,
-                dkim_private_key,
-                -- Per-domain IP warmup lives on dedicated_ips/ip_pool_addresses,
-                -- not on domains (see migrations 071/093); no warmup at the
-                -- domain level yet.
-                false AS warmup_enabled,
-                0 AS warmup_day,
-                NULL::text AS return_path
-            FROM domains
-            WHERE id = $1::uuid AND tenant_id = $2
-              AND status = 'verified'
-              AND dkim_enabled = true
-              AND dkim_selector IS NOT NULL
-              AND dkim_public_key IS NOT NULL
-              AND dkim_private_key IS NOT NULL
-              AND dkim_private_key LIKE 'dkim:v1:%'
-              AND ($3::boolean = false OR ses_verified = true)
-            "#,
-        )
-        .bind(&job.domain_id)
-        .bind(&job.tenant_id)
-        .bind(requires_ses)
-        .fetch_optional(&self.db)
-        .await?
-        .ok_or_else(|| {
-            ProcessorError::Job(format!(
-                "sending domain is absent, unverified, incomplete, or not ready for {} delivery",
-                if requires_ses { "SES" } else { "SMTP" }
-            ))
-        })?;
+        let row = sqlx::query_as::<_, DomainWithWarmupRow>(GET_DOMAIN_SQL)
+            .bind(&job.domain_id)
+            .bind(&job.tenant_id)
+            .bind(requires_ses)
+            .fetch_optional(&self.db)
+            .await?
+            .ok_or_else(|| {
+                ProcessorError::Job(format!(
+                    "sending domain is absent, unverified, incomplete, or not ready for {} delivery",
+                    if requires_ses { "SES" } else { "SMTP" }
+                ))
+            })?;
+
+        let (warmup_enabled, warmup_day) =
+            derive_domain_warmup(Utc::now(), row.warmup_starts.as_deref().unwrap_or(&[]));
+        let domain = Domain {
+            id: row.id,
+            tenant_id: row.tenant_id,
+            domain: row.domain,
+            dkim_selector: row.dkim_selector,
+            dkim_public_key: row.dkim_public_key,
+            dkim_private_key: row.dkim_private_key,
+            warmup_enabled,
+            warmup_day,
+            return_path: row.return_path,
+        };
 
         let sender_domain = job
             .from
@@ -1152,49 +1602,25 @@ impl EmailProcessor {
     /// (`handle_soft_bounce`) retry only this remaining set, so an
     /// already-delivered recipient is never re-sent.
     async fn handle_success(&self, job: &EmailJob, result: &SendResult) -> ProcessorResult<()> {
-        sqlx::query(
-            r#"
-            UPDATE email_queue
-            SET metadata = jsonb_set(
-                    COALESCE(metadata, '{}'::jsonb),
-                    '{pending_recipients}',
-                    COALESCE(
-                        metadata->'pending_recipients',
-                        CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
-                             THEN to_jsonb(to_addresses) END,
-                        CASE WHEN "to" IS NOT NULL AND "to" <> ''
-                             THEN to_jsonb(ARRAY["to"]) END,
-                        '[]'::jsonb
-                    ) - $3::text
-                ),
-                status = CASE WHEN COALESCE(
-                        metadata->'pending_recipients',
-                        CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
-                             THEN to_jsonb(to_addresses) END,
-                        CASE WHEN "to" IS NOT NULL AND "to" <> ''
-                             THEN to_jsonb(ARRAY["to"]) END,
-                        '[]'::jsonb
-                    ) - $3::text = '[]'::jsonb
-                    THEN 'sent' ELSE status END,
-                sent_at = CASE WHEN COALESCE(
-                        metadata->'pending_recipients',
-                        CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
-                             THEN to_jsonb(to_addresses) END,
-                        CASE WHEN "to" IS NOT NULL AND "to" <> ''
-                             THEN to_jsonb(ARRAY["to"]) END,
-                        '[]'::jsonb
-                    ) - $3::text = '[]'::jsonb
-                    THEN NOW() ELSE sent_at END,
-                smtp_message_id = $1,
-                updated_at = NOW()
-            WHERE id = $2::uuid
-            "#,
-        )
-        .bind(&result.smtp_message_id)
-        .bind(&job.id)
-        .bind(&job.to)
-        .execute(&self.db)
-        .await?;
+        let updated = sqlx::query(HANDLE_SUCCESS_UPDATE_SQL)
+            .bind(&result.smtp_message_id)
+            .bind(&job.id)
+            .bind(&job.to)
+            .bind(lease_token_of(job))
+            .execute(&self.db)
+            .await?;
+
+        // Audit-5: a fenced-out write means the lease was lost (the row was
+        // recovered and re-claimed). The new owner owns the row now — do not
+        // record events or stamp messages on its behalf.
+        if fenced_out(updated.rows_affected()) {
+            warn!(
+                job_id = %job.id,
+                recipient = %job.to,
+                "handle_success fenced out — lease lost, row write skipped"
+            );
+            return Ok(());
+        }
 
         // Record sent event
         sqlx::query(
@@ -1312,12 +1738,21 @@ impl EmailProcessor {
     /// `handle_success`) and the row only becomes 'suppressed' when the
     /// pending set is empty.
     async fn handle_suppressed(&self, job: &EmailJob, reason: &str) -> ProcessorResult<()> {
-        sqlx::query(SUPPRESSED_UPDATE_SQL)
+        let updated = sqlx::query(SUPPRESSED_UPDATE_SQL)
             .bind(reason)
             .bind(&job.id)
             .bind(&job.to)
+            .bind(lease_token_of(job))
             .execute(&self.db)
             .await?;
+
+        if fenced_out(updated.rows_affected()) {
+            warn!(
+                job_id = %job.id,
+                recipient = %job.to,
+                "handle_suppressed fenced out — lease lost, row write skipped"
+            );
+        }
 
         Ok(())
     }
@@ -1328,11 +1763,20 @@ impl EmailProcessor {
     /// (auditable) and remove it from the pending set so the row completes
     /// instead of redelivery-looping.
     async fn handle_possibly_sent(&self, job: &EmailJob) -> ProcessorResult<()> {
-        sqlx::query(POSSIBLY_SENT_UPDATE_SQL)
+        let updated = sqlx::query(POSSIBLY_SENT_UPDATE_SQL)
             .bind(&job.id)
             .bind(&job.to)
+            .bind(lease_token_of(job))
             .execute(&self.db)
             .await?;
+
+        if fenced_out(updated.rows_affected()) {
+            warn!(
+                job_id = %job.id,
+                recipient = %job.to,
+                "handle_possibly_sent fenced out — lease lost, row write skipped"
+            );
+        }
 
         Ok(())
     }
@@ -1360,65 +1804,61 @@ impl EmailProcessor {
         // recorded by the OTHER recipients of this row subtract from it, and
         // the retry fetch expands only this set. If nothing remains, the row
         // is simply marked sent.
-        sqlx::query(
-            r#"
-            UPDATE email_queue
-            SET status = CASE WHEN COALESCE(
-                        metadata->'pending_recipients',
-                        CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
-                             THEN to_jsonb(to_addresses) END,
-                        CASE WHEN "to" IS NOT NULL AND "to" <> ''
-                             THEN to_jsonb(ARRAY["to"]) END,
-                        '[]'::jsonb
-                    ) = '[]'::jsonb
-                    THEN 'sent' ELSE 'pending' END,
-                attempt = $1,
-                scheduled_at = $2,
-                error_message = $3,
-                locked_until = NULL,
-                metadata = jsonb_set(
-                    COALESCE(metadata, '{}'::jsonb),
-                    '{pending_recipients}',
-                    COALESCE(
-                        metadata->'pending_recipients',
-                        CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
-                             THEN to_jsonb(to_addresses) END,
-                        CASE WHEN "to" IS NOT NULL AND "to" <> ''
-                             THEN to_jsonb(ARRAY["to"]) END,
-                        '[]'::jsonb
-                    )
-                )
-            WHERE id = $4::uuid
-            "#,
-        )
-        .bind(next_attempt)
-        .bind(retry_at)
-        .bind(error.to_string())
-        .bind(&job.id)
-        .execute(&self.db)
-        .await?;
+        let updated = sqlx::query(SOFT_BOUNCE_UPDATE_SQL)
+            .bind(next_attempt)
+            .bind(retry_at)
+            .bind(error.to_string())
+            .bind(&job.id)
+            .bind(lease_token_of(job))
+            .execute(&self.db)
+            .await?;
+
+        if fenced_out(updated.rows_affected()) {
+            warn!(
+                job_id = %job.id,
+                recipient = %job.to,
+                "handle_soft_bounce fenced out — lease lost, requeue skipped"
+            );
+        }
 
         Ok(())
     }
 
     /// Handle hard bounce (permanent failure).
+    ///
+    /// Audit-3: the row can carry MULTIPLE recipients (FIX-8) — one 550 must
+    /// not terminalize the whole row. Mirrors `handle_success` /
+    /// `handle_suppressed`: the bounced recipient leaves
+    /// `metadata.pending_recipients`, the row becomes terminal 'bounced'
+    /// only when the pending set empties, and ONLY the bounced address is
+    /// suppressed.
     async fn handle_hard_bounce(
         &self,
         job: &EmailJob,
         error: &ProcessorError,
     ) -> ProcessorResult<()> {
-        sqlx::query(
-            r#"
-            UPDATE email_queue SET status = 'bounced', error_message = $1 WHERE id = $2::uuid
-            "#,
-        )
-        .bind(error.to_string())
-        .bind(&job.id)
-        .execute(&self.db)
-        .await?;
+        let updated = sqlx::query(HARD_BOUNCE_UPDATE_SQL)
+            .bind(error.to_string())
+            .bind(&job.id)
+            .bind(&job.to)
+            .bind(lease_token_of(job))
+            .execute(&self.db)
+            .await?;
 
-        // Add to suppressions. suppressions.id is VARCHAR(26), so use a
-        // short random suffix ("sup_" + 18 hex chars = 22 chars).
+        // Audit-5: fenced out — the lease was lost; the new owner owns the
+        // row and must not inherit this worker's suppression/event records.
+        if fenced_out(updated.rows_affected()) {
+            warn!(
+                job_id = %job.id,
+                recipient = %job.to,
+                "handle_hard_bounce fenced out — lease lost, bounce handling skipped"
+            );
+            return Ok(());
+        }
+
+        // Add to suppressions — ONLY the bounced address. suppressions.id is
+        // VARCHAR(26), so use a short random suffix ("sup_" + 18 hex chars
+        // = 22 chars).
         sqlx::query(
             r#"
             INSERT INTO suppressions (id, tenant_id, email, reason, created_at)
@@ -1435,7 +1875,7 @@ impl EmailProcessor {
         .execute(&self.db)
         .await?;
 
-        // Record bounce event
+        // Record bounce event (for the bounced recipient only)
         sqlx::query(
             r#"
             INSERT INTO events (id, tenant_id, message_id, domain_id, campaign_id, event_type, recipient, timestamp)
@@ -1457,7 +1897,30 @@ impl EmailProcessor {
     /// Handle generic error.
     async fn handle_error(&self, job: &EmailJob, error: &ProcessorError) -> ProcessorResult<()> {
         if job.attempt >= self.config.base.max_retries as i32 {
-            // Move to DLQ
+            // Audit-3: dead-letter only THIS recipient — the row may still
+            // owe deliveries to its other recipients (FIX-8). The failed
+            // recipient's delivery is recorded in email_dlq; the row itself
+            // only terminalizes to 'failed' when the pending set empties,
+            // otherwise it returns to 'pending' for the siblings.
+            // Audit-5: the fenced write runs FIRST — a fenced-out (lease
+            // lost) worker must not dead-letter on the new owner's behalf.
+            let updated = sqlx::query(DLQ_FAIL_UPDATE_SQL)
+                .bind(error.to_string())
+                .bind(&job.id)
+                .bind(&job.to)
+                .bind(lease_token_of(job))
+                .execute(&self.db)
+                .await?;
+
+            if fenced_out(updated.rows_affected()) {
+                warn!(
+                    job_id = %job.id,
+                    recipient = %job.to,
+                    "handle_error dead-letter fenced out — lease lost, DLQ write skipped"
+                );
+                return Ok(());
+            }
+
             sqlx::query(
                 r#"
                 INSERT INTO email_dlq (id, job_id, tenant_id, message_id, error_message, created_at)
@@ -1469,16 +1932,6 @@ impl EmailProcessor {
             .bind(&job.tenant_id)
             .bind(&job.message_id)
             .bind(error.to_string())
-            .execute(&self.db)
-            .await?;
-
-            sqlx::query(
-                r#"
-                UPDATE email_queue SET status = 'failed', error_message = $1 WHERE id = $2::uuid
-                "#,
-            )
-            .bind(error.to_string())
-            .bind(&job.id)
             .execute(&self.db)
             .await?;
         } else {
@@ -1498,15 +1951,12 @@ impl EmailProcessor {
     ) -> ProcessorResult<()> {
         let error_message = error.to_string();
         let mut transaction = self.db.begin().await?;
-        let updated = sqlx::query(
-            "UPDATE email_queue
-             SET status = 'failed', error_message = $1, locked_until = NULL, updated_at = NOW()
-             WHERE id = $2::uuid AND status = 'processing'",
-        )
-        .bind(&error_message)
-        .bind(&job.id)
-        .execute(&mut *transaction)
-        .await?;
+        let updated = sqlx::query(PERMANENT_FAILURE_UPDATE_SQL)
+            .bind(&error_message)
+            .bind(&job.id)
+            .bind(lease_token_of(job))
+            .execute(&mut *transaction)
+            .await?;
 
         if updated.rows_affected() > 0 {
             sqlx::query(
@@ -1530,22 +1980,24 @@ impl EmailProcessor {
     async fn requeue_job(&self, job: &EmailJob, reason: &str) -> ProcessorResult<()> {
         let retry_at = Utc::now() + chrono::Duration::minutes(5);
 
-        sqlx::query(
-            r#"
-            UPDATE email_queue
-            SET status = 'pending', scheduled_at = $1, locked_until = NULL,
-                metadata = jsonb_set(COALESCE(metadata, '{}'), '{requeue_reason}', $2::jsonb)
-            WHERE id = $3::uuid
-            "#,
-        )
-        .bind(retry_at)
-        .bind(
-            serde_json::to_value(reason)
-                .map_err(|e| sqlx::Error::Protocol(format!("serialization: {e}")))?,
-        )
-        .bind(&job.id)
-        .execute(&self.db)
-        .await?;
+        let updated = sqlx::query(REQUEUE_JOB_UPDATE_SQL)
+            .bind(retry_at)
+            .bind(
+                serde_json::to_value(reason)
+                    .map_err(|e| sqlx::Error::Protocol(format!("serialization: {e}")))?,
+            )
+            .bind(&job.id)
+            .bind(lease_token_of(job))
+            .execute(&self.db)
+            .await?;
+
+        if fenced_out(updated.rows_affected()) {
+            warn!(
+                job_id = %job.id,
+                reason = reason,
+                "requeue fenced out — lease lost, deferral skipped"
+            );
+        }
 
         Ok(())
     }
@@ -2277,6 +2729,52 @@ mod tests {
     /// crate (std::env is process-global; see `crate::test_support`).
     use crate::test_support::ENV_LOCK;
 
+    /// Audit-2 helper: an ephemeral in-process redis-server on a random
+    /// port, skipped (None) when redis-server is unavailable. The child is
+    /// leaked intentionally — it dies with the test process.
+    async fn ephemeral_redis() -> Option<RedisPool> {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).ok()?;
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut child = std::process::Command::new("redis-server")
+            .args([
+                "--port",
+                &port.to_string(),
+                "--save",
+                "",
+                "--appendonly",
+                "no",
+                "--daemonize",
+                "no",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        for _ in 0..50 {
+            if let Ok(client) = redis::Client::open(format!("redis://127.0.0.1:{port}").as_str()) {
+                if let Ok(mut conn) = client.get_connection() {
+                    if redis::cmd("PING")
+                        .query::<String>(&mut conn)
+                        .map(|r| r == "PONG")
+                        .unwrap_or(false)
+                    {
+                        return deadpool_redis::Config::from_url(format!(
+                            "redis://127.0.0.1:{port}"
+                        ))
+                        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                        .ok();
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        eprintln!("skipping: redis-server did not become ready");
+        None
+    }
+
     /// Builds an EmailProcessor around a lazy (never-connected) pair of pools
     /// with the given tracking config. The SES transport keeps `prepare_email`
     /// off the DKIM path, so no key material is needed.
@@ -2730,6 +3228,34 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------------
+    // Audit-4: SES permanent failures classified at the transport source
+    // -----------------------------------------------------------------------
+
+    /// A MailboxDoesNotExist-class SES rejection arrives as
+    /// `ProcessorError::Ses { permanent: true }` (classified in transport.rs
+    /// where the typed SDK error is still available) and must take the
+    /// hard-bounce path: per-recipient suppression, never a retry.
+    #[test]
+    fn ses_permanent_failure_classifies_hard_for_suppression() {
+        let err = ProcessorError::Ses {
+            permanent: true,
+            message: "SES send failed: MailboxDoesNotExist".into(),
+        };
+        assert_eq!(classify_send_failure(&err), SendFailureClass::Hard);
+    }
+
+    /// A transient SES failure (5xx / network) carries permanent:false and
+    /// must retry via the soft-bounce backoff — never suppress on it.
+    #[test]
+    fn ses_transient_failure_classifies_soft_for_retry() {
+        let err = ProcessorError::Ses {
+            permanent: false,
+            message: "SES send failed: 503 Service Unavailable".into(),
+        };
+        assert_eq!(classify_send_failure(&err), SendFailureClass::Soft);
+    }
+
     // ---------------------------------------------------------------------------
     // G.3a: recipient expansion respects the concurrency cap
     // ---------------------------------------------------------------------------
@@ -2822,6 +3348,317 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------------------
+    // Audit-3: hard bounce / DLQ must terminalize per-RECIPIENT, mirroring
+    // handle_success/handle_suppressed (FIX-8 made rows multi-recipient).
+    // ---------------------------------------------------------------------------
+
+    /// A hard bounce removes the bounced recipient from the pending set and
+    /// only flips the row to terminal 'bounced' when nothing remains owed —
+    /// siblings of a 3-recipient row keep their deliveries.
+    #[test]
+    fn hard_bounce_update_only_marks_row_terminal_when_pending_set_empty() {
+        let sql = HARD_BOUNCE_UPDATE_SQL;
+        assert!(
+            sql.contains("pending_recipients"),
+            "must maintain the pending set"
+        );
+        assert!(
+            sql.contains("- $3::text"),
+            "must remove ONLY the bounced recipient"
+        );
+        assert!(
+            sql.contains("THEN 'bounced' ELSE status END"),
+            "terminal status must be conditional on the pending set emptying"
+        );
+        assert!(
+            sql.contains("error_message = $1"),
+            "bounce reason must be recorded"
+        );
+    }
+
+    /// The DLQ path (attempt budget exhausted on a transient error) must not
+    /// abandon the recipients still owed a delivery: the failed recipient is
+    /// removed, the row only becomes 'failed' when the pending set empties,
+    /// and remaining siblings return to 'pending' for their own deliveries.
+    #[test]
+    fn dlq_failure_only_marks_row_terminal_when_pending_set_empty() {
+        let sql = DLQ_FAIL_UPDATE_SQL;
+        assert!(
+            sql.contains("- $3::text"),
+            "must remove the failed recipient from pending"
+        );
+        assert!(
+            sql.contains("THEN 'failed' ELSE 'pending' END"),
+            "row fails only when pending empties; siblings stay deliverable"
+        );
+        assert!(
+            sql.contains("locked_until = NULL"),
+            "a row returned to pending must be immediately claimable"
+        );
+    }
+
+    /// The suppression insert stays scoped to the single bounced address
+    /// (`$3` = job.to), never the row's whole recipient list.
+    #[test]
+    fn hard_bounce_suppression_covers_only_the_bounced_address() {
+        // The suppression INSERT lives inline in handle_hard_bounce; the
+        // hard-bounce contract (HARD_BOUNCE_UPDATE_SQL) keys the recipient
+        // as $3, and the suppression uses the same per-job recipient — the
+        // bounced sibling's address alone. Pin the SQL contract:
+        assert!(
+            HARD_BOUNCE_UPDATE_SQL.contains("- $3::text"),
+            "the bounced recipient (the suppressed address) is the row's $3"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Audit-5: lease-token fencing on every post-claim row write
+    // (mirrors queue-provider's exact lease fencing; the token lives in
+    // email_queue.metadata because email_queue has no lease_token column —
+    // migration 103 added it to queue_jobs only).
+    // ---------------------------------------------------------------------------
+
+    /// The claim mints a fresh lease token into the row's metadata; the
+    /// next claim overwrites it, so a stale worker's token can never match.
+    #[test]
+    fn claim_mints_a_fresh_lease_token_into_metadata() {
+        assert!(
+            FETCH_JOBS_SQL.contains("gen_random_uuid()"),
+            "claim must mint a fresh token: {FETCH_JOBS_SQL}"
+        );
+        assert!(
+            FETCH_JOBS_SQL.contains("'{lease_token}'"),
+            "token must land in metadata.lease_token"
+        );
+    }
+
+    /// Every post-claim row write must be fenced: the UPDATE only applies
+    /// while the row still carries THIS claim's token (a reclaim mints a
+    /// new one, so a stale worker's write matches nothing and no-ops).
+    /// `IS NOT DISTINCT FROM` keeps token-less legacy rows writable by
+    /// token-less writers; a stale TOKEN can never match the new one.
+    #[test]
+    fn terminal_writes_are_fenced_on_lease_token() {
+        let fenced_sql = [
+            HANDLE_SUCCESS_UPDATE_SQL,
+            SUPPRESSED_UPDATE_SQL,
+            POSSIBLY_SENT_UPDATE_SQL,
+            SOFT_BOUNCE_UPDATE_SQL,
+            HARD_BOUNCE_UPDATE_SQL,
+            DLQ_FAIL_UPDATE_SQL,
+            REQUEUE_JOB_UPDATE_SQL,
+            PERMANENT_FAILURE_UPDATE_SQL,
+        ];
+        for sql in fenced_sql {
+            assert!(
+                sql.contains("(metadata->>'lease_token') IS NOT DISTINCT FROM"),
+                "row write must be fenced on the claim's lease token: {sql}"
+            );
+        }
+    }
+
+    /// The fenced write is a no-op when the lease was lost — the write must
+    /// not be able to resurrect itself by matching a NULL token row with a
+    /// stale token (and vice versa): only exact-token or both-NULL matches
+    /// apply.
+    #[test]
+    fn lease_token_of_reads_the_claim_minted_token() {
+        let mut job = tracking_gate_job();
+        assert!(
+            lease_token_of(&job).is_none(),
+            "a job from a token-less legacy row has no token"
+        );
+        job.metadata = Some(serde_json::json!({"lease_token": "tok-123"}));
+        assert_eq!(lease_token_of(&job), Some("tok-123"));
+        // Unrelated metadata must not accidentally surface a token.
+        job.metadata = Some(serde_json::json!({"pending_recipients": []}));
+        assert_eq!(lease_token_of(&job), None);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Audit-2: send-time admission token bucket (Redis, per tenant AND per
+    // domain, one atomic Lua reserve; exhaustion defers the row)
+    // ---------------------------------------------------------------------------
+
+    /// The admission keys must scope BOTH dimensions: a tenant-wide bucket
+    /// (account ceiling) and a per-domain bucket.
+    #[test]
+    fn send_admission_keys_cover_tenant_and_domain() {
+        let job = tracking_gate_job();
+        let keys = send_admission_keys(&job);
+        assert_eq!(keys.len(), 2);
+        assert!(
+            keys.iter().any(|k| k.contains(&job.tenant_id)),
+            "a tenant-scoped bucket must exist: {keys:?}"
+        );
+        assert!(
+            keys.iter().any(|k| k.contains(&job.domain_id)),
+            "a domain-scoped bucket must exist: {keys:?}"
+        );
+    }
+
+    /// Audit-2 behavioral gate (ephemeral redis-server): the bucket admits
+    /// up to its capacity, refuses when exhausted (the caller defers the
+    /// row instead of sending), and refills over elapsed time — the clock
+    /// is injected as `now_ms`, so refill is tested without sleeping.
+    #[tokio::test]
+    async fn send_admission_bucket_exhausts_then_refills() {
+        let Some(redis) = ephemeral_redis().await else {
+            return;
+        };
+
+        let keys = send_admission_keys(&tracking_gate_job());
+        let t0 = 1_000_000i64;
+        // rate=1/sec, capacity=1 (one-second burst).
+        assert!(
+            reserve_send_admission(&redis, &keys, 1, t0).await.unwrap(),
+            "first send within capacity must be admitted"
+        );
+        assert!(
+            !reserve_send_admission(&redis, &keys, 1, t0).await.unwrap(),
+            "an exhausted bucket must refuse — the row is deferred, not sent"
+        );
+        assert!(
+            !reserve_send_admission(&redis, &keys, 1, t0 + 500)
+                .await
+                .unwrap(),
+            "half a refill period later the bucket is still empty"
+        );
+        assert!(
+            reserve_send_admission(&redis, &keys, 1, t0 + 1_500)
+                .await
+                .unwrap(),
+            "after a full refill period the bucket admits again"
+        );
+    }
+
+    /// The tenant bucket is SHARED across the tenant's domains while each
+    /// domain keeps its own bucket: exhausting the tenant ceiling refuses a
+    /// different domain whose own bucket still has tokens.
+    #[tokio::test]
+    async fn send_admission_buckets_are_per_tenant_and_per_domain() {
+        let Some(redis) = ephemeral_redis().await else {
+            return;
+        };
+
+        let mut job = tracking_gate_job();
+        job.tenant_id = "tenant-rl".into();
+        job.domain_id = "domain-a".into();
+        let keys_a = send_admission_keys(&job);
+        job.domain_id = "domain-b".into();
+        let keys_b = send_admission_keys(&job);
+
+        let t0 = 2_000_000i64;
+        // rate=1/sec, capacity=1: domain-a's send consumes BOTH buckets.
+        assert!(reserve_send_admission(&redis, &keys_a, 1, t0)
+            .await
+            .unwrap());
+        // domain-b's own bucket is untouched, but the shared TENANT bucket
+        // is empty — admission (an AND over both buckets) must refuse.
+        assert!(
+            !reserve_send_admission(&redis, &keys_b, 1, t0)
+                .await
+                .unwrap(),
+            "the shared tenant ceiling must bind across domains"
+        );
+        // A different tenant is unaffected.
+        job.tenant_id = "tenant-other".into();
+        let keys_other = send_admission_keys(&job);
+        assert!(reserve_send_admission(&redis, &keys_other, 1, t0)
+            .await
+            .unwrap());
+    }
+
+    /// The processor-level gate consumes the plumbed config rate and defers
+    /// (returns false) once it is exhausted; a 0 rate disables the gate; an
+    /// unreachable Redis fails OPEN (best-effort, like the send marker).
+    #[tokio::test]
+    async fn check_send_admission_gates_on_config_rate_and_fails_open() {
+        // Unreachable Redis: the gate must fail open (warn + admit).
+        let dead_redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .unwrap();
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let processor = EmailProcessor::new(
+            db,
+            dead_redis,
+            EmailConfig {
+                ses: crate::common::SesConfig {
+                    max_send_rate: 2,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            processor
+                .check_send_admission(&tracking_gate_job())
+                .await
+                .unwrap(),
+            "Redis unavailability must not block sends (best-effort gate)"
+        );
+
+        let Some(redis) = ephemeral_redis().await else {
+            return;
+        };
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://localhost/unused")
+            .unwrap();
+        let processor = EmailProcessor::new(
+            db,
+            redis,
+            EmailConfig {
+                ses: crate::common::SesConfig {
+                    max_send_rate: 2,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let job = tracking_gate_job();
+        assert!(processor.check_send_admission(&job).await.unwrap());
+        assert!(processor.check_send_admission(&job).await.unwrap());
+        assert!(
+            !processor.check_send_admission(&job).await.unwrap(),
+            "above the configured rate the row must be deferred, not sent"
+        );
+
+        // A zero rate disables the gate entirely — even with the bucket
+        // already drained above.
+        let unlimited = EmailProcessor::new(
+            sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_lazy("postgres://localhost/unused")
+                .unwrap(),
+            deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .unwrap(),
+            EmailConfig {
+                ses: crate::common::SesConfig {
+                    max_send_rate: 0,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            unlimited.check_send_admission(&job).await.unwrap(),
+            "rate 0 must disable the admission gate without touching Redis"
+        );
+    }
+
     /// D: the audit `messages` row must follow the queue row: an accepted
     /// SMTP send transitions status 'queued' → 'sent' (mirroring the SES
     /// delivery-notification handler), scoped to tenant and ONLY from
@@ -2855,6 +3692,218 @@ mod tests {
     /// G.3c: simulate the reclaim sequence — the first claim wins, the
     /// reclaim of a lease that expired mid-send is refused, and the marker
     /// is releasable once the attempt is handled.
+    // ---------------------------------------------------------------------------
+    // Audit-1: real per-domain warmup state (dedicated_ips, migrations 071/093)
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn warmup_derivation_disabled_without_warming_ips() {
+        // No dedicated IP in warmup (shared pool = platform reputation):
+        // warmup limiting must stay off.
+        let (enabled, day) = derive_domain_warmup(Utc::now(), &[]);
+        assert!(!enabled, "no warming IPs => warmup disabled");
+        assert_eq!(day, 0);
+    }
+
+    #[test]
+    fn warmup_derivation_uses_elapsed_days_of_warming_ip() {
+        let now = Utc::now();
+        let (enabled, day) = derive_domain_warmup(now, &[now - chrono::Duration::days(3)]);
+        assert!(enabled, "an active warmup row must enable the gate");
+        assert_eq!(day, 3, "day must be the whole days since warmup_started_at");
+    }
+
+    #[test]
+    fn warmup_derivation_binds_to_the_least_warmed_ip() {
+        // Several warming IPs: the furthest-behind one is the binding
+        // constraint on the tenant's sending reputation.
+        let now = Utc::now();
+        let (enabled, day) = derive_domain_warmup(
+            now,
+            &[
+                now - chrono::Duration::days(10),
+                now - chrono::Duration::days(3),
+                now - chrono::Duration::days(40),
+            ],
+        );
+        assert!(enabled);
+        assert_eq!(day, 3, "MIN elapsed days across warming IPs wins");
+    }
+
+    #[test]
+    fn warmup_derivation_clamps_to_day_zero() {
+        // A warmup started moments ago (or a clock-skewed future timestamp)
+        // is day 0, never negative.
+        let now = Utc::now();
+        let (enabled, day) = derive_domain_warmup(
+            now,
+            &[
+                now + chrono::Duration::hours(1),
+                now - chrono::Duration::hours(2),
+            ],
+        );
+        assert!(enabled);
+        assert_eq!(day, 0);
+    }
+
+    /// get_domain must consult the real warmup tables (dedicated_ips was
+    /// given per-IP warmup state by migrations 071/093) instead of
+    /// hardcoding `false AS warmup_enabled, 0 AS warmup_day`.
+    #[test]
+    fn get_domain_sql_consults_dedicated_ips_warmup_state() {
+        assert!(
+            GET_DOMAIN_SQL.contains("dedicated_ips"),
+            "get_domain must read the real warmup state: {GET_DOMAIN_SQL}"
+        );
+        assert!(
+            !GET_DOMAIN_SQL.contains("false AS warmup_enabled"),
+            "the hardcoded warmup constants must be gone: {GET_DOMAIN_SQL}"
+        );
+    }
+
+    /// With the real state wired, the gate switch defaults ON — it only ever
+    /// throttles domains whose tenant actually has a warming dedicated IP.
+    #[test]
+    fn warmup_gate_defaults_to_enabled() {
+        assert!(
+            crate::common::WarmupConfig::default().enabled,
+            "warmup limiting must engage by default now that real state exists"
+        );
+    }
+
+    /// Audit-1 behavioral gate: with warmup_enabled and warmup_day = N, the
+    /// Redis counter gate blocks sends above WarmupLimits::for_day(N)'s cap
+    /// and admits below it.
+    #[tokio::test]
+    async fn warmup_gate_blocks_above_the_days_cap() {
+        let listener = match std::net::TcpListener::bind(("127.0.0.1", 0)) {
+            Ok(l) => l,
+            Err(_) => {
+                eprintln!("skipping: cannot allocate port");
+                return;
+            }
+        };
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let mut child = match std::process::Command::new("redis-server")
+            .args([
+                "--port",
+                &port.to_string(),
+                "--save",
+                "",
+                "--appendonly",
+                "no",
+                "--daemonize",
+                "no",
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => {
+                eprintln!("skipping: redis-server not available");
+                return;
+            }
+        };
+        let mut ready = false;
+        for _ in 0..50 {
+            if let Ok(client) = redis::Client::open(format!("redis://127.0.0.1:{port}").as_str()) {
+                if let Ok(mut conn) = client.get_connection() {
+                    if redis::cmd("PING")
+                        .query::<String>(&mut conn)
+                        .map(|r| r == "PONG")
+                        .unwrap_or(false)
+                    {
+                        ready = true;
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        if !ready {
+            let _ = child.kill();
+            let _ = child.wait();
+            eprintln!("skipping: redis-server did not become ready");
+            return;
+        }
+
+        let result: ProcessorResult<()> = async {
+            let db = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_lazy("postgres://localhost/unused")
+                .unwrap();
+            let redis = deadpool_redis::Config::from_url(format!("redis://127.0.0.1:{port}"))
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+                .map_err(|e| ProcessorError::Job(e.to_string()))?;
+            let processor = EmailProcessor::new(db, redis, EmailConfig::default())
+                .await
+                .unwrap();
+
+            let mut domain = tracking_gate_domain();
+            domain.warmup_enabled = true;
+            domain.warmup_day = 3; // WarmupLimits::for_day(3).daily_limit == 400
+            let job = tracking_gate_job();
+
+            // Pre-fill the shared day counter to exactly the cap: the next
+            // increment exceeds it, so the gate must refuse AND roll the
+            // over-limit increment back.
+            let today = Utc::now().format("%Y-%m-%d").to_string();
+            let key = format!("warmup:count:{}:{}", today, job.domain_id);
+            {
+                let mut conn = processor.redis.get().await.unwrap();
+                let _: () = redis::cmd("SET")
+                    .arg(&key)
+                    .arg(WarmupLimits::for_day(3).daily_limit)
+                    .query_async(&mut *conn)
+                    .await
+                    .unwrap();
+            }
+            assert!(
+                !processor.check_warmup_limit(&job, &domain).await.unwrap(),
+                "a send above the day's cap must be blocked"
+            );
+            let after: i64 = {
+                let mut conn = processor.redis.get().await.unwrap();
+                redis::cmd("GET")
+                    .arg(&key)
+                    .query_async(&mut *conn)
+                    .await
+                    .unwrap()
+            };
+            assert_eq!(
+                after,
+                WarmupLimits::for_day(3).daily_limit,
+                "the refused send must roll its increment back"
+            );
+
+            // Below the cap the gate admits.
+            {
+                let mut conn = processor.redis.get().await.unwrap();
+                let _: () = redis::cmd("SET")
+                    .arg(&key)
+                    .arg(WarmupLimits::for_day(3).daily_limit - 1)
+                    .query_async(&mut *conn)
+                    .await
+                    .unwrap();
+            }
+            assert!(
+                processor.check_warmup_limit(&job, &domain).await.unwrap(),
+                "a send below the cap must be admitted"
+            );
+
+            // A domain without warmup state is never gated, regardless of counters.
+            let cold = tracking_gate_domain();
+            assert!(processor.check_warmup_limit(&job, &cold).await.unwrap());
+            Ok(())
+        }
+        .await;
+        let _ = child.kill();
+        let _ = child.wait();
+        result.expect("warmup gate sequence");
+    }
+
     #[tokio::test]
     async fn send_marker_prevents_double_send_on_reclaim() {
         // Ephemeral redis-server; skip when unavailable.

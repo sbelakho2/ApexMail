@@ -19,7 +19,6 @@
 -- For fresh deployments, earlier migrations that reference these tables via
 -- inline FK constraints must also be modified (see migration 021-024 fixes).
 
-BEGIN;
 
 -- =============================================================================
 -- 0. Column additions to existing tables
@@ -280,4 +279,3 @@ BEGIN
 END;
 $$;
 
-COMMIT;

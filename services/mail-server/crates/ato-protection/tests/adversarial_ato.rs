@@ -196,7 +196,12 @@ fn test_tls_history_duplicate_not_double_counted() {
 #[test]
 fn test_impossible_travel_nyc_to_tokyo() {
     let engine = AtoEngine::new();
-    engine.evaluate(&make_event("dave", "1.1.1.1", 40.71, -74.01)); // NYC
+    // NYC one hour before Tokyo — genuinely impossible (~10,850 km/h).
+    // A same-second Tokyo login is clock-skew/PoP jitter and is
+    // deliberately skipped by the geo tolerance rules.
+    let mut nyc = make_event("dave", "1.1.1.1", 40.71, -74.01);
+    nyc.timestamp = Utc::now() - chrono::Duration::hours(1);
+    engine.evaluate(&nyc);
     let verdict = engine.evaluate(&make_event("dave", "2.2.2.2", 35.68, 139.69)); // Tokyo
     assert!(
         verdict.impossible_travel,

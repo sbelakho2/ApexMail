@@ -748,7 +748,13 @@ impl GdprAutomation {
                 table,
                 email_column,
             } => sqlx::query(&format!(
-                "DELETE FROM {table} WHERE tenant_id = $1 AND {email_column} = $2"
+                // LOWER() on both sides: writers across the platform are
+                // inconsistent about email case (some normalize on write,
+                // some do not), and an exact-match DELETE silently MISSES
+                // User@Example.com rows for a user@example.com DSR while
+                // still reporting success — the deletion certificate then
+                // attests PII is gone that is not.
+                "DELETE FROM {table} WHERE tenant_id = $1 AND LOWER({email_column}) = LOWER($2)"
             ))
             .bind(tid)
             .bind(email)
@@ -761,7 +767,7 @@ impl GdprAutomation {
                 // no operator).
                 sqlx::query(
                     "DELETE FROM sessions WHERE user_id IN \
-                     (SELECT id::text FROM users WHERE email = $1)",
+                     (SELECT id::text FROM users WHERE LOWER(email) = LOWER($1))",
                 )
                 .bind(email)
                 .execute(&self.db)
@@ -781,7 +787,7 @@ impl GdprAutomation {
                 let mut failure: Option<sqlx::Error> = None;
                 for col in columns {
                     let sql = format!(
-                        "UPDATE {table} SET {col} = $3 WHERE tenant_id = $1 AND {col} = $2"
+                        "UPDATE {table} SET {col} = $3 WHERE tenant_id = $1 AND LOWER({col}) = LOWER($2)"
                     );
                     match sqlx::query(&sql)
                         .bind(tid)

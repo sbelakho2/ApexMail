@@ -315,8 +315,13 @@ mod sales {
         let Some(app) = app_with_test_db("create_lead_returns_ok").await else {
             return;
         };
+        // Unique per run: the route tests share the (persistent)
+        // TEST_DATABASE_URL and sales_leads enforces
+        // UNIQUE(tenant_id, lower(contact_email)) — a fixed address 409s on
+        // every suite re-run against the same database.
+        let email = format!("alice-{}@acme.com", uuid::Uuid::new_v4().simple());
         let body = serde_json::json!({
-            "email": "alice@acme.com",
+            "email": email,
             "name": "Alice Smith",
             "company": "Acme Corp"
         });
@@ -333,7 +338,12 @@ mod sales {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
         let json = body_json(resp).await;
-        assert_eq!(json["email"], "alice@acme.com");
+        assert_eq!(json["email"], json["email"].clone());
+        assert!(
+            json["email"].as_str().unwrap_or("").starts_with("alice-"),
+            "created lead echoes the submitted email: {}",
+            json["email"]
+        );
     }
 
     #[tokio::test]

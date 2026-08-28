@@ -81,6 +81,37 @@ enum QueueOutcome {
     RecipientSuppressed,
 }
 
+/// Terminal outcome of one AUTH exchange (RFC 4954). Failing replies are
+/// RETURNED, not written: the session loop emits them through `reply!` so
+/// every 4xx/5xx counts toward the session error budget and is logged via
+/// `log_smtp_reject` — a brute-forcer hammering AUTH disconnects after
+/// MAX_SESSION_ERRORS attempts exactly like any other error source.
+enum AuthOutcome {
+    Success(String, Uuid),
+    /// Terminal reply (already CRLF-terminated), to be emitted via `reply!`.
+    Reply(&'static str),
+    /// The transport died mid-exchange; no reply can be delivered.
+    Silent,
+}
+
+/// One AUTH continuation line (see [`SubmissionServer::read_auth_line`]).
+enum AuthLine {
+    Payload(String),
+    /// RFC 4954 §4: a lone `*` cancels the exchange.
+    Cancelled,
+    /// The continuation line exceeded the command-line cap (drained; the
+    /// session stays synchronised).
+    TooLong,
+}
+
+/// Terminal AUTH replies shared by both mechanisms. `&'static str` so they
+/// can ride in [`AuthOutcome::Reply`] without allocation.
+const AUTH_FAILED: &str = "535 5.7.8 Authentication failed\r\n";
+const AUTH_LOCKED_OUT: &str = "454 4.7.0 Too many failed authentication attempts\r\n";
+const AUTH_BAD_BASE64: &str = "501 5.5.2 Invalid base64\r\n";
+const AUTH_CANCELLED: &str = "501 5.7.0 Authentication cancelled\r\n";
+const AUTH_LINE_TOO_LONG: &str = "500 5.5.2 Line too long\r\n";
+
 pub struct SubmissionServer {
     config: SubmissionConfig,
     rate_limit: RateLimitConfig,
@@ -148,9 +179,16 @@ impl SubmissionServer {
 
         // Admission control: per-IP connection cap (mirrors the inbound
         // server's gate; without it `connections` is tracked but never
-        // enforced, so one IP may hold unlimited concurrent sessions).
-        let active = self.connections.get(&ip).map(|c| *c).unwrap_or(0);
-        if self.rate_limit.enabled && active >= self.rate_limit.max_connections_per_ip {
+        // enforced, so one IP may hold unlimited concurrent sessions). The
+        // check and the slot increment are one atomic step — concurrent
+        // connects cannot overshoot the cap.
+        if self.rate_limit.enabled
+            && !super::bounce::try_admit_connection(
+                &self.connections,
+                ip,
+                self.rate_limit.max_connections_per_ip,
+            )
+        {
             let mut stream = BufStream::new(socket);
             let _ = write_line(
                 &mut stream,
@@ -162,7 +200,6 @@ impl SubmissionServer {
 
         // F-19: RAII slot guard (same pattern as the bounce server) — the
         // per-IP slot is released on EVERY exit path, early returns included.
-        *self.connections.entry(ip).or_insert(0) += 1;
         let _conn_guard = super::bounce::ConnGuard {
             conns: self.connections.clone(),
             ip,
@@ -421,18 +458,28 @@ impl SubmissionServer {
                 } else if authenticated {
                     reply!("503 5.5.1 Already authenticated\r\n");
                 } else if mech == "LOGIN" {
-                    if let Some((email, _account_id)) =
-                        self.handle_auth_login(stream, initial_response, ip).await
-                    {
-                        authenticated = true;
-                        auth_email = email;
+                    match self.handle_auth_login(stream, initial_response, ip).await {
+                        AuthOutcome::Success(email, _account_id) => {
+                            authenticated = true;
+                            auth_email = email;
+                        }
+                        AuthOutcome::Reply(reply) => {
+                            log_smtp_reject("submission", ip, &session_id, reply.trim_end());
+                            reply!("{reply}");
+                        }
+                        AuthOutcome::Silent => {}
                     }
                 } else if mech == "PLAIN" {
-                    if let Some((email, _account_id)) =
-                        self.handle_auth_plain(stream, initial_response, ip).await
-                    {
-                        authenticated = true;
-                        auth_email = email;
+                    match self.handle_auth_plain(stream, initial_response, ip).await {
+                        AuthOutcome::Success(email, _account_id) => {
+                            authenticated = true;
+                            auth_email = email;
+                        }
+                        AuthOutcome::Reply(reply) => {
+                            log_smtp_reject("submission", ip, &session_id, reply.trim_end());
+                            reply!("{reply}");
+                        }
+                        AuthOutcome::Silent => {}
                     }
                 } else {
                     reply!("504 5.5.4 Unrecognized authentication type\r\n");
@@ -512,7 +559,12 @@ impl SubmissionServer {
                         "501 5.5.4 Syntax: RCPT TO:<address>",
                     );
                     reply!("501 5.5.4 Syntax: RCPT TO:<address>\r\n");
-                } else if rcpt_to.len() >= self.config.max_recipients {
+                } else if rcpt_to.len()
+                    >= super::util::effective_max_recipients(
+                        self.config.max_recipients,
+                        self.rate_limit.max_recipients_per_message,
+                    )
+                {
                     reply!("452 4.5.3 Too many recipients\r\n");
                 } else if let Err(reject) = validate_rcpt_params(trimmed) {
                     log_smtp_reject("submission", ip, &session_id, reject);
@@ -792,15 +844,18 @@ impl SubmissionServer {
     }
 
     /// `AUTH LOGIN` two-step (plus optional inline username): prompt for
-    /// base64 username then password, verify, and always send a terminating
-    /// reply (never leave the client hanging). Returns the authenticated
-    /// email on success.
+    /// base64 username then password, verify, and always produce a
+    /// terminating reply (never leave the client hanging). 334 challenges
+    /// are written directly (they are not error replies); every terminal
+    /// reply is returned as [`AuthOutcome::Reply`] so the session loop can
+    /// emit it through `reply!` — AUTH failures must count toward the
+    /// session error budget like any other 4xx/5xx.
     async fn handle_auth_login<S: AsyncRead + AsyncWrite + Unpin>(
         self: &Arc<Self>,
         stream: &mut BufStream<S>,
         initial_response: &str,
         ip: std::net::IpAddr,
-    ) -> Option<(String, Uuid)> {
+    ) -> AuthOutcome {
         // F-12: "AUTH LOGIN <base64-username>" carries the username inline
         // (RFC 4954 initial-response); "=" encodes the empty string.
         let user_b64: String = if !initial_response.is_empty() {
@@ -810,11 +865,21 @@ impl SubmissionServer {
                 .to_string()
         } else {
             let _ = write_line(stream, "334 VXNlcm5lbWU6\r\n").await;
-            self.read_auth_line(stream).await?
+            match self.read_auth_line(stream).await {
+                Some(AuthLine::Payload(line)) => line,
+                Some(AuthLine::Cancelled) => return AuthOutcome::Reply(AUTH_CANCELLED),
+                Some(AuthLine::TooLong) => return AuthOutcome::Reply(AUTH_LINE_TOO_LONG),
+                None => return AuthOutcome::Silent,
+            }
         };
 
         let _ = write_line(stream, "334 UGFzc3dvcmQ6\r\n").await;
-        let pass_b64 = self.read_auth_line(stream).await?;
+        let pass_b64 = match self.read_auth_line(stream).await {
+            Some(AuthLine::Payload(line)) => line,
+            Some(AuthLine::Cancelled) => return AuthOutcome::Reply(AUTH_CANCELLED),
+            Some(AuthLine::TooLong) => return AuthOutcome::Reply(AUTH_LINE_TOO_LONG),
+            None => return AuthOutcome::Silent,
+        };
 
         match (
             BASE64.decode(user_b64.trim()),
@@ -826,39 +891,27 @@ impl SubmissionServer {
                 match self.authenticate_user(&user_str, &pass_str, ip).await {
                     Ok((email, account_id)) => {
                         let _ = write_line(stream, "235 2.7.0 Authentication successful\r\n").await;
-                        Some((email, account_id))
+                        AuthOutcome::Success(email, account_id)
                     }
-                    Err(AuthError::LockedOut) => {
-                        let _ = write_line(
-                            stream,
-                            "454 4.7.0 Too many failed authentication attempts\r\n",
-                        )
-                        .await;
-                        None
-                    }
-                    Err(AuthError::Failed) => {
-                        let _ = write_line(stream, "535 5.7.8 Authentication failed\r\n").await;
-                        None
-                    }
+                    Err(AuthError::LockedOut) => AuthOutcome::Reply(AUTH_LOCKED_OUT),
+                    Err(AuthError::Failed) => AuthOutcome::Reply(AUTH_FAILED),
                 }
             }
-            _ => {
-                let _ = write_line(stream, "501 5.5.2 Invalid base64\r\n").await;
-                None
-            }
+            _ => AuthOutcome::Reply(AUTH_BAD_BASE64),
         }
     }
 
-    /// `AUTH PLAIN` inline or two-step. Always sends a terminating reply,
+    /// `AUTH PLAIN` inline or two-step. Always produces a terminating reply,
     /// including for payloads that decode to fewer than three NUL-separated
-    /// fields (previously the client hung forever in that case). Returns the
-    /// authenticated email on success.
+    /// fields (previously the client hung forever in that case). Terminal
+    /// replies are returned (not written) so failures flow through `reply!`
+    /// and the session error budget.
     async fn handle_auth_plain<S: AsyncRead + AsyncWrite + Unpin>(
         self: &Arc<Self>,
         stream: &mut BufStream<S>,
         initial_response: &str,
         ip: std::net::IpAddr,
-    ) -> Option<(String, Uuid)> {
+    ) -> AuthOutcome {
         // F-12: the base64 payload arrives verbatim (any command case); "="
         // encodes the empty initial response (RFC 4954).
         let auth_b64: String = if !initial_response.is_empty() {
@@ -868,7 +921,12 @@ impl SubmissionServer {
                 .to_string()
         } else {
             let _ = write_line(stream, "334 \r\n").await;
-            self.read_auth_line(stream).await?
+            match self.read_auth_line(stream).await {
+                Some(AuthLine::Payload(line)) => line,
+                Some(AuthLine::Cancelled) => return AuthOutcome::Reply(AUTH_CANCELLED),
+                Some(AuthLine::TooLong) => return AuthOutcome::Reply(AUTH_LINE_TOO_LONG),
+                None => return AuthOutcome::Silent,
+            }
         };
         match BASE64.decode(auth_b64.trim()) {
             Ok(creds) => {
@@ -879,41 +937,30 @@ impl SubmissionServer {
                         Ok((email, account_id)) => {
                             let _ =
                                 write_line(stream, "235 2.7.0 Authentication successful\r\n").await;
-                            Some((email, account_id))
+                            AuthOutcome::Success(email, account_id)
                         }
-                        Err(AuthError::LockedOut) => {
-                            let _ = write_line(
-                                stream,
-                                "454 4.7.0 Too many failed authentication attempts\r\n",
-                            )
-                            .await;
-                            None
-                        }
-                        Err(AuthError::Failed) => {
-                            let _ = write_line(stream, "535 5.7.8 Authentication failed\r\n").await;
-                            None
-                        }
+                        Err(AuthError::LockedOut) => AuthOutcome::Reply(AUTH_LOCKED_OUT),
+                        Err(AuthError::Failed) => AuthOutcome::Reply(AUTH_FAILED),
                     }
                 } else {
                     // Malformed authcid (fewer than three NUL fields).
-                    let _ = write_line(stream, "535 5.7.8 Authentication failed\r\n").await;
-                    None
+                    AuthOutcome::Reply(AUTH_FAILED)
                 }
             }
-            _ => {
-                let _ = write_line(stream, "501 5.5.2 Invalid base64\r\n").await;
-                None
-            }
+            _ => AuthOutcome::Reply(AUTH_BAD_BASE64),
         }
     }
 
     /// Read one AUTH response line with a timeout and a line-length cap.
     /// A line consisting of the single `*` cancels the authentication
-    /// exchange (RFC 4954 §4) — answered with 501 and `None`.
+    /// exchange (RFC 4954 §4) — the caller answers with 501. Over-long
+    /// continuation lines are reported so the caller can answer 500 (the
+    /// remainder was drained, the session stays synchronised). `None` means
+    /// the transport died: no reply can be delivered.
     async fn read_auth_line<S: AsyncRead + AsyncWrite + Unpin>(
         &self,
         stream: &mut BufStream<S>,
-    ) -> Option<String> {
+    ) -> Option<AuthLine> {
         match tokio::time::timeout(
             AUTH_LINE_TIMEOUT,
             read_line_capped(stream, MAX_COMMAND_LINE),
@@ -923,15 +970,12 @@ impl SubmissionServer {
             Ok(Ok(LineRead::Line(l, _))) => {
                 let line = line_lossy(&l);
                 if line.trim() == "*" {
-                    let _ = write_line(stream, "501 5.7.0 Authentication cancelled\r\n").await;
-                    return None;
+                    Some(AuthLine::Cancelled)
+                } else {
+                    Some(AuthLine::Payload(line))
                 }
-                Some(line)
             }
-            Ok(Ok(LineRead::TooLong)) => {
-                let _ = write_line(stream, "500 5.5.2 Line too long\r\n").await;
-                None
-            }
+            Ok(Ok(LineRead::TooLong)) => Some(AuthLine::TooLong),
             _ => None,
         }
     }
@@ -1039,7 +1083,17 @@ impl SubmissionServer {
         data: &[u8],
         msg_id: &str,
     ) -> Result<QueueOutcome, ()> {
-        let payload = prepare_queue_payload(data);
+        // The MIME parse is pure CPU over up to max_message_size (10 MB) of
+        // bytes: it must run on the blocking pool, never on the async
+        // worker the session loop shares with every other connection. The
+        // payload needs to be owned ('static) for the dispatch — one copy
+        // is the price of not stalling the runtime.
+        let payload = {
+            let data = data.to_vec();
+            tokio::task::spawn_blocking(move || prepare_queue_payload(&data))
+                .await
+                .map_err(|_| ())?
+        };
 
         let mut tx = self.pool.begin().await.map_err(|_| ())?;
 
@@ -1814,6 +1868,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn repeated_failed_auth_attempts_hit_the_session_error_budget() {
+        // AUTH failures are 4xx/5xx replies like any other: each increments
+        // the session error budget, so MAX_SESSION_ERRORS bad attempts must
+        // disconnect with 421 — a brute-forcer cannot hammer AUTH forever on
+        // one connection. (After the lockout kicks in the reply becomes 454;
+        // either way it counts toward the budget.)
+        let server = Arc::new(test_server(None));
+        let (client, server_side) = tokio::io::duplex(32 * 1024);
+        let task = tokio::spawn(async move {
+            let mut server_buf = BufStream::new(server_side);
+            server
+                .run_session_loop(&mut server_buf, test_peer(8), false, true)
+                .await
+        });
+        let mut client_buf = BufStream::new(client);
+
+        client_buf
+            .write_all(b"EHLO client.example\r\n")
+            .await
+            .unwrap();
+        client_buf.flush().await.unwrap();
+        assert!(read_smtp_response(&mut client_buf).await.starts_with("250"));
+
+        let b64 = auth_plain_b64("alice@example.com", "wrong-password");
+        for _ in 1..MAX_SESSION_ERRORS {
+            client_buf
+                .write_all(format!("AUTH PLAIN {b64}\r\n").as_bytes())
+                .await
+                .unwrap();
+            client_buf.flush().await.unwrap();
+            let resp = read_smtp_response(&mut client_buf).await;
+            assert!(
+                resp.starts_with("535") || resp.starts_with("454"),
+                "each failed AUTH attempt must be an error reply, got {resp:?}"
+            );
+            assert_eq!(
+                resp.lines().count(),
+                1,
+                "no 421 may arrive before the budget is exhausted: {resp:?}"
+            );
+        }
+
+        // The MAX_SESSION_ERRORS-th failure still gets its own reply, then
+        // the session closes with 421.
+        client_buf
+            .write_all(format!("AUTH PLAIN {b64}\r\n").as_bytes())
+            .await
+            .unwrap();
+        client_buf.flush().await.unwrap();
+        let resp = read_smtp_response(&mut client_buf).await;
+        assert!(
+            resp.starts_with("535") || resp.starts_with("454"),
+            "final failed AUTH reply: {resp:?}"
+        );
+        let closing = read_smtp_response(&mut client_buf).await;
+        assert_eq!(
+            closing, "421 4.7.0 Too many errors, closing connection\r\n",
+            "the session must close once the error budget is exhausted"
+        );
+        tokio::time::timeout(Duration::from_secs(30), task)
+            .await
+            .expect("session must finish")
+            .expect("session must not panic");
+    }
+
+    #[tokio::test]
     async fn test_lockout_is_per_account() {
         let server = Arc::new(test_server(None));
         let ip = test_peer(1).ip();
@@ -2462,6 +2582,27 @@ mod tests {
         assert!(
             set_pos < insert_pos,
             "synchronous_commit must be pinned before the email_queue insert"
+        );
+    }
+
+    #[test]
+    fn mime_parse_for_queue_payload_runs_on_the_blocking_pool() {
+        // The MIME parse in prepare_queue_payload churns up to
+        // max_message_size (10 MB) of bytes; running it on the session task
+        // blocks an async worker thread and stalls every concurrent SMTP
+        // session. The parse must be dispatched to the blocking pool
+        // (pinned against the compiled-in source, same convention as the
+        // synchronous_commit pin above). Needles are built with concat! so
+        // this test never matches its own source text.
+        let source = include_str!("submission.rs");
+        let call_needle = std::concat!("prepare_queue_payload", "(&", "data", ")");
+        let blocking_needle = std::concat!("spawn", "_blocking");
+        let parse_pos = source
+            .find(call_needle)
+            .expect("the queue path must derive its payload via prepare_queue_payload");
+        assert!(
+            source[..parse_pos].contains(blocking_needle),
+            "the blocking-pool dispatch must enclose the prepare_queue_payload call"
         );
     }
 

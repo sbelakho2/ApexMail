@@ -1,7 +1,23 @@
-//! Distributed coordination for multi-region DDoS protection
+//! Coordination primitives for multi-region DDoS protection.
 //!
-//! Uses Redis Streams for event propagation and CRDTs for
-//! eventually-consistent distributed state.
+//! **STATUS — cross-process propagation is NOT implemented.**
+//!
+//! Despite earlier documentation claiming "Redis Streams + CRDTs", every
+//! structure in this module ([`CoordinatorHub`], [`DistributedBlocklist`],
+//! [`RateLimitCoordinator`]) is **per-process and in-memory only**.
+//! Nothing in this crate connects to Redis, publishes to a stream, or
+//! consumes remote events: `process_event` is only callable in-process,
+//! and the `redis_url` / `stream_name` / `consumer_group` / retry /
+//! circuit-breaker fields of [`CoordinatorConfig`] are RESERVED knobs
+//! with **no effect today**. They remain in the config surface so
+//! existing deployments that set them do not break, and so a future
+//! distributed implementation has a stable configuration contract.
+//!
+//! What IS provided and real:
+//! - CRDT types ([`GCounter`], [`PNCounter`], [`ORSet`]) with merge
+//!   semantics, ready to be wired to a transport later;
+//! - a per-process blocklist with TTLs and threat scores;
+//! - a per-process windowed rate-limit coordinator (negative-safe reads).
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -48,10 +64,11 @@ impl NodeId {
             None
         }
     }
+}
 
-    /// Convert to string
-    pub fn to_string(&self) -> String {
-        format!("{}:{}", self.region.0, self.node)
+impl std::fmt::Display for NodeId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.region.0, self.node)
     }
 }
 
@@ -286,10 +303,7 @@ impl<T: Clone + Eq + std::hash::Hash + Serialize> ORSet<T> {
     /// Add element
     pub fn add(&mut self, element: T, node_id: &str) {
         let tag = generate_unique_tag(node_id);
-        self.elements
-            .entry(element)
-            .or_insert_with(HashSet::new)
-            .insert(tag);
+        self.elements.entry(element).or_default().insert(tag);
     }
 
     /// Remove element (all instances)
@@ -320,10 +334,7 @@ impl<T: Clone + Eq + std::hash::Hash + Serialize> ORSet<T> {
     pub fn merge(&mut self, other: &ORSet<T>) {
         // Merge elements
         for (element, tags) in &other.elements {
-            let entry = self
-                .elements
-                .entry(element.clone())
-                .or_insert_with(HashSet::new);
+            let entry = self.elements.entry(element.clone()).or_default();
             for tag in tags {
                 entry.insert(tag.clone());
             }
@@ -341,6 +352,12 @@ impl<T: Clone + Eq + std::hash::Hash + Serialize> ORSet<T> {
     /// Is empty
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+impl<T: Clone + Eq + std::hash::Hash + Serialize> Default for ORSet<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -493,10 +510,7 @@ impl RateLimitCoordinator {
     pub fn increment(&mut self, key: &str, delta: u64) {
         self.maybe_rotate_window();
 
-        let counter = self
-            .counters
-            .entry(key.to_string())
-            .or_insert_with(PNCounter::new);
+        let counter = self.counters.entry(key.to_string()).or_default();
         counter.increment(&self.node_id.to_string(), delta);
     }
 
@@ -507,17 +521,19 @@ impl RateLimitCoordinator {
         self.counters.get(key).map(|c| c.value()).unwrap_or(0)
     }
 
-    /// Check if rate limit exceeded
+    /// Check if rate limit exceeded.
+    ///
+    /// Fix #7a: the count is CLAMPED at 0 before the u64 comparison.
+    /// `self.get_count(key) as u64` wrapped negative PNCounter values
+    /// (merged decrements exceeding increments) to ~u64::MAX, locking
+    /// every affected key out permanently.
     pub fn is_limited(&mut self, key: &str, limit: u64) -> bool {
-        self.get_count(key) as u64 >= limit
+        self.get_count(key).max(0) as u64 >= limit
     }
 
     /// Merge with remote coordinator state
     pub fn merge(&mut self, key: &str, remote_counter: &PNCounter) {
-        let counter = self
-            .counters
-            .entry(key.to_string())
-            .or_insert_with(PNCounter::new);
+        let counter = self.counters.entry(key.to_string()).or_default();
         counter.merge(remote_counter);
     }
 
@@ -549,40 +565,42 @@ pub struct CoordinatorHub {
     config: CoordinatorConfig,
 }
 
-/// Coordinator configuration
+/// Coordinator configuration.
+///
+/// NOTE: the Redis-related fields below are **reserved and currently
+/// unused** — no cross-process propagation is implemented (see the module
+/// documentation). They are retained for configuration compatibility.
 #[derive(Debug, Clone)]
 pub struct CoordinatorConfig {
-    /// Redis URL for communication
+    /// RESERVED (unused): Redis URL for a future distributed transport.
     pub redis_url: String,
-    /// Stream name for events
+    /// RESERVED (unused): stream name for a future distributed transport.
     pub stream_name: String,
-    /// Consumer group
+    /// RESERVED (unused): consumer group for a future distributed transport.
     pub consumer_group: String,
-    /// Rate limit window
+    /// Rate limit window (per-process window rotation).
     pub rate_limit_window: Duration,
-    /// Sync interval
+    /// RESERVED (unused): sync interval for a future distributed transport.
     pub sync_interval: Duration,
-    /// Event retention
+    /// Event deduplication retention (per-process `seen_events` pruning).
     pub event_retention: Duration,
 
-    // ---- Retry / Backoff ----
-    /// Maximum number of retries for a failed Redis operation before giving up
-    /// (default:3). The coordinator will use exponential backoff with jitter
-    /// between retries.
+    // ---- Retry / Backoff (RESERVED, unused) ----
+    /// RESERVED (unused): maximum retries for a future distributed
+    /// transport.
     pub max_retries: u32,
 
-    /// Base delay for exponential backoff (default:100 ms). Each retry waits
-    /// `base_retry_delay × 2^(attempt - 1)` plus random jitter.
+    /// RESERVED (unused): base delay for exponential backoff in a future
+    /// distributed transport.
     pub base_retry_delay: Duration,
 
-    // ---- Circuit Breaker ----
-    /// Number of consecutive Redis failures before the circuit opens and
-    /// operations are short-circuited for `circuit_breaker_recovery` duration
-    /// (default:5). This prevents cascading latency when Redis is down.
+    // ---- Circuit Breaker (RESERVED, unused) ----
+    /// RESERVED (unused): consecutive-failure threshold for a future
+    /// distributed transport.
     pub circuit_breaker_threshold: u32,
 
-    /// Duration the circuit stays open before attempting a probe request
-    /// (default:30 s).
+    /// RESERVED (unused): circuit open duration for a future distributed
+    /// transport.
     pub circuit_breaker_recovery: Duration,
 }
 
@@ -623,7 +641,10 @@ impl CoordinatorHub {
         &self.node_id
     }
 
-    /// Block an IP across all regions
+    /// Block an IP in this process's coordinator state.
+    ///
+    /// NOTE: this does NOT propagate to other regions/processes — no
+    /// distributed transport is implemented (see module docs).
     pub async fn block_ip(&self, ip: IpAddr, reason: &str, ttl_secs: u32, threat_score: u8) {
         let mut blocklist = self.blocklist.write().await;
         blocklist.block(ip, reason, ttl_secs, threat_score);
@@ -698,18 +719,18 @@ impl CoordinatorHub {
             }
             ThreatEventType::DdosAttack { .. }
             | ThreatEventType::BruteForce { .. }
-            | ThreatEventType::CredentialStuffing { .. } => {
+            | ThreatEventType::CredentialStuffing { .. }
+                if event.threat_score > 70 =>
+            {
                 // Block the affected IPs with propagated threat score
-                if event.threat_score > 70 {
-                    let mut blocklist = self.blocklist.write().await;
-                    for ip in &event.affected_ips {
-                        blocklist.block(
-                            *ip,
-                            &format!("remote_{:?}", event.event_type),
-                            event.ttl_secs,
-                            event.threat_score,
-                        );
-                    }
+                let mut blocklist = self.blocklist.write().await;
+                for ip in &event.affected_ips {
+                    blocklist.block(
+                        *ip,
+                        &format!("remote_{:?}", event.event_type),
+                        event.ttl_secs,
+                        event.threat_score,
+                    );
                 }
             }
             _ => {}
@@ -774,20 +795,22 @@ fn current_timestamp() -> u64 {
 
 fn generate_event_id() -> String {
     use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let bytes: [u8; 16] = rng.gen();
+    let mut rng = rand::rng();
+    let bytes: [u8; 16] = rng.random();
     hex::encode(bytes)
 }
 
 fn generate_unique_tag(node_id: &str) -> String {
     use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let random: [u8; 8] = rng.gen();
+    let mut rng = rand::rng();
+    let random: [u8; 8] = rng.random();
     format!("{}-{}", node_id, hex::encode(random))
 }
 
-/// Threat intelligence service for cross-region IP block sharing.
-/// Uses the coordinator hub to propagate block events across all nodes.
+/// Threat intelligence facade over the coordinator hub.
+///
+/// NOTE: "publishing" an IP block currently only mutates the LOCAL hub —
+/// cross-process propagation is NOT implemented (see module docs).
 pub struct ThreatIntelService {
     /// Coordinator hub
     hub: Arc<CoordinatorHub>,
@@ -799,7 +822,8 @@ impl ThreatIntelService {
         Self { hub }
     }
 
-    /// Publish an IP block event to other regions
+    /// Record an IP block in the local coordinator state (no remote
+    /// propagation — see module docs).
     pub async fn publish_ip_block(&self, ip_str: &str, duration: Duration) -> Result<(), String> {
         let ip: IpAddr = ip_str.parse().map_err(|e| format!("Invalid IP: {}", e))?;
         // E-106 fix:Clamp to u32::MAX to prevent overflow for durations > ~136 years
@@ -857,7 +881,7 @@ mod tests {
         let node = NodeId::new("eu-central", "node-1");
         let mut blocklist = DistributedBlocklist::new(node);
 
-        let ip: IpAddr = "192.168.1.1".parse().unwrap();
+        let ip: IpAddr = "192.168.1.1".parse().expect("hardcoded test IP");
         blocklist.block(ip, "test", 3600, 80);
 
         assert!(blocklist.is_blocked(&ip));
@@ -879,13 +903,37 @@ mod tests {
         assert!(!coord.is_limited("user:123", 20));
     }
 
+    /// Fix #7a (fail-first): a NEGATIVE PNCounter value (e.g. merged from a
+    /// peer whose decrements exceed its increments) must NEVER trip the
+    /// limit. `is_limited` previously did `count as u64 >= limit`, so -1
+    /// wrapped to u64::MAX and locked every affected key out.
+    #[test]
+    fn test_negative_counter_never_trips_limit() {
+        let node = NodeId::new("eu-central", "node-1");
+        let mut coord = RateLimitCoordinator::new(node, Duration::from_secs(60));
+
+        // Remote state where decrements exceed increments.
+        let mut remote = PNCounter::new();
+        remote.decrement("peer-a", 100);
+        coord.merge("user:123", &remote);
+
+        assert_eq!(coord.get_count("user:123"), -100);
+        assert!(
+            !coord.is_limited("user:123", 10),
+            "a negative count must not wrap to a huge u64 and trip the limit"
+        );
+        assert!(!coord.is_limited("user:123", 1));
+        // A zero-count key is equally not limited.
+        assert!(!coord.is_limited("user:absent", 1));
+    }
+
     #[tokio::test]
     async fn test_coordinator_hub() {
         let node = NodeId::new("eu-central", "node-1");
         let config = CoordinatorConfig::default();
         let hub = CoordinatorHub::new(node, config);
 
-        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+        let ip: IpAddr = "10.0.0.1".parse().expect("hardcoded test IP");
 
         hub.block_ip(ip, "test attack", 300, 90).await;
         assert!(hub.is_blocked(&ip).await);
@@ -908,14 +956,14 @@ mod tests {
                 reason: "attack detected".to_string(),
             },
         )
-        .with_ip("1.2.3.4".parse().unwrap())
+        .with_ip("1.2.3.4".parse().expect("hardcoded test IP"))
         .with_score(85);
 
         let processed = hub.process_event(event).await;
         assert!(processed);
 
         // IP should now be blocked
-        let ip: IpAddr = "1.2.3.4".parse().unwrap();
+        let ip: IpAddr = "1.2.3.4".parse().expect("hardcoded test IP");
         assert!(hub.is_blocked(&ip).await);
     }
 }

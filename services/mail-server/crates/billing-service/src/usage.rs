@@ -200,6 +200,7 @@ pub async fn record_usage(
     let id = event_id.unwrap_or_else(Uuid::new_v4);
     let now = Utc::now();
     let meta = enrich_usage_metadata(pool, tenant_id, now, metadata).await?;
+    let cycle_anchor = tenant_cycle_anchor(pool, tenant_id, now).await;
 
     // 1. Persist to DB and append an immutable audit record in the same transaction.
     let mut tx = pool.begin().await.map_err(UsageError::Db)?;
@@ -246,8 +247,11 @@ pub async fn record_usage(
     // 2. Atomically set dedup key and bump real-time Redis counter.
     //    Using a Lua script prevents the data race between the dedup check
     //    and counter increment that would exist with separate commands.
+    //    The counter key follows the tenant's BILLING CYCLE when a
+    //    subscription defines one, matching the quota gate and the
+    //    /usage report period semantics.
     let dedup_key = usage_dedup_key(id);
-    let period_key = usage_counter_key(tenant_id, event_type, now);
+    let period_key = usage_counter_key_anchored(tenant_id, event_type, now, cycle_anchor);
     let mut conn = redis.get().await.map_err(UsageError::Redis)?;
 
     // DB insert failed — nothing was persisted, no Redis state to rollback.
@@ -355,9 +359,13 @@ pub async fn check_quota(
     redis: &RedisPool,
     tenant_id: &str,
 ) -> Result<QuotaStatus, UsageError> {
-    // Fast-path:read the real-time Redis counter for the current month.
+    // Fast-path:read the real-time Redis counter for the current BILLING
+    // CYCLE (UTC calendar month only for tenants without a subscription —
+    // the gate and the /usage report must agree on the period).
     let now = Utc::now();
-    let counter_key = usage_counter_key(tenant_id, MeterEventType::EmailsSent, now);
+    let cycle_anchor = tenant_cycle_anchor(pool, tenant_id, now).await;
+    let counter_key =
+        usage_counter_key_anchored(tenant_id, MeterEventType::EmailsSent, now, cycle_anchor);
 
     // that metering is degraded rather than completely broken.
     let current = match redis.get().await {
@@ -632,9 +640,13 @@ pub async fn record_with_quota_check(
     let id = event_id.unwrap_or_else(Uuid::new_v4);
     let now = Utc::now();
     let meta = enrich_usage_metadata(pool, tenant_id, now, metadata).await?;
+    // Billing-cycle period key (see record_usage): the reservation gate, the
+    // fast-path read here, and the rollback must all derive the SAME key or
+    // reservations split across two counters at a cycle boundary.
+    let cycle_anchor = tenant_cycle_anchor(pool, tenant_id, now).await;
 
     let dedup_key = usage_dedup_key(id);
-    let counter_key = usage_counter_key(tenant_id, event_type, now);
+    let counter_key = usage_counter_key_anchored(tenant_id, event_type, now, cycle_anchor);
     let mut conn = redis.get().await.map_err(UsageError::Redis)?;
 
     // 1. Read-only dedup fast path. The dedup key is only *set* after the DB
@@ -734,7 +746,8 @@ pub async fn record_with_quota_check(
                 // Duplicate replay that raced past the Redis fast path:
                 // compensate the reservation and mark the dedup key so the
                 // next replay short-circuits in step 1.
-                rollback_quota_reservation(redis, tenant_id, event_type, quantity, id, now).await?;
+                rollback_quota_reservation(pool, redis, tenant_id, event_type, quantity, id, now)
+                    .await?;
                 let _: () = conn
                     .set_ex(&dedup_key, "1", dedup_ttl_secs())
                     .await
@@ -767,7 +780,8 @@ pub async fn record_with_quota_check(
             // Persist failed — compensate the counter reservation so Redis
             // stays consistent with the DB.
             if let Err(rollback_error) =
-                rollback_quota_reservation(redis, tenant_id, event_type, quantity, id, now).await
+                rollback_quota_reservation(pool, redis, tenant_id, event_type, quantity, id, now)
+                    .await
             {
                 tracing::error!(
                     error = %rollback_error,
@@ -823,6 +837,7 @@ pub async fn rollback_usage_record(
     tx.commit().await.map_err(UsageError::Db)?;
 
     rollback_quota_reservation(
+        pool,
         redis,
         tenant_id,
         event_type,
@@ -926,7 +941,95 @@ fn usage_counter_key(tenant_id: &str, event_type: MeterEventType, at: DateTime<U
     )
 }
 
+/// Billing-cycle-aware counter key. When the tenant's subscription cycle
+/// anchor (the day-of-month the cycle started) is known, the counter period
+/// is labeled by the CYCLE start month, not the UTC calendar month — a
+/// cycle starting on the 15th must not hand the tenant a fresh quota on the
+/// 1st, and the Redis counter must agree with the tz/billing-cycle-aware
+/// `/usage` report about which events belong to the current period.
+fn usage_counter_key_anchored(
+    tenant_id: &str,
+    event_type: MeterEventType,
+    at: DateTime<Utc>,
+    cycle_anchor: Option<chrono::NaiveDate>,
+) -> String {
+    let Some(anchor) = cycle_anchor else {
+        return usage_counter_key(tenant_id, event_type, at);
+    };
+    // Walk back month-by-month from `at` to the most recent anchored cycle
+    // start (same day-of-month; clamped to the month's length so a 31st
+    // anchor still fires in shorter months — mirroring Stripe's own cycle
+    // proration semantics closely enough for a period LABEL).
+    let mut year = at.year();
+    let mut month = at.month();
+    loop {
+        let candidate = anchored_date(year, month, anchor.day());
+        let candidate_start = candidate
+            .and_hms_opt(0, 0, 0)
+            .map(|naive| DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc));
+        if let Some(start) = candidate_start {
+            if start <= at {
+                return format!(
+                    "meter:rt:{}:{}:c{}-{:02}",
+                    tenant_id,
+                    event_type_to_str(event_type),
+                    year,
+                    month
+                );
+            }
+        }
+        if month == 1 {
+            month = 12;
+            year -= 1;
+        } else {
+            month -= 1;
+        }
+    }
+}
+
+fn anchored_date(year: i32, month: u32, day: u32) -> chrono::NaiveDate {
+    let last_day = {
+        let next = if month == 12 {
+            chrono::NaiveDate::from_ymd_opt(year + 1, 1, 1)
+        } else {
+            chrono::NaiveDate::from_ymd_opt(year, month + 1, 1)
+        }
+        .expect("first of next month is always valid");
+        (next - chrono::Duration::days(1)).day()
+    };
+    chrono::NaiveDate::from_ymd_opt(year, month, day.min(last_day))
+        .expect("clamped day is always valid")
+}
+
+/// The tenant's billing-cycle anchor date (most recent cycle start at or
+/// before `at`), when an active/trialing/past-due Stripe subscription
+/// defines one.
+async fn tenant_cycle_anchor(
+    pool: &PgPool,
+    tenant_id: &str,
+    at: DateTime<Utc>,
+) -> Option<chrono::NaiveDate> {
+    sqlx::query_scalar::<_, chrono::NaiveDate>(
+        r#"
+        SELECT billing_cycle_start
+        FROM stripe_subscriptions
+        WHERE tenant_id = $1
+          AND status IN ('active', 'trialing', 'past_due')
+          AND billing_cycle_start IS NOT NULL
+        ORDER BY billing_cycle_start DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(at)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
 async fn rollback_quota_reservation(
+    pool: &PgPool,
     redis: &RedisPool,
     tenant_id: &str,
     event_type: MeterEventType,
@@ -934,7 +1037,8 @@ async fn rollback_quota_reservation(
     event_id: Uuid,
     recorded_at: DateTime<Utc>,
 ) -> Result<(), UsageError> {
-    let counter_key = usage_counter_key(tenant_id, event_type, recorded_at);
+    let cycle_anchor = tenant_cycle_anchor(pool, tenant_id, recorded_at).await;
+    let counter_key = usage_counter_key_anchored(tenant_id, event_type, recorded_at, cycle_anchor);
     let dedup_key = usage_dedup_key(event_id);
     let mut conn = redis.get().await.map_err(UsageError::Redis)?;
 
@@ -1173,6 +1277,62 @@ mod tests {
             let s = event_type_to_str(et);
             assert!(!s.is_empty());
         }
+    }
+
+    #[test]
+    fn usage_counter_key_anchor_follows_the_cycle_not_the_calendar_month() {
+        let anchor = chrono::NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let at = DateTime::parse_from_rfc3339("2026-04-15T12:30:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        // Cycle-day itself: new cycle, new key.
+        assert_eq!(
+            usage_counter_key_anchored("t", MeterEventType::EmailsSent, at, Some(anchor)),
+            "meter:rt:t:emails_sent:c2026-04"
+        );
+        // Day before the cycle rolls over: still the March cycle.
+        let before = DateTime::parse_from_rfc3339("2026-04-14T23:59:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            usage_counter_key_anchored("t", MeterEventType::EmailsSent, before, Some(anchor)),
+            "meter:rt:t:emails_sent:c2026-03"
+        );
+        // A 31st anchor clamps in short months: the January cycle runs
+        // Jan 31 .. Feb 27 and the February cycle begins on the clamped
+        // Feb 28 — one boundary per month, never a skipped or doubled
+        // cycle. (Stripe refreshes billing_cycle_start/end every cycle via
+        // webhook, so the anchor's day self-corrects each period.)
+        let anchor31 = chrono::NaiveDate::from_ymd_opt(2026, 1, 31).unwrap();
+        let jan_cycle_still = DateTime::parse_from_rfc3339("2026-02-27T23:59:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            usage_counter_key_anchored(
+                "t",
+                MeterEventType::EmailsSent,
+                jan_cycle_still,
+                Some(anchor31)
+            ),
+            "meter:rt:t:emails_sent:c2026-01"
+        );
+        let feb_cycle_start = DateTime::parse_from_rfc3339("2026-02-28T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        assert_eq!(
+            usage_counter_key_anchored(
+                "t",
+                MeterEventType::EmailsSent,
+                feb_cycle_start,
+                Some(anchor31)
+            ),
+            "meter:rt:t:emails_sent:c2026-02"
+        );
+        // No anchor: the legacy UTC calendar key.
+        assert_eq!(
+            usage_counter_key_anchored("t", MeterEventType::EmailsSent, at, None),
+            "meter:rt:t:emails_sent:2026-04"
+        );
     }
 
     #[test]

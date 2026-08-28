@@ -130,10 +130,21 @@ pub fn normalize_consent_choice(choice: Option<&str>) -> Option<&'static str> {
 /// apexmail.ee but the endpoint is api.apexmail.ee, so the return hop
 /// is always cross-host within the family). Everything else — open
 /// redirects, other domains, plain HTTP — falls back to `/`.
+///
+/// Backslashes and control characters are rejected outright: WHATWG URL
+/// parsing normalises `\` to `/` inside special schemes, so a browser
+/// handed `/\evil.com` navigates to `//evil.com` — a protocol-relative
+/// hop straight to the attacker. CR/LF/TAB can additionally smuggle
+/// headers. This check runs BEFORE the relative-path test and the URL
+/// parse, so both branches are covered.
 pub fn consent_safe_return_to(return_to: Option<&str>) -> String {
     let Some(value) = return_to.map(str::trim).filter(|v| !v.is_empty()) else {
         return "/".to_string();
     };
+
+    if value.contains('\\') || value.chars().any(char::is_control) {
+        return "/".to_string();
+    }
 
     if value.starts_with('/') && !value.starts_with("//") {
         return value.to_string();
@@ -190,13 +201,74 @@ fn consent_respond(request: ConsentRequest, config: &Config) -> Response {
     response
 }
 
+/// Is `host` an apexmail.ee host (apexmail.ee, www, or any subdomain)?
+/// Shared by the consent GET's Referer check.
+fn is_apexmail_family_host(host: &str) -> bool {
+    let host = host.trim().to_ascii_lowercase();
+    matches!(host.as_str(), "apexmail.ee" | "www.apexmail.ee") || host.ends_with(".apexmail.ee")
+}
+
+/// May this GET request record a consent choice?
+///
+/// `/consent?choice=all` is a bare GET, so before this guard any third
+/// party could forge a visitor's consent by embedding the URL as an
+/// `<img>` (or a hidden iframe/link prefetch). The check:
+///
+/// - `Sec-Fetch-Site` present → only `same-origin`, `same-site` and
+///   `none` (a user-typed URL) may record; `cross-site` is refused.
+/// - Header absent (older browsers) → the Referer is checked instead
+///   and must be an apexmail-family origin.
+/// - Neither header present → allowed, but logged: stripping both is
+///   the shape of an old browser, not of an attacker who controls one.
+///   Real banner clicks always carry one of the two.
+fn consent_get_may_record(headers: &HeaderMap) -> bool {
+    match headers
+        .get("sec-fetch-site")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+    {
+        Some(site) => matches!(site.as_str(), "same-origin" | "same-site" | "none"),
+        None => {
+            let referer = headers
+                .get(header::REFERER)
+                .and_then(|value| value.to_str().ok())
+                .map(str::trim);
+            match referer {
+                Some(referer) => match url::Url::parse(referer) {
+                    Ok(url) => url.host_str().is_some_and(is_apexmail_family_host),
+                    Err(_) => false,
+                },
+                None => {
+                    tracing::info!(
+                        "consent GET without Sec-Fetch-Site/Referer: allowing for \
+                         legacy no-JS browsers (no forgery signal present)"
+                    );
+                    true
+                }
+            }
+        }
+    }
+}
+
 /// GET /consent?choice={all|necessary}&return_to=… — the no-JS banner's
 /// links (plain navigations; the marketing CSP's `form-action 'self'`
-/// forbids cross-origin form posts).
+/// forbids cross-origin form posts). Same-site guarded: a cross-site
+/// GET (an `<img>` on someone else's page) redirects home WITHOUT
+/// setting the cookie.
 async fn consent_get(
     State(state): State<AppState>,
     Query(request): Query<ConsentRequest>,
+    headers: HeaderMap,
 ) -> Response {
+    let return_to = consent_safe_return_to(request.return_to.as_deref());
+    if !consent_get_may_record(&headers) {
+        tracing::warn!(
+            choice = ?request.choice,
+            "refused cross-site consent GET (possible forged consent); cookie not set"
+        );
+        return (StatusCode::FOUND, [(header::LOCATION, return_to)]).into_response();
+    }
     consent_respond(request, &state.config)
 }
 
@@ -430,12 +502,20 @@ fn redirect_error(message: &str, location: &str, config: &Config) -> Response {
     redirect_with_flash(&[FlashMessage::error(message)], location, config)
 }
 
-/// Safe fallback redirect target: same-origin paths only.
+/// Safe fallback redirect target: same-origin paths only. Backslashes
+/// and control characters are rejected for the same reason as in
+/// [`consent_safe_return_to`]: WHATWG URL parsing turns `/\evil.com`
+/// into a protocol-relative `//evil.com` hop.
 fn safe_return_to(form: &HashMap<String, String>, default: &str) -> String {
     form.get("return_to")
         .or_else(|| form.get("next"))
         .map(String::as_str)
-        .filter(|value| value.starts_with('/') && !value.starts_with("//"))
+        .filter(|value| {
+            value.starts_with('/')
+                && !value.starts_with("//")
+                && !value.contains('\\')
+                && !value.chars().any(char::is_control)
+        })
         .unwrap_or(default)
         .to_string()
 }
@@ -485,6 +565,51 @@ fn verify_login_challenge(config: &Config, token: &str, user_id: &str, email: &s
         &format!("{user_id}:{email}"),
         Utc::now().timestamp(),
     )
+}
+
+/// Per-account MFA brute-force bound (the SSR verify step): 10 wrong codes
+/// per 15-minute window locks the account out of the challenge step — a
+/// 6-digit TOTP must not be guessable without limit once the password is
+/// known. Redis outages fail OPEN (no counter, no lock) so logins keep
+/// working; the challenge cookie's own 5-minute TTL bounds the exposure.
+const MFA_VERIFY_MAX_ATTEMPTS: i64 = 10;
+const MFA_VERIFY_WINDOW_SECS: u64 = 15 * 60;
+
+fn mfa_verify_failure_key(user_id: &str) -> String {
+    format!("apexmail:mfa_verify_failures:{user_id}")
+}
+
+async fn mfa_verify_locked(state: &AppState, user_id: &str) -> bool {
+    let Ok(mut conn) = state.redis.get().await else {
+        return false;
+    };
+    let failures: Option<i64> =
+        redis::AsyncCommands::get(&mut *conn, mfa_verify_failure_key(user_id))
+            .await
+            .ok();
+    failures.is_some_and(|count| count >= MFA_VERIFY_MAX_ATTEMPTS)
+}
+
+async fn record_mfa_verify_failure(state: &AppState, user_id: &str) {
+    let Ok(mut conn) = state.redis.get().await else {
+        return;
+    };
+    let key = mfa_verify_failure_key(user_id);
+    let count: Result<i64, _> = redis::cmd("INCR").arg(&key).query_async(&mut *conn).await;
+    if count.is_ok_and(|value| value == 1) {
+        let _: Result<(), _> = redis::cmd("EXPIRE")
+            .arg(&key)
+            .arg(MFA_VERIFY_WINDOW_SECS)
+            .query_async(&mut *conn)
+            .await;
+    }
+}
+
+async fn clear_mfa_verify_failures(state: &AppState, user_id: &str) {
+    if let Ok(mut conn) = state.redis.get().await {
+        let _: Result<(), _> =
+            redis::AsyncCommands::del(&mut *conn, mfa_verify_failure_key(user_id)).await;
+    }
 }
 
 /// Revoke every live session for the user (same Redis key the auth
@@ -1365,10 +1490,11 @@ struct WebUserRow {
     role: String,
     status: String,
     mfa_enabled: bool,
+    email_verified: bool,
 }
 
 const USER_COLUMNS: &str =
-    "id::text, tenant_id::text, email, name, password_hash, role, status, mfa_enabled";
+    "id::text, tenant_id::text, email, name, password_hash, role, status, mfa_enabled, email_verified";
 
 async fn find_user_by_email(state: &AppState, email: &str) -> Option<WebUserRow> {
     sqlx::query_as::<_, WebUserRow>(&format!(
@@ -1466,6 +1592,16 @@ fn hash_password(password: &str) -> Result<String, String> {
     bcrypt::hash(password, bcrypt::DEFAULT_COST).map_err(|e| format!("hash failure: {e}"))
 }
 
+/// Postgres unique-constraint violation (SQLSTATE 23505). The signup
+/// pre-check races concurrent registrations; the constraint is the source
+/// of truth and maps to the friendly "already registered" message.
+fn is_unique_violation(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some("23505")
+    )
+}
+
 fn password_policy_error(password: &str) -> Option<&'static str> {
     let len = password.chars().count();
     if !(12..=128).contains(&len) {
@@ -1536,6 +1672,16 @@ async fn form_cp_login(
     if !verify_password(&user.password_hash, &password) {
         return redirect_error("Invalid email or password.", "/login", &state.config);
     }
+    // Email verification is a login prerequisite: the check runs only
+    // AFTER the password verified, so it never leaks account existence to
+    // anonymous callers.
+    if !user.email_verified {
+        return redirect_error(
+            "Verify your email address before signing in — check your inbox for the verification link.",
+            "/login",
+            &state.config,
+        );
+    }
     if !is_system_tenant(&state, &user.tenant_id).await || !is_operator_role(&user.role) {
         // P0: a customer session must never reach the control plane. Say
         // so clearly instead of minting a CP session for them.
@@ -1569,15 +1715,33 @@ async fn form_cp_login(
     }
 
     let _ = headers;
+    // CP operators receive BOTH cookies: the generic am_session (other
+    // console pages) and the dedicated control-plane session whose signed
+    // claims carry the operator's real MFA state — require_cp_auth only
+    // admits MFA-backed CP sessions, so a non-MFA operator's cookie is
+    // structurally valid but always refused by the gate.
+    let cp_cookie = crate::middleware::cp_auth::issue_cp_session_cookie(
+        &state.config.cp_auth,
+        &user.id,
+        &user.tenant_id,
+        &user.email,
+        &user.role,
+        user.mfa_enabled,
+        is_secure(&state.config),
+    );
     match session_cookie_for_user(&state, &user) {
-        Ok(cookie) => attach_cookie(
-            redirect_success(
+        Ok(cookie) => {
+            let mut response = redirect_success(
                 "Signed in to the control plane.",
                 "/dashboard",
                 &state.config,
-            ),
-            cookie,
-        ),
+            );
+            if let (Ok(am), Ok(cp)) = (cookie.parse(), cp_cookie.parse()) {
+                response.headers_mut().append(header::SET_COOKIE, am);
+                response.headers_mut().append(header::SET_COOKIE, cp);
+            }
+            response
+        }
         Err(_) => redirect_error(
             "Sign-in is temporarily unavailable. Try again.",
             "/login",
@@ -1640,6 +1804,15 @@ async fn perform_password_login(
     }
     if !verify_password(&user.password_hash, &password) {
         return redirect_error("Invalid email or password.", "/login", &state.config);
+    }
+    // Email verification is a login prerequisite (checked only after the
+    // password verified, so unauthenticated callers learn nothing).
+    if !user.email_verified {
+        return redirect_error(
+            "Verify your email address before signing in — check your inbox for the verification link.",
+            "/login",
+            &state.config,
+        );
     }
 
     if user.mfa_enabled {
@@ -1715,6 +1888,23 @@ async fn form_mfa_verify(
             &state.config,
         );
     }
+    // The MFA step is the second half of LOGIN: the email-verification
+    // prerequisite applies here exactly as at the password step.
+    if !user.email_verified {
+        return redirect_error(
+            "Verify your email address before signing in — check your inbox for the verification link.",
+            "/login",
+            &state.config,
+        );
+    }
+    // Brute-force bound before any code is checked.
+    if mfa_verify_locked(&state, &user.id).await {
+        return redirect_error(
+            "Too many verification attempts. Try again in a few minutes.",
+            "/login",
+            &state.config,
+        );
+    }
     if code.len() != 6 || !code.chars().all(|c| c.is_ascii_digit()) {
         return redirect_error(
             "Enter the 6-digit code from your authenticator app.",
@@ -1750,6 +1940,7 @@ async fn form_mfa_verify(
         None => false,
     };
     if !totp_valid {
+        record_mfa_verify_failure(&state, &user.id).await;
         return redirect_error(
             "That code did not match. Check your authenticator and try again.",
             &format!(
@@ -1760,11 +1951,32 @@ async fn form_mfa_verify(
             &state.config,
         );
     }
+    clear_mfa_verify_failures(&state, &user.id).await;
     match session_cookie_for_user(&state, &user) {
-        Ok(cookie) => attach_cookie(
-            redirect_success("Signed in.", &return_to, &state.config),
-            cookie,
-        ),
+        Ok(cookie) => {
+            let mut response = redirect_success("Signed in.", &return_to, &state.config);
+            if let Ok(value) = cookie.parse() {
+                response.headers_mut().append(header::SET_COOKIE, value);
+            }
+            // A system-tenant operator completing MFA also receives the
+            // control-plane session cookie (mfa_enabled now true) so the
+            // CP gate admits them on /web/admin/* and /v1/admin/*.
+            if is_system_tenant(&state, &user.tenant_id).await && is_operator_role(&user.role) {
+                let cp_cookie = crate::middleware::cp_auth::issue_cp_session_cookie(
+                    &state.config.cp_auth,
+                    &user.id,
+                    &user.tenant_id,
+                    &user.email,
+                    &user.role,
+                    user.mfa_enabled,
+                    is_secure(&state.config),
+                );
+                if let Ok(value) = cp_cookie.parse() {
+                    response.headers_mut().append(header::SET_COOKIE, value);
+                }
+            }
+            response
+        }
         Err(_) => redirect_error(
             "Sign-in is temporarily unavailable. Try again.",
             "/login",
@@ -1844,50 +2056,106 @@ async fn form_signup(
         .collect();
     let now = Utc::now();
     let verification_token = Uuid::new_v4().to_string();
+    // The token is stored as its SHA-256 digest — exactly like the JSON
+    // register flow and form_forgot_password. The raw token only ever
+    // exists in the emailed verification link.
+    let verification_token_hash = crate::routes::helpers::hash_token(&verification_token);
 
-    let result = sqlx::query(
-        "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
-         VALUES ($1, $2, $3, 'free', 'pending', $4, $5, $6, $6)",
-    )
-    .bind(&tenant_id)
-    .bind(&company)
-    .bind(format!("{slug}-{}", &tenant_id[..8]))
-    .bind(json!({}))
-    .bind(json!({}))
-    .bind(now)
-    .execute(&state.db)
-    .await;
-    if result.is_err() {
-        return redirect_error(
-            "Registration is temporarily unavailable. Try again.",
-            "/signup",
-            &state.config,
+    // Tenant + user + verification email commit atomically: a queue
+    // failure rolls the account back instead of stranding an owner who
+    // can never receive their verification link.
+    let result: Result<(), &'static str> = async {
+        let mut tx = state.db.begin().await.map_err(|_| "unavailable")?;
+
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, 'free', 'pending', $4, $5, $6, $6)",
+        )
+        .bind(&tenant_id)
+        .bind(&company)
+        .bind(format!("{slug}-{}", &tenant_id[..8]))
+        .bind(json!({}))
+        .bind(json!({}))
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| "unavailable")?;
+
+        let insert_user = sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                email_verified, mfa_enabled, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, 'owner', 'active', false, false, $6, $7, $7)",
+        )
+        .bind(user_id)
+        .bind(&tenant_id)
+        .bind(&email)
+        .bind(&name)
+        .bind(&password_hash)
+        .bind(json!({
+            "verification_token_hash": verification_token_hash,
+            "verification_expires": (now + chrono::Duration::hours(24)).to_rfc3339(),
+        }))
+        .bind(now)
+        .execute(&mut *tx)
+        .await;
+
+        if let Err(error) = insert_user {
+            // TOCTOU: the COUNT pre-check loses the race against a
+            // concurrent signup — the unique violation is the source of
+            // truth and gets the same friendly message.
+            if is_unique_violation(&error) {
+                return Err("email_already_registered");
+            }
+            tracing::error!(error = %error, "web signup users insert failed");
+            return Err("unavailable");
+        }
+
+        let verification_link = format!(
+            "{}/verify-email?token={}&email={}",
+            state.config.base_url.trim_end_matches('/'),
+            urlencode(&verification_token),
+            urlencode(&email),
         );
+        let html_body = format!(
+            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"/></head><body style=\"font-family:ui-monospace,monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px\"><h2>Verify Your ApexMail Account</h2><p>Finish setting up <strong>{email}</strong> by confirming this email address.</p><p><a href=\"{verification_link}\" style=\"display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;text-decoration:none;font-weight:700\">Verify email</a></p><p style=\"font-size:13px;color:#71717a\">This link expires in 24 hours.</p></body></html>"
+        );
+        let text_body = format!(
+            "Verify Your ApexMail Account\n\nConfirm {email} by visiting: {verification_link}\n\nThis link expires in 24 hours."
+        );
+        crate::routes::system_sender::queue_system_email_in_transaction(
+            &mut tx,
+            &email,
+            "Verify your ApexMail account",
+            &html_body,
+            &text_body,
+            vec!["system".into(), "verification".into()],
+        )
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, "web signup verification email queue failed");
+            "unavailable"
+        })?;
+        tx.commit().await.map_err(|_| "unavailable")?;
+        Ok(())
     }
-
-    let insert_user = sqlx::query(
-        "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
-                            email_verified, mfa_enabled, metadata, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, 'owner', 'active', false, false, $6, $7, $7)",
-    )
-    .bind(user_id)
-    .bind(tenant_id)
-    .bind(&email)
-    .bind(&name)
-    .bind(&password_hash)
-    .bind(json!({
-        "verification_token_hash": verification_token,
-        "verification_expires": (now + chrono::Duration::hours(24)).to_rfc3339(),
-    }))
-    .bind(now)
-    .execute(&state.db)
     .await;
-    if insert_user.is_err() {
-        return redirect_error(
-            "Registration is temporarily unavailable. Try again.",
-            "/signup",
-            &state.config,
-        );
+
+    match result {
+        Ok(()) => {}
+        Err("email_already_registered") => {
+            return redirect_error(
+                "An account with this email already exists. Try signing in instead.",
+                "/signup",
+                &state.config,
+            );
+        }
+        Err(_) => {
+            return redirect_error(
+                "Registration is temporarily unavailable. Try again.",
+                "/signup",
+                &state.config,
+            );
+        }
     }
 
     redirect_success(
@@ -2147,6 +2415,12 @@ async fn form_logout(
     );
     if let Ok(value) = clear.parse() {
         response.headers_mut().insert(header::SET_COOKIE, value);
+    }
+    // The control-plane session dies with the console session.
+    let clear_cp =
+        crate::middleware::cp_auth::build_clear_cp_session_cookie(is_secure(&state.config));
+    if let Ok(value) = clear_cp.parse() {
+        response.headers_mut().append(header::SET_COOKIE, value);
     }
     response
 }
@@ -2591,14 +2865,39 @@ async fn form_webhook_create(
     let mut fields = FormFieldMap::new("webhook-create");
     let url = form.field("url").trim().to_string();
     fields.set("url", &url);
-    if !(url.starts_with("https://") || url.starts_with("http://")) {
-        fields.error("url", "Enter a valid https:// endpoint URL.");
-        return redirect_with_field_map(
-            &fields,
-            "Enter a valid https:// endpoint URL.",
-            "/settings/webhooks",
-            &state.config,
-        );
+    // Same hardened validator as the JSON API (audit F): HTTPS-only,
+    // private/reserved/link-local targets rejected — the old http(s)://
+    // prefix check let `http://169.254.169.254/…` and `http://10.x/…`
+    // straight into the webhooks table.
+    if let Err(message) = crate::routes::webhooks::validate_webhook_url(&url) {
+        fields.error("url", &message);
+        return redirect_with_field_map(&fields, &message, "/settings/webhooks", &state.config);
+    }
+    // Same per-tenant cap as the JSON API. The count query failing fails
+    // CLOSED (generic error flash) — never insert past the limit.
+    let existing: Result<i64, _> =
+        sqlx::query_scalar("SELECT COUNT(*) FROM webhooks WHERE tenant_id = $1")
+            .bind(user.tenant_id.as_str())
+            .fetch_one(&state.db)
+            .await;
+    match existing {
+        Ok(count) if count >= crate::routes::webhooks::MAX_WEBHOOKS_PER_TENANT => {
+            let message = format!(
+                "Webhook limit reached: maximum {} webhooks per workspace.",
+                crate::routes::webhooks::MAX_WEBHOOKS_PER_TENANT,
+            );
+            fields.error("url", &message);
+            return redirect_with_field_map(&fields, &message, "/settings/webhooks", &state.config);
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "webhook count check failed");
+            return redirect_error(
+                "Could not add the webhook. Try again.",
+                "/settings/webhooks",
+                &state.config,
+            );
+        }
+        _ => {}
     }
     // Item E: bind the checkbox group — trim, dedupe, validate each name
     // against KNOWN_WEBHOOK_EVENTS, store exactly what was chosen.
@@ -2647,6 +2946,20 @@ async fn form_webhook_create(
     }
 }
 
+/// Role hierarchy used by the team-invite gate: nobody may mint an
+/// invitation for a role ABOVE their own.
+fn invite_role_rank(role: &str) -> i32 {
+    match role {
+        "owner" => 3,
+        "admin" => 2,
+        "developer" | "member" | "viewer" => 1,
+        _ => 0,
+    }
+}
+
+/// Ceiling on outstanding (un-accepted) invitations per tenant.
+const MAX_OPEN_INVITATIONS_PER_TENANT: i64 = 50;
+
 async fn form_team_invite(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
@@ -2655,17 +2968,95 @@ async fn form_team_invite(
     if let Err(message) = check_csrf(&form, &state.config) {
         return redirect_error(message, "/settings/team", &state.config);
     }
-    let email = field(&form, "userName").trim().to_lowercase();
-    let role = match field(&form, "role").as_str() {
-        "admin" => "admin",
-        _ => "member",
+    // Privilege gate: only owner/admin sessions may invite, decided by the
+    // caller's CURRENT role in the database (not anything baked into a
+    // token), and a session without a user id (API key) has no role at all.
+    let Some(caller_id) = user.user_id.clone() else {
+        return redirect_error(
+            "Only workspace owners and admins can send invitations.",
+            "/settings/team",
+            &state.config,
+        );
     };
+    let caller_role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM users WHERE id = $1::uuid AND tenant_id = $2 AND status = 'active'",
+    )
+    .bind(&caller_id)
+    .bind(user.tenant_id.as_str())
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+    let Some(caller_role) = caller_role else {
+        return redirect_error(
+            "Only workspace owners and admins can send invitations.",
+            "/settings/team",
+            &state.config,
+        );
+    };
+    if !matches!(caller_role.as_str(), "owner" | "admin") {
+        return redirect_error(
+            "Only workspace owners and admins can send invitations.",
+            "/settings/team",
+            &state.config,
+        );
+    }
+
+    let email = field(&form, "userName").trim().to_lowercase();
+    // The form offers member/admin only; an unexpected value is rejected
+    // explicitly (never silently downgraded) and the rank check below
+    // forbids granting above the caller regardless.
+    let role = match field(&form, "role").as_str() {
+        "admin" | "member" => field(&form, "role"),
+        _ => {
+            return redirect_error(
+                "Choose a valid role (member or admin).",
+                "/settings/team",
+                &state.config,
+            );
+        }
+    };
+    // No granting a role above the caller's own.
+    if invite_role_rank(&role) > invite_role_rank(&caller_role) {
+        return redirect_error(
+            "You cannot invite someone to a role above your own.",
+            "/settings/team",
+            &state.config,
+        );
+    }
     if !valid_email(&email) {
         return redirect_error(
             "Enter a valid email address.",
             "/settings/team",
             &state.config,
         );
+    }
+    // Outstanding-invitation cap: at most MAX_OPEN_INVITATIONS_PER_TENANT
+    // un-accepted invitations may exist per tenant. Count failures fail
+    // CLOSED.
+    let open_invites: Result<i64, _> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND status = 'invited'",
+    )
+    .bind(user.tenant_id.as_str())
+    .fetch_one(&state.db)
+    .await;
+    match open_invites {
+        Ok(count) if count >= MAX_OPEN_INVITATIONS_PER_TENANT => {
+            return redirect_error(
+                "Invitation limit reached: clear outstanding invitations before sending more.",
+                "/settings/team",
+                &state.config,
+            );
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "team invite count check failed");
+            return redirect_error(
+                "Could not create the invitation. Try again.",
+                "/settings/team",
+                &state.config,
+            );
+        }
+        _ => {}
     }
     let result = sqlx::query(
         "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
@@ -3832,22 +4223,45 @@ async fn form_contacts_import(
     let imported: usize = if fresh.is_empty() {
         0
     } else {
+        // Multi-row INSERT batches (not one statement per row): the same
+        // transaction, the same ON CONFLICT DO NOTHING semantics, and the
+        // same honest rows_affected accounting — a 10k-row import is ~20
+        // round-trips instead of 10k.
+        const IMPORT_BATCH_ROWS: usize = 500;
         let result: Result<usize, sqlx::Error> = async {
             let mut tx = state.db.begin().await?;
             let mut imported = 0usize;
-            for row in &fresh {
-                let insert = sqlx::query(
-                    "INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at)
-                     VALUES ($1, $2, $3, $4, 'subscribed', NOW(), NOW())
-                     ON CONFLICT (tenant_id, email) DO NOTHING",
-                )
-                // contacts.id is a UUID column (068/069 lineage).
-                .bind(Uuid::new_v4())
-                .bind(user.tenant_id.as_str())
-                .bind(&row.email)
-                .bind(row.name.as_deref().filter(|name| !name.is_empty()))
-                .execute(&mut *tx)
-                .await?;
+            for batch in fresh.chunks(IMPORT_BATCH_ROWS) {
+                // VALUES ($1,$2,$3,$4),($5,$6,$7,$8),… four bind params
+                // per row (contacts.id is a UUID column, 068/069 lineage).
+                let mut sql = String::with_capacity(96 * batch.len());
+                sql.push_str(
+                    "INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at) VALUES ",
+                );
+                for (row_index, _) in batch.iter().enumerate() {
+                    if row_index > 0 {
+                        sql.push(',');
+                    }
+                    let base = 4 * row_index + 1;
+                    sql.push_str(&format!(
+                        "(${}, ${}, ${}, ${}, 'subscribed', NOW(), NOW())",
+                        base,
+                        base + 1,
+                        base + 2,
+                        base + 3,
+                    ));
+                }
+                sql.push_str(" ON CONFLICT (tenant_id, email) DO NOTHING");
+
+                let mut query = sqlx::query(&sql);
+                for row in batch {
+                    query = query
+                        .bind(Uuid::new_v4())
+                        .bind(user.tenant_id.as_str())
+                        .bind(&row.email)
+                        .bind(row.name.as_deref().filter(|name| !name.is_empty()));
+                }
+                let insert = query.execute(&mut *tx).await?;
                 imported += insert.rows_affected() as usize;
             }
             tx.commit().await?;
@@ -5455,6 +5869,154 @@ mod tests {
     }
 
     #[test]
+    fn consent_return_to_rejects_backslash_and_control_characters() {
+        // WHATWG URL parsing normalises `\` to `/` inside special
+        // schemes, so a browser handed "/\evil.com" navigates to
+        // "//evil.com" — a protocol-relative hop straight to the
+        // attacker. Control characters (CR/LF/TAB) can additionally
+        // smuggle headers or corrupt parsers. None may survive.
+        assert_eq!(consent_safe_return_to(Some("/\\evil.com")), "/");
+        assert_eq!(consent_safe_return_to(Some("\\/evil.com")), "/");
+        assert_eq!(consent_safe_return_to(Some("/pricing\\@evil.example")), "/");
+        assert_eq!(consent_safe_return_to(Some("/pricing\\")), "/");
+        // The absolute-URL branch must be guarded by the same rule.
+        assert_eq!(
+            consent_safe_return_to(Some("https://apexmail.ee/\\evil.com")),
+            "/"
+        );
+        assert_eq!(
+            consent_safe_return_to(Some(
+                "https://apexmail.ee/pricing\\\r\nSet-Cookie: apexmail_consent=all"
+            )),
+            "/"
+        );
+        assert_eq!(
+            consent_safe_return_to(Some("/pricing\r\nSet-Cookie: x=1")),
+            "/"
+        );
+        // A control char *inside* the path is rejected; one at the very
+        // edge is already neutralised by the trim() above it.
+        assert_eq!(consent_safe_return_to(Some("/pri\u{0007}cing")), "/");
+        assert_eq!(consent_safe_return_to(Some("/pricing\u{0007}")), "/");
+        assert_eq!(consent_safe_return_to(Some("/pricing\t")), "/pricing");
+        // …while the honest values still pass through untouched.
+        assert_eq!(
+            consent_safe_return_to(Some("/pricing?back=1")),
+            "/pricing?back=1"
+        );
+        assert_eq!(consent_safe_return_to(Some("/de/cookies/")), "/de/cookies/");
+        assert_eq!(
+            consent_safe_return_to(Some("https://app.apexmail.ee/dashboard?next=/x")),
+            "https://app.apexmail.ee/dashboard?next=/x"
+        );
+    }
+
+    #[test]
+    fn form_return_to_rejects_backslash_and_control_characters() {
+        let mut form = HashMap::new();
+        // Same WHATWG normalisation hazard as the consent validator.
+        form.insert("return_to".to_string(), "/\\evil.com".to_string());
+        assert_eq!(safe_return_to(&form, "/dashboard"), "/dashboard");
+        form.insert("return_to".to_string(), "\\/evil.com".to_string());
+        assert_eq!(safe_return_to(&form, "/dashboard"), "/dashboard");
+        form.insert("return_to".to_string(), "/ok\r\n".to_string());
+        assert_eq!(safe_return_to(&form, "/dashboard"), "/dashboard");
+        form.insert("return_to".to_string(), "/ok\t".to_string());
+        assert_eq!(safe_return_to(&form, "/dashboard"), "/dashboard");
+        // The `next` alias is guarded identically.
+        form.remove("return_to");
+        form.insert("next".to_string(), "/\\evil.com".to_string());
+        assert_eq!(safe_return_to(&form, "/dashboard"), "/dashboard");
+        // Honest paths keep flowing through.
+        form.remove("next");
+        form.insert("return_to".to_string(), "/contacts?page=2".to_string());
+        assert_eq!(safe_return_to(&form, "/dashboard"), "/contacts?page=2");
+    }
+
+    /// Item 4: `/consent?choice=all` is a bare GET, so any third party
+    /// can embed it as `<img>` and forge a consent cookie for visitors.
+    /// A spoofed `Sec-Fetch-Site: cross-site` request must NOT set the
+    /// cookie; genuine same-site navigations (the no-JS banner links)
+    /// and header-less older browsers must keep working.
+    #[tokio::test]
+    async fn cross_site_consent_get_does_not_set_the_cookie() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        // The consent endpoints never touch the database or Redis, so a
+        // lazy pool against a dead port is enough AppState.
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://apexmail:apexmail@127.0.0.1:1/apexmail")
+            .expect("lazy test pool");
+        let state = crate::app::test_support::test_state_over(db).await;
+        let app = consent_router().with_state(state);
+
+        let send = |fetch_site: Option<&'static str>, referer: Option<&'static str>| {
+            let app = app.clone();
+            async move {
+                let mut builder = Request::get(
+                    "/consent?choice=all&return_to=https%3A%2F%2Fapexmail.ee%2Fpricing",
+                );
+                if let Some(site) = fetch_site {
+                    builder = builder.header("sec-fetch-site", site);
+                }
+                if let Some(referer) = referer {
+                    builder = builder.header(header::REFERER, referer);
+                }
+                app.oneshot(builder.body(Body::empty()).unwrap())
+                    .await
+                    .expect("consent GET")
+            }
+        };
+
+        // Spoofed cross-site GET: redirected, cookie untouched.
+        let forged = send(Some("cross-site"), None).await;
+        assert_eq!(forged.status(), StatusCode::FOUND);
+        assert!(
+            forged.headers().get(header::SET_COOKIE).is_none(),
+            "cross-site GET must not record consent"
+        );
+
+        // Real banner clicks: same-origin (api host page) and same-site
+        // (apexmail.ee → api.apexmail.ee) both set the cookie.
+        for site in ["same-origin", "same-site"] {
+            let response = send(Some(site), None).await;
+            assert_eq!(response.status(), StatusCode::FOUND);
+            let cookie = response
+                .headers()
+                .get(header::SET_COOKIE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            assert!(cookie.starts_with("apexmail_consent=all"), "site={site}");
+        }
+
+        // A cross-site Referer without Sec-Fetch-Site is refused too.
+        let bad_referer = send(None, Some("https://evil.example/consent-trap.html")).await;
+        assert!(bad_referer.headers().get(header::SET_COOKIE).is_none());
+
+        // Older browsers (no Sec-Fetch-Site, no Referer) keep the
+        // no-JS flow: choice still recorded.
+        let legacy = send(None, None).await;
+        let cookie = legacy
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(cookie.starts_with("apexmail_consent=all"));
+
+        // An apexmail-family Referer passes as well.
+        let family = send(None, Some("https://apexmail.ee/pricing")).await;
+        assert!(family
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .starts_with("apexmail_consent=all"));
+    }
+
+    #[test]
     fn consent_return_to_allows_only_apexmail_family_https() {
         // Relative same-origin paths pass through.
         assert_eq!(consent_safe_return_to(Some("/pricing")), "/pricing");
@@ -6206,7 +6768,11 @@ mod tests {
                     post(form_campaigns_delete_bulk),
                 )
                 .route("/web/contacts/import", post(form_contacts_import))
+                .route("/web/auth/signup", post(form_signup))
+                .route("/web/auth/login", post(form_login))
+                .route("/web/auth/mfa/verify", post(form_mfa_verify))
                 .route("/web/webhooks", post(form_webhook_create))
+                .route("/web/team/invite", post(form_team_invite))
                 .route("/web/templates/update", post(form_template_update))
                 .route("/web/confirm", post(form_confirm_destructive))
                 .route(
@@ -6656,6 +7222,690 @@ mod tests {
                     .await
                     .unwrap();
             assert_eq!(rows, 1, "the invalid create was not stored");
+
+            cleanup_tenant(&state, &tenant).await;
+        }
+
+        /// SSRF regression: the form path used to accept ANY `http(s)://`
+        /// prefix and insert verbatim — `http://169.254.169.254/…` (cloud
+        /// metadata) and `http://10.x/…` (private ranges) must be rejected
+        /// by the SAME hardened validator the JSON path uses.
+        #[tokio::test]
+        async fn webhook_create_rejects_ssrf_targets_from_the_form_path() {
+            let state = web_test_state().await;
+            if !db_reachable(&state.db).await {
+                eprintln!(
+                    "skipping webhook_create_rejects_ssrf_targets_from_the_form_path: no database"
+                );
+                return;
+            }
+            let tenant = apexmail_lib::id::generate_id("webssrf", 18);
+            seed_tenant(&state, &tenant).await;
+            let app = web_handlers(state.clone(), session_user(&tenant));
+
+            for url in [
+                "http://169.254.169.254/latest/meta-data",
+                "http://10.1.2.3/hook",
+                "http://192.168.0.9/hook",
+                "http://127.0.0.1:8080/hook",
+                "ftp://example.com/hook",
+            ] {
+                let body = csrf_body(&state, &[("url", url), ("events", "message.sent")]);
+                let response = app
+                    .clone()
+                    .oneshot(post_form("/web/webhooks", &body))
+                    .await
+                    .unwrap();
+                let flash = response_flash(&response, &state.config.csrf_secret);
+                assert!(
+                    flash.iter().any(|message| matches!(
+                        message.kind,
+                        ui_foundation::flash::FlashKind::Error
+                    )),
+                    "SSRF target {url} must be rejected with an error flash"
+                );
+                let stored: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM webhooks WHERE tenant_id = $1 AND url = $2",
+                )
+                .bind(&tenant)
+                .bind(url)
+                .fetch_one(&state.db)
+                .await
+                .unwrap();
+                assert_eq!(stored, 0, "SSRF target {url} must not be stored");
+            }
+
+            cleanup_tenant(&state, &tenant).await;
+        }
+
+        /// The per-tenant webhook cap (25) applies to the form path too.
+        #[tokio::test]
+        async fn webhook_create_enforces_the_per_tenant_cap_from_the_form_path() {
+            let state = web_test_state().await;
+            if !db_reachable(&state.db).await {
+                eprintln!(
+                    "skipping webhook_create_enforces_the_per_tenant_cap_from_the_form_path: no database"
+                );
+                return;
+            }
+            let tenant = apexmail_lib::id::generate_id("webcap", 18);
+            seed_tenant(&state, &tenant).await;
+            for n in 0..25 {
+                sqlx::query(
+                    "INSERT INTO webhooks (id, tenant_id, url, secret, events, enabled, status, created_at, updated_at)
+                     VALUES ($1, $2, $3, 's', '[\"*\"]'::jsonb, true, 'active', NOW(), NOW())",
+                )
+                .bind(apexmail_lib::id::generate_id("", 26))
+                .bind(&tenant)
+                .bind(format!("https://example.com/hook-{n}"))
+                .execute(&state.db)
+                .await
+                .unwrap();
+            }
+            let app = web_handlers(state.clone(), session_user(&tenant));
+
+            // The 26th webhook is refused with a clear error.
+            let body = csrf_body(
+                &state,
+                &[
+                    ("url", "https://example.com/hook-26"),
+                    ("events", "message.sent"),
+                ],
+            );
+            let response = app
+                .clone()
+                .oneshot(post_form("/web/webhooks", &body))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash
+                    .iter()
+                    .any(|message| matches!(message.kind, ui_foundation::flash::FlashKind::Error)),
+                "the 26th webhook must be rejected with an error flash"
+            );
+            let count: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM webhooks WHERE tenant_id = $1")
+                    .bind(&tenant)
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap();
+            assert_eq!(count, 25, "the cap must hold at 25");
+
+            cleanup_tenant(&state, &tenant).await;
+        }
+
+        /// Privilege regression: POST /web/team/invite used to accept ANY
+        /// authenticated session and insert `role='admin'` users. Only
+        /// owner/admin sessions may invite, and nobody may grant a role
+        /// above their own.
+        #[tokio::test]
+        async fn team_invite_gates_on_the_caller_role() {
+            let state = web_test_state().await;
+            if !db_reachable(&state.db).await {
+                eprintln!("skipping team_invite_gates_on_the_caller_role: no database");
+                return;
+            }
+            let tenant = apexmail_lib::id::generate_id("tgate", 18);
+            seed_tenant(&state, &tenant).await;
+            // Seed the caller rows the gate re-reads.
+            let (member_id, admin_id) = (Uuid::new_v4(), Uuid::new_v4());
+            for (id, role) in [(member_id, "member"), (admin_id, "admin")] {
+                sqlx::query(
+                    "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, created_at, updated_at)
+                     VALUES ($1, $2, $3, 'Caller', 'x', $4, 'active', NOW(), NOW())",
+                )
+                .bind(id)
+                .bind(&tenant)
+                .bind(format!("{}@gate.example.com", id.simple()))
+                .bind(role)
+                .execute(&state.db)
+                .await
+                .unwrap();
+            }
+            let invitee = || format!("invitee-{}@example.com", Uuid::new_v4().simple());
+            let invite_body = |state: &AppState, email: &str, role: &str| {
+                csrf_body(state, &[("userName", email), ("role", role)])
+            };
+
+            // A member session cannot invite anyone…
+            let app = web_handlers(
+                state.clone(),
+                AuthUser {
+                    tenant_id: tenant.clone(),
+                    user_id: Some(member_id.to_string()),
+                    api_key_id: None,
+                    session_id: None,
+                    scopes: vec!["*".into()],
+                },
+            );
+            let email = invitee();
+            let response = app
+                .clone()
+                .oneshot(post_form(
+                    "/web/team/invite",
+                    &invite_body(&state, &email, "member"),
+                ))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash
+                    .iter()
+                    .any(|message| matches!(message.kind, ui_foundation::flash::FlashKind::Error)),
+                "a member session must not be able to invite"
+            );
+            let stored: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND email = $2",
+            )
+            .bind(&tenant)
+            .bind(&email)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+            assert_eq!(stored, 0, "the member's invitation must not be stored");
+
+            // …and an admin session cannot grant a role ABOVE their own.
+            let app_admin = web_handlers(
+                state.clone(),
+                AuthUser {
+                    tenant_id: tenant.clone(),
+                    user_id: Some(admin_id.to_string()),
+                    api_key_id: None,
+                    session_id: None,
+                    scopes: vec!["*".into()],
+                },
+            );
+            let email = invitee();
+            let response = app_admin
+                .clone()
+                .oneshot(post_form(
+                    "/web/team/invite",
+                    &invite_body(&state, &email, "owner"),
+                ))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash
+                    .iter()
+                    .any(|message| matches!(message.kind, ui_foundation::flash::FlashKind::Error)),
+                "an admin must not be able to mint an owner invitation"
+            );
+            let stored: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND email = $2",
+            )
+            .bind(&tenant)
+            .bind(&email)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+            assert_eq!(stored, 0, "the owner invitation must not be stored");
+
+            // An admin CAN invite a member.
+            let email = invitee();
+            let response = app_admin
+                .clone()
+                .oneshot(post_form(
+                    "/web/team/invite",
+                    &invite_body(&state, &email, "member"),
+                ))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash.iter().any(|message| matches!(
+                    message.kind,
+                    ui_foundation::flash::FlashKind::Success
+                )),
+                "an admin inviting a member must succeed, flash was {flash:?}"
+            );
+
+            cleanup_tenant(&state, &tenant).await;
+        }
+
+        /// Per-tenant open-invitation cap: at most 50 un-accepted
+        /// invitations may be outstanding.
+        #[tokio::test]
+        async fn team_invite_enforces_an_open_invitation_cap() {
+            let state = web_test_state().await;
+            if !db_reachable(&state.db).await {
+                eprintln!("skipping team_invite_enforces_an_open_invitation_cap: no database");
+                return;
+            }
+            let tenant = apexmail_lib::id::generate_id("teamcap", 18);
+            seed_tenant(&state, &tenant).await;
+            let admin_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, created_at, updated_at)
+                 VALUES ($1, $2, $3, 'Admin', 'x', 'admin', 'active', NOW(), NOW())",
+            )
+            .bind(admin_id)
+            .bind(&tenant)
+            .bind(format!("{admin_id}@cap.example.com"))
+            .execute(&state.db)
+            .await
+            .unwrap();
+            for n in 0..50 {
+                sqlx::query(
+                    "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, created_at, updated_at)
+                     VALUES ($1, $2, $3, '', '!invited-pending-activation', 'member', 'invited', NOW(), NOW())",
+                )
+                .bind(Uuid::new_v4())
+                .bind(&tenant)
+                .bind(format!("pending-{n}-{}@example.com", Uuid::new_v4().simple()))
+                .execute(&state.db)
+                .await
+                .unwrap();
+            }
+            let app = web_handlers(
+                state.clone(),
+                AuthUser {
+                    tenant_id: tenant.clone(),
+                    user_id: Some(admin_id.to_string()),
+                    api_key_id: None,
+                    session_id: None,
+                    scopes: vec!["*".into()],
+                },
+            );
+
+            let email = format!("over-{}@example.com", Uuid::new_v4().simple());
+            let response = app
+                .oneshot(post_form(
+                    "/web/team/invite",
+                    &csrf_body(&state, &[("userName", email.as_str()), ("role", "member")]),
+                ))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash
+                    .iter()
+                    .any(|message| matches!(message.kind, ui_foundation::flash::FlashKind::Error)),
+                "the 51st open invitation must be rejected with an error flash"
+            );
+            let stored: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM users WHERE tenant_id = $1 AND email = $2",
+            )
+            .bind(&tenant)
+            .bind(&email)
+            .fetch_one(&state.db)
+            .await
+            .unwrap();
+            assert_eq!(stored, 0, "the over-cap invitation must not be stored");
+
+            cleanup_tenant(&state, &tenant).await;
+        }
+
+        /// Seed the system sender domain with valid DKIM material so the
+        /// transactional verification-email queue admits messages (same
+        /// contract as the auth.rs signup fixtures; caller must hold the
+        /// DKIM env mutex across the whole seeded scope).
+        async fn seed_web_system_sender(db: &sqlx::PgPool) {
+            std::env::set_var(
+                apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+                "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+            );
+            let key_pair = apexmail_lib::dkim::generate_dkim_keypair().expect("dkim keypair");
+            let aad = apexmail_lib::dkim::dkim_private_key_aad(
+                crate::routes::system_sender::SYSTEM_TENANT_ID,
+                crate::routes::system_sender::SYSTEM_DOMAIN_ID,
+            );
+            let encrypted =
+                apexmail_lib::dkim::encrypt_dkim_private_key(&key_pair.private_key_pem, &aad)
+                    .expect("encrypt dkim key");
+            let public_key = apexmail_lib::dkim::public_key_base64_from_private_key_pem(
+                &key_pair.private_key_pem,
+            )
+            .expect("derive dkim public key");
+            sqlx::query(
+                "INSERT INTO domains (id, tenant_id, name, status, verified, ses_verified,
+                                      dkim_enabled, dkim_selector, dkim_public_key, dkim_private_key)
+                 VALUES ($1, $2, $3, 'verified', true, true, true, 'testsel', $4, $5)
+                 ON CONFLICT (id) DO UPDATE
+                   SET status = 'verified', verified = true, ses_verified = true,
+                       dkim_enabled = true, dkim_selector = 'testsel',
+                       dkim_public_key = EXCLUDED.dkim_public_key,
+                       dkim_private_key = EXCLUDED.dkim_private_key",
+            )
+            .bind(
+                Uuid::parse_str(crate::routes::system_sender::SYSTEM_DOMAIN_ID)
+                    .expect("system domain id is a uuid"),
+            )
+            .bind(crate::routes::system_sender::SYSTEM_TENANT_ID)
+            .bind(crate::routes::system_sender::SYSTEM_DOMAIN)
+            .bind(&public_key)
+            .bind(&encrypted)
+            .execute(db)
+            .await
+            .expect("seed system sender");
+        }
+
+        /// Signup-before-verification regression trio: the verification
+        /// token must be stored HASHED (never plaintext), an unverified
+        /// account must not be able to log in, and a duplicate signup
+        /// gets the friendly "already registered" error.
+        #[allow(clippy::await_holding_lock)]
+        #[tokio::test]
+        async fn web_signup_hashes_token_and_gates_login_on_email_verification() {
+            // The transactional verification-email queue needs the canonical
+            // fixture shape (the shared dev database's messages table has a
+            // stricter NOT NULL the queue path does not satisfy).
+            let Some(pool) = crate::test_db::canonical_pool("web_signup_verify").await else {
+                eprintln!(
+                    "skipping web_signup_hashes_token_and_gates_login_on_email_verification: no TEST_DATABASE_URL"
+                );
+                return;
+            };
+            let state = canonical_web_state(pool.clone()).await;
+            let _env_guard = crate::test_db::DKIM_ENV_MUTEX
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let had_dkim_key =
+                std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
+            seed_web_system_sender(&state.db).await;
+
+            let app = web_handlers(
+                state.clone(),
+                AuthUser {
+                    tenant_id: "unused".into(),
+                    user_id: None,
+                    api_key_id: None,
+                    session_id: None,
+                    scopes: vec![],
+                },
+            );
+            let email = format!("web-signup-{}@example.com", Uuid::new_v4().simple());
+            let password = "Sup3r#SecurePass";
+            let signup_body = csrf_body(
+                &state,
+                &[
+                    ("name", "Web Signup"),
+                    ("company_name", "Web Signup Co"),
+                    ("email", email.as_str()),
+                    ("password", password),
+                    ("plan", "free"),
+                ],
+            );
+            let response = app
+                .clone()
+                .oneshot(post_form("/web/auth/signup", &signup_body))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash.iter().any(|message| matches!(
+                    message.kind,
+                    ui_foundation::flash::FlashKind::Success
+                )),
+                "signup must succeed, flash was {flash:?}"
+            );
+
+            // (a) The stored verification token is a SHA-256 hex digest,
+            // never the raw token (which used to land verbatim under
+            // `verification_token_hash`).
+            let metadata: Option<serde_json::Value> =
+                sqlx::query_scalar("SELECT metadata FROM users WHERE email = $1")
+                    .bind(&email)
+                    .fetch_one(&state.db)
+                    .await
+                    .unwrap();
+            let stored = metadata
+                .as_ref()
+                .and_then(|m| m["verification_token_hash"].as_str())
+                .unwrap_or_default();
+            assert!(
+                stored.len() == 64 && stored.chars().all(|c| c.is_ascii_hexdigit()),
+                "verification token must be stored as a 64-hex-char SHA-256 digest, got {stored:?}"
+            );
+
+            // (b) The unverified account cannot log in.
+            let login_body =
+                csrf_body(&state, &[("email", email.as_str()), ("password", password)]);
+            let response = app
+                .clone()
+                .oneshot(post_form("/web/auth/login", &login_body))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash.iter().any(|message| matches!(
+                    message.kind,
+                    ui_foundation::flash::FlashKind::Error
+                ) && message.text.to_lowercase().contains("verif")),
+                "an unverified account must not receive a session, flash was {flash:?}"
+            );
+            let session_cookie = response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .find(|cookie| cookie.starts_with("am_session="))
+                .is_some();
+            assert!(!session_cookie, "no am_session cookie before verification");
+
+            // Once verified, the same credentials log in.
+            sqlx::query("UPDATE users SET email_verified = true WHERE email = $1")
+                .bind(&email)
+                .execute(&state.db)
+                .await
+                .unwrap();
+            let response = app
+                .clone()
+                .oneshot(post_form("/web/auth/login", &login_body))
+                .await
+                .unwrap();
+            let session_cookie = response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .find(|cookie| cookie.starts_with("am_session="))
+                .is_some();
+            assert!(session_cookie, "a verified account must receive a session");
+
+            // (c) Duplicate signup gets the friendly error (the unique
+            // constraint race is additionally handled at the INSERT).
+            let response = app
+                .clone()
+                .oneshot(post_form("/web/auth/signup", &signup_body))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash.iter().any(|message| matches!(
+                    message.kind,
+                    ui_foundation::flash::FlashKind::Error
+                ) && message.text.to_lowercase().contains("already")),
+                "duplicate signup must be a friendly error, flash was {flash:?}"
+            );
+
+            match had_dkim_key {
+                Some(key) => {
+                    std::env::set_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV, key)
+                }
+                None => {
+                    std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV)
+                }
+            }
+        }
+
+        /// The SSR MFA verify step is brute-forceable (6-digit TOTP): a
+        /// bounded per-account attempt counter must lock it out instead of
+        /// accepting unlimited guesses.
+        #[tokio::test]
+        async fn mfa_verify_locks_out_after_repeated_wrong_codes() {
+            let state = web_test_state().await;
+            if !db_reachable(&state.db).await {
+                eprintln!("skipping mfa_verify_locks_out_after_repeated_wrong_codes: no database");
+                return;
+            }
+            // Redis-backed counter: skip when Redis is not under test.
+            let mut conn = match state.redis.get().await {
+                Ok(conn) => conn,
+                Err(_) => {
+                    eprintln!("skipping mfa_verify_locks_out_after_repeated_wrong_codes: no Redis");
+                    return;
+                }
+            };
+            let pong: Result<String, _> = deadpool_redis::redis::cmd("PING")
+                .query_async(&mut *conn)
+                .await;
+            if pong.is_err() {
+                eprintln!(
+                    "skipping mfa_verify_locks_out_after_repeated_wrong_codes: Redis unreachable"
+                );
+                return;
+            }
+
+            let tenant = apexmail_lib::id::generate_id("mfalock", 16);
+            seed_tenant(&state, &tenant).await;
+            let user_id = Uuid::new_v4();
+            let email = format!("mfalock-{}@example.com", user_id.simple());
+            sqlx::query(
+                "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                                    email_verified, mfa_enabled, mfa_secret, created_at, updated_at)
+                 VALUES ($1, $2, $3, 'MFA Op', 'x', 'owner', 'active', true, true, 'enc:v1:not-a-real-secret', NOW(), NOW())",
+            )
+            .bind(user_id)
+            .bind(&tenant)
+            .bind(&email)
+            .execute(&state.db)
+            .await
+            .expect("seed mfa user");
+            let challenge = sign_login_challenge(&state.config, &user_id.to_string(), &email);
+
+            let app = web_handlers(
+                state.clone(),
+                AuthUser {
+                    tenant_id: tenant.clone(),
+                    user_id: Some(user_id.to_string()),
+                    api_key_id: None,
+                    session_id: None,
+                    scopes: vec![],
+                },
+            );
+            let body_for = |code: &str| {
+                csrf_body(
+                    &state,
+                    &[
+                        ("email", email.as_str()),
+                        ("code", code),
+                        ("return_to", "/dashboard"),
+                    ],
+                )
+            };
+            let verify_request = |body: &str| {
+                Request::post("/web/auth/mfa/verify")
+                    .header("content-type", "application/x-www-form-urlencoded")
+                    .header(
+                        header::COOKIE,
+                        format!("apexmail_login_challenge={challenge}"),
+                    )
+                    .body(Body::from(body.to_string()))
+                    .unwrap()
+            };
+
+            // Ten wrong codes burn the attempt budget…
+            for _ in 0..10 {
+                let response = app
+                    .clone()
+                    .oneshot(verify_request(&body_for("000000")))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            }
+            // …the 11th is locked out (distinct from the mismatch error).
+            let response = app
+                .clone()
+                .oneshot(verify_request(&body_for("000000")))
+                .await
+                .unwrap();
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash.iter().any(|message| matches!(
+                    message.kind,
+                    ui_foundation::flash::FlashKind::Error
+                ) && message.text.to_lowercase().contains("too many")),
+                "the 11th attempt must be locked out, flash was {flash:?}"
+            );
+            let session_cookie = response
+                .headers()
+                .get_all(header::SET_COOKIE)
+                .iter()
+                .filter_map(|value| value.to_str().ok())
+                .any(|cookie| cookie.starts_with("am_session="));
+            assert!(
+                !session_cookie,
+                "a locked-out attempt must not mint a session"
+            );
+
+            cleanup_tenant(&state, &tenant).await;
+        }
+
+        /// Chunked multi-row INSERT must keep exact semantics: a file
+        /// larger than one batch (500) imports fully with honest counts.
+        #[tokio::test]
+        async fn contacts_import_batches_without_losing_rows() {
+            let state = web_test_state().await;
+            if !db_reachable(&state.db).await {
+                eprintln!("skipping contacts_import_batches_without_losing_rows: no database");
+                return;
+            }
+            let tenant = apexmail_lib::id::generate_id("csvbig", 16);
+            seed_tenant(&state, &tenant).await;
+
+            let app = web_handlers(
+                state.clone(),
+                AuthUser {
+                    tenant_id: tenant.clone(),
+                    user_id: Some("bulk-op".into()),
+                    api_key_id: None,
+                    session_id: None,
+                    scopes: vec!["*".into()],
+                },
+            );
+            // Raw multipart body: the `_csrf` field plus a 750-row CSV —
+            // past the 500-row batch boundary.
+            let boundary = "XApexMailTestBoundaryX";
+            let token = ui_foundation::csrf::generate_csrf_token(&state.config.csrf_secret);
+            let mut raw = String::new();
+            raw.push_str(&format!("--{boundary}\r\n"));
+            raw.push_str("Content-Disposition: form-data; name=\"_csrf\"\r\n\r\n");
+            raw.push_str(&token);
+            raw.push_str("\r\n");
+            raw.push_str(&format!("--{boundary}\r\n"));
+            raw.push_str(
+                "Content-Disposition: form-data; name=\"file\"; filename=\"bulk.csv\"\r\n",
+            );
+            raw.push_str("Content-Type: text/csv\r\n\r\n");
+            raw.push_str("email,name\n");
+            for n in 0..750 {
+                raw.push_str(&format!("bulk-{n}-{tenant}@example.com,Bulk {n}\n"));
+            }
+            raw.push_str(&format!("\r\n--{boundary}--\r\n"));
+
+            let response = app
+                .oneshot(
+                    Request::post("/web/contacts/import")
+                        .header(
+                            "content-type",
+                            format!("multipart/form-data; boundary={boundary}"),
+                        )
+                        .body(Body::from(raw))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            let flash = response_flash(&response, &state.config.csrf_secret);
+            assert!(
+                flash.iter().any(|message| matches!(
+                    message.kind,
+                    ui_foundation::flash::FlashKind::Success
+                ) && message.text.contains("750")),
+                "all 750 rows must be imported, flash was {flash:?}"
+            );
 
             cleanup_tenant(&state, &tenant).await;
         }
@@ -7408,8 +8658,8 @@ mod tests {
             let user_id = Uuid::new_v4();
             let hash = hash_password(password).expect("bcrypt hash");
             sqlx::query(
-                "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status)
-                 VALUES ($1, $2, $3, 'Sweep User', $4, 'owner', 'active')",
+                "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified)
+                 VALUES ($1, $2, $3, 'Sweep User', $4, 'owner', 'active', true)",
             )
             .bind(user_id)
             .bind(&tenant)
@@ -7485,6 +8735,7 @@ mod tests {
         /// against a UUID column, driven against a canonical-shape database.
         /// Each case asserts the persisted row changed (or the authenticated
         /// flow completed) — a silent no-match fails loudly here.
+        #[allow(clippy::await_holding_lock)]
         #[tokio::test]
         async fn web_id_binds_match_rows_on_the_canonical_schema() {
             let Some(db) = crate::test_db::canonical_pool("web_id_sweep").await else {
@@ -7492,6 +8743,15 @@ mod tests {
                 return;
             };
             let state = canonical_web_state(db.clone()).await;
+            // The signup case queues a transactional verification email,
+            // which validates the DKIM material at QUEUE time (during the
+            // request) — the env key must stay set for the whole test.
+            let _env_guard = crate::test_db::DKIM_ENV_MUTEX
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            let had_dkim_key =
+                std::env::var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV).ok();
+            seed_web_system_sender(&db).await;
 
             // ── Case 1: profile update (UPDATE users ... WHERE id = $2) ──
             let (tenant, user_id, _hash) = seed_canonical_user(&db, "0ld#SweepPassw0rd").await;
@@ -7886,6 +9146,14 @@ mod tests {
                 "UPDATE system_alerts must match and record the acknowledger"
             );
 
+            match had_dkim_key {
+                Some(key) => {
+                    std::env::set_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV, key)
+                }
+                None => {
+                    std::env::remove_var(apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV)
+                }
+            }
             db.close().await;
         }
     }

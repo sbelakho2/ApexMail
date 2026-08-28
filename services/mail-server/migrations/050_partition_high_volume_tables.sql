@@ -53,6 +53,18 @@ BEGIN
         -- Rename existing table
         ALTER TABLE email_queue RENAME TO email_queue_old;
         
+        -- Index NAMES survive a table rename (they stay attached to the
+        -- renamed *_old table). The CREATE INDEX IF NOT EXISTS statements
+        -- below would therefore silently no-op (the names still exist) and
+        -- the DROP TABLE email_queue_old at the end of this section would
+        -- then destroy them outright — the fresh chain lost every one of
+        -- these indexes that way. Drop the colliding names here so the
+        -- recreated partitioned-parent indexes actually materialize.
+        DROP INDEX IF EXISTS idx_email_queue_tenant_status_created;
+        DROP INDEX IF EXISTS idx_email_queue_status_retry;
+        DROP INDEX IF EXISTS idx_email_queue_campaign;
+        DROP INDEX IF EXISTS idx_email_queue_sent_at;
+        
         -- Create partitioned table (includes ALL columns from the original schema +
         -- the uid column that was added by migration 002, plus any CHECK constraints
         -- added by migration 046, all expressed inline).
@@ -201,6 +213,11 @@ BEGIN
         
         ALTER TABLE email_delivery_log RENAME TO email_delivery_log_old;
         
+        -- See the email_queue note above: index names survive the rename,
+        -- so the re-creates below must reclaim the names first.
+        DROP INDEX IF EXISTS idx_email_delivery_log_email_attempted;
+        DROP INDEX IF EXISTS idx_email_delivery_log_status_attempted;
+        
         CREATE TABLE email_delivery_log (
             id              UUID        NOT NULL DEFAULT gen_random_uuid(),
             email_id        UUID        NOT NULL,
@@ -317,6 +334,14 @@ BEGIN
         
         ALTER TABLE mail_messages RENAME TO mail_messages_old;
         
+        -- See the email_queue note above: index names survive the rename,
+        -- so the re-creates below must reclaim the names first.
+        DROP INDEX IF EXISTS idx_mail_messages_mailbox;
+        DROP INDEX IF EXISTS idx_mail_messages_unread;
+        DROP INDEX IF EXISTS idx_mail_messages_account_message_id;
+        DROP INDEX IF EXISTS idx_mail_messages_search;
+        DROP INDEX IF EXISTS idx_mail_messages_labels_gin;
+        
         CREATE TABLE mail_messages (
             id              UUID        NOT NULL DEFAULT gen_random_uuid(),
             account_id      UUID        NOT NULL,
@@ -410,8 +435,13 @@ BEGIN
                     COALESCE(from_address, '')
                 )
             );
-        CREATE INDEX IF NOT EXISTS idx_mail_messages_mailbox_uid
-            ON mail_messages (mailbox_id, uid);
+        -- idx_mail_messages_mailbox_uid is deliberately NOT (re)created
+        -- here: 002 created it UNIQUE (mailbox_id, uid, created_at on the
+        -- partitioned shape) and it was dropped above with the other
+        -- renamed-table remnants. Migration 109 re-creates the UNIQUE
+        -- variant; a plain index created at this point would occupy the
+        -- name and make 109's guarded unique create a no-op, silently
+        -- dropping the per-mailbox UID uniqueness window.
         CREATE INDEX IF NOT EXISTS idx_mail_messages_labels_gin
             ON mail_messages USING GIN (labels);
         -- FK lookup indexes for partitioned mail_messages (H-09)
@@ -476,6 +506,14 @@ BEGIN
                      AND column_name = 'timestamp') THEN
         
         ALTER TABLE audit_logs RENAME TO audit_logs_old;
+        
+        -- See the email_queue note above: index names survive the rename,
+        -- so the re-creates below must reclaim the names first.
+        DROP INDEX IF EXISTS idx_audit_logs_tenant_ts;
+        DROP INDEX IF EXISTS idx_audit_logs_user_ts;
+        DROP INDEX IF EXISTS idx_audit_logs_action_ts;
+        DROP INDEX IF EXISTS idx_audit_logs_resource;
+        DROP INDEX IF EXISTS idx_audit_logs_outcome;
         
         CREATE TABLE audit_logs (
             id              TEXT        NOT NULL,
@@ -586,6 +624,10 @@ BEGIN
         -- =============================================================================
         
         ALTER TABLE bounce_analytics_daily RENAME TO bounce_analytics_daily_old;
+        
+        -- See the email_queue note above: index names survive the rename,
+        -- so the re-create below must reclaim the name first.
+        DROP INDEX IF EXISTS idx_bounce_analytics_daily_tenant_date;
         
         CREATE TABLE bounce_analytics_daily (
             id                  UUID        NOT NULL DEFAULT gen_random_uuid(),

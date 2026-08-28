@@ -510,6 +510,72 @@ impl EmailTransport for SmtpTransport {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Audit-4: SES failure classification at the source
+// ═══════════════════════════════════════════════════════════════
+
+/// Retry disposition of a failed SES send, decided from the typed SDK error
+/// (see [`classify_ses_failure`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SesFailureDisposition {
+    /// Permanent rejection (400/Validation/MailboxDoesNotExist/MessageRejected
+    /// class): hard-bounce the recipient and suppress the address — retrying
+    /// cannot succeed.
+    Permanent,
+    /// Temporary failure (5xx / network / dispatch): retry with backoff.
+    Transient,
+    /// Throttle-class (TooManyRequests/Throttling/LimitExceeded): keep the
+    /// distinct `ProcessorError::RateLimited` outcome.
+    Throttled,
+}
+
+/// Classify an SES failure from the modeled SDK exception code and/or the
+/// HTTP status of the raw response.
+///
+/// * Modeled code wins when recognized. Permanent modeled errors:
+///   `BadRequestException` (invalid input), `MessageRejected` (invalid
+///   content — includes malformed/undeliverable recipient content),
+///   `NotFoundException` / `MailFromDomainNotVerifiedException` /
+///   `AccountSuspendedException` / `SendingPausedException` (configuration
+///   or account states a retry cannot repair), plus
+///   MailboxDoesNotExist/Validation-shaped codes surfaced through Unhandled.
+/// * Throttle-class codes map to [`SesFailureDisposition::Throttled`].
+/// * Otherwise the HTTP status decides: 4xx → Permanent (the request itself
+///   is bad), 429 → Throttled, 5xx → Transient.
+/// * Neither signal (pure network/dispatch failure) → Transient.
+pub(crate) fn classify_ses_failure(
+    code: Option<&str>,
+    http_status: Option<u16>,
+) -> SesFailureDisposition {
+    if let Some(code) = code {
+        if code.contains("Throttling")
+            || code == "TooManyRequestsException"
+            || code == "LimitExceededException"
+        {
+            return SesFailureDisposition::Throttled;
+        }
+        if matches!(
+            code,
+            "BadRequestException"
+                | "MessageRejected"
+                | "NotFoundException"
+                | "MailFromDomainNotVerifiedException"
+                | "AccountSuspendedException"
+                | "SendingPausedException"
+        ) || code.contains("MailboxDoesNotExist")
+            || code.contains("Validation")
+        {
+            return SesFailureDisposition::Permanent;
+        }
+    }
+    match http_status {
+        Some(429) => SesFailureDisposition::Throttled,
+        Some(status) if (400..=499).contains(&status) => SesFailureDisposition::Permanent,
+        // 5xx responses and signal-less (network/dispatch) failures retry.
+        _ => SesFailureDisposition::Transient,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // AWS SES Transport
 // ═══════════════════════════════════════════════════════════════
 
@@ -577,6 +643,37 @@ impl SesTransport {
 
         builder.write_to_vec().unwrap_or_default()
     }
+
+    /// Map an already-classified SES failure onto the processor error type.
+    ///
+    /// Audit-4: classification happens AT THE SOURCE (in `send`, where the
+    /// typed SDK error — modeled exception code via
+    /// `SendEmailError::meta().code()` and the raw response's HTTP status —
+    /// is still available). The processor used to substring-match the
+    /// flattened `Transport("SES send failed: {msg}")` string, so every
+    /// non-throttling SES error — including permanent 400/Validation/
+    /// MailboxDoesNotExist/MessageRejected rejections — fell into the
+    /// generic retry path.
+    fn ses_error_to_processor_error(
+        code: Option<&str>,
+        http_status: Option<u16>,
+        msg: &str,
+    ) -> ProcessorError {
+        match classify_ses_failure(code, http_status) {
+            SesFailureDisposition::Throttled => {
+                warn!(error = %msg, "SES rate limit hit");
+                ProcessorError::RateLimited(format!("SES: {msg}"))
+            }
+            SesFailureDisposition::Permanent => ProcessorError::Ses {
+                permanent: true,
+                message: format!("SES send failed: {msg}"),
+            },
+            SesFailureDisposition::Transient => ProcessorError::Ses {
+                permanent: false,
+                message: format!("SES send failed: {msg}"),
+            },
+        }
+    }
 }
 
 #[async_trait]
@@ -627,16 +724,24 @@ impl EmailTransport for SesTransport {
             req = req.configuration_set_name(config_set);
         }
 
-        let resp = req.send().await.map_err(|e| {
-            let msg = format!("{e}");
-            // Classify SES errors for upstream retry logic
-            if msg.contains("Throttling") || msg.contains("TooManyRequestsException") {
-                warn!(error = %msg, "SES rate limit hit");
-                ProcessorError::RateLimited(format!("SES: {msg}"))
-            } else {
-                ProcessorError::Transport(format!("SES send failed: {msg}"))
+        // Audit-4: classification happens HERE, where the typed SDK error is
+        // still available — the modeled exception code (SendEmailError's
+        // inherent meta().code()) plus the raw response's HTTP status feed
+        // classify_ses_failure, and the processor consumes the structured
+        // ProcessorError::Ses/RateLimited disposition instead of
+        // substring-matching a flattened message.
+        let resp = match req.send().await {
+            Ok(resp) => resp,
+            Err(sdk_err) => {
+                let http_status = sdk_err.raw_response().map(|r| r.status().as_u16());
+                // into_service_error() yields the modeled SendEmailError
+                // (network/dispatch failures arrive as Unhandled, no code).
+                let modeled = sdk_err.into_service_error();
+                let code = modeled.meta().code();
+                let msg = modeled.to_string();
+                return Err(Self::ses_error_to_processor_error(code, http_status, &msg));
             }
-        })?;
+        };
 
         let ses_message_id = resp.message_id().map(|s| s.to_string());
 
@@ -801,6 +906,101 @@ mod tests {
         let config = SmtpConfig::default();
         let transport = create_transport(&config);
         assert_eq!(transport.transport_name(), "smtp");
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit-4: SES failures are classified at the source (typed SDK error
+    // code / HTTP status), not by substring-matching a flattened message in
+    // the processor.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ses_mailbox_does_not_exist_style_error_is_permanent() {
+        // A MailboxDoesNotExist-style code is a permanent per-recipient
+        // rejection: it must hard-bounce (suppress the address), never retry.
+        assert_eq!(
+            classify_ses_failure(Some("MailboxDoesNotExist"), None),
+            SesFailureDisposition::Permanent
+        );
+    }
+
+    #[test]
+    fn ses_bad_request_validation_and_message_rejected_are_permanent() {
+        for code in [
+            "BadRequestException",
+            "MessageRejected",
+            "NotFoundException",
+            "MailFromDomainNotVerifiedException",
+            "AccountSuspendedException",
+            "SendingPausedException",
+            "ValidationError",
+        ] {
+            assert_eq!(
+                classify_ses_failure(Some(code), None),
+                SesFailureDisposition::Permanent,
+                "modeled SES code {code} must classify permanent"
+            );
+        }
+    }
+
+    #[test]
+    fn ses_throttling_is_rate_limited_not_permanent() {
+        for code in [
+            "TooManyRequestsException",
+            "Throttling",
+            "LimitExceededException",
+        ] {
+            assert_eq!(
+                classify_ses_failure(Some(code), None),
+                SesFailureDisposition::Throttled,
+                "throttle-class SES code {code} must never hard-bounce"
+            );
+        }
+    }
+
+    #[test]
+    fn ses_http_400_classifies_permanent_and_429_throttled() {
+        assert_eq!(
+            classify_ses_failure(None, Some(400)),
+            SesFailureDisposition::Permanent
+        );
+        assert_eq!(
+            classify_ses_failure(None, Some(403)),
+            SesFailureDisposition::Permanent
+        );
+        assert_eq!(
+            classify_ses_failure(None, Some(429)),
+            SesFailureDisposition::Throttled
+        );
+    }
+
+    #[test]
+    fn ses_5xx_and_network_failures_are_transient() {
+        for status in [500u16, 502, 503, 504] {
+            assert_eq!(
+                classify_ses_failure(None, Some(status)),
+                SesFailureDisposition::Transient,
+                "HTTP {status} must retry, not hard-bounce"
+            );
+        }
+        // No modeled code and no HTTP response: a network/dispatch failure.
+        assert_eq!(
+            classify_ses_failure(None, None),
+            SesFailureDisposition::Transient
+        );
+    }
+
+    #[test]
+    fn ses_unknown_modeled_code_falls_back_to_http_status() {
+        // An unmapped modeled error defers to the HTTP status it arrived on.
+        assert_eq!(
+            classify_ses_failure(Some("SomeFutureException"), Some(400)),
+            SesFailureDisposition::Permanent
+        );
+        assert_eq!(
+            classify_ses_failure(Some("SomeFutureException"), Some(503)),
+            SesFailureDisposition::Transient
+        );
     }
 
     #[tokio::test]

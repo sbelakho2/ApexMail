@@ -253,8 +253,13 @@ mod login_pipeline {
         let nyc_event = make_login("user_travel", "1.2.3.4", 40.7128, -74.0060, true);
         ato.evaluate(&nyc_event);
 
-        // Immediate login from Tokyo
-        let tokyo_event = make_login("user_travel", "5.6.7.8", 35.6762, 139.6503, true);
+        // Login from Tokyo 30 minutes later — ~10,850 km in half an hour is
+        // physically impossible. (A ~0s gap is deliberately NOT flagged: the
+        // engine's tolerance floors skip sub-2-minute gaps because mobile/
+        // CGNAT GeoIP resolves to distant PoPs and clock skew produces
+        // non-monotonic timestamps — see ato-protection geo.rs.)
+        let mut tokyo_event = make_login("user_travel", "5.6.7.8", 35.6762, 139.6503, true);
+        tokyo_event.timestamp = Utc::now() + chrono::Duration::minutes(30);
         let verdict = ato.evaluate(&tokyo_event);
 
         assert!(verdict.impossible_travel, "Should detect impossible travel");

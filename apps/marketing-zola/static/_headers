@@ -9,7 +9,14 @@
   X-Content-Type-Options: nosniff
   Referrer-Policy: strict-origin-when-cross-origin
   Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
-  Content-Security-Policy: default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://apexmail.ee; font-src 'self' data:; connect-src 'self' https://api.apexmail.ee https://status.apexmail.ee; frame-src 'none'; form-action 'self'; upgrade-insecure-requests
+  # CSP — keep in lockstep with the nginx marketing vhost
+  # (apps/marketing-zola/nginx.conf) and the edge nginx marketing server
+  # (deploy/nginx/nginx.conf): all three must list the same form-action
+  # exceptions. `form-action` allows the cross-origin API host because
+  # the contact forms (content/contact/*.md × 4 locales) and the pricing
+  # calculator POST to https://api.apexmail.ee — without the exception
+  # every one of those submissions is dead on Netlify/Cloudflare Pages.
+  Content-Security-Policy: default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'none'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://apexmail.ee; font-src 'self' data:; connect-src 'self' https://api.apexmail.ee https://status.apexmail.ee; frame-src 'none'; form-action 'self' https://api.apexmail.ee; upgrade-insecure-requests
   Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=()
 
 /fonts/*

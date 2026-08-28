@@ -11,7 +11,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::warn;
+use tracing::{error, warn};
 
 /// Final verdict for an attachment
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,6 +96,146 @@ fn shared_analyzer_runtime() -> &'static tokio::runtime::Runtime {
             .build()
             .expect("failed to build shared sandbox analyzer runtime")
     })
+}
+
+/// Instrumentation for the shared analyzer blocking pool.
+///
+/// `spawn_blocking` closures that never return (an analyzer without an
+/// internal I/O timeout, a wedged scanner socket) hold one of the 8
+/// blocking threads forever. The caller's `tokio::time::timeout` abandons
+/// the *await*, not the pool slot — so eight stuck analyzers wedge the
+/// entire pool: every later analysis queues forever, times out, and fails
+/// closed (`any_rejected()` returns true for `Err` verdicts) with no
+/// recovery.
+///
+/// Every dispatched task registers its start time here and removes it when
+/// the blocking closure actually returns (RAII [`SlotGuard`]). Slots that
+/// stay in flight for more than 2× the configured analyzer timeout are
+/// reported once each with a loud ERROR and counted in a process-wide
+/// metric.
+///
+/// ## Operator note
+///
+/// If [`analyzer_wedge_events`] is non-zero (and especially if
+/// [`analyzer_slots_in_flight`] stays pinned at the pool bound of 8), the
+/// shared analyzer pool is wedged by analyzers that do not enforce their
+/// own timeouts. Analysis requests will fail closed until the **process
+/// is restarted** — wedged blocking threads cannot be reclaimed from
+/// inside the process. After restart, fix or remove the analyzer that
+/// lacks an internal I/O timeout (every `DynamicAnalyzer` must bound its
+/// own blocking work).
+#[derive(Default)]
+struct AnalyzerSlotTracker {
+    in_flight: std::sync::Mutex<std::collections::HashMap<u64, SlotState>>,
+    next_id: std::sync::atomic::AtomicU64,
+    wedge_events: std::sync::atomic::AtomicU64,
+}
+
+#[derive(Clone, Copy)]
+struct SlotState {
+    started: std::time::Instant,
+    wedge_reported: bool,
+}
+
+impl Default for SlotState {
+    fn default() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            wedge_reported: false,
+        }
+    }
+}
+
+static ANALYZER_SLOTS: std::sync::OnceLock<AnalyzerSlotTracker> = std::sync::OnceLock::new();
+
+fn analyzer_slots() -> &'static AnalyzerSlotTracker {
+    ANALYZER_SLOTS.get_or_init(AnalyzerSlotTracker::default)
+}
+
+/// Metric: analyzer blocking-pool slots currently in flight.
+pub fn analyzer_slots_in_flight() -> usize {
+    analyzer_slots()
+        .in_flight
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .len()
+}
+
+/// Metric: analyzer wedge detections since process start. Non-zero means
+/// at least one analyzer task outlived 2× its configured timeout — see the
+/// operator note on [`AnalyzerSlotTracker`].
+pub fn analyzer_wedge_events() -> u64 {
+    analyzer_slots()
+        .wedge_events
+        .load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// RAII removal of a slot registration: dropped when the blocking closure
+/// truly returns, which is the only correct moment to forget the slot.
+struct SlotGuard {
+    id: u64,
+}
+
+impl Drop for SlotGuard {
+    fn drop(&mut self) {
+        let tracker = analyzer_slots();
+        tracker
+            .in_flight
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.id);
+    }
+}
+
+impl AnalyzerSlotTracker {
+    fn register(&self) -> SlotGuard {
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.in_flight
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(
+                id,
+                SlotState {
+                    started: std::time::Instant::now(),
+                    wedge_reported: false,
+                },
+            );
+        SlotGuard { id }
+    }
+}
+
+/// Report (once per slot) in-flight slots older than 2× the analyzer
+/// timeout. Called on every dispatch and after every analyzer wait.
+fn check_for_wedged_slots(timeout: Duration) {
+    let wedge_after = timeout.saturating_mul(2);
+    let tracker = analyzer_slots();
+    let mut wedged = Vec::new();
+    {
+        let mut slots = tracker.in_flight.lock().unwrap_or_else(|p| p.into_inner());
+        for (id, state) in slots.iter_mut() {
+            if !state.wedge_reported && state.started.elapsed() > wedge_after {
+                state.wedge_reported = true;
+                wedged.push((*id, state.started.elapsed()));
+            }
+        }
+    }
+    for (id, age) in wedged {
+        tracker
+            .wedge_events
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        error!(
+            slot = id,
+            in_flight_secs = age.as_secs_f64(),
+            timeout_secs = timeout.as_secs(),
+            in_flight_now = analyzer_slots_in_flight(),
+            pool_bound = 8,
+            "SANDBOX ANALYZER POOL WEDGE: blocking task outlived 2x its timeout and is holding a pool slot. \
+             If in_flight reaches the pool bound all analyses will fail closed until the process is restarted. \
+             Every DynamicAnalyzer must enforce its own I/O timeout."
+        );
+    }
 }
 
 /// Optional dynamic analyzer (detonation / behavioral emulation)./// **No concrete implementation is provided by this crate.** This trait is an
@@ -250,7 +390,17 @@ impl SandboxEngine {
         // expected to enforce its own I/O timeouts (e.g. the ClamAV socket
         // read/write timeout) so stalled scans release their pool slot.
         let runtime = shared_analyzer_runtime();
-        let task = runtime.spawn_blocking(move || analyzer.analyze(&data, filename.as_deref()));
+        // Register the slot BEFORE dispatch so a wedge (a task that never
+        // returns, holding one of the 8 blocking threads) is observable.
+        let slot = analyzer_slots().register();
+        check_for_wedged_slots(timeout_duration);
+        let task = runtime.spawn_blocking(move || {
+            // RAII: the entry is removed when the blocking task actually
+            // finishes — even if the caller already abandoned it after a
+            // timeout, which is exactly the wedge case we need to see.
+            let _guard = slot;
+            analyzer.analyze(&data, filename.as_deref())
+        });
 
         let joined = runtime.block_on(async {
             match tokio::time::timeout(timeout_duration, task).await {
@@ -262,6 +412,10 @@ impl SandboxEngine {
                 )),
             }
         });
+
+        // Re-check after the wait: a task that outlived its own timeout is
+        // a wedge candidate.
+        check_for_wedged_slots(timeout_duration);
 
         match joined {
             Ok(finding) => Ok(finding),
@@ -541,6 +695,62 @@ mod tests {
             result,
             Err(SandboxError::AnalysisError(message)) if message.contains("timed out")
         ));
+    }
+
+    struct MockDynamicStuck;
+
+    impl DynamicAnalyzer for MockDynamicStuck {
+        fn analyze(&self, _data: &[u8], _filename: Option<&str>) -> Option<DynamicAnalysisFinding> {
+            // No internal timeout: outlives the engine timeout by far.
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            None
+        }
+    }
+
+    #[test]
+    fn test_analyzer_wedge_detected_and_slot_eventually_released() {
+        // Pool-wedge instrumentation: an analyzer without an internal
+        // timeout holds one of the 8 blocking threads past the engine
+        // timeout. The slot must stay observable as in-flight, a later
+        // dispatch must record a wedge event (loud ERROR + metric), and
+        // when the stuck task finally finishes its RAII guard must release
+        // the slot.
+        let config = SandboxConfig {
+            analysis_timeout_secs: 1,
+            ..Default::default()
+        };
+        let stuck = SandboxEngine::with_dynamic_analyzer(config, Arc::new(MockDynamicStuck));
+        let wedges_before = analyzer_wedge_events();
+
+        // First call: times out (fail closed) while the task keeps running.
+        let result = stuck.analyze(b"hello", Some("stuck.bin"));
+        assert!(result.is_err(), "stuck analyzer must fail closed");
+        assert!(
+            analyzer_slots_in_flight() >= 1,
+            "abandoned task must remain observable as in-flight"
+        );
+
+        // Let the slot age past 2x the timeout, then dispatch a fast
+        // analysis — the wedge check must fire.
+        std::thread::sleep(std::time::Duration::from_millis(1_500));
+        let fast = SandboxEngine::with_config(SandboxConfig::default());
+        let fast_result = fast.analyze(b"hello", Some("ok.txt"));
+        assert!(fast_result.is_ok());
+        assert!(
+            analyzer_wedge_events() > wedges_before,
+            "slot older than 2x timeout must be counted as a wedge event"
+        );
+
+        // Once the stuck task truly finishes, its guard releases the slot.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while analyzer_slots_in_flight() > 0 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        assert_eq!(
+            analyzer_slots_in_flight(),
+            0,
+            "slot must be released when the blocking task finally returns"
+        );
     }
 
     #[test]

@@ -63,6 +63,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .connect(&config.database.primary_url())
         .await?;
 
+    // Fix #14: the HA tables (ha_failover_events, ha_replication_lag_history)
+    // are written by this service but exist in NO migration — ensure them
+    // idempotently at startup. LOUD failure: abort startup rather than run
+    // with inserts that would fail at runtime.
+    if let Err(e) = ha::failover::bootstrap_tables(&pool).await {
+        error!(
+            error = %e,
+            "Failed to ensure HA tables (ha_failover_events, ha_replication_lag_history) — aborting startup"
+        );
+        return Err(format!("HA table bootstrap failed: {e}").into());
+    }
+    info!("HA tables ensured (ha_failover_events, ha_replication_lag_history)");
+
     // Build shared state
     let config_for_services = Arc::clone(&config);
     // BackupService::new returns Result to validate encryption key at startup
@@ -106,6 +119,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     error!(error = %e, "Replication lag recording failed");
                 }
             }
+        });
+    }
+
+    // Background cron:primary claim refresh (fix #12). Without a refresh,
+    // PRIMARY_CLAIM_TTL (300s) expired and split-brain detection went blind
+    // after five minutes on a perfectly healthy primary.
+    {
+        let s = state.clone();
+        // Refresh at 1/3 of the TTL: at most one failed refresh can elapse
+        // before the next attempt, keeping the claim continuously alive.
+        let interval = std::time::Duration::from_secs(ha::failover::PRIMARY_CLAIM_TTL_SECS / 3);
+        tokio::spawn(async move {
+            s.failover.run_claim_refresh_loop(interval).await;
         });
     }
 

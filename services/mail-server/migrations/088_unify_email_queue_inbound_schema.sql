@@ -42,7 +42,6 @@
 -- Idempotent: safe to re-run on any deployment.
 -- =============================================================================
 
-BEGIN;
 
 -- =============================================================================
 -- 1. email_queue — worker columns missing from the deployed schema
@@ -65,6 +64,60 @@ ALTER TABLE email_queue
 -- =============================================================================
 -- 2. inbound_messages — canonical superset
 -- =============================================================================
+-- No canonical migration before this one created inbound_messages (the only
+-- CREATE lives in the tools/initdb lineage). The ALTERs below were all
+-- existence-guarded, so a fresh canonical chain simply never materialized
+-- the table and the MTA inbound writer failed at runtime. Create the full
+-- union shape unconditionally-if-missing; on databases that already have a
+-- lineage shape this is a no-op and the guarded ALTERs reconcile columns.
+-- The id is the MTA's `inb_<22 hex>` (26 chars). The legacy from_email/
+-- to_email mirror pair is nullable here directly (migration 114 relaxed
+-- deployed shapes for the same reason: the MTA writer never populates it).
+CREATE TABLE IF NOT EXISTS inbound_messages (
+    id                            VARCHAR(26) PRIMARY KEY,
+    tenant_id                     VARCHAR(26),
+    from_email                    VARCHAR(255),
+    to_email                      VARCHAR(255),
+    message_id_header             VARCHAR(255),
+    subject                       VARCHAR(255),
+    body_text                     TEXT,
+    body_html                     TEXT,
+    domain_id                     VARCHAR(64),
+    mail_from                     TEXT,
+    rcpt_to                       TEXT[],
+    client_ip                     TEXT,
+    helo_hostname                 TEXT,
+    raw_message                   BYTEA,
+    raw_size                      BIGINT,
+    auth_results                  TEXT,
+    spf_result                    TEXT,
+    dkim_result                   VARCHAR(20),
+    dmarc_result                  VARCHAR(20),
+    disposition                   TEXT,
+    is_verp_reply                 BOOLEAN NOT NULL DEFAULT false,
+    lead_id                       VARCHAR(26),
+    classification                TEXT,
+    classification_confidence     DOUBLE PRECISION,
+    suggested_action              JSONB,
+    action_taken                  TEXT,
+    processed                     BOOLEAN NOT NULL DEFAULT false,
+    processing                    BOOLEAN NOT NULL DEFAULT false,
+    processed_at                  TIMESTAMPTZ,
+    ai_response                   TEXT,
+    ai_tokens_used                INTEGER,
+    pending_approval              BOOLEAN NOT NULL DEFAULT false,
+    received_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    headers                       JSONB,
+    attachments                   JSONB,
+    spam_score                    DECIMAL(5,2),
+    spam_status                   VARCHAR(20),
+    virus_status                  VARCHAR(20),
+    session_id                    VARCHAR(50),
+    created_at                    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_inbound_tenant ON inbound_messages (tenant_id);
+CREATE INDEX IF NOT EXISTS idx_inbound_received ON inbound_messages (received_at);
+
 -- MTA inbound writer (crates/mta/src/servers/inbound.rs)
 DO $$
 BEGIN
@@ -161,6 +214,30 @@ $$;
 -- The AnalyticsProcessor claims rows via processed/processing/processing_at
 -- and marks them done via processed_at; it also aggregates on message_id/
 -- domain_id/campaign_id. None of these existed on the deployed table.
+-- Like inbound_messages above, no canonical migration ever created the
+-- table (the tools-lineage shape is a UUID-id job queue, NOT this poll
+-- shape): the guarded ALTERs left fresh canonical chains without it. The
+-- worker reads id as bigint (mark/reset bind ANY($1::bigint[])), so the
+-- canonical fresh shape is a BIGSERIAL event log.
+CREATE TABLE IF NOT EXISTS analytics_queue (
+    id            BIGSERIAL PRIMARY KEY,
+    tenant_id     VARCHAR(26) NOT NULL,
+    event_type    TEXT NOT NULL,
+    message_id    VARCHAR(26),
+    domain_id     VARCHAR(26),
+    campaign_id   VARCHAR(64),
+    recipient     TEXT,
+    metadata      JSONB,
+    "timestamp"   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    processed     BOOLEAN NOT NULL DEFAULT FALSE,
+    processed_at  TIMESTAMPTZ,
+    processing    BOOLEAN NOT NULL DEFAULT FALSE,
+    processing_at TIMESTAMPTZ,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_analytics_queue_pending
+    ON analytics_queue (processed, processing, "timestamp");
+
 DO $$
 BEGIN
     IF to_regclass('public.analytics_queue') IS NOT NULL THEN
@@ -192,30 +269,34 @@ DO $$
 BEGIN
     IF to_regclass('public.analytics_queue') IS NOT NULL THEN
         ALTER TABLE analytics_queue ADD COLUMN IF NOT EXISTS campaign_id VARCHAR(26);
-        
-        -- =============================================================================
-        -- 4. suppressions — missing table
-        -- =============================================================================
-        -- Referenced by the worker (hard-bounce suppression), the reply-handler
-        -- (Suppress/Unsubscribe actions) and the API send path (suppressed_recipients).
-        -- Canonical definition matches tools/migrations/001_initial_schema.sql.
-        CREATE TABLE IF NOT EXISTS suppressions (
-            id         VARCHAR(26) PRIMARY KEY,
-            tenant_id  VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-            email      VARCHAR(255) NOT NULL,
-            reason     VARCHAR(50) NOT NULL,
-            subtype    VARCHAR(100),
-            source     VARCHAR(100),
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at TIMESTAMPTZ,
-            UNIQUE (tenant_id, email)
-        );
-        CREATE INDEX IF NOT EXISTS idx_suppressions_tenant ON suppressions (tenant_id);
-        CREATE INDEX IF NOT EXISTS idx_suppressions_email ON suppressions (email);
-        CREATE INDEX IF NOT EXISTS idx_suppressions_reason ON suppressions (reason);
     END IF;
 END
 $$;
+
+-- =============================================================================
+-- 4. suppressions — missing table
+-- =============================================================================
+-- Referenced by the worker (hard-bounce suppression), the reply-handler
+-- (Suppress/Unsubscribe actions) and the API send path (suppressed_recipients).
+-- Canonical definition matches tools/migrations/001_initial_schema.sql.
+-- Deliberately NOT nested inside the analytics_queue existence guard: no
+-- canonical migration creates analytics_queue either, so on a fresh chain
+-- the guard is never true and the suppressions table (and its consumers)
+-- never materialized.
+CREATE TABLE IF NOT EXISTS suppressions (
+    id         VARCHAR(26) PRIMARY KEY,
+    tenant_id  VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    email      VARCHAR(255) NOT NULL,
+    reason     VARCHAR(50) NOT NULL,
+    subtype    VARCHAR(100),
+    source     VARCHAR(100),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ,
+    UNIQUE (tenant_id, email)
+);
+CREATE INDEX IF NOT EXISTS idx_suppressions_tenant ON suppressions (tenant_id);
+CREATE INDEX IF NOT EXISTS idx_suppressions_email ON suppressions (email);
+CREATE INDEX IF NOT EXISTS idx_suppressions_reason ON suppressions (reason);
 
 
 
@@ -257,4 +338,3 @@ BEGIN
 END
 $$;
 
-COMMIT;

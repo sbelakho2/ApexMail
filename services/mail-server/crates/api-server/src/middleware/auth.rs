@@ -130,7 +130,9 @@ enum AuthMechanism {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CachedUserStatus {
     Missing,
-    Present(String),
+    /// Current `(status, role)` of a live user. The role rides the same
+    /// cache entry so scope narrowing never costs an extra query.
+    Present(String, String),
 }
 
 fn extract_bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -185,7 +187,9 @@ pub(crate) fn validate_session_csrf(
         .filter(|value| !value.is_empty())
         .ok_or_else(|| ApiError::Forbidden("missing X-CSRF-Token header".into()))?;
 
-    if header_token != cookie_token {
+    // Constant-time comparison: a plain `!=` short-circuits on the first
+    // differing byte, leaking how much of the token an attacker guessed.
+    if !apexmail_lib::timing_safe_compare(header_token, cookie_token.as_str()) {
         return Err(ApiError::Forbidden("CSRF token mismatch".into()));
     }
 
@@ -443,7 +447,7 @@ async fn authenticate_api_key(
     }
 
     // Cache in Redis (fire-and-forget) using the current stored hash as key
-    cache_api_key(&row.key_hash, &auth_user, state).await;
+    cache_api_key(&row.key_hash, &auth_user, row.expires_at, state).await;
 
     touch_api_key_last_used(&row.id, &row.key_hash, state).await?;
 
@@ -572,7 +576,7 @@ async fn authenticate_api_key_argon2_fallback(
             );
         }
 
-        cache_api_key(&new_hash, &auth_user, state).await;
+        cache_api_key(&new_hash, &auth_user, row.expires_at, state).await;
         touch_api_key_last_used(&row.id, &new_hash, state).await?;
 
         return Ok(auth_user);
@@ -696,41 +700,49 @@ async fn lookup_cached_api_key(key_hash: &str, state: &AppState) -> Result<AuthU
     })?;
     match cached {
         Some(json) => {
-            match serde_json::from_str::<AuthUser>(&json) {
-                Ok(user) => {
-                    // Validate cached AuthUser is structurally sound to prevent
-                    // cache-poisoning attacks (e.g. empty tenant_id, wildcard
-                    // scopes without an api_key_id — API keys are the only
-                    // mechanism that legitimately grants wildcard scopes).
-                    //
-                    // L-05: map_or(false, ...) ensures a None user_id (legitimate
-                    // for API key auth without a user association) is NOT flagged
-                    // as invalid. Previously map_or(true, ...) caused None user_id
-                    // to always be treated as invalid, evicting valid cache entries.
-                    let is_invalid = user.tenant_id.is_empty()
-                        || user.user_id.as_deref().is_some_and(|id| id.is_empty());
-                    if is_invalid {
-                        tracing::warn!(
-                            cache_key,
-                            tenant_id = %user.tenant_id,
-                            user_id = ?user.user_id,
-                            "cached API key AuthUser has empty required field(s) — evicting"
-                        );
-                        evict_api_key_cache_entry(state, &cache_key).await;
-                        return Err(());
-                    }
-                    Ok(user)
-                }
+            // Entries written before the expiry-aware wrapper (a plain
+            // AuthUser JSON) fail to parse here and are evicted.
+            let entry = match serde_json::from_str::<CachedApiKey>(&json) {
+                Ok(entry) => entry,
                 Err(e) => {
                     tracing::warn!(
                         error = %e, cache_key,
-                        "corrupted or tampered JSON in API key cache — evicting"
+                        "corrupted or legacy API key cache entry — evicting"
                     );
-                    // Best-effort eviction of poisoned cache entry
                     evict_api_key_cache_entry(state, &cache_key).await;
-                    Err(())
+                    return Err(());
                 }
+            };
+            // Expiry re-check on the HIT path: a key that expired after its
+            // entry was written must stop authenticating immediately, not
+            // when the TTL lapses.
+            if entry
+                .expires_at
+                .is_some_and(|expires_at| expires_at < Utc::now())
+            {
+                tracing::info!(cache_key, "cached API key has expired — evicting entry");
+                evict_api_key_cache_entry(state, &cache_key).await;
+                return Err(());
             }
+            let user = entry.user;
+            // Validate cached AuthUser is structurally sound to prevent
+            // cache-poisoning attacks (e.g. empty tenant_id).
+            //
+            // L-05: a None user_id is legitimate for API key auth without a
+            // user association and is NOT flagged as invalid.
+            let is_invalid = user.tenant_id.is_empty()
+                || user.user_id.as_deref().is_some_and(|id| id.is_empty());
+            if is_invalid {
+                tracing::warn!(
+                    cache_key,
+                    tenant_id = %user.tenant_id,
+                    user_id = ?user.user_id,
+                    "cached API key AuthUser has empty required field(s) — evicting"
+                );
+                evict_api_key_cache_entry(state, &cache_key).await;
+                return Err(());
+            }
+            Ok(user)
         }
         None => Err(()),
     }
@@ -743,9 +755,28 @@ async fn evict_api_key_cache_entry(state: &AppState, cache_key: &str) {
     }
 }
 
-async fn cache_api_key(key_hash: &str, user: &AuthUser, state: &AppState) {
+/// Cache entry: the identity plus the key's expiry so a cached HIT can
+/// re-check it (the 10s TTL outlives keys expiring any second — an entry
+/// written just before expiry must not keep authenticating forever).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CachedApiKey {
+    user: AuthUser,
+    #[serde(default)]
+    expires_at: Option<DateTime<Utc>>,
+}
+
+async fn cache_api_key(
+    key_hash: &str,
+    user: &AuthUser,
+    expires_at: Option<DateTime<Utc>>,
+    state: &AppState,
+) {
     let cache_key = format!("{API_KEY_CACHE_PREFIX}{key_hash}");
-    if let Ok(json) = serde_json::to_string(user) {
+    let entry = CachedApiKey {
+        user: user.clone(),
+        expires_at,
+    };
+    if let Ok(json) = serde_json::to_string(&entry) {
         if let Ok(mut conn) = state.redis.get().await {
             let _: Result<(), _> = conn.set_ex(&cache_key, &json, API_KEY_CACHE_TTL).await;
         }
@@ -771,12 +802,19 @@ pub(crate) fn issued_before_or_at_revocation(iat: i64, revoked_after: Option<i64
     revoked_after.is_some_and(|timestamp| iat <= timestamp)
 }
 
-fn parse_cached_user_status(value: &str) -> CachedUserStatus {
+fn parse_cached_user_status(value: &str) -> Option<CachedUserStatus> {
     if value == USER_STATUS_CACHE_MISSING {
-        CachedUserStatus::Missing
-    } else {
-        CachedUserStatus::Present(value.to_owned())
+        return Some(CachedUserStatus::Missing);
     }
+    // "status|role". A value without the role segment is a legacy
+    // status-only entry — treat it as a miss so the authoritative row is
+    // re-read (an unknown role must never silently narrow or widen
+    // scopes).
+    let (status, role) = value.split_once('|')?;
+    Some(CachedUserStatus::Present(
+        status.to_owned(),
+        role.to_owned(),
+    ))
 }
 
 async fn lookup_cached_user_status(
@@ -791,7 +829,8 @@ async fn lookup_cached_user_status(
     let cached: Option<String> = conn.get(&cache_key).await.map_err(|e| {
         tracing::warn!(error = %e, tenant_id, user_id, "redis GET error in user status cache lookup");
     })?;
-    Ok(cached.as_deref().map(parse_cached_user_status))
+    // None (miss) for legacy entries — see parse_cached_user_status.
+    Ok(cached.as_deref().and_then(parse_cached_user_status))
 }
 
 pub(crate) async fn lookup_session_revoked_after(
@@ -811,9 +850,21 @@ pub(crate) async fn lookup_session_revoked_after(
     })
 }
 
-async fn cache_user_status(tenant_id: &str, user_id: &str, status: Option<&str>, state: &AppState) {
+async fn cache_user_status(
+    tenant_id: &str,
+    user_id: &str,
+    status: Option<(&str, &str)>,
+    state: &AppState,
+) {
     let cache_key = user_status_cache_key(tenant_id, user_id);
-    let cached_value = status.unwrap_or(USER_STATUS_CACHE_MISSING);
+    let cached_value = match status {
+        Some((status, role)) => {
+            // '|' cannot appear in either value from the database schema
+            // (status/role are constrained vocabulary columns).
+            format!("{status}|{role}")
+        }
+        None => USER_STATUS_CACHE_MISSING.to_string(),
+    };
     if let Ok(mut conn) = state.redis.get().await {
         let _: Result<(), _> = conn
             .set_ex(&cache_key, cached_value, USER_STATUS_CACHE_TTL)
@@ -884,7 +935,12 @@ pub(crate) fn claims_typ_is_session(typ: Option<&str>) -> bool {
     typ.is_none_or(|token_type| token_type == "session")
 }
 
-async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, ApiError> {
+/// Validate a session JWT exactly as the request-auth path does: token
+/// blacklist, signature, token-type discrimination, per-request user
+/// status recheck, session-revocation registry, and the absolute session
+/// lifetime ceiling. Shared by `require_auth` and the session
+/// introspection endpoint so the two can never disagree.
+pub(crate) async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, ApiError> {
     // Check token blacklist
     if is_token_blacklisted(token, state).await? {
         return Err(ApiError::Unauthorized("token has been revoked".into()));
@@ -920,31 +976,34 @@ async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, Api
         return Err(ApiError::Unauthorized("missing tenant ID in token".into()));
     }
 
-    let user_status = match lookup_cached_user_status(&tenant_id, &user_id, state).await {
+    let (user_status, user_role) = match lookup_cached_user_status(&tenant_id, &user_id, state)
+        .await
+    {
         Ok(Some(CachedUserStatus::Missing)) => {
             return Err(ApiError::Unauthorized("user no longer exists".into()));
         }
-        Ok(Some(CachedUserStatus::Present(status))) => status,
+        Ok(Some(CachedUserStatus::Present(status, role))) => (status, role),
         _ => {
-            let user_status: Option<(String,)> =
-                sqlx::query_as("SELECT status FROM users WHERE id = $1::uuid AND tenant_id = $2")
-                    .bind(&user_id)
-                    .bind(&tenant_id)
-                    .fetch_optional(&state.db)
-                    .await
-                    .map_err(|e| {
-                        tracing::error!(error = %e, "user existence check failed");
-                        ApiError::Internal("authentication error".into())
-                    })?;
+            let user_status: Option<(String, String)> = sqlx::query_as(
+                "SELECT status, role FROM users WHERE id = $1::uuid AND tenant_id = $2",
+            )
+            .bind(&user_id)
+            .bind(&tenant_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "user existence check failed");
+                ApiError::Internal("authentication error".into())
+            })?;
 
             match user_status {
                 None => {
                     cache_user_status(&tenant_id, &user_id, None, state).await;
                     return Err(ApiError::Unauthorized("user no longer exists".into()));
                 }
-                Some((status,)) => {
-                    cache_user_status(&tenant_id, &user_id, Some(&status), state).await;
-                    status
+                Some((status, role)) => {
+                    cache_user_status(&tenant_id, &user_id, Some((&status, &role)), state).await;
+                    (status, role)
                 }
             }
         }
@@ -955,6 +1014,30 @@ async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, Api
             "user account is {user_status}"
         )));
     }
+
+    // Live scope narrowing: the token's scopes are the user's scopes AT
+    // LOGIN; the role may have changed since. Recompute the effective set
+    // from the CURRENT role (read above on the same per-request pass the
+    // status came from) so a demoted admin's still-valid token immediately
+    // loses the grants the old role no longer carries. A token's scope
+    // set can only ever be narrowed, never widened, by this.
+    let current_role_scopes = crate::routes::auth::scopes_for_role(&user_role);
+    let scopes = if current_role_scopes.iter().any(|scope| scope == "*") {
+        // The current role grants everything: the token's own set stands
+        // (it cannot exceed what the role grants).
+        claims.scopes
+    } else if claims.scopes.iter().any(|scope| scope == "*") {
+        // Wildcard token under a narrowed role: exactly what the role
+        // still grants.
+        current_role_scopes
+    } else {
+        claims
+            .scopes
+            .iter()
+            .filter(|scope| current_role_scopes.contains(scope))
+            .cloned()
+            .collect()
+    };
 
     let revoked_after = lookup_session_revoked_after(&tenant_id, &user_id, state).await?;
     if issued_before_or_at_revocation(claims.iat, revoked_after) {
@@ -980,7 +1063,7 @@ async fn authenticate_jwt(token: &str, state: &AppState) -> Result<AuthUser, Api
         user_id: Some(user_id),
         api_key_id: None,
         session_id: Some(claims.jti),
-        scopes: claims.scopes,
+        scopes,
     })
 }
 
@@ -1619,12 +1702,15 @@ mod tests {
     fn test_parse_cached_user_status_handles_missing_sentinel() {
         assert_eq!(
             parse_cached_user_status(USER_STATUS_CACHE_MISSING),
-            CachedUserStatus::Missing
+            Some(CachedUserStatus::Missing)
         );
         assert_eq!(
-            parse_cached_user_status("active"),
-            CachedUserStatus::Present("active".into())
+            parse_cached_user_status("active|owner"),
+            Some(CachedUserStatus::Present("active".into(), "owner".into()))
         );
+        // Legacy status-only entries are treated as cache misses so the
+        // authoritative role is re-read from the database.
+        assert_eq!(parse_cached_user_status("active"), None);
     }
 
     // ── Redis Failover & Cache Resilience Tests ──────────────────
@@ -1748,16 +1834,18 @@ mod tests {
         // The sentinel must be the exact string `__missing__`.
         assert_eq!(
             parse_cached_user_status(USER_STATUS_CACHE_MISSING),
-            CachedUserStatus::Missing
+            Some(CachedUserStatus::Missing)
         );
-        // Any non-sentinel value must be treated as Present, even unusual ones.
+        // Non-sentinel pairs decode as Present, even unusual ones; values
+        // without the role segment are legacy entries (cache misses).
+        assert_eq!(parse_cached_user_status("__MISSING__"), None);
+        assert_eq!(parse_cached_user_status(""), None);
         assert_eq!(
-            parse_cached_user_status("__MISSING__"),
-            CachedUserStatus::Present("__MISSING__".into())
-        );
-        assert_eq!(
-            parse_cached_user_status(""),
-            CachedUserStatus::Present("".into())
+            parse_cached_user_status("__MISSING__|weird-role"),
+            Some(CachedUserStatus::Present(
+                "__MISSING__".into(),
+                "weird-role".into()
+            ))
         );
     }
 
@@ -1844,5 +1932,233 @@ mod tests {
             far_future + 1,
             Some(far_future)
         ));
+    }
+
+    // ─── Live-scope narrowing (DB+Redis) ───────────────────────
+
+    mod live_scopes_tests {
+        use super::*;
+
+        /// Session scopes are recomputed from the user's CURRENT role on
+        /// every authentication: a demoted admin's still-valid token must
+        /// lose the wildcard scope immediately (the token used to carry
+        /// its login-time scopes until natural expiry).
+        #[tokio::test]
+        async fn demoted_admin_session_loses_admin_scopes() {
+            let Some(pool) = crate::test_db::canonical_pool("scopes_narrowing").await else {
+                eprintln!(
+                    "skipping demoted_admin_session_loses_admin_scopes: no TEST_DATABASE_URL"
+                );
+                return;
+            };
+            let redis_url = match std::env::var("TEST_REDIS_URL") {
+                Ok(url) if !url.trim().is_empty() => url,
+                _ => {
+                    eprintln!(
+                        "skipping demoted_admin_session_loses_admin_scopes: no TEST_REDIS_URL"
+                    );
+                    return;
+                }
+            };
+            let redis = match deadpool_redis::Config::from_url(&redis_url)
+                .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            {
+                Ok(pool) => pool,
+                Err(_) => return,
+            };
+            let redis_reachable = match redis.get().await {
+                Ok(mut conn) => deadpool_redis::redis::cmd("PING")
+                    .query_async::<String>(&mut *conn)
+                    .await
+                    .is_ok(),
+                Err(_) => false,
+            };
+            if !redis_reachable {
+                eprintln!(
+                    "skipping demoted_admin_session_loses_admin_scopes: TEST_REDIS_URL unreachable"
+                );
+                return;
+            }
+
+            use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey, LineEnding};
+            let key_pair = apexmail_lib::dkim::generate_dkim_keypair().expect("test RSA keypair");
+            let private_key = rsa::RsaPrivateKey::from_pkcs8_pem(key_pair.private_key_pem.as_str())
+                .expect("valid PKCS8 private key");
+            let mut config = crate::app::test_support::test_config();
+            config.jwt_private_key_pem = key_pair.private_key_pem.to_string();
+            config.jwt_public_key_pem = private_key
+                .to_public_key()
+                .to_public_key_pem(LineEnding::LF)
+                .expect("public PEM")
+                .to_string();
+
+            let state =
+                crate::app::test_support::test_state_over_with_config(pool.clone(), config).await;
+
+            let tenant = apexmail_lib::id::generate_id("scopes", 18);
+            let user_id = uuid::Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified)
+                 VALUES ($1, $2, $3, 'Scope Tester', 'x', 'admin', 'active', true)",
+            )
+            .bind(user_id)
+            .bind(&tenant)
+            .bind(format!("scopes-{}@example.com", user_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("seed admin user");
+
+            let now = Utc::now().timestamp();
+            let claims = JwtClaims {
+                sub: user_id.to_string(),
+                tenant_id: tenant.clone(),
+                scopes: vec!["*".into()],
+                exp: now + 3600,
+                iat: now,
+                jti: uuid::Uuid::new_v4().to_string(),
+                typ: Some("session".into()),
+            };
+            let token = jsonwebtoken::encode(
+                &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+                &claims,
+                &jsonwebtoken::EncodingKey::from_rsa_pem(
+                    state.config.jwt_private_key_pem.as_bytes(),
+                )
+                .expect("encoding key"),
+            )
+            .expect("sign session jwt");
+
+            // Before the demotion the wildcard scope stands.
+            let auth_user = authenticate_jwt(&token, &state)
+                .await
+                .expect("pre-demotion auth must succeed");
+            assert!(auth_user.scopes.contains(&"*".to_string()));
+
+            // Demote and let the (short-TTL) status cache expire.
+            sqlx::query("UPDATE users SET role = 'member' WHERE id = $1::uuid")
+                .bind(user_id)
+                .execute(&pool)
+                .await
+                .expect("demote user");
+            invalidate_user_status_cache(&user_id.to_string(), &tenant, &state).await;
+
+            let demoted = authenticate_jwt(&token, &state)
+                .await
+                .expect("post-demotion auth must still identify the user");
+            assert!(
+                !demoted.scopes.contains(&"*".to_string()),
+                "a demoted admin's session must lose the wildcard scope, got {:?}",
+                demoted.scopes
+            );
+            assert!(
+                demoted.scopes.contains(&"messages:read".to_string()),
+                "the narrowed scope set must be the member role's grants, got {:?}",
+                demoted.scopes
+            );
+
+            pool.close().await;
+        }
+    }
+
+    /// An expired API key must stay rejected even when a cache entry from
+    /// BEFORE its expiry still exists (10s TTL vs. keys expiring any
+    /// second) — the cached hit path used to skip the expiry check
+    /// entirely.
+    #[tokio::test]
+    async fn cached_api_key_hit_still_rejects_expired_keys() {
+        let Some(pool) = crate::test_db::canonical_pool("apikey_cache_expiry").await else {
+            eprintln!(
+                "skipping cached_api_key_hit_still_rejects_expired_keys: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        sqlx::raw_sql(
+            "CREATE TABLE IF NOT EXISTS api_keys (
+                id UUID PRIMARY KEY,
+                tenant_id VARCHAR(26) NOT NULL,
+                name TEXT NOT NULL,
+                key_prefix VARCHAR(32) NOT NULL,
+                key_hash TEXT NOT NULL UNIQUE,
+                scopes JSONB NOT NULL,
+                expires_at TIMESTAMPTZ,
+                last_used_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("api_keys fixture DDL must apply");
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let mut conn = match state.redis.get().await {
+            Ok(conn) => conn,
+            Err(_) => {
+                eprintln!("skipping cached_api_key_hit_still_rejects_expired_keys: no Redis");
+                return;
+            }
+        };
+        let pong: Result<String, _> = deadpool_redis::redis::cmd("PING")
+            .query_async(&mut *conn)
+            .await;
+        if pong.is_err() {
+            eprintln!("skipping cached_api_key_hit_still_rejects_expired_keys: Redis unreachable");
+            return;
+        }
+
+        let raw_key = format!("am_live_{}", uuid::Uuid::new_v4().simple());
+        let key_hash =
+            apexmail_lib::hash_api_key_with_secret(&raw_key, &state.config.api_key_hash_secret);
+        sqlx::query(
+            "INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, scopes, expires_at, created_at, updated_at)
+             VALUES ($1::uuid, $2, 'expired-key', 'am_live', $3, $4::jsonb, NOW() - INTERVAL '1 hour', NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(apexmail_lib::id::generate_id("exp", 18))
+        .bind(&key_hash)
+        .bind(serde_json::json!(["*"]).to_string())
+        .execute(&pool)
+        .await
+        .expect("seed expired api key");
+
+        // Prime the cache exactly as a pre-expiry authentication would
+        // have: an expiry-aware entry whose expires_at is now in the past
+        // (the key expired AFTER the entry was written).
+        let cache_key = format!("apexmail:api_key_cache:{key_hash}");
+        let cached_user = serde_json::json!({
+            "expires_at": (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339(),
+            "user": {
+                "tenant_id": "whatever-tenant",
+                "user_id": null,
+                "api_key_id": null,
+                "session_id": null,
+                "scopes": ["*"],
+            },
+        });
+        let _: Result<(), _> = deadpool_redis::redis::AsyncCommands::set_ex(
+            &mut *conn,
+            &cache_key,
+            cached_user.to_string(),
+            10u64,
+        )
+        .await;
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", raw_key.parse().unwrap());
+        let request = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri("/")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        let mut parts = request;
+        parts.headers = headers;
+        let auth_result = AuthUser::from_request_parts(&mut parts, &state).await;
+        assert!(
+            auth_result.is_err(),
+            "an expired API key must be rejected despite a live cache entry"
+        );
+
+        pool.close().await;
     }
 }

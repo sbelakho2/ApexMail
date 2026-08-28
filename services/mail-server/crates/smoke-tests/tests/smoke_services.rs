@@ -79,7 +79,9 @@ mod apexmail_db_tests {
     #[test]
     fn test_db_types_serialize() {
         let tenant = apexmail_db::Tenant {
-            id: Uuid::new_v4(),
+            // tenants.id is the 26-char canonical type (migration 064 /
+            // apexmail-db contract test) — not a UUID.
+            id: "01JSMOKETESTTENANT000000A".into(),
             name: "Acme Corp".into(),
             slug: "acme".into(),
             plan: "free".into(),

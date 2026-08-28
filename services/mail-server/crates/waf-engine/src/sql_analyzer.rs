@@ -789,21 +789,39 @@ fn strip_sql_comments(input: &str) -> String {
 /// - MSSQL:WAITFOR DELAY
 /// - PostgreSQL:pg_sleep
 /// - Oracle:dbms_lock.sleep, UTL_HTTP.request
+///
+/// SQL syntax context is required: `SLEEP`, `BENCHMARK` and `pg_sleep` must
+/// appear in function-call form (`sleep(`), and `DELAY` only as part of the
+/// `WAITFOR DELAY` pair. The bare words "sleep" and "delay" are ordinary
+/// English ("I could not sleep", "the delay was annoying") and used to push
+/// every note containing them to a blocking score.
 fn detect_blind_injection(tokens: &[SqlToken]) -> bool {
-    for token in tokens {
-        if matches!(
-            token,
-            SqlToken::Keyword(
-                SqlKeyword::Sleep
-                    | SqlKeyword::Benchmark
-                    | SqlKeyword::Waitfor
-                    | SqlKeyword::Delay
-                    | SqlKeyword::PgSleep
-                    | SqlKeyword::DbmsLock
-                    | SqlKeyword::UtlHttp
-            )
-        ) {
-            return true;
+    let significant: Vec<&SqlToken> = tokens
+        .iter()
+        .filter(|t| !matches!(t, SqlToken::Whitespace | SqlToken::Comment))
+        .collect();
+
+    for (i, token) in significant.iter().enumerate() {
+        match token {
+            // Function-call form: SLEEP( / BENCHMARK( / pg_sleep(
+            SqlToken::Keyword(SqlKeyword::Sleep | SqlKeyword::Benchmark | SqlKeyword::PgSleep) => {
+                if matches!(significant.get(i + 1), Some(SqlToken::OpenParen)) {
+                    return true;
+                }
+            }
+            // MSSQL pair: WAITFOR DELAY '0:0:5'
+            SqlToken::Keyword(SqlKeyword::Waitfor) => {
+                if matches!(
+                    significant.get(i + 1),
+                    Some(SqlToken::Keyword(SqlKeyword::Delay))
+                ) {
+                    return true;
+                }
+            }
+            // Oracle package names are never prose words: dbms_lock,
+            // utl_http. No extra context needed.
+            SqlToken::Keyword(SqlKeyword::DbmsLock | SqlKeyword::UtlHttp) => return true,
+            _ => {}
         }
     }
     false
@@ -969,6 +987,39 @@ mod tests {
     fn test_blind_injection() {
         let results = analyze_sqli("1 AND SLEEP(5)", MatchLocation::QueryParam("id".into()));
         assert!(results.iter().any(|r| r.rule_id == 942500));
+    }
+
+    #[test]
+    fn test_blind_injection_prose_keywords_not_scored_5() {
+        // Fail-first: bare "sleep"/"delay" words in prose (no SQL call
+        // syntax) must not fire the blocking blind-injection rule.
+        let results = analyze_sqli(
+            "the delay was annoying and I could not sleep",
+            MatchLocation::QueryParam("note".into()),
+        );
+        assert!(
+            !results.iter().any(|r| r.rule_id == 942500),
+            "prose 'delay'/'sleep' must not fire 942500, got {:?}",
+            results.iter().map(|r| r.rule_id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_blind_injection_sql_syntax_context_detected() {
+        // Function-call form and the WAITFOR DELAY pair are real SQL
+        // syntax and must still be detected.
+        for payload in [
+            "1 AND SLEEP(5)",
+            "1 AND BENCHMARK(5000000, SHA1('test'))",
+            "1; WAITFOR DELAY '0:0:5'",
+            "1 AND pg_sleep(5)",
+        ] {
+            let results = analyze_sqli(payload, MatchLocation::QueryParam("id".into()));
+            assert!(
+                results.iter().any(|r| r.rule_id == 942500),
+                "{payload:?} must fire 942500"
+            );
+        }
     }
 
     #[test]

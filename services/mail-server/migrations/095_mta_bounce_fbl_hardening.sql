@@ -16,7 +16,6 @@
 -- Idempotent: safe to re-run on any deployment.
 -- =============================================================================
 
-BEGIN;
 
 -- Clean up any pre-existing duplicate bounce rows so the unique index can be
 -- created on live deployments (keep the newest row per natural key). The
@@ -73,4 +72,3 @@ CREATE TABLE IF NOT EXISTS sender_reputation (
 ALTER TABLE sender_reputation ADD COLUMN IF NOT EXISTS sent BIGINT NOT NULL DEFAULT 0;
 ALTER TABLE sender_reputation ADD COLUMN IF NOT EXISTS complaints BIGINT NOT NULL DEFAULT 0;
 
-COMMIT;

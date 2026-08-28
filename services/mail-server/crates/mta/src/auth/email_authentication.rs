@@ -318,7 +318,12 @@ impl EmailAuthenticator {
             .verify_spf_sender(client_ip, helo, from_domain, mail_from)
             .await;
         let verdict = map_spf_result(&output.result());
-        self.spf_cache.insert(cache_key.clone(), verdict);
+        // Transient SPF verdicts (TempError — timeout/SERVFAIL) are NOT
+        // cached, mirroring the DMARC guard below: a 5-minute cached
+        // TempError turned a DNS blip into a persistent failure window.
+        if verdict != SpfVerdict::TempError {
+            self.spf_cache.insert(cache_key.clone(), verdict);
+        }
         SpfOutcome {
             result: verdict,
             domain: from_domain.to_string(),
@@ -453,7 +458,7 @@ impl EmailAuthenticator {
         parts.push(format!(
             ";\r\n\tspf={} smtp.mailfrom={}",
             verdict_str_spf(spf.result),
-            spf.domain,
+            printable_or_unknown(&spf.domain),
         ));
 
         // DKIM
@@ -464,8 +469,8 @@ impl EmailAuthenticator {
             parts.push(format!(
                 ";\r\n\tdkim={} header.d={} header.s={}",
                 verdict_str_dkim(d.result),
-                d.domain,
-                d.selector,
+                printable_or_unknown(&d.domain),
+                printable_or_unknown(&d.selector),
             ));
         }
 
@@ -473,10 +478,24 @@ impl EmailAuthenticator {
         parts.push(format!(
             ";\r\n\tdmarc={} header.from={}",
             verdict_str_dmarc(dmarc.result),
-            dmarc.domain,
+            printable_or_unknown(&dmarc.domain),
         ));
 
         parts.join("")
+    }
+}
+
+/// Printable-ASCII gate for values interpolated into the emitted
+/// Authentication-Results header — the same defence `build_received_header`
+/// applies to rDNS names. DKIM `d=`/`s=` (and the SPF/DMARC domains) are
+/// parsed out of attacker-supplied message content, so control characters
+/// or 8-bit bytes must never reach a trace header raw; a non-printable
+/// value is replaced wholesale with "unknown".
+fn printable_or_unknown(value: &str) -> &str {
+    if !value.is_empty() && value.bytes().all(|b| b.is_ascii_graphic()) {
+        value
+    } else {
+        "unknown"
     }
 }
 
@@ -1511,6 +1530,57 @@ mod tests {
         assert!(header.contains("spf=pass"));
         assert!(header.contains("dkim=pass"));
         assert!(header.contains("dmarc=pass"));
+    }
+
+    #[test]
+    fn auth_results_header_sanitizes_attacker_controlled_dkim_tags() {
+        // d=/s= are parsed out of the attacker's DKIM-Signature header;
+        // control characters or 8-bit bytes in them must never be
+        // interpolated raw into the emitted trace header (same defence
+        // build_received_header applies to rDNS names).
+        let config = EmailAuthConfig::default();
+        let Some(auth) = test_authenticator(config, "mx.apexmail.ee") else {
+            return;
+        };
+        let spf = SpfOutcome {
+            result: SpfVerdict::SoftFail,
+            domain: "example.com".into(),
+            explanation: None,
+            status: SpfStatus::Fresh,
+        };
+        let dkim = vec![DkimOutcome {
+            result: DkimVerdict::Fail,
+            domain: "evil.com\r\nBcc: victim@evil.com".into(),
+            selector: "s\x01el".into(),
+            explanation: None,
+        }];
+        let dmarc = DmarcOutcome {
+            result: DmarcVerdict::Fail,
+            domain: "example.com".into(),
+            policy: DmarcPolicy::Quarantine,
+            alignment: DmarcAlignment {
+                spf: false,
+                dkim: false,
+            },
+        };
+
+        let header = auth.build_auth_results_header(&spf, &dkim, &dmarc);
+        assert!(
+            !header.contains("Bcc:"),
+            "CRLF injection via d= must be sanitized: {header:?}"
+        );
+        assert!(
+            !header.contains('\x01'),
+            "control bytes via s= must be sanitized: {header:?}"
+        );
+        assert!(
+            !header.contains("evil.com"),
+            "the attacker-controlled d= value must be replaced wholesale: {header:?}"
+        );
+        assert!(
+            header.contains("header.d=unknown") && header.contains("header.s=unknown"),
+            "non-printable values collapse to the 'unknown' marker: {header:?}"
+        );
     }
 
     #[test]

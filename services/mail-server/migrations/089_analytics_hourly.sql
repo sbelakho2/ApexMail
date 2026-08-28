@@ -19,7 +19,6 @@
 -- the ON CONFLICT clause targets.  Idempotent: safe to re-run.
 -- =============================================================================
 
-BEGIN;
 
 CREATE TABLE IF NOT EXISTS analytics_hourly (
     id           TEXT PRIMARY KEY,
@@ -53,4 +52,3 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_analytics_hourly_unique
 CREATE INDEX IF NOT EXISTS idx_analytics_hourly_period
     ON analytics_hourly (period_start);
 
-COMMIT;

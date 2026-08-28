@@ -13,6 +13,7 @@ use crate::decoder;
 use crate::detection;
 use crate::fast_path;
 use crate::json_graphql;
+use crate::rules;
 use crate::sql_analyzer;
 use crate::xss_analyzer;
 use crate::{AttackCategory, MatchLocation, RuleMatch};
@@ -306,15 +307,23 @@ impl WafEngine {
             }
         }
 
-        // 4. Inspect body (truncated to max_body_size)
-        if let Some(body) = req.body {
-            let truncated = if body.len() > self.config.max_body_size {
-                // Truncate on a UTF-8 char boundary: slicing into the middle
-                // of a multi-byte character panics (`&body[..n]`).
-                &body[floor_char_boundary(body, self.config.max_body_size)..]
+        // 4. Inspect body (truncated to the FIRST max_body_size bytes).
+        // The truncated head is computed ONCE here and reused by every body
+        // consumer below (steps 4, 7 and 8) so no analyzer ever sees the
+        // bytes beyond the cap — that is the whole point of the CPU bound.
+        let truncated_body: Option<&str> = req.body.map(|body| {
+            if body.len() > self.config.max_body_size {
+                // Keep the HEAD of the body (attacks overwhelmingly live at
+                // the start of a payload). The cut lands on a UTF-8 char
+                // boundary: `head_char_boundary` steps back when the byte
+                // limit falls mid-character, so slicing never panics.
+                &body[..head_char_boundary(body, self.config.max_body_size)]
             } else {
                 body
-            };
+            }
+        });
+
+        if let Some(truncated) = truncated_body {
             let decoded_body = decoder::canonicalize_input(
                 truncated,
                 self.config.max_decode_depth,
@@ -456,10 +465,13 @@ impl WafEngine {
         }
 
         // 7. NoSQL injection detection across all decoded inputs
+        // (body analysis uses the SAME truncated head computed in step 4 —
+        // the size cap would be meaningless if this step re-scanned the
+        // full body).
         if self.config.enable_nosqli {
-            if let Some(body) = req.body {
+            if let Some(truncated) = truncated_body {
                 let decoded_body = decoder::canonicalize_input(
-                    body,
+                    truncated,
                     self.config.max_decode_depth,
                     self.config.enable_unicode_normalization,
                 );
@@ -506,14 +518,22 @@ impl WafEngine {
                     ));
                 }
             }
-            if let Some(body) = req.body {
+            if let Some(truncated) = truncated_body {
                 let decoded_body = decoder::canonicalize_input(
-                    body,
+                    truncated,
                     self.config.max_decode_depth,
                     self.config.enable_unicode_normalization,
                 );
                 all_matches.extend(detection::analyze_ssrf(&decoded_body, MatchLocation::Body));
             }
+        }
+
+        // 9. Paranoia-level filtering (OWASP CRS semantics): rules whose
+        // catalog paranoia level exceeds the configured level are skipped.
+        // Uncatalogued rules default to level 1 (always active).
+        if self.config.paranoia_level < rules::MAX_CATALOG_PARANOIA_LEVEL {
+            let level = self.config.paranoia_level;
+            all_matches.retain(|m| rules::rule_paranoia_level(m.rule_id) <= level);
         }
 
         // Calculate total anomaly score
@@ -661,6 +681,14 @@ fn floor_char_boundary(s: &str, index: usize) -> usize {
         i -= 1;
     }
     i
+}
+
+/// End index for a HEAD slice of at most `index` bytes: the largest char
+/// boundary `<= index`. When the byte limit lands in the middle of a
+/// multi-byte character the boundary steps BACK (never forward, so the
+/// scanned head never exceeds the configured cap and never panics).
+fn head_char_boundary(s: &str, index: usize) -> usize {
+    floor_char_boundary(s, index)
 }
 
 /// Truncate a string to at most `max_chars` characters for match payloads.
@@ -905,6 +933,159 @@ mod tests {
         // Empty and zero
         assert_eq!(floor_char_boundary("", 0), 0);
         assert_eq!(floor_char_boundary("日本", 0), 0);
+    }
+
+    #[test]
+    fn test_oversized_body_leading_content_is_inspected() {
+        // Bug (fail-first): body truncation kept the bytes AFTER the cap, so
+        // an attack placed in the FIRST bytes of an oversized body was never
+        // inspected (and a 100MB body with a 1MB cap yielded a 99MB scan).
+        let engine = WafEngine::new(WafConfig {
+            max_body_size: 1024,
+            ..WafConfig::default()
+        });
+        let body = format!(
+            "<script>alert(document.cookie)</script>{}",
+            "A".repeat(8192)
+        );
+        let req = HttpRequest {
+            client_ip: "10.0.0.1".parse().expect("valid IP"),
+            method: "POST",
+            path: "/api/comments",
+            query_string: None,
+            headers: &[
+                ("Host".into(), "example.com".into()),
+                ("Content-Type".into(), "text/plain".into()),
+            ],
+            body: Some(&body),
+        };
+        let info = engine.inspect(&req);
+        assert!(
+            matches!(info.decision, WafDecision::Block(_)),
+            "attack in the first max_body_size bytes must be blocked, score={} matches={:?}",
+            info.total_score,
+            info.matches.iter().map(|m| m.rule_id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_oversized_body_scan_is_bounded() {
+        // The tail beyond max_body_size must NOT be inspected (CPU bound) —
+        // content that only appears after the cap cannot be flagged.
+        let engine = WafEngine::new(WafConfig {
+            max_body_size: 1024,
+            ..WafConfig::default()
+        });
+        // SSRF + NoSQL operators only AFTER the cap.
+        let body = format!(
+            "{}http://169.254.169.254/latest/meta-data",
+            "B".repeat(4096)
+        );
+        let req = HttpRequest {
+            client_ip: "10.0.0.1".parse().expect("valid IP"),
+            method: "POST",
+            path: "/api/urls",
+            query_string: None,
+            headers: &[
+                ("Host".into(), "example.com".into()),
+                ("Content-Type".into(), "text/plain".into()),
+            ],
+            body: Some(&body),
+        };
+        let info = engine.inspect(&req);
+        assert!(
+            !matches!(info.decision, WafDecision::Block(_)),
+            "content beyond the cap must not be scanned (got score={} matches={:?})",
+            info.total_score,
+            info.matches.iter().map(|m| m.rule_id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_oversized_body_tail_sql_not_scanned() {
+        // Step-1 analyzers (SQLi) must also only see the head of the body.
+        let engine = WafEngine::new(WafConfig {
+            max_body_size: 1024,
+            ..WafConfig::default()
+        });
+        let body = format!("{}' OR 1=1 --", "C".repeat(4096));
+        let req = HttpRequest {
+            client_ip: "10.0.0.1".parse().expect("valid IP"),
+            method: "POST",
+            path: "/api/search",
+            query_string: None,
+            headers: &[
+                ("Host".into(), "example.com".into()),
+                ("Content-Type".into(), "text/plain".into()),
+            ],
+            body: Some(&body),
+        };
+        let info = engine.inspect(&req);
+        assert!(
+            !matches!(info.decision, WafDecision::Block(_)),
+            "SQLi payload placed after the cap must not be flagged, score={} matches={:?}",
+            info.total_score,
+            info.matches.iter().map(|m| m.rule_id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_multibyte_char_at_truncation_boundary_does_not_panic() {
+        // The cut point must land on a UTF-8 char boundary even when the
+        // body is multi-byte text (3-byte CJK chars around the cap).
+        // 1025 is intentionally mid-char for the 3-byte CJK run.
+        let engine = WafEngine::new(WafConfig {
+            max_body_size: 1025,
+            ..WafConfig::default()
+        });
+        let body = "x".repeat(1024) + &"日本語テスト".repeat(500);
+        let req = HttpRequest {
+            client_ip: "10.0.0.1".parse().expect("valid IP"),
+            method: "POST",
+            path: "/api/notes",
+            query_string: None,
+            headers: &[
+                ("Host".into(), "example.com".into()),
+                ("Content-Type".into(), "text/plain".into()),
+            ],
+            body: Some(&body),
+        };
+        let info = engine.inspect(&req); // must not panic
+        assert!(info.total_score < u32::MAX);
+    }
+
+    #[test]
+    fn test_paranoia_level_skips_high_level_rules() {
+        // 942400 (SQL comment evasion) is a PL2 rule in the catalog: at
+        // paranoia_level 1 it must be skipped, at the default level 2 kept.
+        let payload = "UN/**/ION SE/**/LECT 1,2,3";
+        let engine = WafEngine::new(WafConfig {
+            paranoia_level: 1,
+            ..WafConfig::default()
+        });
+        let req = HttpRequest {
+            client_ip: "10.0.0.1".parse().expect("valid IP"),
+            method: "POST",
+            path: "/api/search",
+            query_string: None,
+            headers: &[
+                ("Host".into(), "example.com".into()),
+                ("Content-Type".into(), "text/plain".into()),
+            ],
+            body: Some(payload),
+        };
+        let info = engine.inspect(&req);
+        assert!(
+            !info.matches.iter().any(|m| m.rule_id == 942400),
+            "PL2 rule 942400 must be skipped at paranoia level 1"
+        );
+
+        let engine2 = make_engine(); // default paranoia_level = 2
+        let info2 = engine2.inspect(&req);
+        assert!(
+            info2.matches.iter().any(|m| m.rule_id == 942400),
+            "PL2 rule 942400 must fire at the default paranoia level 2"
+        );
     }
 
     #[test]

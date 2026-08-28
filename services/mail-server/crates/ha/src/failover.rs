@@ -16,7 +16,52 @@ const FAILOVER_LOCK_KEY: &str = "ha:failover:lock";
 const FAILOVER_LOCK_TTL: u64 = 60; // seconds
 const STATE_KEY: &str = "ha:failover:state";
 /// B.2: TTL (seconds) for primary claim keys (`ha:primary:{node}`).
-const PRIMARY_CLAIM_TTL: u64 = 300;
+pub const PRIMARY_CLAIM_TTL_SECS: u64 = 300;
+
+/// Fix #10: atomic compare-and-delete — the key is deleted only if it
+/// still holds our owner token. Built once (SHA-1 is computed per
+/// `Script::new`).
+const COMPARE_DELETE_SCRIPT: &str = r#"
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('DEL', KEYS[1])
+else
+    return 0
+end
+"#;
+
+fn compare_delete_script() -> &'static redis::Script {
+    static SCRIPT: std::sync::OnceLock<redis::Script> = std::sync::OnceLock::new();
+    SCRIPT.get_or_init(|| redis::Script::new(COMPARE_DELETE_SCRIPT))
+}
+
+/// Fix #12: atomic compare-and-expire — the TTL is extended only if the
+/// key still holds our owner token, so a claim lost to (or overwritten
+/// by) another node is never resurrected by our refresh.
+const COMPARE_EXPIRE_SCRIPT: &str = r#"
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+    return redis.call('EXPIRE', KEYS[1], ARGV[2])
+else
+    return 0
+end
+"#;
+
+fn compare_expire_script() -> &'static redis::Script {
+    static SCRIPT: std::sync::OnceLock<redis::Script> = std::sync::OnceLock::new();
+    SCRIPT.get_or_init(|| redis::Script::new(COMPARE_EXPIRE_SCRIPT))
+}
+
+/// Health probe outcome for a failover candidate (fix #13).
+#[derive(Debug, Clone, PartialEq)]
+enum ReplicaHealth {
+    /// Replication row found; lag in milliseconds verified.
+    Replicating(f64),
+    /// Database reachable but NO replication row — the candidate is not
+    /// replicating (wrong role / broken replication): verifiably unhealthy.
+    NotReplicating,
+    /// The probe itself failed (monitoring DB unreachable): candidate
+    /// health UNKNOWN — kept as a last-resort failover target.
+    Unknown,
+}
 
 /// FailoverService manages the failover state machine.
 pub struct FailoverService {
@@ -31,6 +76,11 @@ pub struct FailoverService {
     /// path is deterministically exercisable.
     #[cfg(test)]
     fencing_inject_failure: std::sync::atomic::AtomicBool,
+    /// Test seam (fix #13): overrides `probe_replica_health` per replica so
+    /// the health-aware failover-target selection is deterministically
+    /// testable without a live `pg_stat_replication` view.
+    #[cfg(test)]
+    probe_results: tokio::sync::RwLock<HashMap<String, ReplicaHealth>>,
 }
 
 impl FailoverService {
@@ -44,6 +94,8 @@ impl FailoverService {
             failure_counts: Arc::new(RwLock::new(HashMap::new())),
             #[cfg(test)]
             fencing_inject_failure: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            probe_results: tokio::sync::RwLock::new(HashMap::new()),
         }
     }
 
@@ -176,9 +228,9 @@ impl FailoverService {
 
         info!(failover_type = %failover_type, "Failover initiated");
 
-        // Determine target node
+        // Determine target node (fix #13: health-probed selection).
         let current_primary = self.primary_node.read().await.clone();
-        let target = match self.select_failover_target(&current_primary).await {
+        let (target, verified_lag_ms) = match self.select_failover_target(&current_primary).await {
             Ok(t) => t,
             Err(e) => {
                 self.abort_failover(prior_state).await;
@@ -214,6 +266,13 @@ impl FailoverService {
         let event_id = Uuid::new_v4();
         let completed_at = Utc::now();
         let duration_ms = (completed_at - started_at).num_milliseconds().max(0);
+        // Fix #13: `data_loss` must reflect VERIFIED lag, not a constant.
+        // - lag verified and within the configured threshold → false;
+        // - lag verified but beyond the threshold → true (promoting a
+        //   lagging replica discards the delta);
+        // - lag unverifiable → true (no evidence of zero loss).
+        let lag_threshold = self.config.replication.lag_threshold_ms as f64;
+        let data_loss = !matches!(verified_lag_ms, Some(lag) if lag <= lag_threshold);
         let event = FailoverEvent {
             id: event_id,
             from_node: current_primary.clone(),
@@ -224,10 +283,13 @@ impl FailoverService {
             started_at,
             completed_at: Some(completed_at),
             duration_ms: Some(duration_ms),
-            data_loss: false,
+            data_loss,
             metadata: Some(serde_json::json!({
                 "fenced": [current_primary],
-                "primary_claim_ttl_secs": PRIMARY_CLAIM_TTL,
+                "primary_claim_ttl_secs": PRIMARY_CLAIM_TTL_SECS,
+                "lag_verified_ms": verified_lag_ms,
+                "lag_threshold_ms": self.config.replication.lag_threshold_ms,
+                "lag_unverified": verified_lag_ms.is_none(),
             })),
         };
 
@@ -530,19 +592,82 @@ impl FailoverService {
 
     // ── Internal helpers ───────────────────────────────────
 
-    async fn select_failover_target(&self, current_primary: &str) -> Result<String, String> {
+    /// Fix #13: probe a replica's health/role. Reuses the failback lag
+    /// logic (`pg_stat_replication` row presence IS the role probe — a
+    /// replica that is replicating has a row; a promoted/standalone node
+    /// does not).
+    async fn probe_replica_health(&self, replica: &str) -> ReplicaHealth {
+        #[cfg(test)]
+        {
+            let overrides = self.probe_results.read().await;
+            if let Some(health) = overrides.get(replica) {
+                return health.clone();
+            }
+        }
+        match self.verify_replication_lag(replica).await {
+            Ok(Some(lag_ms)) => ReplicaHealth::Replicating(lag_ms),
+            Ok(None) => ReplicaHealth::NotReplicating,
+            Err(_) => ReplicaHealth::Unknown,
+        }
+    }
+
+    /// Fix #13: choose the failover target by HEALTH, not list order.
+    ///
+    /// Priority:
+    /// 1. the first replica with a VERIFIED replication row (healthy);
+    /// 2. the first replica whose health is UNKNOWN (probe failed — e.g.
+    ///    the monitoring DB is unreachable; refusing to fail over at all
+    ///    would trade availability for information);
+    /// 3. replicas that are verifiably NOT replicating are SKIPPED.
+    ///
+    /// Returns the target and the verified lag (if any) so the caller can
+    /// record a truthful `data_loss` flag.
+    async fn select_failover_target(
+        &self,
+        current_primary: &str,
+    ) -> Result<(String, Option<f64>), String> {
         let replicas = &self.config.database.replica_hosts;
         if replicas.is_empty() {
             return Err("No replica hosts configured for failover".into());
         }
-        // Pick the first replica that isn't the current primary
+
+        let mut first_unknown: Option<String> = None;
         for r in replicas {
-            if r != current_primary {
-                return Ok(r.clone());
+            if r == current_primary {
+                continue;
+            }
+            match self.probe_replica_health(r).await {
+                ReplicaHealth::Replicating(lag_ms) => {
+                    info!(
+                        replica = r,
+                        lag_ms, "failover target selected (verified replica)"
+                    );
+                    return Ok((r.clone(), Some(lag_ms)));
+                }
+                ReplicaHealth::NotReplicating => {
+                    warn!(
+                        replica = r,
+                        "replica is not replicating (no pg_stat_replication row) — skipping"
+                    );
+                }
+                ReplicaHealth::Unknown => {
+                    warn!(
+                        replica = r,
+                        "replica health unknown (probe failed) — fallback candidate"
+                    );
+                    if first_unknown.is_none() {
+                        first_unknown = Some(r.clone());
+                    }
+                }
             }
         }
-        // Otherwise just use the first one
-        Ok(replicas[0].clone())
+        if let Some(r) = first_unknown {
+            return Ok((r, None));
+        }
+        // Everything was verifiably unhealthy (or only the primary is
+        // configured): refuse — promoting a non-replicating node is a
+        // guaranteed data-loss split.
+        Err("No healthy failover target: every replica is verifiably not replicating".into())
     }
 
     async fn try_acquire_lock(&self) -> bool {
@@ -581,8 +706,15 @@ impl FailoverService {
         result.unwrap_or(false)
     }
 
-    /// B.4: release the failover lock, but only when this node still owns it
-    /// (never delete another holder's lock).
+    /// B.4: release the failover lock — COMPARE-AND-DELETE (fix #10).
+    ///
+    /// The previous GET-then-DEL pair was non-atomic: if the lock expired
+    /// after our GET (which matched us as owner) and was REACQUIRED by
+    /// another node, our subsequent DEL deleted the new owner's lock,
+    /// allowing two coordinators to run failovers concurrently. The Lua
+    /// script below makes the ownership check and the delete one atomic
+    /// Redis operation: the key is deleted only when it still holds OUR
+    /// owner token at deletion time.
     async fn release_lock(&self) {
         let mut conn = match self.redis_conn().await {
             Ok(conn) => conn,
@@ -591,17 +723,13 @@ impl FailoverService {
                 return;
             }
         };
-        let owner: Option<String> = redis::cmd("GET")
-            .arg(FAILOVER_LOCK_KEY)
-            .query_async(&mut conn)
-            .await
-            .unwrap_or(None);
-        if owner.as_deref() == Some(self.config.multi_region.node_id.as_str()) {
-            let _: () = redis::cmd("DEL")
-                .arg(FAILOVER_LOCK_KEY)
-                .query_async(&mut conn)
-                .await
-                .unwrap_or(());
+        let deleted: Result<i64, _> = compare_delete_script()
+            .key(FAILOVER_LOCK_KEY)
+            .arg(&self.config.multi_region.node_id)
+            .invoke_async(&mut conn)
+            .await;
+        if let Err(e) = deleted {
+            warn!(error = %e, "Failed to release failover lock (compare-and-delete)");
         }
     }
 
@@ -668,8 +796,12 @@ impl FailoverService {
 
     /// B.1 enforcement: write-acceptance guard. Must be consulted before
     /// serving any mutating request; refuses while `ha:fenced:{self}` exists.
-    /// An unreadable fence status (Redis down) fails OPEN for availability —
-    /// there is no evidence the node is fenced.
+    ///
+    /// Fix #9: an UNREADABLE fence status (Redis down / error) fails
+    /// CLOSED. The previous fail-open behavior let a fenced-but-
+    /// unobservable node keep accepting writes — during a Redis outage a
+    /// fenced node would silently keep serving, defeating STONITH exactly
+    /// when coordination is degraded.
     pub async fn ensure_not_fenced(&self) -> Result<(), String> {
         let node = self.config.multi_region.node_id.clone();
         match self.is_fenced_node(&node).await {
@@ -678,31 +810,95 @@ impl FailoverService {
             )),
             Ok(false) => Ok(()),
             Err(e) => {
-                warn!(
+                error!(
+                    node = %node,
                     error = %e,
-                    "fence status unreadable — allowing writes (no fencing evidence)"
+                    "CRITICAL: fence status unreadable — failing CLOSED, writes refused \
+                     (cannot prove this node is not fenced)"
                 );
-                Ok(())
+                Err(format!(
+                    "fence status for '{node}' unreadable ({e}) — failing closed, writes refused"
+                ))
             }
         }
     }
 
-    /// B.2: create (or refresh) this node's primary claim key. The claim is
-    /// what makes `detect_split_brain` able to see two simultaneous primaries.
+    /// B.2: create this node's primary claim key. The claim is what makes
+    /// `detect_split_brain` able to see two simultaneous primaries.
+    ///
+    /// Fix #11: a FAILED `SET NX` (another claimant already holds the key)
+    /// is an ERROR carrying the current holder — the previous `()` reply
+    /// type silently discarded Redis's nil and reported success, so a
+    /// competing coordinator believed it had recorded its claim.
     async fn claim_primary(&self, node: &str) -> Result<(), String> {
         let mut conn = self.redis_conn().await?;
-        // SET NX EX: an existing claim for the SAME node is a no-op refresh;
-        // claims for other nodes are never overwritten here.
-        let _: () = redis::cmd("SET")
-            .arg(format!("ha:primary:{node}"))
+        let key = format!("ha:primary:{node}");
+        let set: Option<String> = redis::cmd("SET")
+            .arg(&key)
             .arg(&self.config.multi_region.node_id)
             .arg("NX")
             .arg("EX")
-            .arg(PRIMARY_CLAIM_TTL)
+            .arg(PRIMARY_CLAIM_TTL_SECS)
             .query_async(&mut conn)
             .await
             .map_err(|e| e.to_string())?;
+        if set.is_none() {
+            let holder: Option<String> = redis::cmd("GET")
+                .arg(&key)
+                .query_async(&mut conn)
+                .await
+                .unwrap_or(None);
+            return Err(format!(
+                "primary claim for '{node}' is already held by '{}' — competing claim detected",
+                holder.unwrap_or_else(|| "unknown".into())
+            ));
+        }
         Ok(())
+    }
+
+    /// Fix #12: refresh the primary claim's TTL (compare-and-expire) so
+    /// `PRIMARY_CLAIM_TTL_SECS` no longer blinds split-brain detection after
+    /// one TTL window on a healthy primary.
+    ///
+    /// Returns `Ok(true)` when the claim was refreshed, `Ok(false)` when
+    /// this node no longer holds the claim (another claimant took it —
+    /// the caller should treat that as a split-brain signal), `Err` when
+    /// Redis could not be reached.
+    pub async fn refresh_primary_claim(&self, node: &str) -> Result<bool, String> {
+        let mut conn = self.redis_conn().await?;
+        let refreshed: i64 = compare_expire_script()
+            .key(format!("ha:primary:{node}"))
+            .arg(&self.config.multi_region.node_id)
+            .arg(PRIMARY_CLAIM_TTL_SECS)
+            .invoke_async(&mut conn)
+            .await
+            .map_err(|e| e.to_string())?;
+        Ok(refreshed > 0)
+    }
+
+    /// Fix #12: periodically refresh the current primary's claim so it
+    /// does not expire while the primary is healthy. Started with the
+    /// coordinator's background jobs (see `ha-server`).
+    pub async fn run_claim_refresh_loop(&self, interval: std::time::Duration) {
+        let mut ticker = tokio::time::interval(interval);
+        loop {
+            ticker.tick().await;
+            let primary = self.primary_node.read().await.clone();
+            match self.refresh_primary_claim(&primary).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    warn!(
+                        primary = %primary,
+                        "our primary claim was taken by another node — flagging split-brain"
+                    );
+                    let mut s = self.state.write().await;
+                    *s = FailoverState::SplitBrain;
+                }
+                Err(e) => {
+                    warn!(error = %e, "failed to refresh primary claim");
+                }
+            }
+        }
     }
 
     /// B.2: delete a demoted node's primary claim.
@@ -774,6 +970,66 @@ impl FailoverService {
 
         Ok(())
     }
+}
+
+/// Fix #14: idempotently create the HA tables this crate writes to.
+///
+/// `ha_failover_events` (failover.rs `record_event`/`get_history`) and
+/// `ha_replication_lag_history` (replication.rs `record_lag`) do NOT
+/// exist in any migration in the chain, so every runtime INSERT failed.
+/// The shapes below are intentionally minimal and match the exact bind
+/// order of the prepared statements; they should be folded into the
+/// migration chain later (this function is `IF NOT EXISTS`, so a future
+/// migration simply takes over).
+///
+/// Called from the coordinator startup (`ha-server`); failures are LOUD —
+/// the caller aborts startup.
+pub async fn bootstrap_tables(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS ha_failover_events (
+            id            UUID PRIMARY KEY,
+            from_node     VARCHAR(255) NOT NULL,
+            to_node       VARCHAR(255) NOT NULL,
+            failover_type VARCHAR(50)  NOT NULL,
+            state         VARCHAR(50)  NOT NULL,
+            reason        TEXT,
+            started_at    TIMESTAMPTZ  NOT NULL,
+            completed_at  TIMESTAMPTZ,
+            duration_ms   BIGINT,
+            data_loss     BOOLEAN      NOT NULL DEFAULT FALSE,
+            metadata      JSONB
+        )"#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_ha_failover_events_started_at
+         ON ha_failover_events (started_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS ha_replication_lag_history (
+            id           BIGSERIAL PRIMARY KEY,
+            replica_name VARCHAR(255)     NOT NULL,
+            lag_ms       DOUBLE PRECISION NOT NULL DEFAULT 0,
+            lag_bytes    BIGINT           NOT NULL DEFAULT 0,
+            recorded_at  TIMESTAMPTZ      NOT NULL DEFAULT NOW()
+        )"#,
+    )
+    .execute(pool)
+    .await?;
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_ha_replication_lag_history_recorded_at
+         ON ha_replication_lag_history (recorded_at DESC)",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -897,8 +1153,70 @@ mod tests {
             let mut cfg = Config::from_env();
             cfg.database.replica_hosts = vec!["replica-1".into(), "replica-2".into()];
             let svc = FailoverService::new(test_pool(), Arc::new(cfg));
-            let target = svc.select_failover_target("replica-1").await.unwrap();
+            // The fake pool cannot probe health: both replicas are
+            // Unknown → first non-primary candidate wins, lag unverified.
+            let (target, lag) = svc.select_failover_target("replica-1").await.unwrap();
             assert_eq!(target, "replica-2");
+            assert_eq!(lag, None);
+        });
+    }
+
+    #[test]
+    fn test_select_failover_target_skips_unhealthy_replica() {
+        test_runtime().block_on(async {
+            let mut cfg = Config::from_env();
+            cfg.database.replica_hosts = vec!["replica-sick".into(), "replica-good".into()];
+            let svc = FailoverService::new(test_pool(), Arc::new(cfg));
+            {
+                let mut probes = svc.probe_results.write().await;
+                // First candidate: reachable DB but no replication row →
+                // verifiably unhealthy, must be SKIPPED (fix #13).
+                probes.insert("replica-sick".into(), ReplicaHealth::NotReplicating);
+                probes.insert("replica-good".into(), ReplicaHealth::Replicating(42.0));
+            }
+            let (target, lag) = svc
+                .select_failover_target("node-primary")
+                .await
+                .expect("a healthy replica exists");
+            assert_eq!(target, "replica-good");
+            assert_eq!(lag, Some(42.0));
+        });
+    }
+
+    #[test]
+    fn test_select_failover_target_all_unhealthy_refuses() {
+        test_runtime().block_on(async {
+            let mut cfg = Config::from_env();
+            cfg.database.replica_hosts = vec!["replica-1".into(), "replica-2".into()];
+            let svc = FailoverService::new(test_pool(), Arc::new(cfg));
+            {
+                let mut probes = svc.probe_results.write().await;
+                probes.insert("replica-1".into(), ReplicaHealth::NotReplicating);
+                probes.insert("replica-2".into(), ReplicaHealth::NotReplicating);
+            }
+            let res = svc.select_failover_target("node-primary").await;
+            assert!(
+                res.is_err(),
+                "must refuse when every replica is verifiably unhealthy"
+            );
+        });
+    }
+
+    #[test]
+    fn test_select_failover_target_unknown_probe_falls_back() {
+        test_runtime().block_on(async {
+            let mut cfg = Config::from_env();
+            cfg.database.replica_hosts = vec!["replica-1".into(), "replica-2".into()];
+            let svc = FailoverService::new(test_pool(), Arc::new(cfg));
+            {
+                let mut probes = svc.probe_results.write().await;
+                probes.insert("replica-1".into(), ReplicaHealth::NotReplicating);
+                // Probe broken for replica-2: unknown health beats refusal.
+                probes.insert("replica-2".into(), ReplicaHealth::Unknown);
+            }
+            let (target, lag) = svc.select_failover_target("node-primary").await.unwrap();
+            assert_eq!(target, "replica-2");
+            assert_eq!(lag, None);
         });
     }
 
@@ -1277,6 +1595,393 @@ mod tests {
                 .await
                 .is_none());
             assert!(redis_get(redis.port, FAILOVER_LOCK_KEY).await.is_none());
+        });
+    }
+
+    // ── Fix #9: fence check fails CLOSED on store errors ────────────────
+
+    #[test]
+    fn test_ensure_not_fenced_fails_closed_on_store_error() {
+        test_runtime().block_on(async {
+            // Redis unreachable: is_fenced_node errors — writes must be
+            // REFUSED (previously the error path returned Ok, letting a
+            // fenced-but-unobservable node keep serving).
+            let svc = FailoverService::new(test_pool(), dead_redis_config());
+            let res = svc.ensure_not_fenced().await;
+            let err = res.expect_err("unreadable fence status must fail closed");
+            assert!(err.contains("failing closed"), "unexpected error: {err}");
+        });
+    }
+
+    // ── Fix #10: compare-and-delete lock release ───────────────────────
+
+    #[test]
+    fn test_release_lock_reacquired_lock_survives_old_owner_release() {
+        let Some(redis) = spawn_test_redis() else {
+            eprintln!("skipping: redis-server not available");
+            return;
+        };
+        test_runtime().block_on(async move {
+            let cfg = live_redis_config(redis.port); // node_id = node-primary
+            let svc = FailoverService::new(test_pool(), cfg);
+
+            // Our lock expired and node-b REACQUIRED it.
+            redis_set(redis.port, FAILOVER_LOCK_KEY, "node-b").await;
+            // Our (stale) release must not delete node-b's lock.
+            svc.release_lock().await;
+            assert_eq!(
+                redis_get(redis.port, FAILOVER_LOCK_KEY).await.as_deref(),
+                Some("node-b"),
+                "reacquired lock must survive the old owner's release"
+            );
+
+            // Releasing a lock we DO own still works.
+            redis_set(redis.port, FAILOVER_LOCK_KEY, "node-primary").await;
+            svc.release_lock().await;
+            assert!(
+                redis_get(redis.port, FAILOVER_LOCK_KEY).await.is_none(),
+                "own lock must be released"
+            );
+        });
+    }
+
+    #[test]
+    fn test_compare_and_delete_script_semantics() {
+        let Some(redis) = spawn_test_redis() else {
+            eprintln!("skipping: redis-server not available");
+            return;
+        };
+        test_runtime().block_on(async move {
+            let mut conn =
+                redis::Client::open(format!("redis://127.0.0.1:{}", redis.port).as_str())
+                    .unwrap()
+                    .get_multiplexed_async_connection()
+                    .await
+                    .unwrap();
+
+            // The atomic compare-and-delete: token mismatch → no delete.
+            let _: () = redis::cmd("SET")
+                .arg("cad:test")
+                .arg("owner-b")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            let n: i64 = compare_delete_script()
+                .key("cad:test")
+                .arg("owner-a")
+                .invoke_async(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(n, 0, "mismatched token must not delete");
+            let v: Option<String> = redis::cmd("GET")
+                .arg("cad:test")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(v.as_deref(), Some("owner-b"));
+
+            // Matching token → atomically deleted.
+            let n: i64 = compare_delete_script()
+                .key("cad:test")
+                .arg("owner-b")
+                .invoke_async(&mut conn)
+                .await
+                .unwrap();
+            assert_eq!(n, 1);
+            let v: Option<String> = redis::cmd("GET")
+                .arg("cad:test")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert!(v.is_none());
+        });
+    }
+
+    // ── Fix #11: competing primary claim surfaces as an error ──────────
+
+    #[test]
+    fn test_claim_primary_competing_claim_surfaces() {
+        let Some(redis) = spawn_test_redis() else {
+            eprintln!("skipping: redis-server not available");
+            return;
+        };
+        test_runtime().block_on(async move {
+            let cfg = live_redis_config(redis.port);
+            let svc = FailoverService::new(test_pool(), cfg);
+
+            // Another coordinator already claimed the same target node.
+            redis_set(redis.port, "ha:primary:node-replica", "rogue-coordinator").await;
+
+            let err = svc
+                .claim_primary("node-replica")
+                .await
+                .expect_err("competing claim must surface as an error");
+            assert!(
+                err.contains("rogue-coordinator"),
+                "error must carry the current holder: {err}"
+            );
+            // The rogue's claim must be intact.
+            assert_eq!(
+                redis_get(redis.port, "ha:primary:node-replica")
+                    .await
+                    .as_deref(),
+                Some("rogue-coordinator")
+            );
+
+            // With no competing claim, claiming succeeds.
+            let _: () = redis::cmd("DEL")
+                .arg("ha:primary:node-replica")
+                .query_async(
+                    &mut redis::Client::open(format!("redis://127.0.0.1:{}", redis.port).as_str())
+                        .unwrap()
+                        .get_multiplexed_async_connection()
+                        .await
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(svc.claim_primary("node-replica").await.is_ok());
+        });
+    }
+
+    // ── Fix #12: primary claim refresh (compare-and-expire) ─────────────
+
+    #[test]
+    fn test_refresh_primary_claim_extends_ttl_and_detects_second_claim() {
+        let Some(redis) = spawn_test_redis() else {
+            eprintln!("skipping: redis-server not available");
+            return;
+        };
+        test_runtime().block_on(async move {
+            let cfg = live_redis_config(redis.port); // node_id = node-primary
+            let svc = FailoverService::new(test_pool(), cfg);
+
+            let mut conn =
+                redis::Client::open(format!("redis://127.0.0.1:{}", redis.port).as_str())
+                    .unwrap()
+                    .get_multiplexed_async_connection()
+                    .await
+                    .unwrap();
+
+            // Claim about to expire.
+            let _: () = redis::cmd("SET")
+                .arg("ha:primary:node-primary")
+                .arg("node-primary")
+                .arg("EX")
+                .arg(5u64)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+
+            // Refresh (compare-and-expire) extends the TTL to ~300s.
+            assert!(svc.refresh_primary_claim("node-primary").await.unwrap());
+            let ttl: i64 = redis::cmd("TTL")
+                .arg("ha:primary:node-primary")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert!(
+                ttl > 200,
+                "claim TTL must be refreshed toward PRIMARY_CLAIM_TTL_SECS (300), got {ttl}"
+            );
+
+            // A second claimant takes the key: our refresh must detect it
+            // (return false) and must NOT resurrect our claim.
+            redis_set(redis.port, "ha:primary:node-primary", "rogue-node").await;
+            assert!(
+                !svc.refresh_primary_claim("node-primary").await.unwrap(),
+                "refresh must report a lost claim"
+            );
+            let ttl: i64 = redis::cmd("TTL")
+                .arg("ha:primary:node-primary")
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+            assert!(
+                ttl < 200,
+                "lost claim must not be re-expired by the old owner (got TTL {ttl})"
+            );
+            assert_eq!(
+                redis_get(redis.port, "ha:primary:node-primary")
+                    .await
+                    .as_deref(),
+                Some("rogue-node")
+            );
+        });
+    }
+
+    // ── Fix #13: data_loss reflects verified lag ────────────────────────
+
+    #[test]
+    fn test_failover_data_loss_reflects_verified_lag() {
+        let Some(redis) = spawn_test_redis() else {
+            eprintln!("skipping: redis-server not available");
+            return;
+        };
+        test_runtime().block_on(async move {
+            let mut cfg = Config::from_env();
+            cfg.redis.host = "127.0.0.1".into();
+            cfg.redis.port = redis.port;
+            cfg.multi_region.node_id = "node-primary".into();
+            cfg.database.replica_hosts = vec!["node-replica".into()];
+            cfg.replication.lag_threshold_ms = 5_000;
+            let svc = FailoverService::new(test_pool(), Arc::new(cfg));
+
+            // Verified lag within the threshold → data_loss must be FALSE.
+            {
+                let mut probes = svc.probe_results.write().await;
+                probes.insert("node-replica".into(), ReplicaHealth::Replicating(250.0));
+            }
+            let event = svc
+                .initiate_failover(FailoverType::Manual, None)
+                .await
+                .expect("failover with verified healthy replica");
+            assert!(
+                !event.data_loss,
+                "verified lag 250ms < 5000ms threshold must NOT claim data loss"
+            );
+            assert_eq!(
+                event.metadata.as_ref().unwrap()["lag_verified_ms"],
+                serde_json::json!(250.0)
+            );
+
+            // Reset for the second scenario.
+            {
+                let mut s = svc.state.write().await;
+                *s = FailoverState::Normal;
+            }
+            {
+                let mut p = svc.primary_node.write().await;
+                *p = "node-primary".into();
+            }
+            let mut conn =
+                redis::Client::open(format!("redis://127.0.0.1:{}", redis.port).as_str())
+                    .unwrap()
+                    .get_multiplexed_async_connection()
+                    .await
+                    .unwrap();
+            let _: () = redis::cmd("DEL")
+                .arg("ha:fenced:node-primary")
+                .arg("ha:fenced:node-replica")
+                .arg("ha:primary:node-replica")
+                .arg(FAILOVER_LOCK_KEY)
+                .query_async(&mut conn)
+                .await
+                .unwrap();
+
+            // Verified lag BEYOND the threshold → data_loss must be TRUE.
+            {
+                let mut probes = svc.probe_results.write().await;
+                probes.insert("node-replica".into(), ReplicaHealth::Replicating(60_000.0));
+            }
+            let event = svc
+                .initiate_failover(FailoverType::Manual, None)
+                .await
+                .expect("failover proceeds (lagging but replicating)");
+            assert!(
+                event.data_loss,
+                "verified lag 60000ms > 5000ms threshold must be recorded as data loss"
+            );
+        });
+    }
+
+    #[test]
+    fn test_failover_data_loss_true_when_lag_unverified() {
+        let Some(redis) = spawn_test_redis() else {
+            eprintln!("skipping: redis-server not available");
+            return;
+        };
+        test_runtime().block_on(async move {
+            let mut cfg = Config::from_env();
+            cfg.redis.host = "127.0.0.1".into();
+            cfg.redis.port = redis.port;
+            cfg.multi_region.node_id = "node-primary".into();
+            cfg.database.replica_hosts = vec!["node-replica".into()];
+            let svc = FailoverService::new(test_pool(), Arc::new(cfg));
+
+            // Health unknown (probe failed): the old code hard-coded
+            // data_loss=false; now the missing evidence is truthful.
+            let event = svc
+                .initiate_failover(FailoverType::Manual, None)
+                .await
+                .expect("failover proceeds on unknown health");
+            assert!(
+                event.data_loss,
+                "unverifiable lag must be recorded as data loss (no zero-loss evidence)"
+            );
+            assert_eq!(
+                event.metadata.as_ref().unwrap()["lag_unverified"],
+                serde_json::json!(true)
+            );
+        });
+    }
+
+    // ── Fix #14: idempotent HA table bootstrap + round trip ────────────
+
+    #[test]
+    fn test_bootstrap_tables_round_trip() {
+        let Ok(url) = std::env::var("HA_TEST_DATABASE_URL") else {
+            eprintln!("skipping: HA_TEST_DATABASE_URL not set");
+            return;
+        };
+        test_runtime().block_on(async {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&url)
+                .await
+                .expect("connect HA_TEST_DATABASE_URL");
+
+            // Idempotent: run twice.
+            bootstrap_tables(&pool).await.expect("bootstrap (1st run)");
+            bootstrap_tables(&pool).await.expect("bootstrap (2nd run, idempotent)");
+
+            // Round-trip a failover event through record_event/get_history
+            // — this INSERT failed at runtime before the tables existed.
+            let mut cfg = Config::from_env();
+            cfg.multi_region.node_id = "roundtrip-node".into();
+            let svc = FailoverService::new(pool.clone(), Arc::new(cfg));
+            let event = FailoverEvent {
+                id: Uuid::new_v4(),
+                from_node: "node-a".into(),
+                to_node: "node-b".into(),
+                failover_type: "manual".into(),
+                state: "completed".into(),
+                reason: Some("bootstrap round-trip".into()),
+                started_at: Utc::now(),
+                completed_at: Some(Utc::now()),
+                duration_ms: Some(7),
+                data_loss: true,
+                metadata: Some(serde_json::json!({"test": true})),
+            };
+            svc.record_event(&event).await.expect("record_event insert");
+
+            let history = svc.get_history(5).await.expect("get_history read");
+            let found = history.iter().find(|e| e.id == event.id).expect("round-tripped event");
+            assert!(found.data_loss);
+            assert_eq!(found.to_node, "node-b");
+
+            // And the replication lag history table accepts inserts.
+            let inserted = sqlx::query(
+                "INSERT INTO ha_replication_lag_history (replica_name, lag_ms, lag_bytes, recorded_at)
+                 VALUES ($1, $2, $3, NOW())",
+            )
+            .bind("roundtrip-replica")
+            .bind(12.5_f64)
+            .bind(1024_i64)
+            .execute(&pool)
+            .await
+            .expect("lag history insert");
+            assert_eq!(inserted.rows_affected(), 1);
+
+            // Cleanup our rows.
+            let _ = sqlx::query("DELETE FROM ha_failover_events WHERE id = $1")
+                .bind(event.id)
+                .execute(&pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM ha_replication_lag_history WHERE replica_name = $1")
+                .bind("roundtrip-replica")
+                .execute(&pool)
+                .await;
         });
     }
 }

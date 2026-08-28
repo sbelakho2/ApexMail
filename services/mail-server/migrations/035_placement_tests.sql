@@ -1,5 +1,4 @@
 -- Placement tests created by customers
-BEGIN;
 CREATE TABLE IF NOT EXISTS placement_tests (
     id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id         UUID NOT NULL,
@@ -18,4 +17,3 @@ CREATE TABLE IF NOT EXISTS placement_tests (
 );
 CREATE INDEX IF NOT EXISTS idx_placement_tests_tenant ON placement_tests (tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_placement_tests_status ON placement_tests (status) WHERE status = 'pending' OR status = 'running';
-COMMIT;

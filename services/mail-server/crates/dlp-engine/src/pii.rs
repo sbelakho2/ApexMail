@@ -248,7 +248,15 @@ fn detect_context_modifier(
     // match (short window) AND the value itself is wrapped in quotes or
     // backtick code formatting — "e.g. <code>4111…</code>". A stray word
     // like "sample" three sentences earlier must not mask real PII.
-    let short_window_start = match_offset.saturating_sub(EXAMPLE_WINDOW);
+    // The window start is walked to a char boundary exactly like the long
+    // window above: a raw `match_offset - 48` byte offset can land
+    // mid-character in multi-byte text (CJK, emoji) and panics on slice.
+    let raw_short_start = match_offset.saturating_sub(EXAMPLE_WINDOW);
+    let short_window_start = text
+        .char_indices()
+        .find(|(idx, _)| *idx >= raw_short_start)
+        .map(|(idx, _)| idx)
+        .unwrap_or(0);
     let short_window = &text[short_window_start..match_offset].to_lowercase();
     let quoted_or_code = is_wrapped_in_quotes_or_code(text, match_offset, matched);
     if quoted_or_code {
@@ -540,6 +548,21 @@ pub fn scan_pii_with_context(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_context_modifier_multibyte_short_window_no_panic() {
+        // Fail-first: the 48-byte short window was sliced on a raw byte
+        // offset (`match_offset - 48`). With CJK text that offset lands
+        // mid-character and the slice panicked. The long window already
+        // walks to a char boundary; the short window must too.
+        let text = format!("{} {}", "日本語テスト".repeat(10), "4111111111111111");
+        // Must not panic; the card is still detected with context applied.
+        let results = scan_pii(&text, true, false, false, false);
+        assert!(
+            results.iter().any(|r| r.pii_type == PiiType::CreditCard),
+            "card after CJK prose must still be detected"
+        );
+    }
 
     #[test]
     fn test_luhn_valid() {

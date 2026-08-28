@@ -11,7 +11,7 @@ full = ["core", "ml", "challenges", "coordinator"]
 core = []
 ml = ["dep:rand"]
 challenges = ["dep:hex", "dep:subtle", "dep:rand"]
-coordinator = ["dep:redis", "dep:bincode"]
+coordinator = ["dep:redis", "dep:bincode", "dep:rand", "dep:hex"]
 xdp = []  # Requires separate kernel module build
 
 [dependencies]

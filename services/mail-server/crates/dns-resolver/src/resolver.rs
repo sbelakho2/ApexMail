@@ -1,16 +1,47 @@
 //! High-level cached DNS resolver combining DnsLookup + DnsCache.
 
+use std::time::Duration;
 use tracing::debug;
 
 use crate::cache::{CachedResult, DnsCache};
 use crate::config::DnsConfig;
-use crate::lookup::{DnsError, DnsLookup};
+use crate::lookup::{DnsError, DnsLookup, DnsLookupResult};
 use crate::records::*;
 
 /// High-level cached DNS resolver.
 pub struct CachedDnsResolver {
     lookup: DnsLookup,
     cache: DnsCache,
+}
+
+/// Cache decision for one MX lookup outcome. Pure (no I/O) so the
+/// definitive-vs-transient discipline is unit-testable without a resolver.
+#[derive(Debug)]
+enum MxCacheAction {
+    /// Definitive no-records (Err(NoRecords) or empty answer section):
+    /// negative-cache under the negative TTL.
+    Negative,
+    /// Records exist: positive-cache the serialized form under the
+    /// authoritative record TTL.
+    Positive(Vec<String>, Duration),
+    /// Transient failure: cache nothing, propagate the error.
+    None,
+}
+
+fn mx_cache_action(outcome: &Result<DnsLookupResult<Vec<MxRecord>>, DnsError>) -> MxCacheAction {
+    match outcome {
+        Ok(result) if result.records.is_empty() => MxCacheAction::Negative,
+        Ok(result) => MxCacheAction::Positive(
+            result
+                .records
+                .iter()
+                .map(|r| format!("{} {}", r.priority, r.exchange))
+                .collect(),
+            result.ttl,
+        ),
+        Err(DnsError::NoRecords(_)) => MxCacheAction::Negative,
+        Err(_) => MxCacheAction::None,
+    }
 }
 
 impl CachedDnsResolver {
@@ -49,27 +80,26 @@ impl CachedDnsResolver {
             return Err(DnsError::NoRecords(domain.to_string()));
         }
 
-        match self.lookup.lookup_mx_with_ttl(domain).await {
-            Ok(result) if result.records.is_empty() => {
+        let outcome = self.lookup.lookup_mx_with_ttl(domain).await;
+        match mx_cache_action(&outcome) {
+            MxCacheAction::Negative => {
+                // Definitive NXDOMAIN/NODATA (Err(NoRecords) or an empty
+                // answer section): negative-cache under the negative TTL so
+                // repeat sends don't re-query; the caller still sees the
+                // Err(NoRecords) it saw before.
                 self.cache.insert_negative(&cache_key);
-                Err(DnsError::NoRecords(domain.to_string()))
             }
-            Ok(result) => {
-                let cached: Vec<String> = result
-                    .records
-                    .iter()
-                    .map(|r| format!("{} {}", r.priority, r.exchange))
-                    .collect();
-                self.cache.insert_with_ttl(&cache_key, cached, result.ttl);
-                Ok(result.records)
+            MxCacheAction::Positive(cached, ttl) => {
+                self.cache.insert_with_ttl(&cache_key, cached, ttl);
             }
             // E-1:transient lookup errors (timeout, SERVFAIL, network) are
             // NEVER negative-cached — a cached failure turned a blip into a
             // full negative-TTL window in which deliverability checks said
             // "no records". Propagate the error so the caller can retry;
             // only definitive NXDOMAIN/NoRecords results are cached.
-            Err(e) => Err(e),
+            MxCacheAction::None => {}
         }
+        outcome.map(|result| result.records)
     }
 
     /// Lookup SPF record with caching.
@@ -145,16 +175,35 @@ impl CachedDnsResolver {
     }
 
     /// Validate domain can receive email (with cache).
+    ///
+    /// Transient DNS failures surface as `Err` and are cached NOWHERE (the
+    /// old code cached `Ok(false)` under the POSITIVE TTL, turning one
+    /// resolver blip into a full TTL of "undeliverable" verdicts). A
+    /// definitive no-MX/no-A answer is negative-cached under the negative
+    /// TTL.
     pub async fn can_receive_email(&self, domain: &str) -> Result<bool, DnsError> {
         let cache_key = format!("can_receive:{domain}");
 
         if let Some(CachedResult::Records(recs)) = self.cache.get(&cache_key) {
             return Ok(recs.first().map(|r| r == "true").unwrap_or(false));
         }
+        if let Some(CachedResult::NxDomain) = self.cache.get(&cache_key) {
+            return Ok(false);
+        }
 
-        let result = self.lookup.can_receive_email(domain).await?;
-        self.cache.insert(&cache_key, vec![result.to_string()]);
-        Ok(result)
+        match self.lookup.can_receive_email(domain).await {
+            crate::lookup::Deliverability::Yes => {
+                self.cache.insert(&cache_key, vec!["true".to_string()]);
+                Ok(true)
+            }
+            crate::lookup::Deliverability::No => {
+                self.cache.insert_negative(&cache_key);
+                Ok(false)
+            }
+            crate::lookup::Deliverability::Transient => Err(DnsError::ResolveFailed(format!(
+                "transient DNS failure checking deliverability of {domain}"
+            ))),
+        }
     }
 
     /// Invalidate all cached records for a domain.
@@ -257,6 +306,83 @@ mod tests {
         let outcome = resolver.mx("example.com").await;
         assert!(outcome.is_err());
         assert!(resolver.cache_size() == 0);
+    }
+
+    // ── E-1b: transient can_receive_email failures are errors, never cached ─
+
+    #[tokio::test]
+    async fn can_receive_email_transient_failure_is_err_and_uncached() {
+        // A SERVFAIL/timeout must NOT be swallowed into Ok(false) — the old
+        // behaviour cached "false" under the POSITIVE TTL, turning one
+        // resolver blip into a full TTL window of "undeliverable" verdicts
+        // (the deliverability check said no records existed).
+        let config = crate::config::DnsConfig {
+            nameservers: vec!["127.0.0.1:1".to_string()],
+            query_timeout_ms: 50,
+            retries: 0,
+            ..crate::config::DnsConfig::default()
+        };
+        let resolver = CachedDnsResolver::new(&config).expect("resolver construction");
+
+        let outcome = resolver.can_receive_email("example.com").await;
+        assert!(
+            outcome.is_err(),
+            "a transient lookup failure must surface as Err, got {outcome:?}"
+        );
+        assert!(
+            resolver.cache_size() == 0,
+            "a transient failure must not be cached (positive or negative)"
+        );
+
+        // A second attempt still consults the resolver instead of being
+        // short-circuited by a cached false verdict.
+        assert!(resolver.can_receive_email("example.com").await.is_err());
+        assert!(resolver.cache_size() == 0);
+    }
+
+    // ── definitive no-records vs transient: the pure cache-decision seam ────
+
+    #[test]
+    fn mx_outcome_no_records_is_negative_cacheable_transient_is_not() {
+        // Genuine NXDOMAIN/NODATA (DnsError::NoRecords, or an Ok with an
+        // empty answer section) is definitive: it may be negative-cached
+        // (bounded by the negative TTL) so repeat sends don't re-query.
+        let no_records: Result<DnsLookupResult<Vec<MxRecord>>, DnsError> =
+            Err(DnsError::NoRecords("nx.example".into()));
+        assert!(matches!(
+            mx_cache_action(&no_records),
+            MxCacheAction::Negative
+        ));
+
+        let empty_answers: Result<DnsLookupResult<Vec<MxRecord>>, DnsError> = Ok(DnsLookupResult {
+            records: Vec::new(),
+            ttl: Duration::from_secs(60),
+        });
+        assert!(matches!(
+            mx_cache_action(&empty_answers),
+            MxCacheAction::Negative
+        ));
+
+        // Transient failures (timeout/SERVFAIL/network) cache NOTHING.
+        let transient: Result<DnsLookupResult<Vec<MxRecord>>, DnsError> =
+            Err(DnsError::ResolveFailed("query timed out".into()));
+        assert!(matches!(mx_cache_action(&transient), MxCacheAction::None));
+        let timeout: Result<DnsLookupResult<Vec<MxRecord>>, DnsError> =
+            Err(DnsError::Timeout("nx.example".into()));
+        assert!(matches!(mx_cache_action(&timeout), MxCacheAction::None));
+
+        // Positive results cache under the authoritative record TTL.
+        let positive: Result<DnsLookupResult<Vec<MxRecord>>, DnsError> = Ok(DnsLookupResult {
+            records: vec![MxRecord::new(10, "mx.example.com")],
+            ttl: Duration::from_secs(120),
+        });
+        match mx_cache_action(&positive) {
+            MxCacheAction::Positive(records, ttl) => {
+                assert_eq!(records, vec!["10 mx.example.com".to_string()]);
+                assert_eq!(ttl, Duration::from_secs(120));
+            }
+            other => panic!("expected Positive, got {other:?}"),
+        }
     }
 
     // ── E-2: invalidate_domain reaches DKIM selector keys ─────────────────

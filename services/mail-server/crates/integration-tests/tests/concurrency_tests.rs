@@ -87,9 +87,23 @@ async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
 }
 
 /// Seed the minimal tables required for billing/wallet tests.
+///
+/// All concurrency tests share ONE isolated database, and the tests run in
+/// parallel — concurrent `CREATE TABLE IF NOT EXISTS` against the same
+/// catalog races in pg_class/pg_type (23505 on pg_type_typname_nsp_index).
+/// Guard the DDL with the same session advisory lock the sales-autopilot
+/// initialize_schema uses (pinned to one dedicated connection, released on
+/// drop); the per-test INSERTs below it are ON CONFLICT-safe without it.
 async fn seed_minimal_billing_tables(pool: &PgPool, tenant_id: &str) {
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS tenants (
+    let mut lock_conn = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(7723691501421983235)")
+        .execute(&mut *lock_conn)
+        .await
+        .unwrap();
+
+    let seed_result: Result<(), sqlx::Error> = async {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS tenants (
             id VARCHAR(26) PRIMARY KEY,
             name TEXT NOT NULL DEFAULT '',
             plan TEXT NOT NULL DEFAULT '',
@@ -97,38 +111,38 @@ async fn seed_minimal_billing_tables(pool: &PgPool, tenant_id: &str) {
             settings JSONB DEFAULT '{}',
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )",
-    )
-    .execute(pool)
-    .await
-    .unwrap();
+        )
+        .execute(pool)
+        .await
+        .unwrap();
 
-    sqlx::query(
-        "INSERT INTO tenants (id, name, plan, status)
+        sqlx::query(
+            "INSERT INTO tenants (id, name, plan, status)
          VALUES ($1, 'test', 'starter', 'active')
          ON CONFLICT (id) DO NOTHING",
-    )
-    .bind(tenant_id)
-    .execute(pool)
-    .await
-    .unwrap();
+        )
+        .bind(tenant_id)
+        .execute(pool)
+        .await
+        .unwrap();
 
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS wallets (
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS wallets (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             tenant_id VARCHAR(26) NOT NULL,
-            balance INTEGER NOT NULL DEFAULT 0,
-            reserved INTEGER NOT NULL DEFAULT 0,
+            balance BIGINT NOT NULL DEFAULT 0,
+            reserved BIGINT NOT NULL DEFAULT 0,
             currency TEXT NOT NULL DEFAULT 'eur',
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )",
-    )
-    .execute(pool)
-    .await
-    .unwrap();
+        )
+        .execute(pool)
+        .await
+        .unwrap();
 
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS wallet_transactions (
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS wallet_transactions (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             tenant_id VARCHAR(26) NOT NULL,
             wallet_id UUID NOT NULL,
@@ -139,28 +153,48 @@ async fn seed_minimal_billing_tables(pool: &PgPool, tenant_id: &str) {
             reference VARCHAR(255),
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )",
-    )
-    .execute(pool)
-    .await
-    .unwrap();
+        )
+        .execute(pool)
+        .await
+        .unwrap();
 
-    // Apply the RC-001 fix: UNIQUE constraint on reference
-    sqlx::query(
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_wallet_transactions_reference
+        // Apply the RC-001 fix: UNIQUE constraint on reference
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_wallet_transactions_reference
          ON wallet_transactions(reference)
          WHERE reference IS NOT NULL",
-    )
-    .execute(pool)
-    .await
-    .unwrap();
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        Ok(())
+    }
+    .await;
+
+    let _ = sqlx::query("SELECT pg_advisory_unlock(7723691501421983235)")
+        .execute(&mut *lock_conn)
+        .await;
+    drop(lock_conn);
+
+    seed_result.unwrap();
 }
 
 /// Seed the minimal tables required for webhook tests.
 async fn seed_minimal_webhook_tables(pool: &PgPool, tenant_id: &str) {
     seed_minimal_billing_tables(pool, tenant_id).await; // for tenants table
 
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS webhooks (
+    // Same catalog-race guard as seed_minimal_billing_tables: concurrent
+    // CREATE TABLE IF NOT EXISTS across the parallel tests in this shared
+    // database collides in pg_class/pg_type without the advisory lock.
+    let mut lock_conn = pool.acquire().await.unwrap();
+    sqlx::query("SELECT pg_advisory_lock(7723691501421983236)")
+        .execute(&mut *lock_conn)
+        .await
+        .unwrap();
+
+    let seed_result: Result<(), sqlx::Error> = async {
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS webhooks (
             id VARCHAR(32) PRIMARY KEY,
             tenant_id VARCHAR(26) NOT NULL,
             name TEXT,
@@ -173,22 +207,22 @@ async fn seed_minimal_webhook_tables(pool: &PgPool, tenant_id: &str) {
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )",
-    )
-    .execute(pool)
-    .await
-    .unwrap();
+        )
+        .execute(pool)
+        .await
+        .unwrap();
 
-    // RC-006: UNIQUE constraint on tenant_id + url
-    sqlx::query(
-        "CREATE UNIQUE INDEX IF NOT EXISTS uq_webhooks_tenant_url
+        // RC-006: UNIQUE constraint on tenant_id + url
+        sqlx::query(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_webhooks_tenant_url
          ON webhooks(tenant_id, url)",
-    )
-    .execute(pool)
-    .await
-    .unwrap();
+        )
+        .execute(pool)
+        .await
+        .unwrap();
 
-    sqlx::query(
-        "CREATE TABLE IF NOT EXISTS webhook_queue (
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS webhook_queue (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             webhook_id VARCHAR(32) NOT NULL,
             tenant_id VARCHAR(26) NOT NULL,
@@ -201,10 +235,20 @@ async fn seed_minimal_webhook_tables(pool: &PgPool, tenant_id: &str) {
             created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )",
-    )
-    .execute(pool)
-    .await
-    .unwrap();
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        Ok(())
+    }
+    .await;
+
+    let _ = sqlx::query("SELECT pg_advisory_unlock(7723691501421983236)")
+        .execute(&mut *lock_conn)
+        .await;
+    drop(lock_conn);
+
+    seed_result.unwrap();
 }
 
 /// Seed the minimal tables required for subscription tests.
@@ -291,6 +335,20 @@ async fn concurrent_wallet_credit_idempotency() {
             .await
             .unwrap();
             let inserted = result.is_some();
+            // Mirror the production admin_apply_credit contract: the ledger
+            // row and the wallet balance move in the SAME transaction — a
+            // credit that only inserts the ledger row would leave the
+            // balance assertion below permanently at 0.
+            if inserted {
+                sqlx::query(
+                    "UPDATE wallets SET balance = balance + $2, updated_at = NOW() WHERE id = $1",
+                )
+                .bind(wallet_id)
+                .bind(amount)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            }
             tx.commit().await.unwrap();
             inserted
         }),
@@ -311,6 +369,16 @@ async fn concurrent_wallet_credit_idempotency() {
             .await
             .unwrap();
             let inserted = result.is_some();
+            if inserted {
+                sqlx::query(
+                    "UPDATE wallets SET balance = balance + $2, updated_at = NOW() WHERE id = $1",
+                )
+                .bind(wallet_id)
+                .bind(amount)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            }
             tx.commit().await.unwrap();
             inserted
         }),
@@ -477,7 +545,13 @@ async fn concurrent_subscription_update_for_update_lock() {
             .fetch_one(&mut *tx)
             .await
             .unwrap();
-            assert_eq!(current.0, "active");
+            // Either task may lock first: this read sees 'active' when task 1
+            // wins the lock, or task 2's committed 'canceled' when it does not.
+            assert!(
+                current.0 == "active" || current.0 == "canceled",
+                "task 1 saw unexpected state: {}",
+                current.0
+            );
             // Simulate processing delay to ensure both transactions overlap
             tokio::time::sleep(Duration::from_millis(50)).await;
             sqlx::query(
@@ -520,27 +594,42 @@ async fn concurrent_subscription_update_for_update_lock() {
     let seen1 = r1.unwrap();
     let seen2 = r2.unwrap();
 
-    // The first task always sees 'active' (it locked first).
-    // The second task must see either 'active' (if it read before first update)
-    // or 'suspended' (if it read after). Either way, both tasks complete
-    // successfully — the FOR UPDATE serializes them.
-    assert_eq!(seen1, "active");
+    // FOR UPDATE serializes the two transactions, but tokio::join! does NOT
+    // guarantee which task locks FIRST — either task may win the race. The
+    // guaranteed contract: exactly ONE task (whichever locked first) reads
+    // the seeded 'active'; the other reads the first task's committed write
+    // ('suspended' from task 1, or 'canceled' from task 2). The final state
+    // is the SECOND locker's write.
+    let (first_seen, second_seen) = if seen1 == "active" {
+        (seen1.as_str(), seen2.as_str())
+    } else {
+        (seen2.as_str(), seen1.as_str())
+    };
+    assert_eq!(
+        first_seen, "active",
+        "exactly one locker must see the seeded state"
+    );
     assert!(
-        seen2 == "active" || seen2 == "suspended",
-        "Second task saw unexpected state: {seen2}"
+        second_seen == "suspended" || second_seen == "canceled",
+        "second locker must see the first locker's committed write, saw: {second_seen}"
     );
 
-    // Final state: last writer wins
+    // Final state: the second locker's write — 'canceled' when task 1 locked
+    // first, 'suspended' when task 2 locked first.
     let final_status: (String,) =
         sqlx::query_as("SELECT status FROM stripe_subscriptions WHERE tenant_id = $1")
             .bind(&tenant_id)
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert!(
-        final_status.0 == "suspended" || final_status.0 == "canceled",
-        "Final subscription status should be suspended or canceled, got: {}",
-        final_status.0
+    let expected_final = if seen1 == "active" {
+        "canceled"
+    } else {
+        "suspended"
+    };
+    assert_eq!(
+        final_status.0, expected_final,
+        "final state must be the second locker's write"
     );
 }
 

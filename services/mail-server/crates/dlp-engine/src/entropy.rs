@@ -7,6 +7,29 @@
 
 use std::collections::HashMap;
 
+/// First `n` characters of `s`. Byte slicing here (`&s[..n]`) can split a
+/// multi-byte character — CJK, emoji — and panic on attacker-controlled
+/// tokens, so the cut always walks to a char boundary.
+fn first_chars(s: &str, n: usize) -> &str {
+    match s.char_indices().nth(n) {
+        Some((idx, _)) => &s[..idx],
+        None => s,
+    }
+}
+
+/// Last `n` characters of `s` (same char-boundary guarantee as
+/// [`first_chars`]; `&s[s.len() - n..]` panics mid-character).
+fn last_chars(s: &str, n: usize) -> &str {
+    let total = s.chars().count();
+    if total <= n {
+        return s;
+    }
+    match s.char_indices().nth(total - n) {
+        Some((idx, _)) => &s[idx..],
+        None => s,
+    }
+}
+
 /// Result of entropy analysis
 #[derive(Debug, Clone)]
 pub struct EntropyResult {
@@ -87,8 +110,8 @@ pub fn scan_entropy(text: &str, threshold: f64, min_length: usize) -> EntropyRes
                     } else {
                         2.0
                     };
-                    let preview = if trimmed.len() > 12 {
-                        format!("{}...{}", &trimmed[..6], &trimmed[trimmed.len() - 4..])
+                    let preview = if trimmed.chars().count() > 12 {
+                        format!("{}...{}", first_chars(trimmed, 6), last_chars(trimmed, 4))
                     } else {
                         trimmed.to_string()
                     };
@@ -146,8 +169,8 @@ pub fn scan_entropy(text: &str, threshold: f64, min_length: usize) -> EntropyRes
                 } else {
                     2.0
                 };
-                let preview = if value.len() > 12 {
-                    format!("{}...{}", &value[..6], &value[value.len() - 4..])
+                let preview = if value.chars().count() > 12 {
+                    format!("{}...{}", first_chars(value, 6), last_chars(value, 4))
                 } else {
                     value.to_string()
                 };
@@ -293,6 +316,33 @@ fn looks_like_assigned_secret_value(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_multibyte_token_preview_no_panic() {
+        // Fail-first: the preview sliced `&trimmed[..6]` / `[len-4..]` on
+        // byte offsets. A key-prefixed token with a multi-byte tail split
+        // the last CJK character and panicked.
+        let result = scan_entropy("key AKIA1234567890日本語 end", 2.0, 10);
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.token_preview.contains("AKIA")),
+            "key-prefixed multi-byte token must still be reported: {:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn test_multibyte_assignment_value_preview_no_panic() {
+        // Same class of panic on the config-line path (`&value[..6]` split
+        // a 4-byte emoji / 3-byte katakana).
+        let result = scan_entropy("password=🔑パスワードSecretValue123456", 2.0, 8);
+        assert!(
+            !result.findings.is_empty(),
+            "assignment with multi-byte value must still be reported"
+        );
+    }
 
     #[test]
     fn test_entropy_uniform() {

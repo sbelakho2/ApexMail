@@ -359,6 +359,14 @@ impl ThreatIntelEngine {
             .any(|f| !f.enabled && f.name.eq_ignore_ascii_case(source_name))
     }
 
+    /// Effective score and monitor-only flag for a hit from `source_name`.
+    ///
+    /// The RAW confidence is returned unmodified: trust weighting is
+    /// applied exactly ONCE, inside
+    /// [`reputation::compute_reputation_weighted`]. Pre-scaling here as
+    /// well double-applied trust — a confidence-10 hit from a trust-7
+    /// feed scored 5.7 instead of 8.2 and fell below the block threshold,
+    /// so confirmed-malicious verdicts were silently dampened to Flags.
     fn feed_adjusted_score(&self, source_name: &str, raw_confidence: f64) -> (f64, bool) {
         let raw = raw_confidence.clamp(0.0, 10.0);
         let Some(feed) = self
@@ -371,12 +379,10 @@ impl ThreatIntelEngine {
         };
 
         let trust = feed.trust_score.clamp(0.0, 10.0);
-        let trust_weight = trust / 10.0;
-        let adjusted = raw * trust_weight;
         let monitor_only = feed.enforcement_mode == FeedEnforcementMode::Monitor
             || trust < self.config.min_feed_trust_score;
 
-        (adjusted, monitor_only)
+        (raw, monitor_only)
     }
 
     /// Get the configured trust score for a named feed (full trust if unknown).
@@ -599,6 +605,50 @@ mod tests {
         assert_eq!(ThreatAction::Allow.to_string(), "ALLOW");
         assert_eq!(ThreatAction::Flag.to_string(), "FLAG");
         assert_eq!(ThreatAction::Block.to_string(), "BLOCK");
+    }
+
+    #[test]
+    fn test_confirmed_malicious_single_source_reaches_block() {
+        // Fail-first: trust was applied TWICE — the engine pre-scaled the
+        // raw confidence by trust/10 and the reputation composite scaled
+        // by trust again. A confidence-10 hit from a trust-7 feed landed
+        // at 5.7, below the block threshold (7.0): confirmed-malicious
+        // verdicts were dampened to Flags. Trust must be applied once.
+        let config = ThreatIntelConfig {
+            feeds: vec![crate::config::FeedSource {
+                name: "trust7-feed".into(),
+                url: "https://example.invalid/feed.txt".into(),
+                format: crate::config::FeedFormat::PlainText,
+                refresh_interval_secs: 3600,
+                enabled: true,
+                trust_score: 7.0,
+                enforcement_mode: FeedEnforcementMode::Enforce,
+            }],
+            ..ThreatIntelConfig::default()
+        };
+        let engine = ThreatIntelEngine::with_config(config);
+        engine.ip_blocklist().add_ip_str(
+            "203.0.113.7",
+            IpBlockEntry {
+                cidr: "203.0.113.7".into(),
+                source: "trust7-feed".into(),
+                category: ThreatCategory::Malware,
+                confidence: 10.0,
+                added_at: Utc::now(),
+                expires_at: Utc::now() + chrono::Duration::hours(1),
+            },
+        );
+        let verdict = engine.check_ip("203.0.113.7");
+        assert_eq!(
+            verdict.action,
+            ThreatAction::Block,
+            "confidence-10 / trust-7 single-source hit must Block (got score {})",
+            verdict
+                .ip_reputation
+                .as_ref()
+                .map(|r| r.score)
+                .unwrap_or(0.0)
+        );
     }
 
     #[test]

@@ -38,13 +38,41 @@ pub struct LoginEvent {
 }
 
 /// Derived device fingerprint
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+///
+/// Identity is `(hash, user_agent)`; `last_seen` records when the device
+/// was last observed and is deliberately excluded from equality/hashing so
+/// refreshing it never changes the device's identity.
+#[derive(Debug, Clone)]
 pub struct DeviceFingerprint {
     /// SHA-256 hash of device attributes
     pub hash: String,
     /// Original user agent (for display/logging)
     pub user_agent: String,
+    /// Last time this device was observed (for LRU eviction).
+    pub last_seen: DateTime<Utc>,
 }
+
+impl PartialEq for DeviceFingerprint {
+    fn eq(&self, other: &Self) -> bool {
+        self.hash == other.hash && self.user_agent == other.user_agent
+    }
+}
+
+impl Eq for DeviceFingerprint {}
+
+impl std::hash::Hash for DeviceFingerprint {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.hash.hash(state);
+        self.user_agent.hash(state);
+    }
+}
+
+/// Maximum number of known devices retained per user. Eviction is
+/// least-recently-seen: a device's `last_seen` is refreshed every time it
+/// appears, so an attacker rotating user-agents can only evict devices
+/// that have not been seen lately — never the victim's active device
+/// (which used to be the case with FIFO eviction).
+const MAX_KNOWN_DEVICES: usize = 20;
 
 /// Extract the network prefix used for device correlation.
 /// IPv4 → first three octets (/24); IPv6 → first four hextets (/64, the
@@ -106,6 +134,9 @@ impl DeviceFingerprint {
         Self {
             hash,
             user_agent: event.user_agent.clone(),
+            // The sighting time is the event's timestamp (not wall-clock)
+            // so replayed/back-dated events order deterministically.
+            last_seen: event.timestamp,
         }
     }
 
@@ -122,6 +153,7 @@ impl DeviceFingerprint {
         Self {
             hash,
             user_agent: user_agent.to_string(),
+            last_seen: Utc::now(),
         }
     }
 }
@@ -156,16 +188,42 @@ impl UserLoginHistory {
     /// server-side pepper.
     pub fn record_with_pepper(&mut self, mut event: LoginEvent, pepper: &[u8]) -> bool {
         let fingerprint = DeviceFingerprint::from_event_with_pepper(&event, pepper);
-        let is_new_device = !self
-            .known_devices
-            .iter()
-            .any(|d| d.hash == fingerprint.hash);
 
-        if is_new_device {
-            self.known_devices.push(fingerprint.clone());
-            // Cap known devices at a reasonable limit
-            if self.known_devices.len() > 20 {
-                self.known_devices.remove(0);
+        if let Some(known) = self
+            .known_devices
+            .iter_mut()
+            .find(|d| d.hash == fingerprint.hash)
+        {
+            // Known device: refresh its last-seen time so LRU eviction
+            // tracks activity, not first insertion.
+            known.last_seen = fingerprint.last_seen;
+            let is_new_device = false;
+
+            // SA2-008: Attach device fingerprint to the event so the ATO engine
+            // and downstream consumers can perform cross-event device correlation.
+            event.device_fingerprint = Some(fingerprint);
+
+            self.events.insert(0, event);
+            if self.events.len() > self.max_entries {
+                self.events.truncate(self.max_entries);
+            }
+
+            return is_new_device;
+        }
+
+        self.known_devices.push(fingerprint.clone());
+        if self.known_devices.len() > MAX_KNOWN_DEVICES {
+            // Evict the least-recently-seen device. FIFO eviction let an
+            // attacker evict the victim's device purely by rotating
+            // user-agents, locking the victim into permanent MFA prompts.
+            if let Some(lru_idx) = self
+                .known_devices
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, d)| d.last_seen)
+                .map(|(i, _)| i)
+            {
+                self.known_devices.remove(lru_idx);
             }
         }
 
@@ -178,7 +236,7 @@ impl UserLoginHistory {
             self.events.truncate(self.max_entries);
         }
 
-        is_new_device
+        true
     }
 
     /// Get the last successful login event
@@ -413,6 +471,47 @@ mod tests {
         // Deterministic with the same pepper.
         let again = DeviceFingerprint::from_event_with_pepper(&event, b"deployment-secret");
         assert_eq!(peppered.hash, again.hash);
+    }
+
+    #[test]
+    fn test_known_devices_lru_not_fifo() {
+        // Fail-first: known_devices was a FIFO — an attacker rotating 20
+        // user-agents evicted the victim's long-lived device, and every
+        // subsequent legitimate login looked "new" (permanent MFA
+        // prompts). Eviction must be least-recently-seen, with the
+        // last-seen time refreshed whenever a device is observed.
+        let mut history = UserLoginHistory::new(100);
+        let base = Utc::now() - chrono::Duration::hours(3);
+        let event = |ua: &str, minutes: i64| LoginEvent {
+            user_id: "lru-user".into(),
+            ip_address: "9.9.9.9".into(),
+            user_agent: ua.into(),
+            latitude: None,
+            longitude: None,
+            timestamp: base + chrono::Duration::minutes(minutes),
+            success: true,
+            tls_fingerprint: None,
+            device_fingerprint: None,
+        };
+
+        // Victim's device (oldest insertion, but seen again later).
+        history.record(event("victim-ua", 0));
+        // 10 attacker UA rotations.
+        for i in 0..10 {
+            history.record(event(&format!("rot-a-{i}"), 5 + i));
+        }
+        // Victim's device is seen again — refresh its last-seen time.
+        history.record(event("victim-ua", 30));
+        // 10 more rotations: 21 distinct devices, one must be evicted.
+        for i in 0..10 {
+            history.record(event(&format!("rot-b-{i}"), 40 + i));
+        }
+
+        let is_new = history.record(event("victim-ua", 90));
+        assert!(
+            !is_new,
+            "recently-seen victim device must not be evicted by UA rotation"
+        );
     }
 
     #[test]

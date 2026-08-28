@@ -434,6 +434,9 @@ services:
       - ../../deploy/grafana/provisioning:/etc/grafana/provisioning:ro
       - ../../deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
     environment:
+      # DEV-ONLY default password: this compose is the mail-server dev stack.
+      # Production requires GRAFANA_ADMIN_PASSWORD (docker-compose.prod.yml
+      # uses ${GRAFANA_ADMIN_PASSWORD:?...} and fails fast when unset).
       - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
       - GF_INSTALL_PLUGINS=grafana-clickhouse-datasource
       - GF_AUTH_ANONYMOUS_ENABLED=false
@@ -470,11 +473,21 @@ services:
     container_name: apexmail-tempo
     ports:
       - "127.0.0.1:3200:3200"   # Query frontend
-      - "127.0.0.1:4317:4317"   # OTLP gRPC (duplicate — use otel-collector instead)
+      # FIX (audit): the duplicate "127.0.0.1:4317:4317" OTLP gRPC host
+      # binding is REMOVED — the otel-collector service above owns host port
+      # 4317, and two services binding the same host port make the second
+      # container fail to start. Tempo still LISTENS on 4317 inside the
+      # compose network (see deploy/tempo/tempo.yaml); OTLP ingestion goes
+      # through the collector.
       - "127.0.0.1:9411:9411"   # Zipkin (legacy)
     volumes:
       - ../../deploy/tempo/tempo.yaml:/etc/tempo.yaml:ro
-      - tempo_data:/tmp/tempo
+      # FIX (audit): tempo.yaml writes traces/wal/generator state under
+      # /var/tempo (storage.trace.local.path, wal.path, metrics_generator
+      # storage.path) — the volume previously mounted /tmp/tempo, so ALL of
+      # that state landed in the container filesystem and was lost on every
+      # recreate. Aligned to /var/tempo.
+      - tempo_data:/var/tempo
     command: [ "-config.file=/etc/tempo.yaml" ]
     networks:
       - apexmail

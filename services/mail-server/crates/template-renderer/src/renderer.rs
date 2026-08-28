@@ -55,11 +55,12 @@ impl TemplateRenderer {
         };
 
         // Resolve subject placeholders (plain text — no HTML escaping; the
-        // subject is a header value, not markup). Missing fields follow the
-        // same fallback policy as the body.
+        // subject is a header value, not markup) and strip CR/LF/NUL so a
+        // merge field can never inject additional headers. Missing fields
+        // follow the same fallback policy as the body.
         let fallback = options.missing_field_fallback.as_deref().unwrap_or("");
         let subject = options.subject.as_ref().map(|s| {
-            transpiler::resolve_placeholders_plain_reported(s, &options.props, fallback).html
+            transpiler::resolve_placeholders_subject_reported(s, &options.props, fallback).html
         });
 
         let elapsed = start.elapsed();
@@ -253,6 +254,7 @@ mod tests {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 9080,
+                request_timeout_secs: 30,
             },
             sandbox: SandboxConfig {
                 timeout_ms: 5000,
@@ -304,6 +306,48 @@ mod tests {
         let resolved_subject =
             transpiler::resolve_placeholders_plain("Hello {{ name }}!", &opts.props);
         assert_eq!(resolved_subject, "Hello Alice!");
+    }
+
+    /// Subject merge fields are header-bound: CR/LF/NUL coming from props
+    /// (or the subject template itself) is a header-injection primitive and
+    /// must never survive into the resolved subject. Bodies may legitimately
+    /// contain newlines and are NOT touched.
+    #[tokio::test]
+    async fn render_source_subject_merge_fields_are_single_line() {
+        let config = test_config();
+        let pool = sqlx::PgPool::connect_lazy("postgres://localhost/test").unwrap();
+        let renderer = TemplateRenderer::new(pool, config);
+        let opts = RenderOptions {
+            props: serde_json::json!({
+                "name": "Bob\r\nBcc: x@evil.example",
+                "body": "first line\nsecond line",
+                "nul": "a\0b",
+            }),
+            generate_plaintext: false,
+            minify: false,
+            subject: Some("Hi {{ name }} | {{ nul }}".to_string()),
+            missing_field_fallback: None,
+        };
+
+        let result = renderer.render_source("<p>{{ body }}</p>", &opts).unwrap();
+
+        let subject = result.subject.expect("subject must be resolved");
+        assert!(
+            !subject.contains('\r') && !subject.contains('\n') && !subject.contains('\0'),
+            "subject must be a single line, got: {subject:?}"
+        );
+        assert!(subject.starts_with("Hi Bob"), "got: {subject:?}");
+        assert!(
+            subject.contains("Bcc:"),
+            "text itself may survive; only the line break must not"
+        );
+
+        // The body keeps its newline — only header-bound values are stripped.
+        assert!(
+            result.html.contains("first line\nsecond line"),
+            "{}",
+            result.html
+        );
     }
 
     #[test]

@@ -3,23 +3,44 @@
 Place your TLS certificates here for production deployment:
 
 - `fullchain.pem` — Full certificate chain (server cert + intermediates)
-- `privkey.pem` — Private key (**must be chmod 600**)
-- `dhparam.pem` — Generated per-deployment (see below)
+- `privkey.pem` — Private key (**must be chmod 640, owned :101** — see below)
+- `ca-chain.pem` — CA chain for OCSP stapling (refreshed by the certbot
+  deploy-hook)
+
+## dhparam.pem — REMOVED (audit)
+
+The placeholder `dhparam.pem` and `generate-dhparams.sh` were deleted:
+`deploy/nginx/nginx.conf` never referenced `ssl_dhparam`, and its cipher
+list is pure ECDHE (no DHE suites are offered), so DH parameters could
+never be used. Regenerating a file nothing reads was pure startup cost.
+Do NOT reintroduce `ssl_dhparam` unless you also add DHE cipher suites.
 
 ## Security: Private Key Permissions
 
-TLS private keys **must** have restricted permissions. Run after copying:
+TLS private keys **must** have restricted permissions. The nginx container
+runs as UID/GID 101; the mta/imap-server containers run as 10001:10001 and
+read `live/<domain>/privkey.pem` through their own bind mount of this tree.
+The certbot deploy-hook (deploy/scripts/certbot-renew-loop.sh) enforces:
+
+- tree-root `privkey.pem`: owner `101:101`, mode `0640` (nginx-only copy)
+- `live/`+`archive/` directories: `0755`
+- `fullchain.pem` / `chain.pem`: `0644` (public material)
+- `live`/`archive` `privkey*.pem`: owner `101:10001`, mode `0640` — nginx
+  reads as owner, mta/imap as group, nobody else.
+
+Manual copies should match:
 
 ```bash
-chmod 600 deploy/nginx/ssl/privkey.pem
-chmod 644 deploy/nginx/ssl/fullchain.pem
+chmod 640 ./deploy/nginx/ssl/privkey.pem
+chown :101 ./deploy/nginx/ssl/privkey.pem
+chmod 644 ./deploy/nginx/ssl/fullchain.pem ./deploy/nginx/ssl/ca-chain.pem
 ```
 
-The Nginx container runs as a non-root user, so the key must be readable by
-the container's user (typically UID 101 for the `nginx` image). If using
-Docker Compose, ensure the volume mount preserves these permissions.
-
 ## Using Let's Encrypt (recommended)
+
+The certbot service maintains this tree automatically (renewal loop +
+deploy-hook, see deploy/scripts/certbot-renew-loop.sh). For a manual
+bootstrap:
 
 ```bash
 # Install certbot and generate certificates
@@ -29,12 +50,9 @@ sudo certbot certonly --webroot -w /var/www/certbot \
 
 # Copy certificates with correct permissions
 cp /etc/letsencrypt/live/apexmail.ee/fullchain.pem ./deploy/nginx/ssl/
-cp /etc/letsencrypt/live/apexmail.ee/privkey.pem ./deploy/nginx/ssl/
-chmod 600 ./deploy/nginx/ssl/privkey.pem
+cp /etc/letsencrypt/live/apexmail.ee/privkey.pem  ./deploy/nginx/ssl/
 chmod 644 ./deploy/nginx/ssl/fullchain.pem
-
-# Generate unique 4096-bit DH parameters (takes several minutes)
-./deploy/nginx/ssl/generate-dhparams.sh
+chown :101 ./deploy/nginx/ssl/privkey.pem && chmod 640 ./deploy/nginx/ssl/privkey.pem
 ```
 
 ## Using self-signed certificates (development only)
@@ -45,10 +63,8 @@ openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
   -out deploy/nginx/ssl/fullchain.pem \
   -subj '/CN=localhost'
 
-chmod 600 deploy/nginx/ssl/privkey.pem
-
-# Generate DH parameters (optional — only needed for DHE cipher suites)
-./deploy/nginx/ssl/generate-dhparams.sh
+chown :101 deploy/nginx/ssl/privkey.pem
+chmod 640 deploy/nginx/ssl/privkey.pem
 ```
 
 ## Override certificate path

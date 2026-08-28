@@ -16,7 +16,6 @@
 --                               (inet->text is an assignment cast) and the row
 --                               struct decodes it back into Option<String>.
 
-BEGIN;
 
 -- ── Compliance (HIPAA/SOC2/GDPR/CCPA/ISO27001) ──────────────────────────
 
@@ -340,4 +339,3 @@ CREATE TABLE IF NOT EXISTS ent_template_submissions (
 CREATE INDEX IF NOT EXISTS idx_ent_template_submissions_tenant_status
     ON ent_template_submissions (tenant_id, status, created_at DESC);
 
-COMMIT;

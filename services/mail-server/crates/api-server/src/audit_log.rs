@@ -132,11 +132,16 @@ pub(crate) async fn advance_chain_head(
     executor: impl sqlx::Executor<'_, Database = sqlx::Postgres>,
     new_hash: &str,
 ) -> Result<Option<String>, sqlx::Error> {
-    sqlx::query_scalar(AUDIT_CHAIN_HEAD_ADVANCE_SQL)
+    // `prev_hash` is NULL for a chain's FIRST entry — decode the scalar as
+    // nullable (Option<Option<String>> distinguishes no-row from NULL
+    // column), otherwise every fresh database's first audit insert fails
+    // to decode and is silently dropped by the best-effort writer.
+    let previous: Option<Option<String>> = sqlx::query_scalar(AUDIT_CHAIN_HEAD_ADVANCE_SQL)
         .bind(AUDIT_CHAIN_GLOBAL)
         .bind(new_hash)
         .fetch_optional(executor)
-        .await
+        .await?;
+    Ok(previous.flatten())
 }
 
 /// Kept as a named constant so tests can pin the exact template (no

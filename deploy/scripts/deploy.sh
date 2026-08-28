@@ -82,7 +82,8 @@ ALL_SERVICES=(api-server mta imap-server mailstore worker enterprise observabili
 declare -A BUILD_TARGETS=(
     [status-server]=auth-server
 )
-ALL_IMAGES="${GHCR_NS}/marketing:latest ${GHCR_NS}/tracking-service:latest"
+ALL_IMAGES="${GHCR_NS}/marketing:latest ${GHCR_NS}/tracking-service:latest
+            ${GHCR_NS}/postgres-backup:latest ${GHCR_NS}/clickhouse-backup:latest"
 for s in "${ALL_SERVICES[@]}"; do ALL_IMAGES+=" ${GHCR_NS}/${s}:latest"; done
 
 # Services with separate Dockerfiles
@@ -103,6 +104,35 @@ step "Step 0: Verify environment"
 
 [[ -d "$DEPLOY_DIR" ]] || { error "$DEPLOY_DIR does not exist."; exit 1; }
 [[ -f "$ENV_FILE" ]]   || { error ".env not found at $ENV_FILE"; exit 1; }
+
+# ── Concurrency lock (audit fix) ─────────────────────────────────────────────
+# flock pattern from ci/pipeline.sh (ci_lock_acquire in ci/lib.sh): two
+# overlapping manual deploys race the build, the migrator and `compose up`,
+# and can interleave image tags. Refuse to run concurrently.
+LOCK_FILE="${DEPLOY_DIR}/.deploy.lock"
+if command -v flock >/dev/null 2>&1; then
+    exec 9>"$LOCK_FILE"
+    if ! flock -n 9; then
+        error "another deploy.sh run holds ${LOCK_FILE} — refusing to start (concurrent deploys corrupt image tags)"
+        exit 1
+    fi
+else
+    # mkdir fallback (atomic on POSIX); a lock whose owning PID is gone is stale.
+    if ! mkdir "${LOCK_FILE}.dir" 2>/dev/null; then
+        _lock_pid="$(cat "${LOCK_FILE}.dir/pid" 2>/dev/null || true)"
+        if [[ -n "$_lock_pid" ]] && ! kill -0 "$_lock_pid" 2>/dev/null; then
+            warn "removing stale deploy lock (pid $_lock_pid gone)"
+            rm -rf "${LOCK_FILE}.dir"
+            mkdir "${LOCK_FILE}.dir"
+        else
+            error "another deploy.sh run holds ${LOCK_FILE}.dir — refusing to start"
+            exit 1
+        fi
+    fi
+    printf '%s\n' $$ >"${LOCK_FILE}.dir/pid"
+    trap 'rm -rf "${LOCK_FILE}.dir"' EXIT
+fi
+log "Deploy lock acquired."
 
 cd "$DEPLOY_DIR"
 log "Deploy: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -142,6 +172,28 @@ rm -f /etc/systemd/system/apexmail-*.service 2>/dev/null || true
 
 log "Cleanup complete."
 
+# ── Step 1.5: Snapshot current images (rollback baseline) ───────────────────
+step "Step 1.5: Snapshot current images (rollback baseline)"
+
+# Audit fix (no rollback on the manual path): tag every locally-present
+# canonical image as :pre-deploy BEFORE the rebuild overwrites :latest. If
+# post-deploy verification fails, Step 8b retags :pre-deploy back to
+# :latest and re-creates the stack — minimal tag-before-upgrade /
+# retag-on-failure, no registry round-trip.
+ROLLBACK_BASELINE=0
+for img in $ALL_IMAGES; do
+    if docker image inspect "$img" >/dev/null 2>&1; then
+        docker tag "$img" "${img%:latest}:pre-deploy" \
+            && ROLLBACK_BASELINE=1 \
+            || warn "could not snapshot $img for rollback"
+    fi
+done
+if [[ "$ROLLBACK_BASELINE" -eq 1 ]]; then
+    log "Rollback baseline captured (:pre-deploy tags)."
+else
+    warn "No previous images found — this looks like a first deploy; no rollback baseline exists."
+fi
+
 # ── Step 2: Build Rust workspace ─────────────────────────────────────────────
 if ! $NO_BUILD; then
     step "Step 2: Build Rust workspace"
@@ -169,11 +221,12 @@ if ! $NO_BUILD; then
             "$BUILD_CONTEXT" 2>&1 | tail -2
     done
 
-    # Build services with separate Dockerfiles (marketing, tracking).
-    # NOTE: pdf-renderer is dev-profile-only (docker-compose.yml profiles:
-    # ["dev","full-stack"]), is NOT part of the production stack, and its
-    # Dockerfile is not buildable from this context — skip it here.
-    for separate_svc in marketing tracking-service postgres-backup; do
+    # Build services with separate Dockerfiles (marketing, tracking,
+    # backup sidecars). NOTE: pdf-renderer is dev-profile-only
+    # (docker-compose.yml profiles: ["dev","full-stack"]), is NOT part of the
+    # production stack, and its Dockerfile is not buildable from this
+    # context — skip it here.
+    for separate_svc in marketing tracking-service postgres-backup clickhouse-backup; do
         should_build=false
         if [[ -z "$SERVICES_TO_BUILD" ]] || echo "$SERVICES_TO_BUILD" | grep -q "$separate_svc"; then
             should_build=true
@@ -198,6 +251,12 @@ if ! $NO_BUILD; then
                     log "Building: ${GHCR_NS}/postgres-backup:latest"
                     docker build --tag "${GHCR_NS}/postgres-backup:latest" \
                         -f "${DEPLOY_DIR}/deploy/hardening/Dockerfile.postgres-backup" \
+                        "${DEPLOY_DIR}/deploy/hardening" 2>&1 | tail -2
+                    ;;
+                clickhouse-backup)
+                    log "Building: ${GHCR_NS}/clickhouse-backup:latest"
+                    docker build --tag "${GHCR_NS}/clickhouse-backup:latest" \
+                        -f "${DEPLOY_DIR}/deploy/hardening/Dockerfile.clickhouse-backup" \
                         "${DEPLOY_DIR}/deploy/hardening" 2>&1 | tail -2
                     ;;
             esac
@@ -256,32 +315,31 @@ log "Migrations up to date."
 step "Step 6: Deploy services via Docker Compose"
 
 log "Starting services..."
-docker compose $COMPOSE_FILES --env-file "$ENV_FILE" up -d --remove-orphans 2>&1
+# FIX (audit): activate the `monitoring` compose profile so the observability
+# stack (prometheus, grafana, loki, alertmanager, exporters, tempo,
+# otel-collector, synthetic-monitor) starts with the deployment. Without the
+# flag, `up -d` only starts default-profile services — production ran blind,
+# and --remove-orphans could even reap manually-started monitoring containers
+# (inactive-profile services are treated as orphans by some compose v2
+# versions). pdf-renderer (dev profile) and migrator (migrate profile) stay
+# excluded. CI does the same — see ci/stages/deploy.sh.
+docker compose $COMPOSE_FILES --env-file "$ENV_FILE" \
+    --profile monitoring up -d --remove-orphans 2>&1
 
 log "Services started."
 
 # ── Step 7: Clean dangling images ────────────────────────────────────────────
 step "Step 7: Clean old Docker images"
 
-# Remove dangling images (<none>:<none>) left from rebuilds
+# Remove dangling images (<none>:<none>) left from rebuilds. NOTE: the
+# per-service non-:latest tag removal (incl. the :pre-deploy rollback
+# baseline) moved to Step 9 — it may only run AFTER verification succeeded.
 log "Pruning dangling images..."
 docker image prune -f 2>/dev/null | grep -v "Total" || true
 
-# For partial deploys, remove old images for the rebuilt services that aren't :latest
-if [[ -n "$SERVICES_TO_BUILD" ]]; then
-    for svc in "${BUILD_LIST[@]}"; do
-        # Remove any non-:latest tags for this service
-        docker images "${GHCR_NS}/${svc}" --format '{{.Tag}}' 2>/dev/null | \
-            grep -v "^latest$" | while read -r old_tag; do
-            warn "Removing old image: ${GHCR_NS}/${svc}:${old_tag}"
-            docker rmi "${GHCR_NS}/${svc}:${old_tag}" 2>/dev/null || true
-        done
-    done
-fi
-
 log "Image cleanup complete."
 
-# ── Step 8: Reload nginx + verify ────────────────────────────────────────────
+# ── Step 8: Reload nginx + verify (+ rollback on failure) ───────────────────
 step "Step 8: Reload nginx + verify"
 
 sleep 3
@@ -290,6 +348,71 @@ if [[ -n "$NGINX_NAME" ]]; then
     docker exec "$NGINX_NAME" nginx -s reload 2>&1 || true
     log "Nginx reloaded."
 fi
+
+# verify_stack — essentials of ci/stages/verify.sh: every canonical service
+# container RUNNING and the core ports answering. Retries for up to ~60s
+# because containers need a moment to settle after `up -d`.
+verify_stack() {
+    local services="api-server mta imap-server mailstore worker enterprise tracking
+                    observability marketing status-server billing-service sales-autopilot
+                    postgres-backup clickhouse-backup nginx certbot postgres redis clickhouse
+                    prometheus grafana loki alertmanager tempo otel-collector
+                    node-exporter blackbox-exporter postgres-exporter redis-exporter
+                    clickhouse-exporter synthetic-monitor"
+    local attempt svc state fail
+    for attempt in 1 2 3; do
+        fail=0
+        for svc in $services; do
+            state=$(docker compose $COMPOSE_FILES --env-file "$ENV_FILE" ps --format '{{.State}}' "$svc" 2>/dev/null | head -1)
+            if [[ "$state" != "running" ]]; then
+                error "verify: service $svc is '${state:-missing}' (expected running)"
+                fail=1
+            fi
+        done
+        for port in 80 443 25; do
+            nc -z -w2 127.0.0.1 "$port" 2>/dev/null \
+                || { error "verify: port $port not answering"; fail=1; }
+        done
+        [[ "$fail" -eq 0 ]] && return 0
+        warn "verify attempt $attempt failed — settling 20s before retry"
+        sleep 20
+    done
+    return 1
+}
+
+# rollback_images — retag the :pre-deploy baseline back onto :latest and
+# recreate the stack (tag-before-upgrade / retag-on-failure, Step 1.5).
+# Migrations are NOT reverted: the migrate gate only ships additive,
+# compatible migrations by design.
+rollback_images() {
+    if [[ "$ROLLBACK_BASELINE" -ne 1 ]]; then
+        warn "no rollback baseline (first deploy?) — leaving the current stack in place"
+        return 0
+    fi
+    error "verify FAILED — rolling back to the pre-deploy images (:pre-deploy -> :latest)"
+    local missing=0 img pre
+    for img in $ALL_IMAGES; do
+        pre="${img%:latest}:pre-deploy"
+        if docker image inspect "$pre" >/dev/null 2>&1; then
+            docker tag "$pre" "$img" || { warn "retag failed for $img"; missing=1; }
+        else
+            warn "no :pre-deploy baseline for $img — it stays on the new image"
+        fi
+    done
+    if [[ "$missing" -eq 1 ]]; then
+        warn "rollback incomplete for at least one image — keeping the current stack (mixed versions are worse)"
+        return 0
+    fi
+    if docker compose $COMPOSE_FILES --env-file "$ENV_FILE" \
+        --profile monitoring up -d --remove-orphans 2>&1; then
+        sleep 3
+        [[ -n "$NGINX_NAME" ]] && docker exec "$NGINX_NAME" nginx -s reload 2>&1 || true
+        error "ROLLBACK COMPLETE: stack restored to the pre-deploy images (migrations NOT reverted — additive by design)"
+    else
+        error "rollback compose up FAILED — the failed rollout is still running; intervene manually"
+    fi
+    return 0
+}
 
 sleep 5
 log "Container status:"
@@ -309,6 +432,31 @@ if echo "Q" | timeout 5 openssl s_client -connect 127.0.0.1:993 2>/dev/null | gr
     log "IMAPS TLS: ${GREEN}VALID${NC}"
 else
     warn "IMAPS TLS: ${RED}CHECK NEEDED${NC}"
+fi
+
+if verify_stack; then
+    log "Verify: all canonical services running, core ports answering."
+else
+    rollback_images
+    error "Deploy FAILED verification — see above (rollback attempted)."
+    exit 1
+fi
+
+# ── Step 9: Post-success tag cleanup ─────────────────────────────────────────
+step "Step 9: Remove rollback baseline + stale tags"
+
+# Only on a VERIFIED deploy may the previous image generation be dropped.
+for img in $ALL_IMAGES; do
+    docker rmi "${img%:latest}:pre-deploy" 2>/dev/null || true
+done
+if [[ -n "$SERVICES_TO_BUILD" ]]; then
+    for svc in "${BUILD_LIST[@]}"; do
+        docker images "${GHCR_NS}/${svc}" --format '{{.Tag}}' 2>/dev/null | \
+            grep -v "^latest$" | while read -r old_tag; do
+                warn "Removing old image: ${GHCR_NS}/${svc}:${old_tag}"
+                docker rmi "${GHCR_NS}/${svc}:${old_tag}" 2>/dev/null || true
+            done
+    done
 fi
 
 log "Deploy complete: $(date -u '+%Y-%m-%dT%H:%M:%SZ')"

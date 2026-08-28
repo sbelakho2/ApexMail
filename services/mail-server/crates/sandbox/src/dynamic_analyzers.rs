@@ -172,13 +172,20 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
             decision: DynamicDecision::Reject,
         },
         MalwareRule {
+            // Tuning note: \xeb\xfe (jmp $-2) is a legitimate infinite
+            // loop used by debuggers/BIOS code AND appears by chance ~16
+            // times per MB of arbitrary binary (1/65536 per position).
+            // A 2-byte pattern can never justify quarantine on its own:
+            // risk 2.0 with an Allow decision keeps it as a low-risk
+            // signal that feeds the composite score, while stronger
+            // evidence (NOP sleds, PE imports, etc.) is what escalates.
             id: "RULE_SHELLCODE_COMMON_STUB".into(),
-            description: "Common shellcode stub (egg hunter)".into(),
+            description: "Common shellcode stub jmp-self (low-confidence signal)".into(),
             patterns: vec![
                 b"\xeb\xfe".to_vec(), // infinite loop (breakpoint)
             ],
-            risk: 6.0,
-            decision: DynamicDecision::Flag,
+            risk: 2.0,
+            decision: DynamicDecision::Allow,
         },
         // ── PDF malware ──
         MalwareRule {
@@ -196,11 +203,27 @@ fn builtin_malware_rules() -> Vec<MalwareRule> {
             decision: DynamicDecision::Reject,
         },
         // ── C2 / Beacon ──
+        // Tuning note: the 6-byte CS config header alone appears by chance
+        // in ~1/2^48 per position — rare enough to quarantine for review,
+        // but it is also present in benign CS-trainer/research samples, so
+        // outright rejection requires a second co-occurring CS artifact
+        // (the ReflectiveLoader export every beacon DLL carries), handled
+        // by RULE_COBALT_STRIKE_BEACON_CONFIRMED below.
         MalwareRule {
             id: "RULE_COBALT_STRIKE_BEACON".into(),
-            description: "Cobalt Strike beacon configuration indicators".into(),
+            description: "Cobalt Strike beacon configuration header (unconfirmed)".into(),
             patterns: vec![
                 b"\x00\x01\x00\x01\x00\x02".to_vec(), // CS config header
+            ],
+            risk: 7.0,
+            decision: DynamicDecision::Flag,
+        },
+        MalwareRule {
+            id: "RULE_COBALT_STRIKE_BEACON_CONFIRMED".into(),
+            description: "Cobalt Strike beacon: config header + ReflectiveLoader".into(),
+            patterns: vec![
+                b"\x00\x01\x00\x01\x00\x02".to_vec(), // CS config header
+                b"ReflectiveLoader".to_vec(),         // CS loader export
             ],
             risk: 9.0,
             decision: DynamicDecision::Reject,
@@ -290,6 +313,13 @@ impl YaraSignatureAnalyzer {
             }
         }
 
+        // Overlapping match semantics: patterns may be shared between
+        // rules (e.g. the CS config header in both the unconfirmed and
+        // confirmed beacon rules). Non-overlapping iteration reports only
+        // ONE pattern id per position, so a duplicated pattern would
+        // never credit the second rule and AND-logic rules sharing a
+        // pattern could never fire. (aho-corasick 1.x supports
+        // overlapping iteration with the default Standard match kind.)
         let automaton = AhoCorasick::builder()
             .ascii_case_insensitive(true)
             .build(&all_patterns)
@@ -331,7 +361,7 @@ impl DynamicAnalyzer for YaraSignatureAnalyzer {
             .map(|r| vec![false; r.patterns.len()])
             .collect();
 
-        for mat in self.compiled.automaton.find_iter(data) {
+        for mat in self.compiled.automaton.find_overlapping_iter(data) {
             let (rule_idx, pat_idx) = self.compiled.pattern_map[mat.pattern().as_usize()];
             rule_pattern_hits[rule_idx][pat_idx] = true;
         }
@@ -789,6 +819,68 @@ mod tests {
         assert!(finding.is_some(), "EICAR should be detected");
         let f = finding.expect("finding");
         assert_eq!(f.id, "RULE_EICAR_TEST");
+        assert_eq!(f.decision, DynamicDecision::Reject);
+    }
+
+    #[test]
+    fn test_two_byte_stub_alone_is_low_risk_signal() {
+        // Fail-first: a lone \xeb\xfe pair fired at risk 6.0 with a Flag
+        // decision, which escalates the verdict to quarantine. The pair
+        // occurs by chance ~16 times per MB of arbitrary binary, so any
+        // ordinary image tripped it. Alone it must stay a low-risk signal
+        // that does NOT force a quarantine decision.
+        let analyzer = YaraSignatureAnalyzer::default();
+        let mut image = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        image.extend_from_slice(&[0x00, 0x00, 0x00, 0x0D]);
+        image.extend_from_slice(b"IHDR");
+        image.extend_from_slice(&[0xEB, 0xFE]); // the byte pair, by chance
+        image.extend_from_slice(&[0x11; 64]);
+        let f = analyzer
+            .analyze(&image, Some("photo.png"))
+            .expect("byte pair should still be reported as a signal");
+        assert_eq!(f.id, "RULE_SHELLCODE_COMMON_STUB");
+        assert!(f.risk <= 2.0, "risk {} must be <= 2.0", f.risk);
+        assert_eq!(
+            f.decision,
+            DynamicDecision::Allow,
+            "2-byte stub alone must not force quarantine"
+        );
+    }
+
+    #[test]
+    fn test_cobalt_strike_header_alone_flags_but_not_rejects() {
+        // Fail-first: the bare 6-byte CS config header rejected (9.0) any
+        // file containing it — including CS research samples and random
+        // binaries where the sequence appears by chance. Alone it must
+        // Flag (quarantine for review), not Reject.
+        let analyzer = YaraSignatureAnalyzer::default();
+        let mut blob = vec![0u8; 32];
+        blob.extend_from_slice(&[0x00, 0x01, 0x00, 0x01, 0x00, 0x02]);
+        blob.extend_from_slice(&[0u8; 32]);
+        let f = analyzer
+            .analyze(&blob, None)
+            .expect("CS config header must still match");
+        assert_eq!(f.id, "RULE_COBALT_STRIKE_BEACON");
+        assert_eq!(f.decision, DynamicDecision::Flag);
+        assert!(
+            f.risk < 9.0,
+            "risk {} must be below the reject tier",
+            f.risk
+        );
+    }
+
+    #[test]
+    fn test_cobalt_strike_header_with_loader_string_rejects() {
+        // A second co-occurring CS artifact (the ReflectiveLoader export
+        // every beacon DLL carries) confirms the beacon → Reject.
+        let analyzer = YaraSignatureAnalyzer::default();
+        let mut beacon = vec![0u8; 16];
+        beacon.extend_from_slice(&[0x00, 0x01, 0x00, 0x01, 0x00, 0x02]);
+        beacon.extend_from_slice(b"\x00\x00ReflectiveLoader\x00\x00");
+        let f = analyzer
+            .analyze(&beacon, None)
+            .expect("confirmed beacon fixture must match");
+        assert_eq!(f.id, "RULE_COBALT_STRIKE_BEACON_CONFIRMED");
         assert_eq!(f.decision, DynamicDecision::Reject);
     }
 

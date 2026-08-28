@@ -326,6 +326,53 @@ async fn list_models_handler(State(state): State<Arc<AppState>>) -> Response {
     .into_response()
 }
 
+/// Maximum length accepted for a forwarded `x-apexmail-tenant-id` value used
+/// as an inference rate-limit key.
+const MAX_TENANT_RATE_KEY_LEN: usize = 64;
+
+/// Rate-limit bucket used when no tenant identity is forwarded at all — i.e.
+/// genuinely tenant-less internal calls from the authenticated control plane
+/// (batch jobs, health probes). A header that is PRESENT but invalid is
+/// rejected instead of landing here (see [`tenant_rate_key_from_headers`]).
+const CONTROL_PLANE_RATE_KEY: &str = "_control-plane";
+
+/// Resolve the inference rate-limit key for a request.
+///
+/// Auth-context note: `require_service_token` authenticates the upstream
+/// control plane with ONE shared internal service token and exposes no
+/// per-caller identity — nothing about the tenant is bound to the token.
+/// The tenant identity therefore arrives only via the `x-apexmail-tenant-id`
+/// header the control plane forwards after its own authorization, so the key
+/// must at least be bounded: length and charset are validated (UUID/ULID
+/// shapes pass) so a caller cannot mint arbitrary or oversized rate-limit
+/// identities. A present-but-invalid header is a 400; an absent (or blank)
+/// header falls back to [`CONTROL_PLANE_RATE_KEY`].
+fn tenant_rate_key_from_headers(headers: &HeaderMap) -> Result<String, &'static str> {
+    // Absent header → the documented control-plane fallback. A PRESENT
+    // header that cannot even be read as UTF-8 text is a rejection: treating
+    // it as absent would let opaque bytes masquerade as tenant-less calls.
+    let Some(value) = headers.get("x-apexmail-tenant-id") else {
+        return Ok(CONTROL_PLANE_RATE_KEY.to_string());
+    };
+    let raw = value
+        .to_str()
+        .map_err(|_| "must be valid UTF-8 header text")?
+        .trim();
+    if raw.is_empty() {
+        return Ok(CONTROL_PLANE_RATE_KEY.to_string());
+    }
+    if raw.len() > MAX_TENANT_RATE_KEY_LEN {
+        return Err("must be at most 64 characters");
+    }
+    if !raw
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+    {
+        return Err("only [A-Za-z0-9._:-] are allowed");
+    }
+    Ok(raw.to_string())
+}
+
 async fn predict_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -339,15 +386,18 @@ async fn predict_handler(
     }
 
     // Enforce the configured inference rate limit per tenant. The upstream
-    // control plane is authenticated by the service-token middleware; the
-    // tenant header carries the end-customer identity when present.
-    let rate_key = headers
-        .get("x-apexmail-tenant-id")
-        .and_then(|value| value.to_str().ok())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("_control-plane")
-        .to_string();
+    // control plane is authenticated by the service-token middleware (which
+    // carries no per-caller identity — see `tenant_rate_key_from_headers`);
+    // the tenant header is accepted only in validated, bounded form, and the
+    // `_control-plane` fallback applies only when it is absent.
+    let rate_key = match tenant_rate_key_from_headers(&headers) {
+        Ok(key) => key,
+        Err(reason) => {
+            return api_error(AiError::InvalidInput(format!(
+                "invalid x-apexmail-tenant-id header: {reason}"
+            )));
+        }
+    };
     if !state.rate_governor.allow(&rate_key) {
         return api_error(AiError::RateLimited(format!(
             "inference rate limit of {} requests per {}s exceeded; retry later",
@@ -640,6 +690,125 @@ mod tests {
             "00000000-0000-0000-0000-000000000001".parse().unwrap(),
         );
         let response = app().oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn tenant_rate_key_validator_direct_cases() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(
+            tenant_rate_key_from_headers(&headers).unwrap(),
+            "_control-plane"
+        );
+        headers.insert(
+            "x-apexmail-tenant-id",
+            "00000000-0000-0000-0000-000000000001".parse().unwrap(),
+        );
+        assert_eq!(
+            tenant_rate_key_from_headers(&headers).unwrap(),
+            "00000000-0000-0000-0000-000000000001"
+        );
+        // Raw non-ASCII bytes in the header (HeaderValue allows them).
+        headers.insert(
+            "x-apexmail-tenant-id",
+            axum::http::HeaderValue::from_bytes(b"ten\xC3\xA9nt").unwrap(),
+        );
+        let res = tenant_rate_key_from_headers(&headers);
+        assert!(res.is_err(), "non-ASCII must be rejected, got {res:?}");
+    }
+
+    fn authenticated_predict_with_tenant(tenant: &str) -> Request<Body> {
+        Request::builder()
+            .uri("/predict")
+            .method("POST")
+            .header("x-api-key", "test-key")
+            .header("x-apexmail-tenant-id", tenant)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "model_id": "apexmail-assistant",
+                    "input": {"prompt": "Hello"}
+                }))
+                .expect("serialize request"),
+            ))
+            .expect("build request")
+    }
+
+    /// Malformed / oversized tenant headers must never become rate-limit
+    /// identities — they are rejected with 400 before the governor sees them.
+    #[tokio::test]
+    async fn predict_rejects_malformed_tenant_rate_key_headers() {
+        let app = app();
+        let bad_headers: [String; 4] = [
+            "bad tenant!".into(),                    // illegal characters
+            "tenant/../../etc".into(),               // path-ish junk
+            "ten\u{00e9}nt".into(),                  // non-ASCII
+            "x".repeat(MAX_TENANT_RATE_KEY_LEN + 1), // oversized
+        ];
+        for bad in bad_headers {
+            let response = app
+                .clone()
+                .oneshot(authenticated_predict_with_tenant(&bad))
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "tenant header {:?} must be rejected, not bucketed",
+                if bad.len() > 80 {
+                    format!("{}…", &bad[..80])
+                } else {
+                    bad.clone()
+                }
+            );
+        }
+    }
+
+    /// Validated keys bucket correctly (isolated per tenant) and the absent
+    /// header still falls back to the shared `_control-plane` bucket.
+    #[tokio::test]
+    async fn predict_rate_limit_buckets_by_validated_tenant_key() {
+        let app = app();
+        let body = serde_json::json!({"model_id":"apexmail-assistant", "input":{"prompt":"Hello"}});
+
+        // Exhaust tenant-b's bucket (limit 60/window 60s): every allowed
+        // request still returns 503 (runtime disabled), the 61st is 429.
+        for _ in 0..60 {
+            let response = app
+                .clone()
+                .oneshot(authenticated_predict_with_tenant(
+                    "01J8XQ7VT9HZZK3WB2GDYB6XYZ",
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        }
+        let response = app
+            .clone()
+            .oneshot(authenticated_predict_with_tenant(
+                "01J8XQ7VT9HZZK3WB2GDYB6XYZ",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // A different valid tenant has its own, untouched bucket.
+        let response = app
+            .clone()
+            .oneshot(authenticated_predict_with_tenant(
+                "00000000-0000-0000-0000-000000000001",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        // Absent header → the documented `_control-plane` fallback bucket,
+        // also untouched by tenant-b's exhaustion.
+        let response = app
+            .clone()
+            .oneshot(authenticated_json_request("/predict", body))
+            .await
+            .unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 }

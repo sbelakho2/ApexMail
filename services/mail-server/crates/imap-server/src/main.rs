@@ -119,9 +119,14 @@ impl ImapSession {
 
 // ── Subscription table ───────────────────────────────────────────────────────
 //
-// SUBSCRIBE/UNSUBSCRIBE state, keyed by account id. The mailstore gRPC API has
-// no subscription endpoints, so this table is the authoritative source for
-// LSUB and the \Subscribed LIST attribute.
+// SUBSCRIBE/UNSUBSCRIBE state, keyed by account id. The mailstore gRPC API
+// has no subscription endpoints and the DB schema has no subscriptions
+// table (adding one needs a migration, out of scope here), so this in-memory
+// table is the authoritative source for LSUB and the \Subscribed LIST
+// attribute. KNOWN LIMITATION (documented deliberately): subscriptions do
+// not survive a restart and are not shared between server replicas. LSUB at
+// least reflects this table honestly — subscribed names are listed even
+// when the mailbox no longer exists (with no attributes).
 
 type SubscriptionTable = HashMap<String, HashSet<String>>;
 static SUBSCRIPTIONS: LazyLock<Arc<Mutex<SubscriptionTable>>> =
@@ -538,7 +543,14 @@ fn format_envelope(env: &mail_proto::EmailEnvelope) -> String {
     };
     let from = format_single_address(&env.from);
     let sender = format_single_address(&env.from);
-    let reply_to = format_single_address(&env.reply_to);
+    // RFC 3501 §7.4.2: the envelope's Reply-To defaults to the From address
+    // when the message carries no Reply-To (the mailstore also defaults the
+    // proto field; this covers envelopes from other producers).
+    let reply_to = if env.reply_to.is_empty() {
+        format_single_address(&env.from)
+    } else {
+        format_single_address(&env.reply_to)
+    };
     let to = format_address_list(&env.to);
     let cc = format_address_list(&env.cc);
     let bcc = format_address_list(&env.bcc);
@@ -807,8 +819,9 @@ fn imap_utf7_decode(s: &str) -> String {
                     continue;
                 }
                 if let Some(decoded) = modified_b64_decode(b64) {
-                    let mut utf16 = Vec::with_capacity(decoded.len() / 2);
-                    for pair in decoded.chunks_exact(2) {
+                    let (pairs, _remainder) = decoded.as_chunks::<2>();
+                    let mut utf16 = Vec::with_capacity(pairs.len());
+                    for pair in pairs {
                         utf16.push(u16::from_be_bytes([pair[0], pair[1]]));
                     }
                     out.extend_from_slice(&String::from_utf16_lossy(&utf16).into_bytes());
@@ -915,6 +928,40 @@ fn combine_list_pattern(reference: &str, pattern: &str) -> String {
     format!("{}/{}", ref_trimmed, pattern)
 }
 
+/// Render a mailbox name as an IMAP quoted string (L7).
+///
+/// LIST/LSUB/STATUS interpolate mailbox names into quoted strings; a name
+/// containing `"` (createable via literals) would terminate the quoted
+/// string and a name containing CRLF would split the response line. The
+/// backslash and double quote are escaped and CR/LF are stripped — mailbox
+/// names are modified UTF-7, so raw CR/LF are never legitimate content.
+fn mailbox_astring(name: &str) -> String {
+    let mut out = String::with_capacity(name.len() + 2);
+    out.push('"');
+    for ch in name.chars() {
+        match ch {
+            '\r' | '\n' => {}
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// L12: the tagged response for a FETCH whose per-message body retrieval
+/// failed. `ResourceExhausted` (the mailstore's rate/quota limiter) maps to
+/// a `NO Server busy` so the client retries instead of silently missing
+/// BODY attributes; any other error surfaces its reason.
+fn fetch_body_failure_line(tag: &str, status: &tonic::Status) -> String {
+    if status.code() == tonic::Code::ResourceExhausted {
+        tagged_no(tag, "Server busy; try again later")
+    } else {
+        tagged_no(tag, &format!("FETCH failed: {}", status.message()))
+    }
+}
+
 /// Extract the tonic gRPC status code from an anyhow error chain, if any.
 fn tonic_code(e: &anyhow::Error) -> Option<tonic::Code> {
     e.root_cause()
@@ -973,23 +1020,99 @@ const MAX_COMMAND_LINE: usize = 1024 * 1024;
 const MAX_LITERAL_SIZE: usize = 32 * 1024 * 1024;
 /// Maximum number of literals accepted in a single command. A command
 /// carrying hundreds of literal specs is hostile; each one would otherwise
-/// receive a continuation and a pre-allocated buffer.
+/// receive a continuation and a read buffer.
 const MAX_LITERALS_PER_COMMAND: usize = 64;
 /// Maximum total literal bytes accepted in a single command. Bounds the
-/// combined pre-allocated buffers (64 x 32 MB would otherwise be 2 GB).
+/// combined literal buffers (64 x 32 MB would otherwise be 2 GB).
 const MAX_TOTAL_LITERAL_BYTES: usize = 64 * 1024 * 1024;
+/// L1: maximum TOTAL literal bytes one connection may send across ALL its
+/// commands. The per-command budget alone let a long-lived connection
+/// stream an unbounded number of legal-sized literals; the per-connection
+/// cumulative budget bounds the total read work per socket.
+const MAX_TOTAL_LITERAL_BYTES_PER_CONNECTION: usize = 512 * 1024 * 1024;
+/// L1: literal buffers grow in these increments. Memory tracks the bytes
+/// that ACTUALLY arrived, not the client's declared size, so a hostile
+/// `{33554432+}` followed by a stall pins only what was received.
+const LITERAL_CHUNK: usize = 64 * 1024;
+/// L1: how long a single command read may stall before the connection is
+/// closed. Abandoned/slow sockets must die; this is independent of (and much
+/// shorter than) the 29-minute IDLE deadline, which governs the IDLE loop.
+const COMMAND_READ_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+
+/// L1: literal read limits for one command/connection.
+#[derive(Debug, Clone, Copy)]
+struct ReadLimits {
+    max_literal_size: usize,
+    max_literals_per_command: usize,
+    max_total_per_command: usize,
+    max_total_per_connection: usize,
+}
+
+impl Default for ReadLimits {
+    fn default() -> Self {
+        Self {
+            max_literal_size: MAX_LITERAL_SIZE,
+            max_literals_per_command: MAX_LITERALS_PER_COMMAND,
+            max_total_per_command: MAX_TOTAL_LITERAL_BYTES,
+            max_total_per_connection: MAX_TOTAL_LITERAL_BYTES_PER_CONNECTION,
+        }
+    }
+}
+
+/// L1: per-connection cumulative literal accounting.
+#[derive(Debug, Default)]
+struct ConnectionReadState {
+    literal_bytes_total: usize,
+}
 
 /// Literal budget check for a command: given the literals already read
-/// (count/total bytes) and the next literal's declared size, decide whether
-/// reading it stays inside the per-command budget.
-fn literal_within_budget(count_so_far: usize, total_so_far: usize, size: usize) -> bool {
-    if count_so_far >= MAX_LITERALS_PER_COMMAND {
+/// (count/total bytes), the next literal's declared size, and the
+/// connection's cumulative total, decide whether reading it stays inside
+/// every budget.
+fn literal_within_budget(
+    count_so_far: usize,
+    total_so_far: usize,
+    size: usize,
+    limits: &ReadLimits,
+    conn_total: usize,
+) -> bool {
+    if count_so_far >= limits.max_literals_per_command {
         return false;
     }
-    if size > MAX_LITERAL_SIZE {
+    if size > limits.max_literal_size {
         return false;
     }
-    total_so_far.saturating_add(size) <= MAX_TOTAL_LITERAL_BYTES
+    if total_so_far.saturating_add(size) > limits.max_total_per_command {
+        return false;
+    }
+    conn_total.saturating_add(total_so_far).saturating_add(size) <= limits.max_total_per_connection
+}
+
+/// L1: read exactly `size` literal bytes INCREMENTALLY, in [`LITERAL_CHUNK`]
+/// steps. Unlike the previous `vec![0u8; size]` + single `read_exact`, the
+/// buffer only grows as data actually arrives — a client that declares a
+/// 32 MiB literal and then stalls pins memory proportional to what it sent,
+/// not to what it promised.
+async fn read_literal_chunked<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    size: usize,
+) -> Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    if size == 0 {
+        return Ok(buf);
+    }
+    let mut chunk = vec![0u8; LITERAL_CHUNK.min(size)];
+    let mut remaining = size;
+    while remaining > 0 {
+        let want = remaining.min(chunk.len());
+        reader
+            .read_exact(&mut chunk[..want])
+            .await
+            .with_context(|| "Literal data truncated")?;
+        buf.extend_from_slice(&chunk[..want]);
+        remaining -= want;
+    }
+    Ok(buf)
 }
 
 /// Read one physical line (bounded) as lossy UTF-8. Returns None on EOF.
@@ -1074,9 +1197,29 @@ fn find_literal_spec(line: &str) -> Option<(usize, usize, usize, bool)> {
 /// Returns None when the client closes the connection cleanly at a command
 /// boundary. Errors indicate the stream is no longer synchronized (e.g. a
 /// literal was truncated) and the connection must be closed.
+/// Test-facing wrapper: production paths use [`read_command_bounded`] (with
+/// the read deadline) over [`read_command_limited`].
+#[cfg(test)]
 async fn read_command<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     reader: &mut BufReader<R>,
     writer: &mut W,
+) -> Result<Option<(String, String, String, Vec<Vec<u8>>)>> {
+    read_command_limited(
+        reader,
+        writer,
+        &ReadLimits::default(),
+        &mut ConnectionReadState::default(),
+    )
+    .await
+}
+
+/// The real command reader: [`ReadLimits`] bounds literals per command and
+/// per connection (L1), and the literal bytes are read incrementally.
+async fn read_command_limited<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: &mut BufReader<R>,
+    writer: &mut W,
+    limits: &ReadLimits,
+    conn: &mut ConnectionReadState,
 ) -> Result<Option<(String, String, String, Vec<Vec<u8>>)>> {
     let mut assembled = String::new();
     let mut literals: Vec<Vec<u8>> = Vec::new();
@@ -1100,18 +1243,22 @@ async fn read_command<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
                 assembled.push_str(&pending[..start]);
                 assembled.push_str(&format!("\x01LIT{}\x01", literals.len()));
                 let total_so_far: usize = literals.iter().map(|l| l.len()).sum();
-                if !literal_within_budget(literals.len(), total_so_far, size) {
-                    bail!("Literal data exceeds per-command budget");
+                if !literal_within_budget(
+                    literals.len(),
+                    total_so_far,
+                    size,
+                    limits,
+                    conn.literal_bytes_total,
+                ) {
+                    bail!("Literal data exceeds per-command or per-connection budget");
                 }
                 if !non_sync {
                     write_line(writer, "+ Ready for literal data\r\n").await?;
                 }
-                let mut buf = vec![0u8; size];
-
-                reader
-                    .read_exact(&mut buf)
-                    .await
-                    .with_context(|| "Literal data truncated")?;
+                // L1: incremental read — memory follows the bytes that
+                // actually arrive, never the declared size up front.
+                let buf = read_literal_chunked(reader, size).await?;
+                conn.literal_bytes_total = conn.literal_bytes_total.saturating_add(buf.len());
 
                 literals.push(buf);
                 // The text after the literal spec is sent after the literal
@@ -1142,6 +1289,26 @@ async fn read_command<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     });
     Ok(Some((tag, cmd, args, literals)))
 }
+
+/// L1: `read_command_limited` with a stall deadline: a client that stops
+/// sending mid-command gets a BYE and the connection is closed instead of
+/// pinning its buffers forever. Distinct from the IDLE deadline (29 min),
+/// which governs the IDLE wait loop, not command reads.
+async fn read_command_bounded<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    reader: &mut BufReader<R>,
+    writer: &mut W,
+    limits: &ReadLimits,
+    conn: &mut ConnectionReadState,
+    timeout: Duration,
+) -> Result<Option<(String, String, String, Vec<Vec<u8>>)>> {
+    match tokio::time::timeout(timeout, read_command_limited(reader, writer, limits, conn)).await {
+        Ok(inner) => inner,
+        Err(_elapsed) => {
+            write_line(writer, &bye("Command read timeout, closing connection")).await?;
+            bail!("command read timed out after {:?}", timeout)
+        }
+    }
+}
 // ── Command dispatcher ──────────────────────────────────────────────────────
 //
 // Handlers write their responses directly to `writer` and read continuation
@@ -1168,7 +1335,7 @@ async fn handle_command<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         "CAPABILITY" => handle_capability(session, tag, writer).await,
         "LOGIN" => handle_login(session, tag, args, literals, writer).await,
         "LOGOUT" => handle_logout(session, tag, writer).await,
-        "AUTHENTICATE" => handle_authenticate(session, tag, args, reader, writer).await,
+        "AUTHENTICATE" => handle_authenticate(session, tag, args, literals, reader, writer).await,
         "NAMESPACE" => handle_namespace(session, tag, writer).await,
         "SELECT" => handle_select(session, tag, args, false, literals, writer).await,
         "EXAMINE" => handle_select(session, tag, args, true, literals, writer).await,
@@ -1414,10 +1581,32 @@ fn parse_login_args(args: &str, literals: &[Vec<u8>]) -> Result<(String, String)
 
 // ── AUTHENTICATE PLAIN (RFC 4616) ───────────────────────────────────────────
 
+/// L13: parse AUTHENTICATE arguments into (mechanism, optional
+/// initial-response). RFC 4959 SASL-IR: `AUTHENTICATE PLAIN <base64>` (or a
+/// literal) carries the initial client response inline; "=" encodes the
+/// empty initial response.
+fn parse_authenticate_args(args: &str, literals: &[Vec<u8>]) -> (String, Option<String>) {
+    let tokens = tokenize_command_args(args.trim());
+    let mech = tokens
+        .first()
+        .map(|t| resolve_token(t, literals))
+        .unwrap_or_default();
+    let initial_response = tokens.get(1).map(|t| {
+        let raw = resolve_token(t, literals);
+        if raw == "=" {
+            String::new()
+        } else {
+            raw
+        }
+    });
+    (mech, initial_response)
+}
+
 async fn handle_authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     session: &mut ImapSession,
     tag: &str,
     args: &str,
+    literals: &[Vec<u8>],
     reader: &mut BufReader<R>,
     writer: &mut W,
 ) -> Result<()> {
@@ -1439,25 +1628,42 @@ async fn handle_authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         )
         .await;
     }
-    if !args.eq_ignore_ascii_case("PLAIN") {
+    // L13: accept the SASL initial-response form (RFC 4959); without it,
+    // run the classic continuation exchange.
+    let (mechanism, initial_response) = parse_authenticate_args(args, literals);
+    if !mechanism.eq_ignore_ascii_case("PLAIN") {
         return write_line(
             writer,
-            &tagged_no(tag, &format!("Unsupported AUTH mechanism: {}", args)),
+            &tagged_no(tag, &format!("Unsupported AUTH mechanism: {}", mechanism)),
         )
         .await;
     }
 
-    // Step 1: send the continuation prompt.
-    write_line(writer, "+ \r\n").await?;
-
-    // Step 2: read the base64 continuation line from the client (bounded so a
-    // client that never sends a newline cannot exhaust memory).
-    let line = match read_line_limited(reader).await {
-        Ok(None) => bail!("Client disconnected during AUTHENTICATE"),
-        Ok(Some(l)) => l,
-        Err(e) => bail!("Read error during AUTHENTICATE: {}", e),
+    // Step 1: the initial response, either inline (SASL-IR) or via the
+    // continuation exchange.
+    let line = match initial_response {
+        Some(ir) => ir,
+        None => {
+            // Send the continuation prompt, then read the base64 line from
+            // the client (bounded so a client that never sends a newline
+            // cannot exhaust memory; L1: also bounded in time).
+            write_line(writer, "+ \r\n").await?;
+            match tokio::time::timeout(COMMAND_READ_TIMEOUT, read_line_limited(reader)).await {
+                Ok(Ok(None)) => bail!("Client disconnected during AUTHENTICATE"),
+                Ok(Ok(Some(l))) => l.trim().to_string(),
+                Ok(Err(e)) => bail!("Read error during AUTHENTICATE: {}", e),
+                Err(_) => {
+                    write_line(
+                        writer,
+                        &bye("Authentication read timeout, closing connection"),
+                    )
+                    .await?;
+                    bail!("AUTHENTICATE continuation timed out");
+                }
+            }
+        }
     };
-    let line = line.trim();
+
     if line.is_empty() || line == "*" {
         // RFC 3501: "*" cancels the authentication exchange.
         return write_line(writer, &tagged_bad(tag, "AUTHENTICATE cancelled")).await;
@@ -1590,14 +1796,11 @@ async fn handle_select<W: AsyncWrite + Unpin>(
     };
     let mb = status.mailbox.unwrap_or_default();
 
-    session.mailbox = mailbox.clone();
-    session.read_only = read_only;
-    session.uid_validity = mb.uidvalidity.max(1);
-    session.uid_next = mb.uidnext.max(1);
-    session.exists = mb.exists;
-    session.recent = mb.recent;
-    session.state = SessionState::Selected;
-
+    // L6: perform EVERY fallible step before touching the session. The old
+    // order marked the session Selected before the message listing; if that
+    // RPC failed, the client was left with a half-selected phantom mailbox
+    // (state Selected, empty uid_map). On any failure below the session
+    // stays exactly as it was (Authenticated with its previous view).
     let mut client = session.client.clone();
     let list_req = ListMessagesRequest {
         account_id: session.account_id.clone(),
@@ -1619,12 +1822,12 @@ async fn handle_select<W: AsyncWrite + Unpin>(
 
     let mut msgs = list_resp.messages;
     msgs.sort_by_key(|m| m.uid);
-    session.uid_map = msgs.iter().map(|m| m.uid).collect();
+    let new_uid_map: Vec<u64> = msgs.iter().map(|m| m.uid).collect();
     // The session's message view is capped at the list limit, so EXISTS must
     // report the size of the resolvable view (uid_map), not the store's total
     // count — otherwise EXISTS > highest usable sequence number and clients
     // desync when fetching the phantom tail.
-    session.exists = session.uid_map.len().min(u32::MAX as usize) as u32;
+    let new_exists = new_uid_map.len().min(u32::MAX as usize) as u32;
 
     // RFC 3501 §6.3.1: [UNSEEN n] is the sequence number of the FIRST unseen
     // message, sent only when the mailbox contains unseen messages.
@@ -1632,6 +1835,16 @@ async fn handle_select<W: AsyncWrite + Unpin>(
         .iter()
         .position(|m| !m.flags.clone().unwrap_or_default().seen)
         .map(|i| i as u32 + 1);
+
+    // All fallible work succeeded — NOW switch the session to the new view.
+    session.mailbox = mailbox.clone();
+    session.read_only = read_only;
+    session.uid_validity = mb.uidvalidity.max(1);
+    session.uid_next = mb.uidnext.max(1);
+    session.exists = new_exists;
+    session.recent = mb.recent;
+    session.state = SessionState::Selected;
+    session.uid_map = new_uid_map;
 
     let mut responses = String::new();
     responses.push_str(&format!("* {} EXISTS\r\n", session.exists));
@@ -1643,6 +1856,12 @@ async fn handle_select<W: AsyncWrite + Unpin>(
     responses.push_str(&permanent_flags_response(&session.permanent_flags));
     responses.push_str(&uid_validity_response(session.uid_validity));
     responses.push_str(&uid_next_response(session.uid_next));
+    // L14(e): when the store holds more messages than the session's capped
+    // view can resolve, say so — STATUS still reports the true count, and
+    // the mismatch would otherwise confuse clients silently.
+    if let Some(notice) = view_capped_notice(session.exists, mb.exists) {
+        responses.push_str(&notice);
+    }
 
     if read_only {
         responses.push_str(&tagged_ok(
@@ -1664,7 +1883,85 @@ async fn handle_select<W: AsyncWrite + Unpin>(
 enum BodySection {
     Full,
     Header,
+    /// BODY[HEADER.FIELDS (a b c)] (+ the .NOT variant).
+    HeaderFields {
+        fields: Vec<String>,
+        not: bool,
+    },
     Text,
+    /// BODY[n] or BODY[n.MIME] (dot-separated part path, e.g. "1.2").
+    Part {
+        number: String,
+        mime: bool,
+    },
+}
+
+impl BodySection {
+    /// Response attribute name for a `BODY[...]` fetch of this section
+    /// (RFC 3501 §7.4.2: the response echoes the requested section spec).
+    fn response_name(&self) -> String {
+        match self {
+            BodySection::Full => "BODY[]".to_string(),
+            BodySection::Header => "BODY[HEADER]".to_string(),
+            BodySection::HeaderFields { fields, not } => format!(
+                "BODY[HEADER.FIELDS{} ({})]",
+                if *not { ".NOT" } else { "" },
+                fields.join(" ")
+            ),
+            BodySection::Text => "BODY[TEXT]".to_string(),
+            BodySection::Part { number, mime } => {
+                format!("BODY[{}{}]", number, if *mime { ".MIME" } else { "" })
+            }
+        }
+    }
+}
+
+/// Parse the section spec between `BODY[` and `]` (L2). Returns an error for
+/// unsupported/malformed specs so they surface as a tagged BAD instead of
+/// being silently dropped.
+fn parse_body_section(spec: &str) -> Result<BodySection> {
+    let spec = spec.trim();
+    if spec.is_empty() {
+        return Ok(BodySection::Full);
+    }
+    if spec.eq_ignore_ascii_case("HEADER") {
+        return Ok(BodySection::Header);
+    }
+    if spec.eq_ignore_ascii_case("TEXT") {
+        return Ok(BodySection::Text);
+    }
+    let upper = spec.to_uppercase();
+    if let Some(list) = upper
+        .strip_prefix("HEADER.FIELDS.NOT")
+        .or_else(|| upper.strip_prefix("HEADER.FIELDS"))
+    {
+        let list = list.trim();
+        let inner = list
+            .strip_prefix('(')
+            .and_then(|l| l.strip_suffix(')'))
+            .ok_or_else(|| anyhow::anyhow!("HEADER.FIELDS requires a (field list)"))?;
+        let fields: Vec<String> = inner.split_whitespace().map(str::to_string).collect();
+        if fields.is_empty() {
+            bail!("HEADER.FIELDS requires at least one field name");
+        }
+        return Ok(BodySection::HeaderFields {
+            fields,
+            not: upper.starts_with("HEADER.FIELDS.NOT"),
+        });
+    }
+    // Part spec: digits dotted with digits, optional .MIME suffix.
+    let (number, mime) = match upper.strip_suffix(".MIME") {
+        Some(num) => (num.to_string(), true),
+        None => (upper.clone(), false),
+    };
+    let valid_part = !number.is_empty()
+        && number.split('.').all(|component| {
+            !component.is_empty() && component.chars().all(|c| c.is_ascii_digit())
+        });
+    if valid_part {
+        return Ok(BodySection::Part { number, mime });
+    }
+    bail!("Unsupported BODY section: {}", spec)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1732,6 +2029,212 @@ fn header_and_text(raw: &[u8]) -> (&[u8], &[u8]) {
     (raw, &[])
 }
 
+/// L2: filter a raw header block down to the named fields (BODY[HEADER.FIELDS
+/// (...)]); with `not`, everything EXCEPT the named fields. Folded
+/// continuation lines stay attached to their field. The result always ends
+/// with the terminating blank line (RFC 3501 §6.4.5).
+fn filter_header_fields(header: &[u8], fields: &[String], not: bool) -> Vec<u8> {
+    let text = String::from_utf8_lossy(header);
+    let mut out = String::new();
+    let mut current_matches = false;
+    for line in text.lines() {
+        let trimmed = line.trim_end_matches('\r');
+        if trimmed.is_empty() {
+            continue; // the terminating blank line is re-added below
+        }
+        let is_continuation = trimmed.starts_with(' ') || trimmed.starts_with('\t');
+        if !is_continuation {
+            let name = trimmed.split(':').next().unwrap_or("").trim();
+            current_matches = fields.iter().any(|f| f.eq_ignore_ascii_case(name));
+        }
+        let include = if not {
+            !current_matches
+        } else {
+            current_matches
+        };
+        if include {
+            out.push_str(trimmed);
+            out.push_str("\r\n");
+        }
+    }
+    // The header block always ends with the terminating empty line
+    // (RFC 3501 §6.4.5).
+    out.push_str("\r\n");
+    out.into_bytes()
+}
+
+/// Parse the boundary parameter of a multipart Content-Type header value.
+fn multipart_boundary(content_type: &str) -> Option<String> {
+    let lower = content_type.to_lowercase();
+    if !lower.trim_start().starts_with("multipart") {
+        return None;
+    }
+    let idx = lower.find("boundary=")?;
+    let after = &content_type[idx + "boundary=".len()..];
+    let after = after.trim();
+    let boundary = if let Some(stripped) = after.strip_prefix('"') {
+        let end = stripped.find('"')?;
+        &stripped[..end]
+    } else {
+        let end = after.find(';').unwrap_or(after.len());
+        &after[..end]
+    };
+    let boundary = boundary.trim();
+    if boundary.is_empty() {
+        None
+    } else {
+        Some(boundary.to_string())
+    }
+}
+
+/// Find a header field's value in a raw header block (first match,
+/// case-insensitive name), with lines joined by single spaces.
+fn raw_header_value(header: &[u8], name: &str) -> Option<String> {
+    let text = String::from_utf8_lossy(header);
+    let mut value: Option<String> = None;
+    for line in text.lines() {
+        let trimmed = line.trim_end_matches('\r');
+        if trimmed.starts_with(' ') || trimmed.starts_with('\t') {
+            if let Some(v) = value.as_mut() {
+                v.push(' ');
+                v.push_str(trimmed.trim());
+            }
+            continue;
+        }
+        let mut parts = trimmed.splitn(2, ':');
+        let key = parts.next().unwrap_or("").trim();
+        if key.eq_ignore_ascii_case(name) {
+            value = Some(parts.next().unwrap_or("").trim().to_string());
+        }
+    }
+    value
+}
+
+/// One MIME part found between boundary delimiters.
+struct MimePart<'a> {
+    /// The part's MIME header block, including the terminating blank line.
+    header: &'a [u8],
+    /// The part's content (after the header blank line, before the CRLF that
+    /// belongs to the next boundary delimiter).
+    content: &'a [u8],
+}
+
+/// Split a header block from its content at the first blank line; the header
+/// return value includes the terminating blank line.
+fn split_part_header(part: &[u8]) -> (&[u8], &[u8]) {
+    if let Some(p) = find_subslice(part, b"\r\n\r\n") {
+        (&part[..p + 4], &part[p + 4..])
+    } else if let Some(p) = find_subslice(part, b"\n\n") {
+        (&part[..p + 2], &part[p + 2..])
+    } else {
+        (part, &[])
+    }
+}
+
+/// Split a multipart body into its parts using `boundary` (RFC 2046):
+/// the preamble before the first `--boundary` line and the epilogue after
+/// `--boundary--` are discarded. The CRLF preceding each delimiter belongs
+/// to the delimiter, not to the part content (so BODY[n] round-trips what
+/// the sender wrote).
+fn split_multipart<'a>(body: &'a [u8], boundary: &str) -> Vec<MimePart<'a>> {
+    let delim = format!("--{}", boundary);
+    let close = format!("{}--", delim);
+
+    // Collect (line_start, line_end_incl_newline) offsets.
+    let mut lines: Vec<(usize, usize)> = Vec::new();
+    let mut i = 0;
+    while i < body.len() {
+        let nl = body[i..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|p| i + p + 1)
+            .unwrap_or(body.len());
+        lines.push((i, nl));
+        i = nl;
+    }
+
+    let mut parts = Vec::new();
+    let mut part_start: Option<usize> = None;
+    for &(start, end) in &lines {
+        let line = String::from_utf8_lossy(&body[start..end]);
+        let trimmed = line.trim_end_matches(['\r', '\n']);
+        let is_delim = trimmed == delim;
+        let is_close = trimmed == close;
+        if is_delim || is_close {
+            if let Some(ps) = part_start.take() {
+                // Strip the CRLF that belongs to this delimiter line.
+                let mut content_end = start;
+                if content_end > ps && body.get(content_end - 1) == Some(&b'\n') {
+                    content_end -= 1;
+                    if content_end > ps && body.get(content_end - 1) == Some(&b'\r') {
+                        content_end -= 1;
+                    }
+                }
+                let part = &body[ps..content_end.max(ps)];
+                let (header, content) = split_part_header(part);
+                parts.push(MimePart { header, content });
+            }
+            if is_delim {
+                part_start = Some(end);
+            } else {
+                break;
+            }
+        }
+    }
+    parts
+}
+
+/// L2: extract BODY[n] / BODY[n.MIME] content from a raw MIME message.
+///
+/// `number` is a dot-separated part path ("1", "2.1", ...). A non-existent
+/// part yields empty bytes (RFC 3501 §6.4.5: a non-existent section returns
+/// an empty string, not an error). For non-multipart content part 1 is the
+/// body itself (for message/rfc822 parts that is the encapsulated message,
+/// headers included, per RFC 3501 §6.4.5).
+fn extract_body_part(raw: &[u8], number: &str, mime: bool) -> Vec<u8> {
+    let components: Vec<&str> = number.split('.').collect();
+    let mut region: Vec<u8> = raw.to_vec();
+    for (i, comp) in components.iter().enumerate() {
+        let Ok(idx) = comp.parse::<usize>() else {
+            return Vec::new();
+        };
+        if idx == 0 {
+            return Vec::new();
+        }
+        let (header, body) = split_part_header(&region);
+        let is_last = i + 1 == components.len();
+        let content_type = raw_header_value(header, "Content-Type").unwrap_or_default();
+        if let Some(boundary) = multipart_boundary(&content_type) {
+            let parts = split_multipart(body, &boundary);
+            let Some(part) = parts.get(idx - 1) else {
+                return Vec::new();
+            };
+            if is_last {
+                return if mime {
+                    part.header.to_vec()
+                } else {
+                    part.content.to_vec()
+                };
+            }
+            // Descend with the ENTIRE part (its MIME header block + its
+            // content): the next component indexes the sub-multipart whose
+            // Content-Type lives in THIS part's headers.
+            region = [part.header, part.content].concat();
+        } else {
+            // Not multipart at this level: part 1 is the body; a higher
+            // part number does not exist.
+            if idx != 1 {
+                return Vec::new();
+            }
+            if is_last {
+                return if mime { header.to_vec() } else { body.to_vec() };
+            }
+            region = body.to_vec();
+        }
+    }
+    Vec::new()
+}
+
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
@@ -1751,9 +2254,20 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
         return write_line(writer, &tagged_bad(tag, "No mailbox selected")).await;
     }
 
-    let (seq_part, items_str) = parse_fetch_args(args)?;
-    let items = parse_fetch_items(&items_str)?;
-    let intervals = parse_sequence_set(&seq_part)?;
+    let (seq_part, items_str) = match parse_fetch_args(args) {
+        Ok(v) => v,
+        Err(e) => return write_line(writer, &tagged_bad(tag, &format!("{}", e))).await,
+    };
+    // L2/L13: unsupported or malformed fetch items must surface as a tagged
+    // BAD (RFC 3501) — never a silent substitution or drop.
+    let items = match parse_fetch_items(&items_str) {
+        Ok(items) => items,
+        Err(e) => return write_line(writer, &tagged_bad(tag, &format!("{}", e))).await,
+    };
+    let intervals = match parse_sequence_set(&seq_part) {
+        Ok(v) => v,
+        Err(e) => return write_line(writer, &tagged_bad(tag, &format!("{}", e))).await,
+    };
     // Fetch the full mailbox listing so sequence numbers are correct and
     // wildcards resolve against actual contents.
     let mut client = session.client.clone();
@@ -1791,6 +2305,13 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
     // responses) are resident at any time; each response is written to the
     // socket as its chunk completes, so no additional per-command cap on
     // body FETCHes is needed.
+    //
+    // Deliberate (documented) bound: the mailbox view itself is capped at
+    // MAX_RESOLVED_UIDS (100k) messages per sequence set by the resolver,
+    // and each chunk's bodies stream; there is no CHANGEDSINCE-style paging.
+    // A full FETCH range therefore costs one bounded metadata pass plus the
+    // streamed body fetches — accepted for an IMAP4rev1 server of this
+    // scale rather than implementing QRESYNC-style paging.
     const FETCH_CONCURRENCY: usize = 8;
     for chunk in uids.chunks(FETCH_CONCURRENCY) {
         let mut body_futures = Vec::new();
@@ -1815,16 +2336,17 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
         // Fetch this chunk's bodies with bounded concurrency. Results are
         // keyed by UID; responses are emitted in sequence-number order, so
         // completing out of order does not affect the FETCH response.
-        let body_results: HashMap<u64, Result<GetMessageBody>> =
+        // L12: the tonic Status is preserved so a failed per-message body
+        // fetch can fail the whole command (NO) instead of silently
+        // stripping the BODY attributes from an OK response.
+        let body_results: HashMap<u64, Result<GetMessageBody, tonic::Status>> =
             futures::stream::iter(body_futures)
                 .buffer_unordered(FETCH_CONCURRENCY)
                 .map(|(uid, r)| {
-                    let parsed = r
-                        .map(|resp| {
-                            let resp = resp.into_inner();
-                            GetMessageBody { body: resp.body }
-                        })
-                        .map_err(|e| anyhow::anyhow!("{}", e));
+                    let parsed = r.map(|resp| {
+                        let resp = resp.into_inner();
+                        GetMessageBody { body: resp.body }
+                    });
                     (uid, parsed)
                 })
                 .collect()
@@ -1832,6 +2354,17 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
 
         // Emit responses in sequence-number order for this chunk.
         for &uid in chunk {
+            // L12: surface body-fetch failures. ResourceExhausted (the
+            // mailstore's per-account limiter) answers NO Server busy so the
+            // client retries later; other errors answer NO with the reason.
+            // Returning partial OK-with-missing-bodies desynced clients that
+            // rely on the requested attributes being present.
+            if need_body && matches!(body_results.get(&uid), Some(Err(_))) {
+                let status = body_results.get(&uid).and_then(|r| r.as_ref().err());
+                if let Some(status) = status {
+                    return write_line(writer, &fetch_body_failure_line(tag, status)).await;
+                }
+            }
             let meta = match meta_map.get(&uid) {
                 Some(m) => m,
                 None => continue,
@@ -1899,7 +2432,7 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
     seq: u32,
     meta: &mail_proto::MessageMeta,
     items: &[FetchItem],
-    body: Option<&Result<GetMessageBody>>,
+    body: Option<&Result<GetMessageBody, tonic::Status>>,
     is_uid: bool,
     sets_seen: bool,
 ) -> Result<()> {
@@ -1914,9 +2447,12 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
     for item in items {
         for ritem in resolve_macro_item(item) {
             match ritem {
-                FetchItem::Uid => {
+                // L11: in UID mode the UID attribute is prepended exactly
+                // once below; an explicit UID item must not add a second.
+                FetchItem::Uid if !is_uid => {
                     attrs.push(format!("UID {}", uid));
                 }
+                FetchItem::Uid => {}
                 FetchItem::Flags => {
                     attrs.push(format!("FLAGS {}", format_imap_flags(&flags)));
                 }
@@ -1948,12 +2484,19 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
                         None => continue,
                     };
                     let (header, text) = header_and_text(raw);
-                    let section_bytes: &[u8] = match section {
-                        BodySection::Full => raw,
-                        BodySection::Header => header,
-                        BodySection::Text => text,
+                    // L2: resolve the requested section to its bytes,
+                    // including HEADER.FIELDS filtering and MIME part
+                    // extraction.
+                    let section_bytes: Vec<u8> = match &section {
+                        BodySection::Full => raw.to_vec(),
+                        BodySection::Header => header.to_vec(),
+                        BodySection::Text => text.to_vec(),
+                        BodySection::HeaderFields { fields, not } => {
+                            filter_header_fields(header, fields, *not)
+                        }
+                        BodySection::Part { number, mime } => extract_body_part(raw, number, *mime),
                     };
-                    let mut payload = section_bytes.to_vec();
+                    let mut payload = section_bytes;
                     // RFC 3501 §7.4.2: a partial fetch response names the
                     // section with its origin, e.g. BODY[HEADER]<0>.
                     let resp_name = match partial {
@@ -1961,11 +2504,8 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
                         None => name.clone(),
                     };
                     if let Some((offset, octets)) = partial {
-                        let end = if octets == 0 {
-                            payload.len()
-                        } else {
-                            offset.saturating_add(octets).min(payload.len())
-                        };
+                        // octets > 0 is guaranteed by split_partial_spec.
+                        let end = offset.saturating_add(octets).min(payload.len());
                         if offset < payload.len() {
                             payload = payload[offset..end].to_vec();
                         } else {
@@ -2031,17 +2571,34 @@ fn parse_fetch_args(args: &str) -> Result<(String, String)> {
 }
 
 /// Split a `<offset.octets>` partial-fetch suffix off a fetch item name.
-fn split_partial_spec(item: &str) -> (String, Option<(usize, usize)>) {
-    if let Some(pos) = item.find('<') {
-        let name = item[..pos].trim().to_string();
-        let spec = item[pos + 1..].trim().trim_end_matches('>');
-        let parts: Vec<&str> = spec.splitn(2, '.').collect();
-        let offset = parts.first().and_then(|p| p.parse().ok()).unwrap_or(0);
-        let octets = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
-        (name, Some((offset, octets)))
-    } else {
-        (item.to_string(), None)
+/// L13: the spec must be well formed and `octets` must be > 0 — RFC 3501
+/// §6.4.5 has no zero-length partial; the old code silently treated a
+/// malformed/zero-octets spec as "return the whole tail".
+fn split_partial_spec(item: &str) -> Result<(String, Option<(usize, usize)>)> {
+    let Some(pos) = item.find('<') else {
+        return Ok((item.trim().to_string(), None));
+    };
+    let name = item[..pos].trim().to_string();
+    let spec = item[pos + 1..].trim().trim_end_matches('>');
+    let parts: Vec<&str> = spec.splitn(2, '.').collect();
+    if parts.len() != 2 {
+        bail!("Invalid partial spec <{}>: expected <offset.octets>", spec);
     }
+    let offset: usize = parts[0]
+        .trim()
+        .parse()
+        .with_context(|| format!("Invalid partial offset in <{}>", spec))?;
+    let octets: usize = parts[1]
+        .trim()
+        .parse()
+        .with_context(|| format!("Invalid partial octet count in <{}>", spec))?;
+    if octets == 0 {
+        bail!(
+            "Invalid partial spec <{}>: octet count must be greater than zero",
+            spec
+        );
+    }
+    Ok((name, Some((offset, octets))))
 }
 
 fn parse_fetch_items(items_str: &str) -> Result<Vec<FetchItem>> {
@@ -2057,7 +2614,7 @@ fn parse_fetch_items(items_str: &str) -> Result<Vec<FetchItem>> {
 
     for token in tokens {
         let upper = token.to_uppercase();
-        let (name, partial) = split_partial_spec(&upper);
+        let (name, partial) = split_partial_spec(&upper)?;
         match name.as_str() {
             "FLAGS" => items.push(FetchItem::Flags),
             "INTERNALDATE" => items.push(FetchItem::InternalDate),
@@ -2067,6 +2624,11 @@ fn parse_fetch_items(items_str: &str) -> Result<Vec<FetchItem>> {
             "FAST" => items.push(FetchItem::Fast),
             "FULL" => items.push(FetchItem::Full),
             "ALL" => items.push(FetchItem::All),
+            // L2: BODYSTRUCTURE (and bare BODY) are not implemented —
+            // reject them with a tagged BAD instead of silently substituting
+            // ALL (which answered FLAGS+ENVELOPE as if ALL had been asked).
+            "BODYSTRUCTURE" => bail!("BODYSTRUCTURE not supported"),
+            "BODY" => bail!("BODY (body structure) not supported; request BODY[...] instead"),
             "RFC822" => items.push(FetchItem::Body {
                 section: BodySection::Full,
                 peek: false,
@@ -2085,79 +2647,41 @@ fn parse_fetch_items(items_str: &str) -> Result<Vec<FetchItem>> {
                 name: "RFC822.TEXT".to_string(),
                 partial,
             }),
-            "BODY[]" => items.push(FetchItem::Body {
-                section: BodySection::Full,
-                peek: false,
-                name: "BODY[]".to_string(),
-                partial,
-            }),
-            "BODY[HEADER]" => items.push(FetchItem::Body {
-                section: BodySection::Header,
-                peek: false,
-                name: "BODY[HEADER]".to_string(),
-                partial,
-            }),
-            "BODY[TEXT]" => items.push(FetchItem::Body {
-                section: BodySection::Text,
-                peek: false,
-                name: "BODY[TEXT]".to_string(),
-                partial,
-            }),
-            "BODY.PEEK[]" => items.push(FetchItem::Body {
-                section: BodySection::Full,
-                peek: true,
-                name: "BODY[]".to_string(),
-                partial,
-            }),
-            "BODY.PEEK[HEADER]" => items.push(FetchItem::Body {
-                section: BodySection::Header,
-                peek: true,
-                name: "BODY[HEADER]".to_string(),
-                partial,
-            }),
-            "BODY.PEEK[TEXT]" => items.push(FetchItem::Body {
-                section: BodySection::Text,
-                peek: true,
-                name: "BODY[TEXT]".to_string(),
-                partial,
-            }),
             _ => {
-                if upper.starts_with("BODY.PEEK[") || upper.starts_with("BODY[") {
-                    let peek = upper.starts_with("BODY.PEEK[");
-                    let rest = if peek {
-                        token["BODY.PEEK".len()..].trim()
-                    } else {
-                        token["BODY".len()..].trim()
-                    };
-                    let (rest, partial) = split_partial_spec(rest);
-                    if rest == "]" || rest == "[]" {
-                        items.push(FetchItem::Body {
-                            section: BodySection::Full,
-                            peek,
-                            name: "BODY[]".to_string(),
-                            partial,
-                        });
-                    } else if rest.eq_ignore_ascii_case("HEADER]") {
-                        items.push(FetchItem::Body {
-                            section: BodySection::Header,
-                            peek,
-                            name: "BODY[HEADER]".to_string(),
-                            partial,
-                        });
-                    } else if rest.eq_ignore_ascii_case("TEXT]") {
-                        items.push(FetchItem::Body {
-                            section: BodySection::Text,
-                            peek,
-                            name: "BODY[TEXT]".to_string(),
-                            partial,
-                        });
-                    }
+                // `name` already has any `<partial>` suffix stripped (and is
+                // uppercased), so the `[section]` suffix can be split safely.
+                if let Some(section_spec) = name
+                    .strip_prefix("BODY.PEEK[")
+                    .and_then(|rest| rest.strip_suffix(']'))
+                {
+                    let section = parse_body_section(section_spec)?;
+                    items.push(FetchItem::Body {
+                        name: BodySection::response_name(&section),
+                        section,
+                        peek: true,
+                        partial,
+                    });
+                } else if let Some(section_spec) = name
+                    .strip_prefix("BODY[")
+                    .and_then(|rest| rest.strip_suffix(']'))
+                {
+                    let section = parse_body_section(section_spec)?;
+                    items.push(FetchItem::Body {
+                        name: BodySection::response_name(&section),
+                        section,
+                        peek: false,
+                        partial,
+                    });
+                } else {
+                    bail!("Unknown FETCH item: {}", token);
                 }
             }
         }
     }
+    // L2: an empty item list is a client syntax error (RFC 3501 requires at
+    // least one item) — BAD, not a silent ALL substitution.
     if items.is_empty() {
-        items.push(FetchItem::All);
+        bail!("FETCH requires at least one item");
     }
     Ok(items)
 }
@@ -2165,7 +2689,7 @@ fn parse_fetch_items(items_str: &str) -> Result<Vec<FetchItem>> {
 fn tokenize_fetch_items(s: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
-    let mut depth = 0;
+    let mut depth = 0usize;
     for c in s.chars() {
         match c {
             '[' => {
@@ -2173,19 +2697,20 @@ fn tokenize_fetch_items(s: &str) -> Vec<String> {
                 current.push(c);
             }
             ']' => {
-                if depth > 0 {
-                    depth -= 1;
-                }
+                depth = depth.saturating_sub(1);
                 current.push(c);
             }
-            '(' => {
+            // Parenthesized lists inside a BODY[...] section (e.g.
+            // HEADER.FIELDS (DATE FROM)) stay inside the token; parens
+            // outside brackets delimit the item list itself.
+            '(' if depth == 0 => {
                 let trimmed = current.trim().to_string();
                 if !trimmed.is_empty() {
                     tokens.push(trimmed);
                 }
                 current.clear();
             }
-            ')' => {
+            ')' if depth == 0 => {
                 let trimmed = current.trim().to_string();
                 if !trimmed.is_empty() {
                     tokens.push(trimmed);
@@ -2399,6 +2924,9 @@ async fn handle_search<W: AsyncWrite + Unpin>(
 
     let mut keep: Vec<&mail_proto::MessageMeta> = all.iter().collect();
     let mut fulltext_terms: Vec<String> = Vec::new();
+    // L8: (field, value) pairs collected from HEADER criteria; each runs as
+    // its own headers-JSONB search and ANDs into the result set.
+    let mut header_criteria: Vec<(String, String)> = Vec::new();
 
     let tokens = match collect_search_tokens(args, literals) {
         Ok(t) => t,
@@ -2422,10 +2950,17 @@ async fn handle_search<W: AsyncWrite + Unpin>(
             "UNANSWERED" => keep.retain(|m| !flags_of(m).answered),
             "DRAFT" => keep.retain(|m| flags_of(m).draft),
             "UNDRAFT" => keep.retain(|m| !flags_of(m).draft),
-            "RECENT" => keep.retain(|m| flags_of(m).recent),
-            "UNRECENT" => keep.retain(|m| !flags_of(m).recent),
-            "NEW" => keep.retain(|m| !flags_of(m).seen && flags_of(m).recent),
-            "OLD" => keep.retain(|m| !flags_of(m).recent),
+            // L13: \Recent semantics are not implemented (the store has no
+            // per-session recent tracking on the wire). RECENT/NEW/OLD used
+            // to silently match nothing, which is worse than an explicit
+            // BAD: clients can distinguish "unsupported" from "no matches".
+            "RECENT" | "UNRECENT" | "NEW" | "OLD" => {
+                return write_line(
+                    writer,
+                    &tagged_bad(tag, "RECENT/NEW/OLD not supported by this server"),
+                )
+                .await;
+            }
             "SUBJECT" | "FROM" | "TO" | "CC" | "BCC" => {
                 i += 1;
                 if i < tokens.len() {
@@ -2505,16 +3040,24 @@ async fn handle_search<W: AsyncWrite + Unpin>(
                     fulltext_terms.push(tokens[i].clone());
                 }
             }
-            // HEADER <field> <value>: consume the field name and search on
-            // the value only (the mailstore fulltext query covers headers).
+            // L8: HEADER <field> <value> filters on the named header field
+            // via the mailstore's headers-JSONB containment search — the old
+            // code ignored the field name and searched the subject/body
+            // fulltext index on the value alone, so `HEADER Message-ID x`
+            // could be satisfied by a subject containing x.
             "HEADER" => {
-                i += 1; // skip HEADER
-                if i < tokens.len() {
-                    i += 1; // skip the field name
+                i += 1;
+                let field = tokens.get(i).cloned().unwrap_or_default();
+                i += 1;
+                let value = tokens.get(i).cloned().unwrap_or_default();
+                if field.is_empty() || value.is_empty() {
+                    return write_line(
+                        writer,
+                        &tagged_bad(tag, "HEADER requires a field name and a value"),
+                    )
+                    .await;
                 }
-                if i < tokens.len() {
-                    fulltext_terms.push(tokens[i].clone());
-                }
+                header_criteria.push((field, value));
             }
             other => {
                 return write_line(
@@ -2527,7 +3070,36 @@ async fn handle_search<W: AsyncWrite + Unpin>(
         i += 1;
     }
 
+    // L8: each HEADER criterion runs as its own mailstore headers-JSONB
+    // search (field name honored; see header_search_query for the wire
+    // convention) and intersects the accumulated set — AND semantics, one
+    // RPC per criterion.
+    for (field, value) in &header_criteria {
+        let req = SearchMessagesRequest {
+            account_id: session.account_id.clone(),
+            mailbox: session.mailbox.clone(),
+            query: header_search_query(field, value),
+            limit: 100_000,
+            offset: 0,
+        };
+        match client.search_messages(req).await {
+            Ok(resp) => {
+                let found: HashSet<u64> =
+                    resp.into_inner().messages.iter().map(|m| m.uid).collect();
+                keep.retain(|m| found.contains(&m.uid));
+            }
+            Err(e) => {
+                warn!("mailstore header search failed: {}", e);
+                return write_line(writer, &tagged_no(tag, &format!("SEARCH failed: {}", e))).await;
+            }
+        }
+    }
+
     if !fulltext_terms.is_empty() {
+        // Deliberate, documented semantics: multiple BODY/TEXT terms are
+        // joined and sent as ONE fulltext query, which the mailstore
+        // evaluates as a stemmed AND (`plainto_tsquery`). This is not a
+        // literal substring match and we do not pretend otherwise.
         let joined = fulltext_terms.join(" ");
         let req = SearchMessagesRequest {
             account_id: session.account_id.clone(),
@@ -2580,6 +3152,32 @@ async fn handle_search<W: AsyncWrite + Unpin>(
 
 fn parse_imap_date(s: &str) -> Option<chrono::NaiveDate> {
     chrono::NaiveDate::parse_from_str(s.trim(), "%d-%b-%Y").ok()
+}
+
+/// L8: encode an IMAP `SEARCH HEADER <field> <value>` as a mailstore search
+/// query. The proto's SearchMessagesRequest has a single `query` string, so
+/// the two crates share this wire convention: `header:<field>\x01<value>`.
+/// The separator is the first \x01, and the convention only triggers with
+/// BOTH the prefix and the separator, so ordinary fulltext queries (even one
+/// starting with "header:") are unaffected. See mailstore-core's
+/// `parse_header_query` (the decoding side).
+fn header_search_query(field: &str, value: &str) -> String {
+    format!("header:{}\x01{}", field, value)
+}
+
+/// L14(e): notice emitted on SELECT when the session's resolvable view is
+/// smaller than the store's true message count (mailbox larger than the
+/// 100k list cap). STATUS keeps reporting the true count, so the client is
+/// told explicitly instead of silently observing EXISTS < STATUS MESSAGES.
+fn view_capped_notice(view_exists: u32, store_exists: u32) -> Option<String> {
+    if store_exists > view_exists {
+        Some(format!(
+            "* OK [ALERT] Mailbox has {} messages; only the first {} are visible in this session\r\n",
+            store_exists, view_exists
+        ))
+    } else {
+        None
+    }
 }
 
 // ── COPY / MOVE ─────────────────────────────────────────────────────────────
@@ -2767,6 +3365,32 @@ fn expunge_response_lines(seqs: &[u32]) -> String {
     let mut out = String::new();
     for &s in seqs {
         out.push_str(&format!("* {} EXPUNGE\r\n", s));
+    }
+    out
+}
+
+/// L5: untagged lines describing a session-view transition from
+/// `old_uid_map` to `new_uids`: an EXPUNGE (descending sequence order, per
+/// RFC 3501 §7.4.1) for every message that disappeared, then EXISTS when
+/// the view gained messages or changed size. Shared by NOOP/CHECK and the
+/// IDLE event path so polling clients learn about removals by other
+/// sessions, not just arrivals.
+fn view_update_lines(old_uid_map: &[u64], new_uids: &[u64]) -> String {
+    let new_set: HashSet<u64> = new_uids.iter().copied().collect();
+    let old_set: HashSet<u64> = old_uid_map.iter().copied().collect();
+    let removed: Vec<u64> = old_uid_map
+        .iter()
+        .copied()
+        .filter(|u| !new_set.contains(u))
+        .collect();
+    let added_any = new_uids.iter().any(|u| !old_set.contains(u));
+
+    let mut out = expunge_response_lines(&expunge_seqs_descending(old_uid_map, &removed));
+    if added_any || new_uids.len() != old_uid_map.len() {
+        out.push_str(&format!(
+            "* {} EXISTS\r\n",
+            new_uids.len().min(u32::MAX as usize) as u32
+        ));
     }
     out
 }
@@ -2984,12 +3608,20 @@ impl RenameApi for MailstoreClient {
 
 /// Core RENAME flow. Returns Ok(()) on success; Err(msg) maps to a tagged NO
 /// and guarantees the source mailbox was NOT deleted.
+///
+/// L9: RFC 3501 §6.3.5 — RENAME INBOX moves all messages to the new mailbox
+/// and leaves INBOX empty but existing. INBOX is never deleted (the
+/// mailstore refuses to delete the system mailbox anyway); the old flow
+/// emptied it and THEN failed on the delete, reporting an error after the
+/// damage was done.
 async fn rename_mailbox_flow(
     api: &mut dyn RenameApi,
     account_id: &str,
     old_name: &str,
     new_name: &str,
 ) -> Result<(), String> {
+    let is_inbox = old_name.eq_ignore_ascii_case("INBOX");
+
     api.create_mailbox(account_id, new_name)
         .await
         .map_err(|e| format!("RENAME failed: {}", e))?;
@@ -3025,9 +3657,9 @@ async fn rename_mailbox_flow(
         uid_max = oldest - 1;
     }
 
-    // Completeness check: only delete the source when it is verifiably
-    // empty. Anything left (move failure swallowed upstream, concurrent
-    // delivery, ...) keeps the mailbox — and its messages — intact.
+    // Completeness check: only finish when the source is verifiably empty.
+    // Anything left (move failure swallowed upstream, concurrent delivery,
+    // ...) is an error; the mailbox — and its messages — stay intact.
     let remaining = api
         .list_page(account_id, old_name, 1, u64::MAX, 1)
         .await
@@ -3038,9 +3670,13 @@ async fn rename_mailbox_flow(
         );
     }
 
-    api.delete_mailbox(account_id, old_name)
-        .await
-        .map_err(|e| format!("RENAME failed: could not delete source mailbox: {}", e))?;
+    // L9: INBOX stays — empty but existing (RFC 3501 §6.3.5). Only regular
+    // mailboxes are deleted after a rename.
+    if !is_inbox {
+        api.delete_mailbox(account_id, old_name)
+            .await
+            .map_err(|e| format!("RENAME failed: could not delete source mailbox: {}", e))?;
+    }
     Ok(())
 }
 
@@ -3119,17 +3755,20 @@ async fn handle_list<W: AsyncWrite + Unpin>(
         let delim = if mb.delimiter.is_empty() {
             "NIL".to_string()
         } else {
-            format!("\"{}\"", mb.delimiter)
+            mailbox_astring(&mb.delimiter)
         };
         let mut attrs = mb.attributes.clone();
         if is_subscribed(&session.account_id, &mb.name).await {
             attrs.push("\\Subscribed".to_string());
         }
+        // L7: the (client-controlled) name is escaped/stripped by
+        // mailbox_astring so it cannot terminate the quoted string or split
+        // the response line.
         responses.push_str(&format!(
-            "* LIST ({}) {} \"{}\"\r\n",
+            "* LIST ({}) {} {}\r\n",
             attrs.join(" "),
             delim,
-            imap_utf7_encode(&mb.name)
+            mailbox_astring(&imap_utf7_encode(&mb.name))
         ));
     }
     responses.push_str(&tagged_ok(tag, "LIST completed"));
@@ -3149,7 +3788,15 @@ async fn handle_lsub<W: AsyncWrite + Unpin>(
     let (reference, pattern) = parse_list_args(args, literals);
     let pattern = imap_utf7_decode(&combine_list_pattern(&reference, &pattern));
 
-    let subscribed = subscribed_mailboxes(&session.account_id).await;
+    // L13: the subscription table (see its module comment) is the
+    // authoritative source for LSUB — reflect it honestly: every subscribed
+    // name matching the pattern is listed, even when the mailbox no longer
+    // exists in the mailstore (reported with no attributes).
+    let mut subscribed: Vec<String> = subscribed_mailboxes(&session.account_id)
+        .await
+        .into_iter()
+        .collect();
+    subscribed.sort();
 
     let mut client = session.client.clone();
     let req = ListMailboxesRequest {
@@ -3165,21 +3812,31 @@ async fn handle_lsub<W: AsyncWrite + Unpin>(
     };
 
     let mut responses = String::new();
-    for mb in resp.mailboxes {
-        let is_sub = subscribed.iter().any(|s| s.eq_ignore_ascii_case(&mb.name));
-        if !is_sub || !imap_pattern_match(&mb.name, &pattern) {
+    for name in &subscribed {
+        if !imap_pattern_match(name, &pattern) {
             continue;
         }
-        let delim = if mb.delimiter.is_empty() {
-            "NIL".to_string()
-        } else {
-            format!("\"{}\"", mb.delimiter)
+        let existing = resp
+            .mailboxes
+            .iter()
+            .find(|mb| mb.name.eq_ignore_ascii_case(name));
+        let (attrs, delim) = match existing {
+            Some(mb) => (
+                mb.attributes.join(" "),
+                if mb.delimiter.is_empty() {
+                    "NIL".to_string()
+                } else {
+                    mailbox_astring(&mb.delimiter)
+                },
+            ),
+            None => (String::new(), "\"/\"".to_string()),
         };
+        // L7: escape the name — it may contain quotes (via literals).
         responses.push_str(&format!(
-            "* LSUB ({}) {} \"{}\"\r\n",
-            mb.attributes.join(" "),
+            "* LSUB ({}) {} {}\r\n",
+            attrs,
             delim,
-            imap_utf7_encode(&mb.name)
+            mailbox_astring(&imap_utf7_encode(name))
         ));
     }
     responses.push_str(&tagged_ok(tag, "LSUB completed"));
@@ -3308,12 +3965,31 @@ async fn handle_status<W: AsyncWrite + Unpin>(
 
     let mut responses = String::new();
     responses.push_str(&format!(
-        "* STATUS \"{}\" ({})\r\n",
-        imap_utf7_encode(&mailbox),
+        "* STATUS {} ({})\r\n",
+        mailbox_astring(&imap_utf7_encode(&mailbox)),
         parts.join(" ")
     ));
     responses.push_str(&tagged_ok(tag, "STATUS completed"));
     write_line(writer, &responses).await
+}
+
+/// Parse an IMAP date-time (APPEND internal date, RFC 3501 date-time
+/// format) into a Unix timestamp.
+fn parse_append_datetime(date_str: &str) -> Result<i64> {
+    chrono::DateTime::parse_from_str(date_str.trim(), "%d-%b-%Y %H:%M:%S %z")
+        .map(|dt| dt.timestamp())
+        .with_context(|| format!("Invalid date-time: {}", date_str))
+}
+
+/// L3: the APPEND internal-date decision — NOW when the client omitted the
+/// date-time token (proto 0 used to stamp 1970-01-01), the exact parsed
+/// timestamp when present.
+fn append_internal_date(tokens: &[String], idx: usize, literals: &[Vec<u8>]) -> Result<i64> {
+    if idx < tokens.len() && tokens[idx].starts_with('"') {
+        parse_append_datetime(&resolve_token(&tokens[idx], literals))
+    } else {
+        Ok(chrono::Utc::now().timestamp())
+    }
 }
 
 // ── APPEND ──────────────────────────────────────────────────────────────────
@@ -3370,20 +4046,22 @@ async fn handle_append<W: AsyncWrite + Unpin>(
         idx += 1;
     }
 
-    let mut internal_date: i64 = 0;
-    if idx < tokens.len() && tokens[idx].starts_with('"') {
-        let date_str = resolve_token(&tokens[idx], literals);
-        let parsed = chrono::DateTime::parse_from_str(&date_str, "%d-%b-%Y %H:%M:%S %z");
-        match parsed {
-            Ok(dt) => internal_date = dt.timestamp(),
-            Err(_) => {
-                return write_line(
-                    writer,
-                    &tagged_bad(tag, &format!("Invalid date-time: {}", date_str)),
-                )
-                .await;
-            }
+    // L3: an omitted APPEND date-time means "now", not epoch 0 (see
+    // append_internal_date). The mailstore also maps proto 0 to now, but
+    // this layer sends the real timestamp so the two agree. (No caller
+    // legitimately sends epoch 0: the SMTP path sends Utc::now().)
+    let internal_date = match append_internal_date(&tokens, idx, literals) {
+        Ok(ts) => ts,
+        Err(_) => {
+            return write_line(
+                writer,
+                &tagged_bad(tag, "Invalid date-time: command rejected"),
+            )
+            .await;
         }
+    };
+    // Advance past the date token when one was consumed.
+    if idx < tokens.len() && tokens[idx].starts_with('"') {
         idx += 1;
     }
 
@@ -3563,17 +4241,36 @@ async fn handle_noop<W: AsyncWrite + Unpin>(
 ) -> Result<()> {
     let mut responses = String::new();
     if mailbox_selected(session) && !session.mailbox.is_empty() {
-        // Refresh mailbox status so polling clients learn about new mail.
+        let old_uid_map = session.uid_map.clone();
+        let mut client = session.client.clone();
         if let Ok(status) =
-            get_mailbox_status(&mut session.client, &session.account_id, &session.mailbox).await
+            get_mailbox_status(&mut client, &session.account_id, &session.mailbox).await
         {
             let mb = status.into_inner().mailbox.unwrap_or_default();
-            if mb.exists != session.exists {
-                // Refresh first, then report EXISTS from the session's
-                // resolvable view so the count always matches the uid_map
-                // (the store count may exceed the capped list view).
-                refresh_session_view(session).await;
-                responses.push_str(&format!("* {} EXISTS\r\n", session.exists));
+
+            // L5: re-list the mailbox so polling clients learn about messages
+            // REMOVED by other sessions (EXPUNGE), not just about arrivals.
+            // The diff shares the IDLE path's logic via view_update_lines.
+            let list_req = ListMessagesRequest {
+                account_id: session.account_id.clone(),
+                mailbox: session.mailbox.clone(),
+                uid_min: 1,
+                uid_max: u64::MAX,
+                limit: 100_000,
+            };
+            if let Ok(resp) = client.list_messages(list_req).await {
+                let mut new_uids: Vec<u64> =
+                    resp.into_inner().messages.iter().map(|m| m.uid).collect();
+                new_uids.sort_unstable();
+                new_uids.dedup();
+                responses.push_str(&view_update_lines(&old_uid_map, &new_uids));
+                session.uid_map = new_uids;
+                // EXISTS reports the size of the session's resolvable view
+                // (the capped uid_map), keeping sequence numbers consistent.
+                session.exists = session.uid_map.len().min(u32::MAX as usize) as u32;
+                if let Some(&last) = session.uid_map.last() {
+                    session.uid_next = session.uid_next.max(last.saturating_add(1));
+                }
             }
             if mb.recent != session.recent {
                 responses.push_str(&format!("* {} RECENT\r\n", mb.recent));
@@ -3601,6 +4298,9 @@ async fn handle_close<W: AsyncWrite + Unpin>(
     }
 
     // CLOSE = EXPUNGE (silently) + deselect (RFC 3501 §6.4.2).
+    // L13: an expunge failure is reported (NO) and the session stays
+    // selected — the old code swallowed the error and deselected anyway,
+    // leaving the client with silently-unexpunged \Deleted messages.
     if !session.read_only {
         let mut client = session.client.clone();
         let req = ExpungeRequest {
@@ -3609,7 +4309,14 @@ async fn handle_close<W: AsyncWrite + Unpin>(
             // CLOSE expunges every \Deleted message (no UID set).
             uids: Vec::new(),
         };
-        let _ = client.expunge(req).await;
+        if let Err(e) = client.expunge(req).await {
+            warn!("CLOSE expunge failed for {}: {}", session.mailbox, e);
+            return write_line(
+                writer,
+                &tagged_no(tag, &format!("CLOSE failed: expunge error: {}", e)),
+            )
+            .await;
+        }
     }
 
     session.state = SessionState::Authenticated;
@@ -4069,10 +4776,22 @@ async fn handle_plaintext_with_starttls(
     writer.write_all(greeting.as_bytes()).await?;
     writer.flush().await?;
 
+    // L1: per-connection literal budget for the pre-STARTTLS reads.
+    let mut conn_state = ConnectionReadState::default();
+
     loop {
         // Re-read commands with literal support in case a client uses a
-        // literal for its username.
-        let command = match read_command(&mut reader, &mut writer).await {
+        // literal for its username. L1: bounded read — a client that stalls
+        // before STARTTLS gets a BYE and is dropped.
+        let command = match read_command_bounded(
+            &mut reader,
+            &mut writer,
+            &ReadLimits::default(),
+            &mut conn_state,
+            COMMAND_READ_TIMEOUT,
+        )
+        .await
+        {
             Ok(Some(c)) => c,
             Ok(None) => return Ok(()),
             Err(e) => {
@@ -4187,6 +4906,10 @@ async fn serve<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin
         writer.flush().await?;
     }
 
+    // L1: per-connection literal budget shared by every command read below.
+    let mut conn_state = ConnectionReadState::default();
+    let limits = ReadLimits::default();
+
     loop {
         // If the session is idling, wait for DONE / mailbox updates / timeout.
         let idle_tag = {
@@ -4204,8 +4927,18 @@ async fn serve<R: tokio::io::AsyncRead + Unpin, W: tokio::io::AsyncWrite + Unpin
 
         // Read the next command with full literal support. Errors here mean
         // the stream is desynchronized (e.g. a truncated literal): close the
-        // connection rather than trying to resync.
-        let command = match read_command(&mut reader, &mut writer).await {
+        // connection rather than trying to resync. L1: the read is bounded by
+        // COMMAND_READ_TIMEOUT (plus the per-connection literal budget held
+        // in `conn_state`) so abandoned or stalling sockets die with a BYE.
+        let command = match read_command_bounded(
+            &mut reader,
+            &mut writer,
+            &limits,
+            &mut conn_state,
+            COMMAND_READ_TIMEOUT,
+        )
+        .await
+        {
             Ok(Some(c)) => c,
             Ok(None) => break,
             Err(e) => {
@@ -4261,6 +4994,61 @@ fn parse_imap_line(line: &str) -> Result<(String, String, String)> {
     Ok((tag.to_string(), cmd.to_string(), args.to_string()))
 }
 
+// ── Connection admission control (L1) ───────────────────────────────────────
+//
+// Without a cap, an unauthenticated client can open thousands of sockets and
+// each one holds a session, buffers and a mailstore gRPC channel. The caps
+// below are enforced at the accept loops (both 143 and 993 share one
+// limiter). Connections beyond the cap are closed immediately with an
+// untagged BYE; the slot is released when the connection task finishes.
+
+/// Maximum simultaneous IMAP connections server-wide (both ports combined).
+const MAX_TOTAL_CONNECTIONS: usize = 500;
+/// Maximum simultaneous connections from a single source IP.
+const MAX_CONNECTIONS_PER_IP: usize = 50;
+
+/// Admission state for the accept loops. Guarded by a tokio Mutex; the
+/// critical section is two integer comparisons, so contention is negligible.
+#[derive(Debug, Default)]
+struct ConnectionLimiter {
+    total: usize,
+    per_ip: HashMap<std::net::IpAddr, usize>,
+}
+
+impl ConnectionLimiter {
+    /// Try to reserve one slot for `ip`; `false` when a cap would be exceeded.
+    fn try_acquire(&mut self, ip: std::net::IpAddr) -> bool {
+        if self.total >= MAX_TOTAL_CONNECTIONS {
+            return false;
+        }
+        let slot = self.per_ip.entry(ip).or_insert(0);
+        if *slot >= MAX_CONNECTIONS_PER_IP {
+            return false;
+        }
+        *slot += 1;
+        self.total += 1;
+        true
+    }
+
+    /// Release the slot held for `ip`.
+    fn release(&mut self, ip: std::net::IpAddr) {
+        self.total = self.total.saturating_sub(1);
+        if let Some(slot) = self.per_ip.get_mut(&ip) {
+            *slot = slot.saturating_sub(1);
+            if *slot == 0 {
+                self.per_ip.remove(&ip);
+            }
+        }
+    }
+}
+
+/// Reject an over-cap connection: say BYE and close. The write is
+/// best-effort — the socket may already be gone.
+async fn reject_connection(mut stream: TcpStream, reason: &str) {
+    let _ = stream.write_all(bye(reason).as_bytes()).await;
+    let _ = stream.shutdown().await;
+}
+
 // ── Main ────────────────────────────────────────────────────────────────────
 
 #[tokio::main]
@@ -4290,6 +5078,9 @@ async fn main() -> Result<()> {
 
     let tls_acceptor = configure_tls(cli.tls_cert_path.as_deref(), cli.tls_key_path.as_deref())?;
 
+    // L1: one admission limiter shared by both accept loops.
+    let conn_limiter = Arc::new(Mutex::new(ConnectionLimiter::default()));
+
     let imap_addr = format!("{}:{}", cli.listen_addr, cli.imap_port);
     let imap_listener = TcpListener::bind(&imap_addr)
         .await
@@ -4310,15 +5101,27 @@ async fn main() -> Result<()> {
         let acceptor = acceptor.clone();
         let mailstore = cli.mailstore_addr.clone();
         let mailstore_auth = mailstore_auth.clone();
+        let conn_limiter = Arc::clone(&conn_limiter);
         Some(tokio::spawn(async move {
             loop {
                 match imaps_listener.accept().await {
                     Ok((stream, addr)) => {
+                        if !conn_limiter.lock().await.try_acquire(addr.ip()) {
+                            warn!("IMAPS connection from {} rejected: connection cap", addr);
+                            let stream = stream;
+                            tokio::spawn(reject_connection(
+                                stream,
+                                "Too many connections; try again later",
+                            ));
+                            continue;
+                        }
                         let acceptor = acceptor.clone();
                         let mailstore = mailstore.clone();
                         let mailstore_auth = mailstore_auth.clone();
+                        let limiter = Arc::clone(&conn_limiter);
+                        let ip = addr.ip();
                         tokio::spawn(async move {
-                            if let Err(e) = handle_connection(
+                            let result = handle_connection(
                                 stream,
                                 Some(acceptor),
                                 mailstore,
@@ -4326,8 +5129,9 @@ async fn main() -> Result<()> {
                                 true,
                                 false,
                             )
-                            .await
-                            {
+                            .await;
+                            limiter.lock().await.release(ip);
+                            if let Err(e) = result {
                                 error!("Connection error from {}: {}", addr, e);
                             }
                         });
@@ -4346,11 +5150,21 @@ async fn main() -> Result<()> {
     loop {
         match imap_listener.accept().await {
             Ok((stream, addr)) => {
+                if !conn_limiter.lock().await.try_acquire(addr.ip()) {
+                    warn!("IMAP connection from {} rejected: connection cap", addr);
+                    tokio::spawn(reject_connection(
+                        stream,
+                        "Too many connections; try again later",
+                    ));
+                    continue;
+                }
                 let mailstore = mailstore.clone();
                 let mailstore_auth = mailstore_auth.clone();
                 let tls_for_plaintext = plaintext_tls_acceptor.clone();
+                let limiter = Arc::clone(&conn_limiter);
+                let ip = addr.ip();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(
+                    let result = handle_connection(
                         stream,
                         tls_for_plaintext,
                         mailstore,
@@ -4358,8 +5172,9 @@ async fn main() -> Result<()> {
                         false,
                         allow_insecure_auth,
                     )
-                    .await
-                    {
+                    .await;
+                    limiter.lock().await.release(ip);
+                    if let Err(e) = result {
                         error!("Connection error from {}: {}", addr, e);
                     }
                 });
@@ -5010,19 +5825,42 @@ mod tests {
     #[test]
     fn literal_budget_unit_matrix() {
         const MB: usize = 1024 * 1024;
+        let limits = ReadLimits::default();
         // Single literal within per-literal and total caps.
-        assert!(literal_within_budget(0, 0, 32 * MB));
+        assert!(literal_within_budget(0, 0, 32 * MB, &limits, 0));
         // A single literal over MAX_LITERAL_SIZE fails.
-        assert!(!literal_within_budget(0, 0, 32 * MB + 1));
+        assert!(!literal_within_budget(0, 0, 32 * MB + 1, &limits, 0));
         // The "100 x 32MB" scenario: two 32MB literals total exactly 64MB
         // (allowed at the cap), one byte more is refused.
-        assert!(literal_within_budget(1, 32 * MB, 32 * MB));
-        assert!(!literal_within_budget(1, 32 * MB, 32 * MB + 1));
+        assert!(literal_within_budget(1, 32 * MB, 32 * MB, &limits, 0));
+        assert!(!literal_within_budget(1, 32 * MB, 32 * MB + 1, &limits, 0));
         // Count cap: the 65th literal is refused regardless of size.
-        assert!(!literal_within_budget(MAX_LITERALS_PER_COMMAND, 0, 1));
-        assert!(literal_within_budget(MAX_LITERALS_PER_COMMAND - 1, 0, 1));
+        assert!(!literal_within_budget(
+            limits.max_literals_per_command,
+            0,
+            1,
+            &limits,
+            0
+        ));
+        assert!(literal_within_budget(
+            limits.max_literals_per_command - 1,
+            0,
+            1,
+            &limits,
+            0
+        ));
         // Total saturates instead of overflowing.
-        assert!(!literal_within_budget(0, usize::MAX, 1));
+        assert!(!literal_within_budget(0, usize::MAX, 1, &limits, 0));
+        // L1: the per-connection cumulative cap refuses literals that are
+        // individually legal once the connection's budget is spent.
+        assert!(!literal_within_budget(
+            0,
+            0,
+            32 * MB,
+            &limits,
+            limits.max_total_per_connection
+        ));
+        assert!(literal_within_budget(0, 0, 32 * MB, &limits, 0));
     }
 
     #[tokio::test]
@@ -5060,10 +5898,7 @@ mod tests {
             "literal count bomb must be an error, got {:?}",
             result
         );
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("per-command budget"));
+        assert!(result.unwrap_err().to_string().contains("budget"));
     }
 
     // ── D: FETCH response emission ─────────────────────────────────────────
@@ -5163,7 +5998,10 @@ mod tests {
                 partial: None,
             },
         ];
-        let body: Result<GetMessageBody> = Err(anyhow::anyhow!("backend down"));
+        // L12: with a Status-typed error the handler aborts with NO before
+        // emitting; emit still degrades gracefully if reached directly.
+        let body: Result<GetMessageBody, tonic::Status> =
+            Err(tonic::Status::internal("backend down"));
         emit_fetch_response(&mut w, 9, 1, &meta, &items, Some(&body), false, false)
             .await
             .unwrap();
@@ -5315,5 +6153,691 @@ mod tests {
         assert!(res.is_err());
         assert!(res.unwrap_err().contains("rename incomplete"));
         assert!(api.deleted.is_empty(), "source mailbox must survive");
+    }
+
+    // ── L2: FETCH items must not be silently dropped ───────────────────────
+
+    #[test]
+    fn fetch_bodystructure_and_bare_body_are_rejected_not_substituted() {
+        // `FETCH 1 BODYSTRUCTURE` used to fall through and push
+        // FetchItem::All — returning FLAGS+ENVELOPE as if ALL was requested.
+        assert!(
+            parse_fetch_items("BODYSTRUCTURE").is_err(),
+            "BODYSTRUCTURE must be a tagged BAD, not a silent ALL substitution"
+        );
+        assert!(
+            parse_fetch_items("BODY").is_err(),
+            "bare BODY must be a tagged BAD"
+        );
+        // An empty item list is a syntax error, not ALL.
+        assert!(parse_fetch_items("").is_err());
+        assert!(parse_fetch_items("()").is_err());
+    }
+
+    // ── L13: partial spec with zero octets is invalid ──────────────────────
+
+    #[test]
+    fn partial_fetch_with_zero_octets_is_rejected() {
+        assert!(parse_fetch_items("BODY[]<0.0>").is_err());
+        assert!(parse_fetch_items("BODY[TEXT]<10.0>").is_err());
+        // Valid partials still parse.
+        assert!(parse_fetch_items("BODY[]<0.100>").is_ok());
+    }
+
+    // ── L11: UID FETCH must emit exactly one UID attribute ─────────────────
+
+    #[tokio::test]
+    async fn uid_fetch_emits_exactly_one_uid_attribute() {
+        let mut w = VecWriter::new();
+        let meta = mail_proto::MessageMeta {
+            uid: 7,
+            ..Default::default()
+        };
+        // `UID FETCH 1 (UID FLAGS)`
+        let items = vec![FetchItem::Uid, FetchItem::Flags];
+        emit_fetch_response(&mut w, 7, 1, &meta, &items, None, true, false)
+            .await
+            .unwrap();
+        let out = w.output();
+        assert_eq!(
+            out.matches("UID 7").count(),
+            1,
+            "UID FETCH must not duplicate the UID attribute, got {:?}",
+            out
+        );
+        assert!(out.starts_with("* 1 FETCH (UID 7"), "got {:?}", out);
+    }
+
+    // ── L4: ENVELOPE Reply-To defaults to From ─────────────────────────────
+
+    #[test]
+    fn envelope_reply_to_defaults_to_from() {
+        let env = mail_proto::EmailEnvelope {
+            from: "someone@example.com".to_string(),
+            reply_to: String::new(),
+            ..Default::default()
+        };
+        let s = format_envelope(&env);
+        // from, sender AND reply_to positions must all render the From
+        // address (the address is split into mbox/host inside the envelope).
+        let addr = "(NIL NIL \"someone\" \"example.com\")";
+        assert_eq!(
+            s.matches(addr).count(),
+            3,
+            "reply_to must default to from, got {:?}",
+            s
+        );
+        // An explicit Reply-To is honored.
+        let env2 = mail_proto::EmailEnvelope {
+            from: "someone@example.com".to_string(),
+            reply_to: "other@example.com".to_string(),
+            ..Default::default()
+        };
+        let s2 = format_envelope(&env2);
+        assert!(
+            s2.contains("(NIL NIL \"other\" \"example.com\")"),
+            "explicit reply_to must win, got {:?}",
+            s2
+        );
+        assert_eq!(
+            s2.matches("(NIL NIL \"someone\" \"example.com\")").count(),
+            2
+        );
+    }
+
+    // ── L9: RENAME INBOX moves messages but never deletes INBOX ────────────
+
+    #[tokio::test]
+    async fn rename_inbox_moves_messages_and_keeps_inbox() {
+        let mut api = MockRenameApi::new((1..=5).collect());
+        let res = rename_mailbox_flow(&mut api, "acct", "INBOX", "Target").await;
+        assert!(res.is_ok(), "got {:?}", res);
+        assert_eq!(api.moved.len(), 5, "messages must move to the new mailbox");
+        assert!(
+            api.deleted.is_empty(),
+            "INBOX must never be deleted (RFC 3501 §6.3.5)"
+        );
+        assert!(api.created == vec!["Target".to_string()]);
+    }
+
+    // ── L12: body-fetch failure must surface as NO, not a silent skip ──────
+
+    #[test]
+    fn body_fetch_failure_maps_to_no_response() {
+        let exhausted = fetch_body_failure_line("a1", &tonic::Status::resource_exhausted("lim"));
+        assert!(exhausted.starts_with("a1 NO "), "got {:?}", exhausted);
+        assert!(exhausted.contains("Server busy"), "got {:?}", exhausted);
+
+        let other = fetch_body_failure_line("a2", &tonic::Status::internal("backend exploded"));
+        assert!(other.starts_with("a2 NO "), "got {:?}", other);
+        assert!(other.contains("backend exploded"), "got {:?}", other);
+    }
+
+    // ── L7: mailbox names cannot break out of the quoted string ────────────
+
+    #[test]
+    fn mailbox_astring_escapes_quotes_and_strips_crlf() {
+        let hostile = "x\" * 1 EXPUNGE\r\nz";
+        let rendered = mailbox_astring(hostile);
+        assert!(
+            !rendered.contains("\r") && !rendered.contains("\n"),
+            "CRLF must be stripped, got {:?}",
+            rendered
+        );
+        assert!(rendered.starts_with('"') && rendered.ends_with('"'));
+        // Unescaping the quoted form recovers the name (minus stripped CRLF),
+        // proving every embedded quote is escaped.
+        assert_eq!(unquote(&rendered), "x\" * 1 EXPUNGEz");
+        // Ordinary names pass through quoted.
+        assert_eq!(mailbox_astring("INBOX"), "\"INBOX\"");
+    }
+
+    // ── L1: connection admission control ───────────────────────────────────
+
+    #[test]
+    fn connection_limiter_enforces_total_and_per_ip_caps() {
+        use std::net::{IpAddr, Ipv4Addr};
+        let ip = |n: u8| IpAddr::V4(Ipv4Addr::new(10, 0, 0, n));
+        let mut limiter = ConnectionLimiter::default();
+
+        // Per-IP cap: MAX_CONNECTIONS_PER_IP from one address...
+        for _ in 0..MAX_CONNECTIONS_PER_IP {
+            assert!(limiter.try_acquire(ip(1)));
+        }
+        // ...then refused, while another IP still gets in.
+        assert!(!limiter.try_acquire(ip(1)), "per-IP cap must hold");
+        assert!(limiter.try_acquire(ip(2)));
+
+        // Release restores the slot.
+        limiter.release(ip(1));
+        assert!(limiter.try_acquire(ip(1)));
+
+        // Global cap: fill up to the total from distinct IPs.
+        let mut limiter = ConnectionLimiter::default();
+        let mut acquired = 0;
+        'outer: for n in 1..=254u8 {
+            for _ in 0..MAX_CONNECTIONS_PER_IP {
+                if !limiter.try_acquire(ip(n)) {
+                    break 'outer;
+                }
+                acquired += 1;
+                if acquired == MAX_TOTAL_CONNECTIONS {
+                    break 'outer;
+                }
+            }
+        }
+        assert_eq!(acquired, MAX_TOTAL_CONNECTIONS);
+        // Any further connection from ANY IP is refused.
+        assert!(!limiter.try_acquire(ip(254)));
+        // Releasing one makes room for exactly one more.
+        limiter.release(ip(1));
+        assert!(limiter.try_acquire(ip(200)));
+    }
+
+    // ── L1: read timeout + incremental literal + cumulative budget ─────────
+
+    #[tokio::test]
+    async fn read_command_times_out_and_says_bye() {
+        use tokio::io::AsyncWriteExt;
+        let (mut client_io, server_io) = tokio::io::duplex(1 << 16);
+        let (server_r, mut server_w) = tokio::io::split(server_io);
+        let mut reader = BufReader::new(server_r);
+
+        // Client sends a partial command then stalls forever.
+        client_io.write_all(b"a1 NOOP").await.unwrap();
+        client_io.flush().await.unwrap();
+
+        let result = read_command_bounded(
+            &mut reader,
+            &mut server_w,
+            &ReadLimits::default(),
+            &mut ConnectionReadState::default(),
+            Duration::from_millis(100),
+        )
+        .await;
+        assert!(result.is_err(), "stalled read must time out");
+
+        // The server must have said BYE before dropping the connection.
+        let mut buf = [0u8; 256];
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let n = client_io.read(&mut buf).await.unwrap();
+                if n == 0 {
+                    break;
+                }
+                let text = String::from_utf8_lossy(&buf[..n]).to_string();
+                if text.contains("* BYE") {
+                    assert!(text.contains("timeout"), "got {:?}", text);
+                    return;
+                }
+            }
+            panic!("no BYE received before EOF");
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn read_command_large_declared_literal_stall_does_not_block() {
+        use tokio::io::AsyncWriteExt;
+        let (mut client_io, server_io) = tokio::io::duplex(1 << 16);
+        let (server_r, mut server_w) = tokio::io::split(server_io);
+        let mut reader = BufReader::new(server_r);
+
+        // Declare a 32 MiB literal, send a few bytes, then stall. The old
+        // code pre-allocated 32 MiB and blocked in read_exact; now the read
+        // is incremental AND deadline-bounded, so the connection dies.
+        let client_task = tokio::spawn(async move {
+            client_io
+                .write_all(b"a1 APPEND INBOX {33554432+}\r\n")
+                .await
+                .unwrap();
+            client_io.write_all(&[b'x'; 4096]).await.unwrap();
+            let mut sink = [0u8; 16];
+            let _ = client_io.read(&mut sink).await;
+        });
+
+        let started = std::time::Instant::now();
+        let result = read_command_bounded(
+            &mut reader,
+            &mut server_w,
+            &ReadLimits::default(),
+            &mut ConnectionReadState::default(),
+            Duration::from_millis(150),
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "declared-but-stalled literal must time out"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout must fire promptly"
+        );
+        client_task.abort();
+    }
+
+    #[tokio::test]
+    async fn read_command_cumulative_literal_budget_is_enforced() {
+        use tokio::io::AsyncWriteExt;
+        let (client_io, server_io) = tokio::io::duplex(1 << 16);
+        let (server_r, mut server_w) = tokio::io::split(server_io);
+        let mut reader = BufReader::new(server_r);
+
+        // Tiny per-connection budget: one 6-byte literal fits per command,
+        // but the SECOND command exceeds the cumulative cap.
+        let limits = ReadLimits {
+            max_total_per_connection: 8,
+            ..ReadLimits::default()
+        };
+        let mut conn = ConnectionReadState::default();
+
+        let client_task = tokio::spawn(async move {
+            let mut client_io = client_io;
+            client_io
+                .write_all(b"a1 NOOP {6+}\r\nabcdef\r\n")
+                .await
+                .unwrap();
+            // Block until the server side closes (EOF) so the task returns.
+            let mut sink = [0u8; 64];
+            let _ = client_io.read(&mut sink).await;
+        });
+
+        let first = read_command_limited(&mut reader, &mut server_w, &limits, &mut conn).await;
+        assert!(first.is_ok(), "first literal is within budget");
+        drop(first);
+
+        // EOF the duplex so the client task's trailing read finishes, then
+        // join it. The budget accounting on the connection state must now
+        // refuse even a legal-sized literal for the NEXT command.
+        drop(reader);
+        drop(server_w);
+        let _ = client_task.await;
+
+        assert!(!literal_within_budget(
+            0,
+            0,
+            6,
+            &limits,
+            conn.literal_bytes_total
+        ));
+        assert_eq!(conn.literal_bytes_total, 6);
+    }
+
+    #[tokio::test]
+    async fn read_literal_chunked_reads_exact_bytes() {
+        let (mut client_io, server_io) = tokio::io::duplex(4096);
+        let (server_r, _server_w) = tokio::io::split(server_io);
+        let mut reader = BufReader::new(server_r);
+
+        let payload: Vec<u8> = (0..=255u8).cycle().take(1000).collect();
+        let expected = payload.clone();
+        let writer_task = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            client_io.write_all(&payload).await.unwrap();
+        });
+
+        // Small chunk size via a short read: 1000 bytes fed through the
+        // default 64 KiB chunk path.
+        let read = read_literal_chunked(&mut reader, 1000).await.unwrap();
+        writer_task.await.unwrap();
+        assert_eq!(read, expected);
+        // Zero-size literal is an immediate empty buffer.
+        assert!(read_literal_chunked(&mut reader, 0)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    // ── L2: fetch body sections ────────────────────────────────────────────
+
+    #[test]
+    fn fetch_items_parse_header_fields_and_parts() {
+        // HEADER.FIELDS with a parenthesized list stays one token.
+        let toks = tokenize_fetch_items("BODY[HEADER.FIELDS (DATE FROM)]");
+        assert_eq!(toks, vec!["BODY[HEADER.FIELDS (DATE FROM)]".to_string()]);
+
+        let items = parse_fetch_items("BODY[HEADER.FIELDS (DATE FROM)]").unwrap();
+        assert_eq!(
+            items,
+            vec![FetchItem::Body {
+                section: BodySection::HeaderFields {
+                    fields: vec!["DATE".to_string(), "FROM".to_string()],
+                    not: false,
+                },
+                peek: false,
+                name: "BODY[HEADER.FIELDS (DATE FROM)]".to_string(),
+                partial: None,
+            }]
+        );
+
+        let items = parse_fetch_items("BODY.PEEK[HEADER.FIELDS.NOT (X-Spam)]").unwrap();
+        assert_eq!(
+            items[0],
+            FetchItem::Body {
+                section: BodySection::HeaderFields {
+                    fields: vec!["X-SPAM".to_string()],
+                    not: true,
+                },
+                peek: true,
+                name: "BODY[HEADER.FIELDS.NOT (X-SPAM)]".to_string(),
+                partial: None,
+            }
+        );
+
+        // Part numbers and .MIME.
+        assert_eq!(
+            parse_fetch_items("BODY[1]").unwrap()[0],
+            FetchItem::Body {
+                section: BodySection::Part {
+                    number: "1".to_string(),
+                    mime: false,
+                },
+                peek: false,
+                name: "BODY[1]".to_string(),
+                partial: None,
+            }
+        );
+        assert_eq!(
+            parse_fetch_items("BODY.PEEK[4.2.MIME]").unwrap()[0],
+            FetchItem::Body {
+                section: BodySection::Part {
+                    number: "4.2".to_string(),
+                    mime: true,
+                },
+                peek: true,
+                name: "BODY[4.2.MIME]".to_string(),
+                partial: None,
+            }
+        );
+
+        // Unknown tokens and malformed sections are BAD, not dropped.
+        assert!(parse_fetch_items("BODY[NOTASECTION]").is_err());
+        assert!(parse_fetch_items("BODY[1.2.HEADER.FIELDS (X)]").is_err());
+        assert!(parse_fetch_items("BOGUS").is_err());
+
+        // Legacy simple sections still work.
+        assert_eq!(
+            parse_fetch_items("BODY.PEEK[TEXT]<0.50>").unwrap()[0],
+            FetchItem::Body {
+                section: BodySection::Text,
+                peek: true,
+                name: "BODY[TEXT]".to_string(),
+                partial: Some((0, 50)),
+            }
+        );
+    }
+
+    #[test]
+    fn header_fields_filter_returns_only_requested_fields() {
+        let raw = b"From: a@b.c\r\nSubject: folded\r\n subject-continued\r\nDate: Tue, 1 Jan 2030 00:00:00 +0000\r\nX-Junk: nope\r\n\r\nbody";
+        let (header, _) = header_and_text(raw);
+
+        let out = filter_header_fields(header, &["DATE".to_string(), "from".into()], false);
+        let text = String::from_utf8_lossy(&out).to_string();
+        assert_eq!(
+            text, "From: a@b.c\r\nDate: Tue, 1 Jan 2030 00:00:00 +0000\r\n\r\n",
+            "exactly the requested fields + terminating blank line, in message order"
+        );
+
+        // The .NOT variant keeps everything else; folded continuation lines
+        // stay attached to their field (original bytes preserved).
+        let out = filter_header_fields(header, &["X-Junk".to_string()], true);
+        let text = String::from_utf8_lossy(&out).to_string();
+        assert!(text.contains("Subject: folded\r\n subject-continued"));
+        assert!(text.contains("From: a@b.c"));
+        assert!(!text.contains("X-Junk"));
+        assert!(text.ends_with("\r\n\r\n"));
+    }
+
+    const MULTIPART_RAW: &[u8] = b"Content-Type: multipart/mixed; boundary=\"BB\"\r\nSubject: outer\r\n\r\npreamble is ignored\r\n--BB\r\nContent-Type: text/plain; charset=us-ascii\r\n\r\nfirst part body\r\n--BB\r\nContent-Type: text/html\r\n\r\n<p>second</p>\r\n--BB--\r\nepilogue";
+
+    #[test]
+    fn body_part_extraction_returns_part_content() {
+        // Part 1 content excludes the part's MIME header and the boundary.
+        assert_eq!(
+            extract_body_part(MULTIPART_RAW, "1", false),
+            b"first part body".to_vec()
+        );
+        assert_eq!(
+            extract_body_part(MULTIPART_RAW, "2", false),
+            b"<p>second</p>".to_vec()
+        );
+        // .MIME returns the part's MIME header block (blank line included).
+        assert_eq!(
+            extract_body_part(MULTIPART_RAW, "1", true),
+            b"Content-Type: text/plain; charset=us-ascii\r\n\r\n".to_vec()
+        );
+        // A non-existent part is an empty string, not an error.
+        assert_eq!(
+            extract_body_part(MULTIPART_RAW, "3", false),
+            Vec::<u8>::new()
+        );
+    }
+
+    #[test]
+    fn body_part_extraction_non_multipart_part_one_is_body() {
+        let raw = b"From: a@b\r\nSubject: s\r\n\r\nplain body";
+        assert_eq!(extract_body_part(raw, "1", false), b"plain body".to_vec());
+        assert_eq!(extract_body_part(raw, "2", false), Vec::<u8>::new());
+        // .MIME of part 1 on a non-multipart message is the message header.
+        assert!(extract_body_part(raw, "1", true).starts_with(b"From: a@b\r\n"));
+    }
+
+    const NESTED_RAW: &[u8] = b"Content-Type: multipart/mixed; boundary=OUTER\r\n\r\n--OUTER\r\nContent-Type: multipart/alternative; boundary=INNER\r\n\r\n--INNER\r\nContent-Type: text/plain\r\n\r\ninner text\r\n--INNER--\r\n--OUTER\r\nContent-Type: text/plain\r\n\r\nouter second\r\n--OUTER--\r\n";
+
+    #[test]
+    fn body_part_extraction_supports_nested_numbering() {
+        assert_eq!(
+            extract_body_part(NESTED_RAW, "1.1", false),
+            b"inner text".to_vec()
+        );
+        assert_eq!(
+            extract_body_part(NESTED_RAW, "2", false),
+            b"outer second".to_vec()
+        );
+        // The nested part's MIME header is addressable as 1.1.MIME (the
+        // ".MIME" suffix is stripped by the fetch-item parser before it
+        // reaches here: number "1.1", mime=true).
+        assert_eq!(
+            extract_body_part(NESTED_RAW, "1.1", true),
+            b"Content-Type: text/plain\r\n\r\n".to_vec()
+        );
+        // The sub-multipart's own header is 1.MIME.
+        assert!(extract_body_part(NESTED_RAW, "1", true)
+            .starts_with(b"Content-Type: multipart/alternative"));
+    }
+
+    #[tokio::test]
+    async fn emit_fetch_response_header_fields_end_to_end() {
+        let mut w = VecWriter::new();
+        let meta = mail_proto::MessageMeta {
+            uid: 3,
+            ..Default::default()
+        };
+        let raw = b"From: a@b.c\r\nTo: x@y.z\r\nSubject: sub\r\n\r\nthe body";
+        let items = parse_fetch_items("BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)]").unwrap();
+        let body = Ok(GetMessageBody { body: raw.to_vec() });
+        emit_fetch_response(&mut w, 3, 1, &meta, &items, Some(&body), false, false)
+            .await
+            .unwrap();
+        let out = w.output();
+        // Exactly the requested headers (plus the terminating blank line) as
+        // a literal; NOT the whole message, NOT ALL-substituted flags.
+        let expected_payload = "From: a@b.c\r\nSubject: sub\r\n\r\n";
+        assert!(
+            out.contains(&format!(
+                "BODY[HEADER.FIELDS (FROM SUBJECT)] {{{}}}\r\n",
+                expected_payload.len()
+            )),
+            "unexpected response: {:?}",
+            out
+        );
+        // The literal ends with the blank line immediately before the paren.
+        assert!(
+            out.contains("From: a@b.c\r\nSubject: sub\r\n\r\n)"),
+            "got {:?}",
+            out
+        );
+        assert!(!out.contains("the body"));
+    }
+
+    #[tokio::test]
+    async fn emit_fetch_response_part_section_end_to_end() {
+        let mut w = VecWriter::new();
+        let meta = mail_proto::MessageMeta {
+            uid: 4,
+            ..Default::default()
+        };
+        let items = parse_fetch_items("BODY[1]").unwrap();
+        let body = Ok(GetMessageBody {
+            body: MULTIPART_RAW.to_vec(),
+        });
+        emit_fetch_response(&mut w, 4, 2, &meta, &items, Some(&body), true, false)
+            .await
+            .unwrap();
+        let out = w.output();
+        let expected = "first part body";
+        assert!(
+            out.contains(&format!(
+                "* 2 FETCH (UID 4 BODY[1] {{{}}}\r\n{})\r\n",
+                expected.len(),
+                expected
+            )),
+            "unexpected response: {:?}",
+            out
+        );
+    }
+
+    // ── L3: APPEND internal date ───────────────────────────────────────────
+
+    #[test]
+    fn append_internal_date_defaults_to_now_and_parses_explicit() {
+        let none_tokens: Vec<String> = vec![];
+        let before = chrono::Utc::now().timestamp();
+        let ts = append_internal_date(&none_tokens, 0, &[]).unwrap();
+        let after = chrono::Utc::now().timestamp();
+        assert!(
+            ts >= before && ts <= after,
+            "omitted date must be now, got {} ({}..{})",
+            ts,
+            before,
+            after
+        );
+
+        let explicit = vec!["\"01-Jan-2020 10:00:00 +0000\"".to_string()];
+        let ts = append_internal_date(&explicit, 0, &[]).unwrap();
+        assert_eq!(
+            ts,
+            chrono::DateTime::parse_from_rfc2822("Wed, 1 Jan 2020 10:00:00 +0000")
+                .unwrap()
+                .timestamp()
+        );
+
+        let bad = vec!["\"not a date\"".to_string()];
+        assert!(append_internal_date(&bad, 0, &[]).is_err());
+    }
+
+    // ── L5: NOOP EXPUNGE via view_update_lines ─────────────────────────────
+
+    #[test]
+    fn view_update_lines_emit_descending_expunges_then_exists() {
+        // UIDs 10,20,30 removed by another session; view goes 5 -> 2.
+        let old = vec![10u64, 20, 30, 40, 50];
+        let new = vec![40u64, 50];
+        let lines = view_update_lines(&old, &new);
+        assert_eq!(
+            lines,
+            "* 3 EXPUNGE\r\n* 2 EXPUNGE\r\n* 1 EXPUNGE\r\n* 2 EXISTS\r\n"
+        );
+
+        // Addition only: no EXPUNGE, one EXISTS.
+        let lines = view_update_lines(&[10], &[10, 20]);
+        assert_eq!(lines, "* 2 EXISTS\r\n");
+
+        // No change: silence (RFC 3501 §7.4.1 allows unsolicited updates but
+        // sending nothing is correct for an unchanged view).
+        assert_eq!(view_update_lines(&[10, 20], &[10, 20]), "");
+    }
+
+    // ── L6: SELECT leaves the session untouched on failure ────────────────
+
+    #[tokio::test]
+    async fn select_failure_keeps_session_authenticated() {
+        // A mailstore client on a definitely-unreachable endpoint: every RPC
+        // fails with a transport error, exercising the fallible path of
+        // SELECT without needing a real mailstore.
+        let channel = tonic::transport::Channel::builder("http://127.0.0.1:1".parse().unwrap())
+            .connect_lazy();
+        let interceptor = mail_proto::InternalServiceAuthInterceptor::new(None).unwrap();
+        let client = build_mailstore_client(channel, interceptor);
+        let mut session = ImapSession::new(client);
+        session.state = SessionState::Authenticated;
+        session.account_id = "11111111-1111-1111-1111-111111111111".to_string();
+
+        let mut w = VecWriter::new();
+        handle_select(&mut session, "a1", "INBOX", false, &[], &mut w)
+            .await
+            .unwrap();
+        let out = w.output();
+        assert!(
+            out.starts_with("a1 NO "),
+            "failure must be NO, got {:?}",
+            out
+        );
+        assert_eq!(
+            session.state,
+            SessionState::Authenticated,
+            "a failed SELECT must not half-select the session"
+        );
+        assert!(session.uid_map.is_empty());
+        assert!(session.mailbox.is_empty());
+    }
+
+    // ── L8: header search query convention ─────────────────────────────────
+
+    #[test]
+    fn header_search_query_matches_the_wire_convention() {
+        // Mirrors mailstore-core's parse_header_query — first \x01 separates
+        // field from value; prefix + separator required.
+        assert_eq!(
+            header_search_query("Message-ID", "<a@b>"),
+            "header:Message-ID\x01<a@b>"
+        );
+    }
+
+    // ── L13: SASL-IR parsing ───────────────────────────────────────────────
+
+    #[test]
+    fn authenticate_args_parse_mechanism_and_optional_initial_response() {
+        let (mech, ir) = parse_authenticate_args("PLAIN", &[]);
+        assert_eq!(mech, "PLAIN");
+        assert!(ir.is_none());
+
+        let (mech, ir) = parse_authenticate_args("PLAIN AGFyZQBwYXNz", &[]);
+        assert_eq!(mech, "PLAIN");
+        assert_eq!(ir.as_deref(), Some("AGFyZQBwYXNz"));
+
+        // RFC 4959: "=" encodes the empty initial response.
+        let (_, ir) = parse_authenticate_args("PLAIN =", &[]);
+        assert_eq!(ir.as_deref(), Some(""));
+
+        // A literal initial response resolves too.
+        let literals = vec![b"literal-ir".to_vec()];
+        let (_, ir) = parse_authenticate_args("PLAIN \x01LIT0\x01", &literals);
+        assert_eq!(ir.as_deref(), Some("literal-ir"));
+    }
+
+    // ── L14(e): capped-view notice ─────────────────────────────────────────
+
+    #[test]
+    fn view_capped_notice_emitted_only_when_store_exceeds_view() {
+        assert!(view_capped_notice(100_000, 100_001).is_some());
+        let notice = view_capped_notice(100_000, 100_001).unwrap();
+        assert!(notice.starts_with("* OK [ALERT]"));
+        assert!(notice.contains("100001"));
+        assert!(notice.contains("100000"));
+        assert!(view_capped_notice(100, 100).is_none());
+        assert!(view_capped_notice(100, 99).is_none());
     }
 }

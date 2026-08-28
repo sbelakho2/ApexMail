@@ -177,6 +177,34 @@ async fn initialize_schema_inner(db: &PgPool) -> Result<(), SalesError> {
     // ── Campaigns ──────────────────────────────────────────────────────
     sqlx::query(
         r#"
+            -- sales_leads is lazily created by the CRM service (crm_pg),
+            -- but campaign start resolves its audience against it — a
+            -- route-initialized deployment without a CRM touch would fail
+            -- every start with "relation sales_leads does not exist".
+            -- Same canonical shape as crm_pg's bootstrap.
+            CREATE TABLE IF NOT EXISTS sales_leads (
+                id          TEXT PRIMARY KEY,
+                tenant_id   TEXT NOT NULL,
+                company_name TEXT NOT NULL DEFAULT '',
+                domain      TEXT NOT NULL DEFAULT '',
+                contact_email TEXT,
+                contact_name TEXT,
+                email       TEXT,
+                title       TEXT NOT NULL DEFAULT '',
+                score       INTEGER NOT NULL DEFAULT 0,
+                source      TEXT NOT NULL DEFAULT '',
+                status      TEXT NOT NULL DEFAULT 'new',
+                created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        "#,
+    )
+    .execute(db)
+    .await
+    .map_err(|e| SalesError::Database(e.to_string()))?;
+
+    sqlx::query(
+        r#"
             CREATE TABLE IF NOT EXISTS sales_campaigns (
                 id UUID PRIMARY KEY,
                 tenant_id TEXT NOT NULL,

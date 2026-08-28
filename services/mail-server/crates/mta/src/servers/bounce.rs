@@ -131,9 +131,14 @@ impl BounceServer {
         let session_id = Uuid::new_v4().to_string();
         let started = std::time::Instant::now();
 
-        // Enforce the per-IP connection cap (C3/H10 hardening).
-        let active = self.connections.get(&peer_ip).map(|e| *e).unwrap_or(0);
-        if !connection_allowed(active, self.config.max_connections_per_ip) {
+        // Enforce the per-IP connection cap (C3/H10 hardening). The
+        // admission check and the slot increment are one atomic step —
+        // concurrent connects cannot overshoot the cap.
+        if !try_admit_connection(
+            &self.connections,
+            peer_ip,
+            self.config.max_connections_per_ip,
+        ) {
             let mut s = BufStream::new(socket);
             log_smtp_reject(
                 "bounce",
@@ -161,7 +166,7 @@ impl BounceServer {
             );
             return;
         }
-        *self.connections.entry(peer_ip).or_insert(0) += 1;
+        // F-19: RAII slot guard (admission above already took the slot).
         let _conn_guard = ConnGuard {
             conns: self.connections.clone(),
             ip: peer_ip,
@@ -664,22 +669,19 @@ impl BounceServer {
             }
         };
 
-        let suppression_recipient = match (&original_recipient, queued_recipient) {
-            (Some(verp_recip), queued_recip) if *verp_recip == queued_recip => {
-                Some(verp_recip.clone())
-            }
-            (Some(verp_recip), queued_recip) => {
+        let suppression_recipient =
+            suppression_target(original_recipient.as_deref(), &queued_recipient);
+        if let Some(verp_recip) = original_recipient.as_deref() {
+            if suppression_recipient.is_none() {
                 // F-23: both addresses are PII — redact before logging.
                 warn!(
                     verp_recipient = %mail_common::pii::redact_email(verp_recip),
-                    queued_recipient = %mail_common::pii::redact_email(&queued_recip),
+                    queued_recipient = %mail_common::pii::redact_email(&queued_recipient),
                     msg_id = ?original_message_id,
                     "VERP recipient does not match queued recipient — dropping forged bounce"
                 );
-                None
             }
-            (None, queued_recip) => Some(queued_recip),
-        };
+        }
 
         // 6. Hard bounces → suppression list (canonical `suppressions` table).
         if bounce_info.bounce_type == BounceType::Hard {
@@ -725,12 +727,13 @@ impl BounceServer {
         });
 
         if let Ok(mut conn) = self.redis.get().await {
-            redis::cmd("LPUSH")
-                .arg("mta:webhook_queue")
-                .arg(payload.to_string())
-                .query_async::<i64>(&mut *conn) // LPUSH returns list length (i64)
-                .await
-                .ok();
+            // LPUSH + LTRIM: a dead consumer must not grow the list (and
+            // Redis memory) without bound.
+            if let Err(e) =
+                super::util::push_webhook_bounded(&mut *conn, &payload.to_string()).await
+            {
+                debug!(error = %e, "Failed to push bounce webhook to Redis queue");
+            }
         }
 
         info!(
@@ -794,6 +797,22 @@ impl BounceServer {
 
 // ── bounce classification (RFC 3463) ───────────────────────────────────────────
 
+/// Whether a 5.7.1 bounce's diagnostic text indicates an authentication
+/// failure (SPF/DMARC/DKIM) rather than a generic content/spam policy.
+/// Only the former says something permanent about future mail from this
+/// sender; a generic policy rejection may accept mail again later.
+fn is_authentication_policy_rejection(message: &str) -> bool {
+    message
+        .to_ascii_lowercase()
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .any(|token| {
+            matches!(
+                token,
+                "spf" | "dmarc" | "dkim" | "authentication" | "authenticated"
+            )
+        })
+}
+
 /// Classify a bounce message by its DSN status code.
 pub fn classify_bounce(message: &str) -> BounceInfo {
     let status_code = extract_status_code(message);
@@ -825,17 +844,33 @@ pub fn classify_bounce(message: &str) -> BounceInfo {
         s if s.starts_with("5.4.") => (BounceType::Hard, "network-error"),
         s if s.starts_with("5.5.") => (BounceType::Hard, "protocol-error"),
         s if s.starts_with("5.6.") => (BounceType::Hard, "content-error"),
-        s if s.starts_with("5.7.") => (
-            BounceType::Hard,
-            match s {
-                "5.7.1" => "policy",
-                "5.7.13" => "account-disabled",
-                "5.7.23" => "spf-failed",
-                "5.7.25" => "ip-blacklisted",
-                "5.7.26" => "dmarc-failed",
-                _ => "security-error",
-            },
-        ),
+        s if s.starts_with("5.7.") => {
+            let hard = if s == "5.7.1" {
+                // A bare 5.7.1 ("policy rejection") is usually a content or
+                // spam policy, not a verdict on the recipient — retrying
+                // later often succeeds, so it must not permanently suppress.
+                // Only an SPF/DMARC/DKIM-flavoured 5.7.1 is a genuine hard
+                // failure of the sender's authentication.
+                is_authentication_policy_rejection(message)
+            } else {
+                true
+            };
+            (
+                if hard {
+                    BounceType::Hard
+                } else {
+                    BounceType::Soft
+                },
+                match s {
+                    "5.7.1" => "policy",
+                    "5.7.13" => "account-disabled",
+                    "5.7.23" => "spf-failed",
+                    "5.7.25" => "ip-blacklisted",
+                    "5.7.26" => "dmarc-failed",
+                    _ => "security-error",
+                },
+            )
+        }
         s if s.starts_with("4.2.") => (
             BounceType::Soft,
             match s {
@@ -915,6 +950,24 @@ pub(crate) fn connection_allowed(current: u32, max: u32) -> bool {
     current < max
 }
 
+/// Atomically admit one connection under a per-IP cap.
+///
+/// Returns `true` when the slot was taken; the caller MUST then hold a
+/// [`ConnGuard`] so the slot is released on every exit path. The
+/// check-and-increment must be ONE critical section: a separate
+/// read-then-increment let concurrent connects all observe "under the cap"
+/// and slip past it (TOCTOU overshoot).
+pub(crate) fn try_admit_connection(conns: &DashMap<IpAddr, u32>, ip: IpAddr, max: u32) -> bool {
+    // DashMap's entry() pins the shard lock for the guard's lifetime, so
+    // the cap check and the increment are one critical section per IP.
+    let mut entry = conns.entry(ip).or_insert(0);
+    if !connection_allowed(*entry, max) {
+        return false;
+    }
+    *entry += 1;
+    true
+}
+
 /// RFC 5321:bounce sessions require exactly the null sender `<>`.
 ///
 /// `extract_addr` returns the address BETWEEN the angle brackets, so the null
@@ -990,6 +1043,24 @@ pub(crate) fn append_data_line(message: &mut BytesMut, content: &[u8], max_size:
 /// `suppressions.id VARCHAR(26)` column).
 pub(crate) fn suppression_row_id() -> String {
     format!("sup_{}", &uuid::Uuid::new_v4().simple().to_string()[..18])
+}
+
+/// Decide which address (if any) a bounce may place on the suppression list.
+///
+/// `verp_recipient` is the recipient parsed from the bounce's VERP envelope
+/// address (whose local part already resolved to the queued message);
+/// `queued_recipient` is the recipient recorded on that queued message.
+fn suppression_target(verp_recipient: Option<&str>, queued_recipient: &str) -> Option<String> {
+    match verp_recipient {
+        Some(verp) if verp == queued_recipient => Some(verp.to_string()),
+        // No VERP recipient: the bounce's only linkage to the queued message
+        // is the attacker-writable Original-Message-ID header. Such a bounce
+        // may be classified and logged, but must never suppress.
+        None => None,
+        // VERP present but pointing at a different address than the queued
+        // message's recipient: forged or replayed VERP — never suppress.
+        Some(_) => None,
+    }
 }
 
 fn parse_verp_address(addr: &str, verp_domain: &str) -> Option<(String, String)> {
@@ -1082,6 +1153,12 @@ fn is_dsn_header_line(trimmed_lower: &str) -> bool {
 fn extract_diagnostic_code(message: &str) -> Option<String> {
     for line in message.lines() {
         let trimmed = line.trim().to_lowercase();
+        // M54 parity with extract_status_code: a Diagnostic-Code line after
+        // the message/rfc822 boundary belongs to the attached original
+        // message and must never drive the bounce classification.
+        if is_attached_original_boundary(&trimmed) {
+            break;
+        }
         if trimmed.starts_with("diagnostic-code:") {
             return Some(line.trim().to_string());
         }
@@ -1092,6 +1169,12 @@ fn extract_diagnostic_code(message: &str) -> Option<String> {
 fn extract_original_message_id(message: &str) -> Option<String> {
     for line in message.lines() {
         let trimmed = line.trim().to_lowercase();
+        // M54 parity with extract_status_code: the linkage header must come
+        // from the DSN part — everything after the message/rfc822 boundary
+        // belongs to the attached original message and is attacker-writable.
+        if is_attached_original_boundary(&trimmed) {
+            break;
+        }
         if trimmed.starts_with("original-message-id:")
             || trimmed.starts_with("x-original-message-id:")
         {
@@ -1155,9 +1238,37 @@ mod tests {
 
     #[test]
     fn test_classify_hard_bounce_policy() {
-        let msg = "Status: 5.7.1\r\nPolicy rejection";
+        let msg = "Status: 5.7.1\r\nDiagnostic-Code: smtp; 550 5.7.1 SPF verification failed";
         let info = classify_bounce(msg);
         assert_eq!(info.bounce_type, BounceType::Hard);
+        assert_eq!(info.bounce_subtype, "policy");
+    }
+
+    #[test]
+    fn test_classify_generic_571_policy_rejection_is_soft() {
+        // A bare 5.7.1 "policy rejection" (spam/content policy, rate
+        // limits, greylisting-ish deferrals) says nothing permanent about
+        // the RECIPIENT — treating it as Hard permanently suppressed
+        // addresses that could accept mail again minutes later.
+        let msg = "Status: 5.7.1\r\nDiagnostic-Code: smtp; 550 5.7.1 Policy rejection - mail refused by local policy";
+        let info = classify_bounce(msg);
+        assert_eq!(
+            info.bounce_type,
+            BounceType::Soft,
+            "generic 5.7.1 must be transient, not a permanent suppression"
+        );
+    }
+
+    #[test]
+    fn test_classify_571_with_dmarc_detail_is_hard() {
+        let msg =
+            "Status: 5.7.1\r\nDiagnostic-Code: smtp; 550 5.7.1 DMARC policy violation (p=reject)";
+        let info = classify_bounce(msg);
+        assert_eq!(
+            info.bounce_type,
+            BounceType::Hard,
+            "an authentication-flavoured 5.7.1 is a genuine hard failure"
+        );
         assert_eq!(info.bounce_subtype, "policy");
     }
 
@@ -1166,6 +1277,32 @@ mod tests {
         let msg = "Status: 4.0.0\r\nTemporary issue";
         let info = classify_bounce(msg);
         assert_eq!(info.bounce_type, BounceType::Transient);
+    }
+
+    #[test]
+    fn test_extract_diagnostic_code_stops_at_attached_original() {
+        // A Diagnostic-Code inside the attached original message is
+        // attacker-writable and must not drive classification when the DSN
+        // part itself carries none.
+        let msg = concat!(
+            "Content-Type: multipart/report; boundary=BB\r\n",
+            "--BB\r\n",
+            "Content-Type: message/rfc822\r\n",
+            "\r\n",
+            "Diagnostic-Code: smtp; 550 forged diagnostic\r\n",
+            "--BB--\r\n",
+        );
+        assert_eq!(
+            extract_diagnostic_code(msg),
+            None,
+            "an attached-original Diagnostic-Code must be ignored"
+        );
+        // The DSN part's own diagnostic is still extracted.
+        let dsn = "Final-Recipient: rfc822; user@example.com\r\nDiagnostic-Code: smtp; 550 user unknown\r\n";
+        assert_eq!(
+            extract_diagnostic_code(dsn),
+            Some("Diagnostic-Code: smtp; 550 user unknown".into())
+        );
     }
 
     #[test]
@@ -1270,6 +1407,80 @@ mod tests {
         assert_eq!(
             extract_original_message_id(msg),
             Some("abc123@example.com".into())
+        );
+    }
+
+    #[test]
+    fn test_extract_original_message_id_stops_at_attached_original() {
+        // M54 parity with extract_status_code: everything after the
+        // message/rfc822 boundary belongs to the attached original message
+        // (attacker-writable) and must never be used as the bounce linkage.
+        let msg = concat!(
+            "Content-Type: multipart/report; report-type=delivery-status; boundary=BB\r\n",
+            "\r\n",
+            "--BB\r\n",
+            "Content-Type: message/delivery-status\r\n",
+            "\r\n",
+            "Reporting-MTA: dns; mail.example.com\r\n",
+            "\r\n",
+            "--BB\r\n",
+            "Content-Type: message/rfc822\r\n",
+            "\r\n",
+            "Original-Message-ID: <forged-attacker-id@evil.com>\r\n",
+            "X-Original-Message-ID: <also-forged@evil.com>\r\n",
+            "--BB--\r\n",
+        );
+        assert_eq!(
+            extract_original_message_id(msg),
+            None,
+            "an Original-Message-ID inside the attached original message must be ignored"
+        );
+    }
+
+    #[test]
+    fn test_extract_original_message_id_in_dsn_part_still_parsed() {
+        // The per-message DSN field (before the attached message) stays the
+        // supported linkage for classification/logging.
+        let msg = concat!(
+            "Reporting-MTA: dns; mail.example.com\r\n",
+            "Original-Message-ID: <legit-dsn-ref@example.com>\r\n",
+            "\r\n",
+            "Content-Type: message/rfc822\r\n",
+            "\r\n",
+            "Subject: attached original\r\n",
+        );
+        assert_eq!(
+            extract_original_message_id(msg),
+            Some("legit-dsn-ref@example.com".into())
+        );
+    }
+
+    #[test]
+    fn forged_bounce_with_only_original_message_id_never_suppresses() {
+        // A bounce carrying only an attacker-writable Original-Message-ID
+        // (no valid VERP envelope) must never land the queued recipient on
+        // the suppression list — otherwise anyone can suppress any victim
+        // by forging one header referencing a sent message.
+        assert!(
+            suppression_target(None, "victim@example.com").is_none(),
+            "no VERP recipient => no suppression target"
+        );
+    }
+
+    #[test]
+    fn genuine_verp_bounce_still_suppresses() {
+        assert_eq!(
+            suppression_target(Some("user@example.com"), "user@example.com"),
+            Some("user@example.com".to_string()),
+            "a VERP recipient matching the queued recipient is suppressible"
+        );
+    }
+
+    #[test]
+    fn mismatched_verp_recipient_never_suppresses() {
+        assert!(
+            suppression_target(Some("other@example.com"), "user@example.com").is_none(),
+            "a VERP recipient that differs from the queued recipient is a forged/replayed VERP"
         );
     }
 
@@ -1472,6 +1683,39 @@ mod tests {
         assert!(connection_allowed(9, 10));
         assert!(!connection_allowed(10, 10));
         assert!(!connection_allowed(11, 10));
+    }
+
+    #[test]
+    fn concurrent_admissions_cannot_exceed_the_per_ip_cap() {
+        // 16 threads released by a barrier all attempt admission against a
+        // cap of 10: exactly 10 may be admitted and the counter must land
+        // on exactly 10 — a check-then-increment race admits the whole
+        // first wave (16) past the cap.
+        let conns: Arc<DashMap<IpAddr, u32>> = Arc::new(DashMap::new());
+        let ip: IpAddr = "192.0.2.10".parse().unwrap();
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let admitted = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut handles = Vec::new();
+        for _ in 0..16 {
+            let conns = conns.clone();
+            let barrier = barrier.clone();
+            let admitted = admitted.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                if try_admit_connection(&conns, ip, 10) {
+                    admitted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("admission must not deadlock");
+        }
+        assert_eq!(
+            admitted.load(std::sync::atomic::Ordering::SeqCst),
+            10,
+            "exactly the cap may be admitted"
+        );
+        assert_eq!(*conns.get(&ip).unwrap(), 10);
     }
 
     // ── B: full-session smuggling test (real TCP, DB unreachable) ──────────
@@ -1898,5 +2142,19 @@ mod tests {
             .await
             .expect("session task must finish")
             .expect("session task must not panic");
+    }
+
+    #[test]
+    fn webhook_push_is_trimmed_to_a_bounded_length() {
+        // The `mta:webhook_queue` Redis list must be trimmed after every
+        // LPUSH: with a dead consumer an unbounded list grows Redis memory
+        // without limit. Pinned against the compiled-in source (needles
+        // concat!-built so the test cannot match its own text).
+        let source = include_str!("bounce.rs");
+        let trim_needle = std::concat!("LT", "RIM");
+        assert!(
+            source.contains(trim_needle),
+            "the webhook push path must trim the queue to a bounded length"
+        );
     }
 }

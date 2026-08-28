@@ -1,7 +1,6 @@
 -- Enterprise support and SSO tables required by the Rust enterprise service.
 -- These tables replace the legacy TS-owned schema assumptions with live Rust-owned backing tables.
 
-BEGIN;
 
 -- H-12: Own the sequence to the number column so it's cleaned up if the
 -- table is dropped.
@@ -278,4 +277,3 @@ BEGIN
     END IF;
 END $$;
 
-COMMIT;

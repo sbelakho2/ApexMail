@@ -16,7 +16,6 @@
 --   3. Documents the canonical tenant_id type decision (VARCHAR(26) per 064).
 -- =============================================================================
 
-BEGIN;
 
 -- =============================================================================
 -- Section 1: Down-migration registry
@@ -80,8 +79,24 @@ ON CONFLICT (migration_id) DO NOTHING;
 --   - Deterministic hashing of non-conforming values to 26 hex chars
 -- =============================================================================
 
--- Record the canonical type decision in a persistent comment
-COMMENT ON SCHEMA public IS 'ApexMail schema. Canonical tenant_id type: VARCHAR(26) (per migration 064). Migration 058 UUID was an interim step.';
+-- Record the canonical type decision in a persistent comment.
+-- Ownership guard: COMMENT ON SCHEMA requires being the schema owner; on
+-- PG15+ databases created from a template whose public schema is owned by
+-- the bootstrap superuser, the migrating role (the DB owner) is NOT the
+-- schema owner and the unguarded statement aborts the whole chain with
+-- "must be owner of schema public". Skip the cosmetic comment there.
+DO $$
+BEGIN
+    IF pg_has_role(
+        current_user,
+        (SELECT nspowner::regrole::oid FROM pg_catalog.pg_namespace WHERE nspname = 'public'),
+        'MEMBER'
+    ) THEN
+        COMMENT ON SCHEMA public IS 'ApexMail schema. Canonical tenant_id type: VARCHAR(26) (per migration 064). Migration 058 UUID was an interim step.';
+    ELSE
+        RAISE NOTICE '060: current role is not the owner of schema public — skipping cosmetic schema COMMENT';
+    END IF;
+END $$;
 
 -- =============================================================================
 -- Section 3: Down-migration helper function
@@ -122,4 +137,3 @@ BEGIN
     RAISE NOTICE 'Canonical tenant_id type: VARCHAR(26) (per migration 064)';
 END $$;
 
-COMMIT;

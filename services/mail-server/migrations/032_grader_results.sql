@@ -11,7 +11,6 @@
 --   * `expires_at` is populated from per-tenant retention settings on insert
 --     and the `purge_expired_grader_results()` function is intended to be
 --     called periodically by the workers crate.
-BEGIN;
 
 CREATE TABLE IF NOT EXISTS grader_results (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -66,4 +65,3 @@ BEGIN
 END;
 $$;
 
-COMMIT;

@@ -307,7 +307,14 @@ fn has_mixed_scripts(host: &str) -> bool {
     let mut has_greek = false;
 
     for c in host.chars() {
-        if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+        // Script-neutral characters: '.', '-', and digits carry no script
+        // information. Counting them as "Latin" flagged every legitimate
+        // single-script IDN (почта.рф) as a homograph attack — only ASCII
+        // LETTERS establish a Latin component.
+        if c == '.' || c == '-' || c.is_ascii_digit() {
+            continue;
+        }
+        if c.is_ascii_alphabetic() {
             has_latin = true;
             continue;
         }
@@ -770,6 +777,32 @@ mod tests {
         assert!(has_mixed_scripts("exаmple.com"));
         // Pure ASCII
         assert!(!has_mixed_scripts("example.com"));
+    }
+
+    #[test]
+    fn test_mixed_scripts_clean_idn_not_flagged() {
+        // Fail-first: '.', '-' and digits were counted as "Latin", so every
+        // legitimate single-script Cyrillic IDN (почта.рф) was flagged as a
+        // mixed-script homograph attack. Only Latin LETTERS count as Latin.
+        assert!(
+            !has_mixed_scripts("почта.рф"),
+            "pure Cyrillic IDN must be clean"
+        );
+        assert!(
+            !has_mixed_scripts("почта123.рф"),
+            "digits are script-neutral and must not imply Latin"
+        );
+        assert!(
+            !has_mixed_scripts("例え.テスト"),
+            "pure non-Latin, non-Cyrillic/Greek host is out of scope"
+        );
+    }
+
+    #[test]
+    fn test_mixed_scripts_homograph_still_flagged() {
+        // Latin 'p' + Cyrillic 'а' + Latin rest → genuine mixed script.
+        assert!(has_mixed_scripts("pаypal.com"));
+        assert!(has_mixed_scripts("exаmple.com"));
     }
 
     #[tokio::test]

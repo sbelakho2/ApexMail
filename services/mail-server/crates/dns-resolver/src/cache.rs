@@ -47,10 +47,18 @@ impl Expiry<String, CachedEntry> for PositiveRecordExpiry {
 }
 
 /// Thread-safe DNS cache with TTL-based eviction.
+///
+/// Concurrency: both internal caches are moka (thread-safe, sharded) and
+/// are accessed WITHOUT a global lock — `get` never blocks on inserts. The
+/// positive/negative cross-invalidation inside insert/insert_negative is a
+/// best-effort ordering: a `get` racing an insert may briefly observe the
+/// pre-insert state, in which case the caller simply re-queries DNS (the
+/// next lookup hits the fresh entry). The only remaining lock guards the
+/// DKIM key index, which is touched solely on `dkim:`-prefixed keys and by
+/// suffix invalidation — never on the hot lookup path.
 pub struct DnsCache {
     cache: Cache<String, CachedEntry>,
     negative_cache: Cache<String, ()>,
-    consistency_lock: RwLock<()>,
     /// E-2:live index of DKIM keys (`dkim:{selector}._domainkey.{domain}`).
     /// moka does not expose key iteration, so keys are tracked here to make
     /// `invalidate_by_domain_suffix` a REAL invalidation instead of the old
@@ -85,7 +93,6 @@ impl DnsCache {
         Self {
             cache,
             negative_cache,
-            consistency_lock: RwLock::new(()),
             dkim_keys: RwLock::new(std::collections::HashSet::new()),
             default_positive_ttl,
             max_positive_ttl,
@@ -99,7 +106,6 @@ impl DnsCache {
 
     /// Get cached result.
     pub fn get(&self, key: &str) -> Option<CachedResult> {
-        let _guard = self.consistency_lock.read();
         // Check positive cache first
         if let Some(entry) = self.cache.get(key) {
             debug!(key, "DNS cache hit");
@@ -120,7 +126,6 @@ impl DnsCache {
 
     /// Insert a positive result with the authoritative record TTL.
     pub fn insert_with_ttl(&self, key: impl Into<String>, records: Vec<String>, ttl: Duration) {
-        let _guard = self.consistency_lock.write();
         let key = key.into();
         let effective_ttl = self.positive_ttl(ttl);
         debug!(
@@ -146,7 +151,6 @@ impl DnsCache {
 
     /// Insert a negative (NXDOMAIN) result.
     pub fn insert_negative(&self, key: impl Into<String>) {
-        let _guard = self.consistency_lock.write();
         let key = key.into();
         debug!(key, "DNS negative cache insert");
         self.track_dkim_key(&key);
@@ -156,7 +160,6 @@ impl DnsCache {
 
     /// Remove a cached entry.
     pub fn invalidate(&self, key: &str) {
-        let _guard = self.consistency_lock.write();
         self.untrack_dkim_key(key);
         self.cache.invalidate(key);
         self.negative_cache.invalidate(key);
@@ -169,7 +172,6 @@ impl DnsCache {
     /// Previously this invalidated a selector-less key nobody ever wrote,
     /// so stale DKIM public keys survived a domain key rotation.
     pub fn invalidate_by_domain_suffix(&self, domain: &str) {
-        let _guard = self.consistency_lock.write();
         let suffix = format!(".{domain}");
         let mut dkim = self.dkim_keys.write();
         let mut invalidated = 0usize;
@@ -219,7 +221,6 @@ impl DnsCache {
 
     /// Clear all caches.
     pub fn clear(&self) {
-        let _guard = self.consistency_lock.write();
         self.cache.invalidate_all();
         self.negative_cache.invalidate_all();
         self.dkim_keys.write().clear();
@@ -275,6 +276,51 @@ mod tests {
         cache.insert("key", vec!["value".into()]);
         cache.invalidate("key");
         assert!(cache.get("key").is_none());
+    }
+
+    #[test]
+    fn concurrent_gets_and_inserts_never_block_each_other() {
+        // Lookups run on the hot DNS path; they must never serialize behind
+        // inserts (the old global RwLock made every insert block every
+        // get). Stress concurrent readers/writers: no deadlock, no panic,
+        // and the final inserts are visible.
+        // Generous capacities so the final-visibility assertions cannot be
+        // defeated by LRU eviction (defaults cap the negative cache at 1k
+        // entries and the test writes 2k).
+        let cache = std::sync::Arc::new(DnsCache::new(&DnsConfig {
+            positive_cache_size: 10_000,
+            negative_cache_size: 10_000,
+            ..DnsConfig::default()
+        }));
+        let mut handles = Vec::new();
+        for t in 0..4u32 {
+            let cache = cache.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..500u32 {
+                    cache.insert(format!("k{t}-{i}"), vec!["v".into()]);
+                    cache.insert_negative(format!("n{t}-{i}"));
+                }
+            }));
+        }
+        for _ in 0..4 {
+            let cache = cache.clone();
+            handles.push(std::thread::spawn(move || {
+                for i in 0..500u32 {
+                    let _ = cache.get(&format!("k0-{i}"));
+                    let _ = cache.get(&format!("n0-{i}"));
+                }
+            }));
+        }
+        for handle in handles {
+            handle
+                .join()
+                .expect("cache must be lock-free on the read path");
+        }
+        assert!(matches!(
+            cache.get("k3-499"),
+            Some(CachedResult::Records(_))
+        ));
+        assert!(matches!(cache.get("n3-499"), Some(CachedResult::NxDomain)));
     }
 
     #[test]

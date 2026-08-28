@@ -253,8 +253,14 @@ fn tracking_base_url_from_env() -> String {
 }
 
 /// Warmup configuration.
-/// DEPRECATED: This warmup config is unused. Hetzner dedicated IP warmup is managed
-/// by the API server's DedicatedIpProvider (mail-common::warmup).
+///
+/// The API server's DedicatedIpProvider (mail-common::warmup) owns the
+/// per-IP warmup *schedule*; this switch only gates the worker's send-time
+/// warmup cap. It defaults ON now that `get_domain` reads the REAL warmup
+/// state (the tenant's `dedicated_ips` rows, migrations 003/071/093):
+/// the cap can only ever engage for a domain whose tenant actually has a
+/// dedicated IP still in status 'warming' — every shared-pool domain is
+/// unaffected (warmup_enabled comes back false for them).
 #[derive(Debug, Clone)]
 pub struct WarmupConfig {
     pub enabled: bool,
@@ -265,7 +271,7 @@ pub struct WarmupConfig {
 impl Default for WarmupConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             schedule: vec![50, 100, 200, 400, 800, 1500, 3000, 5000, 10000],
         }
     }
@@ -388,9 +394,48 @@ impl Default for ReplyHandlerConfig {
     }
 }
 
+impl EmailConfig {
+    /// Send-time admission rate (emails/second) enforced by the email
+    /// processor's Redis token bucket before every transport.send —
+    /// Audit-2: previously `SmtpConfig::rate_limit_per_second` and
+    /// `SesConfig::max_send_rate` were configured but read by no send path.
+    /// SES accounts use the account-level `max_send_rate`; SMTP uses the
+    /// relay's `rate_limit_per_second`. `0` disables the gate.
+    pub fn send_rate_per_second(&self) -> u32 {
+        match self.transport_type {
+            TransportType::Ses => self.ses.max_send_rate,
+            TransportType::Smtp => self.smtp.rate_limit_per_second,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Audit-2: the configured per-second send rate must actually be
+    /// reachable from the email processor's admission gate — the SES path
+    /// plumbed from SesConfig.max_send_rate, the SMTP path from
+    /// SmtpConfig.rate_limit_per_second.
+    #[test]
+    fn send_rate_per_second_plumbs_both_transport_configs() {
+        let ses = EmailConfig::default();
+        assert_eq!(
+            ses.send_rate_per_second(),
+            ses.ses.max_send_rate,
+            "SES transport must use the account-level max_send_rate"
+        );
+
+        let smtp = EmailConfig {
+            transport_type: TransportType::Smtp,
+            smtp: SmtpConfig {
+                rate_limit_per_second: 7,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(smtp.send_rate_per_second(), 7);
+    }
 
     /// Serializes env-mutating tests against every other module in this
     /// crate (std::env is process-global; see `crate::test_support`).

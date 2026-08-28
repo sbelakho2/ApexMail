@@ -26,6 +26,22 @@ use uuid::Uuid;
 // ── Bootstrap ───────────────────────────────────────────────────────────────
 
 const MAIN_SCHEMA: &str = r#"
+-- The CP mirror production submits also write (gdpr_automation.rs
+-- submit_request): without it the DB-backed submit tests fail with
+-- "relation gdpr_requests does not exist" — these tests never ran before
+-- TEST_DATABASE_URL was wired into the sweep.
+CREATE TABLE IF NOT EXISTS gdpr_requests (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    request_type TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    token_hash TEXT,
+    fulfilled_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE TABLE IF NOT EXISTS data_subject_requests (
     id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
@@ -1914,7 +1930,7 @@ async fn dsr_outbox_flush_queues_system_email_and_marks_sent() {
     // "from"/"to"/html/text; get_domain authorizes on domain_id+tenant_id).
     let queued: QueuedEmailRow = sqlx::query_as(
         "SELECT from_address, to_addresses[1], subject, \"from\", \"to\", html, text, \
-                domain_id::text, status, priority, metadata \
+                domain_id, status, priority, metadata \
          FROM email_queue",
     )
     .fetch_one(&pool)
@@ -2038,10 +2054,19 @@ async fn dsr_outbox_flush_retries_then_caps_attempts() {
             .await
             .unwrap();
     assert_eq!(statuses.iter().filter(|(s, _)| s == "pending").count(), 3);
-    assert!(statuses.iter().all(|(_, a)| *a == 1));
+    // ORDER BY created_at: the two OLDEST rows are the batch the bound let
+    // this tick touch; the newest row must remain untouched (attempts 0).
+    assert_eq!(statuses[0], ("pending".to_string(), 1));
+    assert_eq!(statuses[1], ("pending".to_string(), 1));
+    assert_eq!(statuses[2], ("pending".to_string(), 0));
 
-    flusher.flush_once().await.expect("flush runs"); // attempts 2
-    flusher.flush_once().await.expect("flush runs"); // attempts 3 → cap → failed
+    flusher.flush_once().await.expect("flush runs"); // rows 1-2: attempts 2
+    flusher.flush_once().await.expect("flush runs"); // rows 1-2: attempts 3 → cap → failed
+                                                     // Rows 1-2 parked as failed leave the retry set, so subsequent ticks
+                                                     // admit row 3 (batch bound 2): three more flushes walk it to the cap.
+    for _ in 0..3 {
+        flusher.flush_once().await.expect("flush runs");
+    }
     let after: Vec<(String, i32)> =
         sqlx::query_as("SELECT status, attempts FROM dsr_verification_outbox ORDER BY created_at")
             .fetch_all(&pool)

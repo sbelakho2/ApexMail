@@ -62,19 +62,12 @@ modules:
       preferred_ip_protocol: "ip4"
       tls_config:
         insecure_skip_verify: false
-  http_api_email_send:
-    prober: http
-    timeout: 15s
-    http:
-      method: POST
-      headers:
-        Content-Type: application/json
-      body: '{"to":"probe@apexmail.ee","subject":"Blackbox Probe","text":"This is a synthetic probe test email"}'
-      valid_status_codes: [200, 201, 202]
-      follow_redirects: false
-      preferred_ip_protocol: "ip4"
-      tls_config:
-        insecure_skip_verify: false
+  # NOTE (audit): the old `http_api_email_send` module was removed — it
+  # POSTed an unauthenticated "send email" request to /v1/email/send and
+  # expected 2xx, which the route can never answer (it rejects
+  # unauthenticated sends with 401), so the probe failed permanently.
+  # The scrape job that used it now probes the unauthenticated /health
+  # endpoint (see deploy/prometheus.yml, job blackbox-http-api-health).
   http_login:
     prober: http
     timeout: 10s

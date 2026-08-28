@@ -60,9 +60,6 @@ pub struct TrackingPayload {
 /// Env var holding the shared master secret (same name as tracking-service).
 const TRACKING_SECRET_KEY_ENV: &str = "TRACKING_SECRET_KEY";
 
-/// Env var for the hashing salt (G.3d: configurable instead of hardcoded).
-const TRACKING_HASH_SALT_ENV: &str = "TRACKING_HASH_SALT";
-
 const IV_LEN: usize = 12;
 const AUTH_TAG_LEN: usize = 16;
 
@@ -194,38 +191,6 @@ static SCRIPT_SELECTOR: LazyLock<Selector> =
 static STYLE_SELECTOR: LazyLock<Selector> =
     LazyLock::new(|| Selector::parse("style").expect("`style` is a valid CSS selector"));
 
-/// Hash a tenant ID for privacy-preserving tracking.
-/// The server maintains a mapping of hashes to tenant IDs.
-/// G.3d: the salt is configurable via `TRACKING_HASH_SALT` and the digest is
-/// 16 bytes (was 8 unsalted) to resist rainbow-table reversal.
-fn hash_tenant_id(tenant_id: &str) -> String {
-    salted_hash(b"apexmail_tenant_v1:", tenant_id)
-}
-
-/// Hash an email address for privacy-preserving tracking.
-/// G.3d: salted + 16-byte digest (previously unsalted SHA-256 truncated to
-/// 8 bytes, which was trivially reversible for a known domain set).
-fn hash_email(email: &str) -> String {
-    salted_hash(b"apexmail_email_v1:", email)
-}
-
-/// SHA-256(salt || value) hex-encoded, first 16 bytes. The salt comes from
-/// `TRACKING_HASH_SALT` when set (shared across redeployments) and otherwise
-/// uses the built-in domain-separation prefix.
-fn salted_hash(domain_prefix: &[u8], value: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let configured = std::env::var(TRACKING_HASH_SALT_ENV).unwrap_or_default();
-    let mut hasher = Sha256::new();
-    hasher.update(domain_prefix);
-    if !configured.is_empty() {
-        hasher.update(configured.as_bytes());
-        hasher.update(b":");
-    }
-    hasher.update(value.as_bytes());
-    let result = hasher.finalize();
-    hex::encode(&result[..16])
-}
-
 /// Check whether a byte-offset in the original HTML falls inside a `<script>`
 /// or `<style>` element by using the DOM parse tree for validation.
 fn is_inside_script_or_style(html: &str, offset: usize) -> bool {
@@ -273,8 +238,13 @@ fn raw_text_tag_open_before_offset(before: &str, tag: &str) -> bool {
 fn build_payload(job: &EmailJob, original_url: Option<String>) -> TrackingPayload {
     TrackingPayload {
         message_id: job.message_id.clone(),
-        tenant_id: hash_tenant_id(&job.tenant_id),
-        recipient_hash: hash_email(&job.to),
+        // RAW identifiers (see build_payload_carries_raw_identifiers): the
+        // token is AES-128-GCM encrypted; hashing here broke the
+        // tracking-service's domain authorization, tenant attribution, and
+        // one-click suppression. Analytics pseudonymization happens at
+        // ClickHouse ingest via recipient_for_analytics.
+        tenant_id: job.tenant_id.clone(),
+        recipient_hash: job.to.clone(),
         original_url,
         campaign_id: job.campaign_id.clone(),
     }
@@ -490,11 +460,29 @@ mod tests {
     fn sample_payload() -> TrackingPayload {
         TrackingPayload {
             message_id: "msg_123".to_string(),
-            tenant_id: hash_tenant_id("ten_456"),
-            recipient_hash: hash_email("user@example.com"),
+            tenant_id: "ten_456".to_string(),
+            recipient_hash: "user@example.com".to_string(),
             original_url: Some("https://example.com".to_string()),
             campaign_id: Some("camp_789".to_string()),
         }
+    }
+
+    /// The payload carries RAW tenant and recipient identifiers. The token
+    /// is AES-128-GCM encrypted (confidentiality is the cipher's job), and
+    /// the tracking-service consumes tenant_id directly for redirect-domain
+    /// authorization (domains.tenant_id) and the recipient for suppression
+    /// — a hashed value made every click fall back and every unsubscribe
+    /// suppress a hash no sender ever matches. Analytics privacy is applied
+    /// at ingest (recipient_for_analytics), not in the token.
+    #[test]
+    fn build_payload_carries_raw_identifiers() {
+        let mut job = make_test_job();
+        job.message_id = "msg_raw".to_string();
+        job.tenant_id = "01JRAW_TENANT_ID_000001".to_string();
+        job.to = "real@example.com".to_string();
+        let payload = build_payload(&job, None);
+        assert_eq!(payload.tenant_id, "01JRAW_TENANT_ID_000001");
+        assert_eq!(payload.recipient_hash, "real@example.com");
     }
 
     /// C: a worker-encoded token must decode with the tracking-service codec
@@ -565,23 +553,6 @@ mod tests {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var(TRACKING_SECRET_KEY_ENV, "too-short");
         assert!(encode_tracking_id(&sample_payload()).is_err());
-    }
-
-    /// G.3d: hashes are 16-byte digests, stable, and salt-configurable.
-    #[test]
-    fn hashes_are_salted_and_16_bytes() {
-        let a = hash_email("user@example.com");
-        let b = hash_email("user@example.com");
-        assert_eq!(a, b, "stable");
-        assert_eq!(a.len(), 32, "16 bytes hex-encoded");
-        assert_ne!(a, hash_email("other@example.com"));
-        assert_ne!(hash_tenant_id("t1"), hash_tenant_id("t2"));
-
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var(TRACKING_HASH_SALT_ENV, "pepper");
-        let salted = hash_email("user@example.com");
-        assert_ne!(a, salted, "configured salt changes the digest");
-        std::env::remove_var(TRACKING_HASH_SALT_ENV);
     }
 
     /// C: worker and tracking-service default tracking hosts must match.

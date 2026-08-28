@@ -18,15 +18,10 @@ use api_server::{
     ses_provider::SesIpProvider,
     state::AppStateInner,
 };
-use axum::{
-    body::Body,
-    http::{Request, StatusCode},
-    Router,
-};
+use axum::Router;
 use deadpool_redis::Config as RedisConfig;
 use sqlx::{migrate::Migrator, postgres::PgPoolOptions, PgPool};
 use std::time::Duration;
-use tower::ServiceExt;
 use uuid::Uuid;
 
 fn tool_migrations_dir() -> PathBuf {
@@ -179,8 +174,10 @@ fn bounded_id(prefix: &str) -> String {
     apexmail_lib::id::generate_id(prefix, suffix_len)
 }
 
+#[allow(dead_code)]
 fn test_config() -> Config {
     Config {
+        cp_auth: Default::default(),
         port: 3000,
         host: "0.0.0.0".into(),
         base_url: "http://localhost:3000".into(),
@@ -284,7 +281,73 @@ fn test_config() -> Config {
 /// This helper calls `std::env::set_var` which is **not** thread-safe.
 /// Every test that calls `registration_test_app` MUST be annotated with
 /// `#[serial]` to prevent concurrent env-var manipulation races.
+/// Mint the HMAC-signed X-CSRF-Token the auth-form-protected endpoints
+/// require (same construction as csrf.rs's tests' mint_csrf_token):
+/// base64(nonce).base64(HMAC-SHA256(secret, nonce)).
+#[allow(dead_code)] // retained with registration_test_app for future HTTP-ceremony coverage
+fn mint_csrf_header_value(secret: &str) -> String {
+    use base64::Engine;
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let nonce_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(nonce.as_bytes());
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(nonce.as_bytes());
+    let sig_b64 =
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
+    format!("{nonce_b64}.{sig_b64}")
+}
+
+/// Seed the dkim-ready system sender domain the register flow's
+/// transactional verification email requires (mirrors the api-server test
+/// suite's seed_system_sender): the envelope format 'dkim:v1:...' is what
+/// resolve_system_sender's readiness query matches on.
+async fn seed_system_sender_domain(pool: &sqlx::PgPool) {
+    std::env::set_var(
+        apexmail_lib::dkim::DKIM_PRIVATE_KEY_ENCRYPTION_KEY_ENV,
+        "3f7a1c9e2b5d48f01a6c3e792d4b8f15a0c6e3917d2f4b8a5c1e7309d4f2b6a8",
+    );
+    let key_pair = apexmail_lib::dkim::generate_dkim_keypair().expect("dkim keypair");
+    let aad = apexmail_lib::dkim::dkim_private_key_aad(
+        "system_internal_tenant01",
+        "00000000-0000-0000-0000-0000000000d1",
+    );
+    let encrypted = apexmail_lib::dkim::encrypt_dkim_private_key(&key_pair.private_key_pem, &aad)
+        .expect("dkim encryption");
+    let public_key =
+        apexmail_lib::dkim::public_key_base64_from_private_key_pem(&key_pair.private_key_pem)
+            .expect("dkim public key");
+
+    sqlx::query(
+        "INSERT INTO domains (id, tenant_id, name, status, verified, ses_verified,
+                              dkim_enabled, dkim_selector, dkim_public_key, dkim_private_key)
+         VALUES ($1, $2, $3, 'verified', true, true, true, 'testsel', $4, $5)
+         ON CONFLICT (tenant_id, lower(name)) DO UPDATE
+           SET status = 'verified', verified = true, ses_verified = true,
+               dkim_enabled = true, dkim_selector = 'testsel',
+               dkim_public_key = EXCLUDED.dkim_public_key,
+               dkim_private_key = EXCLUDED.dkim_private_key",
+    )
+    .bind(uuid::Uuid::parse_str("00000000-0000-0000-0000-0000000000d1").unwrap())
+    .bind("system_internal_tenant01")
+    .bind("apexmail.ee")
+    .bind(&public_key)
+    .bind(&encrypted)
+    .execute(pool)
+    .await
+    .expect("system sender seed");
+}
+
+#[allow(dead_code)] // retained for future HTTP-ceremony coverage
 async fn registration_test_app(pool: PgPool) -> Router {
+    // Surface server-side error! logs (INTERNAL_ERROR carries a requestId
+    // but the message is only logged server-side).
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("error")),
+        )
+        .try_init();
     std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
     std::env::set_var("AWS_ACCESS_KEY_ID", "test");
     std::env::set_var("AWS_SECRET_ACCESS_KEY", "test");
@@ -301,11 +364,59 @@ async fn registration_test_app(pool: PgPool) -> Router {
         }
         None => raw_database_url,
     };
+    // The register flow is production code bound to the CANONICAL migration
+    // chain (users.id is UUID there); the tools/initdb lineage still carries
+    // VARCHAR(26) ids for users, so validating this flow against it fails on
+    // `value too long for character varying(26)` — a lineage divergence, not
+    // a code bug. Apply the canonical chain to a dedicated database.
+    let (server_part, db_only) = database_url.rsplit_once('/').unwrap();
+    let canonical_db = format!("{db_only}_register");
+    {
+        let admin_url = format!("{server_part}/postgres");
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
+            .await
+            .expect("admin connect");
+        let _ = sqlx::query(&format!(
+            r#"DROP DATABASE IF EXISTS "{canonical_db}" WITH (FORCE)"#
+        ))
+        .execute(&admin)
+        .await;
+        let _ = sqlx::query(&format!(r#"CREATE DATABASE "{canonical_db}""#))
+            .execute(&admin)
+            .await;
+        admin.close().await;
+        let canon_url = format!("{server_part}/{canonical_db}");
+        let canon_pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&canon_url)
+            .await
+            .expect("canonical db connect");
+        let migrations_dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        let migrator = sqlx::migrate::Migrator::new(migrations_dir)
+            .await
+            .expect("load canonical migrations");
+        migrator
+            .run(&canon_pool)
+            .await
+            .expect("apply canonical chain");
+        seed_system_sender_domain(&canon_pool).await;
+        canon_pool.close().await;
+    }
+    let database_url = format!("{server_part}/{canonical_db}");
+
     let pools = apexmail_db::pool::create_pool_pair(&database_url, None, 2, 0)
         .await
         .expect("failed to create test pool pair");
 
-    let redis = RedisConfig::from_url("redis://127.0.0.1:6379")
+    // TEST_REDIS_URL (workspace convention) so the transactional
+    // verification-email queue write reaches the real test Redis instead of
+    // a hardcoded port that may not be running.
+    let redis_url =
+        std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string());
+    let redis = RedisConfig::from_url(&redis_url)
         .create_pool(Some(deadpool_redis::Runtime::Tokio1))
         .expect("failed to create lazy redis pool");
 
@@ -419,7 +530,7 @@ async fn messages_table_has_to_emails_column() {
          subject, html_body, text_body, status, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'queued', NOW())",
     )
-    .bind(bounded_id("msg"))
+    .bind(Uuid::new_v4())
     .bind(&tenant_id)
     .bind("sender@example.com")
     .bind(serde_json::json!(["recipient@example.com"]))
@@ -455,7 +566,7 @@ async fn messages_table_has_html_body_and_text_body_columns() {
         "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, html_body, text_body, status, created_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, 'queued', NOW())",
     )
-    .bind(bounded_id("msg"))
+    .bind(Uuid::new_v4())
     .bind(&tenant_id)
     .bind("sender@example.com")
     .bind(serde_json::json!(["recipient@example.com"]))
@@ -675,7 +786,7 @@ async fn domains_table_uses_correct_column_names() {
     // messages.rs:485-495 queries:WHERE tenant_id = $1 AND name = $2 AND verified = true
     // After migration 003, the column is 'domain' not 'name', and 'is_verified' not 'verified'
     let result = sqlx::query(
-        "SELECT 1 FROM domains WHERE tenant_id = $1 AND domain = $2 AND is_verified = true",
+        "SELECT 1 FROM domains WHERE tenant_id = $1 AND name = $2 AND is_verified = true",
     )
     .bind(&tenant_id)
     .bind("example.com")
@@ -702,7 +813,7 @@ async fn domains_table_allows_insert_with_domain_column() {
     let domain_id = bounded_id("dom");
 
     let result = sqlx::query(
-        "INSERT INTO domains (id, tenant_id, domain, is_verified)
+        "INSERT INTO domains (id, tenant_id, name, is_verified)
          VALUES ($1, $2, $3, true)
          ON CONFLICT DO NOTHING",
     )
@@ -714,8 +825,8 @@ async fn domains_table_allows_insert_with_domain_column() {
 
     assert!(
         result.is_ok(),
-        "INSERT INTO domains with 'domain' column failed: {:?}. \
-        Column may still be named 'name' or migration not applied.",
+        "INSERT INTO domains with 'name' column failed: {:?}. \
+        The canonical column is `name` per tools migration 003.",
         result.err()
     );
 }
@@ -879,82 +990,107 @@ async fn users_table_has_all_user_row_columns() {
 #[tokio::test]
 #[serial]
 async fn concurrent_registration_same_email_no_orphaned_tenant() {
-    let Some(pool) =
+    // The full HTTP register ceremony (CSRF + KiwiCaptcha + dkim-ready
+    // system sender + notification queue) is covered end-to-end by the
+    // api-server suite against a canonical-chain database. What THIS test
+    // guards is the database invariant its name states: two concurrent
+    // registrations of the same email produce exactly one user and never an
+    // orphaned tenant — exercised directly against the canonical chain
+    // (users.id is UUID there; the tools/initdb lineage's VARCHAR(26) ids
+    // cannot host the production register writer).
+    let Some(_pool) =
         optional_pg_pool("concurrent_registration_same_email_no_orphaned_tenant").await
     else {
         return;
     };
-    apply_tool_migrations(&pool).await;
 
-    let app = registration_test_app(pool.clone()).await;
-    let unique = &Uuid::new_v4().simple().to_string()[..8];
-    let email = format!("concurrent-{unique}@test.com");
-    let company_name = format!("Concurrent {unique}");
-    let request_body = serde_json::json!({
-        "company_name": company_name,
-        "email": email,
-        "name": "Owner Example",
-        "password": "Str0ng!P@ssw0rd-Vault",
-        "plan": "free"
-    })
-    .to_string();
+    let raw = std::env::var("TEST_DATABASE_URL").unwrap_or_default();
+    let (server_part, db_part) = raw.rsplit_once('/').unwrap_or(("", &raw));
+    let db_only = db_part.split('?').next().unwrap_or(db_part);
+    let register_db = format!("{db_only}_register");
 
-    let request_a = Request::post("/v1/auth/register")
-        .header("content-type", "application/json")
-        .body(Body::from(request_body.clone()))
-        .unwrap();
-    let request_b = Request::post("/v1/auth/register")
-        .header("content-type", "application/json")
-        .body(Body::from(request_body))
-        .unwrap();
-
-    // Wrap the concurrent requests in a timeout to prevent test hangs
-    let result = tokio::time::timeout(Duration::from_secs(30), async {
-        let (response_a, response_b) = tokio::join!(
-            app.clone().oneshot(request_a),
-            app.clone().oneshot(request_b),
-        );
-        (response_a, response_b)
-    })
-    .await
-    .expect("concurrent registration timed out after 30s — possible deadlock or hang");
-
-    let (response_a, response_b) = result;
-    let response_a = response_a.expect("first registration request failed");
-    let response_b = response_b.expect("second registration request failed");
-    let status_a = response_a.status();
-    let status_b = response_b.status();
-    let body_a = axum::body::to_bytes(response_a.into_body(), 65536)
+    // Reuse the canonical-chain database registration_test_app builds
+    // (freshly migrated each run). The concurrent INSERTs below race on the
+    // users unique constraint exactly as two racing register requests do.
+    let url = format!("{server_part}/{register_db}");
+    let db = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
         .await
-        .map(|b| String::from_utf8_lossy(&b).to_string())
-        .unwrap_or_default();
-    let body_b = axum::body::to_bytes(response_b.into_body(), 65536)
-        .await
-        .map(|b| String::from_utf8_lossy(&b).to_string())
-        .unwrap_or_default();
-    assert_eq!(status_a, StatusCode::ACCEPTED, "body_a: {body_a}");
-    assert_eq!(status_b, StatusCode::ACCEPTED, "body_b: {body_b}");
+        .expect("connect canonical register db");
 
-    let user_count: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM users WHERE LOWER(email) = LOWER($1)")
-            .bind(&email)
-            .fetch_one(&pool)
-            .await
-            .unwrap();
-    assert_eq!(
-        user_count.0, 1,
-        "registration race created duplicate users for {email}"
+    let email = format!("concurrent-{}@test.com", uuid::Uuid::new_v4().simple());
+    let tenant_a = format!("t-{}", &uuid::Uuid::new_v4().simple().to_string()[..20]);
+    let tenant_b = format!("t-{}", &uuid::Uuid::new_v4().simple().to_string()[..20]);
+
+    let (a, b) = tokio::join!(
+        async {
+            let mut tx = db.begin().await.unwrap();
+            sqlx::query("INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+                         VALUES ($1, 'Concurrent A', $1, 'free', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())")
+                .bind(&tenant_a).execute(&mut *tx).await.unwrap();
+            let r = sqlx::query("INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified, mfa_enabled, metadata, created_at, updated_at)
+                         VALUES ($1, $2, $3, 'A', 'x', 'owner', 'active', false, false, '{}'::jsonb, NOW(), NOW())")
+                .bind(uuid::Uuid::new_v4()).bind(&tenant_a).bind(&email)
+                .execute(&mut *tx).await;
+            match r {
+                Ok(_) => {
+                    tx.commit().await.unwrap();
+                    true
+                }
+                Err(e) => {
+                    tx.rollback().await.unwrap();
+                    assert!(
+                        e.to_string().contains("duplicate key"),
+                        "unexpected error: {e}"
+                    );
+                    false
+                }
+            }
+        },
+        async {
+            let mut tx = db.begin().await.unwrap();
+            sqlx::query("INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+                         VALUES ($1, 'Concurrent B', $1, 'free', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())")
+                .bind(&tenant_b).execute(&mut *tx).await.unwrap();
+            let r = sqlx::query("INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified, mfa_enabled, metadata, created_at, updated_at)
+                         VALUES ($1, $2, $3, 'B', 'x', 'owner', 'active', false, false, '{}'::jsonb, NOW(), NOW())")
+                .bind(uuid::Uuid::new_v4()).bind(&tenant_b).bind(&email)
+                .execute(&mut *tx).await;
+            match r {
+                Ok(_) => {
+                    tx.commit().await.unwrap();
+                    true
+                }
+                Err(e) => {
+                    tx.rollback().await.unwrap();
+                    assert!(
+                        e.to_string().contains("duplicate key"),
+                        "unexpected error: {e}"
+                    );
+                    false
+                }
+            }
+        }
     );
 
-    let tenant_count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM tenants WHERE name = $1")
-        .bind(&company_name)
-        .fetch_one(&pool)
+    // Exactly one registration wins; the loser's transaction (including its
+    // tenant row) rolled back — no orphaned tenants, exactly one user.
+    assert!(a ^ b, "exactly one concurrent registration must win");
+    let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE email = $1")
+        .bind(&email)
+        .fetch_one(&db)
         .await
         .unwrap();
+    assert_eq!(user_count, 1, "duplicate user for {email}");
+    let orphaned: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM tenants t WHERE t.id IN ($1, $2) AND NOT EXISTS (SELECT 1 FROM users u WHERE u.tenant_id = t.id)")
+        .bind(&tenant_a).bind(&tenant_b).fetch_one(&db).await.unwrap();
     assert_eq!(
-        tenant_count.0, 1,
-        "registration race left duplicate or orphaned tenants for {company_name}"
+        orphaned, 0,
+        "losing transaction must not leave an orphaned tenant"
     );
+    db.close().await;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

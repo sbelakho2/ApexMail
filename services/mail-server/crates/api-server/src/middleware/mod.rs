@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod cp_auth;
 pub mod ddos;
 pub mod idempotency;
 pub mod metrics;

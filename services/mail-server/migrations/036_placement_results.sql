@@ -1,5 +1,4 @@
 -- Per-account delivery results for placement tests
-BEGIN;
 CREATE TABLE IF NOT EXISTS placement_results (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     test_id         UUID NOT NULL REFERENCES placement_tests(id) ON DELETE CASCADE,
@@ -14,4 +13,3 @@ CREATE TABLE IF NOT EXISTS placement_results (
 );
 CREATE INDEX IF NOT EXISTS idx_placement_results_test ON placement_results (test_id);
 CREATE INDEX IF NOT EXISTS idx_placement_results_account ON placement_results (seed_account_id);
-COMMIT;

@@ -5,7 +5,8 @@
 //! - **Layer 2**:Protocol-level defense (TLS fingerprinting, protocol validation)
 //! - **Layer 3**:Application-level protection (rate limiting, challenges)
 //! - **Layer 4**:Behavioral analysis & ML (anomaly detection, adaptive thresholds)
-//! - **Layer 5**:Distributed coordination (cross-region threat intel, CRDT rate limits)
+//! - **Layer 5**:Coordination primitives (CRDTs, blocklists) — cross-process
+//!   propagation is NOT implemented; see `coordinator` module docs
 //!
 //! ## Quick Start
 //!
@@ -29,7 +30,10 @@
 //! - `core` (default):Basic rate limiting and fingerprinting
 //! - `ml`:Machine learning anomaly detection (Isolation Forest)
 //! - `challenges`:Proof-of-work and JS challenges
-//! - `coordinator`:Cross-region threat intelligence sharing
+//! - `coordinator`:In-process coordination primitives (CRDTs, blocklist
+//!   hub). NOTE: cross-process/cross-region propagation is NOT
+//!   implemented — the Redis knobs in `coordinator::CoordinatorConfig`
+//!   are reserved placeholders.
 //! - `full`:All features enabled
 
 #![deny(unsafe_code)]
@@ -252,10 +256,12 @@ impl DdosProtector {
         // current request's decisions use the updated score.
         let reputation = self.get_or_create_reputation(&ctx.ip);
 
-        // Layer 2:Cost-based rate limiting
-        let cost_decision =
-            self.cost_limiter
-                .check(&ctx.tenant_id.clone().unwrap_or_default(), &ctx.path, None);
+        // Layer 2:Cost-based rate limiting.
+        // Fix #8: anonymous requests key their cost bucket by CLIENT IP.
+        // All unauthenticated traffic previously shared ONE "" bucket, so
+        // a single abusive client 429'd every other unauthenticated user.
+        let bucket_key = cost_bucket_key(ctx.tenant_id.as_deref(), Some(&ctx.ip));
+        let cost_decision = self.cost_limiter.check(&bucket_key, &ctx.path, None);
 
         match cost_decision {
             cost_based::CostDecision::SystemOverloaded { retry_after } => {
@@ -651,76 +657,90 @@ impl DdosProtector {
         }
     }
 
-    /// Background cleanup task
+    /// Background cleanup task.
+    ///
+    /// Fix #7b: each iteration now also runs [`CostBasedLimiter::cleanup`]
+    /// (Bug E-105) so the per-tenant budget map is bounded — previously
+    /// only the refill loop ran and ephemeral tenants leaked entries
+    /// forever.
     pub async fn run_cleanup_loop(&self, interval: Duration) {
         let mut ticker = tokio::time::interval(interval);
 
         loop {
             ticker.tick().await;
-
-            let now = std::time::Instant::now();
-
-            // Cleanup expired blocks
-            let mut expired = Vec::new();
-            for entry in self.blocklist.iter() {
-                if entry.expires_at < now {
-                    expired.push(*entry.key());
-                }
-            }
-            for ip in expired {
-                self.blocklist.remove(&ip);
-                if let Some(metric) = metrics::BLOCKED_IPS.as_ref() {
-                    metric.with_label_values(&["local"]).dec();
-                }
-            }
-
-            // Cleanup old sessions
-            self.session_tracker.cleanup(now);
-
-            // Decay reputation scores toward neutral and evict stale entries.
-            // Fix G: entries are ALSO evicted by last-seen regardless of
-            // score — previously any IP with a non-neutral score was pinned
-            // in the table forever (unbounded memory under IP floods).
-            let eviction_threshold = if self.config.reputation_stale_after.is_zero() {
-                Duration::from_secs(3600)
-            } else {
-                self.config.reputation_stale_after
-            };
-            self.reputation_db.retain(|_ip, entry| {
-                // Decay toward neutral
-                if entry.score < 50 {
-                    entry.score = (entry.score + 1).min(50);
-                } else if entry.score > 50 {
-                    entry.score = (entry.score - 1).max(50);
-                }
-
-                // Evict if:not seen within the stale window (regardless of
-                // score) OR neutral+inactive+old (previous policy).
-                let is_stale = entry.last_seen.elapsed() > eviction_threshold;
-
-                let is_neutral = entry.score == 50;
-                let is_inactive = entry.total_requests < 10
-                    && entry.challenges_passed == 0
-                    && entry.challenges_failed == 0
-                    && entry.rate_limit_hits == 0
-                    && entry.blocked_requests == 0
-                    && !entry.is_trusted
-                    && !entry.is_flagged;
-                let is_old = entry.first_seen.elapsed() > eviction_threshold;
-
-                !(is_stale || is_neutral && is_inactive && is_old)
-            });
-
-            // Periodic enforcement of the hard capacity cap as well.
-            self.enforce_reputation_capacity();
-
-            info!(
-                blocked_ips = self.blocklist.len(),
-                active_sessions = self.session_tracker.active_count(),
-                reputation_entries = self.reputation_db.len(),
-                "DDoS protection cleanup complete"
-            );
+            self.run_cleanup_once();
         }
+    }
+
+    /// One cleanup pass: expired blocks, stale sessions, reputation
+    /// decay/eviction, and stale per-tenant cost budgets.
+    fn run_cleanup_once(&self) {
+        let now = std::time::Instant::now();
+
+        // Cleanup expired blocks
+        let mut expired = Vec::new();
+        for entry in self.blocklist.iter() {
+            if entry.expires_at < now {
+                expired.push(*entry.key());
+            }
+        }
+        for ip in expired {
+            self.blocklist.remove(&ip);
+            if let Some(metric) = metrics::BLOCKED_IPS.as_ref() {
+                metric.with_label_values(&["local"]).dec();
+            }
+        }
+
+        // Cleanup old sessions
+        self.session_tracker.cleanup(now);
+
+        // Cleanup stale tenant cost budgets (fix #7b / Bug E-105).
+        self.cost_limiter.cleanup();
+
+        // Decay reputation scores toward neutral and evict stale entries.
+        // Fix G: entries are ALSO evicted by last-seen regardless of
+        // score — previously any IP with a non-neutral score was pinned
+        // in the table forever (unbounded memory under IP floods).
+        let eviction_threshold = if self.config.reputation_stale_after.is_zero() {
+            Duration::from_secs(3600)
+        } else {
+            self.config.reputation_stale_after
+        };
+        self.reputation_db.retain(|_ip, entry| {
+            // Decay toward neutral
+            if entry.score < 50 {
+                entry.score = (entry.score + 1).min(50);
+            } else if entry.score > 50 {
+                entry.score = (entry.score - 1).max(50);
+            }
+
+            // Evict if:not seen within the stale window (regardless of
+            // score) OR neutral+inactive+old (previous policy).
+            let is_stale = entry.last_seen.elapsed() > eviction_threshold;
+
+            let is_neutral = entry.score == 50;
+            let is_inactive = entry.total_requests < 10
+                && entry.challenges_passed == 0
+                && entry.challenges_failed == 0
+                && entry.rate_limit_hits == 0
+                && entry.blocked_requests == 0
+                && !entry.is_trusted
+                && !entry.is_flagged;
+            let is_old = entry.first_seen.elapsed() > eviction_threshold;
+
+            !(is_stale || is_neutral && is_inactive && is_old)
+        });
+
+        // Periodic enforcement of the hard capacity cap as well.
+        self.enforce_reputation_capacity();
+
+        info!(
+            blocked_ips = self.blocklist.len(),
+            active_sessions = self.session_tracker.active_count(),
+            reputation_entries = self.reputation_db.len(),
+            tracked_cost_tenants = self.cost_limiter.tracked_tenants(),
+            "DDoS protection cleanup complete"
+        );
     }
 }
 
@@ -738,9 +758,23 @@ fn generate_challenge_secret() -> [u8; 32] {
             .unwrap_or_default(),
     );
     let digest = hasher.finalize();
-    let mut secret = [0u8; 32];
+    let mut secret = [u8; 32];
     secret.copy_from_slice(&digest);
     secret
+}
+
+/// Cost-bucket key for a request (fix #8).
+///
+/// Authenticated requests are keyed by tenant ID as before. Anonymous
+/// requests are keyed by CLIENT IP so one abusive client cannot exhaust
+/// the budget of all unauthenticated traffic. Only when neither identity
+/// nor address is available does the legacy shared bucket ("") apply.
+fn cost_bucket_key(tenant_id: Option<&str>, ip: Option<&IpAddr>) -> String {
+    match (tenant_id, ip) {
+        (Some(tenant), _) => tenant.to_string(),
+        (None, Some(ip)) => format!("anon:{ip}"),
+        (None, None) => String::new(),
+    }
 }
 
 /// DDoS protection errors
@@ -983,8 +1017,105 @@ mod tests {
         assert!(protector.reputation_entry_count() <= 10);
     }
 
-    // ── Fix I:challenge issuance/verification hardening ────────────
+    // ── Fix #7b:cost-budget map bounded by the cleanup loop ────────
 
+    #[tokio::test]
+    async fn test_cleanup_once_evicts_stale_cost_tenants() {
+        let config = ProtectorConfig {
+            default_cost_budget: 10_000,
+            system_cost_capacity: 1_000_000,
+            ..ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+
+        let _ = protector.cost_limiter.check("active", "/v1/health", None);
+        protector.cost_limiter.force_stale_for_test("stale");
+        assert_eq!(protector.cost_limiter.tracked_tenants(), 2);
+
+        // One pass of the (formerly loop-only) cleanup must evict the
+        // stale tenant budget entry — before fix #7b the loop never called
+        // CostBasedLimiter::cleanup and ephemeral tenants leaked forever.
+        protector.run_cleanup_once();
+        assert_eq!(
+            protector.cost_limiter.tracked_tenants(),
+            1,
+            "stale tenant budget must be evicted by the cleanup pass"
+        );
+    }
+
+    // ── Fix #8:anonymous cost buckets keyed by client IP ───────────
+
+    #[test]
+    fn test_cost_bucket_key_ip_vs_shared() {
+        let ip1: IpAddr = "198.51.100.1".parse().expect("hardcoded test IP");
+        let ip2: IpAddr = "198.51.100.2".parse().expect("hardcoded test IP");
+        // Anonymous requests: per-IP keys, distinct.
+        assert_eq!(cost_bucket_key(None, Some(&ip1)), "anon:198.51.100.1");
+        assert_ne!(
+            cost_bucket_key(None, Some(&ip1)),
+            cost_bucket_key(None, Some(&ip2)),
+            "distinct anonymous IPs must get distinct buckets"
+        );
+        // Authenticated requests: tenant wins even with an IP present.
+        assert_eq!(cost_bucket_key(Some("tenant-7"), Some(&ip1)), "tenant-7");
+        // No identity at all: legacy shared bucket.
+        assert_eq!(cost_bucket_key(None, None), "");
+    }
+
+    #[tokio::test]
+    async fn test_anonymous_cost_budgets_are_per_ip() {
+        // Small budget so /v1/health (cost 10) exhausts after 3 hits.
+        let config = ProtectorConfig {
+            default_cost_budget: 30,
+            system_cost_capacity: 10_000_000,
+            ..ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+
+        let anon_ctx = |ip: &str| RequestContext {
+            ip: ip.parse().expect("hardcoded test IP"),
+            path: "/v1/health".to_string(),
+            method: "GET".to_string(),
+            tls_fingerprint: None,
+            h2_fingerprint: None,
+            user_agent: None,
+            body_size: 0,
+            tenant_id: None,
+            api_key_id: None,
+        };
+
+        // Drain the budget of 198.51.100.10.
+        for _ in 0..3 {
+            assert!(matches!(
+                protector.evaluate(&anon_ctx("198.51.100.10")).await,
+                ProtectionDecision::Allow
+            ));
+        }
+        assert!(
+            matches!(
+                protector.evaluate(&anon_ctx("198.51.100.10")).await,
+                ProtectionDecision::RateLimit { .. }
+            ),
+            "the abusive IP must be limited"
+        );
+
+        // A different anonymous IP has its OWN budget and is unaffected —
+        // previously all anonymous traffic shared one \"\" bucket and was
+        // 429'd together.
+        assert!(
+            matches!(
+                protector.evaluate(&anon_ctx("198.51.100.11")).await,
+                ProtectionDecision::Allow
+            ),
+            "a different anonymous IP must not be collateral damage"
+        );
+    }
+
+    // ── Fix I:challenge issuance/verification hardening ────────────
     #[cfg(feature = "challenges")]
     #[tokio::test]
     async fn test_verify_pow_replay_rejected_through_protector() {

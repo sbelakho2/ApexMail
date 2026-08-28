@@ -11,6 +11,10 @@ use crate::transpiler;
 use crate::types::{RenderOptions, TemplateError, TranspiledTemplate};
 
 /// A sandbox for executing template rendering with resource limits.
+///
+/// Cheap to clone (config only) so request handlers can move a copy into
+/// `spawn_blocking`.
+#[derive(Clone)]
 pub struct Sandbox {
     config: SandboxConfig,
 }
@@ -56,9 +60,16 @@ impl Sandbox {
         // 5. Check timeout again
         self.check_timeout(start)?;
 
+        // Per-phase deadline: later phases (especially minify, whose
+        // protected-region scan is quadratic in the number of `<pre>`/`<code>`
+        // regions) can burn CPU far longer than the whole budget before the
+        // next between-phase check would fire. Every loop iteration now
+        // consults the deadline, so a single phase cannot overrun unbounded.
+        let deadline = start + Duration::from_millis(self.config.timeout_ms);
+
         // 6. Minify if requested (whitespace-sensitive tags are preserved)
         let html = if options.minify {
-            minify_html(&html)
+            minify_html_within(&html, deadline, self.config.timeout_ms)?
         } else {
             html
         };
@@ -81,10 +92,14 @@ impl Sandbox {
             });
         }
 
-        // Subject resolution reports the same missing-field warnings.
+        // Subject resolution reports the same missing-field warnings (the
+        // caller re-resolves with header hardening for the final value).
         if let Some(subject) = options.subject.as_ref() {
-            let subject_outcome =
-                transpiler::resolve_placeholders_plain_reported(subject, &options.props, &fallback);
+            let subject_outcome = transpiler::resolve_placeholders_subject_reported(
+                subject,
+                &options.props,
+                &fallback,
+            );
             warnings.extend(subject_outcome.warnings);
         }
 
@@ -138,10 +153,27 @@ const WHITESPACE_SENSITIVE_TAGS: &[&str] = &["pre", "textarea", "code"];
 /// Content inside `<pre>`, `<textarea>`, and `<code>` is copied verbatim:
 /// collapsing whitespace there corrupts code samples and preformatted email
 /// blocks that renderers and tests compare byte-for-byte.
-fn minify_html(html: &str) -> String {
+///
+/// Deadline-bounded: if the protected-region scan is still running past
+/// `deadline` (e.g. quadratic cost from thousands of `<pre>` regions), it
+/// aborts with [`TemplateError::Timeout`] instead of grinding past the whole
+/// sandbox budget.
+fn minify_html_within(
+    html: &str,
+    deadline: Instant,
+    timeout_ms: u64,
+) -> Result<String, TemplateError> {
     let mut result = String::with_capacity(html.len());
     let mut rest = html;
     while let Some(open_pos) = find_sensitive_boundary(rest, false) {
+        if Instant::now() > deadline {
+            warn!(
+                timeout_ms,
+                remaining_bytes = rest.len(),
+                "Sandbox minify phase timed out"
+            );
+            return Err(TemplateError::Timeout { ms: timeout_ms });
+        }
         // Minify everything before the protected region, keep the open tag.
         let (head, tail) = rest.split_at(open_pos);
         result.push_str(&minify_html_unprotected(head));
@@ -164,12 +196,12 @@ fn minify_html(html: &str) -> String {
             None => {
                 // Unbalanced — copy the remainder verbatim (fail safe).
                 result.push_str(rest);
-                return result;
+                return Ok(result);
             }
         }
     }
     result.push_str(&minify_html_unprotected(rest));
-    result
+    Ok(result)
 }
 
 /// Locate the next whitespace-sensitive tag boundary. With `closing_only`,
@@ -236,6 +268,13 @@ fn minify_html_unprotected(html: &str) -> String {
 mod tests {
     use super::*;
     use crate::config::SandboxConfig;
+
+    /// Unbounded minification for tests: the deadline variant with a
+    /// far-future deadline that can never elapse.
+    fn minify_html(html: &str) -> String {
+        minify_html_within(html, Instant::now() + Duration::from_secs(3600), u64::MAX)
+            .expect("far-future deadline cannot elapse")
+    }
 
     fn test_sandbox() -> Sandbox {
         Sandbox::new(SandboxConfig {
@@ -438,5 +477,43 @@ mod tests {
             max_output_length: 2 * 1024 * 1024,
         });
         assert!(sandbox.execute("<p>ok</p>", &opts).is_ok());
+    }
+
+    /// The minify phase consults the sandbox deadline on every protected
+    /// region, so a pathological number of `<pre>` blocks cannot grind past
+    /// the budget between the existing between-phase checks.
+    #[test]
+    fn test_minify_deadline_bounds_each_phase() {
+        let html = "<pre>a</pre>".repeat(20_000);
+        // Deadline already elapsed -> the very first iteration must abort.
+        let err = minify_html_within(&html, Instant::now(), 4321).unwrap_err();
+        assert!(matches!(err, TemplateError::Timeout { ms: 4321 }), "{err}");
+
+        // Same input with a far-future deadline minifies normally.
+        let out = minify_html_within(&html, Instant::now() + Duration::from_secs(3600), 3_600_000)
+            .unwrap();
+        assert!(out.contains("<pre>a</pre>"));
+    }
+
+    /// 5 000 nested `<div>`s (~25KB) is far past the nesting limit and must
+    /// return a sandbox error — not abort the tokio worker thread with a
+    /// stack overflow. Runs on this test thread's default stack: unbounded
+    /// recursion would abort the process before the assert is reached.
+    #[test]
+    fn test_sandbox_deeply_nested_html_returns_error_not_abort() {
+        let sandbox = test_sandbox();
+        let source = "<div>".repeat(5_000);
+        let opts = RenderOptions {
+            props: serde_json::json!({}),
+            generate_plaintext: false,
+            minify: false,
+            subject: None,
+            missing_field_fallback: None,
+        };
+        let err = sandbox.execute(&source, &opts).unwrap_err();
+        assert!(
+            matches!(err, TemplateError::InvalidSyntax { ref message } if message.contains("nesting too deep")),
+            "unexpected error: {err}"
+        );
     }
 }

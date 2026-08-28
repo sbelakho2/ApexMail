@@ -10,7 +10,10 @@
 //! next flush cycle retries (-500-001); after 10 retries an event is dropped
 //! as poison with an error log.
 //! • Events are wrapped in versioned envelopes with a SHA-256 checksum
-//! (E-174) for forward-compatible integrity checking.
+//! (E-174). v2 envelopes carry the full 64-hex-char digest; v1 envelopes
+//! carry only the first 8 hex chars (32 bits) — a corruption heuristic,
+//! NOT a security integrity check — and remain readable for backward
+//! compatibility with entries already queued in Redis.
 //! • Dedup via Redis SETNX (EX 86400, open; EX 1 s, rapid clicks) — the key
 //! is rolled back (DEL) when the subsequent WAL enqueue fails, so a failed
 //! enqueue never swallows the client's retry as a "duplicate".
@@ -36,8 +39,15 @@ use uuid::Uuid;
 
 // ── Event envelope ────────────────────────────────────────────────────────────
 
-/// WAL envelope version for the persisted tracking payload.
-const WAL_VERSION: u8 = 1;
+/// WAL envelope version for newly persisted tracking payloads.
+/// v2 — full 64-hex-char SHA-256 digest in `cs`.
+const WAL_VERSION: u8 = 2;
+
+/// Legacy envelope version still accepted on replay: v1 carried only the
+/// first 8 hex chars of the digest (a corruption heuristic, not a security
+/// integrity check). Kept readable so entries already queued in Redis
+/// survive an upgrade.
+const WAL_VERSION_V1: u8 = 1;
 
 /// Maximum re-enqueue attempts for a WAL event whose Postgres write keeps
 /// failing. Events exceeding this are dropped as poison (with an error log)
@@ -469,8 +479,7 @@ impl EventProcessor {
     /// Wrap event in a versioned envelope and RPUSH to Redis WAL.
     async fn enqueue_event(&self, event: &TrackingEvent) -> Result<()> {
         let payload = serde_json::to_string(event).context("serialize event")?;
-        let cs = sha256_hex8(&payload);
-        let envelope = format!(r#"{{"v":{WAL_VERSION},"cs":"{cs}","d":{payload}}}"#);
+        let envelope = build_wal_envelope(&payload);
 
         let mut conn = self.redis.get().await.context("redis pool get")?;
         redis::cmd("RPUSH")
@@ -966,7 +975,7 @@ fn parse_single_wal_entry(raw: &str) -> Result<TrackingEvent> {
 
     if outer.get("v").is_some() {
         let v = outer["v"].as_u64().unwrap_or(0);
-        if v != WAL_VERSION as u64 {
+        if v != WAL_VERSION as u64 && v != WAL_VERSION_V1 as u64 {
             anyhow::bail!("unsupported WAL version {v}");
         }
 
@@ -975,14 +984,14 @@ fn parse_single_wal_entry(raw: &str) -> Result<TrackingEvent> {
         // content inside the payload itself.
         let d_value = outer.get("d").context("no 'd' key in envelope")?;
         let raw_payload = serde_json::to_string(d_value).context("re-serialize 'd' value")?;
-        let expected_cs = sha256_hex8(&raw_payload);
+        let expected_cs = wal_checksum_hex(v as u8, &raw_payload);
         let actual_cs = outer["cs"].as_str().unwrap_or("");
         if actual_cs != expected_cs {
             // Fall back:try the original raw extraction for backward compatibility
             // with envelopes where checksum was computed over the raw substring
             let d_idx = raw.find(",\"d\":").context("no 'd' key in raw envelope")?;
             let raw_payload_legacy = &raw[d_idx + 5..raw.len() - 1];
-            let expected_cs_legacy = sha256_hex8(raw_payload_legacy);
+            let expected_cs_legacy = wal_checksum_hex(v as u8, raw_payload_legacy);
             if actual_cs != expected_cs_legacy {
                 anyhow::bail!("checksum mismatch: expected={expected_cs} actual={actual_cs}");
             }
@@ -996,7 +1005,26 @@ fn parse_single_wal_entry(raw: &str) -> Result<TrackingEvent> {
 
 // ── Utility functions ─────────────────────────────────────────────────────────
 
-/// Compute the first 8 hex chars of SHA-256.
+/// Envelope checksum for a given envelope version.
+///
+/// v2 — full 64-hex-char SHA-256 digest.
+/// v1 — first 8 hex chars (4 bytes): a 32-bit corruption heuristic, not a
+///      security integrity check. Kept only so legacy envelopes still verify.
+fn wal_checksum_hex(version: u8, s: &str) -> String {
+    if version >= WAL_VERSION {
+        hex::encode(Sha256::digest(s.as_bytes()))
+    } else {
+        sha256_hex8(s)
+    }
+}
+
+/// Serialize `payload` into the current-version WAL envelope string.
+fn build_wal_envelope(payload: &str) -> String {
+    let cs = wal_checksum_hex(WAL_VERSION, payload);
+    format!(r#"{{"v":{WAL_VERSION},"cs":"{cs}","d":{payload}}}"#)
+}
+
+/// Compute the first 8 hex chars of SHA-256 (v1 envelope checksum width).
 fn sha256_hex8(s: &str) -> String {
     let hash = Sha256::digest(s.as_bytes());
     hex::encode(&hash[..4]) // 4 bytes = 8 hex chars
@@ -1025,8 +1053,8 @@ fn dedup_key(event_type: &str, message_id: &str, recipient: &str, link_id: Optio
 ///
 /// Legacy bare-event entries (no envelope) are wrapped into a versioned
 /// envelope with `r = 1`. The checksum is computed over the re-serialized
-/// `d` value so the modern verification path in
-/// [`parse_single_wal_entry`] accepts the result.
+/// `d` value (at the envelope's own version, so v1 entries stay v1) so the
+/// verification path in [`parse_single_wal_entry`] accepts the result.
 fn bump_envelope_retries(raw: &str) -> Option<String> {
     let mut outer: serde_json::Value = serde_json::from_str(raw).ok()?;
     if let Some(retries) = outer.get("r").and_then(|r| r.as_u64()) {
@@ -1036,20 +1064,27 @@ fn bump_envelope_retries(raw: &str) -> Option<String> {
     }
     if outer.get("v").is_some() {
         let next = outer.get("r").and_then(|r| r.as_u64()).unwrap_or(0) + 1;
+        // Preserve the envelope's version (and therefore its checksum
+        // width): a v1 entry being re-queued must remain a valid v1 entry.
+        let version = outer
+            .get("v")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(WAL_VERSION as u64) as u8;
         // Recompute the checksum over the re-serialized `d` value so the
         // modern verification path (which hashes `d.to_string()`) accepts
         // the bumped envelope — the original string-form checksum does not
         // survive a Value round-trip without preserve_order.
         let d_str = outer.get("d").map(|d| d.to_string()).unwrap_or_default();
-        let cs = sha256_hex8(&d_str);
+        let cs = wal_checksum_hex(version, &d_str);
         outer["r"] = serde_json::json!(next);
         outer["cs"] = serde_json::json!(cs);
         Some(outer.to_string())
     } else {
-        // Legacy bare event — wrap it, computing the checksum the same way
-        // the modern parse path verifies it (`d` re-serialized as a Value).
+        // Legacy bare event — wrap it at the CURRENT version, computing the
+        // checksum the same way the modern parse path verifies it (`d`
+        // re-serialized as a Value).
         let d_str = outer.to_string();
-        let cs = sha256_hex8(&d_str);
+        let cs = wal_checksum_hex(WAL_VERSION, &d_str);
         let envelope = serde_json::json!({
             "v": WAL_VERSION,
             "r": 1,
@@ -1097,8 +1132,7 @@ mod tests {
             metadata: None,
         };
         let payload = serde_json::to_string(&event).unwrap();
-        let cs = sha256_hex8(&payload);
-        let envelope = format!(r#"{{"v":1,"cs":"{cs}","d":{payload}}}"#);
+        let envelope = build_wal_envelope(&payload);
         let parsed = parse_single_wal_entry(&envelope).unwrap();
         assert_eq!(parsed.id, event.id);
     }
@@ -1108,6 +1142,57 @@ mod tests {
         let payload = r#"{"id":"evt_1","type":"opened","tenantId":"t","messageId":"m","recipient":"x@y.com","timestamp":"2024-01-01T00:00:00Z"}"#;
         let envelope = format!(r#"{{"v":1,"cs":"00000000","d":{payload}}}"#);
         assert!(parse_single_wal_entry(&envelope).is_err());
+    }
+
+    const BARE_PAYLOAD: &str = r#"{"id":"evt_1","type":"opened","tenantId":"t","messageId":"m","recipient":"x@y.com","timestamp":"2024-01-01T00:00:00Z"}"#;
+
+    /// v2 envelopes carry the FULL 64-hex-char SHA-256 digest as `cs` and
+    /// must be accepted by the replay parser.
+    #[test]
+    fn parse_accepts_v2_envelope_with_full_sha256_digest_checksum() {
+        let full = hex::encode(Sha256::digest(BARE_PAYLOAD.as_bytes()));
+        assert_eq!(full.len(), 64);
+        let envelope = format!(r#"{{"v":2,"cs":"{full}","d":{BARE_PAYLOAD}}}"#);
+        let parsed = parse_single_wal_entry(&envelope);
+        assert!(
+            parsed.is_ok(),
+            "v2 full-digest envelope must parse: {parsed:?}"
+        );
+    }
+
+    /// Backward compatibility: v1 envelopes already sitting in Redis carry
+    /// only the first 8 hex chars (4 bytes) of the digest and must keep
+    /// parsing.
+    #[test]
+    fn parse_still_accepts_legacy_v1_hex8_envelope() {
+        let cs = sha256_hex8(BARE_PAYLOAD);
+        assert_eq!(cs.len(), 8);
+        let envelope = format!(r#"{{"v":1,"cs":"{cs}","d":{BARE_PAYLOAD}}}"#);
+        let parsed = parse_single_wal_entry(&envelope);
+        assert!(
+            parsed.is_ok(),
+            "legacy v1 hex8 envelope must parse: {parsed:?}"
+        );
+    }
+
+    /// A v2-labelled envelope with only a truncated (8-hex) checksum must be
+    /// rejected — the version commits the digest width.
+    #[test]
+    fn parse_rejects_v2_envelope_with_truncated_checksum() {
+        let truncated = sha256_hex8(BARE_PAYLOAD);
+        let envelope = format!(r#"{{"v":2,"cs":"{truncated}","d":{BARE_PAYLOAD}}}"#);
+        assert!(parse_single_wal_entry(&envelope).is_err());
+    }
+
+    /// Envelopes written today (WAL_VERSION) must carry the full digest.
+    #[test]
+    fn written_envelopes_carry_the_full_digest() {
+        let envelope = build_wal_envelope(BARE_PAYLOAD);
+        let outer: serde_json::Value = serde_json::from_str(&envelope).unwrap();
+        assert_eq!(outer["v"].as_u64(), Some(WAL_VERSION as u64));
+        let cs = outer["cs"].as_str().unwrap();
+        assert_eq!(cs.len(), 64, "v2 checksum must be the full digest");
+        assert!(parse_single_wal_entry(&envelope).is_ok());
     }
 
     #[test]
@@ -1134,8 +1219,7 @@ mod tests {
             metadata: None,
         };
         let payload = serde_json::to_string(&event).unwrap();
-        let cs = sha256_hex8(&payload);
-        let envelope = format!(r#"{{"v":{WAL_VERSION},"cs":"{cs}","d":{payload}}}"#);
+        let envelope = build_wal_envelope(&payload);
 
         let bumped = bump_envelope_retries(&envelope).unwrap();
         let outer: serde_json::Value = serde_json::from_str(&bumped).unwrap();
@@ -1167,10 +1251,26 @@ mod tests {
             metadata: None,
         };
         let payload = serde_json::to_string(&event).unwrap();
-        let cs = sha256_hex8(&payload);
+        let cs = wal_checksum_hex(WAL_VERSION, &payload);
         let envelope =
             format!(r#"{{"v":{WAL_VERSION},"r":{MAX_EVENT_RETRIES},"cs":"{cs}","d":{payload}}}"#);
         assert!(bump_envelope_retries(&envelope).is_none());
+    }
+
+    /// Re-queueing a legacy v1 entry must keep it a VALID v1 entry (the
+    /// checksum width follows the envelope version).
+    #[test]
+    fn bump_preserves_v1_envelope_version_and_checksum() {
+        let cs = sha256_hex8(BARE_PAYLOAD);
+        let envelope = format!(r#"{{"v":1,"cs":"{cs}","d":{BARE_PAYLOAD}}}"#);
+        let bumped = bump_envelope_retries(&envelope).unwrap();
+        let outer: serde_json::Value = serde_json::from_str(&bumped).unwrap();
+        assert_eq!(outer["v"].as_u64(), Some(1));
+        assert_eq!(outer["r"].as_u64(), Some(1));
+        assert!(
+            parse_single_wal_entry(&bumped).is_ok(),
+            "bumped v1 envelope must remain parseable"
+        );
     }
 
     #[test]

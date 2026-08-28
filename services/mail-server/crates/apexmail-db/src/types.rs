@@ -8,7 +8,8 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Tenant {
-    pub id: Uuid,
+    /// 26-char ULID-style string (migration 064 canonical type); NOT a UUID.
+    pub id: String,
     pub name: String,
     pub slug: String,
     pub plan: String,
@@ -258,7 +259,7 @@ mod tests {
     #[test]
     fn test_tenant_serialization() {
         let t = Tenant {
-            id: Uuid::new_v4(),
+            id: "01j9z0z0z0z0z0z0z0z0z0z0z0".into(),
             name: "Test Corp".into(),
             slug: "test-corp".into(),
             plan: "pro".into(),

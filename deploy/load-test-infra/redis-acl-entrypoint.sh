@@ -14,9 +14,23 @@ fi
 ACL_DIR="/tmp/redis-acl"
 ACL_FILE="${ACL_DIR}/users.acl"
 mkdir -p "$ACL_DIR"
-echo "user default on >${REDIS_PASSWORD} ~* &* +@all" > "$ACL_FILE"
+# Audit fix: default user keeps only the data plane — the destructive/
+# reconfiguration commands (FLUSHALL/FLUSHDB/CONFIG/DEBUG/SHUTDOWN/ACL/
+# REPLICAOF/MODULE/MIGRATE/RESTORE) are removed; load generators (k6 etc.)
+# auth as default with the password only. A full-privilege admin user is
+# declared but disabled unless REDIS_ADMIN_PASSWORD(_FILE) is provided.
+echo "user default on >${REDIS_PASSWORD} ~* &* +@all -flushall -flushdb -config -debug -shutdown -acl -slaveof -replicaof -module -migrate -restore" > "$ACL_FILE"
+REDIS_ADMIN_PASSWORD=""
+if [ -n "${REDIS_ADMIN_PASSWORD_FILE:-}" ] && [ -f "${REDIS_ADMIN_PASSWORD_FILE}" ]; then
+    REDIS_ADMIN_PASSWORD="$(tr -d '\r\n' < "${REDIS_ADMIN_PASSWORD_FILE}")"
+fi
+if [ -n "${REDIS_ADMIN_PASSWORD:-}" ]; then
+    echo "user admin on >${REDIS_ADMIN_PASSWORD} ~* &* +@all" >> "$ACL_FILE"
+else
+    echo "user admin off ~* &* +@all" >> "$ACL_FILE"
+fi
 chmod 600 "$ACL_FILE"
-unset REDIS_PASSWORD
+unset REDIS_PASSWORD REDIS_ADMIN_PASSWORD
 
 exec redis-server \
     --maxmemory 512mb \

@@ -15,7 +15,30 @@
 -- it. Make both nullable (they carry no data the canonical columns lack).
 --
 -- Idempotent: safe to re-run on any deployment.
+--
+-- Guarded: no canonical migration before this one created inbound_messages
+-- until 088 was folded to create it (CREATE TABLE IF NOT EXISTS superset).
+-- Databases where inbound_messages still does not exist (runtime-provisioned
+-- or older lineages) must not abort the chain here — the unguarded ALTER
+-- failed the whole fresh chain with "relation inbound_messages does not
+-- exist". The guard also tolerates shapes that lack the legacy mirror
+-- columns entirely (088's fresh-create declares them nullable already).
 -- =============================================================================
 
-ALTER TABLE inbound_messages ALTER COLUMN from_email DROP NOT NULL;
-ALTER TABLE inbound_messages ALTER COLUMN to_email DROP NOT NULL;
+DO $$
+BEGIN
+    IF to_regclass('public.inbound_messages') IS NULL THEN
+        RAISE NOTICE '114: inbound_messages does not exist — nothing to relax';
+    ELSE
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = 'inbound_messages'
+                     AND column_name = 'from_email' AND is_nullable = 'NO') THEN
+            ALTER TABLE inbound_messages ALTER COLUMN from_email DROP NOT NULL;
+        END IF;
+        IF EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'public' AND table_name = 'inbound_messages'
+                     AND column_name = 'to_email' AND is_nullable = 'NO') THEN
+            ALTER TABLE inbound_messages ALTER COLUMN to_email DROP NOT NULL;
+        END IF;
+    END IF;
+END $$;

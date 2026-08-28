@@ -58,6 +58,13 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAILSTORE_CHANNEL_TIMEOUT: Duration = Duration::from_secs(10);
 const MAILSTORE_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Overall wall-clock cap for the WHOLE mailbox-delivery phase of one
+/// message (end-of-DATA), regardless of recipient count: per-recipient RPC
+/// pairs are fanned out concurrently under this single deadline, so a slow
+/// mailstore bounds end-of-DATA to ~30 s instead of
+/// max_recipients × 2 × MAILSTORE_RPC_TIMEOUT.
+const MAILSTORE_DELIVERY_DEADLINE: Duration = Duration::from_secs(30);
+
 /// F-14: number of 4xx/5xx replies after which the session is closed with
 /// `421 4.7.0 Too many errors` (RFC 5321 §4.3.2 recommends a small limit).
 const MAX_SESSION_ERRORS: u32 = 20;
@@ -304,7 +311,13 @@ impl InboundServer {
         tls: Option<TlsAcceptor>, // #136:renamed from _tls, now used for STARTTLS
     ) {
         let ip = peer.ip();
-        if !self.check_rate_limit(ip) {
+        if self.rate_limit_config.enabled
+            && !super::bounce::try_admit_connection(
+                &self.connections,
+                ip,
+                self.rate_limit_config.max_connections_per_ip,
+            )
+        {
             let _ = write_line_tcp(
                 &socket,
                 "421 4.7.0 Too many connections, try again later\r\n",
@@ -314,8 +327,6 @@ impl InboundServer {
         }
         // F-19: RAII slot guard (same pattern as the bounce server) — the
         // per-IP slot is released on EVERY exit path, early returns included.
-        // F-19: increment + RAII guard (decrement happens on drop).
-        *self.connections.entry(ip).or_insert(0) += 1;
         let _conn_guard = super::bounce::ConnGuard {
             conns: self.connections.clone(),
             ip,
@@ -796,7 +807,13 @@ impl InboundServer {
         peer: SocketAddr,
     ) {
         let ip = peer.ip();
-        if !self.check_rate_limit(ip) {
+        if self.rate_limit_config.enabled
+            && !super::bounce::try_admit_connection(
+                &self.connections,
+                ip,
+                self.rate_limit_config.max_connections_per_ip,
+            )
+        {
             // F-13: the implicit-TLS listener must not drop over-limit
             // connections silently — the client already paid for the TLS
             // handshake, so tell it why the connection is going away.
@@ -809,8 +826,6 @@ impl InboundServer {
             return;
         }
         // F-19: RAII slot guard — released on every exit path.
-        // F-19: increment + RAII guard (decrement happens on drop).
-        *self.connections.entry(ip).or_insert(0) += 1;
         let _conn_guard = super::bounce::ConnGuard {
             conns: self.connections.clone(),
             ip,
@@ -887,8 +902,10 @@ impl InboundServer {
             // Advertise AUTH on TLS connections whose listener permits it
             // (port 465 by default; port 25 only with
             // SMTP_ADVERTISE_AUTH_PORT25=true). Clients submitting real mail
-            // should use the dedicated submission ports 587/465.
-            if ctx.tls_active && ctx.auth_enabled {
+            // should use the dedicated submission ports 587/465. RFC 4954
+            // §4: never offer AUTH to a session that is already
+            // authenticated (same gate the submission server applies).
+            if ctx.tls_active && ctx.auth_enabled && !ctx.authenticated {
                 caps.push_str("250-AUTH PLAIN LOGIN\r\n");
             }
             // 8BITMIME (RFC 6152): body octets outside US-ASCII are accepted
@@ -1076,7 +1093,12 @@ impl InboundServer {
             if ctx.mail_from.is_none() {
                 return "503 5.5.1 Error: need MAIL command first\r\n".into();
             }
-            if ctx.rcpt_to.len() >= self.config.max_recipients {
+            if ctx.rcpt_to.len()
+                >= super::util::effective_max_recipients(
+                    self.config.max_recipients,
+                    self.rate_limit_config.max_recipients_per_message,
+                )
+            {
                 return "452 4.5.3 Too many recipients\r\n".into();
             }
             if !is_rcpt_to_arg(arg) {
@@ -1165,7 +1187,10 @@ impl InboundServer {
         match disposition {
             crate::auth::MessageDisposition::Reject => {
                 metric_message("inbound", "rejected");
-                anyhow::bail!("Message rejected by policy (DMARC)");
+                // Typed marker (not a string bail): format_data_response
+                // downcasts it to answer 550 instead of the generic 451 —
+                // a permanent policy refusal must not invite retries.
+                return Err(anyhow::Error::new(PermanentReject));
             }
             crate::auth::MessageDisposition::Quarantine => {
                 metric_message("inbound", "quarantined");
@@ -1337,16 +1362,6 @@ impl InboundServer {
         };
 
         let aad = apexmail_lib::dkim::dkim_private_key_aad(&tenant_id, &domain_id.to_string());
-        let private_key = match apexmail_lib::dkim::decrypt_dkim_private_key(&stored_key, &aad)
-            .map_err(|e| anyhow::anyhow!("dkim envelope: {e}"))
-            .and_then(|pem| parse_rsa_private_key(&pem))
-        {
-            Ok(key) => key,
-            Err(error) => {
-                warn!(%error, domain = %domain, "ARC sealing key unusable; skipping seal");
-                return None;
-            }
-        };
 
         let (headers_bytes, body_bytes) = super::submission::split_headers_body(raw);
         let headers = String::from_utf8_lossy(headers_bytes);
@@ -1368,22 +1383,48 @@ impl InboundServer {
                 .unwrap_or_else(|| "none".to_string()),
             dmarc: format!("{:?}", auth_results.dmarc.result).to_lowercase(),
         };
-        let config = crate::auth::ArcSigningConfig {
-            domain: domain.to_string(),
-            selector,
-            private_key,
-        };
-        match crate::auth::generate_arc_headers(
-            &headers,
-            body_bytes,
-            &arc_input,
-            &config,
-            &[],
-            &|_, _| None,
-        ) {
-            Ok(set) => Some(crate::auth::format_arc_headers_for_message(&set)),
-            Err(error) => {
+
+        // The seal build is pure CPU — RSA envelope decrypt + key parse +
+        // two RSA signatures over up to 10 MB of message — and must not run
+        // on the async worker the session loop shares with every other
+        // connection; dispatch it to the blocking pool. Data is moved in
+        // owned ('static) form for the dispatch. Any failure (including a
+        // panicking seal task) is downgraded to "no seal": ARC must never
+        // reject or delay mail.
+        let seal_task = tokio::task::spawn_blocking({
+            let headers = headers.into_owned();
+            let body = body_bytes.to_vec();
+            let domain = domain.to_string();
+            move || -> anyhow::Result<String> {
+                let pem = apexmail_lib::dkim::decrypt_dkim_private_key(&stored_key, &aad)
+                    .map_err(|e| anyhow::anyhow!("dkim envelope: {e}"))?;
+                let private_key = parse_rsa_private_key(&pem)?;
+                let config = crate::auth::ArcSigningConfig {
+                    domain,
+                    selector,
+                    private_key,
+                };
+                crate::auth::generate_arc_headers(
+                    &headers,
+                    &body,
+                    &arc_input,
+                    &config,
+                    &[],
+                    &|_, _| None,
+                )
+                .map(|set| crate::auth::format_arc_headers_for_message(&set))
+            }
+        })
+        .await;
+
+        match seal_task {
+            Ok(Ok(sealed)) => Some(sealed),
+            Ok(Err(error)) => {
                 warn!(%error, domain = %domain, "ARC seal generation failed; skipping seal");
+                None
+            }
+            Err(error) => {
+                warn!(%error, "ARC sealing task failed; skipping seal");
                 None
             }
         }
@@ -1409,12 +1450,11 @@ impl InboundServer {
             let mut conn = self.redis.get().await.map_err(|e| {
                 tracing::error!(message_id = %message_id, error = %e, "Failed to get Redis connection for inbound webhook");
             })?;
-            // #139:LPUSH returns list length (i64), not String
-            if let Err(e) = redis::cmd("LPUSH")
-                .arg("mta:webhook_queue")
-                .arg(payload.to_string())
-                .query_async::<i64>(&mut *conn)
-                .await
+            // #139: LPUSH returns list length (i64), not String. The push
+            // is paired with an LTRIM so a dead consumer cannot grow the
+            // list (and Redis memory) without bound.
+            if let Err(e) =
+                super::util::push_webhook_bounded(&mut *conn, &payload.to_string()).await
             {
                 tracing::error!(message_id = %message_id, error = %e, "Failed to push inbound webhook to Redis queue");
             }
@@ -1426,94 +1466,37 @@ impl InboundServer {
         Ok(())
     }
 
-    /// Deliver an accepted message into the recipient's mailstore mailbox.
+    /// Deliver an accepted message into the recipients' mailstore mailboxes.
     ///
     /// The fully-composed stored message (Received trace header +
     /// Authentication-Results + optional ARC seal + raw client bytes) is
-    /// stored into the recipient's Inbox via the mailstore gRPC service so
+    /// stored into each recipient's Inbox via the mailstore gRPC service so
     /// the message is visible over IMAP. Best-effort: failures are logged,
     /// never propagated to the SMTP session.
+    ///
+    /// Recipients are delivered CONCURRENTLY under ONE overall deadline
+    /// (see [`MAILSTORE_DELIVERY_DEADLINE`]): sequentially, two RPCs at up
+    /// to [`MAILSTORE_RPC_TIMEOUT`] each for up to max_recipients
+    /// recipients could stall end-of-DATA for tens of minutes inside a
+    /// single SMTP transaction.
     async fn deliver_to_mailstore(&self, ctx: &SessionContext, final_message: &[u8]) {
-        let mut client = self.mailstore.clone();
-
-        for recipient in &ctx.rcpt_to {
-            let lookup = GetAccountRequest {
-                account_id: String::new(),
-                email: recipient.clone(),
-            };
-            // M28: bounded RPC — a hung mailstore must not stall the session.
-            let account_id =
-                match rpc_with_deadline(client.get_account(lookup), MAILSTORE_RPC_TIMEOUT).await {
-                    Some(Ok(resp)) => {
-                        let r = resp.into_inner();
-                        if r.account_id.is_empty() {
-                            continue;
-                        }
-                        r.account_id
-                    }
-                    Some(Err(e)) => {
-                        debug!(
-                            recipient = %mail_common::pii::redact_email(recipient),
-                            error = %e,
-                            "No mailstore account for recipient; skipping mailbox delivery"
-                        );
-                        continue;
-                    }
-                    None => {
-                        debug!(
-                            recipient = %mail_common::pii::redact_email(recipient),
-                            "Mailstore account lookup timed out; skipping mailbox delivery"
-                        );
-                        continue;
-                    }
-                };
-
-            let req = StoreMessageRequest {
-                account_id,
-                mailbox: "Inbox".to_string(),
-                raw_message: final_message.to_vec().into(),
-                flags: Some(MessageFlags {
-                    recent: true,
-                    ..Default::default()
-                }),
-                internal_date: chrono::Utc::now().timestamp(),
-                // Delivery path: keep per-mailbox Message-ID dedup active.
-                dedup_exempt: false,
-            };
-            match rpc_with_deadline(client.store_message(req), MAILSTORE_RPC_TIMEOUT).await {
-                Some(Ok(resp)) => {
-                    info!(
-                        recipient = %mail_common::pii::redact_email(recipient),
-                        uid = resp.into_inner().uid,
-                        "Message delivered to mailstore mailbox"
-                    );
+        let deadline = tokio::time::Instant::now() + MAILSTORE_DELIVERY_DEADLINE;
+        let deliveries = ctx
+            .rcpt_to
+            .iter()
+            .map(|recipient| {
+                let mut client = self.mailstore.clone();
+                let recipient = recipient.clone();
+                let message = final_message.to_vec();
+                async move {
+                    deliver_one_to_mailstore(&mut client, &recipient, &message, deadline).await
                 }
-                Some(Err(e)) => {
-                    warn!(
-                        recipient = %mail_common::pii::redact_email(recipient),
-                        error = %e,
-                        "Failed to deliver message to mailstore mailbox"
-                    );
-                }
-                None => {
-                    warn!(
-                        recipient = %mail_common::pii::redact_email(recipient),
-                        "Mailstore store_message timed out; mailbox delivery skipped"
-                    );
-                }
-            }
-        }
+            })
+            .collect::<Vec<_>>();
+        fan_out_under_deadline(deliveries, deadline).await;
     }
 
     // ── rate limiting ──────────────────────────────────────────────────────────
-
-    fn check_rate_limit(&self, ip: IpAddr) -> bool {
-        if !self.rate_limit_config.enabled {
-            return true;
-        }
-        let count = self.connections.get(&ip).map(|v| *v).unwrap_or(0);
-        count < self.rate_limit_config.max_connections_per_ip
-    }
 
     async fn is_managed_recipient(&self, recipient: &str) -> anyhow::Result<bool> {
         let Some(domain) = recipient_domain(recipient) else {
@@ -1889,12 +1872,27 @@ async fn write_line_buf<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>
     stream.flush().await
 }
 
+/// A PERMANENT policy refusal of one message (DMARC p=reject, or the
+/// require_spf / require_dkim hard gates). The marker rides inside the
+/// `anyhow::Error` returned by [`InboundServer::process_message`] so the
+/// end-of-DATA reply can distinguish it from genuine transients: a policy
+/// Reject must answer `550 5.7.1` (the sender must give up), while everything
+/// else keeps the generic `451 4.3.0` (the sender must retry).
+#[derive(Debug, thiserror::Error)]
+#[error("Message rejected by policy")]
+pub(crate) struct PermanentReject;
+
 /// M23: format the SMTP response for a DATA result. The client only ever sees
 /// a generic temporary-failure message; internal error details are logged
-/// server-side and never echoed to the remote peer.
+/// server-side and never echoed to the remote peer. The single exception is
+/// the [`PermanentReject`] policy marker, which surfaces as a hard `550 5.7.1`.
 fn format_data_response(result: &anyhow::Result<String>) -> String {
     match result {
         Ok(id) => format!("250 2.0.0 Ok id={id}\r\n"),
+        Err(e) if e.downcast_ref::<PermanentReject>().is_some() => {
+            warn!(error = %e, "Message rejected by policy; sending 550");
+            "550 5.7.1 Message rejected by policy\r\n".into()
+        }
         Err(e) => {
             warn!(error = %e, "Message processing failed; sending generic 451");
             "451 4.3.0 Temporary failure\r\n".into()
@@ -1939,6 +1937,111 @@ async fn rpc_with_deadline<T>(fut: impl Future<Output = T>, dur: Duration) -> Op
             warn!(timeout = %dur.as_secs(), "mailstore RPC timed out");
             None
         }
+    }
+}
+
+/// One recipient's mailbox delivery: account lookup then store, both under
+/// the shared overall deadline (which also subsumes the per-RPC
+/// [`MAILSTORE_RPC_TIMEOUT`] bounds). Best-effort: every failure path logs
+/// and returns without propagating to the SMTP session.
+async fn deliver_one_to_mailstore(
+    client: &mut MailstoreClient,
+    recipient: &str,
+    final_message: &[u8],
+    deadline: tokio::time::Instant,
+) {
+    let work = async {
+        let lookup = GetAccountRequest {
+            account_id: String::new(),
+            email: recipient.to_string(),
+        };
+        // M28: bounded RPC — a hung mailstore must not stall the session.
+        let account_id =
+            match rpc_with_deadline(client.get_account(lookup), MAILSTORE_RPC_TIMEOUT).await {
+                Some(Ok(resp)) => {
+                    let r = resp.into_inner();
+                    if r.account_id.is_empty() {
+                        return;
+                    }
+                    r.account_id
+                }
+                Some(Err(e)) => {
+                    debug!(
+                        recipient = %mail_common::pii::redact_email(recipient),
+                        error = %e,
+                        "No mailstore account for recipient; skipping mailbox delivery"
+                    );
+                    return;
+                }
+                None => {
+                    debug!(
+                        recipient = %mail_common::pii::redact_email(recipient),
+                        "Mailstore account lookup timed out; skipping mailbox delivery"
+                    );
+                    return;
+                }
+            };
+
+        let req = StoreMessageRequest {
+            account_id,
+            mailbox: "Inbox".to_string(),
+            raw_message: final_message.to_vec().into(),
+            flags: Some(MessageFlags {
+                recent: true,
+                ..Default::default()
+            }),
+            internal_date: chrono::Utc::now().timestamp(),
+            // Delivery path: keep per-mailbox Message-ID dedup active.
+            dedup_exempt: false,
+        };
+        match rpc_with_deadline(client.store_message(req), MAILSTORE_RPC_TIMEOUT).await {
+            Some(Ok(resp)) => {
+                info!(
+                    recipient = %mail_common::pii::redact_email(recipient),
+                    uid = resp.into_inner().uid,
+                    "Message delivered to mailstore mailbox"
+                );
+            }
+            Some(Err(e)) => {
+                warn!(
+                    recipient = %mail_common::pii::redact_email(recipient),
+                    error = %e,
+                    "Failed to deliver message to mailstore mailbox"
+                );
+            }
+            None => {
+                warn!(
+                    recipient = %mail_common::pii::redact_email(recipient),
+                    "Mailstore store_message timed out; mailbox delivery skipped"
+                );
+            }
+        }
+    };
+    if tokio::time::timeout_at(deadline, work).await.is_err() {
+        warn!(
+            recipient = %mail_common::pii::redact_email(recipient),
+            "Mailstore delivery exceeded the overall delivery deadline; mailbox delivery skipped"
+        );
+    }
+}
+
+/// Fan one delivery future out per recipient, all sharing a single overall
+/// deadline: the returned future completes no later than `deadline`, and any
+/// per-recipient future still pending at the deadline is dropped (cancelling
+/// its in-flight RPC). Generic so the deadline semantics are unit-testable
+/// with plain sleep/pending futures.
+async fn fan_out_under_deadline<Fut>(futures: Vec<Fut>, deadline: tokio::time::Instant)
+where
+    Fut: Future<Output = ()>,
+{
+    if tokio::time::timeout_at(deadline, futures::future::join_all(futures))
+        .await
+        .is_err()
+    {
+        warn!(
+            deadline_secs = MAILSTORE_DELIVERY_DEADLINE.as_secs(),
+            "Mailstore delivery phase exceeded its overall deadline; cancelling remaining deliveries"
+        );
     }
 }
 
@@ -2344,6 +2447,89 @@ mod tests {
     fn test_format_data_response_ok_includes_id() {
         let resp = format_data_response(&Ok("abc-123".into()));
         assert_eq!(resp, "250 2.0.0 Ok id=abc-123\r\n");
+    }
+
+    #[test]
+    fn arc_seal_cpu_work_runs_on_the_blocking_pool() {
+        // The ARC seal build (RSA key decrypt+parse, two RSA signatures over
+        // up to 10 MB of message) is pure CPU: it must be dispatched to the
+        // blocking pool, not run on the async worker. Pinned against the
+        // compiled-in source; needles are concat!-built so the test cannot
+        // match its own text.
+        let source = include_str!("inbound.rs");
+        let seal_needle = std::concat!("auth::", "generate_arc", "_headers");
+        let blocking_needle = std::concat!("spawn", "_blocking");
+        let seal_pos = source
+            .find(seal_needle)
+            .expect("the ARC sealing path must generate ARC headers");
+        assert!(
+            source[..seal_pos].contains(blocking_needle),
+            "the seal build must be wrapped in the blocking-pool dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_delivery_fans_out_instead_of_serializing() {
+        // 20 deliveries of 150 ms each must complete in ~150 ms wall clock
+        // (fan-out), not 3 s (serial per-recipient loop).
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let deliveries: Vec<_> = (0..20)
+            .map(|_| async {
+                tokio::time::sleep(Duration::from_millis(150)).await;
+            })
+            .collect();
+        let started = tokio::time::Instant::now();
+        fan_out_under_deadline(deliveries, deadline).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "fan-out must overlap per-recipient work (took {:?})",
+            started.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn delivery_deadline_bounds_stragglers() {
+        // A recipient whose delivery never completes must not hold
+        // end-of-DATA open: the shared deadline cuts it (the pending future
+        // is dropped) and the delivery phase returns at the deadline.
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
+        let deliveries: Vec<std::pin::Pin<Box<dyn Future<Output = ()>>>> = vec![
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }),
+            Box::pin(std::future::pending()),
+        ];
+        let started = tokio::time::Instant::now();
+        fan_out_under_deadline(deliveries, deadline).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "the overall deadline must bound the delivery phase (took {:?})",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn test_format_data_response_policy_reject_answers_550() {
+        // A Reject disposition (DMARC p=reject, require_spf/require_dkim
+        // failures) is a PERMANENT refusal: the reply must be 550 5.7.1 so
+        // the spoofing sender gives up instead of being invited to retry.
+        // The error is built exactly the way process_message builds it.
+        let resp = format_data_response(&Err(anyhow::Error::new(PermanentReject)));
+        assert_eq!(
+            resp, "550 5.7.1 Message rejected by policy\r\n",
+            "a policy rejection is permanent and must answer 550, got {resp:?}"
+        );
+    }
+
+    #[test]
+    fn test_format_data_response_tempfail_answers_451() {
+        let resp = format_data_response(&Err(anyhow::anyhow!(
+            "Message temporarily rejected: DMARC policy lookup failed"
+        )));
+        assert_eq!(
+            resp, "451 4.3.0 Temporary failure\r\n",
+            "a transient DMARC failure must stay a temporary refusal, got {resp:?}"
+        );
     }
 
     // ── E-6: inbound MAIL FROM reverse-path validation ─────────────────────
@@ -2859,6 +3045,50 @@ mod tests {
         assert_eq!(
             handle_cmd(&server, "FROBNICATE", &mut ctx).await,
             "500 5.5.2 Command not recognised\r\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn ehlo_does_not_advertise_auth_after_authentication() {
+        // RFC 4954 §4: AUTH is pointless once the session is authenticated —
+        // advertising it anymore (re)invites AUTH brute-forcing mid-session.
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        ctx.authenticated = true;
+        let resp = handle_cmd(&server, "EHLO mail.example.com\r\n", &mut ctx).await;
+        assert!(
+            !resp.contains("AUTH"),
+            "an authenticated session must not be offered AUTH: {resp:?}"
+        );
+
+        // The same TLS listener still advertises AUTH pre-authentication.
+        ctx.authenticated = false;
+        let resp = handle_cmd(&server, "EHLO mail.example.com\r\n", &mut ctx).await;
+        assert!(
+            resp.contains("250-AUTH PLAIN LOGIN"),
+            "pre-auth TLS session must see AUTH: {resp:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn rate_limit_recipients_per_message_bounds_the_rcpt_budget() {
+        // rate_limit.max_recipients_per_message (config-governed) must be
+        // enforced as an upper bound intersected with the per-server
+        // max_recipients — the stricter budget wins. The cap fires BEFORE
+        // any recipient validation/DB work.
+        let (mut server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        server.rate_limit_config.max_recipients_per_message = 2;
+        ctx.mail_from = Some("user@example.com".into());
+        ctx.rcpt_to = vec!["a@example.com".into(), "b@example.com".into()];
+
+        let resp = handle_cmd(&server, "RCPT TO:<c@example.com>", &mut ctx).await;
+        assert_eq!(
+            resp, "452 4.5.3 Too many recipients\r\n",
+            "the global per-message budget must cap the transaction before the per-server max"
+        );
+        assert_eq!(
+            ctx.rcpt_to.len(),
+            2,
+            "no recipient may be added past the cap"
         );
     }
 
@@ -3435,6 +3665,20 @@ mod tests {
         assert!(
             terminated < hop_check && hop_check < process,
             "the hop-limit refusal must fire at end-of-DATA, before processing"
+        );
+    }
+
+    #[test]
+    fn webhook_push_is_trimmed_to_a_bounded_length() {
+        // The `mta:webhook_queue` Redis list must be trimmed after every
+        // LPUSH: with a dead consumer an unbounded list grows Redis memory
+        // without limit. Pinned against the compiled-in source (needles
+        // concat!-built so the test cannot match its own text).
+        let source = include_str!("inbound.rs");
+        let trim_needle = std::concat!("LT", "RIM");
+        assert!(
+            source.contains(trim_needle),
+            "the webhook push path must trim the queue to a bounded length"
         );
     }
 }

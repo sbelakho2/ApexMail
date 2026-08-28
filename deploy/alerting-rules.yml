@@ -104,7 +104,13 @@ groups:
           runbook_url: "https://apexmail.ee/docs/alerts#synthetic-smtp-failure"
 
       - alert: BlackboxProbeFailure
-        expr: probe_success{job=~"blackbox|blackbox-smtp|blackbox-dns"} == 0
+        # FIX (audit): was job=~"blackbox|blackbox-smtp|blackbox-dns" — fully
+        # anchored, matched NONE of the real job names (blackbox-https,
+        # blackbox-http-api-health, blackbox-http-login, blackbox-smtp,
+        # blackbox-dns, blackbox-dns-txt, blackbox-sales-*,
+        # blackbox-billing-internal) → permanently dead rule. The prefix
+        # regex matches every blackbox job defined in deploy/prometheus.yml.
+        expr: probe_success{job=~"blackbox.*"} == 0
         for: 2m
         labels:
           severity: critical
@@ -252,16 +258,40 @@ groups:
           description: "Webhook failure rate is {{ $value | humanizePercentage }}, exceeding 10% threshold."
           runbook_url: "https://apexmail.ee/docs/alerts#high-webhook-failure-rate"
 
-      # Tracking events processing
-      - alert: TrackingProcessingBacklog
-        expr: rate(tracking_requests_total[5m]) == 0 and up{job="apexmail-tracking"} == 1
+      # ── Tracking pipeline health (FIX: dead-rule rewrite) ────────────────
+      # The old TrackingProcessingBacklog keyed on tracking_requests_total —
+      # a metric NOTHING exports, so the rule could never fire. The tracking
+      # service itself exports only counters (apexmail_tracking_
+      # clickhouse_events_total, _clickhouse_failures_total, _dedup_total,
+      # _click_redirects_blocked_total — see crates/tracking-service/src/
+      # processor.rs); it has NO in-process backlog gauge. The honest backlog
+      # signal is the WAL: inbound events are RPUSHed to the Redis list
+      # `apexmail:events:pending` (REDIS_WAL_KEY) and drained by an
+      # LLEN-driven adaptive batch loop. The redis-exporter exports that
+      # list's depth as redis_key_size (enabled via REDIS_EXPORTER_CHECK_KEYS
+      # on the redis-exporter service in docker-compose.yml).
+      - alert: TrackingWalBacklog
+        expr: redis_key_size{job="redis",key="apexmail:events:pending"} > 10000
         for: 15m
         labels:
           severity: warning
         annotations:
-          summary: "No tracking events being processed"
-          description: "Tracking service is up but processing zero events for 15 minutes."
-          runbook_url: "https://apexmail.ee/docs/alerts#tracking-processing-backlog"
+          summary: "Tracking WAL backlog is deep"
+          description: "More than 10,000 events have been queued in the tracking WAL Redis list (apexmail:events:pending) for 15 minutes — the flush loop cannot keep up (Postgres/ClickHouse slow or down)."
+          runbook_url: "https://apexmail.ee/docs/alerts#tracking-wal-backlog"
+
+      # The service's own honest "processing broken" counter: every failed
+      # ClickHouse flush bumps apexmail_tracking_clickhouse_failures_total
+      # (events remain safe in Postgres).
+      - alert: TrackingIngestFailures
+        expr: increase(apexmail_tracking_clickhouse_failures_total[15m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Tracking ClickHouse ingest is failing"
+          description: "The tracking service failed its ClickHouse flush (apexmail_tracking_clickhouse_failures_total increased over the last 15m). Postgres remains the source of truth; analytics is degraded."
+          runbook_url: "https://apexmail.ee/docs/alerts#tracking-ingest-failures"
 
   - name: apexmail-billing
     rules:
@@ -304,44 +334,80 @@ groups:
           description: "Redis exporter is reporting down for more than 2 minutes."
           runbook_url: "https://apexmail.ee/docs/alerts#redis-down"
 
+      # FIX (audit): severity warning → critical. ClickHouse down kills the
+      # tracking/analytics pipeline; PostgresDown/RedisDown are critical.
       - alert: ClickHouseDown
         expr: up{job="clickhouse"} == 0
         for: 2m
         labels:
-          severity: warning
+          severity: critical
         annotations:
           summary: "ClickHouse is down"
           description: "ClickHouse exporter is reporting down for more than 2 minutes."
           runbook_url: "https://apexmail.ee/docs/alerts#clickhouse-down"
 
-      - alert: ClickHouseQueryLatencyHigh
-        expr: histogram_quantile(0.95, rate(clickhouse_query_duration_seconds_bucket{job="clickhouse"}[5m])) > 5
+      # FIX (audit: dead-rule rewrite). The in-house exporter
+      # (deploy/clickhouse-exporter/clickhouse_exporter.py) scrapes
+      # system.metrics + system.asynchronous_metrics and exposes them as
+      # FLATTENED GAUGES ONLY (names normalized: non-alphanumerics collapsed
+      # to '_', lowercased, clickhouse_ prefix) — it can never emit the
+      # clickhouse_query_duration_seconds_bucket histogram the old
+      # ClickHouseQueryLatencyHigh quantiled over, so that rule was dead.
+      # The supported saturation signal from system.metrics is `Query` (the
+      # number of concurrently executing queries) → clickhouse_query.
+      - alert: ClickHouseConcurrentQueriesHigh
+        expr: clickhouse_query{job="clickhouse"} > 50
         for: 10m
         labels:
           severity: warning
         annotations:
-          summary: "ClickHouse p95 query latency is high"
-          description: "ClickHouse p95 query latency is above 5 seconds for more than 10 minutes."
-          runbook_url: "https://apexmail.ee/docs/alerts#clickhouse-query-latency-high"
+          summary: "ClickHouse concurrent queries are saturated"
+          description: "More than 50 concurrently executing ClickHouse queries (system.metrics `Query`) for 10 minutes — queries are queueing behind slow scans; check the query log for the hot query."
+          runbook_url: "https://apexmail.ee/docs/alerts#clickhouse-concurrent-queries-high"
 
+      # FIX (audit): metric-name repair. The real system.metrics gauge is
+      # `BackgroundMergesAndMutationsPoolTask` (tasks, pending + active, in
+      # the merges/mutations pool), which the exporter normalizes to
+      # clickhouse_backgroundmergesandmutationspooltask — the old
+      # underscored camelCase selector matched nothing.
       - alert: ClickHouseMergeBacklog
-        expr: clickhouse_background_merges_and_mutations_pool_task{job="clickhouse"} > 20
+        expr: clickhouse_backgroundmergesandmutationspooltask{job="clickhouse"} > 20
         for: 15m
         labels:
           severity: warning
         annotations:
           summary: "ClickHouse merge backlog is high"
-          description: "ClickHouse has more than 20 pending merge or mutation tasks for 15 minutes."
+          description: "ClickHouse has more than 20 pending or active merge/mutation pool tasks (system.metrics `BackgroundMergesAndMutationsPoolTask`) for 15 minutes."
           runbook_url: "https://apexmail.ee/docs/alerts#clickhouse-merge-backlog"
 
+      # Canonical "too many parts" signal the exporter DOES emit:
+      # asynchronous_metrics `MaxPartCountForPartition` →
+      # clickhouse_maxpartcountforpartition. Crossing 300 parts per partition
+      # is ClickHouse's own too_many_parts danger zone (insert path
+      # stalling).
+      - alert: ClickHouseTooManyParts
+        expr: clickhouse_maxpartcountforpartition{job="clickhouse"} > 300
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "ClickHouse too-many-parts on the insert path"
+          description: "The busiest partition has more than 300 parts (MaxPartCountForPartition) for 15 minutes — merges are not keeping up with inserts."
+          runbook_url: "https://apexmail.ee/docs/alerts#clickhouse-too-many-parts"
+
+      # FIX (audit): same normalization repair — asynchronous_metrics exposes
+      # `ReplicasMaxAbsoluteDelay` (seconds) → clickhouse_
+      # replicasmaxabsolutedelay; the underscored selector matched nothing.
+      # Single-node deployments do not emit the metric, so the rule stays
+      # inert there (no series → no alert).
       - alert: ClickHouseReplicasDown
-        expr: clickhouse_replicas_max_absolute_delay{job="clickhouse"} > 300
+        expr: clickhouse_replicasmaxabsolutedelay{job="clickhouse"} > 300
         for: 10m
         labels:
           severity: warning
         annotations:
           summary: "ClickHouse replica lag is high"
-          description: "ClickHouse replica {{ $labels.replica }} on table {{ $labels.table }} has been lagging by more than 300 seconds for 10 minutes."
+          description: "A ClickHouse replicated table has been lagging by more than 300 seconds (ReplicasMaxAbsoluteDelay) for 10 minutes."
           runbook_url: "https://apexmail.ee/docs/alerts#clickhouse-replicas-down"
 
       - alert: PostgresHighConnections

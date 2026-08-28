@@ -18,7 +18,7 @@ use axum::{
     response::Response,
 };
 use serde::Deserialize;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::processor::ClickData;
 use crate::routes::extract_client_ip;
@@ -28,7 +28,10 @@ const TRACKING_CSP: &str = "default-src 'none'; base-uri 'none'; frame-ancestors
 
 #[derive(Deserialize)]
 pub struct ClickQuery {
-    /// Optional override URL (used when originalUrl was not baked into the token).
+    /// Optional override URL (used when originalUrl was not baked into the
+    /// token). NOTE:axum's `Query` extractor has ALREADY percent-decoded
+    /// this value exactly once (serde_urlencoded form decoding) — use it
+    /// verbatim, never decode it again.
     r: Option<String>,
 }
 
@@ -54,9 +57,18 @@ pub async fn handle_click(
         .map(str::to_owned);
     let ip = extract_client_ip(&headers, addr.ip(), &state);
 
+    // E-190 (parity with pixel.rs): bots and security scanners still get
+    // their click-through served — never break the user's redirect — but
+    // their hits must not pollute click analytics.
+    let is_bot = state.bot_detector.is_bot(user_agent.as_deref(), Some(&ip));
+    if is_bot {
+        info!("E-190: Bot detected on click redirect, skipping recording");
+    }
+
     debug!(
         id_prefix = &tracking_id[..tracking_id.len().min(20)],
         has_r = q.r.is_some(),
+        is_bot,
         "Click tracking request"
     );
 
@@ -64,50 +76,62 @@ pub async fn handle_click(
 
     let redirect_url = determine_redirect_url(&data, q.r.as_deref(), &fallback);
 
-    // Validate protocol and domain
-    let redirect_url = match validate_redirect_url(&redirect_url, data.as_ref(), &state).await {
-        Ok(url) => url,
-        Err(_) => fallback.clone(),
+    // Validate protocol and domain. `validated` keeps the outcome so the
+    // click is only RECORDED when the redirect was actually authorised —
+    // recording a blocked link as a "click on the fallback URL" would
+    // poison click analytics and the per-link URL cache.
+    let validated = validate_redirect_url(&redirect_url, data.as_ref(), &state).await;
+    let redirect_url = match &validated {
+        Ok(url) => url.clone(),
+        Err(_) => {
+            // The block reason is warn!'d inside validate_redirect_url;
+            // the counter feeds blocked-link dashboards separately.
+            metrics::counter!("apexmail_tracking_click_redirects_blocked_total").increment(1);
+            fallback.clone()
+        }
     };
 
-    // Record click asynchronously (fire-and-forget)
+    // Record click asynchronously (fire-and-forget) — only for valid tokens,
+    // non-bot clients, and redirects that passed domain validation.
     if let Some(d) = &data {
-        let processor = state.processor.clone();
-        let click_data = ClickData {
-            tenant_id: d.tenant_id.clone(),
-            message_id: d.message_id.clone(),
-            recipient: d.recipient.clone(),
-            link_id: d.link_id.clone().unwrap_or_else(|| "unknown".into()),
-            link_url: redirect_url.clone(),
-            user_agent: user_agent.clone(),
-            ip_address: Some(ip.clone()),
-        };
+        if validated.is_ok() && !is_bot {
+            let processor = state.processor.clone();
+            let click_data = ClickData {
+                tenant_id: d.tenant_id.clone(),
+                message_id: d.message_id.clone(),
+                recipient: d.recipient.clone(),
+                link_id: d.link_id.clone().unwrap_or_else(|| "unknown".into()),
+                link_url: redirect_url.clone(),
+                user_agent: user_agent.clone(),
+                ip_address: Some(ip.clone()),
+            };
 
-        // Store link URL in Redis for analytics (F-213, 90 day TTL)
-        if let Some(link_id) = &d.link_id {
-            let redis = state.redis.clone();
-            let link_key = format!("links:{}:{}", d.tenant_id, d.message_id);
-            let lid = link_id.clone();
-            let url2 = redirect_url.clone();
-            tokio::spawn(async move {
-                if let Ok(mut conn) = redis.get().await {
-                    if let Err(error) = redis::pipe()
-                        .hset(&link_key, &lid, &url2)
-                        .expire(&link_key, 86400 * 90)
-                        .query_async::<()>(&mut *conn)
-                        .await
-                    {
-                        warn!(link_key = %link_key, link_id = %lid, error = %error, "Failed to cache click-tracking link metadata");
+            // Store link URL in Redis for analytics (F-213, 90 day TTL)
+            if let Some(link_id) = &d.link_id {
+                let redis = state.redis.clone();
+                let link_key = format!("links:{}:{}", d.tenant_id, d.message_id);
+                let lid = link_id.clone();
+                let url2 = redirect_url.clone();
+                tokio::spawn(async move {
+                    if let Ok(mut conn) = redis.get().await {
+                        if let Err(error) = redis::pipe()
+                            .hset(&link_key, &lid, &url2)
+                            .expire(&link_key, 86400 * 90)
+                            .query_async::<()>(&mut *conn)
+                            .await
+                        {
+                            warn!(link_key = %link_key, link_id = %lid, error = %error, "Failed to cache click-tracking link metadata");
+                        }
                     }
+                });
+            }
+
+            tokio::spawn(async move {
+                if let Err(e) = processor.record_click(click_data).await {
+                    error!(error = %e, "Failed to record click event");
                 }
             });
         }
-
-        tokio::spawn(async move {
-            if let Err(e) = processor.record_click(click_data).await {
-                error!(error = %e, "Failed to record click event");
-            }
-        });
     } else {
         warn!(
             id_prefix = &tracking_id[..tracking_id.len().min(20)],
@@ -130,17 +154,16 @@ fn determine_redirect_url(
             return url.clone();
         }
         if let Some(r) = r_param {
-            // F-211:decodeURIComponent equivalent — percent-decode only
-            return percent_decode(r).unwrap_or_else(|| fallback.to_owned());
+            // F-211:the `?r=` value was percent-decoded exactly ONCE by
+            // axum's `Query` extractor (which also maps `+` to space, so
+            // producers must encode a literal `+` as `%2B`). Use it as
+            // received: a second decode would silently rewrite URLs that
+            // legitimately contain `%2F`-style sequences
+            // (`https://x/a%2Fb` → `https://x/a/b`).
+            return r.to_owned();
         }
     }
     fallback.to_owned()
-}
-
-fn percent_decode(s: &str) -> Option<String> {
-    // Use a simple approach:percent-decode once
-    let decoded = urlencoding::decode(s).ok()?;
-    Some(decoded.into_owned())
 }
 
 async fn validate_redirect_url(
@@ -304,7 +327,7 @@ fn csp_redirect(url: &str, status: u16) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::TrackingData;
+    use crate::codec::{TrackingCodec, TrackingData};
 
     #[test]
     fn determine_redirect_url_prefers_token_original_url() {
@@ -325,8 +348,12 @@ mod tests {
         assert_eq!(redirect, "https://safe.example.com/path");
     }
 
+    /// The `?r=` value arrives here ALREADY percent-decoded exactly once by
+    /// axum's `Query` extractor — `determine_redirect_url` must use it
+    /// verbatim. A second decode would silently rewrite URLs that
+    /// legitimately contain `%2F`-style sequences.
     #[test]
-    fn determine_redirect_url_decodes_query_only_once() {
+    fn determine_redirect_url_uses_r_param_verbatim() {
         let data = Some(TrackingData {
             tenant_id: "tenant_1".into(),
             message_id: "msg_1".into(),
@@ -337,12 +364,11 @@ mod tests {
 
         let redirect = determine_redirect_url(
             &data,
-            Some("https%253A%252F%252Fevil.example.com%252Flanding"),
+            Some("https://safe.example.com/promo%2Fsale+event"),
             "https://fallback.example.com",
         );
 
-        assert_eq!(redirect, "https%3A%2F%2Fevil.example.com%2Flanding");
-        assert!(parse_allowed_redirect_url(&redirect).is_err());
+        assert_eq!(redirect, "https://safe.example.com/promo%2Fsale+event");
     }
 
     #[test]
@@ -370,5 +396,310 @@ mod tests {
         assert!(csp.contains("default-src 'none'"));
         assert!(csp.contains("frame-ancestors 'none'"));
         assert!(csp.contains("script-src 'none'"));
+    }
+
+    // ── Handler-level tests (drive the real axum Query extractor) ─────────
+    //
+    // These issue real HTTP requests through [`build_router`] so the `?r=`
+    // parameter goes through axum's `Query` extraction (serde_urlencoded
+    // form decoding) exactly as in production. They need the live test
+    // Redis (`TEST_REDIS_URL`, workspace convention) to authorise redirect
+    // domains and to observe the WAL side effects; they soft-skip without
+    // it. Postgres is never contacted (the domain cache is seeded in Redis).
+
+    mod handler {
+        use super::*;
+        use crate::processor::REDIS_WAL_KEY;
+        use crate::routes::{build_router, test_support};
+        use std::time::Duration;
+
+        const NORMAL_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+        const PREFETCHER_UA: &str = "Mozilla/5.0 (compatible; LinkPreviewer/prefetch)";
+
+        fn click_token(tenant: &str, message_id: &str) -> String {
+            TrackingCodec::new(test_support::TEST_SECRET)
+                .encode(&TrackingData {
+                    tenant_id: tenant.into(),
+                    message_id: message_id.into(),
+                    recipient: "user@example.com".into(),
+                    link_id: Some(format!("lnk_{message_id}")),
+                    original_url: None,
+                })
+                .expect("encode token")
+        }
+
+        async fn click_server(state: &AppState) -> axum_test::TestServer {
+            axum_test::TestServer::new(
+                build_router(state.clone()).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .expect("test server")
+        }
+
+        async fn seed_domain(
+            pool: &deadpool_redis::Pool,
+            tenant: &str,
+            domain: &str,
+            allowed: bool,
+        ) {
+            let mut conn = pool.get().await.expect("redis conn");
+            redis::cmd("SETEX")
+                .arg(format!("redirect_domain:{tenant}:{domain}"))
+                .arg(300u64)
+                .arg(if allowed { "1" } else { "0" })
+                .query_async::<()>(&mut *conn)
+                .await
+                .expect("seed domain cache entry");
+        }
+
+        async fn wal_entries_for(pool: &deadpool_redis::Pool, needle: &str) -> Vec<String> {
+            let Ok(mut conn) = pool.get().await else {
+                return Vec::new();
+            };
+            redis::cmd("LRANGE")
+                .arg(REDIS_WAL_KEY)
+                .arg(0)
+                .arg(-1)
+                .query_async::<Vec<String>>(&mut *conn)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|entry| entry.contains(needle))
+                .collect()
+        }
+
+        /// Give the fire-and-forget recorder time to (wrongly) enqueue.
+        async fn settle() {
+            tokio::time::sleep(Duration::from_millis(400)).await;
+        }
+
+        async fn cleanup(pool: &deadpool_redis::Pool, tenant: &str, message_id: &str) {
+            let Ok(mut conn) = pool.get().await else {
+                return;
+            };
+            for entry in wal_entries_for(pool, message_id).await {
+                let _: Result<(), _> = redis::cmd("LREM")
+                    .arg(REDIS_WAL_KEY)
+                    .arg(1)
+                    .arg(&entry)
+                    .query_async(&mut *conn)
+                    .await;
+            }
+            let _: Result<(), _> = redis::cmd("DEL")
+                .arg(format!("links:{tenant}:{message_id}"))
+                .query_async(&mut *conn)
+                .await;
+        }
+
+        /// Query-extractor path: the link rewriter percent-encodes the
+        /// original URL exactly once (`%` → `%25`, `+` → `%2B`), and axum's
+        /// `Query` extractor decodes it exactly once. `%2F` and `+` in the
+        /// original URL must therefore survive verbatim in the redirect.
+        /// (`add_query_param` performs the same serde_urlencoded form
+        /// encoding the real producer uses, so the request drives the
+        /// genuine extractor path.)
+        #[tokio::test]
+        async fn click_r_param_not_decoded_twice_percent_and_plus_survive() {
+            let Some((state, redis)) = test_support::live_redis_state(&[]).await else {
+                eprintln!("skipping: set TEST_REDIS_URL to run handler test");
+                return;
+            };
+            let tenant = test_support::unique_tenant("dbldecode");
+            let message_id = format!("msg_{tenant}");
+            seed_domain(&redis, &tenant, "allowed.example.test", true).await;
+
+            let token = click_token(&tenant, &message_id);
+            let server = click_server(&state).await;
+            let response = server
+                .get(&format!("/c/{token}"))
+                .add_query_param("r", "https://allowed.example.test/promo%2Fsale+event")
+                .add_header(
+                    axum::http::HeaderName::from_static("user-agent"),
+                    NORMAL_UA.parse().expect("ua"),
+                )
+                .await;
+
+            assert_eq!(response.status_code().as_u16(), 302);
+            let location = response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            assert_eq!(
+                location, "https://allowed.example.test/promo%2Fsale+event",
+                "the extractor-decoded value must be used verbatim (no second decode)"
+            );
+
+            // The recorder is fire-and-forget; settle before cleanup so the
+            // eventual WAL entry is actually removed.
+            settle().await;
+            cleanup(&redis, &tenant, &message_id).await;
+        }
+
+        /// E-190 parity with pixel.rs: a known prefetcher UA still gets its
+        /// click-through (302 to the original URL) but records NOTHING.
+        #[tokio::test]
+        async fn click_from_prefetcher_bot_records_nothing_but_still_redirects() {
+            let Some((state, redis)) = test_support::live_redis_state(&[]).await else {
+                eprintln!("skipping: set TEST_REDIS_URL to run handler test");
+                return;
+            };
+            let tenant = test_support::unique_tenant("botclick");
+            let message_id = format!("msg_{tenant}");
+            seed_domain(&redis, &tenant, "allowed.example.test", true).await;
+
+            let token = click_token(&tenant, &message_id);
+            let server = click_server(&state).await;
+            let response = server
+                .get(&format!("/c/{token}"))
+                .add_query_param("r", "https://allowed.example.test/landing")
+                .add_header(
+                    axum::http::HeaderName::from_static("user-agent"),
+                    PREFETCHER_UA.parse().expect("ua"),
+                )
+                .await;
+
+            assert_eq!(response.status_code().as_u16(), 302);
+            let location = response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            assert_eq!(location, "https://allowed.example.test/landing");
+
+            settle().await;
+            let recorded = wal_entries_for(&redis, &message_id).await;
+            assert!(
+                recorded.is_empty(),
+                "bot click must not be recorded, got: {recorded:?}"
+            );
+
+            cleanup(&redis, &tenant, &message_id).await;
+        }
+
+        /// Normal UA on an authorised domain → the click IS recorded.
+        #[tokio::test]
+        async fn click_from_normal_user_is_recorded() {
+            let Some((state, redis)) = test_support::live_redis_state(&[]).await else {
+                eprintln!("skipping: set TEST_REDIS_URL to run handler test");
+                return;
+            };
+            let tenant = test_support::unique_tenant("human");
+            let message_id = format!("msg_{tenant}");
+            seed_domain(&redis, &tenant, "allowed.example.test", true).await;
+
+            let token = click_token(&tenant, &message_id);
+            let server = click_server(&state).await;
+            let response = server
+                .get(&format!("/c/{token}"))
+                .add_query_param("r", "https://allowed.example.test/landing")
+                .add_header(
+                    axum::http::HeaderName::from_static("user-agent"),
+                    NORMAL_UA.parse().expect("ua"),
+                )
+                .await;
+            assert_eq!(response.status_code().as_u16(), 302);
+
+            settle().await;
+            let recorded = wal_entries_for(&redis, &message_id).await;
+            assert_eq!(
+                recorded.len(),
+                1,
+                "normal-UA click must be recorded exactly once, got: {recorded:?}"
+            );
+
+            cleanup(&redis, &tenant, &message_id).await;
+        }
+
+        /// A blocked redirect domain must NOT produce a click row/event on
+        /// the fallback URL — the user is redirected, the analytics are not
+        /// poisoned.
+        #[tokio::test]
+        async fn click_on_blocked_domain_records_nothing_and_falls_back() {
+            let Some((state, redis)) = test_support::live_redis_state(&[]).await else {
+                eprintln!("skipping: set TEST_REDIS_URL to run handler test");
+                return;
+            };
+            let tenant = test_support::unique_tenant("blocked");
+            let message_id = format!("msg_{tenant}");
+            seed_domain(&redis, &tenant, "evil.example.test", false).await;
+
+            let token = click_token(&tenant, &message_id);
+            let server = click_server(&state).await;
+            let response = server
+                .get(&format!("/c/{token}"))
+                .add_query_param("r", "https://evil.example.test/phish")
+                .add_header(
+                    axum::http::HeaderName::from_static("user-agent"),
+                    NORMAL_UA.parse().expect("ua"),
+                )
+                .await;
+
+            assert_eq!(response.status_code().as_u16(), 302);
+            let location = response
+                .headers()
+                .get("location")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_default();
+            assert_eq!(location, "https://fallback.test.example/");
+
+            settle().await;
+            let recorded = wal_entries_for(&redis, &message_id).await;
+            assert!(
+                recorded.is_empty(),
+                "blocked-domain click must not be recorded, got: {recorded:?}"
+            );
+
+            // The per-link URL cache must not record the blocked link either.
+            let mut conn = redis.get().await.expect("redis conn");
+            let cached_link: Option<String> = redis::cmd("HGET")
+                .arg(format!("links:{tenant}:{message_id}"))
+                .arg(format!("lnk_{message_id}"))
+                .query_async(&mut *conn)
+                .await
+                .expect("hget links cache");
+            assert_eq!(
+                cached_link, None,
+                "blocked-domain link must not land in the links cache"
+            );
+
+            cleanup(&redis, &tenant, &message_id).await;
+        }
+
+        /// Allowed domain → recorded with the ORIGINAL url (not the fallback
+        /// and not a re-decoded variant).
+        #[tokio::test]
+        async fn click_on_allowed_domain_records_original_url() {
+            let Some((state, redis)) = test_support::live_redis_state(&[]).await else {
+                eprintln!("skipping: set TEST_REDIS_URL to run handler test");
+                return;
+            };
+            let tenant = test_support::unique_tenant("allowed");
+            let message_id = format!("msg_{tenant}");
+            seed_domain(&redis, &tenant, "allowed.example.test", true).await;
+
+            let token = click_token(&tenant, &message_id);
+            let server = click_server(&state).await;
+            let response = server
+                .get(&format!("/c/{token}"))
+                .add_query_param("r", "https://allowed.example.test/promo%2Fsale+event")
+                .add_header(
+                    axum::http::HeaderName::from_static("user-agent"),
+                    NORMAL_UA.parse().expect("ua"),
+                )
+                .await;
+            assert_eq!(response.status_code().as_u16(), 302);
+
+            settle().await;
+            let recorded = wal_entries_for(&redis, &message_id).await;
+            assert_eq!(recorded.len(), 1, "got: {recorded:?}");
+            assert!(
+                recorded[0]
+                    .contains("\"linkUrl\":\"https://allowed.example.test/promo%2Fsale+event\""),
+                "click must be recorded with the ORIGINAL url, got: {}",
+                recorded[0]
+            );
+
+            cleanup(&redis, &tenant, &message_id).await;
+        }
     }
 }

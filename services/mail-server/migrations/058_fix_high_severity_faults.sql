@@ -285,10 +285,16 @@ END $$;
 
 DO $outer$
 BEGIN
-    -- Drop any existing definition to ensure clean slate
-    DROP FUNCTION IF EXISTS update_updated_at_column() CASCADE;
-
-    -- Recreate with canonical form (matching migration 001)
+    -- Recreate with the canonical form (matching migration 001) using
+    -- CREATE OR REPLACE ONLY.
+    --
+    -- The original DROP FUNCTION ... CASCADE here destroyed EVERY trigger
+    -- attached to update_updated_at_column() across the database (CASCADE
+    -- drops dependent triggers) and Section 5 restored only 14 of them,
+    -- silently disabling updated_at auto-maintenance everywhere else.
+    -- CREATE OR REPLACE keeps the function's OID and therefore keeps every
+    -- existing trigger intact; the signature and body are identical to the
+    -- canonical 001 definition, so nothing is lost by not dropping first.
     CREATE OR REPLACE FUNCTION update_updated_at_column()
     RETURNS TRIGGER AS $func$
     BEGIN
@@ -297,7 +303,7 @@ BEGIN
     END;
     $func$ language 'plpgsql';
 
-    RAISE NOTICE 'H-03: Recreated update_updated_at_column() function (canonical form)';
+    RAISE NOTICE 'H-03: Reconciled update_updated_at_column() function (canonical form, triggers preserved)';
 END $outer$;
 
 -- =============================================================================
@@ -741,7 +747,7 @@ BEGIN
 
             IF NOT v_is_partial THEN
                 -- Drop the full index and create partial
-                EXECUTE 'DROP INDEX IF EXISTS IF EXISTS idx_mail_mailboxes_parent_id';
+                EXECUTE 'DROP INDEX IF EXISTS idx_mail_mailboxes_parent_id';
                 RAISE NOTICE 'H-10: Dropped full index idx_mail_mailboxes_parent_id';
                 EXECUTE 'CREATE INDEX IF NOT EXISTS idx_mail_mailboxes_parent_id
                          ON mail_mailboxes (parent_id)

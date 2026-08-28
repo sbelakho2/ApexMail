@@ -435,6 +435,41 @@ pub(crate) fn received_hop_limit_exceeded(raw: &[u8]) -> bool {
     count_received_headers(raw) >= MAX_RECEIVED_HOPS
 }
 
+/// Effective per-message recipient cap: the per-server `max_recipients`
+/// intersected with the global, config-governed
+/// `rate_limit.max_recipients_per_message` — the stricter (smaller) bound
+/// always wins, so the global budget cannot be bypassed by a per-server
+/// setting (and vice versa).
+pub(crate) fn effective_max_recipients(server_max: usize, rate_limit_max: usize) -> usize {
+    server_max.min(rate_limit_max)
+}
+
+/// Hard cap on the `mta:webhook_queue` Redis list: LPUSH alone grows the
+/// list without bound when the consumer is dead; the paired LTRIM keeps
+/// only the newest entries so Redis memory stays bounded. 10_000 events is
+/// generous headroom for a consumer catching up after an outage.
+pub(crate) const WEBHOOK_QUEUE_MAX_LEN: i64 = 10_000;
+
+/// Push one serialized webhook event onto `mta:webhook_queue` and trim the
+/// list to the newest [`WEBHOOK_QUEUE_MAX_LEN`] entries (best-effort:
+/// errors propagate to the caller, which only logs them).
+pub(crate) async fn push_webhook_bounded<C: redis::aio::ConnectionLike>(
+    conn: &mut C,
+    payload: &str,
+) -> Result<(), redis::RedisError> {
+    redis::cmd("LPUSH")
+        .arg("mta:webhook_queue")
+        .arg(payload)
+        .query_async::<i64>(conn)
+        .await?;
+    redis::cmd("LTRIM")
+        .arg("mta:webhook_queue")
+        .arg(-(WEBHOOK_QUEUE_MAX_LEN as isize))
+        .arg(-1)
+        .query_async::<()>(conn)
+        .await
+}
+
 /// Build the `Received:` trace header for one SMTP hop (RFC 5321 §4.4),
 /// WITHOUT a trailing CRLF. Layout:
 ///

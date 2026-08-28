@@ -130,6 +130,11 @@ pub struct AtoEngine {
     /// After lockout_escalation_threshold events within lockout_escalation_window,
     /// escalate to RequireCaptcha action.
     lockout_events: Arc<DashMap<String, Vec<DateTime<Utc>>>>,
+    /// Per-user lockout expiry (`locked_until`). Implements
+    /// `config.lockout_duration_secs`: an account that crossed the failure
+    /// threshold stays locked until this instant even after the individual
+    /// failures age out of `failed_attempt_window_secs`.
+    locked_until: Arc<DashMap<String, DateTime<Utc>>>,
     /// Pluggable lockout backend for shared state across nodes.
     /// When `config.redis_lockout_url` is set, this is a `RedisLockoutBackend`.
     /// Otherwise it falls back to [`InMemoryLockoutBackend`].
@@ -176,6 +181,7 @@ impl AtoEngine {
             store,
             tls_histories: Arc::new(DashMap::new()),
             lockout_events,
+            locked_until: Arc::new(DashMap::new()),
             lockout_backend,
             ip_call_counts: Arc::new(DashMap::new()),
             last_tls_capacity_eviction: Mutex::new(None),
@@ -211,6 +217,7 @@ impl AtoEngine {
             store,
             tls_histories: Arc::new(DashMap::new()),
             lockout_events,
+            locked_until: Arc::new(DashMap::new()),
             lockout_backend,
             ip_call_counts: Arc::new(DashMap::new()),
             last_tls_capacity_eviction: Mutex::new(None),
@@ -350,14 +357,84 @@ impl AtoEngine {
         // 3. Failed-attempt lockout with escalation tracking.
         // The failure count now INCLUDES the current attempt, so the
         // threshold-th failing login itself is locked out.
-        if failure_count >= self.config.max_failed_attempts {
+        //
+        // The lockout PERSISTS for `lockout_duration_secs` from the
+        // threshold crossing: previously the lock expired together with the
+        // `failed_attempt_window_secs` failure window, granting an attacker
+        // another `max_failed_attempts` free guesses per window forever.
+        let now = Utc::now();
+        let mut lockout_active = false;
+        let mut remaining_secs = 0i64;
+        // Expire a finished lockout first; a live one short-circuits the
+        // failure-count branch below. Copy the expiry out BEFORE matching
+        // so the read guard is dropped: removing the entry while holding
+        // the shard's read guard would deadlock DashMap.
+        let lock_expiry = self.locked_until.get(&event.user_id).map(|e| *e);
+        match lock_expiry {
+            Some(expiry) if expiry > now => {
+                lockout_active = true;
+                remaining_secs = (expiry - now).num_seconds();
+            }
+            Some(_) => {
+                self.locked_until.remove(&event.user_id);
+            }
+            None => {}
+        }
+
+        if lockout_active {
+            // Escalation still applies while a lockout is active.
+            let escalation_cutoff =
+                now - chrono::Duration::seconds(self.config.lockout_escalation_window_secs as i64);
+            let local_count = {
+                let mut entry = self
+                    .lockout_events
+                    .entry(event.user_id.clone())
+                    .or_default();
+                entry.retain(|ts| *ts > escalation_cutoff);
+                entry.len() as u32
+            };
+            let backend_count = self
+                .lockout_backend
+                .recent_lockouts(&event.user_id, self.config.lockout_escalation_window_secs);
+            let lockout_count = local_count.max(backend_count);
+
+            if lockout_count >= self.config.lockout_escalation_threshold {
+                escalated_lockout = true;
+                factors.push(RiskFactor {
+                    id: "LOCKOUT_ESCALATED",
+                    description: format!(
+                        "{} lockout events in {} hours — requires CAPTCHA/admin unlock",
+                        lockout_count,
+                        self.config.lockout_escalation_window_secs / 3600
+                    ),
+                    risk: 10.0,
+                });
+            } else {
+                factors.push(RiskFactor {
+                    id: "LOCKOUT_ACTIVE",
+                    description: format!(
+                        "account locked: {}s remaining of {}s lockout (failures may have aged out of the {}s window)",
+                        remaining_secs,
+                        self.config.lockout_duration_secs,
+                        self.config.failed_attempt_window_secs
+                    ),
+                    risk: 10.0,
+                });
+            }
+            risk_score += 10.0 * self.config.weight_failures;
+        } else if failure_count >= self.config.max_failed_attempts {
             // Record via pluggable backend (Redis or in-memory) BEFORE
             // taking any local map lock — the backend performs I/O and
             // must never run inside a DashMap shard lock.
             self.lockout_backend
                 .record_lockout(&event.user_id, self.config.lockout_escalation_window_secs);
 
-            let now = Utc::now();
+            // Start the configured lockout duration NOW.
+            self.locked_until.insert(
+                event.user_id.clone(),
+                now + chrono::Duration::seconds(self.config.lockout_duration_secs as i64),
+            );
+
             let escalation_cutoff =
                 now - chrono::Duration::seconds(self.config.lockout_escalation_window_secs as i64);
 
@@ -395,10 +472,11 @@ impl AtoEngine {
                 factors.push(RiskFactor {
                     id: "LOCKOUT",
                     description: format!(
-                        "{} failed attempts in {} seconds (max: {}), lockout {}/{}",
+                        "{} failed attempts in {} seconds (max: {}), locked for {}s, lockout {}/{}",
                         failure_count,
                         self.config.failed_attempt_window_secs,
                         self.config.max_failed_attempts,
+                        self.config.lockout_duration_secs,
                         lockout_count,
                         self.config.lockout_escalation_threshold
                     ),
@@ -877,17 +955,91 @@ mod tests {
         let engine = AtoEngine::new();
 
         // Login from NYC
-        let nyc = login_event("user1", "1.2.3.4", 40.7128, -74.006);
+        let mut nyc = login_event("user1", "1.2.3.4", 40.7128, -74.006);
+        nyc.timestamp = Utc::now() - chrono::Duration::hours(1);
         engine.evaluate(&nyc);
 
-        // Immediately login from Tokyo (impossible)
-        let tokyo = login_event("user1", "5.6.7.8", 35.6762, 139.6503);
+        // An hour later, login from Tokyo (impossible: ~10,850 km/h).
+        // A same-second Tokyo login is clock skew / PoP bounce and is
+        // deliberately NOT flagged (see geo.rs tolerance rules).
+        let mut tokyo = login_event("user1", "5.6.7.8", 35.6762, 139.6503);
+        tokyo.timestamp = Utc::now();
         let verdict = engine.evaluate(&tokyo);
         assert!(verdict.impossible_travel, "Should detect impossible travel");
         assert!(
             verdict.risk_score > 5.0,
             "High risk for impossible travel: {}",
             verdict.risk_score
+        );
+    }
+
+    #[test]
+    fn test_lockout_persists_past_failure_window() {
+        // Fail-first: the lockout expired together with the failure window,
+        // so once failures aged out the account was unlocked — 5 free
+        // guesses per window, forever. The lockout must persist for
+        // lockout_duration_secs even after the failures age out.
+        let config = AtoConfig {
+            max_failed_attempts: 3,
+            failed_attempt_window_secs: 1,
+            lockout_duration_secs: 4,
+            lockout_escalation_threshold: 1000, // isolate from escalation
+            ..AtoConfig::development()
+        };
+        let engine = AtoEngine::with_config(config);
+        let user = "lockdur-user";
+        let mut fail = login_event(user, "6.6.6.6", 40.7128, -74.006);
+        fail.success = false;
+
+        for i in 0..3 {
+            let verdict = engine.evaluate(&fail);
+            if i == 2 {
+                assert!(
+                    matches!(verdict.action, AtoAction::Block | AtoAction::RequireCaptcha),
+                    "3rd failure must lock"
+                );
+            }
+        }
+
+        // Failures age out of the 1s window, but the 4s lockout persists.
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let attempt = login_event(user, "6.6.6.6", 40.7128, -74.006);
+        let verdict = engine.evaluate(&attempt);
+        assert!(
+            matches!(verdict.action, AtoAction::Block | AtoAction::RequireCaptcha),
+            "account must stay locked after failures age out (lockout_duration_secs), got {:?}",
+            verdict.action
+        );
+        assert!(
+            verdict.factors.iter().any(|f| f.id.contains("LOCKOUT")),
+            "an active-lockout factor must be reported: {:?}",
+            verdict.factors.iter().map(|f| f.id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn test_lockout_releases_after_duration() {
+        let config = AtoConfig {
+            max_failed_attempts: 2,
+            failed_attempt_window_secs: 1,
+            lockout_duration_secs: 2,
+            lockout_escalation_threshold: 1000,
+            ..AtoConfig::development()
+        };
+        let engine = AtoEngine::with_config(config);
+        let user = "lockdur-release-user";
+        let mut fail = login_event(user, "7.7.7.7", 40.7128, -74.006);
+        fail.success = false;
+        engine.evaluate(&fail);
+        engine.evaluate(&fail); // threshold reached → locked for 2s
+
+        std::thread::sleep(std::time::Duration::from_millis(2600));
+        let attempt = login_event(user, "7.7.7.7", 40.7128, -74.006);
+        let verdict = engine.evaluate(&attempt);
+        assert!(
+            !matches!(verdict.action, AtoAction::Block | AtoAction::RequireCaptcha),
+            "lockout must release after lockout_duration_secs, got {:?}",
+            verdict.action
         );
     }
 

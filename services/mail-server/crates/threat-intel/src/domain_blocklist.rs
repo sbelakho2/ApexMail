@@ -53,8 +53,13 @@ impl DomainBlocklist {
     /// The walk climbs toward the registrable parent (e.g.
     /// `a.b.c.d.evil.com` → … → `evil.com`), stopping once a two-label
     /// apex (the presumable registrable domain) has been checked.
-    /// The walk is capped at 5 levels to prevent abuse from pathologically
-    /// deep subdomains causing excessive DashMap lookups per request.
+    ///
+    /// There is no fixed walk cap: a 5-label cap was a shipped bypass —
+    /// nesting six subdomains in front of a blocked domain evaded the
+    /// blocklist entirely. The work is bounded by the hostname itself
+    /// (DNS limits names to 253 bytes, so the walk is at most ~126 hops
+    /// over a handful of map lookups each, terminated by the two-label
+    /// apex rule below).
     pub fn lookup(&self, domain: &str) -> Option<DomainBlockEntry> {
         let normalized = domain.to_lowercase();
         let normalized = normalized.trim_end_matches('.');
@@ -69,14 +74,8 @@ impl DomainBlocklist {
 
         // Walk up the domain hierarchy toward the registrable parent.
         let mut parts = normalized;
-        let mut walk_count = 0;
-        const MAX_DOMAIN_WALK: usize = 5;
         while let Some(dot_pos) = parts.find('.') {
-            if walk_count >= MAX_DOMAIN_WALK {
-                break;
-            }
             parts = &parts[dot_pos + 1..];
-            walk_count += 1;
             if let Some(entry) = self.exact.get(parts) {
                 if entry.expires_at > now {
                     return Some(entry.clone());
@@ -85,7 +84,7 @@ impl DomainBlocklist {
             // Apex heuristic:once the remaining name has two labels
             // ("evil.com") we have checked the presumable registrable
             // domain — stop. Multi-part public suffixes (co.uk) may need
-            // one extra level, which the 5-walk cap still permits.
+            // one extra level, which the walk reaches naturally.
             if parts.matches('.').count() <= 1 {
                 break;
             }
@@ -275,10 +274,17 @@ mod tests {
             bl.lookup("a.b.c.d.evil.com").is_some(),
             "deep subdomain must match its registrable parent"
         );
-        // 5-label prefix:still within the walk cap.
+        // 5-label prefix:still within the old walk cap.
         assert!(bl.lookup("x.a.b.c.d.evil.com").is_some());
-        // Pathologically deep names beyond the cap do not (bounded work).
-        assert!(bl.lookup("z.y.x.a.b.c.d.evil.com").is_none());
+        // Fail-first regression: the old 5-label walk cap meant an attacker
+        // could bypass the evil.com block simply by nesting 6+ subdomains
+        // (z.y.x.a.b.c.d.evil.com was NOT matched). The walk must reach the
+        // registrable domain regardless of depth; work is bounded by the
+        // number of labels in the hostname itself.
+        assert!(
+            bl.lookup("z.y.x.a.b.c.d.evil.com").is_some(),
+            "arbitrarily deep subdomain must still match its registrable parent"
+        );
     }
 
     #[test]

@@ -1,5 +1,4 @@
 -- Seed providers for inbox placement testing
-BEGIN;
 CREATE TABLE IF NOT EXISTS seed_providers (
     id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name        VARCHAR(100) NOT NULL UNIQUE,
@@ -18,4 +17,3 @@ INSERT INTO seed_providers (name, display_name, inbox_types) VALUES
     ('aol', 'AOL Mail', '{inbox,spam}'),
     ('zoho', 'Zoho Mail', '{inbox,spam}')
 ON CONFLICT (name) DO NOTHING;
-COMMIT;

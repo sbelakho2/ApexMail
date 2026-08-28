@@ -679,6 +679,7 @@ mod tests {
             control_plane_api_key: None,
             sales_autopilot_base_url: "http://localhost:3010".into(),
             internal_service_token: None,
+            cp_auth: Default::default(),
             tracking_secret_key: "test-tracking-secret-123456789012".into(),
             billing_company_iban: "EE381010220123456789".into(),
             billing_company_phone: "+3721234567".into(),

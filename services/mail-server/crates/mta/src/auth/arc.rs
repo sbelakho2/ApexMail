@@ -440,39 +440,53 @@ pub fn parse_arc_headers(raw_headers: &str) -> Vec<ArcSet> {
 
     for line in unfolded.split("\r\n") {
         let line = line.trim();
-        if let Some(rest) = line.strip_prefix("ARC-Authentication-Results:") {
-            if let Some(inst) = extract_instance(rest) {
-                sets.entry(inst)
-                    .or_insert_with(|| ArcSet {
-                        instance: inst,
-                        authentication_results: String::new(),
-                        message_signature: String::new(),
-                        seal: String::new(),
-                    })
-                    .authentication_results = line.to_string();
+        // RFC 5322 §2.1: header field names are ASCII case-insensitive —
+        // "arc-seal:" is the same field as "ARC-Seal:". Missing lowercase
+        // variants made the sealing path stamp i=1/cv=none over an
+        // existing chain it failed to see.
+        let Some((field_name, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let kind = field_name.trim().to_ascii_lowercase();
+        let rest = rest.trim_start();
+        match kind.as_str() {
+            "arc-authentication-results" => {
+                if let Some(inst) = extract_instance(rest) {
+                    sets.entry(inst)
+                        .or_insert_with(|| ArcSet {
+                            instance: inst,
+                            authentication_results: String::new(),
+                            message_signature: String::new(),
+                            seal: String::new(),
+                        })
+                        .authentication_results = line.to_string();
+                }
             }
-        } else if let Some(rest) = line.strip_prefix("ARC-Message-Signature:") {
-            if let Some(inst) = extract_instance(rest) {
-                sets.entry(inst)
-                    .or_insert_with(|| ArcSet {
-                        instance: inst,
-                        authentication_results: String::new(),
-                        message_signature: String::new(),
-                        seal: String::new(),
-                    })
-                    .message_signature = line.to_string();
+            "arc-message-signature" => {
+                if let Some(inst) = extract_instance(rest) {
+                    sets.entry(inst)
+                        .or_insert_with(|| ArcSet {
+                            instance: inst,
+                            authentication_results: String::new(),
+                            message_signature: String::new(),
+                            seal: String::new(),
+                        })
+                        .message_signature = line.to_string();
+                }
             }
-        } else if let Some(rest) = line.strip_prefix("ARC-Seal:") {
-            if let Some(inst) = extract_instance(rest) {
-                sets.entry(inst)
-                    .or_insert_with(|| ArcSet {
-                        instance: inst,
-                        authentication_results: String::new(),
-                        message_signature: String::new(),
-                        seal: String::new(),
-                    })
-                    .seal = line.to_string();
+            "arc-seal" => {
+                if let Some(inst) = extract_instance(rest) {
+                    sets.entry(inst)
+                        .or_insert_with(|| ArcSet {
+                            instance: inst,
+                            authentication_results: String::new(),
+                            message_signature: String::new(),
+                            seal: String::new(),
+                        })
+                        .seal = line.to_string();
+                }
             }
+            _ => {}
         }
     }
 
@@ -499,31 +513,63 @@ fn extract_instance(header_value: &str) -> Option<u32> {
     None
 }
 
+/// RFC 6376 §3.4.4 relaxed body canonicalization, on RAW OCTETS:
+/// trailing WSP ignored per line, interior WSP runs collapsed to one SP,
+/// trailing empty lines removed, and a completely empty body canonicalizes
+/// to a single CRLF. A lossy UTF-8 decode is forbidden here — 8BITMIME
+/// octets would be replaced by U+FFFD and change the digest input.
 fn canonicalize_body_relaxed(body: &[u8]) -> Vec<u8> {
-    let text = String::from_utf8_lossy(body);
-    let mut result = String::new();
-    for line in text.split('\n') {
-        let trimmed = line.trim_end();
-        // Collapse whitespace runs to single space
+    fn emit_line(result: &mut Vec<u8>, line: &[u8]) {
+        // Reduce WSP runs (SP = 0x20, HTAB = 0x09) within the line to a
+        // single SP, then ignore all WSP at the end of the line.
+        let mut collapsed: Vec<u8> = Vec::with_capacity(line.len());
         let mut prev_ws = false;
-        for ch in trimmed.chars() {
-            if ch == ' ' || ch == '\t' {
+        for &c in line {
+            if c == b' ' || c == b'\t' {
                 if !prev_ws {
-                    result.push(' ');
+                    collapsed.push(b' ');
                     prev_ws = true;
                 }
             } else {
-                result.push(ch);
+                collapsed.push(c);
                 prev_ws = false;
             }
         }
-        result.push_str("\r\n");
+        while collapsed.last() == Some(&b' ') {
+            collapsed.pop();
+        }
+        result.extend_from_slice(&collapsed);
+        result.extend_from_slice(b"\r\n");
     }
-    // Remove trailing empty lines
-    while result.ends_with("\r\n\r\n") {
+
+    let mut result: Vec<u8> = Vec::with_capacity(body.len());
+    let mut line: Vec<u8> = Vec::new();
+    for &b in body {
+        if b == b'\n' {
+            // The CR of a CRLF terminator is not part of the line content.
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            emit_line(&mut result, &line);
+            line.clear();
+        } else {
+            line.push(b);
+        }
+    }
+    // A non-empty final line without its own terminator still contributes
+    // (canonicalization supplies the missing CRLF).
+    if !line.is_empty() {
+        emit_line(&mut result, &line);
+    }
+    // Ignore all empty lines at the end of the body.
+    while result.ends_with(b"\r\n\r\n") {
         result.truncate(result.len() - 2);
     }
-    result.into_bytes()
+    // A completely empty or missing body canonicalizes as a single CRLF.
+    if result.is_empty() {
+        result.extend_from_slice(b"\r\n");
+    }
+    result
 }
 
 /// #123:Canonicalize a single header field (relaxed algorithm per RFC 6376 §3.4.2).
@@ -537,23 +583,29 @@ fn canonicalize_header_relaxed(header_line: &str) -> String {
     }
 }
 
-/// #123:Extract and canonicalize headers listed in the h= tag from raw message headers.
+/// Extract and canonicalize the headers listed in the h= tag (RFC 6376
+/// §5.4.2 selection): h= names are processed left to right and each name
+/// selects the BOTTOM-MOST header instance not yet consumed. A repeated
+/// name therefore walks up the header block (last instance first), and an
+/// external verifier can reconstruct the exact same signing input from the
+/// wire headers.
 fn extract_signing_headers(raw_headers: &str, h_list: &[&str]) -> String {
     let unfolded = unfold_headers(raw_headers);
+    let lines: Vec<&str> = unfolded.split("\r\n").collect();
+    let mut consumed = vec![false; lines.len()];
     let mut result = Vec::new();
 
     for &name in h_list {
         let lower_name = name.to_lowercase();
-        let mut found = None;
-        for line in unfolded.split("\r\n") {
-            if let Some((hdr_name, _)) = line.split_once(':') {
-                if hdr_name.trim().to_lowercase() == lower_name {
-                    found = Some(line.to_string());
-                }
-            }
-        }
-        if let Some(header_line) = found {
-            result.push(canonicalize_header_relaxed(&header_line));
+        let found = lines.iter().enumerate().rev().find(|(i, line)| {
+            !consumed[*i]
+                && line
+                    .split_once(':')
+                    .is_some_and(|(hdr_name, _)| hdr_name.trim().to_lowercase() == lower_name)
+        });
+        if let Some((i, line)) = found {
+            consumed[i] = true;
+            result.push(canonicalize_header_relaxed(line));
         }
     }
 
@@ -693,6 +745,78 @@ mod tests {
         assert!(text.contains("Test tabs"));
         // Trailing empty lines removed
         assert!(!text.ends_with("\r\n\r\n"));
+    }
+
+    // ── RFC 6376 conformance: raw-octet body canonicalization, §5.4.2
+    //    header selection, case-insensitive field names (RFC 5322) ────────
+
+    #[test]
+    fn relaxed_body_canonicalization_is_byte_exact_for_invalid_utf8() {
+        // RFC 6376 §3.4.4/§3.4.5: relaxed body canonicalization operates on
+        // RAW OCTETS. An 8BITMIME body (0xE9 …) must reach the hasher
+        // unchanged — a from_utf8_lossy replaced each invalid octet with a
+        // 3-byte U+FFFD sequence, producing digests no external verifier
+        // could ever reconstruct.
+        let body = b"caf\xe9  \r\nline\ttwo\t\r\n\r\n\r\n";
+        let canon = canonicalize_body_relaxed(body);
+        assert_eq!(
+            canon,
+            b"caf\xe9\r\nline two\r\n".to_vec(),
+            "WSP folding applies byte-wise; 8-bit octets survive unchanged"
+        );
+        // Known-vector style: the digest over the canonical form must equal
+        // an independently computed SHA-256 over the same octets.
+        let mut expected = Sha256::new();
+        expected.update(b"caf\xe9\r\nline two\r\n");
+        let mut actual = Sha256::new();
+        actual.update(&canon);
+        assert_eq!(
+            B64.encode(actual.finalize()),
+            B64.encode(expected.finalize())
+        );
+    }
+
+    #[test]
+    fn relaxed_body_canonicalization_empty_body_is_single_crlf() {
+        assert_eq!(canonicalize_body_relaxed(b""), b"\r\n".to_vec());
+        assert_eq!(canonicalize_body_relaxed(b"\r\n\r\n\r\n"), b"\r\n".to_vec());
+        // A final line without CRLF gets one supplied.
+        assert_eq!(canonicalize_body_relaxed(b"tail  "), b"tail\r\n".to_vec());
+    }
+
+    #[test]
+    fn signing_header_selection_consumes_instances_bottom_up() {
+        // RFC 6376 §5.4.2: h= names are processed left to right and each
+        // selects the BOTTOM-MOST unconsumed instance of that field. A
+        // duplicated name therefore walks UP the header block (r3, then
+        // r2), and a verifier can reconstruct the exact signing input.
+        let raw = "Received: r1\r\nTo: t1\r\nReceived: r2\r\nReceived: r3";
+        let selected = extract_signing_headers(raw, &["received", "to", "received"]);
+        assert_eq!(selected, "received:r3\r\nto:t1\r\nreceived:r2");
+        // A single occurrence of the name takes the bottom-most instance.
+        assert_eq!(extract_signing_headers(raw, &["received"]), "received:r3");
+        // Exhausting the instances stops selecting (r3, r2 then nothing).
+        assert_eq!(
+            extract_signing_headers(raw, &["received", "received", "received"]),
+            "received:r3\r\nreceived:r2\r\nreceived:r1"
+        );
+    }
+
+    #[test]
+    fn parse_arc_headers_matches_field_names_case_insensitively() {
+        // RFC 5322 §2.1: field names are ASCII case-insensitive. A chain
+        // written as "arc-seal:" is a chain — missing it made the inbound
+        // sealing path stamp i=1/cv=none over an existing chain.
+        let raw = "arc-seal: i=1; cv=none; b=abc\r\narc-message-signature: i=1; a=rsa-sha256; b=def\r\narc-authentication-results: i=1; mx.test; spf=pass";
+        let sets = parse_arc_headers(raw);
+        assert_eq!(sets.len(), 1, "lowercase ARC field names must be parsed");
+        assert_eq!(sets[0].instance, 1);
+        assert!(sets[0].seal.contains("cv=none"));
+        // Mixed case variants are the same chain.
+        let mixed = "Arc-Seal: i=2; cv=pass; b=x\r\nARC-MESSAGE-SIGNATURE: i=2; b=y\r\narc-authentication-results: i=2; spf=fail";
+        let sets = parse_arc_headers(mixed);
+        assert_eq!(sets.len(), 1);
+        assert_eq!(sets[0].instance, 2);
     }
 
     // ── FIX-C (H12): real RFC 8617 cryptographic verification ─────────────

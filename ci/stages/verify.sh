@@ -21,10 +21,23 @@ set -eu
 
 VERIFY_SERVICES="api-server mta imap-server mailstore worker enterprise tracking
                  observability marketing status-server billing-service sales-autopilot
-                 postgres-backup nginx certbot postgres redis clickhouse"
+                 postgres-backup clickhouse-backup nginx certbot postgres redis clickhouse
+                 prometheus grafana loki alertmanager tempo otel-collector
+                 node-exporter blackbox-exporter postgres-exporter redis-exporter
+                 clickhouse-exporter synthetic-monitor"
+
+# FIX (audit): rollback_to_previous_sha iterated $STACK_SERVICES, which was
+# never defined in this script (each stage runs as its own process — the
+# deploy stage's variable does not carry over), so the rollback loop was
+# EMPTY and a failed verify would "roll back" nothing. Mirror the deploy
+# stage's canonical service list (incl. the monitoring slice) here.
+STACK_SERVICES="$VERIFY_SERVICES"
 
 compose() {
-    docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env "$@"
+    # --profile monitoring: keep the profiled monitoring services part of the
+    # active project set during rollback (see ci/stages/deploy.sh).
+    docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env \
+        --profile monitoring "$@"
 }
 
 check_http() {

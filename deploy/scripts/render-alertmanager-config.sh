@@ -12,6 +12,12 @@
 #   SMTP_PORT (587), ALERT_EMAIL_CRITICAL/ALERT_EMAIL_WARNING
 #   (admin@apexmail.ee), everything else defaults to empty.
 #
+# Delivery-channel validation: when NONE of PagerDuty/OpsGenie/Slack/real
+# email (SMTP_HOST other than the dead 127.0.0.1 default) is configured, a
+# loud banner is stamped into the rendered config comments AND stderr — the
+# deploy is not failed, but the dead-config case is unmistakable. Run with
+# `--check` to render + validate without exec'ing alertmanager.
+#
 # Mounted read-only by the alertmanager services in:
 #   docker-compose.yml, services/mail-server/docker-compose.yml
 # =============================================================================
@@ -142,6 +148,79 @@ if [ -z "$(printenv SLACK_WEBHOOK_PATH 2>/dev/null || true)" ] || \
   strip_empty_slack_webhooks
   echo "[alertmanager-render] empty SLACK_WEBHOOK_PATH[_LOW] — matching slack webhook entries stripped"
 fi
+
+# ── Delivery-channel validation (audit: alert delivery was a black hole) ────
+# The compose files default SMTP_HOST to 127.0.0.1 (nothing listens there in
+# the container network) and every receiver env var to empty. When ALL of
+# PagerDuty / OpsGenie / Slack / real email are unconfigured, every alert
+# still fires, is grouped, and is routed to the internal
+# observability:4400/alerts webhook only — i.e. alerts about the platform are
+# delivered INTO the platform that is failing. That must be unmistakable, so
+# this check stamps a loud banner into the rendered config comments AND
+# prints to stderr. It deliberately does NOT hard-fail the deploy (the
+# internal webhook still records alerts; failing the container would turn a
+# delivery problem into a stack-down problem).
+#
+# Email counts as configured only when SMTP_HOST points somewhere real: the
+# 127.0.0.1/localhost defaults are the dead-loopback case the compose files
+# fall back to.
+delivery_channels_configured() {
+  _smtp_host="$(printenv SMTP_HOST 2>/dev/null || true)"
+  case "$_smtp_host" in
+    ""|127.0.0.1|localhost|::1) _email_ok=0 ;;
+    *) _email_ok=1 ;;
+  esac
+  [ "$(printenv PAGERDUTY_ROUTING_KEY 2>/dev/null || true)" ] && return 0
+  [ "$(printenv OPSGENIE_API_KEY 2>/dev/null || true)" ] && return 0
+  [ "$(printenv SLACK_WEBHOOK_PATH 2>/dev/null || true)" ] && return 0
+  [ "$(printenv SLACK_WEBHOOK_PATH_LOW 2>/dev/null || true)" ] && return 0
+  [ "$_email_ok" -eq 1 ] && return 0
+  return 1
+}
+
+validate_delivery_channels() {
+  if delivery_channels_configured; then
+    echo "[alertmanager-render] OK: at least one external delivery channel configured"
+    return 0
+  fi
+  {
+    echo "#"
+    echo "# ############################################################################"
+    echo "# #                                                                          ##"
+    echo "# #  WARNING: NO EXTERNAL ALERT DELIVERY CHANNEL IS CONFIGURED               ##"
+    echo "# #                                                                          ##"
+    echo "# #  NONE of the following are set to working values:                        ##"
+    echo "# #    PAGERDUTY_ROUTING_KEY, OPSGENIE_API_KEY,                              ##"
+    echo "# #    SLACK_WEBHOOK_PATH / SLACK_WEBHOOK_PATH_LOW,                          ##"
+    echo "# #    SMTP_HOST (currently the dead 127.0.0.1 default)                      ##"
+    echo "# #                                                                          ##"
+    echo "# #  Alerts are only routed to the INTERNAL observability webhook            ##"
+    echo "# #  (http://observability:4400/alerts) — when the platform itself is        ##"
+    echo "# #  down, nobody is notified. Set at least ONE receiver env var             ##"
+    echo "# #  (see deploy/DEPLOYMENT.md \"Alerting / notification receivers\").         ##"
+    echo "# #                                                                          ##"
+    echo "# ############################################################################"
+    echo "#"
+  } >"${RENDERED}.banner"
+  cat "$RENDERED" >>"${RENDERED}.banner" && mv "${RENDERED}.banner" "$RENDERED"
+  echo "[alertmanager-render] ================================================================" >&2
+  echo "[alertmanager-render] WARNING: NO EXTERNAL ALERT DELIVERY CHANNEL IS CONFIGURED!" >&2
+  echo "[alertmanager-render]   PagerDuty / OpsGenie / Slack / email are ALL unconfigured" >&2
+  echo "[alertmanager-render]   (SMTP_HOST is '${_smtp_host:-unset}' — nothing listens there)." >&2
+  echo "[alertmanager-render]   Alerts only reach the internal observability webhook." >&2
+  echo "[alertmanager-render]   Set at least one of: PAGERDUTY_ROUTING_KEY, OPSGENIE_API_KEY," >&2
+  echo "[alertmanager-render]   SLACK_WEBHOOK_PATH, or a real SMTP_HOST (+SMTP creds) —" >&2
+  echo "[alertmanager-render]   see deploy/DEPLOYMENT.md. Continuing (not failing)..." >&2
+  echo "[alertmanager-render] ================================================================" >&2
+}
+
+# --check: render + validate only (no exec) — usable from CI/verify stages
+# or a shell on the host to test the wiring without starting alertmanager.
+case "${1:-}" in
+  --check) validate_delivery_channels; exit 0 ;;
+esac
+
+validate_delivery_channels
 
 echo "[alertmanager-render] config rendered at ${RENDERED}; starting alertmanager"
 exec /bin/alertmanager --config.file="$RENDERED" --storage.path="$STORAGE_PATH" "$@"

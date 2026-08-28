@@ -383,7 +383,7 @@ fn verify_password_or_log(password: &str, hash: &str, subject: &str) -> Result<b
     }
 }
 
-fn scopes_for_role(role: &str) -> Vec<String> {
+pub(crate) fn scopes_for_role(role: &str) -> Vec<String> {
     match role {
         "admin" | "owner" => vec!["*".into()],
         "developer" => vec![
@@ -1490,7 +1490,7 @@ async fn login(
     }
 
     let user = sqlx::query_as::<_, UserRow>(
-        "SELECT id::text, tenant_id::text, email, name, password_hash, role, status, mfa_enabled, mfa_secret, mfa_recovery_hashes
+        "SELECT id::text, tenant_id::text, email, name, password_hash, role, status, mfa_enabled, email_verified, mfa_secret, mfa_recovery_hashes
          FROM users WHERE LOWER(email) = LOWER($1) OR LOWER(username) = LOWER($2)",
     )
     .bind(&body.email)
@@ -1517,6 +1517,15 @@ async fn login(
     }
 
     clear_login_failures(&state.redis, &login_identifier).await?;
+
+    // Email verification is a login prerequisite, enforced only after the
+    // password verified (never leaking account existence to anonymous
+    // callers).
+    if !user.email_verified {
+        return Err(ApiError::Forbidden(
+            "email not verified — check your inbox for the verification link".into(),
+        ));
+    }
 
     if role_requires_mfa(&user.role) {
         if user.mfa_enabled {
@@ -1856,7 +1865,7 @@ async fn complete_mfa_challenge(
     clear_login_failures(&state.redis, &login_identifier).await?;
 
     let mut user = sqlx::query_as::<_, UserRow>(
-        "SELECT id::text, tenant_id, email, name, password_hash, role, status, mfa_enabled, mfa_secret, mfa_recovery_hashes
+        "SELECT id::text, tenant_id, email, name, password_hash, role, status, mfa_enabled, email_verified, mfa_secret, mfa_recovery_hashes
          FROM users WHERE id = $1::uuid AND tenant_id = $2",
     )
     .bind(&challenge.user_id)
@@ -1869,6 +1878,13 @@ async fn complete_mfa_challenge(
 
     if user.status != "active" {
         return Err(ApiError::Forbidden(format!("account is {}", user.status)));
+    }
+    // MFA completion is the second half of login: the email-verification
+    // prerequisite applies exactly as at the password step.
+    if !user.email_verified {
+        return Err(ApiError::Forbidden(
+            "email not verified — check your inbox for the verification link".into(),
+        ));
     }
 
     match challenge.kind {
@@ -2102,7 +2118,7 @@ async fn confirm_mfa_setup(
     }
 
     let user = sqlx::query_as::<_, UserRow>(
-        "SELECT id::text, tenant_id, email, name, password_hash, role, status, mfa_enabled, mfa_secret, mfa_recovery_hashes
+        "SELECT id::text, tenant_id, email, name, password_hash, role, status, mfa_enabled, email_verified, mfa_secret, mfa_recovery_hashes
          FROM users WHERE id = $1::uuid AND tenant_id = $2",
     )
     .bind(user_id)
@@ -2205,6 +2221,7 @@ struct UserRow {
     role: String,
     status: String,
     mfa_enabled: bool,
+    email_verified: bool,
     mfa_secret: Option<String>,
     mfa_recovery_hashes: Option<serde_json::Value>,
 }
@@ -2988,7 +3005,7 @@ async fn refresh_token(
     }
 
     let user = sqlx::query_as::<_, UserRow>(
-        "SELECT id::text, tenant_id, email, name, password_hash, role, status FROM users WHERE id = $1::uuid",
+        "SELECT id::text, tenant_id, email, name, password_hash, role, status, email_verified FROM users WHERE id = $1::uuid",
     )
     .bind(&user_id)
     .fetch_optional(&state.db)
@@ -2998,6 +3015,13 @@ async fn refresh_token(
     // Fix #21: Reject refresh if the user is no longer active.
     if user.status != "active" {
         return Err(ApiError::Forbidden(format!("account is {}", user.status)));
+    }
+    // Refresh is a login continuation: an unverified account never
+    // receives a fresh session through it either.
+    if !user.email_verified {
+        return Err(ApiError::Forbidden(
+            "email not verified — check your inbox for the verification link".into(),
+        ));
     }
 
     // Fix #20: Blacklist the old token so it cannot be reused.
@@ -4563,13 +4587,51 @@ mod tests {
         .await
         .expect("login request must dispatch");
 
-        // A fresh owner account is MFA-required: login succeeds up to the
-        // enrollment challenge (202), which is only reachable AFTER the
-        // password verified against the row the signup created.
+        // A fresh owner account is UNVERIFIED: login must refuse it (403
+        // verify-your-email) — proving the password verified against the
+        // row the signup created (it is not a 401 invalid-credentials).
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::FORBIDDEN,
+            "login before email verification must be refused"
+        );
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            json.to_string().to_lowercase().contains("verif"),
+            "the refusal must name the verification requirement, got: {json}"
+        );
+
+        // After verification the same credentials authenticate — for a
+        // fresh owner that means the 202 MFA-enrollment challenge.
+        sqlx::query("UPDATE users SET email_verified = true WHERE email = $1")
+            .bind(&email)
+            .execute(&pool)
+            .await
+            .expect("mark verified");
+        let state2 = signup_test_state(pool.clone(), &redis_url).await;
+        let csrf2 = ui_foundation::csrf::generate_csrf_token(&state2.config.csrf_secret);
+        let app2 = axum::Router::new()
+            .merge(crate::routes::auth::router())
+            .with_state(state2);
+        let response = tower::ServiceExt::oneshot(
+            app2,
+            axum::http::Request::builder()
+                .method(axum::http::Method::POST)
+                .uri("/login")
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .header("x-csrf-token", csrf2)
+                .body(axum::body::Body::from(login_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .expect("verified login dispatch");
         assert_eq!(
             response.status(),
             axum::http::StatusCode::ACCEPTED,
-            "login after signup must authenticate (202 MFA-enrollment), not reject"
+            "login after verification must reach the MFA-enrollment challenge"
         );
 
         restore_dkim_env(had_dkim_key);

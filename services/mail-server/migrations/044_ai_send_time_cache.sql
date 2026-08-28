@@ -1,6 +1,5 @@
 -- Cache for API-server send-time optimization responses.
 
-BEGIN;
 
 CREATE TABLE IF NOT EXISTS ai_send_time_cache (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -38,4 +37,3 @@ BEGIN
 END;
 $$;
 
-COMMIT;

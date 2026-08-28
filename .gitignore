@@ -65,13 +65,11 @@ dump.rdb
 !.env.production.example
 .vast_api_key
 vast_instance_id.txt
-# NOTE (audit P): dhparam.pem is a PLACEHOLDER that was previously tracked.
-# It is untracked now — generate real DH parameters per-deployment using:
-#   deploy/nginx/ssl/generate-dhparams.sh
-# (deploy-hetzner.yml also regenerates any dhparam smaller than 1024 bytes.)
-# All .pem files (including dhparam.pem with real values) are excluded below.
+# NOTE (audit P + cleanup): the dead deploy/nginx/ssl/dhparam.pem placeholder
+# and its generator were REMOVED — nginx.conf never referenced ssl_dhparam
+# and its cipher list is pure ECDHE (see deploy/nginx/ssl/README.md).
+# All .pem files (real cert material) are excluded below.
 *.pem
-deploy/nginx/ssl/dhparam.pem
 *.key
 secrets/
 **/secrets/

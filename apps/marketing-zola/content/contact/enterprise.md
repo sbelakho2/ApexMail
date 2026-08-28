@@ -17,7 +17,14 @@ After you submit the form, our enterprise team reviews your requirements and res
 
 ## Enterprise Enquiry Form
 
+<div id="enquiry-submitted" class="form-banner form-banner--success" role="status">
+  <p><strong>Thank you — your submission was received.</strong> Our team reviews submissions and responds within 2 business days.</p>
+</div>
+<div id="enquiry-error" class="form-banner form-banner--error" role="alert">
+  <p><strong>We could not accept your submission.</strong> Please check the required fields (a valid work email is required) and try again.</p>
+</div>
 <form id="enterprise-contact-form" class="space-y-6 max-w-2xl" method="POST" action="https://api.apexmail.ee/v1/contact/enterprise">
+  <input type="hidden" name="page_language" value="en" />
   <div>
     <label for="work-email" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Work Email <span class="text-red-500">*</span></label>
     <input type="email" id="work-email" name="work_email" required
@@ -79,6 +86,7 @@ After you submit the form, our enterprise team reviews your requirements and res
       <svg class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
     </button>
   </div>
+  <p class="form-privacy-note">By submitting this form you agree to our <a href="/privacy/">Privacy Policy</a>. We use the details you provide solely to respond to your enquiry, as set out in our GDPR Art. 13 notice at the point of collection.</p>
 </form>
 
 ## Direct Contact

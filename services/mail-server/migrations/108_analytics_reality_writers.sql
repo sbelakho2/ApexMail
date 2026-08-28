@@ -16,7 +16,6 @@
 --    email-engagement reference ranges for B2B/SaaS senders.
 -- =============================================================================
 
-BEGIN;
 
 -- ── 1. system_alerts writer columns ────────────────────────────────────────
 
@@ -53,4 +52,3 @@ VALUES
     ('other', 'click_rate',      2.8,  1.2,  2.8, 4.5,  7.0, 'percent', 'INDUSTRY_BASELINE', 'INDUSTRY_BASELINE')
 ON CONFLICT (industry, metric_name) DO NOTHING;
 
-COMMIT;

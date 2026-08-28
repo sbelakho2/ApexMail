@@ -30,7 +30,6 @@
 --           ALTER TABLE messages DROP COLUMN IF EXISTS idempotency_key;
 -- =============================================================================
 
-BEGIN;
 
 ALTER TABLE messages ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
 
@@ -39,4 +38,3 @@ ALTER TABLE messages ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_tenant_idempotency_key
     ON messages (tenant_id, idempotency_key);
 
-COMMIT;

@@ -109,16 +109,21 @@ pub fn build_router(state: AppState) -> Router {
 ///
 /// Algorithm:
 /// 1. Get socket IP from `ConnectInfo<SocketAddr>` (normalised).
-/// 2. If trusted proxies ARE configured and the socket IP is NOT one of them,
-///    the peer is the client itself → return the socket IP.
-/// 3. Otherwise walk `X-Forwarded-For` **right-to-left**, skipping IPs that
-///    are trusted proxies; the first untrusted IP is the client. The
-///    rightmost entries are appended by our own infrastructure, so they are
-///    trustworthy — leftmost entries are client-supplied and spoofable.
-///    (When no trusted proxies are configured this naturally selects the
-///    LAST XFF entry, i.e. the one appended by the nearest proxy.)
-/// 4. Fall back to a validated `X-Real-IP`.
-/// 5. Fall back to the socket IP.
+/// 2. If NO trusted proxies are configured, forwarded headers are pure
+///    client-supplied input — return the socket IP unconditionally.
+/// 3. If trusted proxies ARE configured and the socket IP is NOT one of
+///    them, the peer is the client itself → return the socket IP (any XFF
+///    it sent is spoofable).
+/// 4. Otherwise (the peer IS a configured trusted proxy) walk
+///    `X-Forwarded-For` **right-to-left**, skipping IPs that are trusted
+///    proxies; the first untrusted IP is the client. The rightmost entries
+///    are appended by our own infrastructure, so they are trustworthy —
+///    leftmost entries are client-supplied and spoofable. The walk stops at
+///    the first entry that does not parse as an IP: everything to its left
+///    was written by the client, not by our proxies.
+/// 5. Fall back to a validated `X-Real-IP` (only reachable via a trusted
+///    peer).
+/// 6. Fall back to the socket IP.
 pub fn extract_client_ip(
     headers: &HeaderMap,
     socket_ip: std::net::IpAddr,
@@ -129,25 +134,36 @@ pub fn extract_client_ip(
     // Normalise IPv4-mapped IPv6 (::ffff:a.b.c.d → a.b.c.d)
     let socket_ip = normalise_ip(socket_ip);
 
-    if !trusted.is_empty() && !is_in_trusted(socket_ip, trusted) {
+    // With no trusted proxies configured there is nobody who could have
+    // legitimately appended a forwarded header — honouring XFF here would
+    // let any direct client spoof an arbitrary source IP.
+    if trusted.is_empty() {
         return socket_ip.to_string();
     }
 
-    // Connecting address is a trusted proxy (or no proxies are configured) —
-    // read the forwarded header right-to-left.
+    if !is_in_trusted(socket_ip, trusted) {
+        return socket_ip.to_string();
+    }
+
+    // Connecting address is a trusted proxy — read the forwarded header
+    // right-to-left, trusting only entries our infrastructure appended.
     if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
         for part in xff.split(',').map(str::trim).rev() {
-            if let Ok(ip) = part.parse::<std::net::IpAddr>() {
-                let ip = normalise_ip(ip);
-                if !is_in_trusted(ip, trusted) {
-                    return ip.to_string();
-                }
+            let Ok(ip) = part.parse::<std::net::IpAddr>() else {
+                // Malformed entry: our proxies only append valid IPs, so
+                // this entry (and everything to its left) is client input.
+                break;
+            };
+            let ip = normalise_ip(ip);
+            if !is_in_trusted(ip, trusted) {
+                return ip.to_string();
             }
         }
         // Every XFF entry is itself a trusted proxy — fall through.
     }
 
-    // #188:Validate X-Real-IP as a valid IP address before trusting it
+    // #188:Validate X-Real-IP as a valid IP address before trusting it.
+    // Only reachable when the peer is a trusted proxy.
     if let Some(xri) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
         let trimmed = xri.trim();
         if trimmed.parse::<std::net::IpAddr>().is_ok() {
@@ -303,8 +319,236 @@ fn rate_limited_response(ip: &str, count: u64, req: Request) -> Response {
 }
 
 #[cfg(test)]
+pub(crate) mod test_support {
+    //! Shared helpers for route handler tests.
+    //!
+    //! Building an [`AppState`] needs no live services: the Postgres pool is
+    //! lazy and the Redis pool points at a dead port unless a test opts into
+    //! the live test server via the workspace `TEST_REDIS_URL` convention
+    //! (soft-skip when unset or unreachable). Handlers tolerate Redis /
+    //! Postgres errors, so offline unit tests are safe; tests that assert on
+    //! WAL side effects must use [`live_redis_state`].
+
+    use crate::bot::BotDetector;
+    use crate::codec::TrackingCodec;
+    use crate::config::{
+        ClickHouseConfig, Config, DatabaseConfig, MetricsConfig, RateLimitConfig, RedisConfig,
+        ServerConfig, TrackingConfig,
+    };
+    use crate::processor::EventProcessor;
+    use crate::state::AppState;
+
+    pub(crate) const TEST_SECRET: &str = "test-secret-key-32-bytes-minimum!!";
+
+    /// Unique tenant discriminator: unique per process AND per call so tests
+    /// never collide on shared Redis keys (domain cache, dedup, WAL search).
+    pub(crate) fn unique_tenant(label: &str) -> String {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        format!("tenant_{label}_{}_{n}", std::process::id())
+    }
+
+    pub(crate) fn test_config(trusted_proxies: &[&str]) -> Config {
+        Config {
+            server: ServerConfig {
+                addr: "127.0.0.1:0".parse().expect("test addr"),
+            },
+            database: DatabaseConfig {
+                url: "postgresql://offline:offline@127.0.0.1:1/offline".into(),
+                max_connections: 1,
+            },
+            redis: RedisConfig {
+                url: "redis://127.0.0.1:1".into(),
+                key_prefix: "tracking:".into(),
+                pool_size: 1,
+            },
+            clickhouse: ClickHouseConfig {
+                url: "http://127.0.0.1:1".into(),
+                database: "apexmail".into(),
+                user: "default".into(),
+                password: String::new(),
+                insert_timeout_seconds: 1,
+            },
+            tracking: TrackingConfig {
+                base_url: "https://track.test.example".into(),
+                pixel_path: "/o".into(),
+                click_path: "/c".into(),
+                unsubscribe_path: "/u".into(),
+                preferences_path: "/p".into(),
+                fallback_url: "https://fallback.test.example/".into(),
+                confirmation_url: "https://fallback.test.example/unsubscribed".into(),
+                redirect_status: 302,
+                trusted_proxies: trusted_proxies
+                    .iter()
+                    .filter_map(|s| s.parse().ok())
+                    .collect(),
+                max_redirect_url_len: 2048,
+            },
+            rate_limit: RateLimitConfig {
+                enabled: false,
+                max_per_minute: 1000,
+            },
+            metrics: MetricsConfig {
+                enabled: false,
+                port: 9092,
+            },
+            secret_key: zeroize::Zeroizing::new(TEST_SECRET.into()),
+            jwt_public_key_pem: String::new(),
+        }
+    }
+
+    fn state_with(trusted_proxies: &[&str], redis: deadpool_redis::Pool) -> AppState {
+        let cfg = test_config(trusted_proxies);
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy(&cfg.database.url)
+            .expect("lazy pg pool");
+        let clickhouse = clickhouse::Client::default();
+        let processor = std::sync::Arc::new(EventProcessor::new(
+            db.clone(),
+            redis.clone(),
+            clickhouse,
+            std::time::Duration::from_secs(1),
+        ));
+        AppState::new(
+            TrackingCodec::new(TEST_SECRET),
+            db,
+            redis,
+            processor,
+            BotDetector::new(),
+            cfg,
+        )
+    }
+
+    fn dead_redis_pool() -> deadpool_redis::Pool {
+        deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            .builder()
+            .expect("dead redis builder")
+            .max_size(1)
+            .runtime(deadpool_redis::Runtime::Tokio1)
+            .build()
+            .expect("dead redis pool")
+    }
+
+    /// State wired to a dead Redis port — for tests that never touch Redis.
+    pub(crate) fn offline_state(trusted_proxies: &[&str]) -> AppState {
+        state_with(trusted_proxies, dead_redis_pool())
+    }
+
+    /// State wired to the live test Redis (`TEST_REDIS_URL`, workspace
+    /// convention). Returns `None` (soft-skip) when unset or unreachable.
+    #[allow(clippy::type_complexity)]
+    pub(crate) async fn live_redis_state(
+        trusted_proxies: &[&str],
+    ) -> Option<(AppState, deadpool_redis::Pool)> {
+        let url = std::env::var("TEST_REDIS_URL").ok()?;
+        let pool = deadpool_redis::Config::from_url(&url)
+            .builder()
+            .ok()?
+            .max_size(4)
+            .runtime(deadpool_redis::Runtime::Tokio1)
+            .build()
+            .ok()?;
+        let mut conn = pool.get().await.ok()?;
+        redis::cmd("PING")
+            .query_async::<String>(&mut *conn)
+            .await
+            .ok()?;
+        Some((state_with(trusted_proxies, pool.clone()), pool))
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::IpAddr;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().expect("test ip")
+    }
+
+    fn xff(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::HeaderName::from_static("x-forwarded-for"),
+            value.parse().expect("header value"),
+        );
+        headers
+    }
+
+    /// A direct client (peer not a trusted proxy) must never have its
+    /// client-supplied XFF honoured — otherwise the source IP is spoofable.
+    #[tokio::test]
+    async fn direct_client_with_spoofed_xff_uses_peer_ip() {
+        let state = test_support::offline_state(&["10.0.0.0/8"]);
+        let headers = xff("1.2.3.4, 198.51.100.9");
+
+        assert_eq!(
+            extract_client_ip(&headers, ip("203.0.113.5"), &state),
+            "203.0.113.5"
+        );
+    }
+
+    /// With NO trusted proxies configured there is no infrastructure that
+    /// could have appended XFF/X-Real-IP — every forwarded header is
+    /// client-supplied and must be ignored in favour of the socket peer.
+    #[tokio::test]
+    async fn no_trusted_proxies_configured_ignores_forwarded_headers_entirely() {
+        let state = test_support::offline_state(&[]);
+        let mut headers = xff("1.2.3.4");
+        headers.insert(
+            axum::http::HeaderName::from_static("x-real-ip"),
+            "5.6.7.8".parse().expect("header value"),
+        );
+
+        assert_eq!(
+            extract_client_ip(&headers, ip("203.0.113.5"), &state),
+            "203.0.113.5"
+        );
+    }
+
+    /// Via a trusted proxy chain, the real client is the rightmost XFF entry
+    /// that is NOT a trusted proxy; leftmost (spoofable) entries are ignored.
+    #[tokio::test]
+    async fn trusted_proxy_xff_walk_yields_real_client_not_spoofed_leftmost() {
+        let state = test_support::offline_state(&["10.0.0.0/8"]);
+        // Chain: client 203.0.113.9 → proxy 10.0.0.9 → peer proxy 10.0.0.1.
+        // The client pre-seeded a spoofed leftmost entry (6.6.6.6).
+        let headers = xff("6.6.6.6, 203.0.113.9, 10.0.0.9");
+
+        assert_eq!(
+            extract_client_ip(&headers, ip("10.0.0.1"), &state),
+            "203.0.113.9"
+        );
+    }
+
+    /// When every XFF entry is a trusted proxy the walk falls through to a
+    /// validated X-Real-IP (only reachable through a trusted peer) and then
+    /// to the socket IP.
+    #[tokio::test]
+    async fn all_trusted_xff_falls_back_to_socket_ip() {
+        let state = test_support::offline_state(&["10.0.0.0/8"]);
+        let headers = xff("10.0.0.9, 10.0.0.8");
+
+        assert_eq!(
+            extract_client_ip(&headers, ip("10.0.0.1"), &state),
+            "10.0.0.1"
+        );
+    }
+
+    /// A malformed XFF entry terminates the right-to-left walk: everything
+    /// left of it was written by the client, not by our proxies.
+    #[tokio::test]
+    async fn malformed_xff_entry_stops_the_walk() {
+        let state = test_support::offline_state(&["10.0.0.0/8"]);
+        let headers = xff("6.6.6.6, not-an-ip, 10.0.0.9");
+
+        assert_eq!(
+            extract_client_ip(&headers, ip("10.0.0.1"), &state),
+            "10.0.0.1"
+        );
+    }
 
     /// G.1: the local fallback limit is the conservative emergency quota,
     /// clamped by (and never above) the configured Redis limit.

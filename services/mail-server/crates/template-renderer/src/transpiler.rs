@@ -67,6 +67,15 @@ static LINK_HREF_ATTR_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// clients block remote CSS anyway; same-origin/relative URLs only.
 pub const ALLOWED_STYLESHEET_HOSTS: &[&str] = &[];
 
+/// Maximum HTML element nesting depth accepted during tree traversal.
+///
+/// Bounds the recursion in [`html_node_to_template_node`] and
+/// [`validate_ast`]: a 512KB source of nested `<div>`s (~100 000 levels)
+/// passes the size cap yet overflows a default stack, aborting the whole
+/// process (the tokio worker thread included). Anything deeper than this
+/// limit is rejected with a `nesting too deep` validation error.
+pub const MAX_HTML_NESTING_DEPTH: usize = 256;
+
 /// Dangerous-code patterns. The former blanket `\bprocess\b` hard-fail
 /// rejected ordinary prose ("We process payments securely"); these forms are
 /// anchored to code/template-syntax contexts. The same list backs
@@ -154,10 +163,15 @@ pub fn validate_source(source: &str, max_length: usize) -> ValidationResult {
     }
 
     // O-7.1 / O-7.2: AST-level validation — parse HTML into nodes and check
-    // every element tag and attribute against the allowlists.
-    if let Ok(nodes) = parse_html_to_nodes(source) {
-        let ast_errors = validate_ast(&nodes, source);
-        errors.extend(ast_errors);
+    // every element tag and attribute against the allowlists. Parse failures
+    // (including the nesting-depth guard) are validation errors, not silence.
+    match parse_html_to_nodes(source) {
+        Ok(nodes) => errors.extend(validate_ast(&nodes, source)),
+        Err(e) => errors.push(ValidationError {
+            message: e.to_string(),
+            line: None,
+            column: None,
+        }),
     }
 
     ValidationResult {
@@ -323,6 +337,41 @@ pub fn resolve_placeholders_plain_reported(
     ResolveOutcome { html, warnings }
 }
 
+/// Resolve placeholders for a SUBJECT line (plain text, header-bound).
+///
+/// Identical to [`resolve_placeholders_plain_reported`], plus header-injection
+/// hardening: CR/LF are mapped to spaces and NUL is removed from the final
+/// value (whether it came from a merge field or the subject template itself).
+/// A subject containing `"Hi\r\nBcc: x"` must never smuggle a second header
+/// into the outgoing mail. Bodies are not routed through here — they may
+/// legitimately contain newlines.
+pub fn resolve_placeholders_subject_reported(
+    text: &str,
+    props: &serde_json::Value,
+    missing_fallback: &str,
+) -> ResolveOutcome {
+    let outcome = resolve_placeholders_plain_reported(text, props, missing_fallback);
+    ResolveOutcome {
+        html: strip_header_control_chars(&outcome.html),
+        warnings: outcome.warnings,
+    }
+}
+
+/// Remove characters that can terminate/forge email headers from a
+/// header-bound string: CR and LF become a single space each (keeping the
+/// text readable), NUL is dropped entirely.
+pub fn strip_header_control_chars(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\r' | '\n' => out.push(' '),
+            '\0' => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 // ─── Internal helpers ──────────────────────────────────────────
 
 /// HTML-escape a string so it is inert when interpolated into markup.
@@ -356,10 +405,7 @@ fn resolve_prop_raw(props: &serde_json::Value, path: &str) -> Option<String> {
     let parts: Vec<&str> = path.split('.').collect();
     let mut current = props;
     for part in parts {
-        match current.get(part) {
-            Some(v) => current = v,
-            None => return None,
-        }
+        current = current.get(part)?;
     }
     match current {
         serde_json::Value::String(s) => Some(s.clone()),
@@ -534,8 +580,31 @@ fn decode_url_control_entities(value: &str) -> String {
 /// Validate every node in the AST against the element and attribute allowlists.
 /// Returns a list of validation errors for disallowed elements, blocked
 /// attributes, or attributes not permitted on a given element.
-#[allow(clippy::only_used_in_recursion)]
+///
+/// Depth-guarded (see [`MAX_HTML_NESTING_DEPTH`]): even if a caller ever
+/// feeds `validate_ast` a tree that skipped the parse-time conversion check,
+/// the recursion is stopped with a `nesting too deep` error instead of
+/// overflowing the stack.
 fn validate_ast(nodes: &[TemplateNode], source: &str) -> Vec<ValidationError> {
+    validate_ast_at_depth(nodes, source, 0)
+}
+
+#[allow(clippy::only_used_in_recursion)]
+fn validate_ast_at_depth(
+    nodes: &[TemplateNode],
+    source: &str,
+    depth: usize,
+) -> Vec<ValidationError> {
+    if depth > MAX_HTML_NESTING_DEPTH {
+        return vec![ValidationError {
+            message: format!(
+                "HTML nesting too deep: more than {} levels",
+                MAX_HTML_NESTING_DEPTH
+            ),
+            line: None,
+            column: None,
+        }];
+    }
     let mut errors = Vec::new();
     for node in nodes {
         match &node.kind {
@@ -571,8 +640,8 @@ fn validate_ast(nodes: &[TemplateNode], source: &str) -> Vec<ValidationError> {
                     }
                 }
 
-                // Recurse into children
-                errors.extend(validate_ast(&node.children, source));
+                // Recurse into children (depth-guarded)
+                errors.extend(validate_ast_at_depth(&node.children, source, depth + 1));
             }
             NodeKind::Text(_) | NodeKind::Expression(_) | NodeKind::Fragment => {}
         }
@@ -593,10 +662,13 @@ fn parse_html_to_nodes(source: &str) -> Result<Vec<TemplateNode>, TemplateError>
         fragment_body_node(&document).unwrap_or_else(|| document.tree.root())
     };
 
-    Ok(root
-        .children()
-        .filter_map(html_node_to_template_node)
-        .collect())
+    let mut nodes = Vec::new();
+    for child in root.children() {
+        if let Some(node) = html_node_to_template_node(child, 0)? {
+            nodes.push(node);
+        }
+    }
+    Ok(nodes)
 }
 
 fn should_parse_as_document(source: &str) -> bool {
@@ -624,7 +696,25 @@ fn is_element_named(node: NodeRef<'_, Node>, expected: &str) -> bool {
     matches!(node.value(), Node::Element(element) if element.name().eq_ignore_ascii_case(expected))
 }
 
-fn html_node_to_template_node(node: NodeRef<'_, Node>) -> Option<TemplateNode> {
+/// Convert one html5ever tree node (and, recursively, its children) into a
+/// [`TemplateNode`].
+///
+/// `depth` is the element nesting level and is hard-bounded by
+/// [`MAX_HTML_NESTING_DEPTH`] — the recursion must never be driven by
+/// attacker-controlled input depth, which can exceed any fixed stack within
+/// the 512KB source cap.
+fn html_node_to_template_node(
+    node: NodeRef<'_, Node>,
+    depth: usize,
+) -> Result<Option<TemplateNode>, TemplateError> {
+    if depth > MAX_HTML_NESTING_DEPTH {
+        return Err(TemplateError::InvalidSyntax {
+            message: format!(
+                "HTML nesting too deep: more than {} levels",
+                MAX_HTML_NESTING_DEPTH
+            ),
+        });
+    }
     match node.value() {
         Node::Element(element) => {
             let tag = element.name().to_string();
@@ -634,19 +724,19 @@ fn html_node_to_template_node(node: NodeRef<'_, Node>) -> Option<TemplateNode> {
                 .collect();
             let children = node
                 .children()
-                .filter_map(html_node_to_template_node)
-                .collect();
+                .filter_map(|child| html_node_to_template_node(child, depth + 1).transpose())
+                .collect::<Result<Vec<_>, _>>()?;
 
-            Some(TemplateNode {
+            Ok(Some(TemplateNode {
                 kind: NodeKind::Element { tag },
                 attributes,
                 children,
-            })
+            }))
         }
         Node::Text(text) => {
             let text = text.trim();
             if text.is_empty() {
-                return None;
+                return Ok(None);
             }
 
             let kind = if PLACEHOLDER_RE.is_match(text) {
@@ -655,17 +745,17 @@ fn html_node_to_template_node(node: NodeRef<'_, Node>) -> Option<TemplateNode> {
                 NodeKind::Text(text.to_string())
             };
 
-            Some(TemplateNode {
+            Ok(Some(TemplateNode {
                 kind,
                 attributes: vec![],
                 children: vec![],
-            })
+            }))
         }
         Node::Document
         | Node::Fragment
         | Node::Doctype(_)
         | Node::Comment(_)
-        | Node::ProcessingInstruction(_) => None,
+        | Node::ProcessingInstruction(_) => Ok(None),
     }
 }
 
@@ -1063,6 +1153,33 @@ mod tests {
         assert_eq!(result, "Hello Tom & Jerry <b>");
     }
 
+    /// Subject-bound values lose CR/LF/NUL no matter whether they come from
+    /// a merge field or the subject template itself; warnings still report.
+    #[test]
+    fn test_subject_variant_strips_header_control_chars() {
+        let props = serde_json::json!({"name": "Bob\r\nBcc: x@evil.example", "nul": "a\0b"});
+        let outcome =
+            resolve_placeholders_subject_reported("Hi {{ name }} | {{ nul }}", &props, "");
+        assert_eq!(outcome.html, "Hi Bob  Bcc: x@evil.example | ab");
+        assert!(outcome.warnings.is_empty());
+
+        // Literal CR/LF inside the subject template is stripped too.
+        let outcome = resolve_placeholders_subject_reported("line1\r\nline2", &props, "");
+        assert_eq!(outcome.html, "line1  line2");
+
+        // Missing-field fallback also runs through the strip (each of \r and
+        // \n becomes one space).
+        let outcome = resolve_placeholders_subject_reported("Hey {{ who }}", &props, "fb\r\n");
+        assert_eq!(outcome.html, "Hey fb  ");
+        assert_eq!(outcome.warnings.len(), 1);
+    }
+
+    #[test]
+    fn test_strip_header_control_chars() {
+        assert_eq!(strip_header_control_chars("a\rb\nc\0d"), "a b cd");
+        assert_eq!(strip_header_control_chars("clean"), "clean");
+    }
+
     #[test]
     fn test_html5_parser_preserves_attributes() {
         let nodes = parse_html_to_nodes(r#"<img src="{logo_url}" alt="Logo">"#).unwrap();
@@ -1115,5 +1232,84 @@ mod tests {
         assert_eq!(find_line_number(source, 0), Some(1));
         assert_eq!(find_line_number(source, 6), Some(2));
         assert_eq!(find_line_number(source, 12), Some(3));
+    }
+
+    // ── Nesting-depth guard ─────────────────────────────────────
+
+    /// 20 000 nested `<div>`s (100KB) — well inside the 512KB source cap and
+    /// deep enough to blow a default 2 MiB thread stack (~5 MB of frames) if
+    /// the tree conversion recursed unboundedly. The original defect was
+    /// reproduced with the full 512KB/100k-level payload; this enduring
+    /// regression test uses 20k levels so the (superlinear) html5ever parse
+    /// keeps the suite fast while staying 78x past the depth limit.
+    #[test]
+    fn test_deeply_nested_html_returns_error_not_stack_overflow() {
+        let source = "<div>".repeat(20_000);
+        assert!(source.len() <= 512 * 1024, "payload must pass the size cap");
+
+        // Run the conversion on a DEFAULT-stack thread: if it recursed too
+        // deep the process aborts here and this test (and the whole binary)
+        // dies — that is the defect. Reaching the assert below proves the
+        // recursion is bounded.
+        let handle = std::thread::Builder::new()
+            .spawn(move || transpile(&source, 512 * 1024))
+            .expect("spawn conversion thread");
+        let result = handle.join().expect("conversion must not overflow");
+        match result {
+            Err(TemplateError::InvalidSyntax { message }) => {
+                assert!(message.contains("nesting too deep"), "{message}");
+            }
+            other => panic!("expected nesting-depth error, got {other:?}"),
+        }
+    }
+
+    /// `validate_source` must surface the same nesting error (previously the
+    /// `if let Ok(nodes)` silently swallowed parse errors and reported valid).
+    /// 5 000 levels is comfortably past the limit and parses fast; the 100k
+    /// stack-overflow reproduction lives in the test above.
+    #[test]
+    fn test_validate_source_flags_deep_nesting() {
+        let source = "<div>".repeat(5_000);
+        let result = validate_source(&source, 512 * 1024);
+        assert!(!result.valid, "deep nesting must not validate");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("nesting too deep")),
+            "{:?}",
+            result.errors
+        );
+    }
+
+    /// Legitimate nesting far below the limit must keep working.
+    #[test]
+    fn test_reasonable_nesting_depth_still_allowed() {
+        let source = format!(
+            "{}<p>deep but legal</p>{}",
+            "<div>".repeat(200),
+            "</div>".repeat(200)
+        );
+        assert!(validate_source(&source, 512 * 1024).valid);
+        assert!(transpile(&source, 512 * 1024).is_ok());
+    }
+
+    /// Just past the limit is rejected, just under it is not.
+    #[test]
+    fn test_nesting_limit_boundary() {
+        let over = format!(
+            "{}x{}",
+            "<div>".repeat(MAX_HTML_NESTING_DEPTH + 1),
+            "</div>".repeat(MAX_HTML_NESTING_DEPTH + 1)
+        );
+        let err = transpile(&over, 512 * 1024).unwrap_err();
+        assert!(err.to_string().contains("nesting too deep"), "{err}");
+
+        let under = format!(
+            "{}x{}",
+            "<div>".repeat(MAX_HTML_NESTING_DEPTH),
+            "</div>".repeat(MAX_HTML_NESTING_DEPTH)
+        );
+        assert!(transpile(&under, 512 * 1024).is_ok());
     }
 }

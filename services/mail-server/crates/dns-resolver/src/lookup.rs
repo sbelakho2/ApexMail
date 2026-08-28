@@ -124,7 +124,7 @@ impl DnsLookup {
             .resolver
             .mx_lookup(domain)
             .await
-            .map_err(|e| DnsError::ResolveFailed(e.to_string()))?;
+            .map_err(|e| classify_lookup_error(e, domain))?;
 
         let mut records: Vec<MxRecord> = response
             .answers()
@@ -327,21 +327,75 @@ impl DnsLookup {
     }
 
     /// Validate that a domain has MX or A records (can receive email).
-    pub async fn can_receive_email(&self, domain: &str) -> Result<bool, DnsError> {
-        // Check MX first
-        if let Ok(mx) = self.lookup_mx(domain).await {
-            if !mx.is_empty() {
-                return Ok(true);
+    ///
+    /// Distinguishes definitive answers from transient failures: only a
+    /// definitive "no MX and no A" is reported as [`Deliverability::No`]
+    /// (safe to negative-cache); a SERVFAIL/timeout/network error on BOTH
+    /// lookups is [`Deliverability::Transient`] — swallowing it as a plain
+    /// `Ok(false)` used to let the caller cache a false "undeliverable"
+    /// verdict under the POSITIVE TTL.
+    pub async fn can_receive_email(&self, domain: &str) -> Deliverability {
+        // Check MX first. A definitive no-records answer falls through to
+        // the implicit-MX (A) check per RFC 5321 §5.1; a transient failure
+        // does not.
+        match self.resolver.mx_lookup(domain).await {
+            Ok(response) => {
+                let has_mx = response
+                    .answers()
+                    .iter()
+                    .any(|r| matches!(r.data, trust_dns_resolver::proto::rr::RData::MX(_)));
+                if has_mx {
+                    return Deliverability::Yes;
+                }
             }
+            Err(err) if is_definitive_no_records(&err) => {}
+            Err(_) => return Deliverability::Transient,
         }
-        // Fall back to A record (implicit MX per RFC 5321)
-        if let Ok(a) = self.lookup_a(domain).await {
-            if !a.is_empty() {
-                return Ok(true);
-            }
+        // Fall back to A record (implicit MX per RFC 5321).
+        match self.resolver.ipv4_lookup(domain).await {
+            Ok(response) if !response.answers().is_empty() => Deliverability::Yes,
+            Ok(_) => Deliverability::No,
+            Err(err) if is_definitive_no_records(&err) => Deliverability::No,
+            Err(_) => Deliverability::Transient,
         }
-        Ok(false)
     }
+}
+
+/// Deliverability outcome of [`DnsLookup::can_receive_email`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Deliverability {
+    /// MX or implicit-MX (A) records exist — the domain can receive mail.
+    Yes,
+    /// Definitively no MX and no A records (NXDOMAIN/NODATA) — a definitive
+    /// negative answer the caller may negative-cache.
+    No,
+    /// The lookup transiently failed (timeout/SERVFAIL/network) on both MX
+    /// and A — the caller must surface an error and cache NOTHING.
+    Transient,
+}
+
+/// Map a raw resolver error, preserving the definitive/transient split:
+/// NXDOMAIN/NODATA (NoRecordsFound) becomes [`DnsError::NoRecords`] so
+/// callers can negative-cache; everything else stays a transient failure.
+fn classify_lookup_error(err: trust_dns_resolver::net::NetError, domain: &str) -> DnsError {
+    if is_definitive_no_records(&err) {
+        DnsError::NoRecords(domain.to_string())
+    } else {
+        DnsError::ResolveFailed(err.to_string())
+    }
+}
+
+/// True when the resolver error is a definitive no-records answer
+/// (NXDOMAIN/NODATA) rather than a transient failure (timeout, SERVFAIL,
+/// network). Mirrors the discipline the MTA's DMARC lookup applies
+/// (email_authentication fetch_dmarc).
+fn is_definitive_no_records(err: &trust_dns_resolver::net::NetError) -> bool {
+    matches!(
+        err,
+        trust_dns_resolver::net::NetError::Dns(
+            trust_dns_resolver::net::DnsError::NoRecordsFound { .. }
+        )
+    )
 }
 
 fn ttl_from_valid_until(valid_until: Instant) -> Duration {

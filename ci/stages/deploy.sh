@@ -23,12 +23,28 @@ set -eu
 . "${CI_ROOT:-$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib.sh"
 
 # Canonical production service set (deploy-hetzner.yml "Apply stack" order).
+# FIX (audit): the monitoring services (prometheus, grafana, loki,
+# alertmanager, exporters, tempo, otel-collector, synthetic-monitor) live
+# behind the `monitoring` compose profile and were absent from this list —
+# production therefore ran WITHOUT its own observability stack, and
+# `up --remove-orphans` over the non-monitoring list could even reap
+# manually-started profile containers. They are now enumerated explicitly
+# AND the profile is activated in compose() below. Both are needed: an
+# explicit service list keeps `up` starting exactly the canonical set
+# regardless of profile semantics, while `--profile monitoring` makes the
+# profiled services part of the project's active set so `--remove-orphans`
+# can never treat their containers as orphans (a long-standing compose v2
+# quirk with inactive-profile services).
 STACK_SERVICES="api-server mta imap-server mailstore worker enterprise tracking
                 observability marketing status-server billing-service sales-autopilot
-                postgres-backup nginx certbot postgres redis clickhouse"
+                postgres-backup clickhouse-backup nginx certbot postgres redis clickhouse
+                prometheus grafana loki alertmanager tempo otel-collector
+                node-exporter blackbox-exporter postgres-exporter redis-exporter
+                clickhouse-exporter synthetic-monitor"
 
 compose() {
-    docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env "$@"
+    docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env \
+        --profile monitoring "$@"
 }
 
 # deploy.sh Step 4: publish the live LE cert at the ssl tree root nginx reads.

@@ -3,12 +3,131 @@
 use chrono::{Duration, Utc};
 use deadpool_redis::Pool as RedisPool;
 use redis::AsyncCommands;
+use std::sync::OnceLock;
 use tracing::info;
 
 use crate::config::QuotaConfig;
 use crate::types::*;
 
 // ── Rate Limit Service ─────────────────────────────────────
+
+// Fix (rate-limiter K1 pattern): `redis::Script::new` computes the
+// script's SHA-1 on every construction. These were previously rebuilt on
+// EVERY request, burning CPU on the hot path. `Script::invoke` only needs
+// `&self` (it clones internally), so a `&'static Script` behind a
+// `OnceLock` is safe to share across requests.
+
+/// Sliding-window check script (atomic prune + count + conditional add).
+static SLIDING_WINDOW_SCRIPT: OnceLock<redis::Script> = OnceLock::new();
+
+fn sliding_window_script() -> &'static redis::Script {
+    SLIDING_WINDOW_SCRIPT.get_or_init(|| {
+        redis::Script::new(
+            r#"
+            local key = KEYS[1]
+            local now = tonumber(ARGV[1])
+            local windowStart = tonumber(ARGV[2])
+            local maxRequests = tonumber(ARGV[3])
+            local member = ARGV[4]
+            local windowMs = tonumber(ARGV[5])
+
+            redis.call('ZREMRANGEBYSCORE', key, '-inf', windowStart)
+            local count = tonumber(redis.call('ZCARD', key))
+            if count >= maxRequests then
+                redis.call('PEXPIRE', key, windowMs)
+                return {0, count}
+            end
+
+            redis.call('ZADD', key, now, member)
+            redis.call('PEXPIRE', key, windowMs)
+            return {1, count + 1}
+        "#,
+        )
+    })
+}
+
+/// Token-bucket check script (atomic refill + take).
+///
+/// The key TTL is derived from the ACTUAL refill math: a bucket refills
+/// from empty to full in `capacity / refill_rate` refill intervals, i.e.
+/// `(capacity / refill_rate) * refill_interval_ms` milliseconds (plus a
+/// 1s buffer). The previous hard-coded `refillInterval * capacity + 1000`
+/// was dimensionally wrong (ms × tokens) whenever `refill_rate != 1`.
+static TOKEN_BUCKET_SCRIPT: OnceLock<redis::Script> = OnceLock::new();
+
+fn token_bucket_script() -> &'static redis::Script {
+    TOKEN_BUCKET_SCRIPT.get_or_init(|| {
+        redis::Script::new(
+            r#"
+            local key = KEYS[1]
+            local capacity = tonumber(ARGV[1])
+            local refillRate = tonumber(ARGV[2])
+            local refillInterval = tonumber(ARGV[3])
+            local requested = tonumber(ARGV[4])
+            local now = tonumber(ARGV[5])
+
+            local data = redis.call('HMGET', key, 'tokens', 'lastRefill')
+            local tokens = tonumber(data[1]) or capacity
+            local lastRefill = tonumber(data[2]) or now
+
+            local elapsed = now - lastRefill
+            local refills = math.floor(elapsed / refillInterval)
+            if refills > 0 then
+                tokens = math.min(capacity, tokens + refills * refillRate)
+                lastRefill = lastRefill + refills * refillInterval
+            end
+
+            local allowed = 0
+            if tokens >= requested then
+                tokens = tokens - requested
+                allowed = 1
+            end
+
+            redis.call('HMSET', key, 'tokens', tokens, 'lastRefill', lastRefill)
+            -- TTL from the real refill math (see TOKEN_BUCKET_SCRIPT docs).
+            local ttlMs = 61000
+            if refillRate > 0 then
+                ttlMs = math.ceil((capacity / refillRate) * refillInterval) + 1000
+            end
+            redis.call('PEXPIRE', key, ttlMs)
+
+            return {allowed, math.floor(tokens), lastRefill}
+        "#,
+        )
+    })
+}
+
+/// Resource-limit check script (atomic increment-under-limit).
+static RESOURCE_LIMIT_SCRIPT: OnceLock<redis::Script> = OnceLock::new();
+
+fn resource_limit_script() -> &'static redis::Script {
+    RESOURCE_LIMIT_SCRIPT.get_or_init(|| {
+        redis::Script::new(
+            r#"
+            local key = KEYS[1]
+            local increment = tonumber(ARGV[1])
+            local limit = tonumber(ARGV[2])
+
+            if increment < 0 then
+                increment = 0
+            end
+
+            local current = tonumber(redis.call('GET', key) or '0')
+            local projected = current + increment
+
+            if projected > limit then
+                return {0, current}
+            end
+
+            if increment > 0 then
+                current = tonumber(redis.call('INCRBY', key, increment))
+            end
+
+            return {1, current}
+        "#,
+        )
+    })
+}
 
 pub struct RateLimitService {
     redis: RedisPool,
@@ -35,27 +154,7 @@ impl RateLimitService {
 
         let mut conn = self.redis.get().await?;
 
-        let lua = r#"
-            local key = KEYS[1]
-            local now = tonumber(ARGV[1])
-            local windowStart = tonumber(ARGV[2])
-            local maxRequests = tonumber(ARGV[3])
-            local member = ARGV[4]
-            local windowMs = tonumber(ARGV[5])
-
-            redis.call('ZREMRANGEBYSCORE', key, '-inf', windowStart)
-            local count = tonumber(redis.call('ZCARD', key))
-            if count >= maxRequests then
-                redis.call('PEXPIRE', key, windowMs)
-                return {0, count}
-            end
-
-            redis.call('ZADD', key, now, member)
-            redis.call('PEXPIRE', key, windowMs)
-            return {1, count + 1}
-        "#;
-
-        let result: Vec<i64> = redis::Script::new(lua)
+        let result: Vec<i64> = sliding_window_script()
             .key(&redis_key)
             .arg(now_ms)
             .arg(window_start_ms)
@@ -96,43 +195,14 @@ impl RateLimitService {
         let now = Utc::now();
         let now_ms = now.timestamp_millis();
 
-        let lua = r#"
-            local key = KEYS[1]
-            local capacity = tonumber(ARGV[1])
-            local refillRate = tonumber(ARGV[2])
-            local refillInterval = tonumber(ARGV[3])
-            local requested = tonumber(ARGV[4])
-            local now = tonumber(ARGV[5])
-
-            local data = redis.call('HMGET', key, 'tokens', 'lastRefill')
-            local tokens = tonumber(data[1]) or capacity
-            local lastRefill = tonumber(data[2]) or now
-
-            local elapsed = now - lastRefill
-            local refills = math.floor(elapsed / refillInterval)
-            if refills > 0 then
-                tokens = math.min(capacity, tokens + refills * refillRate)
-                lastRefill = lastRefill + refills * refillInterval
-            end
-
-            local allowed = 0
-            if tokens >= requested then
-                tokens = tokens - requested
-                allowed = 1
-            end
-
-            redis.call('HMSET', key, 'tokens', tokens, 'lastRefill', lastRefill)
-            redis.call('PEXPIRE', key, refillInterval * capacity + 1000)
-
-            return {allowed, tokens, lastRefill}
-        "#;
-
         let mut conn = self.redis.get().await?;
 
-        let result: Vec<i64> = redis::Script::new(lua)
+        // Pass refill_rate as f64 (previously truncated via `as i64`, so
+        // fractional refill rates collapsed to 0 = bucket never refilled).
+        let result: Vec<i64> = token_bucket_script()
             .key(&redis_key)
             .arg(config.capacity)
-            .arg(config.refill_rate as i64)
+            .arg(config.refill_rate)
             .arg(config.refill_interval_ms)
             .arg(tokens_requested)
             .arg(now_ms)
@@ -298,30 +368,7 @@ impl RateLimitService {
         let redis_key = format!("workspace:{}:resource:{}", workspace_id, metric);
         let mut conn = self.redis.get().await?;
 
-        let lua = r#"
-            local key = KEYS[1]
-            local increment = tonumber(ARGV[1])
-            local limit = tonumber(ARGV[2])
-
-            if increment < 0 then
-                increment = 0
-            end
-
-            local current = tonumber(redis.call('GET', key) or '0')
-            local projected = current + increment
-
-            if projected > limit then
-                return {0, current}
-            end
-
-            if increment > 0 then
-                current = tonumber(redis.call('INCRBY', key, increment))
-            end
-
-            return {1, current}
-        "#;
-
-        let result: Vec<i64> = redis::Script::new(lua)
+        let result: Vec<i64> = resource_limit_script()
             .key(&redis_key)
             .arg(increment)
             .arg(limit)
@@ -434,5 +481,81 @@ mod tests {
         assert_eq!(configs["api"].max_requests, 200);
         assert_eq!(configs["api"].burst_limit, Some(20));
         assert_eq!(configs["email"].max_requests, 100_000);
+    }
+
+    // ── Fix:Lua scripts cached in OnceLock (no per-call SHA-1) ─────
+
+    #[test]
+    fn test_lua_scripts_cached_and_shared() {
+        // `redis::Script::new` computes the SHA-1 per construction; the
+        // scripts must be cached so repeated requests reuse one instance.
+        assert!(std::ptr::eq(
+            sliding_window_script(),
+            sliding_window_script()
+        ));
+        assert!(std::ptr::eq(token_bucket_script(), token_bucket_script()));
+        assert!(std::ptr::eq(
+            resource_limit_script(),
+            resource_limit_script()
+        ));
+        // And each script is a distinct object.
+        assert!(!std::ptr::eq(
+            sliding_window_script() as *const _,
+            token_bucket_script() as *const _
+        ));
+    }
+
+    /// Expected token-bucket key TTL derived from the refill math:
+    /// refilling from empty to full takes `capacity / refill_rate`
+    /// intervals of `refill_interval_ms` ms, plus a 1s buffer.
+    fn expected_bucket_ttl_ms(config: &TokenBucketConfig) -> i64 {
+        ((config.capacity as f64 / config.refill_rate) as i64) * config.refill_interval_ms + 1000
+    }
+
+    /// Integration test (gated on REDIS_TEST_URL — no ambient default):
+    /// pins that the token bucket key TTL follows the refill math
+    /// `(capacity / refill_rate) * refill_interval_ms + 1000` and NOT the
+    /// dimensionally wrong `refill_interval_ms * capacity + 1000`.
+    #[tokio::test]
+    async fn test_token_bucket_ttl_derived_from_refill_math() {
+        let Ok(url) = std::env::var("REDIS_TEST_URL") else {
+            eprintln!("skipping: REDIS_TEST_URL not set");
+            return;
+        };
+        let pool = deadpool_redis::Config::from_url(url)
+            .create_pool(None)
+            .expect("valid pool config");
+        let service = RateLimitService::new(pool);
+
+        // capacity 10, 2 tokens per 500ms interval → full refill in
+        // (10/2)*500 = 2500ms → TTL ≈ 3500ms. The OLD buggy formula gave
+        // 500*10+1000 = 6000ms.
+        let config = TokenBucketConfig {
+            capacity: 10,
+            refill_rate: 2.0,
+            refill_interval_ms: 500,
+        };
+        let key = "ttl-pin-test";
+        let redis_key = format!("tokenbucket:{key}");
+
+        let mut conn = service.redis.get().await.expect("redis conn");
+        let _: () = conn.del(&redis_key).await.expect("clean slate");
+
+        let result = service
+            .check_token_bucket(key, &config, 1)
+            .await
+            .expect("bucket check");
+        assert!(result.allowed);
+
+        let ttl_ms: i64 = conn.pttl(&redis_key).await.expect("PTTL after check");
+        let expected = expected_bucket_ttl_ms(&config);
+        assert_eq!(expected, 3500, "sanity: expected TTL is 3500ms");
+        // Redis TTLs tick down; allow a small margin for elapsed time.
+        assert!(
+            (3300..=3500).contains(&ttl_ms),
+            "TTL must follow refill math (~3500ms), got {ttl_ms}ms"
+        );
+
+        let _: () = conn.del(&redis_key).await.expect("cleanup");
     }
 }

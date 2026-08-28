@@ -157,7 +157,6 @@ pub struct GraderEngine {
     tenant_dns_budget: DashMap<String, VecDeque<Instant>>,
     spam_engine: SpamEngine,
     authenticator: OnceCell<EmailAuthenticator>,
-    http: reqwest::Client,
 }
 
 #[derive(Debug, Clone)]
@@ -193,12 +192,9 @@ impl GraderEngine {
         }
 
         let dns_lookup = DnsLookup::new().map_err(|e| format!("DNS resolver init failed: {e}"))?;
-        let http = reqwest::Client::builder()
-            .user_agent("ApexMail-Grader/1.0")
-            .timeout(Duration::from_secs(config.network_timeout_seconds.max(1)))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|e| format!("HTTP client init failed: {e}"))?;
+        // NOTE: no shared HTTP client anymore — the MTA-STS policy fetch
+        // builds a per-request client pinned to pre-validated IPs (SSRF
+        // hardening; see network_checks::lookup_mta_sts).
         // Validate all configured tenant scoring weights at startup so
         // misconfigured zero/infinite weights are caught early and fall back
         // to uniform defaults with a warning.
@@ -215,7 +211,6 @@ impl GraderEngine {
             tenant_dns_budget: DashMap::new(),
             spam_engine: SpamEngine::new(),
             authenticator: OnceCell::new(),
-            http,
             config,
         })
     }
@@ -276,7 +271,6 @@ impl GraderEngine {
             net_to.saturating_mul(2), // policy fetch may take a bit longer
             lookup_mta_sts(
                 &self.dns_lookup,
-                &self.http,
                 domain,
                 self.config.mta_sts_policy_max_bytes,
                 net_to,

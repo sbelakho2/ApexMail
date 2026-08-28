@@ -23,7 +23,6 @@
 --   - Safe to re-run; all DDL uses IF [NOT] EXISTS guards or dynamic checks.
 -- =============================================================================
 
-BEGIN;
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -321,4 +320,3 @@ COMMENT ON COLUMN tenants.id IS
 DROP FUNCTION IF EXISTS apexmail_normalize_tenant_id(TEXT);
 DROP FUNCTION IF EXISTS apexmail_lookup_tenant_id(TEXT);
 
-COMMIT;

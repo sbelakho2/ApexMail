@@ -1,6 +1,5 @@
 -- Billing alert runtime tables required by the Rust API and maintenance jobs.
 
-BEGIN;
 
 CREATE TABLE IF NOT EXISTS notification_queue (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -62,4 +61,3 @@ BEGIN
     END IF;
 END $$;
 
-COMMIT;

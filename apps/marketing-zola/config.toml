@@ -13,8 +13,13 @@ default_language = "en"
 compile_sass = false          # We use Tailwind CLI instead
 build_search_index = false    # Marketing site doesn't need search
 minify_html = true
-generate_feeds = true
-feed_filenames = ["atom.xml", "rss.xml"]
+# Feeds disabled: the marketing site has no chronological content
+# (sections are landing pages, not a blog), so generate_feeds=true was
+# publishing empty atom.xml/rss.xml shells — feed readers subscribing
+# got a 653-byte document with zero entries. If a blog/changelog
+# section is added later, flip this back on (Zola feeds the `blog`
+# section by default via feed_filenames).
+generate_feeds = false
 
 # ── Taxonomy (not used yet but ready) ────────────────────────
 
@@ -73,7 +78,11 @@ analytics_domain = "apexmail.ee"
 analytics_pixel_url = ""          # Legacy pixel URL (kept for backward compat)
 
 support_email = "support@apexmail.ee"
-cookie_consent_cookie_name = "apexmail_cookie_consent"
+# The cookie actually set by the api-server /consent endpoint
+# (CONSENT_COOKIE_NAME in api-server routes/web.rs) and read by the
+# marketing nginx's `map $cookie_apexmail_consent`. The former value
+# "apexmail_cookie_consent" never matched any real cookie.
+cookie_consent_cookie_name = "apexmail_consent"
 cookie_consent_policy_path = "/cookies/"
 cookie_consent_policy_label = "Cookie Policy"
 

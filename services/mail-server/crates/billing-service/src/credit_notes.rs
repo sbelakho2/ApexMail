@@ -58,6 +58,13 @@ pub enum CreditNoteError {
     InvoiceNotCreditable(Uuid),
     #[error("credit amount exceeds invoice total")]
     AmountExceedsInvoice,
+    #[error(
+        "invoice currency {invoice_currency} does not match wallet currency {wallet_currency}"
+    )]
+    CurrencyMismatch {
+        invoice_currency: String,
+        wallet_currency: String,
+    },
     #[error("audit log failure: {0}")]
     Audit(String),
 }
@@ -69,8 +76,7 @@ pub enum CreditNoteError {
 /// Invoice row lookup used by [`create_credit_note`]. `FOR UPDATE` serializes
 /// concurrent credit-note writers on the same invoice so the read of
 /// `already_credited` can never race (Fix F — TOCTOU over-credit).
-const LOCK_INVOICE_FOR_CREDIT_SQL: &str =
-    "SELECT status::text, total FROM invoices WHERE id = $1 AND tenant_id = $2 FOR UPDATE";
+const LOCK_INVOICE_FOR_CREDIT_SQL: &str = "SELECT status::text, total, currency FROM invoices WHERE id = $1 AND tenant_id = $2 FOR UPDATE";
 
 /// Validate a credit amount against the invoice total and the amount already
 /// credited (pure — Fix F). Callers must hold a row lock on the invoice while
@@ -120,14 +126,14 @@ pub async fn create_credit_note(
     // ── 1. Open the transaction and lock the invoice row (Fix F) ────────
     let mut tx = pool.begin().await.map_err(CreditNoteError::Db)?;
 
-    let invoice_row: Option<(String, i64)> = sqlx::query_as(LOCK_INVOICE_FOR_CREDIT_SQL)
+    let invoice_row: Option<(String, i64, String)> = sqlx::query_as(LOCK_INVOICE_FOR_CREDIT_SQL)
         .bind(input.invoice_id)
         .bind(&input.tenant_id)
         .fetch_optional(&mut *tx)
         .await
         .map_err(CreditNoteError::Db)?;
 
-    let Some((invoice_status, invoice_total)) = invoice_row else {
+    let Some((invoice_status, invoice_total, invoice_currency)) = invoice_row else {
         return Err(CreditNoteError::InvoiceNotFound(input.invoice_id));
     };
 
@@ -195,17 +201,43 @@ pub async fn create_credit_note(
             // Sequential statements (not sibling CTEs) because data-modifying
             // CTEs cannot see each other's writes — the UPDATE would miss a
             // wallet created in the same statement.
+            // The wallet is single-currency: a credit in the invoice's
+            // currency must never land in a wallet held in another currency
+            // (a 10_000-cent USD credit in a EUR wallet is €100.00 of
+            // phantom money). Create with the invoice currency; when a wallet
+            // already exists, refuse the mismatch instead of mixing.
             sqlx::query(
                 r#"
                 INSERT INTO wallets (tenant_id, balance, reserved, currency, created_at, updated_at)
-                VALUES ($1, 0, 0, 'eur', NOW(), NOW())
+                VALUES ($1, 0, 0, $2, NOW(), NOW())
                 ON CONFLICT (tenant_id) DO NOTHING
                 "#,
             )
             .bind(&input.tenant_id)
+            .bind(&invoice_currency)
             .execute(&mut *tx)
             .await
             .map_err(CreditNoteError::Db)?;
+
+            let wallet_currency: String =
+                sqlx::query_scalar("SELECT currency FROM wallets WHERE tenant_id = $1")
+                    .bind(&input.tenant_id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .map_err(CreditNoteError::Db)?;
+            if !wallet_currency.eq_ignore_ascii_case(&invoice_currency) {
+                tracing::error!(
+                    tenant_id = %input.tenant_id,
+                    invoice_id = %input.invoice_id,
+                    invoice_currency = %invoice_currency,
+                    wallet_currency = %wallet_currency,
+                    "credit-note currency mismatch refused — refund via the payment provider instead"
+                );
+                return Err(CreditNoteError::CurrencyMismatch {
+                    invoice_currency,
+                    wallet_currency,
+                });
+            }
 
             sqlx::query(
                 r#"

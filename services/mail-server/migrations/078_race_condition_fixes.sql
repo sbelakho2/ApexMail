@@ -3,7 +3,6 @@
 -- ============================================================================
 -- Fixes across wallet_transactions, subscriptions, webhooks, and pagination.
 
-BEGIN;
 
 -- ── 1. wallet_transactions: idempotency via UNIQUE constraint on reference ──
 -- The admin_apply_credit handler passes idempotency_key as `reference` but
@@ -122,4 +121,3 @@ BEGIN
     END IF;
 END $$;
 
-COMMIT;

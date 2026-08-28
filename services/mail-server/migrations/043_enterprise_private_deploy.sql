@@ -1,7 +1,6 @@
 -- Enterprise private deployment, dedicated IP pool, and BYOIP lifecycle tables.
 -- These tables back the Rust enterprise::private_deploy service and its routes.
 
-BEGIN;
 
 CREATE TABLE IF NOT EXISTS ent_private_deployments (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -135,4 +134,3 @@ BEGIN
 END;
 $$;
 
-COMMIT;

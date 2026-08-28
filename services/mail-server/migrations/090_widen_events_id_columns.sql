@@ -19,7 +19,6 @@
 -- (tracking-service, api-server dashboards) and idempotent.
 -- =============================================================================
 
-BEGIN;
 
 -- events pre-exists without these columns on runtime-provisioned
 -- (apexmail-db SCHEMA) databases — add them before widening.
@@ -32,4 +31,3 @@ ALTER TABLE events
 ALTER TABLE events
     ALTER COLUMN campaign_id TYPE TEXT;
 
-COMMIT;

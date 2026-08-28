@@ -57,22 +57,32 @@ static SES_CLIENTS: LazyLock<std::sync::Mutex<std::collections::HashMap<String, 
 /// is simply replaced — clients are interchangeable and lazily connected, so
 /// this is harmless and avoids holding a std lock across an await.
 async fn shared_ses_client(region: &str) -> SharedSesClient {
-    if let Some(client) = SES_CLIENTS
-        .lock()
-        .expect("SES client cache lock poisoned")
-        .get(region)
-    {
-        return client.clone();
+    // Lock-poisoning recovery: a panic in some other critical section while
+    // holding this cache lock must not cascade into a worker panic here —
+    // the map stays structurally valid (its operations are atomic), so the
+    // poisoned guard is recovered rather than unwrapped. The guard is
+    // dropped before the await (std locks must not be held across await
+    // points), hence the two locking phases.
+    let cached = {
+        let clients = match SES_CLIENTS.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        clients.get(region).cloned()
+    };
+    if let Some(client) = cached {
+        return client;
     }
     let sdk_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .region(aws_sdk_sesv2::config::Region::new(region.to_string()))
         .load()
         .await;
     let client = std::sync::Arc::new(aws_sdk_sesv2::Client::new(&sdk_config));
-    SES_CLIENTS
-        .lock()
-        .expect("SES client cache lock poisoned")
-        .insert(region.to_string(), client.clone());
+    let mut clients = match SES_CLIENTS.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    clients.insert(region.to_string(), client.clone());
     client
 }
 

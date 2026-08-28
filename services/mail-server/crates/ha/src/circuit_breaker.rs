@@ -142,6 +142,15 @@ impl CircuitBreakerService {
     }
 
     /// Report a successful call.
+    ///
+    /// Fix #15: in the CLOSED state each success RETIRES one prior
+    /// failure (count-based decay, 1:1). Previously `failure_count` only
+    /// ever grew in Closed — five lifetime errors (however long ago, with
+    /// any number of healthy calls in between) tripped a healthy
+    /// dependency. With the decay, `threshold` CONSECUTIVE failures (no
+    /// interleaved success) are still required to open the circuit.
+    /// Half-open recovery semantics are unchanged (a success_threshold
+    /// run closes and zeroes the counter).
     pub async fn report_success(&self, circuit_name: &str) -> Result<(), String> {
         let mut circuits = self.circuits.write().await;
         let circuit = circuits
@@ -159,6 +168,12 @@ impl CircuitBreakerService {
             circuit.failure_count = 0;
             circuit.state_changed_at = Utc::now();
             info!(circuit = circuit_name, "Circuit closed after recovery");
+            return Ok(());
+        }
+
+        // Fix #15: successes age out prior failures while Closed.
+        if circuit.state == CircuitState::Closed {
+            circuit.failure_count = circuit.failure_count.saturating_sub(1);
         }
         Ok(())
     }
@@ -297,6 +312,55 @@ mod tests {
             // Allow request should be false (timeout hasn't elapsed)
             let allowed = svc.allow_request("database").await.unwrap();
             assert!(!allowed);
+        });
+    }
+
+    /// Fix #15 (fail-first): scattered failures must NOT accumulate into
+    /// an open circuit — 4 failures + enough successes to retire them +
+    /// 1 more failure stays CLOSED (the old code opened here: 5 lifetime
+    /// failures tripped the breaker regardless of intervening successes).
+    #[test]
+    fn test_failures_decay_with_successes_in_closed_state() {
+        test_runtime().block_on(async {
+            let svc = CircuitBreakerService::new(test_config()); // threshold 5
+            for _ in 0..4 {
+                svc.report_failure("database").await.unwrap();
+            }
+            for _ in 0..20 {
+                svc.report_success("database").await.unwrap();
+            }
+            // All four prior failures have been retired by successes.
+            {
+                let circuits = svc.circuits.read().await;
+                assert_eq!(circuits.get("database").unwrap().failure_count, 0);
+            }
+            svc.report_failure("database").await.unwrap();
+            let stats = svc.get_stats("database").await.unwrap();
+            assert_eq!(
+                stats.state, "closed",
+                "4 retired failures + 1 fresh failure must not open the circuit"
+            );
+            assert_eq!(stats.failure_count, 1);
+        });
+    }
+
+    /// Fix #15: the decay must not weaken protection against CLUSTERED
+    /// failures — 5 failures with no interleaved success still open.
+    #[test]
+    fn test_clustered_failures_still_open_circuit() {
+        test_runtime().block_on(async {
+            let svc = CircuitBreakerService::new(test_config()); // threshold 5
+                                                                 // Interleave successes so each failure is immediately retired…
+            for _ in 0..4 {
+                svc.report_failure("database").await.unwrap();
+                svc.report_success("database").await.unwrap();
+            }
+            assert_eq!(svc.get_stats("database").await.unwrap().state, "closed");
+            // …then 5 failures back-to-back (no success between them).
+            for _ in 0..5 {
+                svc.report_failure("database").await.unwrap();
+            }
+            assert_eq!(svc.get_stats("database").await.unwrap().state, "open");
         });
     }
 

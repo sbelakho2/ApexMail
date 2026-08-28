@@ -13,7 +13,14 @@ Para compras empresariales, revisiones de seguridad o planificación de nube pri
 
 ## Formulario de consulta de ventas
 
+<div id="enquiry-submitted" class="form-banner form-banner--success" role="status">
+  <p><strong>Gracias — su solicitud se ha recibido correctamente.</strong> Nuestro equipo la revisa y responde en un plazo de 2 días laborables.</p>
+</div>
+<div id="enquiry-error" class="form-banner form-banner--error" role="alert">
+  <p><strong>No se ha podido aceptar su solicitud.</strong> Compruebe los campos obligatorios (se necesita un correo electrónico profesional válido) e inténtelo de nuevo.</p>
+</div>
 <form id="sales-contact-form" class="space-y-6 max-w-2xl" method="POST" action="https://api.apexmail.ee/v1/contact/sales">
+  <input type="hidden" name="page_language" value="es" />
   <div>
     <label for="company" class="block text-xs font-bold tracking-widest text-surface-600 uppercase mb-2">Empresa <span class="text-red-500">*</span></label>
     <input type="text" id="company" name="company" required
@@ -166,6 +173,7 @@ Para compras empresariales, revisiones de seguridad o planificación de nube pri
       <svg class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
     </button>
   </div>
+  <p class="form-privacy-note">Al enviar este formulario, acepta nuestra <a href="/es/privacy/">política de privacidad</a>. Utilizamos estos datos únicamente para responder a su consulta (RGPD art. 13).</p>
 </form>
 
 ## Qué sucede a continuación

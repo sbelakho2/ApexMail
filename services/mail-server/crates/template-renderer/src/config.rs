@@ -24,6 +24,11 @@ pub struct ServerConfig {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    /// HTTP-level request timeout (seconds) enforced by `TimeoutLayer`.
+    /// Bounds the whole /render request even when the blocking sandbox work
+    /// cannot be preempted mid-phase (see `routes::render_handler`).
+    #[serde(default = "default_request_timeout_secs")]
+    pub request_timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -63,6 +68,9 @@ fn default_host() -> String {
 fn default_port() -> u16 {
     9080
 }
+fn default_request_timeout_secs() -> u64 {
+    30
+}
 fn default_timeout_ms() -> u64 {
     5000
 }
@@ -99,6 +107,9 @@ impl RendererConfig {
         if self.server.port == 0 {
             return Err("PORT must be > 0".into());
         }
+        if self.server.request_timeout_secs == 0 {
+            return Err("REQUEST_TIMEOUT_SECS must be > 0".into());
+        }
         if self.sandbox.timeout_ms == 0 {
             return Err("SANDBOX_TIMEOUT_MS must be > 0".into());
         }
@@ -131,6 +142,7 @@ mod tests {
             server: ServerConfig {
                 host: "127.0.0.1".to_string(),
                 port: 9080,
+                request_timeout_secs: 30,
             },
             sandbox: SandboxConfig {
                 timeout_ms: 5000,

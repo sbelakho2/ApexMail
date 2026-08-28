@@ -875,8 +875,28 @@ async fn list_messages(
     }
     let limit = clamp_limit(params.limit, 100);
 
-    // Cursor-based pagination: decode the cursor (hex-encoded created_at timestamp)
-    let cursor_value = params.cursor.as_deref().and_then(decode_cursor);
+    // Cursor-based pagination: the cursor is a base64-encoded RFC3339
+    // `created_at` timestamp. Validate it parses BEFORE binding — a
+    // decoded-but-bogus cursor used to reach the `::timestamp` cast and
+    // surface as a database 500 instead of a client 400.
+    let cursor_value = match params.cursor.as_deref() {
+        Some(encoded) => match decode_cursor(encoded) {
+            Some(decoded) => match chrono::DateTime::parse_from_rfc3339(&decoded) {
+                Ok(timestamp) => Some(timestamp.with_timezone(&chrono::Utc)),
+                Err(_) => {
+                    return Err(ApiError::BadRequest(
+                        "invalid cursor: must be an encoded created_at timestamp".into(),
+                    ))
+                }
+            },
+            None => {
+                return Err(ApiError::BadRequest(
+                    "invalid cursor: malformed encoding".into(),
+                ))
+            }
+        },
+        None => None,
+    };
 
     let fetch_limit = limit + 1; // fetch one extra to detect has_more
 

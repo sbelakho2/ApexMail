@@ -1,0 +1,16 @@
+# clickhouse-backup scheduler image: clickhouse-client + openssl + rsync.
+#
+# Built from the official server image because it ships the clickhouse
+# binary (client functionality) and busybox (sh/find/stat/pgrep for the
+# healthcheck). openssl + rsync are baked in for the same reason as
+# Dockerfile.postgres-backup: the container runs on the NO-EGRESS
+# apexmail_data_internal network, so a runtime `apk add` can never reach a
+# CDN and the scheduler would silently store PLAINTEXT backups.
+#
+# Entrypoint (set in docker-compose.prod.yml) is
+# deploy/hardening/scripts/clickhouse-backup-encrypt.sh, which drives
+# scripts/clickhouse-backup.sh (mounted at
+# /usr/local/bin/clickhouse-backup.sh) on a nightly schedule and encrypts
+# every produced backup directory before the plaintext is removed.
+FROM clickhouse/clickhouse-server:24.8-alpine
+RUN apk add --no-cache openssl rsync

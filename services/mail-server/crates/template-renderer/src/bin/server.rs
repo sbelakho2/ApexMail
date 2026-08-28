@@ -77,6 +77,10 @@ async fn main() -> anyhow::Result<()> {
         server: ServerConfig {
             host: cli.host.clone(),
             port: cli.port,
+            request_timeout_secs: std::env::var("REQUEST_TIMEOUT_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
         },
         sandbox: SandboxConfig {
             timeout_ms: 5000,

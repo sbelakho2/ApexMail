@@ -17,6 +17,10 @@ tower-http = { workspace = true }
 hyper = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Contact-form parsing: repeated checkbox keys (compliance_needs=…&…)
+# cannot be collected by serde_urlencoded, so routes/contact.rs parses
+# the RawForm body directly. Already in the tree via serde_urlencoded.
+form_urlencoded = "1"
 sqlx = { workspace = true }
 redis = { workspace = true }
 deadpool-redis = { workspace = true }

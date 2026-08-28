@@ -98,6 +98,16 @@ details[data-dropdown] > [data-dropdown-menu] {
   overflow: hidden;
   pointer-events: none;
 }
+/* Visible focus treatment (a11y audit): the checkbox itself is the
+   keyboard operative control, but its ring used to paint at
+   left:-9999px — keyboard users got NO focus indicator at all. The
+   checkbox precedes #site-header as a sibling, so its focus state can
+   ring the visible hamburger affordance (#mobile-menu-toggle label
+   inside the header) instead. */
+#nav-toggle:focus-visible ~ #site-header #mobile-menu-toggle {
+  outline: 2px solid rgb(var(--primary));
+  outline-offset: 2px;
+}
 /* Ensure close icon is hidden by default (overrides header partial) */
 #menu-icon-close { display: none; }
 #nav-toggle:checked ~ #site-header #menu-icon-open { display: none !important; }
@@ -112,9 +122,21 @@ details[data-dropdown] > [data-dropdown-menu] {
   #site-header #mobile-menu > .mobile-menu-inner {
     overflow: hidden;
     min-height: 0;
+    /* Collapsed menu links stayed tabbable (and screen-reader
+       traversable) behind the 0fr grid row — visibility:hidden takes
+       them out of the tab order AND the a11y tree while the grid
+       animation still plays. It flips to visible immediately on
+       expand, and only after the collapse animation finishes on the
+       way back. */
+    visibility: hidden;
+    transition: visibility 0ms linear 280ms;
   }
   #nav-toggle:checked ~ #site-header #mobile-menu {
     grid-template-rows: 1fr;
+  }
+  #nav-toggle:checked ~ #site-header #mobile-menu > .mobile-menu-inner {
+    visibility: visible;
+    transition: visibility 0ms;
   }
 }
 /* Open-state header styling: opaque surface + deepened border so the
@@ -180,6 +202,35 @@ html.dark #deploy-byoc:checked ~ .deploy-tabs [for="deploy-byoc"] {
   display: block;
 }
 
+/* ── Pricing calculator billing-cycle pills (radio + :has(:checked)) ──
+   The calculator's Monthly/Annual segmented control (templates/
+   partials/pricing/calculator.html). The radios live INSIDE their
+   labels (bigger hit area), so the checked state styles the pill via
+   :has() — the only pure-CSS way to style an ancestor. Visual-only
+   progressive enhancement: browsers without :has() render both pills
+   unselected; the radio still posts correctly. Same pattern family as
+   the deploy-tabs rules above (those can use ~ because their radios
+   sit outside the labels). */
+.billing-pill {
+  padding: 0.5rem 1rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: rgb(var(--surface-500));
+  cursor: pointer;
+}
+.billing-pill:hover { color: rgb(var(--surface-950)); }
+.billing-pill:has(input:checked) {
+  background-color: rgb(var(--surface-950));
+  color: #fff;
+}
+/* Keyboard focus on the radio rings its pill, mirroring the mobile
+   menu-toggle treatment. */
+.billing-pill:has(input:focus-visible) {
+  outline: 2px solid rgb(var(--primary));
+  outline-offset: 2px;
+}
+
 /* ── Testimonials (scroll-snap) ─────────────────────────────── */
 .testimonials-track {
   display: flex;
@@ -220,6 +271,54 @@ html.dark #deploy-byoc:checked ~ .deploy-tabs [for="deploy-byoc"] {
 #cookie-consent-banner:not([hidden]) ~ #back-to-top {
   display: none;
 }
+
+/* ── Contact-form PRG banners (zero-JS :target reveal) ──────────
+   The api-server contact endpoints (POST /v1/contact/{sales,
+   enterprise,security}) redirect back to these static pages with
+   `?submitted=true#enquiry-submitted` (success) or `?error=…#
+   enquiry-error` (failure). A query parameter alone cannot be read
+   without client script, so the banners ship hidden in the static
+   markup and the CSS :target selector — driven by the fragment the
+   redirect carries — reveals them. Works identically on the static
+   host and the api-server's marketing mirror (same HTML). */
+.form-banner { display: none; }
+.form-banner:target { display: block; }
+.form-banner p { margin: 0; }
+.form-banner--success,
+.form-banner--error {
+  max-width: 42rem;
+  margin-bottom: 1.5rem;
+  padding: 1rem 1.25rem;
+  font-size: 0.875rem;
+  line-height: 1.5;
+  border: 1px solid;
+  border-left-width: 4px;
+}
+.form-banner--success {
+  background: rgb(var(--success-50, 248 250 252));
+  border-color: rgb(var(--success-200, 134 239 172));
+  color: rgb(var(--success-900, 20 83 45));
+}
+.form-banner--error {
+  background: rgb(var(--danger-50, 253 242 248));
+  border-color: rgb(var(--danger-200, 244 146 176));
+  color: rgb(var(--danger-900, 76 5 25));
+}
+
+/* GDPR Art. 13 point-of-collection notice under each contact form's
+   submit button (all locales). */
+.form-privacy-note {
+  margin-top: 1rem;
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: rgb(var(--surface-500));
+}
+.form-privacy-note a {
+  color: rgb(var(--surface-700));
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.form-privacy-note a:hover { color: rgb(var(--brand-600)); }
 
 /* ── Cookie banner recorded-consent state (no-JS) ─────────────
    After a choice is made, the api-server /consent endpoint sets the

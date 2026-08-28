@@ -284,6 +284,26 @@ impl CostBasedLimiter {
         });
     }
 
+    /// Test-only: force a tenant entry into the stale-and-full state so
+    /// the cleanup path can be exercised without waiting an hour.
+    #[cfg(test)]
+    pub(crate) fn force_stale_for_test(&self, tenant_id: &str) {
+        let entry = self
+            .tenant_budgets
+            .entry(tenant_id.to_string())
+            .or_insert_with(|| {
+                RwLock::new(TenantBudget {
+                    remaining: self.default_budget,
+                    capacity: self.default_budget,
+                    last_refill: Instant::now(),
+                    refill_rate: self.default_budget / 60,
+                })
+            });
+        let mut budget = entry.write();
+        budget.remaining = budget.capacity;
+        budget.last_refill = Instant::now() - Duration::from_secs(7200);
+    }
+
     /// Get number of tracked tenants (for monitoring)
     pub fn tracked_tenants(&self) -> usize {
         self.tenant_budgets.len()
@@ -390,5 +410,32 @@ mod tests {
             matches!(other_tenant, CostDecision::Allowed { .. }),
             "Expected Allowed for different tenant"
         );
+    }
+
+    /// Fix #7b (fail-first): `cleanup` must evict stale, full-budget
+    /// entries (Bug E-105) so the tenant-budget map stays bounded, and
+    /// must keep active entries.
+    #[test]
+    fn test_cleanup_evicts_stale_tenants_and_keeps_active() {
+        let limiter = CostBasedLimiter::new(CostLimiterConfig {
+            default_tenant_budget: 10_000,
+            system_capacity: 1_000_000,
+        });
+
+        // An active tenant (recent consumption, below capacity).
+        let _ = limiter.check("active", "/v1/health", None);
+        // A stale tenant: at capacity, untouched for 2 hours.
+        limiter.force_stale_for_test("stale");
+
+        assert_eq!(limiter.tracked_tenants(), 2);
+        limiter.cleanup();
+        assert_eq!(
+            limiter.tracked_tenants(),
+            1,
+            "stale full-budget tenant must be evicted"
+        );
+        // The survivor is the active one.
+        let _ = limiter.check("active", "/v1/health", None);
+        assert_eq!(limiter.tracked_tenants(), 1);
     }
 }

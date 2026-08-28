@@ -31,7 +31,6 @@ SET uidnext = COALESCE((
 -- between the first backfill and the lock, before applying SET NOT NULL.
 -- ACCESS EXCLUSIVE MODE is required because IN EXCLUSIVE MODE still allows
 -- concurrent reads, which could allow INSERTs to slip through the window.
-BEGIN;
 LOCK TABLE mail_messages IN ACCESS EXCLUSIVE MODE;
 
 -- Second backfill: catch any rows inserted after the first backfill
@@ -49,7 +48,6 @@ WHERE m.id = r.id;
 
 ALTER TABLE mail_messages
     ALTER COLUMN uid SET NOT NULL;
-COMMIT;
 
 DO $$
 BEGIN

@@ -77,9 +77,12 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 USER apexmail
 EXPOSE 8080
 
+# source label = the repo home the site itself publishes
+# (config.extra.github_url); the old github.com/apexmail org does not
+# exist.
 LABEL org.opencontainers.image.title="apexmail-marketing" \
     org.opencontainers.image.description="ApexMail marketing website" \
-    org.opencontainers.image.source="https://github.com/apexmail" \
+    org.opencontainers.image.source="https://github.com/Bel-Consulting-OU/ApexMail" \
     org.opencontainers.image.licenses="PROPRIETARY"
 
 HEALTHCHECK --interval=15s --timeout=3s --start-period=5s --retries=3 \
