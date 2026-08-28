@@ -756,6 +756,42 @@ final class Configuration implements ConfigurationInterface
                         ->thenInvalid('risk.chaining.enabled requires risk.enabled=true AND a non-null risk.request_binding_authority — the chain is a server-side transaction obligation anchored on the AUTHORITATIVE binding, never on an unexamined client string')
                     ->end()
                 ->end()
+            ->end()
+            // Cross-field rotation invariants over the signing key
+            // identity (kid, secret_key, secrets_by_kid, revoked_kids),
+            // validated here on the root node where all four are in
+            // scope. Each combination below is a guaranteed-outage or
+            // silently-weakened-security configuration, refused at
+            // compile time instead of failing on the first challenge.
+            // Each validate() call appends one rule (a single ExprBuilder
+            // keeps only its last ifTrue/thenInvalid pair).
+            ->validate()
+                ->ifTrue(static fn (array $v): bool => \in_array($v['kid'], $v['revoked_kids'], true))
+                ->thenInvalid('kiwi_captcha.kid must not appear in kiwi_captcha.revoked_kids: issuing under a revoked kid is a guaranteed outage, since every freshly issued challenge would fail verification with UnknownKid. Remove the kid from revoked_kids (revocation applies to superseded keys only) or bump kid to a new signing key id')
+            ->end()
+            ->validate()
+                ->ifTrue(static function (array $v): bool {
+                    foreach (\array_keys($v['secrets_by_kid']) as $historicalKid) {
+                        if ((int) $historicalKid === (int) $v['kid']) {
+                            return true;
+                        }
+                    }
+
+                    return false;
+                })
+                ->thenInvalid('kiwi_captcha.secrets_by_kid must not contain the current kiwi_captcha.kid: a historical entry for the current signing key would make the verifier select the wrong secret. The current secret belongs in kiwi_captcha.secret_key, not in the historical map')
+            ->end()
+            ->validate()
+                ->ifTrue(static function (array $v): bool {
+                    foreach (\array_keys($v['secrets_by_kid']) as $historicalKid) {
+                        if ((int) $historicalKid > (int) $v['kid']) {
+                            return true;
+                        }
+                    }
+
+                    return false;
+                })
+                ->thenInvalid('every kiwi_captcha.secrets_by_kid key must be strictly below kiwi_captcha.kid: the map holds historical signing keys only, and a future key would silently extend the verifier rollback/forward guard (a record kid above the newest ring key) so no deployment should accept it. Bump kid above the newest historical key when rotating')
             ->end();
 
         return $treeBuilder;

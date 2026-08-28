@@ -10,6 +10,7 @@ use KiwiCaptcha\AtomicStorageInterface;
 use KiwiCaptcha\ConsumedResult;
 use KiwiCaptcha\OperationIdentity;
 use KiwiCaptcha\OperationIdentityAwareStorageInterface;
+use KiwiCaptcha\ResumeDerivationClaimInterface;
 use KiwiCaptcha\StorageInterface;
 use KiwiCaptcha\ChallengeRuntimeStateReadableInterface;
 use KiwiCaptcha\ChallengeRuntimeStateKind;
@@ -41,15 +42,24 @@ use KiwiCaptcha\ChallengeRuntimeState;
  * `cancelled` marker of
  * {@see \KiwiCaptcha\CancellableStorageInterface::cancel()}; a cancelled
  * record is unverifiable and retained until deletion.
+ *
+ * Implements {@see \KiwiCaptcha\ResumeDerivationClaimInterface}: the
+ * resultless consumed-operation resume can claim the re-derivation
+ * ownership in-process, tracked in the same envelope. Exactly one
+ * concurrent same-operation recovery derives and commits (the
+ * read-modify-write sequence is de-facto atomic here, like every other
+ * transition of this backend). The claim has no TTL: the whole store is
+ * process-local, so a crashed recovery vanishes with the process and
+ * nothing can poison later retries.
  */
-final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface, \KiwiCaptcha\ChallengeRuntimeStateReadableInterface
+final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface, \KiwiCaptcha\ChallengeRuntimeStateReadableInterface, ResumeDerivationClaimInterface
 {
-    /** @var array<string, array{record: ChallengeRecord, consumed: bool, cancelled: bool, result: ConsumedResult|null, operationIdentity: string|null}> */
+    /** @var array<string, array{record: ChallengeRecord, consumed: bool, cancelled: bool, result: ConsumedResult|null, operationIdentity: string|null, claim: string|null}> */
     private array $records = [];
 
     public function store(ChallengeRecord $record): void
     {
-        $this->records[$record->nonce] = ['record' => $record, 'consumed' => false, 'cancelled' => false, 'result' => null, 'operationIdentity' => null];
+        $this->records[$record->nonce] = ['record' => $record, 'consumed' => false, 'cancelled' => false, 'result' => null, 'operationIdentity' => null, 'claim' => null];
     }
 
     public function find(string $nonce): ?ChallengeRecord
@@ -128,6 +138,63 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
     public function delete(string $nonce): void
     {
         unset($this->records[$nonce]);
+    }
+
+    /**
+     * The resume-claim transition (in-process de-facto atomic, like the
+     * other transitions here) claims the re-derivation ownership of a
+     * consumed, resultless record and returns a fresh random owner
+     * token. It returns null when the record is missing, not consumed,
+     * already committed, cancelled, or already claimed. The claim is
+     * tracked in the same envelope as the record and has no TTL (the
+     * store is process-local; a crashed recovery vanishes with the
+     * process).
+     */
+    public function claimResumeDerivation(string $nonce): ?string
+    {
+        $entry = $this->records[$nonce] ?? null;
+        if ($entry === null || !$entry['consumed'] || ($entry['cancelled'] ?? false) || $entry['result'] !== null || ($entry['claim'] ?? null) !== null) {
+            return null;
+        }
+        $owner = bin2hex(random_bytes(16));
+        $this->records[$nonce]['claim'] = $owner;
+
+        return $owner;
+    }
+
+    /**
+     * Compare-and-delete release of the resume claim: deletes the claim
+     * only when it still holds exactly this owner token; a stale owner
+     * can never delete a newer recovery's claim.
+     */
+    public function releaseResumeDerivation(string $nonce, string $owner): bool
+    {
+        $entry = $this->records[$nonce] ?? null;
+        if ($entry === null || ($entry['claim'] ?? null) !== $owner) {
+            return false;
+        }
+        $this->records[$nonce]['claim'] = null;
+
+        return true;
+    }
+
+    /**
+     * The resume-path commit that clears the re-derivation claim with
+     * the result write (in-process de-facto atomic): the same one-shot
+     * semantics as commitResult() with the claim as a fencing
+     * precondition. The caller must still hold the claim; a stale owner
+     * can never commit, and the successful write clears the claim.
+     */
+    public function commitResultResume(string $nonce, bool $valid, ?string $binding, string $owner): bool
+    {
+        $entry = $this->records[$nonce] ?? null;
+        if ($entry === null || !$entry['consumed'] || ($entry['cancelled'] ?? false) || $entry['result'] !== null || ($entry['claim'] ?? null) !== $owner) {
+            return false;
+        }
+        $this->records[$nonce]['result'] = new ConsumedResult($valid, $binding);
+        $this->records[$nonce]['claim'] = null;
+
+        return true;
     }
 
     /**

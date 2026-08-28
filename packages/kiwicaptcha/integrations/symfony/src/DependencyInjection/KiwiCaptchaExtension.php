@@ -36,6 +36,7 @@ use BelConsulting\KiwiCaptchaBundle\Security\RedisAdmissionSemaphore;
 use BelConsulting\KiwiCaptchaBundle\Security\RequestScopeAdmissionGate;
 use BelConsulting\KiwiCaptchaBundle\Security\ResultReceiptSigner;
 use BelConsulting\KiwiCaptchaBundle\Security\ScopeIssuanceCap;
+use BelConsulting\KiwiCaptchaBundle\Security\VerificationSecurityContext;
 use BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaExtension as TwigExtension;
 use BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaRuntime;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
@@ -336,7 +337,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         if (!\in_array($environment, ['test', 'dev'], true)) {
             if ($config['rate_limit_global'] > 0 && $redisRef === null && !$config['allow_local_global_limit_fallback']) {
                 throw new \LogicException(sprintf(
-                    'kiwi_captcha: rate_limit_global=%d is a deployment-wide limit, but no Redis client is wired — the limiter would silently fall back to a process-local or best-effort window, so the aggregate of N workers could approach N x %d. Wire redis_service (or a shared PSR-6 pool that is truly deployment-wide) or explicitly set allow_local_global_limit_fallback: true to accept the weaker semantics.',
+                    'kiwi_captcha: rate_limit_global=%d is a deployment-wide limit, but no Redis client is wired — the limiter will enforce it as a per-process or best-effort shared window, not an exact distributed gate: the cap is exact per process (N workers can approach N x %d in aggregate) and a shared PSR-6 pool cannot make the window atomic under concurrent requests, so races may briefly exceed the cap. Wire redis_service (or a shared PSR-6 pool that is truly deployment-wide) for the exact distributed gate, or explicitly set allow_local_global_limit_fallback: true to accept the weaker semantics.',
                     $config['rate_limit_global'],
                     $config['rate_limit_global'],
                 ));
@@ -459,6 +460,27 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $gateRef = new Reference('kiwi_captcha.argon2_inprocess_gate');
             }
         }
+        // The effective verification keyring (single source of truth):
+        // the historical secrets_by_kid map merged with the current
+        // signing key (kid => secret_key), numerically sorted. The core
+        // verifier resolves every record's kid against this ring, so an
+        // outstanding challenge signed under a superseded kid still
+        // verifies (rotation grace), a freshly issued challenge resolves
+        // the current secret, and the core's rollback/forward guard
+        // (record kid above the newest ring key) still rejects future
+        // keys. The same context feeds the Siteverify security-context
+        // digest below, so the wired keyring and the digested keyring
+        // can never diverge. With an empty historical map the ring stays
+        // empty and the core's legacy single-secret path is untouched.
+        $securityContext = new VerificationSecurityContext(
+            $config['kid'],
+            $config['secret_key'],
+            $config['secrets_by_kid'],
+            $config['revoked_kids'],
+            $config['issuer'],
+            $config['risk']['region'],
+        );
+
         $container->setDefinition('kiwi_captcha.verifier', (new Definition(Verifier::class, [
             $storageRef,
             $gateRef,
@@ -470,9 +492,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setArgument('$expectedPolicyVersion', $config['risk']['policy_version'])
             // HMAC-key rotation (secretsByKid), emergency revocation
             // (revokedKids) and the expected issuer are first-class bundle
-            // options.
+            // options. secretsByKid receives the effective keyring from
+            // VerificationSecurityContext: the historical map plus the
+            // current signing key, so freshly issued challenges (stamped
+            // with the current kid) resolve the current secret even while
+            // historical secrets are configured.
             ->setArgument('$expectedIssuer', $config['issuer'])
-            ->setArgument('$secretsByKid', $config['secrets_by_kid'])
+            ->setArgument('$secretsByKid', $securityContext->acceptedKeys())
             ->setArgument('$revokedKids', $config['revoked_kids'])
             ->setPublic(true));
         if ($config['risk']['region'] !== null) {
@@ -1111,21 +1137,20 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             (float) SiteVerifyController::IDEMPOTENCY_WAIT_SECS, // idempotency wait bound (the ctor default — never null, the param is float)
             $config['risk']['policy_version'] ?? 1, // security-policy epoch in the idempotency identity
         ]))
-            // The static deployment security-context digest (configured
-            // issuer, region, keyring and revocation state): bound into
-            // the idempotency backend identity so a cached SiteVerify
-            // provider result can never outlive the security context
-            // that produced it — an issuer/region/keyring rotation
+            // The static deployment security-context digest, built by
+            // the same VerificationSecurityContext that wired the
+            // verifier's keyring: version marker, issuer, region, the
+            // current kid, a sha256 of the current signing secret, the
+            // effective merged keyring (historical + current), and the
+            // revoked set. Bound into the idempotency backend identity
+            // so a cached SiteVerify provider result can never outlive
+            // the signing security context that produced it: a kid,
+            // secret, issuer, region, keyring or revocation rotation
             // invalidates the idempotency namespace (a same-key retry
             // becomes a different logical operation), exactly as the
             // core's hard-security verdicts dominate even a
             // same-operation retry.
-            ->setArgument('$securityContextDigest', hash('sha256', implode("\0", [
-                (string) ($config['issuer'] ?? ''),
-                (string) ($config['risk']['region'] ?? ''),
-                json_encode($config['secrets_by_kid'] ?? []),
-                json_encode($config['revoked_kids'] ?? []),
-            ])))
+            ->setArgument('$securityContextDigest', $securityContext->contextDigest())
             ->setArgument('$outstanding', $riskConfig['enabled'] ? new Reference('kiwi_captcha.risk.outstanding') : null)
             // The security-epoch monitor drives the identity and the
             // fail-closed check: the effective epoch (the monitor's

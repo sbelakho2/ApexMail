@@ -867,6 +867,106 @@ final class RedisStorageTest extends TestCase
         self::assertSame(VerifyError::InsufficientWork, $second->error, 'the wrong-counter verify must have consumed the record and committed the invalid outcome');
     }
 
+    public function testResumeClaimLifecycleWithTheAtomicLua(): void
+    {
+        // The re-derivation claim: ONE Lua script fuses the
+        // claimability check with the SET NX of a fresh random owner
+        // token under `resume-claim:<nonce>` with the 60-second TTL.
+        // The second caller is refused while the claim is held; the
+        // compare-and-delete release only ever releases the true owner;
+        // the claim-bearing commit clears the claim atomically with the
+        // result write.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $storage->store($this->makeRecord());
+        $storage->consume('redis-nonce-1');
+
+        $owner = $storage->claimResumeDerivation('redis-nonce-1');
+        self::assertIsString($owner, 'a consumed, resultless record is claimable');
+        self::assertSame(60, $client->expirations['kiwicaptcha:resume-claim:redis-nonce-1'] ?? null, 'the claim must carry the 60s TTL');
+        self::assertNull($storage->claimResumeDerivation('redis-nonce-1'), 'a second claim while the first is held must be refused');
+
+        self::assertFalse($storage->releaseResumeDerivation('redis-nonce-1', 'not-the-owner'), 'a stale owner can never release the claim');
+        self::assertTrue($storage->releaseResumeDerivation('redis-nonce-1', $owner), 'the true owner releases the claim');
+        self::assertNull($client->store['kiwicaptcha:resume-claim:redis-nonce-1'] ?? null, 'the release deleted the claim key');
+
+        // Claim again, then commit through the claim: the result lands
+        // and the claim is cleared in the same transition.
+        $owner = $storage->claimResumeDerivation('redis-nonce-1');
+        self::assertIsString($owner);
+        self::assertFalse($storage->commitResultResume('redis-nonce-1', true, 'txn-1', 'not-the-owner'), 'a stale owner can never commit');
+        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        self::assertNull($data['consumed_result'], 'the refused claim-bearing commit writes nothing');
+        self::assertSame($owner, $client->store['kiwicaptcha:resume-claim:redis-nonce-1'] ?? null, 'the true owner still holds the claim after the refused commit');
+
+        self::assertTrue($storage->commitResultResume('redis-nonce-1', true, 'txn-1', $owner), 'the true owner commits through the claim');
+        self::assertNull($client->store['kiwicaptcha:resume-claim:redis-nonce-1'] ?? null, 'the successful commit cleared the claim in the same transition');
+        self::assertNull($storage->claimResumeDerivation('redis-nonce-1'), 'a committed record is no longer claimable');
+
+        $evals = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'EVAL'));
+        $claimEvals = array_values(array_filter($evals, fn ($e) => str_starts_with((string) $e[1][0], '-- kiwicaptcha resume-derivation claim') && !str_contains((string) $e[1][0], 'release')));
+        self::assertCount(4, $claimEvals, 'the four claim attempts (two refusals included) must each go through the claim Lua');
+        $releaseEvals = array_values(array_filter($evals, fn ($e) => str_contains((string) $e[1][0], 'release (compare-and-delete)')));
+        self::assertCount(2, $releaseEvals, 'both release attempts must go through the compare-and-delete Lua');
+        $commitEvals = array_values(array_filter($evals, fn ($e) => str_starts_with((string) $e[1][0], '-- kiwicaptcha commit result')));
+        self::assertNotEmpty($commitEvals);
+        self::assertContains('kiwicaptcha:resume-claim:redis-nonce-1', $commitEvals[0][1], 'the claim-bearing commit passes the claim key to the same COMMIT Lua');
+        self::assertSame(2, $commitEvals[0][1][1] ?? null, 'the claim-bearing commit declares two keys');
+    }
+
+    public function testResumeClaimRefusesPendingCommittedMissingAndCancelledRecords(): void
+    {
+        // The claimability contract: only a consumed, resultless record
+        // is claimable; pending, committed, missing and cancelled
+        // records refuse the claim at the Lua (no separate read-then-set
+        // race).
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+
+        self::assertNull($storage->claimResumeDerivation('never-stored'), 'a missing record is not claimable');
+
+        $storage->store($this->makeRecord('pending-nonce'));
+        self::assertNull($storage->claimResumeDerivation('pending-nonce'), 'a pending record is not claimable');
+
+        $storage->store($this->makeRecord('committed-nonce'));
+        $storage->consume('committed-nonce');
+        self::assertTrue($storage->commitResult('committed-nonce', true, null));
+        self::assertNull($storage->claimResumeDerivation('committed-nonce'), 'a committed record is not claimable');
+
+        $storage->store($this->makeRecord('cancelled-nonce'));
+        $storage->cancel('cancelled-nonce');
+        self::assertNull($storage->claimResumeDerivation('cancelled-nonce'), 'a cancelled record is not claimable');
+    }
+
+    public function testResumeClaimBearingCommitIssuesWaitOnlyOnSuccess(): void
+    {
+        // The claim-bearing commit carries the same gated verified-WAIT
+        // barrier as the plain commit: WAIT exactly when the fresh
+        // mutation landed, never on a refused commit (a stale owner or a
+        // non-resultless record performs no write and must issue none).
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client, waitReplicas: 1, waitTimeoutMs: 100);
+        $client->waitAck = 1;
+        $waits = fn (): int => \count(array_values(array_filter($client->calls, fn ($c) => $c[0] === 'WAIT')));
+
+        $storage->store($this->makeRecord()); // +1 WAIT (issuance)
+        $storage->consume('redis-nonce-1'); // +1 WAIT (transition)
+        self::assertSame(2, $waits());
+
+        $owner = $storage->claimResumeDerivation('redis-nonce-1');
+        self::assertIsString($owner);
+        self::assertSame(2, $waits(), 'the claim performs no write that needs a replica wait');
+
+        self::assertFalse($storage->commitResultResume('redis-nonce-1', true, 'txn-1', 'not-the-owner'));
+        self::assertSame(2, $waits(), 'a refused claim-bearing commit writes nothing and must issue NO WAIT');
+
+        self::assertTrue($storage->commitResultResume('redis-nonce-1', true, 'txn-1', $owner));
+        self::assertSame(3, $waits(), 'a fresh claim-bearing commit must issue exactly one WAIT');
+
+        self::assertFalse($storage->commitResultResume('redis-nonce-1', true, 'txn-1', $owner), 'a second commit is refused (already committed) and writes nothing');
+        self::assertSame(3, $waits(), 'a refused replay commit must issue NO WAIT');
+    }
+
     public function testRealRedisConsumedStateReplayRoundTrip(): void
     {
         $url = getenv('RISK_REDIS_URL');

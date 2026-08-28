@@ -778,6 +778,21 @@ final class Verifier
      * stored outcome), and only a genuinely missing result yields
      * StorageUnavailable.
      *
+     * The re-derivation is claimed when the storage offers the
+     * {@see ResumeDerivationClaimInterface} capability: exactly one
+     * concurrent same-operation recovery derives and commits under a
+     * short-TTL `resume-claim:<nonce>` owner token. The losers re-read
+     * and resolve the winner's committed outcome (or the retryable
+     * ConsumeIndeterminate while it has not landed). The
+     * claim is acquired only after the cheap-phase revalidation and the
+     * admission gate, released via compare-and-delete on every early
+     * return (expiry, derivation failure, storage failure), and cleared
+     * atomically with the commit. A storage without the capability
+     * resumes byte-identically to the legacy path: every concurrent
+     * recovery derives, and the deterministic outcome converges on the
+     * single committed result either way. Security is identical in both
+     * modes: the claim only deduplicates the expensive derivation.
+     *
      * Native replay security is aligned: {@see self::verify()} gates a
      * stored success on the exact operation identity the same way, and
      * it still returns ConsumeIndeterminate for a consumed record
@@ -969,6 +984,53 @@ final class Verifier
             }
         }
 
+        // The atomic re-derivation claim with an owner token (a storage
+        // with the {@see ResumeDerivationClaimInterface} capability):
+        // exactly one concurrent same-operation recovery derives; the
+        // losers re-read and resolve the winner's committed outcome
+        // (never an unsynchronized derive storm). The claim is a
+        // short-TTL lease keyed by the nonce, recorded atomically and
+        // only for a consumed-resultless record, and released on every
+        // early return via compare-and-delete below; a process crash
+        // leaves only the short lease, never a poison marker. The
+        // claim sits after the cheap-phase revalidation and the
+        // admission gate (a refused or unavailable capacity lease must
+        // not poison the claim for later retries) and before the
+        // expensive derivation. A storage without the capability keeps
+        // the legacy behavior byte-identically: every concurrent
+        // recovery derives, and the deterministic outcome converges on
+        // the single committed result either way.
+        $claimOwner = null;
+        if ($this->storage instanceof ResumeDerivationClaimInterface) {
+            try {
+                $claimOwner = $this->storage->claimResumeDerivation($record->nonce);
+            } catch (\Throwable) {
+                // Fail closed: a claim that cannot be established must
+                // never fall back to an unsynchronized derive storm (the
+                // Rust mirror). The record stays consumed-without-result
+                // for a later retry.
+                return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+            }
+            if ($claimOwner === null) {
+                // Claim refused: another recovery holds the claim (or
+                // the record stopped being resultless). Re-read the
+                // retained state and resolve the winner's committed
+                // outcome; while the winner has not committed yet, the
+                // retryable ConsumeIndeterminate answers (the Rust
+                // mirror), never a second derivation.
+                try {
+                    $loserState = $this->storage->consumedState($record->nonce);
+                } catch (\Throwable) {
+                    return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+                }
+                if ($loserState?->consumedResult !== null) {
+                    return $this->acceptStoredResumeResult($loserState, 'the resumed claim-refused re-read acceptance');
+                }
+
+                return VerifyOutcome::invalid(VerifyError::ConsumeIndeterminate);
+            }
+        }
+
         try {
             $hash = $this->deriveHash($record, $token->counter);
             if ($hash === null) {
@@ -1018,13 +1080,19 @@ final class Verifier
             // Commit the resumed deterministic outcome, not best-effort:
             // the resume must persist what it derived (a retry of the
             // consumed record without a stored result would degrade to
-            // ConsumeIndeterminate forever). A failed commit reads the
-            // state back: a concurrent recovery may have won the commit,
-            // and the winner's stored result is then authoritative (the
-            // same logical operation derives the same outcome either way).
+            // ConsumeIndeterminate forever). A held claim makes the
+            // commit the fenced claim-clearing variant: the claim must
+            // still be held (ownership lost refuses before any write)
+            // and the result write clears the claim atomically. A failed
+            // commit reads the state back: a concurrent recovery may
+            // have won the commit, and the winner's stored result is
+            // then authoritative (the same logical operation derives the
+            // same outcome either way).
             $binding = $record->requestBinding;
             try {
-                $committed = $this->storage->commitResult($record->nonce, $valid, $binding);
+                $committed = $claimOwner !== null
+                    ? $this->storage->commitResultResume($record->nonce, $valid, $binding, $claimOwner)
+                    : $this->storage->commitResult($record->nonce, $valid, $binding);
             } catch (\Throwable) {
                 $committed = false;
             }
@@ -1035,36 +1103,45 @@ final class Verifier
                     $after = null;
                 }
                 if ($after?->consumedResult !== null) {
-                    // Failed-barrier replay guard: both mutations of this
-                    // resume, the original consume and the commitResult,
-                    // may have landed on the primary with their WAIT
-                    // failing, leaving the replica still holding the
-                    // pending challenge. Accepting the read-back success
-                    // would return a Valid a stale-replica promotion could
-                    // resurrect into a second redemption. The causal
-                    // fence is re-established on this accepting connection
-                    // before the acceptance, and a shortfall fails closed
-                    // to StorageUnavailable, never Valid.
-                    try {
-                        if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
-                            $this->storage->establishReplicationFence('the resumed post-commit read acceptance');
-                        }
-                    } catch (\Throwable $fenceFailure) {
-                        return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
-                    }
-
-                    return $after->consumedResult->valid
-                        ? VerifyOutcome::valid($after->record->nonce, $after->consumedResult->binding, true)
-                        : VerifyOutcome::invalid(VerifyError::InsufficientWork);
+                    return $this->acceptStoredResumeResult($after, 'the resumed post-commit read acceptance');
                 }
 
-                return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+                // A genuinely missing result. With a held claim the
+                // loser semantics apply (the claim is released by the
+                // finally below; a newer recovery may be mid-derive):
+                // ConsumeIndeterminate, exactly the Rust mirror. The
+                // legacy no-claim path keeps the retryable
+                // StorageUnavailable: nothing else could have written
+                // the record, so a failure to commit means the storage
+                // is down.
+                return VerifyOutcome::invalid($claimOwner !== null
+                    ? VerifyError::ConsumeIndeterminate
+                    : VerifyError::StorageUnavailable);
             }
+
+            // The claim was cleared atomically with the commit: disarm
+            // the compare-and-delete release below (a released claim can
+            // never delete anything anyway, but the extra round trip is
+            // pointless once the commit owns the outcome).
+            $claimOwner = null;
 
             return $valid
                 ? VerifyOutcome::valid($record->nonce, $binding)
                 : VerifyOutcome::invalid(VerifyError::InsufficientWork);
         } finally {
+            if ($claimOwner !== null) {
+                try {
+                    // Compare-and-delete release on every early return
+                    // after acquisition (expiry, derivation failure,
+                    // storage failure): the claim is released only when
+                    // it still holds this owner, so a moved owner is
+                    // never touched. A failed release is best-effort
+                    // (the short TTL lease expires anyway) and must not
+                    // override the resumed verification result.
+                    $this->storage->releaseResumeDerivation($record->nonce, $claimOwner);
+                } catch (\Throwable) {
+                }
+            }
             if ($lease !== null) {
                 try {
                     $this->argonGate?->release($lease);
@@ -1075,6 +1152,35 @@ final class Verifier
                 }
             }
         }
+    }
+
+    /**
+     * Resolve an already-committed retained result on the resume path:
+     * the deterministic outcome is returned unchanged, but only behind
+     * the failed-barrier replay guard. The consume and commit mutations
+     * that produced this stored success may have landed on the primary
+     * with their WAIT failing, leaving the replica still holding the
+     * pending challenge. Accepting the stored success read-only would
+     * return a Valid a stale-replica promotion could resurrect into a
+     * second redemption. The causal fence is re-established before the
+     * acceptance, and a barrier or shortfall failure maps to the
+     * retryable StorageUnavailable (never a generic exception escaping
+     * the verifier). A stored invalid outcome is deterministic and
+     * replays to any caller.
+     */
+    private function acceptStoredResumeResult(ConsumedRecord $after, string $fenceReason): VerifyOutcome
+    {
+        try {
+            if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
+                $this->storage->establishReplicationFence($fenceReason);
+            }
+        } catch (\Throwable) {
+            return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+        }
+
+        return $after->consumedResult->valid
+            ? VerifyOutcome::valid($after->record->nonce, $after->consumedResult->binding, true)
+            : VerifyOutcome::invalid(VerifyError::InsufficientWork);
     }
 
     /**

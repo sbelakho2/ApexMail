@@ -49,9 +49,14 @@ final class KidRotationWiringTest extends TestCase
         self::assertSame('auth-prod', $container->getDefinition('kiwi_captcha.config')->getArgument(12));
         self::assertSame(3, $container->getDefinition('kiwi_captcha.config')->getArgument(13));
 
+        // The verifier must receive the effective keyring: the historical
+        // map merged with the current signing key (the same key the
+        // issuer signs with). Without the current entry, every freshly
+        // issued kid-3 challenge would fail UnknownKid the moment the
+        // historical map is configured.
         $verifier = $container->getDefinition('kiwi_captcha.verifier');
         self::assertSame('auth-prod', $verifier->getArgument('expectedIssuer'));
-        self::assertSame([2 => str_repeat('b', 32)], $verifier->getArgument('secretsByKid'));
+        self::assertSame([2 => str_repeat('b', 32), 3 => str_repeat('a', 32)], $verifier->getArgument('secretsByKid'));
         self::assertSame([1], $verifier->getArgument('revokedKids'));
     }
 

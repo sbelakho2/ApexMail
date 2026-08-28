@@ -20,12 +20,29 @@ use Psr\Cache\CacheItemPoolInterface;
  *     single Lua script implements the audit's atomic sliding window for both
  *     the per-client ZSET and the deployment-global ZSET. `TIME` (the Redis
  *     server clock) drives the window, so all PHP-FPM workers share one
- *     consistent window and the enforcement is an exact gate.
+ *     consistent window and the enforcement is an exact gate. Redis is the
+ *     only backend where the deployment-global cap is an exact distributed
+ *     bound.
  *  2. PSR-6 pool (shared, best-effort): when a shared pool is configured but
- *     no Redis client exists, the per-client window is kept in the pool. A
- *     PSR-6 pool cannot express an atomic read-modify-write, so concurrent
- *     requests may briefly exceed the limit; this is a soft bound.
- *  3. In-memory (per-process): single-worker fallback.
+ *     no Redis client exists, the per-client window is kept in the pool. The
+ *     deployment-global window lives in ONE dedicated cache item
+ *     (`kr_global`, shared by every client identity, distinct from the
+ *     per-client `kr_`+60-hex keys). A PSR-6 pool cannot express an atomic
+ *     read-modify-write, so the shared global window is cross-worker
+ *     best-effort: concurrent requests racing the read-modify-write may
+ *     briefly exceed the cap (N workers can admit up to ~N x cap in a
+ *     race). It is a soft bound, never an exact distributed gate.
+ *  3. In-memory (per-process): single-worker fallback. The global window is
+ *     exact within the process (a hard per-process gate); N workers share
+ *     no memory, so the deployment aggregate can approach N x cap.
+ *
+ * Degradation ladder for the deployment-global cap: exact distributed
+ * (Redis) -> shared best-effort (PSR-6) -> per-process exact (in-memory).
+ * The global cap is enforced on ALL backends: without Redis the limiter
+ * keeps a real global window (the shared `kr_global` item when a pool is
+ * configured, the process-local list otherwise) instead of disabling the
+ * cap. `allow_local_global_limit_fallback` therefore means "per-process /
+ * best-effort window", never "no global cap at all".
  *
  * Privacy: raw client IPs are never stored. Every key (Redis, PSR-6 and
  * in-memory) is a peppered HMAC of the IP, `hash_hmac('sha256', $ip,
@@ -63,6 +80,16 @@ final class IssuanceRateLimiter
     // The identity is already a keyed 256-bit HMAC, so truncating to 240
     // bits is more than sufficient.
     private const CACHE_KEY_PREFIX = 'kr_';
+
+    /**
+     * PSR-6 cache key for the deployment-global window: a fixed item shared
+     * by every client identity (the global cap is deployment-wide, not
+     * per-client). It must stay distinct from the per-client keys
+     * ('kr_' + 60 hex chars): this literal contains non-hex characters, so
+     * it can never collide with a client-HMAC key, and it must never be
+     * rotated (the global budget is rotation-independent by design).
+     */
+    private const GLOBAL_CACHE_KEY = 'kr_global';
 
     /**
      * PSR-6 cache key for a client identity: 'kr_' + the first 60 hex chars
@@ -158,6 +185,9 @@ LUA;
     /** @var array<string, list<float>> sliding-window hit timestamps, per process */
     private array $hits = [];
 
+    /** @var list<float> deployment-global sliding-window hit timestamps, per process */
+    private array $globalHits = [];
+
     /**
      * @param int                        $maxChallenges 0 disables the per-client limit.
      * @param int                        $windowSecs    sliding-window size in seconds.
@@ -167,7 +197,9 @@ LUA;
      * @param \Redis|\Predis\Client|null $redis         when set, the atomic Redis backend
      *                                                  is used (per-client + global).
      * @param int                        $globalMax     0 disables the global limit
-     *                                                  (enforced in the Redis backend).
+     *                                                  (enforced on all backends:
+     *                                                  Redis, shared PSR-6 and
+     *                                                  in-memory).
      * @param string                     $namespace     deployment discriminator for the
      *                                                  Redis keys (sanitized to
      *                                                  [A-Za-z0-9_.-]).
@@ -213,16 +245,26 @@ LUA;
      */
     public function check(string $clientIp): int
     {
-        if ($this->maxChallenges <= 0 && ($this->redis === null || $this->globalMax <= 0)) {
+        // Everything disabled: no limit applies at all.
+        if ($this->maxChallenges <= 0 && $this->globalMax <= 0) {
             return 1;
         }
         // Global-only mode short-circuits before any client identity is
         // computed or rotated: with maxChallenges == 0 and globalMax > 0
         // the deployment-wide budget is the only limit, so no per-client
         // pseudonym is ever derived and no client key is ever written
-        // (even when rotation is enabled).
-        if ($this->redis !== null && $this->maxChallenges <= 0 && $this->globalMax > 0) {
-            return $this->checkRedisGlobalOnly();
+        // (even when rotation is enabled — the global window is
+        // rotation-independent by design).
+        if ($this->maxChallenges <= 0) {
+            if ($this->redis !== null) {
+                return $this->checkRedisGlobalOnly();
+            }
+
+            // Without Redis the global-only budget is still enforced: the
+            // shared PSR-6 item when a pool is configured, the
+            // process-local window otherwise (both best-effort per
+            // deployment — see the class docblock).
+            return $this->checkLocalGlobalOnly();
         }
         // An unknown client IP must never bypass the limit: bucket it with
         // the other unidentifiable clients instead (conservative, shared
@@ -268,27 +310,41 @@ LUA;
                 return $this->checkRedisRotated($identityPrev, $identityCur);
             }
 
-            return $this->maxChallenges > 0
-                ? (int) ($this->pool !== null ? $this->allowSharedTwoEpoch($identityPrev, $identityCur) : $this->allowLocalTwoEpoch($identityPrev, $identityCur))
-                : 1;
+            // Non-Redis fallback: per-client window first (deny = 0), then
+            // the deployment-global window (deny = -1), mirroring the
+            // Redis script's check order. maxChallenges > 0 is guaranteed
+            // here (global-only short-circuited above).
+            $allowed = $this->pool !== null
+                ? $this->allowSharedTwoEpoch($identityPrev, $identityCur)
+                : $this->allowLocalTwoEpoch($identityPrev, $identityCur);
+            if (!$allowed) {
+                return 0;
+            }
+            if ($this->globalMax > 0 && !$this->allowGlobal()) {
+                return -1;
+            }
+
+            return 1;
         }
 
         $key = hash_hmac('sha256', $identity, $this->pepper);
 
         if ($this->redis !== null) {
-            if ($this->maxChallenges <= 0) {
-                // Global-only: no client key or pseudonym is created at all
-                // (data minimization: per-client control is explicitly
-                // disabled, so no client identifier should exist).
-                return $this->checkRedisGlobalOnly();
-            }
-
             return $this->checkRedis($key);
         }
 
-        return $this->maxChallenges > 0
-            ? (int) ($this->pool !== null ? $this->allowShared($key) : $this->allowLocal($key))
-            : 1;
+        // Non-Redis fallback: per-client window first (deny = 0), then the
+        // deployment-global window (deny = -1), mirroring the Redis
+        // script's check order.
+        $allowed = $this->pool !== null ? $this->allowShared($key) : $this->allowLocal($key);
+        if (!$allowed) {
+            return 0;
+        }
+        if ($this->globalMax > 0 && !$this->allowGlobal()) {
+            return -1;
+        }
+
+        return 1;
     }
 
     private function epochIdentity(string $identity, int $epoch): string
@@ -359,6 +415,87 @@ LUA;
         ]);
 
         return (int) $result;
+    }
+
+    /**
+     * Global-only window without Redis (maxChallenges == 0, globalMax > 0):
+     * the deployment-global budget is the only limit, so no client identity
+     * is ever computed or written. The window lives in the shared PSR-6
+     * item when a pool is configured, otherwise in the process-local list;
+     * it is rotation-independent by design (the global budget is shared by
+     * all clients and epochs).
+     *
+     * @return int 1 = allowed, -1 = global limit reached
+     */
+    private function checkLocalGlobalOnly(): int
+    {
+        return $this->allowGlobal() ? 1 : -1;
+    }
+
+    /**
+     * Enforce the deployment-global sliding window on the non-Redis
+     * backends: the shared PSR-6 item (`kr_global`) when a pool is
+     * configured, the process-local list otherwise. A denied request adds
+     * NO timestamp and does not reset the window (the pruned state is
+     * retained, mirroring the per-client deny behavior).
+     *
+     * Best-effort semantics: the in-process window is exact per process (N
+     * workers can reach ~N x cap), the shared PSR-6 window is cross-worker
+     * best-effort (a generic read-modify-write is not atomic, so concurrent
+     * requests may briefly exceed the cap). Only Redis is an exact
+     * distributed gate — see the class docblock.
+     */
+    private function allowGlobal(): bool
+    {
+        if ($this->pool !== null) {
+            return $this->allowGlobalShared();
+        }
+
+        return $this->allowGlobalLocal();
+    }
+
+    private function allowGlobalLocal(): bool
+    {
+        $now = $this->now();
+        $hits = $this->prune($this->globalHits, $now);
+
+        if (\count($hits) >= $this->globalMax) {
+            // Retain the pruned state on denial — clearing it would let a
+            // denied request reset the window and pass on the next call
+            // (a deterministic every-other-request bypass).
+            $this->globalHits = $hits;
+
+            return false;
+        }
+        $hits[] = $now;
+        $this->globalHits = $hits;
+
+        return true;
+    }
+
+    private function allowGlobalShared(): bool
+    {
+        $now = $this->now();
+        $item = $this->pool->getItem(self::GLOBAL_CACHE_KEY);
+        $state = $item->isHit() ? $item->get() : null;
+        $hits = \is_array($state) ? $this->timestamps($state) : [];
+        $hits = $this->prune($hits, $now);
+
+        if (\count($hits) >= $this->globalMax) {
+            // Retain the pruned state on denial — clearing it would let a
+            // denied request reset the window and pass on the next call.
+            $item->set(['t' => $hits]);
+            $item->expiresAfter($this->windowSecs + 1);
+            $this->pool->save($item);
+
+            return false;
+        }
+        $hits[] = $now;
+        $item->set(['t' => $hits]);
+        $item->expiresAfter($this->windowSecs + 1);
+        $this->pool->save($item);
+
+        return true;
     }
 
     /**

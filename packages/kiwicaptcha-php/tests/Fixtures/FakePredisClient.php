@@ -22,7 +22,15 @@ namespace KiwiCaptcha\Tests\Fixtures;
  *  - delete-if-pending script: missing / deleted-pending / cancelled
  *    (kept) / consumed (kept, verbatim).
  *  - commit-result script: stores {valid, binding} on a consumed record
- *    without a result yet; returns 1/0.
+ *    without a result yet; returns 1/0. With a second key (the resume
+ *    claim) and ARGV[4] (the claim owner), the claim is a fencing
+ *    precondition: ownership lost returns 2 without a write, and the
+ *    successful write clears the claim in the same transition.
+ *  - resume-derivation claim script: sets the claim key with the owner
+ *    token and TTL only for a consumed, resultless, unclaimed record
+ *    (returns the owner; nil otherwise).
+ *  - resume-derivation claim release script: compare-and-delete of the
+ *    claim key (1 when the owner matches, 0 otherwise).
  *  - WAIT: returns {@see FakePredisClient::$waitAck} (default 0; a real
  *    replica-less Redis reports 0 acknowledged replicas without error,
  *    and only the number of acknowledged replicas is returned). Tests
@@ -216,7 +224,11 @@ final class FakePredisClient extends \Predis\Client
         }
 
         // Commit result: only on a consumed record without a
-        // result yet. ARGV = [valid, binding, has_binding].
+        // result yet. ARGV = [valid, binding, has_binding]. With a
+        // second key (the resume claim) and ARGV[4] (the claim owner),
+        // the claim is a fencing precondition: the caller must still
+        // hold it (ownership lost returns 2, no write), and the
+        // successful write clears the claim in the same transition.
         if (str_starts_with($script, '-- kiwicaptcha commit result')) {
             $key = (string) $keys[0];
             if (!isset($this->store[$key])) {
@@ -233,13 +245,65 @@ final class FakePredisClient extends \Predis\Client
             if (isset($obj['consumed_result']) && $obj['consumed_result'] !== null) {
                 return 0;
             }
+            $claimKey = $keys[1] ?? null;
+            if ($claimKey !== null) {
+                if (($this->store[(string) $claimKey] ?? null) !== ($args[3] ?? null)) {
+                    return 2;
+                }
+            }
             $obj['consumed_result'] = [
                 'valid' => ($args[0] ?? '0') === '1',
                 'binding' => ($args[2] ?? '0') === '1' ? (string) ($args[1] ?? '') : null,
             ];
             $this->store[$key] = json_encode($obj, JSON_UNESCAPED_SLASHES);
+            if ($claimKey !== null) {
+                unset($this->store[(string) $claimKey]);
+            }
 
             return 1;
+        }
+
+        // Resume-derivation claim: KEYS = [record, claim], ARGV =
+        // [owner, ttl]. The claim is refused (nil) for a missing,
+        // not-consumed, committed or cancelled record, or when the claim
+        // key already exists; otherwise the claim key is SET with the
+        // owner and the TTL, mirroring the real Lua.
+        if (str_starts_with($script, '-- kiwicaptcha resume-derivation claim')) {
+            if (str_starts_with($script, '-- kiwicaptcha resume-derivation claim release')) {
+                // Compare-and-delete release: the claim is deleted only
+                // when it still holds exactly this owner.
+                $claimKey = (string) $keys[0];
+                if (($this->store[$claimKey] ?? null) === ($args[0] ?? null)) {
+                    unset($this->store[$claimKey]);
+
+                    return 1;
+                }
+
+                return 0;
+            }
+            $recordKey = (string) $keys[0];
+            $claimKey = (string) $keys[1];
+            if (!isset($this->store[$recordKey])) {
+                return null;
+            }
+            try {
+                $obj = json_decode($this->store[$recordKey], true, flags: JSON_THROW_ON_ERROR);
+            } catch (\JsonException) {
+                return null;
+            }
+            if (($obj['state'] ?? 'pending') !== 'consumed' || ($obj['state'] ?? 'pending') === 'cancelled') {
+                return null;
+            }
+            if (isset($obj['consumed_result']) && $obj['consumed_result'] !== null) {
+                return null;
+            }
+            if (isset($this->store[$claimKey])) {
+                return null;
+            }
+            $this->store[$claimKey] = (string) ($args[0] ?? '');
+            $this->expirations[$claimKey] = (int) ($args[1] ?? 0);
+
+            return $args[0] ?? null;
         }
 
         return null;

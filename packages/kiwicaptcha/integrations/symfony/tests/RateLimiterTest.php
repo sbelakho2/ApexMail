@@ -281,6 +281,234 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(1, $storage->stores, 'the rate-limited request must never reach the issuer');
     }
 
+    // ── Non-Redis global window (per-process / shared PSR-6) ─────────────
+
+    public function testInMemoryGlobalCapBlocksDifferentClients(): void
+    {
+        // THE audit scenario: without Redis, a distributed attacker rotating
+        // through many IPs must not escape the deployment-global cap — the
+        // fallback window is per-process, but the cap still applies.
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(100, 60, null, static function () use (&$clock): float {
+            return $clock;
+        }, 'pepper', null, 2);
+
+        self::assertSame(1, $limiter->check('198.51.100.7'), 'IP A admitted');
+        self::assertSame(1, $limiter->check('198.51.100.8'), 'IP B admitted');
+        self::assertSame(-1, $limiter->check('198.51.100.9'), 'IP C is denied by the global cap (-1), not the per-client cap');
+        self::assertSame(-1, $limiter->check('198.51.100.10'), 'denied requests do not reset the window');
+
+        // Per-client accounting is unchanged: one IP alone exhausts its own
+        // cap and gets 0, not -1.
+        $clock = 10_000.0;
+        $perClient = new IssuanceRateLimiter(1, 60, null, static function () use (&$clock): float {
+            return $clock;
+        }, 'pepper', null, 2);
+        self::assertSame(1, $perClient->check('198.51.100.7'));
+        self::assertSame(0, $perClient->check('198.51.100.7'), 'per-client deny stays 0');
+    }
+
+    public function testInMemoryGlobalWindowSlides(): void
+    {
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(100, 60, null, static function () use (&$clock): float {
+            return $clock;
+        }, 'pepper', null, 2);
+
+        self::assertSame(1, $limiter->check('198.51.100.1'));
+        self::assertSame(1, $limiter->check('198.51.100.2'));
+        self::assertSame(-1, $limiter->check('198.51.100.3'));
+
+        $clock += 61.0; // both admissions slid out of the window
+        self::assertSame(1, $limiter->check('198.51.100.3'), 'the global window slid: the cap is free again');
+        self::assertSame(1, $limiter->check('198.51.100.4'), 'a second admission still fits (cap 2)');
+        self::assertSame(-1, $limiter->check('198.51.100.5'), 'the cap is full again');
+    }
+
+    public function testPsr6SharedGlobalCapBlocksAcrossClients(): void
+    {
+        $pool = new ArrayAdapter();
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(100, 60, $pool, static function () use (&$clock): float {
+            return $clock;
+        }, 'pepper', null, 2);
+
+        self::assertSame(1, $limiter->check('198.51.100.1'));
+        self::assertSame(1, $limiter->check('198.51.100.2'));
+        self::assertSame(-1, $limiter->check('198.51.100.3'), 'the shared global window denies the third identity');
+        self::assertSame(-1, $limiter->check('198.51.100.4'), 'denied requests do not reset the shared window');
+
+        // The global window is exactly ONE dedicated item, distinct from
+        // the per-client kr_ + 60-hex keys.
+        $keys = array_keys($pool->getValues());
+        self::assertContains('kr_global', $keys, 'the global window must be one dedicated shared item');
+        foreach ($keys as $key) {
+            if ($key === 'kr_global') {
+                continue;
+            }
+            self::assertMatchesRegularExpression('/^kr_[0-9a-f]{60}$/', (string) $key, 'per-client keys keep the kr_ + 60-hex shape');
+        }
+        // Best-effort cross-worker semantics (concurrent readers can race
+        // the non-atomic read-modify-write) are documented in the class
+        // docblock — a generic PSR-6 pool cannot be tested for atomicity.
+    }
+
+    public function testPsr6SharedGlobalWindowSlides(): void
+    {
+        $pool = new ArrayAdapter();
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(100, 60, $pool, static function () use (&$clock): float {
+            return $clock;
+        }, 'pepper', null, 2);
+
+        self::assertSame(1, $limiter->check('198.51.100.1'));
+        self::assertSame(1, $limiter->check('198.51.100.2'));
+        self::assertSame(-1, $limiter->check('198.51.100.3'));
+
+        $clock += 61.0;
+        self::assertSame(1, $limiter->check('198.51.100.3'), 'the shared global window slid: the cap is free');
+    }
+
+    public function testInMemoryGlobalOnlyModeEnforcesGlobalWindow(): void
+    {
+        // maxChallenges = 0, redis = null: the unpatched behavior allowed
+        // unconditionally (the audit bug) — the global-only budget must
+        // now be enforced as a real window.
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(0, 60, null, static function () use (&$clock): float {
+            return $clock;
+        }, 'pepper', null, 2);
+
+        self::assertSame(1, $limiter->check('198.51.100.1'));
+        self::assertSame(1, $limiter->check('198.51.100.2'));
+        self::assertSame(-1, $limiter->check('198.51.100.3'), 'global-only: the third request hits the global cap');
+        self::assertSame(-1, $limiter->check('198.51.100.4'), 'denied requests do not reset the window');
+
+        $clock += 61.0;
+        self::assertSame(1, $limiter->check('198.51.100.5'), 'window slide re-allows');
+    }
+
+    public function testPsr6GlobalOnlyModeWritesOnlyTheSharedGlobalItem(): void
+    {
+        $pool = new ArrayAdapter();
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(0, 60, $pool, static function () use (&$clock): float {
+            return $clock;
+        }, 'pepper', null, 2);
+
+        self::assertSame(1, $limiter->check('198.51.100.1'));
+        self::assertSame(1, $limiter->check('198.51.100.2'));
+        self::assertSame(-1, $limiter->check('198.51.100.3'));
+
+        self::assertSame(['kr_global'], array_keys($pool->getValues()), 'global-only mode must write exactly one shared global item and no client keys');
+    }
+
+    public function testGlobalOnlyModeIgnoresRotation(): void
+    {
+        // Rotation is a per-client pseudonym concern; with the per-client
+        // limit disabled the global window must still be enforced across
+        // the rotation boundary (rotation-independent by design). Rotation
+        // equals the window (allowed): the boundary at t=10_020 falls
+        // inside the window of the t=10_000 admission.
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(
+            maxChallenges: 0,
+            windowSecs: 60,
+            now: static function () use (&$clock): float {
+                return $clock;
+            },
+            pepper: 'pepper',
+            globalMax: 1,
+            rateLimitRotationSecs: 60,
+        );
+
+        self::assertSame(1, $limiter->check('203.0.113.1'), 'the first admission fills the global cap');
+        $clock = 10_021.0; // rotated into the next epoch: floor(10021/60) = 167
+        self::assertSame(-1, $limiter->check('203.0.113.2'), 'rotation must not reset the global window');
+        $clock = 10_061.0; // the window slid past the admission
+        self::assertSame(1, $limiter->check('203.0.113.2'), 'window slide re-allows');
+    }
+
+    public function testRotatedInMemoryGlobalCapIsSharedAcrossEpochs(): void
+    {
+        // With rotation enabled (no Redis), the global budget must stay
+        // deployment-wide: rotating the client pseudonyms must NOT reset
+        // the global window. Rotation equals the window (allowed): the
+        // boundary at t=10_020 falls inside the window of the two
+        // t=10_000 admissions.
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(
+            maxChallenges: 100,
+            windowSecs: 60,
+            now: static function () use (&$clock): float {
+                return $clock;
+            },
+            pepper: 'pepper',
+            globalMax: 2,
+            rateLimitRotationSecs: 60,
+        );
+
+        self::assertSame(1, $limiter->check('203.0.113.1'), 'epoch 166 admission');
+        self::assertSame(1, $limiter->check('203.0.113.2'));
+
+        // Cross the rotation boundary (epoch 167): the client pseudonyms
+        // rotate, but the two global admissions still fill the cap.
+        $clock = 10_021.0;
+        self::assertSame(-1, $limiter->check('203.0.113.3'), 'rotation must not reset the global window');
+
+        // The window slides past both admissions: the cap is free.
+        $clock = 10_061.0;
+        $slid = $limiter->check('203.0.113.3');
+        self::assertSame(1, $slid, 'the global window slid past the rotation boundary');
+    }
+
+    public function testRotatedPsr6GlobalCapIsSharedAcrossEpochs(): void
+    {
+        $pool = new ArrayAdapter();
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(
+            maxChallenges: 100,
+            windowSecs: 60,
+            pool: $pool,
+            now: static function () use (&$clock): float {
+                return $clock;
+            },
+            pepper: 'pepper',
+            globalMax: 2,
+            rateLimitRotationSecs: 60,
+        );
+
+        self::assertSame(1, $limiter->check('203.0.113.1'));
+        self::assertSame(1, $limiter->check('203.0.113.2'));
+        $clock = 10_021.0; // rotated into epoch 167
+        self::assertSame(-1, $limiter->check('203.0.113.3'), 'the shared global window survives rotation');
+        $clock = 10_061.0;
+        self::assertSame(1, $limiter->check('203.0.113.3'));
+    }
+
+    public function testNoGlobalCapNeverConsultsTheGlobalWindow(): void
+    {
+        // Regression: globalMax = 0 (the default) must leave the non-Redis
+        // behavior exactly as before — many different clients are all
+        // admitted and no global state is ever kept.
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(100, 60, null, static function () use (&$clock): float {
+            return $clock;
+        }, 'pepper', null, 0);
+        for ($i = 1; $i <= 5; $i++) {
+            self::assertSame(1, $limiter->check('198.51.100.'.$i));
+        }
+
+        $pool = new ArrayAdapter();
+        $limiter = new IssuanceRateLimiter(100, 60, $pool, static function () use (&$clock): float {
+            return $clock;
+        }, 'pepper', null, 0);
+        for ($i = 1; $i <= 5; $i++) {
+            self::assertSame(1, $limiter->check('198.51.100.'.$i));
+        }
+        self::assertArrayNotHasKey('kr_global', $pool->getValues(), 'no global cap -> no global item is ever written');
+    }
+
     // ── Redis backend (atomic, cross-worker) ──────────────────────────────
 
     private function requireRedisClient(): FakePredisClient

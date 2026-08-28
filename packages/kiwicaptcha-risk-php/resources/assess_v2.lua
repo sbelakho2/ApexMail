@@ -107,7 +107,7 @@
 -- Event semantics (risk-v1 v3):
 --   PreIssue (1)            → request velocity + scope-hopping
 --   ChallengeIssued (2)     → issue_debt
---   SolveSuccess (3)        → repay debt, tiny trust
+--   SolveSuccess (3)        → repay debt only (no trust credit)
 --   InvalidProof (4)        → bad
 --   MalformedToken (5)      → mal
 --   ExpiredChallenge (6)    → small issue-debt effect (not automatically

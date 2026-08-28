@@ -867,6 +867,231 @@ final class VerifierResumeTest extends TestCase
         self::assertTrue($resume->isOk(), 'only the identity-proven resume derives');
     }
 
+    // ── The re-derivation claim ─────────────────────────────────────────
+
+    public function testEarlyReturnReleasesTheClaim(): void
+    {
+        // The claim is released via compare-and-delete on every early
+        // return after acquisition: a resume that fails the post-derive
+        // revalidation (a policy-epoch rotation lands mid-derivation)
+        // must release its claim, so a fresh claim succeeds immediately
+        // and the next retry is never blocked by the failed attempt.
+        [$storage, $record, $token] = $this->issueAndSolveArgon(policyVersion: 2);
+        $storage->consumeWithOperationIdentity($record->nonce, $this->identity('claim-release'));
+
+        $verifier = null;
+        $gate = $this->rotatingGate(static function () use (&$verifier): void {
+            $verifier?->rotateDeploymentExpectations(policyVersion: 3, region: null, issuer: null);
+        });
+        $verifier = new Verifier($storage, $gate, expectedPolicyVersion: 2);
+
+        $outcome = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('claim-release'), 'login', self::CLIENT_IP);
+        self::assertSame(VerifyError::WrongPolicyVersion, $outcome->error, 'the rotation must fail the post-derive re-check');
+        self::assertNull($storage->consumedState($record->nonce)?->consumedResult, 'the rotated resume must NOT commit anything');
+
+        // The early return released the claim: a fresh claim succeeds
+        // immediately, nothing blocks the next retry.
+        $reclaimed = $storage->claimResumeDerivation($record->nonce);
+        self::assertIsString($reclaimed, 'a fresh claim must succeed right after the released early return');
+        $storage->releaseResumeDerivation($record->nonce, $reclaimed);
+    }
+
+    public function testClaimedNonceRefusesAConcurrentRecoveryUntilReleased(): void
+    {
+        // Exactly one concurrent same-operation recovery derives: while
+        // one caller holds the claim, the other observes the refusal,
+        // re-reads the retained state, and (with no committed result
+        // yet) answers the retryable ConsumeIndeterminate instead of
+        // deriving. Releasing the claim lets the retry derive and
+        // commit.
+        [$storage, $record, $token] = $this->issueAndSolve();
+        $storage->consumeWithOperationIdentity($record->nonce, $this->identity('claim-held'));
+
+        $winner = $storage->claimResumeDerivation($record->nonce);
+        self::assertIsString($winner);
+
+        $outcome = (new Verifier($storage))->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('claim-held'), 'login', self::CLIENT_IP);
+        self::assertSame(VerifyError::ConsumeIndeterminate, $outcome->error, 'a refused claim while the winner is mid-derive must answer ConsumeIndeterminate, never derive');
+        self::assertNull($storage->consumedState($record->nonce)?->consumedResult, 'the loser must not commit anything');
+
+        $storage->releaseResumeDerivation($record->nonce, $winner);
+        $outcome = (new Verifier($storage))->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('claim-held'), 'login', self::CLIENT_IP);
+        self::assertTrue($outcome->isOk(), 'after the release the retry derives and commits');
+    }
+
+    public function testClaimRefusedLoserResolvesTheWinnersCommittedOutcome(): void
+    {
+        // The loser re-reads the retained state after a refused claim:
+        // a result committed between the loser's top-of-resume read and
+        // its claim attempt is authoritative (the stored Valid behind
+        // the fence), never a second derivation. The seam: the wrapper
+        // serves ONE stale resultless snapshot at the top of the resume
+        // (the interleaving where the winner commits right after), while
+        // the inner store already holds the claim and the committed
+        // result.
+        [$inner, $record, $token] = $this->issueAndSolve();
+        $inner->consumeWithOperationIdentity($record->nonce, $this->identity('claim-loser'));
+
+        $winner = $inner->claimResumeDerivation($record->nonce);
+        self::assertIsString($winner);
+        $stale = $inner->consumedState($record->nonce);
+        self::assertNotNull($stale);
+        self::assertNull($stale->consumedResult);
+        self::assertTrue($inner->commitResult($record->nonce, true, $record->requestBinding), 'the winner commits while holding the claim');
+
+        $storage = new class($inner, $stale) implements StorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, \KiwiCaptcha\ResumeDerivationClaimInterface {
+            public function __construct(
+                private readonly ArrayStorage $inner,
+                private readonly ConsumedRecord $stale,
+                private bool $staleServed = false,
+            ) {
+            }
+
+            public function store(ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consume(string $nonce): ?ConsumedRecord
+            {
+                return $this->inner->consume($nonce);
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+
+            public function consumedState(string $nonce): ?ConsumedRecord
+            {
+                // The first read serves the stale resultless snapshot
+                // (the winner committed after it); every later read sees
+                // the live store.
+                if (!$this->staleServed) {
+                    $this->staleServed = true;
+
+                    return $this->stale;
+                }
+
+                return $this->inner->consumedState($nonce);
+            }
+
+            public function claimResumeDerivation(string $nonce): ?string
+            {
+                return $this->inner->claimResumeDerivation($nonce);
+            }
+
+            public function releaseResumeDerivation(string $nonce, string $owner): bool
+            {
+                return $this->inner->releaseResumeDerivation($nonce, $owner);
+            }
+
+            public function commitResultResume(string $nonce, bool $valid, ?string $binding, string $owner): bool
+            {
+                return $this->inner->commitResultResume($nonce, $valid, $binding, $owner);
+            }
+        };
+
+        $outcome = (new Verifier($storage))->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('claim-loser'), 'login', self::CLIENT_IP);
+        self::assertTrue($outcome->isOk(), 'the loser resolves the winner\'s committed Valid after the refused claim');
+        self::assertTrue($outcome->fromStoredResult, 'the resolved outcome is the stored result, not a derivation');
+        self::assertSame($record->nonce, $outcome->nonce());
+    }
+
+    public function testCommitClearsTheClaimAndAStaleOwnerIsRefused(): void
+    {
+        // The commit clears the claim atomically with the result write:
+        // after commitResultResume the claim is gone, a fresh claim
+        // succeeds immediately, and the former owner's release is a
+        // refused no-op (the claim it owns no longer exists). A stale
+        // owner can never commit: commitResultResume with a wrong owner
+        // writes nothing and keeps the claim for its true owner.
+        [$storage, $record] = $this->issueAndSolve();
+        $storage->consumeWithOperationIdentity($record->nonce, $this->identity('claim-commit'));
+
+        $owner = $storage->claimResumeDerivation($record->nonce);
+        self::assertIsString($owner);
+        self::assertTrue($storage->commitResultResume($record->nonce, true, $record->requestBinding, $owner), 'the claim-bearing commit lands');
+
+        $after = $storage->consumedState($record->nonce);
+        self::assertNotNull($after?->consumedResult, 'the claim-bearing commit stores the result');
+        self::assertTrue($after->consumedResult->valid);
+        self::assertFalse($storage->releaseResumeDerivation($record->nonce, $owner), 'the commit already cleared the claim; the former owner release is a no-op');
+        self::assertNull($storage->claimResumeDerivation($record->nonce), 'the committed record is no longer claimable');
+
+        // Wrong owner: the commit is refused before any write and the
+        // true owner's claim survives.
+        [$storage2, $record2] = $this->issueAndSolve();
+        $storage2->consumeWithOperationIdentity($record2->nonce, $this->identity('claim-wrong-owner'));
+        $realOwner = $storage2->claimResumeDerivation($record2->nonce);
+        self::assertIsString($realOwner);
+        self::assertFalse($storage2->commitResultResume($record2->nonce, true, $record2->requestBinding, 'not-the-owner'), 'a stale owner can never commit');
+        self::assertNull($storage2->consumedState($record2->nonce)?->consumedResult, 'the refused commit writes nothing');
+        self::assertFalse($storage2->releaseResumeDerivation($record2->nonce, 'not-the-owner'), 'a stale owner can never release');
+        self::assertNull($storage2->claimResumeDerivation($record2->nonce), 'the true owner still holds the claim');
+        self::assertTrue($storage2->commitResultResume($record2->nonce, true, $record2->requestBinding, $realOwner), 'the true owner commits');
+        self::assertFalse($storage2->releaseResumeDerivation($record2->nonce, $realOwner), 'the commit already cleared the claim; the former owner release is a refused no-op');
+    }
+
+    public function testClaimIsRefusedForNonResultlessRecords(): void
+    {
+        // The claimability contract: only a consumed, resultless record
+        // is claimable. Missing, pending, committed and cancelled
+        // records all refuse the claim.
+        $storage = new ArrayStorage();
+
+        $missing = $storage->claimResumeDerivation('never-stored');
+        self::assertNull($missing, 'a missing record is not claimable');
+
+        $issuer = new Issuer(new Config(secretKey: Vectors::SECRET, targetBits: 8, ttlSecs: 120, minDurationMs: 0), $storage, now: static fn (): int => self::ISSUED_AT);
+        $challenge = $issuer->issue('login', self::CLIENT_IP);
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+        self::assertNull($storage->claimResumeDerivation($record->nonce), 'a pending record is not claimable');
+
+        $storage->consumeWithOperationIdentity($record->nonce, $this->identity('claimability'));
+        $storage->commitResult($record->nonce, true, null);
+        self::assertNull($storage->claimResumeDerivation($record->nonce), 'a committed record is not claimable');
+
+        $issuer2 = new Issuer(new Config(secretKey: Vectors::SECRET, targetBits: 8, ttlSecs: 120, minDurationMs: 0), $storage, now: static fn (): int => self::ISSUED_AT);
+        $challenge2 = $issuer2->issue('login', self::CLIENT_IP);
+        $record2 = $storage->find($challenge2->nonce);
+        self::assertNotNull($record2);
+        $storage->cancel($record2->nonce);
+        self::assertNull($storage->claimResumeDerivation($record2->nonce), 'a cancelled record is not claimable');
+    }
+
+    public function testWithoutTheClaimCapabilityTheResumeDerivesExactlyAsBefore(): void
+    {
+        // A storage without the ResumeDerivationClaimInterface
+        // capability resumes byte-identically to the legacy path: the
+        // recovery derives and commits even while another caller holds
+        // a claim-shaped lock it knows nothing about, and the
+        // deterministic outcome converges on the single committed
+        // result.
+        [$inner, $record, $token] = $this->issueAndSolve();
+        $storage = self::lostReplyStorage($inner, true);
+        self::assertNotInstanceOf(\KiwiCaptcha\ResumeDerivationClaimInterface::class, $storage, 'precondition: the lost-reply storage lacks the capability');
+        $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
+
+        $original = $verifier->verify($token, Vectors::SECRET, 'login', self::CLIENT_IP, nowNs: $record->issuedAtNs + 1_000_000, operationIdentity: $this->identity('nocap'));
+        self::assertSame(VerifyError::ConsumeIndeterminate, $original->error);
+
+        $outcome = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('nocap'), 'login', self::CLIENT_IP);
+        self::assertTrue($outcome->isOk(), sprintf('the capability-less resume must derive and commit, got %s', $outcome->code()));
+        self::assertNotNull($inner->consumedState($record->nonce)?->consumedResult, 'the capability-less resume commits the deterministic outcome');
+    }
+
     // ── Post-derive final revalidation (current expectations) ─────────
 
     public function testPolicyEpochRotationBetweenPreDeriveCheckAndCommitRefusesTheResume(): void
