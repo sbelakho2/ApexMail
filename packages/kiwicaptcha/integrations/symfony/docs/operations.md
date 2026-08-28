@@ -13,21 +13,27 @@ Three backends, in priority order:
 - **PSR-6 pool (shared, best-effort).** `rate_limit_cache` is used when no Redis client exists.
   PSR-6 cannot express an atomic read-modify-write, so concurrent requests may briefly exceed the limit.
   This is a bound, not a gate.
-- In-memory (per-process). Single-worker fallback.
+  A shared pool is the only no-Redis mode whose windows survive across requests, so it is the only no-Redis fallback that keeps the per-client and global limits temporal under conventional PHP-FPM.
+- Object memory (long-lived runtime only). The fallback when no pool is configured.
+  The windows live in the limiter object, so they are exact for one persistent worker process (RoadRunner, Swoole, amphp, or a single CLI process).
+  Under conventional PHP-FPM each request rebuilds the bundle services, so the object windows are per-request and provide no temporal limiting across requests.
+  Production temporal limiting (per-client or global) without Redis therefore requires a genuinely persistent or shared PSR-6 pool; see [configuration.md](configuration.md#production-hardening).
 
 All backends use a true sliding window.
 The state is a set of hit timestamps pruned on every check, so a burst straddling a window boundary can never double the rate.
 Raw client IPs are never stored.
-Every key is a peppered HMAC of the IP (`hash_hmac('sha256', $ip, $pepper)` with `rate_limit_pepper`, defaulting to the bundle secret), in Redis, the shared pool, and the in-memory buckets.
+Every key is a peppered HMAC of the IP (`hash_hmac('sha256', $ip, $pepper)` with `rate_limit_pepper`, defaulting to the bundle secret), in Redis, the shared pool, and the object-memory buckets.
 Configure a dedicated, stable `rate_limit_pepper`: the HMAC identities anchor the per-client rate-limit memory, and a routine signing-key rotation must not silently reset that memory.
 A fresh pepper derives fresh identities, so every client window would restart empty.
 `rate_limit: 0` and `rate_limit_global: 0` disable the respective limit; both default to nonzero (10 / 500).
-The deployment-global cap is enforced on every backend, with the ladder: Redis exact distributed window, shared PSR-6 best-effort window, in-process exact per-process window.
+The deployment-global cap is enforced on every backend, with the ladder: Redis exact distributed window, shared PSR-6 best-effort window, object-memory exact window for one persistent worker.
 Global-only mode (`rate_limit: 0` with a positive `rate_limit_global`) works on all backends.
 
 ### Local admission before Redis
 
 The process-local emergency window (`risk.hard_limits.process_per_second`, default 10000, the engine's `ProcessEmergencyCap`) is checked before any Redis issuance limiter.
+Like the limiter's object-memory mode, this window is long-lived-runtime-only: under conventional PHP-FPM the cap object is rebuilt per request, so it provides no temporal pre-Redis cap across requests (the distributed Redis risk controls are unaffected).
+In a persistent worker (RoadRunner, Swoole, amphp, or a single CLI process) the window is a genuine per-process emergency shield.
 A saturated window refuses immediately with the standard 429 `{"error":{"code":"RISK_DENIED"}}` (retry_after_ms 1000) without a single Redis round trip.
 The check is non-consuming (`isOpen()`), so the engine's own consuming check inside `assessPreIssue()` remains the single consumer of the per-process budget.
 A request admitted here can still be denied there, never double-counted.

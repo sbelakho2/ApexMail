@@ -340,13 +340,41 @@ pub(crate) mod test_db {
             tenant_id   VARCHAR(26),
             from_email  TEXT        NOT NULL,
             to_emails   JSONB       NOT NULL,
+            cc_emails   JSONB,
+            bcc_emails  JSONB,
             subject     TEXT,
             html_body   TEXT,
             text_body   TEXT,
             status      VARCHAR(50) NOT NULL DEFAULT 'queued',
             tags        JSONB,
+            metadata    JSONB,
+            scheduled_at TIMESTAMPTZ,
+            sent_at     TIMESTAMPTZ,
             created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
         );
+        CREATE INDEX IF NOT EXISTS idx_messages_status ON messages(tenant_id, status);
+        CREATE INDEX IF NOT EXISTS idx_messages_created ON messages(created_at DESC);
+        -- Migration 096: dedicated idempotency column + unique index so the
+        -- send path's ON CONFLICT (tenant_id, idempotency_key) infers it.
+        ALTER TABLE messages ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(255);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_tenant_idempotency_key
+            ON messages (tenant_id, idempotency_key);
+
+        -- Runtime api_keys shape (apexmail-db CREATE_API_KEYS): UUID ids,
+        -- hashed secrets, prefix column for display. tenant_id follows the
+        -- migration-064 VARCHAR(26) standardization like every other table.
+        CREATE TABLE IF NOT EXISTS api_keys (
+            id           UUID PRIMARY KEY,
+            tenant_id    VARCHAR(26),
+            name         TEXT        NOT NULL,
+            key_hash     TEXT        NOT NULL,
+            key_prefix   TEXT        NOT NULL,
+            scopes       JSONB       NOT NULL DEFAULT '[]'::jsonb,
+            last_used_at TIMESTAMPTZ,
+            expires_at   TIMESTAMPTZ,
+            created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        );
+        CREATE INDEX IF NOT EXISTS idx_api_keys_tenant ON api_keys(tenant_id);
 
         CREATE TABLE IF NOT EXISTS email_queue (
             id            UUID PRIMARY KEY,

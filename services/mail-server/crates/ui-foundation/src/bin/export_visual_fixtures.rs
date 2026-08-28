@@ -331,6 +331,98 @@ fn export_full_route_fixtures(
     Ok(())
 }
 
+/// The public sandbox pages served by the api-server (live API Explorer +
+/// pricing calculator response). Registered with the `web` surface so the
+/// contrast/layout/tag-balance gates audit them like every other served
+/// page. Exported in BOTH fixture modes (they are not part of the SSR route
+/// manifest, so `export_full_route_fixtures` would otherwise skip them).
+fn export_explorer_fixtures(
+    out_dir: &std::path::Path,
+    manifest: &mut FixtureManifest,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use ui_foundation::explorer::{
+        api_explorer_response_page, pricing_calculator_response_page, CalculatorInputs,
+        CalculatorResultView, ExplorerResultView, JSON_RENDER_CAP_BYTES,
+    };
+
+    let sample_result = ExplorerResultView {
+        lane: "send".into(),
+        method: "POST".into(),
+        path: "/v1/messages".into(),
+        request_body: "{\n  \"from\": \"you@example.com\",\n  \"to\": \"user@test.com\",\n  \"subject\": \"Hello from ApexMail\",\n  \"html\": \"<h1>Welcome!</h1>\"\n}".into(),
+        status: 202,
+        status_text: "Accepted".into(),
+        latency_ms: 12,
+        body_html: ui_foundation::explorer::json_pretty_html(
+            &serde_json::json!({
+                "data": {
+                    "id": "0f2c6a5e-8d1b-4c37-9f0a-2b6d1c9e4a77",
+                    "status": "sandbox",
+                    "created_at": "2026-08-21T12:00:00.000000+00:00"
+                },
+                "error": null
+            }),
+            JSON_RENDER_CAP_BYTES,
+        )
+        .0,
+        truncated: false,
+    };
+    let calculator_result = CalculatorResultView {
+        plan_id: "starter".into(),
+        plan_name: "Starter".into(),
+        included_volume: 50_000,
+        base_price_cents: 2_500,
+        overage_emails: 10_000,
+        overage_cost_cents: 400,
+        ip_fees_cents: 0,
+        monthly_total_cents: 2_900,
+        annual_total_cents: 29_800,
+        included_domains: 5,
+        included_users: 5,
+        support_level: "email".into(),
+        notes: Vec::new(),
+    };
+
+    let entries: [(&str, &str, String); 3] = [
+        (
+            "/explorer",
+            "web-explorer.html",
+            api_explorer_response_page("fixtures-token", None, None),
+        ),
+        (
+            "/explorer",
+            "web-explorer-response.html",
+            api_explorer_response_page("fixtures-token", Some("send"), Some(&sample_result)),
+        ),
+        (
+            "/explorer/calculate",
+            "web-explorer-calculator.html",
+            pricing_calculator_response_page(
+                &CalculatorInputs::default(),
+                Some(&calculator_result),
+            ),
+        ),
+    ];
+
+    for (route, html_file, html) in entries {
+        write_fixture_html(out_dir, html_file, &html)?;
+        let route_stem = route_file_stem(route);
+        for (viewport_name, viewport) in FULL_ROUTE_VIEWPORTS {
+            let id = format!("explorer-{}-{}", route_stem, viewport_name);
+            manifest.fixtures.push(FixtureManifestEntry {
+                id: id.clone(),
+                surface: "web",
+                route,
+                html_file: html_file.to_string(),
+                snapshot_file: format!("{id}.png"),
+                viewport,
+            });
+        }
+    }
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let out_dir = std::env::args()
         .nth(1)
@@ -352,6 +444,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         export_auth_fixtures(&out_dir, &mut manifest)?;
         export_marketing_fixtures(&out_dir, &mut manifest)?;
     }
+    export_explorer_fixtures(&out_dir, &mut manifest)?;
 
     let manifest_json = serde_json::to_string_pretty(&manifest)?;
     fs::write(out_dir.join("manifest.json"), manifest_json)?;

@@ -473,6 +473,10 @@ pub fn build_app(state: AppState) -> Router {
         .route("/legal/terms", get(legal_terms_redirect))
         .route("/legal/privacy", get(legal_privacy_redirect))
         .nest("/health", routes::health::router())
+        // Public zero-JS sandbox surfaces (API Explorer + pricing calculator
+        // form target): Rust-rendered, signed-token, rate-limited. See
+        // routes/explorer.rs for the anti-abuse and no-delivery contracts.
+        .nest("/explorer", routes::explorer::router())
         .nest("/v1/ses", routes::ses_notifications::router())
         .merge(marketing_assets)
         .merge(rate_limited_public)

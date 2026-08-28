@@ -92,10 +92,13 @@ is never forced) are the privacy contract; see
     # rate_limit: 10
     # Deployment-GLOBAL rate limit (default 500 per window; 0 = disabled),
     # enforced on every backend. Redis: exact distributed sliding window
-    # shared by all workers. PSR-6 pool: best-effort shared window (races
-    # can briefly exceed the cap). In-memory: exact per-process window (N
-    # workers can approach N x the cap). Global-only mode (rate_limit: 0)
-    # works on all backends.
+    # shared by all workers. PSR-6 pool: the only no-Redis mode that
+    # survives across requests (best-effort: races can briefly exceed the
+    # cap). Object memory: long-lived-runtime-only (RoadRunner/Swoole/amphp
+    # or a single CLI process) — under conventional PHP-FPM each request
+    # rebuilds the limiter, so the object window is per-request and
+    # provides no temporal limiting across requests. Global-only mode
+    # (rate_limit: 0) works on all backends.
     # rate_limit_global: 500
     # rate_limit_window_secs: 60            # sliding window (default 60)
     # rate_limit_cache: null                # optional PSR-6 pool service id
@@ -103,8 +106,12 @@ is never forced) are the privacy contract; see
     #                                       # fallback when no Redis client
     #                                       # exists (e.g. a Redis-backed
     #                                       # Symfony Cache pool). Without it,
-    #                                       # the fallback is a per-process
-    #                                       # in-memory window.
+    #                                       # the fallback is a per-object
+    #                                       # in-memory window: temporal
+    #                                       # cross-request limiting under
+    #                                       # conventional PHP-FPM requires
+    #                                       # Redis or a genuinely shared
+    #                                       # PSR-6 pool.
     #                                       # Raw client IPs are never stored:
     #                                       # every key is a peppered HMAC of
     #                                       # the IP (rate_limit_pepper

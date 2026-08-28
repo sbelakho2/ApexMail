@@ -74,7 +74,6 @@ mod apexmail_lib_tests {
 #[cfg(test)]
 mod apexmail_db_tests {
     use chrono::Utc;
-    use uuid::Uuid;
 
     #[test]
     fn test_db_types_serialize() {

@@ -4510,7 +4510,7 @@ fn resume_releases_the_claim_on_an_early_return() {
     // The early return released the claim: a fresh claim succeeds.
     assert!(
         store
-            .claim_resume_derivation(&issued.record.nonce)
+            .claim_resume_derivation(&issued.record.nonce, 60)
             .unwrap()
             .is_some(),
         "the RAII guard must release the claim on the early return"
@@ -4700,17 +4700,11 @@ fn resume_commit_requires_current_claim_ownership() {
         .unwrap()
         .is_some());
 
-    // A new owner holds the claim (the old one's lease expired).
-    let new_owner = "new-owner-token";
-    let claim_key = format!("{}resume-claim:{}", prefix, issued.record.nonce);
-    let mut conn = redis::Client::open(url.clone()).unwrap();
-    redis::cmd("SET")
-        .arg(&claim_key)
-        .arg(new_owner)
-        .arg("EX")
-        .arg(60)
-        .query::<()>(&mut conn)
-        .unwrap();
+    // The real owner holds the claim, embedded in the record envelope.
+    let owner = store
+        .claim_resume_derivation(&issued.record.nonce, 60)
+        .unwrap()
+        .expect("the fresh claim is taken");
 
     // The stale owner's commit is refused before any write.
     let committed = store
@@ -4729,12 +4723,17 @@ fn resume_commit_requires_current_claim_ownership() {
 
     // The current owner's commit lands and clears the claim.
     let committed = store
-        .commit_result_clearing_claim(&issued.record.nonce, true, None, new_owner)
+        .commit_result_clearing_claim(&issued.record.nonce, true, None, &owner)
         .unwrap();
     assert!(committed, "the current owner's commit lands");
-    let claim_now: Option<String> = redis::cmd("GET").arg(&claim_key).query(&mut conn).unwrap();
+    let mut conn = redis::Client::open(url.clone()).unwrap();
+    let raw: Option<String> = redis::cmd("GET")
+        .arg(format!("{}{}", prefix, issued.record.nonce))
+        .query(&mut conn)
+        .unwrap();
+    let raw = raw.expect("the record is still retained");
     assert!(
-        claim_now.is_none(),
-        "the current owner's commit clears the claim"
+        !raw.contains("resume_owner"),
+        "the current owner's commit clears the claim from the envelope"
     );
 }
