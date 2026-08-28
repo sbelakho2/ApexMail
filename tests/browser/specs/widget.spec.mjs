@@ -61,4 +61,63 @@ test.describe('KiwiCaptcha browser solver', () => {
     expect(JSON.parse(parts[3])).toEqual({});
     expect(external).toEqual([]);
   });
+
+  test('a solve that exhausts its bounded search notifies the server once for the abandoned nonce', async ({ page }) => {
+    // The exhaustion path (the bounded search cap) abandons the challenge:
+    // the driver must inform the server (fire-and-forget, rate-limited) for
+    // the abandoned nonce only. The retry flow re-acquires fresh challenges
+    // and the per-widget cooldown keeps the notification bounded — never a
+    // spam, and never a cancel for a nonce this widget did not abandon.
+    const cancelBodies = [];
+    await page.route('**/challenge/cancel', async (route) => {
+      cancelBodies.push(route.request().postDataJSON() ?? {});
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{"cancelled":true}' });
+    });
+    let calls = 0;
+    await page.route('**/challenge', async (route) => {
+      calls++;
+      // An unsolvable challenge (targetBits 255: the 5M-hash bounded search
+      // can never find a match) — the solver exhausts and the widget fails
+      // after the bounded retry flow.
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          nonce: 'exhaust-nonce-' + calls,
+          salt: btoa(String(calls).padStart(16, '0')),
+          prefix: 'x',
+          targetBits: 255,
+          algorithm: 'sha256',
+          mKib: 0,
+          t: 1,
+          p: 1,
+          ttlSecs: 120,
+          minDurationMs: 0,
+        }),
+      });
+    });
+    await page.goto('/?algorithm=sha256');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed', { timeout: 90_000 });
+    expect(calls).toBeGreaterThanOrEqual(3); // the bounded retry flow re-acquired
+    expect(cancelBodies.length).toBeGreaterThanOrEqual(1);
+    expect(cancelBodies.length).toBeLessThanOrEqual(calls); // at most one per abandoned challenge
+    expect(cancelBodies[0]).toEqual({ nonce: 'exhaust-nonce-1' }); // the first abandoned nonce
+    const notified = cancelBodies.map((b) => b.nonce);
+    expect(new Set(notified).size).toBe(notified.length); // once per nonce, never a re-acquired nonce
+  });
+
+  test('a normal solve sends no cancel request', async ({ page }) => {
+    let cancelHits = 0;
+    await page.route('**/challenge/cancel', async (route) => {
+      cancelHits++;
+      await route.fulfill({ status: 200, contentType: 'application/json', body: '{"cancelled":true}' });
+    });
+    await page.goto('/?algorithm=sha256');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length).toBeGreaterThan(0);
+    const resp = await page.request.post('http://127.0.0.1:8085/verify', { data: { token } });
+    expect((await resp.json()).ok).toBe(true);
+    expect(cancelHits).toBe(0); // a successful solve never abandons a challenge
+  });
 });
