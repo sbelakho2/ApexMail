@@ -543,6 +543,16 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // never to invalid_or_expired — the client must not be told its
         // token is burned when it may still redeem.
         if (!$outcome->isOk()) {
+            // Native risk feedback for the failure path — the same
+            // shared classification as the provider surface
+            // (RiskFeedback: bad proofs, malformed traffic and
+            // retained-state replays enrich the model; server and
+            // deployment-context outcomes produce no client event, so a
+            // client is never punished for a backend or rollout
+            // condition). Previously the failures returned here without
+            // any evidence, leaving bad_proof, malformed and replay
+            // counters fed only by issuance debt and velocity.
+            $this->risk?->solveOutcome($constraint->scope, $ip, $session, $outcome->error);
             $code = $this->publicCode($outcome->error);
             if ($outcome->error !== null && $code !== KiwiCaptcha::INVALID_OR_EXPIRED_ERROR) {
                 $this->logger?->info('KiwiCaptcha: verification refused', [

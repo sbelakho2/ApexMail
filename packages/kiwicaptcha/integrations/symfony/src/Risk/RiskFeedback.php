@@ -21,6 +21,38 @@ use KiwiCaptcha\VerifyError;
  */
 final class RiskFeedback
 {
+    /**
+     * The canonical post-verification risk classification, used by the
+     * native validator AND the provider-compatible SiteVerify surface
+     * (the single shared mapping). The provenance rule is preserved:
+     * attacker-controllable proof outcomes may repay a specific debt
+     * (SolveSuccess) or add risk (malformed / invalid / replay
+     * evidence), but never subtract it.
+     *
+     * Categories:
+     *  - SolveSuccess        (null error): repays the issuance debt.
+     *  - ReplayAttempt:      the retained-state replay outcomes
+     *                        (AlreadyConsumed, RecordNotFound).
+     *  - MalformedToken:     the wire/shape/signature corruptions.
+     *  - InvalidProof:       the client's insufficient-work and
+     *                        binding-circumstance evidence
+     *                        (InsufficientWork, TooFast, TooManyAttempts,
+     *                        TelemetryRejected, WrongScope,
+     *                        RequestBindingMismatch, IpMismatch,
+     *                        MissingClientIp).
+     *  - ExpiredChallenge:   the client let the signed deadline pass (an
+     *                        abandonment signal, not an infrastructure
+     *                        condition).
+     *  - No client event:    server/infrastructure failures
+     *                        (CapacityExceeded, AdmissionUnavailable,
+     *                        StorageUnavailable, ConsumeIndeterminate)
+     *                        and deployment-context outcomes
+     *                        (WrongPolicyVersion, WrongIssuer,
+     *                        WrongRegion, UnknownKid,
+     *                        UnsupportedArgon2Params) — clients must
+     *                        never be punished for backend or rollout
+     *                        conditions outside their control.
+     */
     public static function eventFor(?VerifyError $error): ?RiskEventKind
     {
         if ($error === null) {
@@ -28,13 +60,31 @@ final class RiskFeedback
         }
 
         return match ($error) {
-            VerifyError::Expired => RiskEventKind::ExpiredChallenge,
+            VerifyError::AlreadyConsumed,
             VerifyError::RecordNotFound => RiskEventKind::ReplayAttempt,
             VerifyError::MalformedToken,
             VerifyError::MalformedRecord,
             VerifyError::BadSignature => RiskEventKind::MalformedToken,
-            VerifyError::CapacityExceeded => null,
-            default => RiskEventKind::InvalidProof,
+            VerifyError::InsufficientWork,
+            VerifyError::TooFast,
+            VerifyError::TooManyAttempts,
+            VerifyError::TelemetryRejected,
+            VerifyError::WrongScope,
+            VerifyError::RequestBindingMismatch,
+            VerifyError::IpMismatch,
+            VerifyError::MissingClientIp => RiskEventKind::InvalidProof,
+            VerifyError::Expired => RiskEventKind::ExpiredChallenge,
+            // Server/infrastructure + deployment-context outcomes:
+            // no client risk event.
+            VerifyError::CapacityExceeded,
+            VerifyError::AdmissionUnavailable,
+            VerifyError::StorageUnavailable,
+            VerifyError::ConsumeIndeterminate,
+            VerifyError::WrongPolicyVersion,
+            VerifyError::WrongIssuer,
+            VerifyError::WrongRegion,
+            VerifyError::UnknownKid,
+            VerifyError::UnsupportedArgon2Params => null,
         };
     }
 }
