@@ -65,8 +65,9 @@ construction and at container compile time:
 
 ```
 max verification runtime  <  fixed owner lease (60)
-                           <  waiter deadline (90)
                            <= retained-state recovery retention (>=90)
+per-request waiter bound (2 s) < the lease (it only caps request-slot
+occupancy, never the takeover horizon)
 ```
 
 The logical-operation identity rides in the consumed runtime state. The

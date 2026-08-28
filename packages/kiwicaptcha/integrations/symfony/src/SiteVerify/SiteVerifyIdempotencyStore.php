@@ -15,7 +15,11 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  *   same response + different key -> second key gets timeout-or-duplicate.
  *   same key + different response -> rejected (`CONFLICT`).
  *   same key + different remoteip -> rejected (`CONFLICT`: the claim binds
- *                                    the canonicalized remoteip fingerprint).
+ *                                    the canonicalized remoteip pseudonym —
+ *                                    a purpose-separated keyed HMAC, never
+ *                                    the raw address; the raw request
+ *                                    binding is likewise stored only as a
+ *                                    keyed equality digest).
  *
  * The crash window (claim -> consume -> crash before finalize) is
  * recovered through the core's retained consumed-state machinery: a
@@ -53,11 +57,11 @@ interface SiteVerifyIdempotencyStore
     /**
      * The default lease window in seconds, see {@see self::takeover()}.
      * The ordering invariant is strict and enforced by the Siteverify
-     * controller at construction:
-     *
-     *   max verification window  <  `LEASE_SECONDS` (60)
-     *                            <  the `PENDING_SAME` waiter bound (90)
-     *                            <  the default challenge lifetime (120).
+     * controller at construction. The max verification window stays
+     * below `LEASE_SECONDS` (60). The retained-state recovery retention
+     * is at least 90. The per-request `PENDING_SAME` waiter bound (2 s)
+     * stays below the lease, only capping request-slot occupancy. The
+     * default challenge lifetime stays above the retention.
      *
      * A lease that outlives the waiter bound would make the crash-
      * recovery takeover unreachable (the waiter gives up first), and a
@@ -78,9 +82,9 @@ interface SiteVerifyIdempotencyStore
      * siteverify secrets/policies so namespaces never collide, and
      * `remoteipFingerprint` (the canonicalized request remoteip, or
      * 'no-ip') is bound into the record: a later claim with the same key
-     * but a different fingerprint conflicts. The same UUID with a
-     * changed remoteip must never join, overtake or reuse an entry whose
-     * outcome was derived under another IP.
+     * but a different pseudonym conflicts. The same UUID with a changed
+     * remoteip must never join, overtake or reuse an entry whose outcome
+     * was derived under another IP.
      *
      * @return array{0: IdempotencyClaim, 1: ?string} the claim outcome and
      *         the owner token when this request claimed the entry (null

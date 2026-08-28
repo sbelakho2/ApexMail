@@ -8,20 +8,24 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  * Redis-backed atomic idempotency store.
  *
  * Key: `{kiwi:<namespace>}:siteverify-idem:<backend_id>:<uuid>`
- * Value: JSON {response_hash, remoteip_fingerprint, state:
+ * Value: JSON {response_hash, remoteip_fingerprint, binding, state:
  * pending|complete, owner, result, lease_expires_at}
  * TTL: bounded (the caller passes the window).
  *
  * The claim is a single Lua script — atomic even under concurrency.
  * `owner` is a random per-request token so only the owning request can
  * finalize (a stale retry can never overwrite a completed outcome). The
- * claim binds the canonicalized remoteip fingerprint alongside the
- * response hash. A retry with the same key but a different fingerprint
- * is a conflict: a changed remoteip can materially change the
- * verification outcome, and no entry may be joined or reused across
- * fingerprints. Records written without a fingerprint (created by an
- * older release) carry none and therefore conflict with every claim,
- * fail-closed, and expire on TTL. The owner's lease
+ * claim binds the canonicalized remoteip pseudonym and the canonical
+ * transaction binding's keyed equality digest alongside the response
+ * hash. The controller derives both with purpose-separated HMACs, so
+ * the entry carries no raw address and no raw binding — Redis
+ * persistence, AOF history or forensic snapshots can outlive the
+ * logical TTL. A retry with the same key but a different pseudonym or
+ * binding digest is a conflict: a changed remoteip or transaction
+ * context can materially change the verification outcome, and no entry
+ * may be joined or reused across them. Records written without a
+ * fingerprint (created by an older release) carry none and therefore
+ * conflict with every claim, fail-closed, and expire on TTL. The owner's lease
  * (`lease_expires_at`, set from the server clock via redis TIME at
  * claim creation) is configurable (`leaseSeconds`, default
  * {@see SiteVerifyIdempotencyStore::LEASE_SECONDS}) and bounds how long

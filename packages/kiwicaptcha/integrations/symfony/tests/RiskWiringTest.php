@@ -459,7 +459,13 @@ final class RiskWiringTest extends TestCase
         self::assertSame('wiring-test', $monitor->getArgument(2), 'the monitor uses the risk namespace ({kiwi:<ns>}:security-policy)');
         self::assertSame(2, $monitor->getArgument(3), 'the monitor floors at risk.policy_version');
         self::assertSame(3, $monitor->getArgument(4), 'the monitor uses risk.security_epoch_cache_secs');
-        self::assertSame('eu-central-1', $monitor->getArgument('$region'), 'the monitor re-applies the verifier region on every rotation');
+        // The monitor owns only the policy epoch: region and issuer are
+        // construction-time verifier expectations and must never be
+        // carried (or rewritten) by the monitor — wiring a null issuer
+        // through it would silently disable the issuer security boundary
+        // after the first epoch bump.
+        self::assertArrayNotHasKey('region', $monitor->getArguments(), 'the monitor must NOT carry the verifier region: an epoch refresher never rewrites deployment expectations');
+        self::assertArrayNotHasKey('issuer', $monitor->getArguments(), 'the monitor must NOT carry the verifier issuer: an epoch refresher never rewrites deployment expectations');
 
         // The validator receives the monitor (per-verification refresh).
         $validator = $container->getDefinition(\BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator::class);

@@ -515,12 +515,8 @@ final class VerifierResumeTest extends TestCase
         $verifier = new Verifier($barrier, now: static fn (): int => self::ISSUED_AT);
 
         $barrier->confirmResult = false;
-        try {
-            $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7', operationIdentity: $this->identity('barrier-replay'), expectedRequestBinding: 'txn-1', bindingExpectation: RequestBindingExpectation::exact('txn-1'));
-            self::fail('the stored-result replay must NOT return an unproven success');
-        } catch (\RuntimeException $e) {
-            self::assertSame('replication barrier shortfall', $e->getMessage());
-        }
+        $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7', operationIdentity: $this->identity('barrier-replay'), expectedRequestBinding: 'txn-1', bindingExpectation: RequestBindingExpectation::exact('txn-1'));
+        self::assertSame(VerifyError::StorageUnavailable, $outcome->error, 'the stored-result replay must fail CLOSED to StorageUnavailable on a barrier shortfall, never return an unproven success and never leak a storage exception out of the verifier');
 
         // The barrier satisfied: the replay returns the stored Valid.
         $barrier->confirmResult = true;
@@ -531,12 +527,8 @@ final class VerifierResumeTest extends TestCase
         // The same guard on resumeConsumedOperation's committed-result
         // fast path.
         $barrier->confirmResult = false;
-        try {
-            $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('barrier-replay'), 'login', self::CLIENT_IP, 'txn-1', RequestBindingExpectation::exact('txn-1'));
-            self::fail('the resumed committed-result must NOT return an unproven success');
-        } catch (\RuntimeException $e) {
-            self::assertSame('replication barrier shortfall', $e->getMessage());
-        }
+        $failedResume = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('barrier-replay'), 'login', self::CLIENT_IP, 'txn-1', RequestBindingExpectation::exact('txn-1'));
+        self::assertSame(VerifyError::StorageUnavailable, $failedResume->error, 'the resumed committed-result must fail CLOSED to StorageUnavailable on a barrier shortfall, never return an unproven success and never leak a storage exception out of the verifier');
         $barrier->confirmResult = true;
         $resumed = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('barrier-replay'), 'login', self::CLIENT_IP, 'txn-1', RequestBindingExpectation::exact('txn-1'));
         self::assertTrue($resumed->isOk());

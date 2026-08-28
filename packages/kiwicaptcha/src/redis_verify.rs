@@ -22,18 +22,19 @@
 //! between transition and commit) gets
 //! [`VerifyError::ConsumeIndeterminate`].
 //!
-//! Recovery gap (documented, not a replay risk): the result commit is
-//! deliberately best-effort, so a caller can receive `Valid` while the
-//! commit failed; a retry then sees consumed-without-result and gets
-//! [`VerifyError::ConsumeIndeterminate`]. That never permits a replay
-//! (the one-shot consume is the authorization boundary), but it creates a
-//! recovery/idempotency availability gap: the interrupted same-operation
-//! redemption cannot be reconstructed through the Rust verifier alone.
-//! The PHP core's `resumeConsumedOperation()` is the reference semantics
-//! for that reconstruction (a carefully constrained identity gate re-
-//! derives and re-commits); the Rust verifier's equivalent recovery
-//! operation is the intended follow-up if the Rust path must provide the
-//! same end-to-end idempotent semantics as PHP/Symfony.
+//! Interrupted-redemption recovery exists: [`ProductionVerifier::resume_consumed_operation`]
+//! reconstructs a same-operation redemption that consumed on the primary
+//! but lost its reply before the commit — the constant-time operation-
+//! identity gate authorizes it, the replication fence is re-established
+//! before any stored-success acceptance, the committed-result fast path
+//! reruns the hard replay-security context (record shape, key
+//! revocation/signature, scope, exact binding, region, policy epoch,
+//! issuer, minimum duration) before resolving the retained Valid, and a
+//! resultless consume re-derives and re-commits the deterministic
+//! outcome. A refused commit, a fence shortfall or a store error fails
+//! closed to `ConsumeIndeterminate`/`StorageUnavailable` — never a
+//! `Valid` the next promotion could resurrect. This mirrors the PHP
+//! core's `resumeConsumedOperation()` exactly.
 //!
 //! The retained success is identity-gated: an already-consumed record with
 //! a committed valid outcome replays that success only for the logical

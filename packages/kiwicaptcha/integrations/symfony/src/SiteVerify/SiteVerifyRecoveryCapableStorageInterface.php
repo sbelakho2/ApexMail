@@ -22,7 +22,7 @@ use KiwiCaptcha\OperationIdentityAwareStorageInterface;
  * for Siteverify idempotency: the takeover path could never prove that a
  * claim is the nonce's original logical operation, so reconstruction
  * would silently refuse everything. The refusal closes the silent gap
- * where {@see \KiwiCaptcha\ConsumedOutcomeRecovery} returns null —
+ * where the core's consumed-state reconstruction returns null —
  * ordinary verification remains compatible with any StorageInterface.
  *
  * The full capability set is four interfaces, and the marker extends

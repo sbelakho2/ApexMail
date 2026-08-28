@@ -50,9 +50,14 @@ use KiwiCaptcha\Verifier;
  * the pool, so a serving node's configured epoch is always >= the central
  * value.
  *
- * The epoch is applied to the shared {@see Verifier} via its deployment-
- * expectations seam, so every verification on this worker enforces the
- * current epoch, including the post-derive final revalidation.
+ * The epoch is applied to the shared {@see Verifier} via its public
+ * {@see Verifier::setExpectedPolicyVersion()} seam: this monitor owns
+ * only the policy epoch. Region and issuer are static deployment
+ * expectations established once at verifier construction (the bundle's
+ * `region` and `issuer` options) and are never rewritten here. A
+ * policy-epoch refresher has no reason to mutate the deployment
+ * compartment; doing so would let a central epoch bump silently disable
+ * issuer enforcement.
  */
 final class SecurityEpochMonitor
 {
@@ -94,15 +99,6 @@ final class SecurityEpochMonitor
      * @param int                        $cacheSecs     short cache window
      *                                                   (risk.security_epoch_cache_secs).
      * @param callable(): float|null     $nowMs         clock override (tests).
-     * @param string|null                $region        the verifier's expected
-     *                                                   region, re-applied
-     *                                                   with every epoch
-     *                                                   rotation so the shared
-     *                                                   verifier keeps all its
-     *                                                   expectations.
-     * @param string|null                $issuer        the verifier's expected
-     *                                                   deployment issuer,
-     *                                                   same re-apply rule.
      * @param int                        $maxStaleSecs  max-stale window
      *                                                   (risk.security_epoch_
      *                                                   max_stale_secs, >= 10):
@@ -110,6 +106,13 @@ final class SecurityEpochMonitor
      *                                                   last_success +
      *                                                   max_stale, the
      *                                                   monitor reports stale.
+     *
+     * The monitor deliberately does not carry region or issuer: those
+     * are construction-time verifier expectations (the bundle's `region`
+     * and `issuer` options), and an epoch refresher must never rewrite
+     * them. Rotating a null issuer through the shared verifier would
+     * silently disable issuer enforcement on every subsequent
+     * verification.
      */
     public function __construct(
         private readonly Verifier $verifier,
@@ -118,8 +121,6 @@ final class SecurityEpochMonitor
         private readonly int $configuredEpoch,
         private readonly int $cacheSecs = 1,
         private $nowMs = null,
-        private readonly ?string $region = null,
-        private readonly ?string $issuer = null,
         private readonly int $maxStaleSecs = 60,
     ) {
         if ($cacheSecs < 1) {
@@ -137,8 +138,8 @@ final class SecurityEpochMonitor
      *
      * Never throws: a central-read failure serves the last-observed max
      * (fail-safe). The verifier rotation is applied at most once per epoch
-     * change, and always carries the configured region/issuer expectations
-     * so rotating the epoch can never disable them.
+     * change and mutates only the expected policy version: the
+     * construction-time region/issuer expectations are never rewritten.
      */
     public function currentEpoch(): int
     {
@@ -253,10 +254,12 @@ final class SecurityEpochMonitor
             return;
         }
         $this->currentEpoch = $epoch;
-        // The rotation carries the current region/issuer expectations so
-        // the shared verifier keeps them (the core applies all three
-        // together).
-        $this->verifier->rotateDeploymentExpectations($epoch, $this->region, $this->issuer);
+        // The rotation mutates only the policy epoch (the one expectation
+        // this monitor owns). Region and issuer are static deployment
+        // expectations established at verifier construction; rewriting
+        // them here — in particular with a null issuer — would silently
+        // disable the issuer security boundary after an epoch bump.
+        $this->verifier->setExpectedPolicyVersion($epoch);
     }
 
     private function nowMs(): float

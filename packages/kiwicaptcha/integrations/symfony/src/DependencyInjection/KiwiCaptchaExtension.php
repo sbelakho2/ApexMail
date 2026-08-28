@@ -198,14 +198,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // store's crash recovery rests on the strict ordering
         // (SiteVerifyIdempotencyStore::LEASE_SECONDS):
         //
-        //   max verification window  <  lease (60)  <  waiter bound (90)
+        //   max verification window  <  lease (60)  <  waiter bound (2 s)
         //                            <= retained-state recovery retention
         //
-        // The controller enforces only waiter > lease; the Argon admission
-        // lease and the retained consumed-state retention margin complete
-        // the ordering and are validated here, since a configuration that
-        // breaks it makes crash recovery impossible (a `PENDING_SAME` waiter
-        // gives up before the owner lease can be taken over, or a
+        // The controller enforces waiter < lease (the per-request waiter
+        // bound only caps request-slot occupancy; the takeover is a later
+        // retry's job); the Argon admission lease and the retained
+        // consumed-state retention margin complete the ordering and are
+        // validated here, since a configuration that breaks it makes
+        // crash recovery impossible (a `PENDING_SAME` waiter
         // lease-bounded verification outlasts the Siteverify lease and is
         // displaced at takeover). Signed token expiry is irrelevant to the
         // reconstruction: the retained consumed record, kept readable by
@@ -896,13 +897,16 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // cache (risk.security_epoch_cache_secs), keeps a monotonic
         // in-process max (a regressed central value is ignored) and
         // serves the last-observed max when Redis is unavailable. The
-        // effective epoch is applied to the shared verifier (rotating its
-        // expected policy version, always re-applying the configured
-        // region/issuer expectations), so every verification enforces the
-        // current epoch and a central policy bump revokes outstanding
-        // challenges within one cache window. Without a Redis client the
-        // monitor serves the configured risk.policy_version (no central
-        // state to read).
+        // effective epoch is applied to the shared verifier via
+        // setExpectedPolicyVersion(), mutating only the policy epoch: the
+        // region and issuer expectations are construction-time verifier
+        // settings (wired above with the configured values) and are
+        // deliberately never rewritten by the monitor — a central epoch
+        // bump must not disable the issuer security boundary. Every
+        // verification enforces the current epoch and a central policy
+        // bump revokes outstanding challenges within one cache window.
+        // Without a Redis client the monitor serves the configured
+        // risk.policy_version (no central state to read).
         $namespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', (string) $riskConfig['namespace']) ?: 'kiwi';
         $container->setDefinition(SecurityEpochMonitor::class, (new Definition(SecurityEpochMonitor::class, [
             new Reference('kiwi_captcha.verifier'),
@@ -911,8 +915,6 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $config['risk']['policy_version'],
             $riskConfig['security_epoch_cache_secs'],
         ]))
-            ->setArgument('$region', $config['risk']['region'])
-            ->setArgument('$issuer', null)
             // The max-stale fail-closed window: past last_success +
             // max_stale the validator fails verification closed
             // (temporary_unavailable) and the controller refuses
@@ -1109,6 +1111,21 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             (float) SiteVerifyController::IDEMPOTENCY_WAIT_SECS, // idempotency wait bound (the ctor default — never null, the param is float)
             $config['risk']['policy_version'] ?? 1, // security-policy epoch in the idempotency identity
         ]))
+            // The static deployment security-context digest (configured
+            // issuer, region, keyring and revocation state): bound into
+            // the idempotency backend identity so a cached SiteVerify
+            // provider result can never outlive the security context
+            // that produced it — an issuer/region/keyring rotation
+            // invalidates the idempotency namespace (a same-key retry
+            // becomes a different logical operation), exactly as the
+            // core's hard-security verdicts dominate even a
+            // same-operation retry.
+            ->setArgument('$securityContextDigest', hash('sha256', implode("\0", [
+                (string) ($config['issuer'] ?? ''),
+                (string) ($config['risk']['region'] ?? ''),
+                json_encode($config['secrets_by_kid'] ?? []),
+                json_encode($config['revoked_kids'] ?? []),
+            ])))
             ->setArgument('$outstanding', $riskConfig['enabled'] ? new Reference('kiwi_captcha.risk.outstanding') : null)
             // The security-epoch monitor drives the identity and the
             // fail-closed check: the effective epoch (the monitor's

@@ -54,8 +54,9 @@ use Symfony\Component\HttpFoundation\Response;
  *    enforced at construction and at container compile time. It requires
  *
  *      max verification runtime  <  fixed owner lease (60)
- *                                 <  waiter deadline (90)
  *                                 <= retained-state recovery retention (>=90)
+ *      per-request waiter bound (2 s) < the lease.
+ *      The waiter bound only caps request-slot occupancy.
  *
  *    Signed token expiry affects only fresh redemptions, never the
  *    retained-state reconstruction, so a late-lifetime crash still
@@ -125,17 +126,6 @@ final class SiteVerifyController
     private const PENDING_SAME_POLL_MAX_MS = 1000;
 
     /**
-     * The retained consumed-state recovery used on the takeover path. It
-     * reconstructs only when the storage is recovery-capable (the
-     * SiteVerifyRecoveryCapableStorageInterface compile-time check in the
-     * extension). It then checks that the consumed record's own operation
-     * identity equals this claim's fingerprint, which was written
-     * atomically with the pending->consumed transition, so a different
-     * logical operation can never match.
-     */
-    private ?\KiwiCaptcha\ConsumedOutcomeRecovery $recovery;
-
-    /**
      * @param array<string, string> $siteverifySecrets map of
      *        server-to-server secret -> expected scope; empty disables the
      *        endpoint. A per-secret expected scope is required, so a
@@ -166,7 +156,17 @@ final class SiteVerifyController
          * replay of the pre-change outcome.
          */
         private readonly int $policyVersion = 0,
-        ?\KiwiCaptcha\ConsumedOutcomeRecovery $recovery = null,
+        /**
+         * The static deployment security-context digest bound into the
+         * idempotency backend identity (wired by the container from the
+         * configured issuer, region and keyring/revocation state). A
+         * same-key request after an issuer, region or key-rotation change
+         * is a new logical operation (a conflict), never a replay of a
+         * result cached under the previous context. The cached success
+         * can never outlive the security context that produced it. Null (fixtures, direct construction) keeps the
+         * identity bound to secret+scope+epoch only.
+         */
+        private readonly ?string $securityContextDigest = null,
         /**
          * Anti-stockpiling accounting (wired when the risk layer is
          * enabled): every successful Siteverify redemption releases the
@@ -236,7 +236,6 @@ final class SiteVerifyController
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway $riskGateway = null,
     ) {
         $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
-        $this->recovery = $recovery ?? (new \KiwiCaptcha\ConsumedOutcomeRecovery($this->storage ?? new \KiwiCaptcha\Storage\ArrayStorage()));
         // The lease-ordering invariant is enforced at construction. The
         // waiter bound is the per-request occupancy cap and must be
         // smaller than the fixed owner lease (the store's configured
@@ -274,16 +273,21 @@ final class SiteVerifyController
     }
 
     /**
-     * The idempotency fingerprint of the request remoteip: 'no-ip' when
-     * absent (or whitespace-only), otherwise 'ip:' + the canonicalized
-     * address. IPv4/IPv6 are normalized via inet_pton/inet_ntop so
-     * equivalent spellings of one address collide, and IPv4-mapped IPv6
-     * (`::ffff:a.b.c.d`) is folded to its 4-byte IPv4 form, mirroring
-     * the verifier's binding identity (the core's
-     * Issuer::canonicalIpFamily() applies the same normalization).
-     * Anything else keeps its raw trimmed form. The claim binds this
-     * fingerprint, so verification-affecting remoteip changes cannot
-     * reuse a stored outcome derived under another IP.
+     * The idempotency pseudonym of the request remoteip: 'no-ip' when
+     * absent (or whitespace-only), otherwise a purpose-separated keyed
+     * HMAC over the canonicalized address. IPv4/IPv6 are normalized via
+     * inet_pton/inet_ntop so equivalent spellings of one address
+     * collide, and IPv4-mapped IPv6 (`::ffff:a.b.c.d`) is folded to its
+     * 4-byte IPv4 form, mirroring the verifier's binding identity (the
+     * core's Issuer::canonicalIpFamily() applies the same
+     * normalization). Anything else keeps its raw trimmed form as the
+     * HMAC input. The claim binds this pseudonym, so
+     * verification-affecting remoteip changes cannot reuse a stored
+     * outcome derived under another IP. Only equality is ever required:
+     * the raw address is never stored — Redis persistence, AOF history
+     * or forensic snapshots can outlive the 300s logical TTL, and a
+     * fixed-size non-dictionary-recoverable pseudonym carries the same
+     * equality semantics without personal data.
      */
     private function remoteipFingerprint(?string $remoteIp): string
     {
@@ -301,7 +305,23 @@ final class SiteVerifyController
         }
         $canonical ??= $trimmed;
 
-        return 'ip:'.$canonical;
+        return hash_hmac('sha256', 'siteverify-idem-ip-v1|'.$canonical, $this->secretKey);
+    }
+
+    /**
+     * The idempotency equality digest of the canonical transaction
+     * binding: a purpose-separated keyed HMAC, never the raw binding (a
+     * request binding may carry sensitive application identifiers, and
+     * the idempotency contract needs equality only). Null passes through
+     * unchanged (an unbound transaction stays unbound in the entry).
+     */
+    private function idempotencyBinding(?string $canonicalBinding): ?string
+    {
+        if ($canonicalBinding === null || $canonicalBinding === '') {
+            return null;
+        }
+
+        return hash_hmac('sha256', 'siteverify-idem-binding-v1|'.$canonicalBinding, $this->secretKey);
     }
 
     private function logGateKey(): string
@@ -449,7 +469,16 @@ final class SiteVerifyController
         // configured epoch otherwise): a same-key request after a scope
         // remap or policy bump is a new logical operation (a conflict),
         // never a replay of the pre-change outcome.
-        $backendId = hash('sha256', $secret.'|'.$expectedScope.'|'.$effectiveEpoch);
+        // The backend identity binds the secret, the server-resolved
+        // expected scope, the effective security-policy epoch AND the
+        // static deployment security-context digest (configured issuer,
+        // region, keyring/revocation state): a cached provider result can
+        // never outlive the security context that produced it — rotating
+        // the issuer, region or an emergency key revocation invalidates
+        // the idempotency namespace instead of returning the historical
+        // answer, exactly as the native hard-security verdicts dominate
+        // even a same-operation retry.
+        $backendId = hash('sha256', $secret.'|'.$expectedScope.'|'.$effectiveEpoch.'|'.$this->securityContextDigest);
 
         // The authoritative transaction binding, resolved before any
         // claim or verification: when a request-binding authority is
@@ -548,11 +577,11 @@ final class SiteVerifyController
         // conflict (the response hash is part of the claim identity), and
         // a `COMPLETE_SAME` entry (same malformed hash) returns the stored
         // canonical result instead of re-finalizing. The owner lease is
-        // the store's fixed configured lease (default 60s) and the waiter
-        // bound the configured `PENDING_SAME` bound (default 90s); neither
-        // is derived from this token's remaining signed validity, so
-        // signed expiry affects only fresh redemptions, never the
-        // retained-state reconstruction.
+        // the store's fixed configured lease (default 60s) and the
+        // per-request `PENDING_SAME` waiter bound (the 2s constant) stays
+        // below it; neither is derived from this token's
+        // remaining signed validity, so signed expiry affects only fresh
+        // redemptions, never the retained-state reconstruction.
         try {
             $token = SolutionToken::decode($response);
         } catch (DecodeError) {
@@ -578,7 +607,7 @@ final class SiteVerifyController
             $claimOwner = null;
             if ($idempotencyKey !== null && $this->idempotencyStore !== null) {
                 try {
-                    [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp), null, $canonicalBinding);
+                    [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp), null, $this->idempotencyBinding($canonicalBinding));
                 } catch (\Throwable) {
                     // The malformed-token claim is a raw store operation:
                     // nothing has been consumed (the decode failed), so a
@@ -643,7 +672,7 @@ final class SiteVerifyController
         if ($idempotencyKey !== null) {
             $idempotent = true;
             try {
-                [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp), null, $canonicalBinding);
+                [$claim, $claimOwner] = $this->idempotencyStore->claim($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp), null, $this->idempotencyBinding($canonicalBinding));
             } catch (\Throwable) {
                 // The claim is a raw store operation (a Redis outage):
                 // nothing has been consumed yet, so a same-key retry is
@@ -807,22 +836,18 @@ final class SiteVerifyController
         // mapping a consumed token to timeout-or-duplicate via the
         // verifier's own replay path.
         //
-        // Two sub-cases of the identity-proven takeover:
-        //  - Committed-result reconstruction: the original attempt
-        //    consumed and committed its deterministic outcome, and the
-        //    retained consumed_result reproduces it without re-deriving
-        //    (ConsumedOutcomeRecovery).
-        //  - Uncommitted-result resume: the original attempt consumed (the
-        //    atomic transition landed and recorded this claim's identity)
-        //    but the response was lost before the derivation/commit, so
-        //    consumed_result stays null forever for the ordinary verifier
-        //    (ConsumeIndeterminate). The resume path is authorized only by
-        //    the exact operation-identity match just proven: the caller
-        //    has shown that this logical operation won the atomic consume,
-        //    so the derivation can be re-run and committed, producing the
-        //    same deterministic outcome the original attempt would have
-        //    committed.
-        $reconstructed = null;
+        // ONE recovery path for the identity-proven takeover, covering
+        // both sub-cases: the core's resumeConsumedOperation() handles a
+        // committed-result record (the retained consumed_result is
+        // accepted only through the rerun hard replay-security context —
+        // record shape, key revocation/signature, scope, exact binding,
+        // region, policy epoch, issuer, minimum duration) and a
+        // resultless record (consumed_result stays null forever for the
+        // ordinary verifier — ConsumeIndeterminate — the resume path is
+        // authorized only by the exact operation-identity match just
+        // proven, so the derivation can be re-run and committed,
+        // producing the same deterministic outcome the original attempt
+        // would have committed).
         $resumeOutcome = null;
         if ($idempotent && $claim === IdempotencyClaim::TookOver) {
             try {
@@ -830,25 +855,30 @@ final class SiteVerifyController
                     ? $this->storage->consumedState($token->nonce)
                     : null;
                 if ($consumed?->operationIdentity === $operationFingerprint) {
-                    if ($consumed->consumedResult !== null) {
-                        // The identity travels into the recovery call: the
-                        // stored valid outcome is released only to the
-                        // exact logical operation (constant-time compare
-                        // inside the recovery; the equality above already
-                        // proved it, and the inner gate keeps the recovery
-                        // API itself from being a replay oracle).
-                        $reconstructed = $this->recovery->recover($response, $operationFingerprint);
-                    } else {
-                        $resumeOutcome = $this->withScopeAttribute($request, $expectedScope, fn () => $this->verifier->resumeConsumedOperation(
-                            $response,
-                            $this->secretKey,
-                            $operationFingerprint,
-                            $expectedScope,
-                            $remoteIp,
-                            $canonicalBinding,
-                            \KiwiCaptcha\RequestBindingExpectation::exact($canonicalBinding),
-                        ));
-                    }
+                    // ONE recovery path for both committed and resultless
+                    // consumed records: the core's
+                    // resumeConsumedOperation() reruns the hard
+                    // replay-security invariants (authenticated record
+                    // shape incl. key resolution and emergency
+                    // revocation, signature, Argon ceilings, scope,
+                    // exact request binding, region, policy epoch,
+                    // issuer, minimum duration) before accepting a
+                    // stored Valid, and re-derives + commits for a
+                    // resultless consume. The provider surface therefore
+                    // never steps around the core's committed-result
+                    // hardening through a read-only reconstruction
+                    // helper: an emergency key revocation after the
+                    // original consume/commit is still enforced on the
+                    // takeover.
+                    $resumeOutcome = $this->withScopeAttribute($request, $expectedScope, fn () => $this->verifier->resumeConsumedOperation(
+                        $response,
+                        $this->secretKey,
+                        $operationFingerprint,
+                        $expectedScope,
+                        $remoteIp,
+                        $canonicalBinding,
+                        \KiwiCaptcha\RequestBindingExpectation::exact($canonicalBinding),
+                    ));
                 }
             } catch (\Throwable) {
                 // A consumed-state or recovery-store outage on the
@@ -857,27 +887,6 @@ final class SiteVerifyController
                 // again once the store is back.
                 return $this->internalErrorResponse();
             }
-        }
-        if ($reconstructed !== null) {
-            $canonicalResponse = $this->outcomeToCanonical($reconstructed);
-            if ($canonicalResponse instanceof JsonResponse) {
-                return $canonicalResponse;
-            }
-            $canonical = $this->canonicalizeResponse($canonicalResponse);
-            if ($claimOwner !== null) {
-                $failed = $this->finalizeSafely($backendId, $idempotencyKey, hash('sha256', $response), $claimOwner, $canonical, $claimedAt);
-                if ($failed !== null) {
-                    return $failed;
-                }
-            }
-            if ($reconstructed->isOk()) {
-                // The crash-recovery success releases too: a crash
-                // between the original consume/commit and its release is
-                // repaired by the first later successful reconstruction.
-                return $this->releaseAndJsonResponse($reconstructed->nonce(), $canonical);
-            }
-
-            return new JsonResponse($canonical);
         }
         if ($resumeOutcome !== null) {
             // The resumed outcome maps through the same canonicalization
@@ -1186,7 +1195,7 @@ final class SiteVerifyController
     private function attemptTakeover(string $backendId, string $idempotencyKey, string $response, ?string $remoteIp, ?string &$claimOwner, ?float &$claimedAt, ?string $canonicalBinding): bool|JsonResponse
     {
         try {
-            [$takeover, $takeoverOwner] = $this->idempotencyStore->takeover($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp), null, $canonicalBinding);
+            [$takeover, $takeoverOwner] = $this->idempotencyStore->takeover($backendId, $idempotencyKey, hash('sha256', $response), 300, $this->remoteipFingerprint($remoteIp), null, $this->idempotencyBinding($canonicalBinding));
         } catch (\Throwable) {
             return $this->internalErrorResponse();
         }

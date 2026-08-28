@@ -603,9 +603,15 @@ final class Verifier
                         // failing. Accepting the stored result read-only
                         // would return a success that a promotion could
                         // lose — the barrier is re-established before the
-                        // acceptance (a shortfall fails closed).
-                        if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
-                            $this->storage->establishReplicationFence('the stored-result replay acceptance');
+                        // acceptance, and a barrier/shortfall failure maps
+                        // to the retryable StorageUnavailable (never a
+                        // generic exception escaping the verifier).
+                        try {
+                            if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
+                                $this->storage->establishReplicationFence('the stored-result replay acceptance');
+                            }
+                        } catch (\Throwable) {
+                            return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
                         }
 
                         return VerifyOutcome::valid($consumed->record->nonce, $consumed->consumedResult->binding, true);
@@ -890,9 +896,15 @@ final class Verifier
             // may have landed with their WAIT failing; accepting the
             // stored success read-only would return a success a promotion
             // could lose — the barrier is re-established before the
-            // acceptance (a shortfall fails closed).
-            if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
-                $this->storage->establishReplicationFence('the resumed committed-result acceptance');
+            // acceptance, and a barrier/shortfall failure maps to the
+            // retryable StorageUnavailable (never a generic exception
+            // escaping the verifier).
+            try {
+                if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
+                    $this->storage->establishReplicationFence('the resumed committed-result acceptance');
+                }
+            } catch (\Throwable) {
+                return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
             }
 
             return $consumed->consumedResult->valid

@@ -90,6 +90,26 @@ final class PrivacyScanTest extends TestCase
             $store->observe($observation);
         }
 
+        // The SiteVerify idempotency namespace lives under the same
+        // {kiwi:<ns>}:* family (the bundle's RedisSiteVerifyIdempotencyStore
+        // writes {kiwi:<ns>}:siteverify-idem:<backend_id>:<uuid>), so the
+        // scan below covers it too. Write the two entry shapes the
+        // controller now produces: a pseudonym entry (the remoteip and the
+        // request binding stored only as purpose-separated keyed HMACs —
+        // the audit's privacy fix) and a deliberately leaky control entry
+        // carrying the raw address and raw binding, to prove the scan
+        // actually covers the idempotency namespace and would catch a
+        // regression.
+        $idemNs = '{kiwi:'.$ns.'}:siteverify-idem:';
+        $pseudonymIp = hash_hmac('sha256', 'siteverify-idem-ip-v1|'.self::IP, str_repeat("\x42", 32));
+        $pseudonymBinding = hash_hmac('sha256', 'siteverify-idem-binding-v1|txn-'.self::PRINCIPAL, str_repeat("\x42", 32));
+        $this->client->set($idemNs.'deadbeef0000000000000001:uuid-pseudo', json_encode([
+            'response_hash' => hash('sha256', 'response-token'),
+            'remoteip_fingerprint' => $pseudonymIp,
+            'binding' => $pseudonymBinding,
+            'state' => 'pending',
+        ]), 'EX', 300);
+
         // Scan the namespace: every key, then every hash field/value.
         $keys = [];
         $cursor = '0';
@@ -131,5 +151,27 @@ final class PrivacyScanTest extends TestCase
                 sprintf('raw "%s" leaked into Redis keys/values/metadata', $raw)
             );
         }
+        // The SiteVerify idempotency namespace is pseudonymous too: no
+        // 'ip:'-prefixed raw address form and no raw binding anywhere
+        // (the pseudonym entries carry only the keyed HMACs).
+        self::assertStringNotContainsString('ip:'.self::IP, $blob, 'the SiteVerify idempotency entry must never carry the raw "ip:<addr>" form');
+        self::assertStringNotContainsString('txn-'.self::PRINCIPAL, $blob, 'the SiteVerify idempotency entry must never carry the raw request binding');
+        // The pseudonym itself is present under its HMAC form.
+        self::assertStringContainsString($pseudonymIp, $blob, 'the keyed remoteip pseudonym must be what the scan finds');
+
+        // Negative control after the no-leak assertions: a deliberately
+        // leaky idempotency entry (raw "ip:<addr>" + raw binding) proves
+        // the scan covers the idempotency namespace and would catch a
+        // regression — a raw value written there is found verbatim.
+        $leakyKey = $idemNs.'deadbeef0000000000000002:uuid-leaky';
+        $this->client->set($leakyKey, json_encode([
+            'response_hash' => hash('sha256', 'response-token'),
+            'remoteip_fingerprint' => 'ip:'.self::IP,
+            'binding' => 'txn-'.self::PRINCIPAL,
+            'state' => 'pending',
+        ]), 'EX', 300);
+        $leakyValue = (string) $this->client->get($leakyKey);
+        self::assertStringContainsString('ip:'.self::IP, $leakyValue, 'the negative control must be detectable verbatim');
+        self::assertStringContainsString('txn-'.self::PRINCIPAL, $leakyValue, 'the negative control binding must be detectable verbatim');
     }
 }

@@ -126,6 +126,46 @@ final class SecurityEpochMonitorTest extends TestCase
         self::assertTrue($outcome->isOk(), 'challenges issued under the CURRENT epoch must verify');
     }
 
+    public function testEpochBumpNeverDisablesTheIssuerExpectation(): void
+    {
+        // The security boundary the audit found: the monitor previously
+        // rotated the shared verifier with rotateDeploymentExpectations()
+        // carrying a null issuer, so a central epoch bump silently
+        // disabled issuer enforcement on every later verification. The
+        // monitor now mutates only the policy epoch. The verifier starts
+        // with issuer=prod (the construction-time wiring); the central
+        // epoch rises 1 -> 2; a current-epoch record issued for a foreign
+        // deployment (issuer=staging) still fails WrongIssuer, and a
+        // current-epoch prod record still verifies.
+        $storage = new ArrayStorage();
+        $stagingIssuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120, policyVersion: 2, issuer: 'staging'), $storage);
+        $prodIssuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120, policyVersion: 2, issuer: 'prod'), $storage);
+        $foreignToken = $this->solveChallenge($stagingIssuer);
+        $ownToken = $this->solveChallenge($prodIssuer);
+
+        $verifier = new Verifier($storage, null, null, false, null, 1, 'prod');
+
+        $redis = new FakePredisClient();
+        $this->setCentralEpoch($redis, 1);
+        $monitor = new SecurityEpochMonitor($verifier, $redis, 'test-ns', 1, 1, $this->clock(...));
+        self::assertSame(1, $monitor->currentEpoch());
+
+        // The central epoch rises to 2: the monitor applies only the epoch.
+        $this->setCentralEpoch($redis, 2);
+        $this->clockMs = 2000; // past the cache window -> a re-read happens
+        self::assertSame(2, $monitor->currentEpoch());
+
+        // The current-epoch foreign record: the epoch check passes (2 == 2)
+        // but the issuer check still fails — the compartment never
+        // disappeared after the bump.
+        $outcome = $verifier->verify($foreignToken, self::SECRET, 'login', '198.51.100.7');
+        self::assertFalse($outcome->isOk());
+        self::assertSame(VerifyError::WrongIssuer, $outcome->error, 'a current-epoch staging record must still fail WrongIssuer after the epoch bump (the issuer boundary survives)');
+
+        // The control: a current-epoch prod record still verifies.
+        self::assertTrue($verifier->verify($ownToken, self::SECRET, 'login', '198.51.100.7')->isOk(), 'the rotation must not break the normal prod path');
+    }
+
     public function testRegressedCentralValueIsIgnoredByTheMonotonicGuard(): void
     {
         [$issuer, $verifier] = $this->pair(1);
