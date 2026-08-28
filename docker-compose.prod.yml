@@ -215,8 +215,8 @@ services:
   # --profile monitoring — see ci/stages/deploy.sh / deploy/scripts/deploy.sh).
   grafana:
     environment:
-      # Audit fix: NO default admin password in production. ${VAR:?...} makes
-      # compose fail fast with this exact message when the env var is unset;
+      # Audit fix: NO default admin password in production. The :? guard
+      # below makes compose fail fast with this exact message when unset;
       # the dev base file's "changeme" default can never reach production.
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set in production (Grafana admin login) — add it to .env}
 
