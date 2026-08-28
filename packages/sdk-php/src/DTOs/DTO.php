@@ -38,12 +38,23 @@ abstract class DTO implements \ArrayAccess, \JsonSerializable
         return json_encode($this->data, $flags);
     }
 
-    /** Re-create from a JSON string. */
-    public static function fromJson(string $json, string $class = self::class): static
+    /**
+     * Re-create from a JSON string.
+     *
+     * The class defaults to static::class (the CALLED class), never
+     * self::class: DTO is abstract, and the pre-fix default lexical binding
+     * made Message::fromJson('{"id":"m1"}') fatal with "Cannot instantiate
+     * abstract class ApexMail\DTOs\DTO".
+     */
+    public static function fromJson(string $json, ?string $class = null): static
     {
         $data = json_decode($json, true, 512, JSON_THROW_ON_ERROR);
         if (!is_array($data)) {
             throw new \InvalidArgumentException('JSON must decode to an object');
+        }
+        $class ??= static::class;
+        if (!is_subclass_of($class, self::class) && $class !== self::class) {
+            throw new \InvalidArgumentException($class . ' is not a DTO subclass');
         }
         return new $class($data);
     }

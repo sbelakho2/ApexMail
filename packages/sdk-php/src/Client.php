@@ -23,7 +23,7 @@ namespace ApexMail;
 
 class Client
 {
-    public const SDK_VERSION     = '1.0.0';
+    public const SDK_VERSION     = '1.0.1';
     public const DEFAULT_URL     = 'https://api.apexmail.ee';
     public const DEFAULT_MAX_RESPONSE_BYTES = 20971520;
     /** Upper bound for retry delays; the server's Retry-After is honored in full up to this cap. */
@@ -64,9 +64,28 @@ class Client
             // production URLs must use HTTPS.
             throw new \InvalidArgumentException('baseUrl must use HTTPS');
         }
-        $this->timeout = (int) ($options['timeout'] ?? 30);
-        $this->maxRetries = (int) ($options['maxRetries'] ?? 3);
-        $this->maxResponseBytes = (int) ($options['maxResponseBytes'] ?? self::DEFAULT_MAX_RESPONSE_BYTES);
+        // Numeric options are validated, not silently coerced: a 0/negative
+        // timeout means "no timeout" in cURL (an infinite hang), a 0
+        // maxResponseBytes makes the write callback reject the first chunk
+        // of every response, and negative retries silently mean "no
+        // retries". Fail fast with a clear message instead.
+        $timeout = $options['timeout'] ?? 30;
+        if (!is_numeric($timeout) || (int) $timeout < 1) {
+            throw new \InvalidArgumentException('timeout must be an integer of at least 1 second');
+        }
+        $this->timeout = (int) $timeout;
+
+        $maxRetries = $options['maxRetries'] ?? 3;
+        if (!is_numeric($maxRetries) || (int) $maxRetries < 0) {
+            throw new \InvalidArgumentException('maxRetries must be an integer of at least 0');
+        }
+        $this->maxRetries = (int) $maxRetries;
+
+        $maxResponseBytes = $options['maxResponseBytes'] ?? self::DEFAULT_MAX_RESPONSE_BYTES;
+        if (!is_numeric($maxResponseBytes) || (int) $maxResponseBytes < 1) {
+            throw new \InvalidArgumentException('maxResponseBytes must be an integer of at least 1');
+        }
+        $this->maxResponseBytes = (int) $maxResponseBytes;
 
         $this->emails       = new Resources\Emails($this);
         $this->domains      = new Resources\Domains($this);
@@ -95,6 +114,17 @@ class Client
         ?string $idempotencyKey = null,
     ): array {
         $url = $this->baseUrl . $path;
+
+        // Duplicate-side-effect protection (SDK-B, extended beyond send): a
+        // POST that times out AFTER the server processed it retries blind —
+        // creating a second webhook/template/API key. Every non-idempotent
+        // request without a caller-supplied key gets one generated here,
+        // BEFORE the retry loop, so all attempts of this call present the
+        // same key and the server deduplicates.
+        $methodUpper = strtoupper($method);
+        if ($idempotencyKey === null && $body !== null && $methodUpper === 'POST') {
+            $idempotencyKey = self::uuid4();
+        }
 
         // SDK-G L4: serialize the body BEFORE opening the cURL handle so a
         // JsonException can never leak an open handle, and so each retry
@@ -129,7 +159,13 @@ class Client
                 'User-Agent: apexmail-php/' . self::SDK_VERSION,
             ];
             if ($idempotencyKey !== null) {
-                $headers[] = 'X-Idempotency-Key: ' . $idempotencyKey;
+                // Header injection: the caller-supplied key flows into a raw
+                // cURL header. Strip control bytes (CR/LF/NUL) and cap the
+                // length; printable-token validation happens where the key
+                // is generated (uuid4) and any hostile input collapses to a
+                // harmless value here rather than splitting the request.
+                $safeKey = preg_replace('/[\x00-\x1F\x7F]/', '', $idempotencyKey) ?? '';
+                $headers[] = 'X-Idempotency-Key: ' . substr($safeKey, 0, 128);
             }
 
             $responseBody = '';
@@ -199,7 +235,16 @@ class Client
             }
 
             if ($responseTooLarge) {
-                throw new Exceptions\NetworkException('Response body exceeds maxResponseBytes', 0);
+                // Deterministic application failure: callers that treat
+                // NetworkException as "transport error, safe to retry" must
+                // not re-attempt (and for non-idempotent POSTs, duplicate)
+                // a request that will fail identically on every retry.
+                throw new Exceptions\ApiException(
+                    'Response body exceeds maxResponseBytes',
+                    $statusCode > 0 ? $statusCode : 0,
+                    'RESPONSE_TOO_LARGE',
+                    []
+                );
             }
 
             if ($curlError) {
@@ -256,21 +301,40 @@ class Client
      */
     private function sleepRetryAfter(?string $retryAfter, int $attempt): void
     {
-        usleep((int) (self::computeRetryDelay($retryAfter, $attempt) * 1_000_000));
+        $delay = self::computeRetryDelay($retryAfter, $attempt + 1);
+        self::sleepWithJitter($delay);
     }
 
     private function sleepBackoff(int $attempt): void
     {
-        usleep((int) (self::computeRetryDelay(null, $attempt) * 1_000_000));
+        self::sleepWithJitter(self::computeRetryDelay(null, $attempt + 1));
+    }
+
+    /**
+     * Sleep delay seconds with up to ±20% jitter: without jitter every
+     * client that received the same 429 retries in lockstep (thundering
+     * herd). Jitter is applied symmetrically so the honored Retry-After
+     * window is never shortened by more than 20%.
+     */
+    private static function sleepWithJitter(float $delay): void
+    {
+        $jitter = $delay * 0.2;
+        $actual = $delay + (random_int(-1, 1) * $jitter * (random_int(0, 100) / 100));
+        usleep((int) (max(0.0, $actual) * 1_000_000));
     }
 
     /**
      * Pure delay computation (unit-testable, no sleeping):
      * delay = min(max(quadraticBackoff, retryAfterSeconds), 120.0).
+     *
+     * $attempt is the retry NUMBER about to run (1 = first retry): the
+     * pre-fix code passed 0 for the first retry, producing a 0s delay — an
+     * immediate hammer at a server that had just said "slow down" — and
+     * burned a retry against the still-warm failure.
      */
     public static function computeRetryDelay(?string $retryAfter, int $attempt): float
     {
-        $backoff = self::calculateBackoff($attempt);
+        $backoff = self::calculateBackoff(max(1, $attempt));
 
         if ($retryAfter !== null && $retryAfter !== '') {
             $retryAfterSeconds = -1;
@@ -322,12 +386,26 @@ class Client
         );
     }
 
+    /**
+     * Verify an ApexMail webhook signature.
+     *
+     * The platform delivers (see worker-processors/src/webhook/processor.rs):
+     *   X-ApexMail-Signature: sha256=<hex hmac>
+     *   X-ApexMail-Timestamp: <milliseconds since epoch>
+     * and signs the message "{timestamp_millis}.{payload}" with HMAC-SHA256.
+     *
+     * Pass BOTH headers; the timestamp may be milliseconds (platform) or
+     * seconds and is auto-detected. The legacy Stripe-style single header
+     * "t=<seconds>,v1=<hex>" is still accepted for backwards compatibility,
+     * as is an explicit $timestamp override (seconds or milliseconds).
+     */
     public static function verifyWebhookSignature(
         string $payload,
         string|array|null $signatureHeader,
         string $secret,
         int $toleranceSeconds = 300,
         ?int $timestamp = null,
+        ?string $timestampHeader = null,
     ): bool {
         if ($signatureHeader === null || $signatureHeader === '' || $secret === '') {
             return false;
@@ -341,22 +419,34 @@ class Client
         }
 
         $parsed = self::parseSignatureHeader($signatureHeader);
-        $timestampValue = $timestamp ?? ($parsed['timestamp'] ?? null);
         $signature = $parsed['signature'] ?? null;
-        if ($timestampValue === null || $signature === null || $signature === '') {
-            return false;
-        }
-        if (!is_numeric($timestampValue)) {
+        if ($signature === null || $signature === '') {
             return false;
         }
 
-        $timestampInt = (int) $timestampValue;
-        $now = time();
-        if (abs($now - $timestampInt) > $toleranceSeconds) {
+        // Timestamp resolution order: explicit argument, the platform's
+        // X-ApexMail-Timestamp header, then the legacy t= header field.
+        $timestampValue = $timestamp ?? $timestampHeader ?? ($parsed['timestamp'] ?? null);
+        if ($timestampValue === null || !is_numeric($timestampValue)) {
             return false;
         }
 
-        $signedPayload = $timestampInt . '.' . $payload;
+        // Auto-detect seconds vs milliseconds: anything past 2001-09-09 in
+        // integer terms cannot be seconds and anything before 2001 cannot be
+        // milliseconds. 1e12 = 2001-09-09T01:46:40Z.
+        $timestampString = (string) $timestampValue;
+        $asInt = (int) $timestampValue;
+        $isMilliseconds = strlen(preg_replace('/\D/', '', $timestampString) ?? '') > 11
+            || $asInt > 1_000_000_000_000;
+        $timestampSeconds = $isMilliseconds ? intdiv($asInt, 1000) : $asInt;
+
+        if (abs(time() - $timestampSeconds) > $toleranceSeconds) {
+            return false;
+        }
+
+        // The signature input uses the timestamp EXACTLY as delivered
+        // (milliseconds on the platform path) — never a normalized form.
+        $signedPayload = $timestampString . '.' . $payload;
         $expected = hash_hmac('sha256', $signedPayload, $secret);
         if (strlen($expected) !== strlen($signature)) {
             return false;
@@ -397,22 +487,48 @@ class Client
 
     // ── Private ─────────────────────────────────────────────────────────────
 
+    /** @var array|null Envelope metadata (has_more, next_cursor, ...) of the last list response. */
+    private ?array $lastResponseMeta = null;
+
+    /**
+     * Pagination metadata of the last list response: the API envelope is
+     * {"data": [...], "meta": {"has_more": bool, "next_cursor": "..."}} and
+     * the SDK unwraps `data` for the resource methods. Without this
+     * accessor, cursor pagination was unusable — the next cursor was
+     * decoded and then silently discarded.
+     */
+    public function getLastResponseMeta(): ?array
+    {
+        return $this->lastResponseMeta;
+    }
+
+    /** Convenience: the next-page cursor of the last list response, if any. */
+    public function getNextCursor(): ?string
+    {
+        $cursor = $this->lastResponseMeta['next_cursor'] ?? null;
+        return \is_string($cursor) && $cursor !== '' ? $cursor : null;
+    }
+
     private function decodeResponseBody(string $responseBody): array
     {
         $decoded = json_decode($responseBody, true, 512, JSON_THROW_ON_ERROR);
 
         if (is_array($decoded)) {
-            // SDK-111: Unwrap API envelope {"data": ..., "meta": ...}
-            if (isset($decoded['data'])) {
-                $data = $decoded['data'];
-                if (is_array($data)) {
-                    return $data;
-                }
+            // SDK-111: Unwrap API envelope {"data": ..., "meta": ...}.
+            // Only unwrap when the envelope shape is unambiguous: a `data`
+            // key holding an array, optionally alongside `error`/`meta`.
+            // A lone `data` array (no envelope siblings) is also an array
+            // payload — return it as-is so nested resources keep their shape.
+            if (isset($decoded['data']) && is_array($decoded['data'])
+                && (isset($decoded['meta']) || isset($decoded['error']) || array_keys($decoded) === ['data'])) {
+                $this->lastResponseMeta = isset($decoded['meta']) && is_array($decoded['meta'])
+                    ? $decoded['meta']
+                    : null;
+                return $decoded['data'];
             }
-            return $decoded;
         }
 
-        return [];
+        return is_array($decoded) ? $decoded : [];
     }
 
     private function normalizeRateLimit(array $rateLimit): ?array

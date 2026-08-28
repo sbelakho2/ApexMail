@@ -2,7 +2,7 @@
   "name": "apexmail/apexmail-php",
   "description": "Official PHP SDK for the ApexMail transactional email API",
   "type": "library",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "license": "MIT",
   "homepage": "https://apexmail.ee",
   "keywords": ["email", "transactional", "api", "sdk"],

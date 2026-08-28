@@ -10,7 +10,7 @@ composer require apexmail/apexmail-php
 
 ## Quick Start
 
-Use your real ApexMail API key in place of `am_live_xxxxxxxxxxxx`; the value shown below is a placeholder.
+Use your real ApexMail API key in place of `am_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`; the value shown below is a placeholder.
 
 ```php
 <?php
@@ -19,7 +19,7 @@ require 'vendor/autoload.php';
 
 use ApexMail\Client;
 
-$client = new Client('am_live_xxxxxxxxxxxx');
+$client = new Client('am_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');
 
 $response = $client->emails->send([
     'from'    => 'hello@yourdomain.com',
@@ -128,7 +128,7 @@ try {
 ## Configuration
 
 ```php
-$client = new Client('am_live_xxxx', [
+$client = new Client('am_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', [
     'baseUrl'          => 'https://api.apexmail.ee',  // Custom API endpoint
     'timeout'          => 30,                          // Request timeout in seconds
     'maxRetries'       => 3,                           // Number of retries

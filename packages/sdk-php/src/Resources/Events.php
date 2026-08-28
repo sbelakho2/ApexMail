@@ -56,11 +56,17 @@ class Events
      *
      * @param string $messageId  The email ID returned by emails.send()
      */
-    public function getByMessage(string $messageId): array
+    /**
+     * Events for one message. The limit is exposed (default 100, server
+     * cap) and the client's getNextCursor()/getLastResponseMeta() carry the
+     * continuation when a retry storm produced more events than one page.
+     */
+    public function getByMessage(string $messageId, int $limit = 100): array
     {
+        $limit = max(1, min(100, $limit));
         return $this->client->request(
             'GET',
-            '/v1/events?messageId=' . urlencode($messageId) . '&limit=100'
+            '/v1/events?messageId=' . urlencode($messageId) . '&limit=' . $limit
         );
     }
 

@@ -435,11 +435,13 @@ try {
 
 echo "\nRetry delay computation\n";
 
-expect('Retry-After 60 → 60s delay (not capped at 5)', \ApexMail\Client::computeRetryDelay('60', 0) === 60.0);
-expect('Retry-After 300 → capped at 120s', \ApexMail\Client::computeRetryDelay('300', 0) === 120.0);
-expect('no Retry-After, attempt 0 → 0s backoff', \ApexMail\Client::computeRetryDelay(null, 0) === 0.0);
-expect('no Retry-After, attempt 2 → 2s backoff', \ApexMail\Client::computeRetryDelay(null, 2) === 2.0);
-expect('garbage Retry-After falls back to backoff', \ApexMail\Client::computeRetryDelay('not-a-date', 1) === 0.5);
+expect('Retry-After 60 → 60s delay (not capped at 5)', \ApexMail\Client::computeRetryDelay('60', 1) === 60.0);
+expect('Retry-After 300 → capped at 120s', \ApexMail\Client::computeRetryDelay('300', 1) === 120.0);
+// The argument is the retry NUMBER about to run: the first retry delays
+// 0.5s (the pre-fix 0s fired immediately at a server that said slow down).
+expect('no Retry-After, first retry → 0.5s backoff', \ApexMail\Client::computeRetryDelay(null, 1) === 0.5);
+expect('no Retry-After, third retry → 4.5s backoff', \ApexMail\Client::computeRetryDelay(null, 3) === 4.5);
+expect('garbage Retry-After falls back to backoff', \ApexMail\Client::computeRetryDelay('not-a-date', 2) === 2.0);
 expect('uuid4() shape', (bool) preg_match('/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/', \ApexMail\Client::uuid4()));
 expect('uuid4() uniqueness', \ApexMail\Client::uuid4() !== \ApexMail\Client::uuid4());
 
@@ -560,13 +562,16 @@ if ($stubReady) {
             expect('429 exposes Retry-After header', $e->getRetryAfter() === '60');
         }
 
-        // Non-happy-path: huge body rejected by the streaming cap.
+        // Non-happy-path: huge body rejected by the streaming cap. This is a
+        // DETERMINISTIC failure (RESPONSE_TOO_LARGE ApiException), not a
+        // transport error — callers must not treat it as retryable.
         $client = stub_client(0, 1024);
         try {
             $client->request('GET', '/huge');
             assert_fail('oversized body throws', 'no exception thrown');
-        } catch (\ApexMail\Exceptions\NetworkException $e) {
-            expect('oversized body throws NetworkException', str_contains($e->getMessage(), 'maxResponseBytes'));
+        } catch (\ApexMail\Exceptions\ApiException $e) {
+            expect('oversized body throws ApiException', str_contains($e->getMessage(), 'maxResponseBytes'));
+            expect('oversized body carries RESPONSE_TOO_LARGE', $e->getApiCode() === 'RESPONSE_TOO_LARGE');
         }
     } finally {
         proc_terminate($proc);

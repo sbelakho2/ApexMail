@@ -36,16 +36,21 @@ class Emails
      */
     public function send(array $params): array
     {
-        if (empty($params['from'])) {
+        // isset + trim checks, NOT empty(): in PHP empty("0") === true, so
+        // a transactional email whose subject or body is literally "0"
+        // (counters, order states) was rejected as "required field missing".
+        if (!isset($params['from']) || trim((string) $params['from']) === '') {
             throw new \InvalidArgumentException('"from" is required');
         }
-        if (empty($params['to'])) {
+        if (!isset($params['to']) || trim((string) $params['to']) === '') {
             throw new \InvalidArgumentException('"to" is required');
         }
-        if (empty($params['subject'])) {
+        if (!isset($params['subject']) || trim((string) $params['subject']) === '') {
             throw new \InvalidArgumentException('"subject" is required');
         }
-        if (empty($params['html']) && empty($params['text'])) {
+        $htmlSet = isset($params['html']) && trim((string) $params['html']) !== '';
+        $textSet = isset($params['text']) && trim((string) $params['text']) !== '';
+        if (!$htmlSet && !$textSet) {
             throw new \InvalidArgumentException('Either "html" or "text" body is required');
         }
 
