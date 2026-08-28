@@ -1082,11 +1082,7 @@ fn row_to_detail(r: MessageRow) -> MessageDetail {
 }
 
 /// Validate a send request before enqueueing.
-///
-/// `pub(crate)`: the public API-explorer sandbox (routes/explorer.rs) runs
-/// the SAME validation for its `send` lane — playground requests must fail
-/// exactly like production traffic.
-pub(crate) async fn validate_send(
+async fn validate_send(
     body: &SendMessageRequest,
     db: &sqlx::PgPool,
     tenant_id: &str,
