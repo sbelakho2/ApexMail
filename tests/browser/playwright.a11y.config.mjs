@@ -17,7 +17,7 @@ export default defineConfig({
     { name: 'webkit', use: { browserName: 'webkit' } },
   ],
   webServer: {
-    command: 'php -S 127.0.0.1:8087 router.php',
+    command: 'php -d opcache.jit=off -S 127.0.0.1:8087 router.php',
     url: 'http://127.0.0.1:8087/',
     reuseExistingServer: false,
     timeout: 30_000,
