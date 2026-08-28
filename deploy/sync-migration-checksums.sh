@@ -53,7 +53,12 @@ while IFS=$'\t' read -r version checksum name; do
     CURRENT=$(psql "$DATABASE_URL" -t -A -c \
         "SELECT checksum FROM _sqlx_migrations WHERE version = ${version};")
     [ -z "$CURRENT" ] && { echo "note: version ${version} (${name}) not applied yet — migrator will apply it"; continue; }
-    if [ "$CURRENT" != "$CHECKSUM" ]; then
+    # psql renders bytea as "\x<hex>"; strip the prefix so the comparison is
+    # hex-to-hex. Without this every row compares unequal (leading "\x") and
+    # the script rewrites all of them on every run, hiding which files really
+    # changed.
+    CURRENT_HEX="${CURRENT#\\x}"
+    if [ "$CURRENT_HEX" != "$checksum" ]; then
         echo "update: v${version} (${name})"
         psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c \
             "UPDATE _sqlx_migrations SET checksum = '\\x${checksum}' WHERE version = ${version};" >/dev/null
