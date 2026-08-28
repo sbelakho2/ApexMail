@@ -151,6 +151,22 @@ final class Verifier
     public const MAX_PARALLELISM = 4;
 
     /**
+     * The resume re-derivation claim lease, in seconds. The claim must
+     * cover the maximum supported derivation duration so a legitimate
+     * derivation never outlives its own claim. 60 seconds is far beyond
+     * the worst Argon2id derivation under the process ceilings
+     * ({@see self::MAX_ARGON_MEMORY_KIB} x {@see self::MAX_ARGON_TIME},
+     * a few seconds at most) plus the surrounding cheap phase and
+     * commit. The {@see VerificationAdmissionGate} interface exposes no
+     * lease TTL to read (the bundle's semaphore lease is internal), so
+     * the claim keeps the Rust `CLAIM_TTL_SECS` value. Fencing is still
+     * correct when the claim expires: a stale owner can never commit
+     * through a claim it no longer holds; the TTL exists to preserve
+     * the single-derivation efficiency property.
+     */
+    private const RESUME_CLAIM_TTL_SECS = 60;
+
+    /**
      * @var \Closure|null clock override for tests
      */
     private $now;
@@ -781,12 +797,17 @@ final class Verifier
      * The re-derivation is claimed when the storage offers the
      * {@see ResumeDerivationClaimInterface} capability: exactly one
      * concurrent same-operation recovery derives and commits under a
-     * short-TTL `resume-claim:<nonce>` owner token. The losers re-read
+     * short-TTL owner token embedded in the record envelope, never a
+     * second Redis key (single-slot on a Cluster).
+     * The losers re-read
      * and resolve the winner's committed outcome (or the retryable
      * ConsumeIndeterminate while it has not landed). The
-     * claim is acquired only after the cheap-phase revalidation and the
-     * admission gate, released via compare-and-delete on every early
-     * return (expiry, derivation failure, storage failure), and cleared
+     * claim is acquired before the admission gate: a claim loser never
+     * touches an Argon capacity slot, and a refused or unavailable
+     * lease releases the claim it held, so a CapacityExceeded
+     * loser never leaves a poison claim behind. The
+     * claim is released via compare-and-delete on every early
+     * return (expiry, derivation failure, storage failure) and cleared
      * atomically with the commit. A storage without the capability
      * resumes byte-identically to the legacy path: every concurrent
      * recovery derives, and the deterministic outcome converges on the
@@ -967,43 +988,30 @@ final class Verifier
             return VerifyOutcome::invalid($failure);
         }
 
-        // Argon2id admission still applies: the resumed derivation is as
-        // expensive as the original, so the gate bounds it the same way.
-        // Exhaustion rejects without committing (the record stays
-        // consumed-without-result, and a later retry can resume again
-        // once capacity is available).
-        $lease = null;
-        if ($record->algorithm === PoWAlgorithm::Argon2id && $this->argonGate !== null) {
-            try {
-                $lease = $this->argonGate->acquire();
-            } catch (\Throwable) {
-                return VerifyOutcome::invalid(VerifyError::AdmissionUnavailable);
-            }
-            if ($lease === null) {
-                return VerifyOutcome::invalid(VerifyError::CapacityExceeded);
-            }
-        }
-
         // The atomic re-derivation claim with an owner token (a storage
         // with the {@see ResumeDerivationClaimInterface} capability):
         // exactly one concurrent same-operation recovery derives; the
         // losers re-read and resolve the winner's committed outcome
         // (never an unsynchronized derive storm). The claim is a
-        // short-TTL lease keyed by the nonce, recorded atomically and
-        // only for a consumed-resultless record, and released on every
-        // early return via compare-and-delete below; a process crash
-        // leaves only the short lease, never a poison marker. The
-        // claim sits after the cheap-phase revalidation and the
-        // admission gate (a refused or unavailable capacity lease must
-        // not poison the claim for later retries) and before the
-        // expensive derivation. A storage without the capability keeps
-        // the legacy behavior byte-identically: every concurrent
-        // recovery derives, and the deterministic outcome converges on
-        // the single committed result either way.
+        // short-TTL lease embedded in the record envelope — single-key,
+        // Cluster-safe — recorded atomically and only for a
+        // consumed-resultless record, and released on every early
+        // return via compare-and-delete below; a process crash leaves
+        // only the short lease, never a poison marker. The claim sits
+        // after the cheap-phase revalidation and before the admission
+        // gate: a claim loser never acquires an Argon capacity slot
+        // (audit fix: the old order leaked a slot for the whole lease
+        // TTL), and a refused or unavailable capacity lease releases
+        // the claim it held in the finally below, so a CapacityExceeded
+        // loser never leaves a poison claim behind for later retries. A
+        // storage without the capability keeps the legacy behavior
+        // byte-identically: every concurrent recovery derives, and the
+        // deterministic outcome converges on the single committed
+        // result either way.
         $claimOwner = null;
         if ($this->storage instanceof ResumeDerivationClaimInterface) {
             try {
-                $claimOwner = $this->storage->claimResumeDerivation($record->nonce);
+                $claimOwner = $this->storage->claimResumeDerivation($record->nonce, self::RESUME_CLAIM_TTL_SECS);
             } catch (\Throwable) {
                 // Fail closed: a claim that cannot be established must
                 // never fall back to an unsynchronized derive storm (the
@@ -1012,12 +1020,13 @@ final class Verifier
                 return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
             }
             if ($claimOwner === null) {
-                // Claim refused: another recovery holds the claim (or
+                // Claim refused: another recovery holds a live claim (or
                 // the record stopped being resultless). Re-read the
                 // retained state and resolve the winner's committed
                 // outcome; while the winner has not committed yet, the
                 // retryable ConsumeIndeterminate answers (the Rust
-                // mirror), never a second derivation.
+                // mirror), never a second derivation. No Argon slot was
+                // ever acquired on this path.
                 try {
                     $loserState = $this->storage->consumedState($record->nonce);
                 } catch (\Throwable) {
@@ -1031,7 +1040,27 @@ final class Verifier
             }
         }
 
+        $lease = null;
         try {
+            // Argon2id admission still applies: the resumed derivation is
+            // as expensive as the original, so the gate bounds it the
+            // same way. Exhaustion rejects without committing (the record
+            // stays consumed-without-result, and a later retry can resume
+            // again once capacity is available). The claim is held by
+            // now; a refused or unavailable lease returns through the
+            // finally below, which releases the claim (no 60s poison for
+            // the next retry).
+            if ($record->algorithm === PoWAlgorithm::Argon2id && $this->argonGate !== null) {
+                try {
+                    $lease = $this->argonGate->acquire();
+                } catch (\Throwable) {
+                    return VerifyOutcome::invalid(VerifyError::AdmissionUnavailable);
+                }
+                if ($lease === null) {
+                    return VerifyOutcome::invalid(VerifyError::CapacityExceeded);
+                }
+            }
+
             $hash = $this->deriveHash($record, $token->counter);
             if ($hash === null) {
                 // An Argon2id record whose parameters are within the

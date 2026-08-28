@@ -869,13 +869,16 @@ final class RedisStorageTest extends TestCase
 
     public function testResumeClaimLifecycleWithTheAtomicLua(): void
     {
-        // The re-derivation claim: ONE Lua script fuses the
-        // claimability check with the SET NX of a fresh random owner
-        // token under `resume-claim:<nonce>` with the 60-second TTL.
-        // The second caller is refused while the claim is held; the
-        // compare-and-delete release only ever releases the true owner;
-        // the claim-bearing commit clears the claim atomically with the
-        // result write.
+        // The re-derivation claim: ONE Lua script over the record key
+        // fuses the claimability check with the envelope splice of the
+        // fresh random owner token and its expiry (`resume_owner` /
+        // `resume_until`). The second caller is refused while a live
+        // claim is held; the compare-and-delete release only ever
+        // releases the true owner; the claim-bearing commit clears the
+        // claim atomically with the result write. The claim lives in
+        // the record envelope, never in a second key, so every claim,
+        // release and claim-bearing commit EVAL declares exactly one
+        // key (single-slot on a Redis Cluster, never `CROSSSLOT`).
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());
@@ -883,12 +886,19 @@ final class RedisStorageTest extends TestCase
 
         $owner = $storage->claimResumeDerivation('redis-nonce-1');
         self::assertIsString($owner, 'a consumed, resultless record is claimable');
-        self::assertSame(60, $client->expirations['kiwicaptcha:resume-claim:redis-nonce-1'] ?? null, 'the claim must carry the 60s TTL');
+        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame($owner, $data['resume_owner'] ?? null, 'the claim owner is embedded in the record envelope');
+        self::assertGreaterThan(time(), $data['resume_until'] ?? 0, 'the claim must carry a future expiry');
+        self::assertLessThanOrEqual(time() + 60, $data['resume_until'] ?? 0, 'the claim expiry must be the 60s lease');
         self::assertNull($storage->claimResumeDerivation('redis-nonce-1'), 'a second claim while the first is held must be refused');
 
         self::assertFalse($storage->releaseResumeDerivation('redis-nonce-1', 'not-the-owner'), 'a stale owner can never release the claim');
+        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame($owner, $data['resume_owner'] ?? null, 'the refused release leaves the claim with its true owner');
         self::assertTrue($storage->releaseResumeDerivation('redis-nonce-1', $owner), 'the true owner releases the claim');
-        self::assertNull($client->store['kiwicaptcha:resume-claim:redis-nonce-1'] ?? null, 'the release deleted the claim key');
+        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        self::assertArrayNotHasKey('resume_owner', $data, 'the release cleared the claim from the envelope');
+        self::assertArrayNotHasKey('resume_until', $data, 'the release cleared the claim expiry from the envelope');
 
         // Claim again, then commit through the claim: the result lands
         // and the claim is cleared in the same transition.
@@ -897,21 +907,74 @@ final class RedisStorageTest extends TestCase
         self::assertFalse($storage->commitResultResume('redis-nonce-1', true, 'txn-1', 'not-the-owner'), 'a stale owner can never commit');
         $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
         self::assertNull($data['consumed_result'], 'the refused claim-bearing commit writes nothing');
-        self::assertSame($owner, $client->store['kiwicaptcha:resume-claim:redis-nonce-1'] ?? null, 'the true owner still holds the claim after the refused commit');
+        self::assertSame($owner, $data['resume_owner'] ?? null, 'the true owner still holds the claim after the refused commit');
 
         self::assertTrue($storage->commitResultResume('redis-nonce-1', true, 'txn-1', $owner), 'the true owner commits through the claim');
-        self::assertNull($client->store['kiwicaptcha:resume-claim:redis-nonce-1'] ?? null, 'the successful commit cleared the claim in the same transition');
+        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame(['valid' => true, 'binding' => 'txn-1'], $data['consumed_result'], 'the claim-bearing commit stores the result');
+        self::assertArrayNotHasKey('resume_owner', $data, 'the successful commit cleared the claim in the same transition');
+        self::assertArrayNotHasKey('resume_until', $data, 'the successful commit cleared the claim expiry in the same transition');
         self::assertNull($storage->claimResumeDerivation('redis-nonce-1'), 'a committed record is no longer claimable');
 
-        $evals = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'EVAL'));
-        $claimEvals = array_values(array_filter($evals, fn ($e) => str_starts_with((string) $e[1][0], '-- kiwicaptcha resume-derivation claim') && !str_contains((string) $e[1][0], 'release')));
+        $claimEvals = array_values(array_filter($client->evals, fn ($e) => str_starts_with($e['script'], '-- kiwicaptcha resume-derivation claim') && !str_contains($e['script'], 'release')));
         self::assertCount(4, $claimEvals, 'the four claim attempts (two refusals included) must each go through the claim Lua');
-        $releaseEvals = array_values(array_filter($evals, fn ($e) => str_contains((string) $e[1][0], 'release (compare-and-delete)')));
+        foreach ($claimEvals as $claimEval) {
+            self::assertCount(1, $claimEval['keys'], 'every claim EVAL must declare exactly one key (the record)');
+            self::assertSame(['kiwicaptcha:redis-nonce-1'], $claimEval['keys'], 'the single key is the record key');
+        }
+        $releaseEvals = array_values(array_filter($client->evals, fn ($e) => str_contains($e['script'], 'release (compare-and-delete)')));
         self::assertCount(2, $releaseEvals, 'both release attempts must go through the compare-and-delete Lua');
-        $commitEvals = array_values(array_filter($evals, fn ($e) => str_starts_with((string) $e[1][0], '-- kiwicaptcha commit result')));
+        foreach ($releaseEvals as $releaseEval) {
+            self::assertCount(1, $releaseEval['keys'], 'every release EVAL must declare exactly one key (the record)');
+        }
+        $commitEvals = array_values(array_filter($client->evals, fn ($e) => str_starts_with($e['script'], '-- kiwicaptcha commit result')));
         self::assertNotEmpty($commitEvals);
-        self::assertContains('kiwicaptcha:resume-claim:redis-nonce-1', $commitEvals[0][1], 'the claim-bearing commit passes the claim key to the same COMMIT Lua');
-        self::assertSame(2, $commitEvals[0][1][1] ?? null, 'the claim-bearing commit declares two keys');
+        foreach ($commitEvals as $commitEval) {
+            self::assertCount(1, $commitEval['keys'], 'every commit EVAL (claim-bearing included) must declare exactly one key');
+            self::assertSame(['kiwicaptcha:redis-nonce-1'], $commitEval['keys']);
+        }
+        self::assertArrayNotHasKey('kiwicaptcha:resume-claim:redis-nonce-1', $client->store, 'no second claim key may ever exist — the claim is embedded in the record envelope');
+    }
+
+    public function testAClaimedEnvelopeReadsBackWithItsRecordFieldsIntact(): void
+    {
+        // The envelope readers must tolerate the two new claim fields:
+        // a claimed record still decodes with every canonical record
+        // field intact (the runtime fields, claim included, are
+        // stripped before the strict serde-mirror parse). The slot of
+        // the record key is trivially the only key that exists for a
+        // claimed record — the second-key invariant is eliminated.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $storage->store($this->makeRecord());
+        $storage->consume('redis-nonce-1');
+
+        $owner = $storage->claimResumeDerivation('redis-nonce-1');
+        self::assertIsString($owner);
+
+        $raw = (string) $client->store['kiwicaptcha:redis-nonce-1'];
+        self::assertStringContainsString('"resume_owner":"'.$owner.'"', $raw, 'the claimed envelope carries the owner');
+        self::assertStringContainsString('"resume_until":', $raw, 'the claimed envelope carries the expiry');
+
+        $consumed = $storage->consumedState('redis-nonce-1');
+        self::assertNotNull($consumed, 'a claimed record is still a readable consumed record');
+        self::assertSame('redis-nonce-1', $consumed->record->nonce);
+        self::assertSame('login', $consumed->record->scope);
+        self::assertSame('abc123', $consumed->record->ipHash());
+        self::assertSame(PoWAlgorithm::Sha256, $consumed->record->algorithm);
+        self::assertSame(123_456_789, $consumed->record->issuedAtNs);
+        self::assertSame(1_800_000_000, $consumed->record->issuedAt);
+        self::assertNull($consumed->consumedResult, 'the claimed record is still resultless');
+
+        // The same tolerance on the find() decode path.
+        $found = $storage->find('redis-nonce-1');
+        self::assertNotNull($found);
+        self::assertSame('redis-nonce-1', $found->nonce);
+        self::assertSame(2, $found->protocolVersion);
+
+        // The slot-of-record-key invariant: the record key is the only
+        // key in the store for this record (no second claim key).
+        self::assertSame(['kiwicaptcha:redis-nonce-1'], array_keys($client->store));
     }
 
     public function testResumeClaimRefusesPendingCommittedMissingAndCancelledRecords(): void

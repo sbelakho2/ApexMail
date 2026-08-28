@@ -22,15 +22,17 @@ namespace KiwiCaptcha\Tests\Fixtures;
  *  - delete-if-pending script: missing / deleted-pending / cancelled
  *    (kept) / consumed (kept, verbatim).
  *  - commit-result script: stores {valid, binding} on a consumed record
- *    without a result yet; returns 1/0. With a second key (the resume
- *    claim) and ARGV[4] (the claim owner), the claim is a fencing
- *    precondition: ownership lost returns 2 without a write, and the
- *    successful write clears the claim in the same transition.
- *  - resume-derivation claim script: sets the claim key with the owner
- *    token and TTL only for a consumed, resultless, unclaimed record
- *    (returns the owner; nil otherwise).
+ *    without a result yet; returns 1/0. With a non-empty ARGV[4] (the
+ *    resume claim owner), the claim is a fencing precondition: the
+ *    envelope must carry a live claim owned by exactly that token,
+ *    otherwise 2 without a write. The successful write clears the
+ *    claim fields in the same transition.
+ *  - resume-derivation claim script: splices `resume_owner` /
+ *    `resume_until` into the record envelope (ONE key) only for a
+ *    consumed, resultless, unclaimed record (returns the owner; nil
+ *    otherwise).
  *  - resume-derivation claim release script: compare-and-delete of the
- *    claim key (1 when the owner matches, 0 otherwise).
+ *    embedded claim fields (1 when the owner matches, 0 otherwise).
  *  - WAIT: returns {@see FakePredisClient::$waitAck} (default 0; a real
  *    replica-less Redis reports 0 acknowledged replicas without error,
  *    and only the number of acknowledged replicas is returned). Tests
@@ -38,7 +40,9 @@ namespace KiwiCaptcha\Tests\Fixtures;
  *
  * Every call is recorded in {@see FakePredisClient::$calls} so tests
  * can assert on the Redis commands issued (Lua usage, EX expiration,
- * and the like).
+ * and the like). Every EVAL additionally records its key count and key
+ * list in {@see FakePredisClient::$evals}, so tests can prove the
+ * single-key invariant of the claim transitions (never `CROSSSLOT`).
  */
 final class FakePredisClient extends \Predis\Client
 {
@@ -53,6 +57,9 @@ final class FakePredisClient extends \Predis\Client
 
     /** @var list<array{0: string, 1: list<mixed>}> */
     public array $calls = [];
+
+    /** @var list<array{script: string, keys: list<string>}> every EVAL's key list */
+    public array $evals = [];
 
     public function __construct()
     {
@@ -126,6 +133,7 @@ final class FakePredisClient extends \Predis\Client
         $keysAndArgs = \array_slice($arguments, 2);
         $keys = \array_slice($keysAndArgs, 0, $numKeys);
         $args = \array_slice($keysAndArgs, $numKeys);
+        $this->evals[] = ['script' => $script, 'keys' => array_map('strval', $keys)];
 
         // Consume transition: mark consumed, keep the record. ARGV[1] is
         // the JSON-escaped operation identity ('' = none); it lands in
@@ -224,11 +232,12 @@ final class FakePredisClient extends \Predis\Client
         }
 
         // Commit result: only on a consumed record without a
-        // result yet. ARGV = [valid, binding, has_binding]. With a
-        // second key (the resume claim) and ARGV[4] (the claim owner),
-        // the claim is a fencing precondition: the caller must still
-        // hold it (ownership lost returns 2, no write), and the
-        // successful write clears the claim in the same transition.
+        // result yet. ARGV = [valid, binding, has_binding, claim_owner].
+        // With a non-empty ARGV[4] (the resume claim owner), the claim
+        // is a fencing precondition: the envelope must carry a live
+        // claim owned by exactly that token (ownership lost returns 2,
+        // no write), and the successful write clears the claim fields
+        // in the same transition.
         if (str_starts_with($script, '-- kiwicaptcha commit result')) {
             $key = (string) $keys[0];
             if (!isset($this->store[$key])) {
@@ -245,49 +254,58 @@ final class FakePredisClient extends \Predis\Client
             if (isset($obj['consumed_result']) && $obj['consumed_result'] !== null) {
                 return 0;
             }
-            $claimKey = $keys[1] ?? null;
-            if ($claimKey !== null) {
-                if (($this->store[(string) $claimKey] ?? null) !== ($args[3] ?? null)) {
+            $owner = $args[3] ?? '';
+            if ($owner !== '') {
+                $until = $obj['resume_until'] ?? null;
+                if (($obj['resume_owner'] ?? null) !== $owner || !\is_int($until) || $until <= time()) {
                     return 2;
                 }
-            }
-            $obj['consumed_result'] = [
+            }            $obj['consumed_result'] = [
                 'valid' => ($args[0] ?? '0') === '1',
                 'binding' => ($args[2] ?? '0') === '1' ? (string) ($args[1] ?? '') : null,
             ];
-            $this->store[$key] = json_encode($obj, JSON_UNESCAPED_SLASHES);
-            if ($claimKey !== null) {
-                unset($this->store[(string) $claimKey]);
+            if ($owner !== '') {
+                unset($obj['resume_owner'], $obj['resume_until']);
             }
+            $this->store[$key] = json_encode($obj, JSON_UNESCAPED_SLASHES);
 
             return 1;
         }
 
-        // Resume-derivation claim: KEYS = [record, claim], ARGV =
+        // Resume-derivation claim: KEYS = [record] only, ARGV =
         // [owner, ttl]. The claim is refused (nil) for a missing,
-        // not-consumed, committed or cancelled record, or when the claim
-        // key already exists; otherwise the claim key is SET with the
-        // owner and the TTL, mirroring the real Lua.
+        // not-consumed, committed or cancelled record, or while a live
+        // claim is held; otherwise `resume_owner` / `resume_until`
+        // (now + ttl, epoch seconds) are spliced into the envelope,
+        // mirroring the real single-key Lua.
         if (str_starts_with($script, '-- kiwicaptcha resume-derivation claim')) {
             if (str_starts_with($script, '-- kiwicaptcha resume-derivation claim release')) {
-                // Compare-and-delete release: the claim is deleted only
-                // when it still holds exactly this owner.
-                $claimKey = (string) $keys[0];
-                if (($this->store[$claimKey] ?? null) === ($args[0] ?? null)) {
-                    unset($this->store[$claimKey]);
-
-                    return 1;
+                // Compare-and-delete release: the embedded claim fields
+                // are cleared only when they still hold exactly this
+                // owner.
+                $key = (string) $keys[0];
+                if (!isset($this->store[$key])) {
+                    return 0;
                 }
+                try {
+                    $obj = json_decode($this->store[$key], true, flags: JSON_THROW_ON_ERROR);
+                } catch (\JsonException) {
+                    return 0;
+                }
+                if (($obj['resume_owner'] ?? null) !== ($args[0] ?? null)) {
+                    return 0;
+                }
+                unset($obj['resume_owner'], $obj['resume_until']);
+                $this->store[$key] = json_encode($obj, JSON_UNESCAPED_SLASHES);
 
-                return 0;
+                return 1;
             }
-            $recordKey = (string) $keys[0];
-            $claimKey = (string) $keys[1];
-            if (!isset($this->store[$recordKey])) {
+            $key = (string) $keys[0];
+            if (!isset($this->store[$key])) {
                 return null;
             }
             try {
-                $obj = json_decode($this->store[$recordKey], true, flags: JSON_THROW_ON_ERROR);
+                $obj = json_decode($this->store[$key], true, flags: JSON_THROW_ON_ERROR);
             } catch (\JsonException) {
                 return null;
             }
@@ -297,11 +315,13 @@ final class FakePredisClient extends \Predis\Client
             if (isset($obj['consumed_result']) && $obj['consumed_result'] !== null) {
                 return null;
             }
-            if (isset($this->store[$claimKey])) {
+            $now = time();
+            if (isset($obj['resume_owner']) && isset($obj['resume_until']) && $obj['resume_until'] > $now) {
                 return null;
             }
-            $this->store[$claimKey] = (string) ($args[0] ?? '');
-            $this->expirations[$claimKey] = (int) ($args[1] ?? 0);
+            $obj['resume_owner'] = (string) ($args[0] ?? '');
+            $obj['resume_until'] = $now + (int) ($args[1] ?? 0);
+            $this->store[$key] = json_encode($obj, JSON_UNESCAPED_SLASHES);
 
             return $args[0] ?? null;
         }

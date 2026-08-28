@@ -118,6 +118,14 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     {
         $configuration = new Configuration();
         $config = $this->processConfiguration($configuration, $configs);
+        // Canonicalize the historical secrets map once, at configuration
+        // processing time: every downstream consumer (the verifier keyring
+        // and the Siteverify security-context digest) receives the same
+        // array<int, string> keyed by canonical kid, never a mix of
+        // textual aliases and ints. The tree already refused non-canonical
+        // keys ('02', '0', text) and duplicate canonical kids, so this
+        // pass is a pure int-key projection.
+        $config['secrets_by_kid'] = self::canonicalHistoricalSecrets($config['secrets_by_kid']);
 
         // Privacy posture enforcement: 'strict' (default) forces the
         // privacy-sensitive options off or true:
@@ -1784,5 +1792,27 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         }
 
         return $container->getDefinition($id)->getClass();
+    }
+
+    /**
+     * Canonicalize the historical secrets map to array<int, string> keys:
+     * the single source of truth for the kid-keyed keyring handed to
+     * VerificationSecurityContext. The tree has already refused textual
+     * aliases and duplicate canonical kids, so this is an int-key
+     * projection, deterministically sorted for a stable config value.
+     *
+     * @param array<int|string, string> $secrets
+     *
+     * @return array<int, string>
+     */
+    private static function canonicalHistoricalSecrets(array $secrets): array
+    {
+        $canonical = [];
+        foreach ($secrets as $kid => $secret) {
+            $canonical[(int) $kid] = $secret;
+        }
+        ksort($canonical, SORT_NUMERIC);
+
+        return $canonical;
     }
 }

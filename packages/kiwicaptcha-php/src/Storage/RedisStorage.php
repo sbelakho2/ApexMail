@@ -51,7 +51,11 @@ use KiwiCaptcha\ResumeDerivationClaimInterface;
  * `consumed_result` (null | {valid, binding}) and `operation_identity`
  * (null | a bounded <= 128-byte logical-operation identity recorded
  * atomically with the pending→consumed transition via
- * {@see OperationIdentityAwareStorageInterface}). The `cancelled` state
+ * {@see OperationIdentityAwareStorageInterface}). Two more optional
+ * runtime fields exist only while a resume re-derivation claim is held:
+ * `resume_owner` (hex owner token) and `resume_until` (epoch seconds);
+ * they are absent otherwise and cleared atomically with the release and
+ * the claim-bearing commit. The `cancelled` state
  * is the terminal marker of
  * {@see \KiwiCaptcha\CancellableStorageInterface::cancel()}. A pending
  * record flipped to cancelled is dead. The consume transition refuses
@@ -71,12 +75,22 @@ use KiwiCaptcha\ResumeDerivationClaimInterface;
  *
  * Implements {@see \KiwiCaptcha\ResumeDerivationClaimInterface}: the
  * resultless consumed-operation resume can claim the re-derivation
- * ownership under `{prefix}resume-claim:<nonce>` with a random owner
- * token and the 60-second TTL, so exactly one concurrent same-operation
+ * ownership with a random owner token and a bounded TTL embedded in the
+ * record's runtime envelope. Exactly one concurrent same-operation
  * recovery derives and commits; the losers re-read the winner's
  * committed outcome. The claim, its compare-and-delete release and the
- * claim-clearing commit are all fused Lua scripts, mirroring the Rust
- * production verifier byte for byte.
+ * claim-clearing commit are all fused Lua scripts over the record key
+ * only. The claim never lives in a second key, so every claim
+ * transition is single-slot and safe on a Redis Cluster deployment,
+ * where a second unhash-tagged key would raise `CROSSSLOT`. The
+ * semantics mirror the Rust production verifier byte for byte.
+ *
+ * The claim's runtime envelope fields: `resume_owner` (the hex owner
+ * token) and `resume_until` (epoch seconds on the server clock) exist
+ * only while a claim is held; they are absent otherwise and cleared
+ * atomically by the release and by the claim-bearing commit. Every
+ * envelope reader strips them with the other runtime fields before the
+ * strict record parse.
  */
 final class RedisStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface, \KiwiCaptcha\ChallengeRuntimeStateReadableInterface, \KiwiCaptcha\ReplicationBarrierInterface, ResumeDerivationClaimInterface
 {
@@ -253,27 +267,40 @@ return {'cancelled-now'}
 LUA;
 
     /**
-     * The resume-claim TTL: a crashed recovery leaves only this short
-     * lease before a later retry may claim again (a 60s poison marker
-     * would block resultless recovery for its full TTL even when nothing
-     * is running). Mirrors the Rust `CLAIM_TTL_SECS`.
+     * The resume-claim TTL default: a crashed recovery leaves only this
+     * short lease before a later retry may claim again (a poison marker
+     * would block resultless recovery for its full TTL even when
+     * nothing is running). Mirrors the Rust `CLAIM_TTL_SECS`. The
+     * caller may pass a longer lease (the verifier passes a TTL that
+     * covers the maximum supported derivation duration); the default
+     * stays 60 seconds.
      */
     private const RESUME_CLAIM_TTL_SECS = 60;
 
+    /**
+     * Atomic resume-derivation claim, ONE key: the claim is embedded in
+     * the record's runtime envelope (`resume_owner` / `resume_until`),
+     * so the transition is a single-key splice that a Redis Cluster
+     * deployment routes to one slot, never `CROSSSLOT`. ARGV[1] = the
+     * random owner token, ARGV[2] = the claim TTL in seconds.
+     */
     private const CLAIM_RESUME_SCRIPT = <<<'LUA'
 -- kiwicaptcha resume-derivation claim
 --
 -- The re-derivation claim for a resultless consumed record (the resume
 -- path): exactly one concurrent same-operation recovery may derive and
 -- commit; the losers re-read and resolve the winner's committed outcome.
--- KEYS[1] = the record, KEYS[2] = the claim key; ARGV[1] = the random
--- owner token, ARGV[2] = the claim TTL in seconds. The claim is a SET
--- NX under `resume-claim:<nonce>` with a short TTL, so a crash leaves
--- only the short lease. The record checks use the RAW markers (the same
--- strategy as the rest of this storage layer, which never re-encodes
--- the record's JSON bytes): the envelope stores `"consumed_result":null`,
--- and a cjson decode would map a JSON null to cjson.null, never Lua nil,
--- refusing every resultless record.
+-- KEYS[1] = the record key only. ARGV[1] = the random owner token,
+-- ARGV[2] = the claim TTL in seconds. The claim lives INSIDE the record
+-- envelope: `"resume_owner":"<hex token>","resume_until":<epoch secs>`
+-- is spliced before the envelope's closing brace (the record key TTL is
+-- preserved), so this script touches exactly one key and is single-slot
+-- on a Redis Cluster. A crash leaves only the short lease: once
+-- resume_until passes, a later retry may claim again. The record checks
+-- use the RAW markers (the same strategy as the rest of this storage
+-- layer, which never re-encodes the record's JSON bytes): the envelope
+-- stores `"consumed_result":null`, and a cjson decode would map a JSON
+-- null to cjson.null, never Lua nil, refusing every resultless record.
 local v = redis.call("GET", KEYS[1])
 if not v then
   return nil
@@ -284,23 +311,56 @@ end
 if not string.find(v, '"consumed_result":null', 1, true) then
   return nil
 end
-if redis.call("SET", KEYS[2], ARGV[1], "EX", ARGV[2], "NX") then
-  return ARGV[1]
+-- Live-claim check: refuse while a live claim is held. An owner marker
+-- without a parseable expiry is treated as live (fail safe: never a
+-- second unsynchronized derivation).
+local untilStr = string.match(v, '"resume_until":(%d+)')
+if string.find(v, '"resume_owner":"', 1, true) then
+  local time = redis.call("TIME")
+  local now = tonumber(time[1])
+  if untilStr == nil or tonumber(untilStr) > now then
+    return nil
+  end
+  -- Expired claim: strip the stale fields before appending the fresh
+  -- ones. The fields always sit at the envelope's end (only this script
+  -- family writes them); a shape that cannot be stripped is refused as
+  -- still-claimed rather than duplicated.
+  local stripped, n = string.gsub(v, ',"resume_owner":"[^"]*","resume_until":%d+}$', '}')
+  if n ~= 1 then
+    return nil
+  end
+  v = stripped
 end
-return nil
+local time = redis.call("TIME")
+local untilVal = tonumber(time[1]) + tonumber(ARGV[2])
+local ttl = redis.call("TTL", KEYS[1])
+if ttl < 1 then ttl = 1 end
+local updated = string.sub(v, 1, -2) .. ',"resume_owner":"' .. ARGV[1] .. '","resume_until":' .. untilVal .. '}'
+redis.call("SET", KEYS[1], updated, "EX", ttl)
+return ARGV[1]
 LUA;
 
     private const RELEASE_RESUME_SCRIPT = <<<'LUA'
 -- kiwicaptcha resume-derivation claim release (compare-and-delete)
 --
--- KEYS[1] = the claim key, ARGV[1] = the owner token. The claim is
--- deleted only when it still holds exactly this owner: a stale owner
--- after a crash and TTL expiry can never delete a newer recovery's
--- claim.
-if redis.call("GET", KEYS[1]) == ARGV[1] then
-  return redis.call("DEL", KEYS[1])
+-- KEYS[1] = the record key only (the claim is embedded in the record
+-- envelope; ONE key, single-slot on a Redis Cluster). ARGV[1] = the
+-- owner token. The claim fields are cleared from the envelope only when
+-- they still hold exactly this owner: a stale owner after a crash and
+-- TTL expiry can never delete a newer recovery's claim. The record key
+-- TTL is preserved.
+local v = redis.call("GET", KEYS[1])
+if not v then
+  return 0
 end
-return 0
+local updated, n = string.gsub(v, ',"resume_owner":"' .. ARGV[1] .. '","resume_until":%d+}$', '}')
+if n ~= 1 then
+  return 0
+end
+local ttl = redis.call("TTL", KEYS[1])
+if ttl < 1 then ttl = 1 end
+redis.call("SET", KEYS[1], updated, "EX", ttl)
+return 1
 LUA;
 
     private const COMMIT_SCRIPT = <<<'LUA'
@@ -313,14 +373,16 @@ LUA;
 -- must be a REAL JSON boolean (matching the Rust commit Lua and the
 -- strict ConsumedResult parser), binding a string or null.
 --
--- The resume-path claim is an optional fencing precondition: when a
--- second key is passed (KEYS[2] = the resume claim, ARGV[4] = the claim
--- owner), the caller must still hold the claim before the protected
--- mutation is written. Ownership lost returns 2 (no write), so a stale
--- owner whose claim expired mid-derivation can never commit, and the
--- successful write clears the claim in the same atomic transition.
--- Callers without a claim pass one key and no owner: byte-identical
--- legacy behavior.
+-- The resume-path claim is an optional fencing precondition carried in
+-- ARGV[4]: when non-empty, the envelope must hold a LIVE claim owned by
+-- exactly this token before the protected mutation is written.
+-- Ownership lost (missing, expired, or owned by a different token)
+-- returns 2 with no write, so a stale owner whose claim expired
+-- mid-derivation can never commit, and the successful write clears the
+-- claim fields in the same atomic transition. The claim is embedded in
+-- the record envelope, so this script touches exactly one key
+-- (single-slot on a Redis Cluster, never CROSSSLOT). Callers without a
+-- claim pass ARGV[4] = '': byte-identical legacy behavior.
 local v = redis.call("GET", KEYS[1])
 if not v then
   return 0
@@ -331,8 +393,18 @@ end
 if not string.find(v, '"consumed_result":null', 1, true) then
   return 0
 end
-if KEYS[2] and redis.call("GET", KEYS[2]) ~= ARGV[4] then
-  return 2
+local claim = (ARGV[4] ~= nil) and (ARGV[4] ~= '')
+if claim then
+  -- Fencing: a live claim owned by this exact token. The owner token is
+  -- hex ([0-9a-f]), so it is safe inside the Lua pattern. The claim
+  -- must be LIVE: an expired claim no longer fences (the stale owner
+  -- may not commit, exactly the Rust GET-on-an-expired-key behavior).
+  local untilStr = string.match(v, '"resume_owner":"' .. ARGV[4] .. '","resume_until":(%d+)')
+  local time = redis.call("TIME")
+  local now = tonumber(time[1])
+  if untilStr == nil or tonumber(untilStr) <= now then
+    return 2
+  end
 end
 local encoded = cjson.encode({
   valid = (ARGV[1] == '1'),
@@ -342,12 +414,16 @@ local updated, n = string.gsub(v, '"consumed_result":null', '"consumed_result":'
 if n ~= 1 then
   return 0
 end
+if claim then
+  local cleared, m = string.gsub(updated, ',"resume_owner":"' .. ARGV[4] .. '","resume_until":%d+}$', '}')
+  if m ~= 1 then
+    return 0
+  end
+  updated = cleared
+end
 local ttl = redis.call("TTL", KEYS[1])
 if ttl < 1 then ttl = 1 end
 redis.call("SET", KEYS[1], updated, "EX", ttl)
-if KEYS[2] then
-  redis.call("DEL", KEYS[2])
-end
 return 1
 LUA;
 
@@ -896,31 +972,45 @@ LUA;
      * Atomically claim the re-derivation ownership of a consumed,
      * resultless record (the resume path): exactly one concurrent
      * same-operation recovery may derive and commit; the losers re-read
-     * and resolve the winner's committed outcome. ONE Lua script fuses
-     * the claimability check with the SET NX of a fresh random owner
-     * token under `{prefix}resume-claim:<nonce>` with the 60-second TTL.
-     * The claimability check requires the record to exist, be consumed
-     * and carry no committed result yet; pending, committed, missing and
-     * cancelled records are refused. A crash leaves only the short
-     * lease, exactly what the TTL covers.
+     * and resolve the winner's committed outcome. ONE Lua script over
+     * the record key fuses the claimability check with the envelope
+     * splice of the fresh random owner token and its expiry
+     * (`resume_owner` / `resume_until`, epoch seconds on the server
+     * clock). The claim lives in the record envelope, never in a second
+     * key: every claim transition is single-slot and safe on a Redis
+     * Cluster deployment, where a second unhash-tagged key would raise
+     * `CROSSSLOT`. The claimability check requires the record to exist,
+     * be consumed and carry no committed result yet; pending,
+     * committed, missing and cancelled records are refused, and so is a
+     * record with a live claim (an expired claim is re-claimable). A
+     * crash leaves only the short lease, exactly what the TTL covers.
      *
      * Returns the owner token when this caller won the claim, or null
      * when the claim was refused (not claimable, or another recovery
-     * currently holds it). Fail closed: owner-generation failure (the
-     * secure RNG) or a storage failure throws, so a distributed mutex
-     * owner never falls back to a repeatable process identifier and the
-     * caller never falls back to an unsynchronized derive storm.
+     * currently holds a live claim). Fail closed: owner-generation
+     * failure (the secure RNG) or a storage failure throws, so a
+     * distributed mutex owner never falls back to a repeatable process
+     * identifier and the caller never falls back to an unsynchronized
+     * derive storm.
+     *
+     * @param int $ttlSecs the claim lease length in seconds (>= 1). The
+     *                     verifier passes a TTL that covers the maximum
+     *                     supported derivation duration so a legitimate
+     *                     derivation never outlives its own claim; the
+     *                     default 60 mirrors the Rust `CLAIM_TTL_SECS`.
      */
-    public function claimResumeDerivation(string $nonce): ?string
+    public function claimResumeDerivation(string $nonce, int $ttlSecs = self::RESUME_CLAIM_TTL_SECS): ?string
     {
+        if ($ttlSecs < 1) {
+            throw new \InvalidArgumentException('the resume claim TTL must be at least 1 second');
+        }
         $recordKey = $this->prefix.$nonce;
-        $claimKey = $this->prefix.'resume-claim:'.$nonce;
         // Secure RNG fail closed: a repeatable owner token could let two
         // recoveries in one process observe the same apparent owner
         // across a lease expiry. Generation failure propagates as a
         // storage failure and the recovery answers StorageUnavailable.
         $owner = bin2hex(random_bytes(16));
-        $raw = $this->evalScript(self::CLAIM_RESUME_SCRIPT, [$recordKey, $claimKey, $owner, (string) self::RESUME_CLAIM_TTL_SECS], 2);
+        $raw = $this->evalScript(self::CLAIM_RESUME_SCRIPT, [$recordKey, $owner, (string) $ttlSecs], 1);
         if ($raw === false || $raw === null) {
             return null;
         }
@@ -931,38 +1021,40 @@ LUA;
     /**
      * Compare-and-delete the resume claim: only the claim's owner may
      * release it (a stale owner after a crash and TTL expiry can never
-     * delete a newer recovery's claim). ONE Lua script compares and
-     * deletes. Returns true when the release deleted the claim, false
-     * when the claim is missing or owned by another token. No replica
-     * wait: the release is a lease cleanup, not durability-critical
-     * state (the same as the Rust side).
+     * delete a newer recovery's claim). ONE Lua script over the record
+     * key compares and clears the embedded claim fields. Returns true
+     * when the release cleared the claim, false when the claim is
+     * missing or owned by another token. No replica wait: the release
+     * is a lease cleanup, not durability-critical state (the same as
+     * the Rust side).
      */
     public function releaseResumeDerivation(string $nonce, string $owner): bool
     {
-        $claimKey = $this->prefix.'resume-claim:'.$nonce;
-        $raw = $this->evalScript(self::RELEASE_RESUME_SCRIPT, [$claimKey, $owner], 1);
+        $recordKey = $this->prefix.$nonce;
+        $raw = $this->evalScript(self::RELEASE_RESUME_SCRIPT, [$recordKey, $owner], 1);
 
         return $raw === 1 || $raw === '1' || $raw === true;
     }
 
     /**
      * The resume-path commit clears the re-derivation claim atomically
-     * with the result write. The same `COMMIT_SCRIPT` takes the claim
-     * key and owner as a fencing precondition (ownership lost is
-     * refused before any write) and deletes the claim in the same script
-     * run as the result splice. The verified replica wait applies to
-     * the fresh mutation exactly as on the plain commit.
-     * Returns true only when the result was stored and the claim
-     * cleared; false when the record is not a resultless consumed
-     * record, or this caller no longer holds the claim. The caller then
-     * re-reads the retained state and resolves the winner's committed
-     * outcome, mirroring the Rust `commit_result_clearing_claim`.
+     * with the result write. The same `COMMIT_SCRIPT` takes the owner
+     * token as a fencing precondition: ownership lost, whether missing,
+     * expired, or owned by a different token, is refused before any
+     * write. The script clears the embedded claim fields in the same
+     * run as the result splice, over the record key only. The verified
+     * replica wait applies to the fresh mutation exactly as on the
+     * plain commit. Returns true only when the result was stored and
+     * the claim cleared; false when the record is not a resultless
+     * consumed record, or this caller no longer holds a live claim. The
+     * caller then re-reads the retained state and resolves the winner's
+     * committed outcome, mirroring the Rust
+     * `commit_result_clearing_claim`.
      */
     public function commitResultResume(string $nonce, bool $valid, ?string $binding, string $owner): bool
     {
         $recordKey = $this->prefix.$nonce;
-        $claimKey = $this->prefix.'resume-claim:'.$nonce;
-        $raw = $this->evalScript(self::COMMIT_SCRIPT, [$recordKey, $claimKey, $valid ? '1' : '0', $binding ?? '', $binding === null ? '0' : '1', $owner], 2);
+        $raw = $this->evalScript(self::COMMIT_SCRIPT, [$recordKey, $valid ? '1' : '0', $binding ?? '', $binding === null ? '0' : '1', $owner], 1);
         $committed = $raw === 1 || $raw === '1' || $raw === true;
 
         if ($committed && $this->waitReplicas > 0) {
@@ -1034,9 +1126,10 @@ LUA;
 
     /**
      * Decode a stored JSON value back into a record, stripping the storage
-     * runtime fields (`state`, `consumed_result`, `operation_identity`)
-     * before the strict serde-mirror parse; the canonical record schema
-     * never sees them.
+     * runtime fields (`state`, `consumed_result`, `operation_identity`,
+     * and the resume-claim fields `resume_owner` / `resume_until`) before
+     * the strict serde-mirror parse; the canonical record schema never
+     * sees them.
      *
      * @return ChallengeRecord|null null when the value is absent, not valid
      *                              JSON, not an object, or does not map to a
@@ -1053,7 +1146,7 @@ LUA;
         if (!\is_array($data)) {
             return null;
         }
-        unset($data['state'], $data['consumed_result'], $data['operation_identity']);
+        unset($data['state'], $data['consumed_result'], $data['operation_identity'], $data['resume_owner'], $data['resume_until']);
 
         try {
             return ChallengeRecord::fromArray($data);

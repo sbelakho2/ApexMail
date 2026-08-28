@@ -31,17 +31,61 @@ final class Configuration implements ConfigurationInterface
                     ->defaultNull()
                 ->end()
                 ->integerNode('kid')
-                    ->info('Signing key id (1..4294967295) stamped into every issued challenge. Paired with secrets_by_kid + revoked_kids this is the controlled HMAC-key rotation control: bump kid + add the new secret to secrets_by_kid; the superseded secret remains valid for verification until its kid is revoked.')
+                    ->info('Signing key id (1..4294967295) stamped into every issued challenge. Paired with secrets_by_kid + revoked_kids this is the controlled HMAC-key rotation control. The rotation procedure: move the superseded old kid and its key into secrets_by_kid, update secret_key to the new key, then bump kid to the new id. The current kid must never appear in secrets_by_kid — a historical entry for the current signing key would make the verifier select the wrong secret. The superseded secret remains valid for verification until its kid is revoked.')
                     ->min(1)
                     ->max(4294967295)
                     ->defaultValue(1)
                 ->end()
                 ->arrayNode('secrets_by_kid')
-                    ->info('Verification-only secrets for historical signing key ids (map of kid => secret, each >= 16 bytes). With the CURRENT signing secret in secret_key and kid matching, key rotation is: add the superseded secret here, bump kid + update secret_key with the new one. Verification of records signed under superseded kids uses these secrets.')
+                    ->info('Verification-only secrets for historical signing key ids (map of canonical kid => secret, each >= 16 bytes). Rotation: move the superseded old kid and its key here, update secret_key to the new key, then bump kid — the current kid must never appear in this map. Verification of records signed under superseded kids uses these secrets.')
                     ->scalarPrototype()->end()
                     ->useAttributeAsKey('kid')
                     ->normalizeKeys(false)
                     ->defaultValue([])
+                    ->validate()
+                        ->ifTrue(static function (array $secrets): bool {
+                            // Two distinct map keys that canonicalize to
+                            // the same integer (e.g. the string key '02'
+                            // next to the int key 2) would silently
+                            // overwrite one historical secret downstream,
+                            // so the duplicate is refused before any
+                            // shape rule.
+                            $seen = [];
+                            foreach (\array_keys($secrets) as $kid) {
+                                $canonical = (int) $kid;
+                                if (isset($seen[$canonical])) {
+                                    return true;
+                                }
+                                $seen[$canonical] = true;
+                            }
+
+                            return false;
+                        })
+                        ->thenInvalid('secrets_by_kid keys must be distinct canonical kids: two entries that resolve to the same integer would silently overwrite one historical secret')
+                    ->end()
+                    ->validate()
+                        ->ifTrue(static function (array $secrets): bool {
+                            foreach (\array_keys($secrets) as $kid) {
+                                if (\is_int($kid)) {
+                                    if ($kid < 1 || $kid > 4294967295) {
+                                        return true;
+                                    }
+
+                                    continue;
+                                }
+                                if (preg_match('/^[1-9][0-9]*$/D', (string) $kid) !== 1) {
+                                    return true;
+                                }
+                                $canonical = (int) $kid;
+                                if ($canonical < 1 || $canonical > 4294967295) {
+                                    return true;
+                                }
+                            }
+
+                            return false;
+                        })
+                        ->thenInvalid('secrets_by_kid keys must be canonical decimal integers in 1..4294967295: a historical signing kid is written without leading zeros and without text, so "02", "0" and "foo" are all refused')
+                    ->end()
                     ->validate()
                         ->ifTrue(static function (array $secrets): bool {
                             foreach ($secrets as $k => $v) {
@@ -89,7 +133,7 @@ final class Configuration implements ConfigurationInterface
                     ->min(0)
                 ->end()
                 ->integerNode('rate_limit_global')
-                    ->info('DEPLOYMENT-WIDE cap on challenge issuances per rate_limit_window_secs (0 = disabled; default 500). Enforced ATOMICALLY against Redis (Redis-backed rate limiter) so all PHP-FPM workers share one sliding window; without a Redis client the global cap is not enforced (in-memory/PSR-6 fallbacks are per-process/best-effort — see README). Exhaustion returns HTTP 429 with a distinct GLOBAL_RATE_LIMITED code. This hard limiter is the binding constraint on the default deployment: its window throughput (500 per 60s, about 8.3/s) is far below the default resource_capacity.issuance_per_second, so the default deployment is bounded here, not by the resource-pressure signal. Operators scaling beyond this limit must raise BOTH this cap and resource_capacity.issuance_per_second together; the global limiter stores one exact-timestamp member per admitted request, so its Redis cardinality is bounded by this cap itself, never by the window.')
+                    ->info('DEPLOYMENT-WIDE cap on challenge issuances per rate_limit_window_secs (0 = disabled; default 500). Enforced on every backend. The enforcement ladder: Redis executes an exact distributed sliding window, atomic and shared by all PHP-FPM workers. A shared PSR-6 pool keeps a best-effort shared window: a non-atomic read-modify-write can briefly exceed the cap under concurrency. Without either, the in-process window is exact per process, so N workers can approach N times the cap in aggregate. Global-only mode (rate_limit: 0) is supported on all backends. Exhaustion returns HTTP 429 with a distinct GLOBAL_RATE_LIMITED code. This hard limiter is the binding constraint on the default deployment: its window throughput (500 per 60s, about 8.3/s) is far below the default resource_capacity.issuance_per_second, so the default deployment is bounded here, not by the resource-pressure signal. Operators scaling beyond this limit must raise BOTH this cap and resource_capacity.issuance_per_second together; the global limiter stores one exact-timestamp member per admitted request, so its Redis cardinality is bounded by this cap itself, never by the window.')
                     ->defaultValue(500)
                     ->min(0)
                 ->end()
@@ -202,7 +246,7 @@ final class Configuration implements ConfigurationInterface
                     ->defaultNull()
                 ->end()
                 ->scalarNode('rate_limit_pepper')
-                    ->info('Secret used to HMAC client IPs before they are used as rate-limit keys, so raw IPs are never stored. Defaults to secret_key when not set.')
+                    ->info('Secret used to HMAC client IPs before they are used as rate-limit keys, so raw IPs are never stored. Defaults to secret_key when not set. Configure a dedicated, stable pepper instead: the HMAC identities anchor the per-client rate-limit memory, and a routine signing-key rotation must not silently reset that memory. A fresh pepper derives fresh identities, so every client window would restart empty. An emergency root compromise may intentionally rotate everything; a routine rotation should leave the rate-limit identities untouched.')
                     ->defaultNull()
                 ->end()
                 ->integerNode('argon2_max_concurrent_verifications')
@@ -248,7 +292,7 @@ final class Configuration implements ConfigurationInterface
                             ->defaultValue('%kernel.project_dir%')
                         ->end()
                         ->scalarNode('master_secret')
-                            ->info('HKDF master key for the risk identity keys (source/subnet/session/principal). MUST be a high-entropy secret (%env(KIWI_RISK_SECRET)% recommended). When null, the bundle derives the keys from the captcha secret_key (documented fallback; a dedicated risk secret is strongly recommended so a compromise of one never leaks the other).')
+                            ->info('HKDF master key for the risk identity keys (source/subnet/session/principal). MUST be a high-entropy secret (%env(KIWI_RISK_SECRET)% recommended). When null, the bundle derives the keys from the captcha secret_key (documented fallback). Configure a dedicated, stable master secret: the derived identities anchor the adaptive risk memory, and a routine signing-key rotation must not silently reset that memory. A fresh master derives fresh pseudonyms, so every source/subnet/session counter restarts at zero and a previously-flagged source loses its memory. A compromise of one secret never leaks the other. An emergency root compromise may intentionally rotate everything; a routine rotation should leave the risk identities untouched.')
                             ->defaultNull()
                         ->end()
                         ->integerNode('source_epoch_secs')
@@ -764,7 +808,11 @@ final class Configuration implements ConfigurationInterface
             // silently-weakened-security configuration, refused at
             // compile time instead of failing on the first challenge.
             // Each validate() call appends one rule (a single ExprBuilder
-            // keeps only its last ifTrue/thenInvalid pair).
+            // keeps only its last ifTrue/thenInvalid pair). The
+            // secrets_by_kid keys are canonicalized to ints by the map
+            // node's own rules first; the cross-field comparisons still
+            // run through self::canonicalKid() so a textual alias can
+            // never bypass them.
             ->validate()
                 ->ifTrue(static fn (array $v): bool => \in_array($v['kid'], $v['revoked_kids'], true))
                 ->thenInvalid('kiwi_captcha.kid must not appear in kiwi_captcha.revoked_kids: issuing under a revoked kid is a guaranteed outage, since every freshly issued challenge would fail verification with UnknownKid. Remove the kid from revoked_kids (revocation applies to superseded keys only) or bump kid to a new signing key id')
@@ -772,7 +820,7 @@ final class Configuration implements ConfigurationInterface
             ->validate()
                 ->ifTrue(static function (array $v): bool {
                     foreach (\array_keys($v['secrets_by_kid']) as $historicalKid) {
-                        if ((int) $historicalKid === (int) $v['kid']) {
+                        if (self::canonicalKid($historicalKid) === (int) $v['kid']) {
                             return true;
                         }
                     }
@@ -784,7 +832,8 @@ final class Configuration implements ConfigurationInterface
             ->validate()
                 ->ifTrue(static function (array $v): bool {
                     foreach (\array_keys($v['secrets_by_kid']) as $historicalKid) {
-                        if ((int) $historicalKid > (int) $v['kid']) {
+                        $canonical = self::canonicalKid($historicalKid);
+                        if ($canonical === null || $canonical > (int) $v['kid']) {
                             return true;
                         }
                     }
@@ -795,5 +844,28 @@ final class Configuration implements ConfigurationInterface
             ->end();
 
         return $treeBuilder;
+    }
+
+    /**
+     * Canonical kid of a secrets_by_kid map key: a strictly-positive
+     * canonical decimal integer within the signing kid range, or null for
+     * anything else (text, leading zeros, out of range). The cross-field
+     * rotation rules compare these canonical ints so a textual alias like
+     * '02' can never bypass or collide with a numeric kid.
+     */
+    private static function canonicalKid(int|string $raw): ?int
+    {
+        if (\is_int($raw)) {
+            $canonical = $raw;
+        } elseif (preg_match('/^[1-9][0-9]*$/D', $raw) === 1) {
+            $canonical = (int) $raw;
+        } else {
+            return null;
+        }
+        if ($canonical < 1 || $canonical > 4294967295) {
+            return null;
+        }
+
+        return $canonical;
     }
 }

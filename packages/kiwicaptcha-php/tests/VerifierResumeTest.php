@@ -156,6 +156,49 @@ final class VerifierResumeTest extends TestCase
         };
     }
 
+    /**
+     * An admission gate that counts every acquire and release and
+     * tracks the live permits, so the resume's gate interaction is
+     * observable. The counters record how many slots were acquired,
+     * how many leases were released, and how many permits are still
+     * live after the call. Saturation is modelled by pre-setting
+     * `live` to the capacity before the resume (the slot held from the
+     * outside).
+     *
+     * @param array{acquires?: int, releases?: int, live?: int} $counters
+     */
+    private function countingGate(int $capacity, array &$counters): VerificationAdmissionGate
+    {
+        return new class($capacity, $counters) implements VerificationAdmissionGate {
+            private int $capacity;
+
+            private array $counters;
+
+            public function __construct(int $capacity, array &$counters)
+            {
+                $this->capacity = $capacity;
+                $this->counters = &$counters;
+            }
+
+            public function acquire(): ?string
+            {
+                $this->counters['acquires']++;
+                if ($this->counters['live'] >= $this->capacity) {
+                    return null;
+                }
+                $this->counters['live']++;
+
+                return 'lease-'.$this->counters['acquires'];
+            }
+
+            public function release(string $lease): void
+            {
+                $this->counters['releases']++;
+                $this->counters['live']--;
+            }
+        };
+    }
+
     // ── The lost-reply storage seam ─────────────────────────────────────
 
     /**
@@ -986,9 +1029,9 @@ final class VerifierResumeTest extends TestCase
                 return $this->inner->consumedState($nonce);
             }
 
-            public function claimResumeDerivation(string $nonce): ?string
+            public function claimResumeDerivation(string $nonce, int $ttlSecs = 60): ?string
             {
-                return $this->inner->claimResumeDerivation($nonce);
+                return $this->inner->claimResumeDerivation($nonce, $ttlSecs);
             }
 
             public function releaseResumeDerivation(string $nonce, string $owner): bool
@@ -1090,6 +1133,194 @@ final class VerifierResumeTest extends TestCase
         $outcome = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('nocap'), 'login', self::CLIENT_IP);
         self::assertTrue($outcome->isOk(), sprintf('the capability-less resume must derive and commit, got %s', $outcome->code()));
         self::assertNotNull($inner->consumedState($record->nonce)?->consumedResult, 'the capability-less resume commits the deterministic outcome');
+    }
+
+    // ── Claim-before-admission (the Argon lease must not leak) ────────
+
+    public function testClaimLoserNeverTouchesTheArgonGate(): void
+    {
+        // Round-90 audit fix: the claim is acquired before the Argon
+        // admission gate. A recovery that loses the claim must never
+        // have acquired an Argon capacity slot (the old order leaked
+        // the slot for the whole lease TTL). The loser answers the
+        // retryable ConsumeIndeterminate with the gate untouched.
+        [$storage, $record, $token] = $this->issueAndSolveArgon();
+        $storage->consumeWithOperationIdentity($record->nonce, $this->identity('gate-loser'));
+
+        $winner = $storage->claimResumeDerivation($record->nonce);
+        self::assertIsString($winner, 'precondition: the winner holds the claim');
+
+        $counters = ['acquires' => 0, 'releases' => 0, 'live' => 0];
+        $gate = $this->countingGate(1, $counters);
+        $outcome = (new Verifier($storage, $gate))->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('gate-loser'), 'login', self::CLIENT_IP);
+        self::assertSame(VerifyError::ConsumeIndeterminate, $outcome->error, 'the claim loser must answer ConsumeIndeterminate, never derive');
+        self::assertSame(0, $counters['acquires'], 'the claim loser must NEVER acquire an Argon capacity slot');
+        self::assertSame(0, $counters['releases'], 'with no acquire there is nothing to release');
+        self::assertSame(0, $counters['live'], 'no Argon permit may be live after the loser returns');
+        self::assertNull($storage->consumedState($record->nonce)?->consumedResult, 'the loser must not commit anything');
+    }
+
+    public function testClaimBackendExceptionReturnsStorageUnavailableWithoutTouchingTheArgonGate(): void
+    {
+        // The claim-backend-exception branch: a storage whose
+        // claimResumeDerivation throws fails closed to
+        // StorageUnavailable (never an unsynchronized derive storm),
+        // and the failure happens before the Argon gate — no capacity
+        // slot is ever acquired.
+        [$inner, $record, $token] = $this->issueAndSolveArgon();
+        $inner->consumeWithOperationIdentity($record->nonce, $this->identity('claim-throw'));
+
+        $storage = new class($inner) implements StorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, \KiwiCaptcha\ResumeDerivationClaimInterface {
+            public function __construct(private readonly ArrayStorage $inner)
+            {
+            }
+
+            public function store(ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consumedState(string $nonce): ?ConsumedRecord
+            {
+                return $this->inner->consumedState($nonce);
+            }
+
+            public function consume(string $nonce): ?ConsumedRecord
+            {
+                return $this->inner->consume($nonce);
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+
+            public function claimResumeDerivation(string $nonce, int $ttlSecs = 60): ?string
+            {
+                throw new \RuntimeException('claim storage down');
+            }
+
+            public function releaseResumeDerivation(string $nonce, string $owner): bool
+            {
+                return $this->inner->releaseResumeDerivation($nonce, $owner);
+            }
+
+            public function commitResultResume(string $nonce, bool $valid, ?string $binding, string $owner): bool
+            {
+                return $this->inner->commitResultResume($nonce, $valid, $binding, $owner);
+            }
+        };
+
+        $counters = ['acquires' => 0, 'releases' => 0, 'live' => 0];
+        $gate = $this->countingGate(1, $counters);
+        $outcome = (new Verifier($storage, $gate))->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('claim-throw'), 'login', self::CLIENT_IP);
+        self::assertSame(VerifyError::StorageUnavailable, $outcome->error, 'a claim-backend failure must fail closed to StorageUnavailable');
+        self::assertSame(0, $counters['acquires'], 'the claim failure must NOT reach the Argon gate');
+        self::assertSame(0, $counters['releases']);
+        self::assertSame(0, $counters['live'], 'no Argon permit may be live after the claim failure');
+        self::assertNull($inner->consumedState($record->nonce)?->consumedResult, 'nothing is committed on the claim failure');
+    }
+
+    public function testClaimWinnerAcquiresAndReleasesExactlyOneArgonLease(): void
+    {
+        // The winner path: the claim is held, exactly one Argon slot is
+        // acquired, the derivation runs, the commit lands, and the
+        // finally releases the lease — live permits are back to zero
+        // after completion.
+        [$storage, $record, $token] = $this->issueAndSolveArgon();
+        $storage->consumeWithOperationIdentity($record->nonce, $this->identity('gate-winner'));
+
+        $counters = ['acquires' => 0, 'releases' => 0, 'live' => 0];
+        $gate = $this->countingGate(1, $counters);
+        $outcome = (new Verifier($storage, $gate))->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('gate-winner'), 'login', self::CLIENT_IP);
+        self::assertTrue($outcome->isOk(), sprintf('the winner must derive and commit, got %s', $outcome->code()));
+        self::assertSame(1, $counters['acquires'], 'the winner acquires exactly one Argon slot');
+        self::assertSame(1, $counters['releases'], 'the winner releases exactly one lease');
+        self::assertSame(0, $counters['live'], 'no Argon permit may be live after the winner returns');
+        self::assertNotNull($storage->consumedState($record->nonce)?->consumedResult, 'the winner committed the deterministic outcome');
+    }
+
+    public function testCapacityExceededWithAHeldClaimReleasesTheClaim(): void
+    {
+        // The claim is held when the admission gate refuses: the resume
+        // must return CapacityExceeded AND release the claim it held
+        // (the finally covers the admission refusals too). A capacity
+        // loser must never leave a 60s poison claim behind: a
+        // subsequent resume on the same nonce can claim immediately.
+        [$storage, $record, $token] = $this->issueAndSolveArgon();
+        $storage->consumeWithOperationIdentity($record->nonce, $this->identity('gate-capacity'));
+
+        $counters = ['acquires' => 0, 'releases' => 0, 'live' => 1];
+        $gate = $this->countingGate(1, $counters);
+        $outcome = (new Verifier($storage, $gate))->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('gate-capacity'), 'login', self::CLIENT_IP);
+        self::assertSame(VerifyError::CapacityExceeded, $outcome->error, 'the saturated gate refuses the resumed Argon derivation');
+        self::assertSame(1, $counters['acquires'], 'the refusal attempted exactly one acquire');
+        self::assertSame(0, $counters['releases'], 'the refused acquire held no lease to release');
+        self::assertSame(1, $counters['live'], 'the outside slot is the only live permit');
+        self::assertNull($storage->consumedState($record->nonce)?->consumedResult, 'capacity exhaustion must NOT commit anything');
+
+        // The audit contract: the CapacityExceeded loser did NOT leave
+        // the claim held — a fresh claim on the same nonce succeeds
+        // immediately, no 60s poison.
+        $reclaimed = $storage->claimResumeDerivation($record->nonce);
+        self::assertIsString($reclaimed, 'a claim must succeed immediately after a CapacityExceeded return');
+        $storage->releaseResumeDerivation($record->nonce, $reclaimed);
+
+        // With capacity freed, the next resume claims again, derives
+        // and commits, and releases everything.
+        $counters['live'] = 0;
+        $outcome = (new Verifier($storage, $gate))->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('gate-capacity'), 'login', self::CLIENT_IP);
+        self::assertTrue($outcome->isOk(), sprintf('with capacity available the resume must derive and commit, got %s', $outcome->code()));
+        self::assertSame(2, $counters['acquires']);
+        self::assertSame(1, $counters['releases']);
+        self::assertSame(0, $counters['live'], 'no Argon permit may be live after the successful resume');
+        self::assertNotNull($storage->consumedState($record->nonce)?->consumedResult);
+    }
+
+    public function testArrayStorageClaimExpiresAndIsReclaimable(): void
+    {
+        // Bug 3: the in-process claim carries the same bounded-lease
+        // contract as the Redis backend. resume_until is now + TTL; a
+        // claim whose lease expired is re-claimable (the release-less
+        // crash path: a crashed recovery vanishes, its lease expires
+        // with the clock), and a stale owner whose lease expired can
+        // never commit. The clock advances through the $now closure.
+        $clock = self::ISSUED_AT;
+        $now = static function () use (&$clock): int {
+            return $clock;
+        };
+        $storage = new ArrayStorage(now: $now);
+        $issuer = new Issuer(new Config(secretKey: Vectors::SECRET, targetBits: 8, ttlSecs: 120, minDurationMs: 0), $storage, now: static fn (): int => self::ISSUED_AT);
+        $challenge = $issuer->issue('login', self::CLIENT_IP);
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+        $storage->consumeWithOperationIdentity($record->nonce, $this->identity('claim-ttl'));
+
+        $owner = $storage->claimResumeDerivation($record->nonce, 60);
+        self::assertIsString($owner, 'a consumed, resultless record is claimable');
+        self::assertNull($storage->claimResumeDerivation($record->nonce), 'a live claim is refused');
+        self::assertFalse($storage->commitResultResume($record->nonce, true, null, 'not-the-owner'), 'a different owner can never commit');
+
+        // The release-less crash path: no release, the clock advances
+        // past the lease.
+        $clock += 61;
+        self::assertNull($storage->consumedState($record->nonce)?->consumedResult, 'nothing was committed by the crashed recovery');
+        $reclaimed = $storage->claimResumeDerivation($record->nonce);
+        self::assertIsString($reclaimed, 'an expired claim is re-claimable');
+        self::assertFalse($storage->commitResultResume($record->nonce, true, null, $owner), 'the stale owner whose lease expired can never commit');
+        self::assertNull($storage->consumedState($record->nonce)?->consumedResult, 'the stale commit writes nothing');
+        self::assertTrue($storage->commitResultResume($record->nonce, true, null, $reclaimed), 'the fresh owner commits');
+        self::assertNotNull($storage->consumedState($record->nonce)?->consumedResult);
     }
 
     // ── Post-derive final revalidation (current expectations) ─────────

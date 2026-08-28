@@ -228,6 +228,7 @@ The bundle defines three strictly separated credential classes:
   Client-supplied identifiers are never accepted, so none can be abused.
 - Server API credential: `kiwi_captcha.secret_key` (and `risk.master_secret`, `rate_limit_pepper`) signs/verifies challenges and derives every keyed pseudonym.
   It must live only in server configuration/environment; the widget never receives it.
+  `risk.master_secret` and `rate_limit_pepper` should be dedicated, stable secrets: the identities they derive anchor the adaptive risk and rate-limit memory, so a routine signing-key rotation must not silently reset that memory.
 - Admin + control-plane: the security Redis (policy hash, calibration state) and the deployment secrets are control-plane material with independent privileges: read vs write roles, scoped machine credentials, and audit logging.
   See the control-plane threat model in [operations.md](operations.md#control-plane-threat-model).
   No component of the client-facing protocol can reach this plane.

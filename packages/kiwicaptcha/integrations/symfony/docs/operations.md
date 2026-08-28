@@ -19,7 +19,11 @@ All backends use a true sliding window.
 The state is a set of hit timestamps pruned on every check, so a burst straddling a window boundary can never double the rate.
 Raw client IPs are never stored.
 Every key is a peppered HMAC of the IP (`hash_hmac('sha256', $ip, $pepper)` with `rate_limit_pepper`, defaulting to the bundle secret), in Redis, the shared pool, and the in-memory buckets.
+Configure a dedicated, stable `rate_limit_pepper`: the HMAC identities anchor the per-client rate-limit memory, and a routine signing-key rotation must not silently reset that memory.
+A fresh pepper derives fresh identities, so every client window would restart empty.
 `rate_limit: 0` and `rate_limit_global: 0` disable the respective limit; both default to nonzero (10 / 500).
+The deployment-global cap is enforced on every backend, with the ladder: Redis exact distributed window, shared PSR-6 best-effort window, in-process exact per-process window.
+Global-only mode (`rate_limit: 0` with a positive `rate_limit_global`) works on all backends.
 
 ### Local admission before Redis
 

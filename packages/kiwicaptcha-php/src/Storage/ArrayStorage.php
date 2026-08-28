@@ -48,18 +48,31 @@ use KiwiCaptcha\ChallengeRuntimeState;
  * ownership in-process, tracked in the same envelope. Exactly one
  * concurrent same-operation recovery derives and commits (the
  * read-modify-write sequence is de-facto atomic here, like every other
- * transition of this backend). The claim has no TTL: the whole store is
- * process-local, so a crashed recovery vanishes with the process and
- * nothing can poison later retries.
+ * transition of this backend). The claim carries the same bounded-lease
+ * contract as the Redis backend: `resume_until`, the server clock at
+ * claim time plus the TTL, bounds the lease; an expired claim is
+ * re-claimable, and a stale owner whose claim expired can never commit.
+ * The clock comes from the optional `$now` constructor closure, which
+ * defaults to `time()`, the same test seam the {@see Verifier} uses.
  */
 final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface, \KiwiCaptcha\ChallengeRuntimeStateReadableInterface, ResumeDerivationClaimInterface
 {
-    /** @var array<string, array{record: ChallengeRecord, consumed: bool, cancelled: bool, result: ConsumedResult|null, operationIdentity: string|null, claim: string|null}> */
+    /** @var array<string, array{record: ChallengeRecord, consumed: bool, cancelled: bool, result: ConsumedResult|null, operationIdentity: string|null, claim: string|null, claimUntil: int|null}> */
     private array $records = [];
+
+    /**
+     * @param \Closure|null $now the clock override (epoch seconds) used
+     *                           for the resume-claim lease; defaults to
+     *                           `time()`. Test seam, same style as
+     *                           {@see Verifier}'s `$now`.
+     */
+    public function __construct(private readonly ?\Closure $now = null)
+    {
+    }
 
     public function store(ChallengeRecord $record): void
     {
-        $this->records[$record->nonce] = ['record' => $record, 'consumed' => false, 'cancelled' => false, 'result' => null, 'operationIdentity' => null, 'claim' => null];
+        $this->records[$record->nonce] = ['record' => $record, 'consumed' => false, 'cancelled' => false, 'result' => null, 'operationIdentity' => null, 'claim' => null, 'claimUntil' => null];
     }
 
     public function find(string $nonce): ?ChallengeRecord
@@ -145,25 +158,36 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
      * other transitions here) claims the re-derivation ownership of a
      * consumed, resultless record and returns a fresh random owner
      * token. It returns null when the record is missing, not consumed,
-     * already committed, cancelled, or already claimed. The claim is
-     * tracked in the same envelope as the record and has no TTL (the
-     * store is process-local; a crashed recovery vanishes with the
-     * process).
+     * already committed, cancelled, or already claimed by a live lease.
+     * The lease is bounded like the Redis backend: `claimUntil` is the
+     * current clock plus the TTL, a claim whose `claimUntil` has passed
+     * is dead and re-claimable, and the clock comes from the optional
+     * `$now` closure, which defaults to `time()`.
+     *
+     * @param int $ttlSecs the claim lease length in seconds (>= 1).
      */
-    public function claimResumeDerivation(string $nonce): ?string
+    public function claimResumeDerivation(string $nonce, int $ttlSecs = 60): ?string
     {
+        if ($ttlSecs < 1) {
+            throw new \InvalidArgumentException('the resume claim TTL must be at least 1 second');
+        }
         $entry = $this->records[$nonce] ?? null;
-        if ($entry === null || !$entry['consumed'] || ($entry['cancelled'] ?? false) || $entry['result'] !== null || ($entry['claim'] ?? null) !== null) {
+        if ($entry === null || !$entry['consumed'] || ($entry['cancelled'] ?? false) || $entry['result'] !== null) {
+            return null;
+        }
+        $now = $this->now !== null ? (int) ($this->now)() : time();
+        if (($entry['claim'] ?? null) !== null && ($entry['claimUntil'] ?? null) !== null && ($entry['claimUntil'] ?? 0) > $now) {
             return null;
         }
         $owner = bin2hex(random_bytes(16));
         $this->records[$nonce]['claim'] = $owner;
+        $this->records[$nonce]['claimUntil'] = $now + $ttlSecs;
 
         return $owner;
     }
 
     /**
-     * Compare-and-delete release of the resume claim: deletes the claim
+     * Compare-and-delete release of the resume claim: clears the claim
      * only when it still holds exactly this owner token; a stale owner
      * can never delete a newer recovery's claim.
      */
@@ -174,6 +198,7 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
             return false;
         }
         $this->records[$nonce]['claim'] = null;
+        $this->records[$nonce]['claimUntil'] = null;
 
         return true;
     }
@@ -182,17 +207,23 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
      * The resume-path commit that clears the re-derivation claim with
      * the result write (in-process de-facto atomic): the same one-shot
      * semantics as commitResult() with the claim as a fencing
-     * precondition. The caller must still hold the claim; a stale owner
-     * can never commit, and the successful write clears the claim.
+     * precondition. The caller must still hold a live claim; a stale
+     * owner — a different token, or a token whose lease expired — can
+     * never commit, and the successful write clears the claim.
      */
     public function commitResultResume(string $nonce, bool $valid, ?string $binding, string $owner): bool
     {
         $entry = $this->records[$nonce] ?? null;
-        if ($entry === null || !$entry['consumed'] || ($entry['cancelled'] ?? false) || $entry['result'] !== null || ($entry['claim'] ?? null) !== $owner) {
+        if ($entry === null || !$entry['consumed'] || ($entry['cancelled'] ?? false) || $entry['result'] !== null) {
+            return false;
+        }
+        $now = $this->now !== null ? (int) ($this->now)() : time();
+        if (($entry['claim'] ?? null) !== $owner || ($entry['claimUntil'] ?? null) === null || ($entry['claimUntil'] ?? 0) <= $now) {
             return false;
         }
         $this->records[$nonce]['result'] = new ConsumedResult($valid, $binding);
         $this->records[$nonce]['claim'] = null;
+        $this->records[$nonce]['claimUntil'] = null;
 
         return true;
     }

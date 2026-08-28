@@ -57,8 +57,9 @@ final class VerifierResumeClaimRealRedisTest extends TestCase
     }
 
     /**
-     * The storage prefix, so the test can inspect the claim key it
-     * created (the claim key is `{prefix}resume-claim:<nonce>`).
+     * The storage prefix, so the test can read the stored envelope
+     * bytes (the claim is embedded in the record envelope, never a
+     * second key).
      */
     private function storagePrefix(RedisStorage $storage): string
     {
@@ -75,9 +76,22 @@ final class VerifierResumeClaimRealRedisTest extends TestCase
         return [$storage, $this->storagePrefix($storage)];
     }
 
-    private function claimKey(RedisStorage $storage, string $nonce): string
+    /**
+     * The envelope of the stored record, decoded from the raw bytes the
+     * client holds (the claim is embedded in the record envelope, never
+     * a second key).
+     *
+     * @return array<string, mixed>
+     */
+    private function envelope(\Predis\Client $client, RedisStorage $storage, string $nonce): array
     {
-        return $this->storagePrefix($storage).'resume-claim:'.$nonce;
+        $raw = $client->get($this->storagePrefix($storage).$nonce);
+        self::assertIsString($raw, 'the record must still be stored');
+
+        $data = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
+        self::assertIsArray($data);
+
+        return $data;
     }
 
     /** @return array{0: RedisStorage, 1: ChallengeRecord, 2: string} */
@@ -110,35 +124,73 @@ final class VerifierResumeClaimRealRedisTest extends TestCase
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120, minDurationMs: 0), $storage, now: static fn (): int => self::ISSUED_AT);
         $challenge = $issuer->issue('login', '198.51.100.7');
         $storage->consume($challenge->nonce);
-        $claimKey = $this->claimKey($storage, $challenge->nonce);
 
         $owner = $storage->claimResumeDerivation($challenge->nonce);
         self::assertIsString($owner, 'a consumed, resultless record is claimable');
 
-        $ttl = $client->ttl($claimKey);
-        self::assertGreaterThan(0, $ttl, 'the claim must carry a live TTL');
-        self::assertLessThanOrEqual(60, $ttl, 'the claim TTL must be the 60s lease');
+        // The claim is embedded in the record envelope with a bounded
+        // expiry (epoch seconds, server clock).
+        $data = $this->envelope($client, $storage, $challenge->nonce);
+        self::assertSame($owner, $data['resume_owner'] ?? null, 'the claim owner is embedded in the record envelope');
+        self::assertGreaterThan(time(), $data['resume_until'] ?? 0, 'the claim must carry a live expiry');
+        self::assertLessThanOrEqual(time() + 60, $data['resume_until'] ?? 0, 'the claim expiry must be the 60s lease');
 
         self::assertNull($storage->claimResumeDerivation($challenge->nonce), 'a second claim while the first is held must be refused');
         self::assertFalse($storage->releaseResumeDerivation($challenge->nonce, 'not-the-owner'), 'a stale owner can never release');
-        self::assertSame($owner, $client->get($claimKey), 'the refused release leaves the claim with its true owner');
+        $data = $this->envelope($client, $storage, $challenge->nonce);
+        self::assertSame($owner, $data['resume_owner'] ?? null, 'the refused release leaves the claim with its true owner');
         self::assertTrue($storage->releaseResumeDerivation($challenge->nonce, $owner), 'the true owner releases');
-        self::assertNull($client->get($claimKey), 'the release deleted the claim key');
+        $data = $this->envelope($client, $storage, $challenge->nonce);
+        self::assertArrayNotHasKey('resume_owner', $data, 'the release cleared the claim from the envelope');
+        self::assertArrayNotHasKey('resume_until', $data, 'the release cleared the claim expiry from the envelope');
 
         // Commit through the claim: the result lands and the claim is
         // cleared in the same Lua script run.
         $owner = $storage->claimResumeDerivation($challenge->nonce);
         self::assertIsString($owner);
         self::assertFalse($storage->commitResultResume($challenge->nonce, true, 'txn-1', 'not-the-owner'), 'a stale owner can never commit');
-        self::assertNull($storage->consumedState($challenge->nonce)?->consumedResult, 'the refused commit writes nothing');
-        self::assertSame($owner, $client->get($claimKey), 'the true owner still holds the claim after the refused commit');
+        $data = $this->envelope($client, $storage, $challenge->nonce);
+        self::assertNull($data['consumed_result'], 'the refused commit writes nothing');
+        self::assertSame($owner, $data['resume_owner'] ?? null, 'the true owner still holds the claim after the refused commit');
         self::assertTrue($storage->commitResultResume($challenge->nonce, true, 'txn-1', $owner), 'the true owner commits through the claim');
-        self::assertNull($client->get($claimKey), 'the successful commit cleared the claim in the same transition');
+        $data = $this->envelope($client, $storage, $challenge->nonce);
+        self::assertArrayNotHasKey('resume_owner', $data, 'the successful commit cleared the claim in the same transition');
+        self::assertArrayNotHasKey('resume_until', $data, 'the successful commit cleared the claim expiry in the same transition');
         self::assertNull($storage->claimResumeDerivation($challenge->nonce), 'a committed record is no longer claimable');
         $after = $storage->consumedState($challenge->nonce);
         self::assertNotNull($after?->consumedResult);
         self::assertTrue($after->consumedResult->valid);
         self::assertSame('txn-1', $after->consumedResult->binding);
+    }
+
+    public function testClaimExpiryAllowsReclaimOnRealRedis(): void
+    {
+        // The bounded lease: a claim whose resume_until has passed is
+        // dead and re-claimable — a crashed recovery leaves only the
+        // short lease, never a poison marker. The 1-second lease is
+        // claimed, the clock moves past it, and the same nonce is
+        // claimable again without any release.
+        $client = $this->redisOrSkip();
+        self::assertNotNull($client);
+        [$storage, $prefix] = $this->makeStorage($client);
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120, minDurationMs: 0), $storage, now: static fn (): int => self::ISSUED_AT);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        $storage->consume($challenge->nonce);
+
+        $first = $storage->claimResumeDerivation($challenge->nonce, 1);
+        self::assertIsString($first, 'the 1-second lease is claimable');
+        self::assertNull($storage->claimResumeDerivation($challenge->nonce), 'the live lease is refused');
+        $data = $this->envelope($client, $storage, $challenge->nonce);
+        self::assertLessThanOrEqual(time() + 1, $data['resume_until'] ?? 0, 'the lease expiry must be now + 1s');
+
+        // No release (the crashed-recovery path); the lease expires.
+        sleep(2);
+        $reclaimed = $storage->claimResumeDerivation($challenge->nonce);
+        self::assertIsString($reclaimed, 'an expired claim is re-claimable without any release');
+        self::assertNotSame($first, $reclaimed, 'the re-claim mints a fresh owner token');
+        $data = $this->envelope($client, $storage, $challenge->nonce);
+        self::assertSame($reclaimed, $data['resume_owner'] ?? null, 'the re-claim replaced the expired owner');
+        $storage->releaseResumeDerivation($challenge->nonce, $reclaimed);
     }
 
     public function testClaimIsRefusedForNonResultlessRecordsOnRealRedis(): void
@@ -162,8 +214,10 @@ final class VerifierResumeClaimRealRedisTest extends TestCase
         $storage->cancel($challenge2->nonce);
         self::assertNull($storage->claimResumeDerivation($challenge2->nonce), 'a cancelled record is not claimable');
 
-        self::assertNull($client->get($this->claimKey($storage, $nonce)), 'a refused claim on a committed record may not leave a claim key behind');
-        self::assertNull($client->get($this->claimKey($storage, $challenge2->nonce)), 'a refused claim on a cancelled record may not leave a claim key behind');
+        $data = $this->envelope($client, $storage, $nonce);
+        self::assertArrayNotHasKey('resume_owner', $data, 'a refused claim on a committed record may not leave a claim behind');
+        $data2 = $this->envelope($client, $storage, $challenge2->nonce);
+        self::assertArrayNotHasKey('resume_owner', $data2, 'a refused claim on a cancelled record may not leave a claim behind');
     }
 
     public function testTheVerifierResumeClaimsAndCommitsOnRealRedis(): void
@@ -177,7 +231,9 @@ final class VerifierResumeClaimRealRedisTest extends TestCase
         $outcome = $verifier->resumeConsumedOperation($token, self::SECRET, $identity, 'login', '198.51.100.7');
         self::assertTrue($outcome->isOk(), sprintf('the identity-proven resume must derive and commit, got %s', $outcome->code()));
         self::assertNotNull($storage->consumedState($record->nonce)?->consumedResult, 'the resume committed the deterministic outcome');
-        self::assertNull($client->get($this->storagePrefix($storage).'resume-claim:'.$record->nonce), 'the commit cleared the claim in the same transition');
+        $data = $this->envelope($client, $storage, $record->nonce);
+        self::assertArrayNotHasKey('resume_owner', $data, 'the commit cleared the claim in the same transition');
+        self::assertArrayNotHasKey('resume_until', $data, 'the commit cleared the claim expiry in the same transition');
 
         // The committed-result recovery stays the fast path.
         $replay = $verifier->resumeConsumedOperation($token, self::SECRET, $identity, 'login', '198.51.100.7');
@@ -202,6 +258,29 @@ final class VerifierResumeClaimRealRedisTest extends TestCase
         $storage->releaseResumeDerivation($record->nonce, $winner);
         $outcome = (new Verifier($storage, now: static fn (): int => self::ISSUED_AT))->resumeConsumedOperation($token, self::SECRET, $identity, 'login', '198.51.100.7');
         self::assertTrue($outcome->isOk(), 'after the release the retry derives and commits');
+    }
+
+    public function testClaimRefusedLoserResolvesTheWinnersCommittedOutcomeOnRealRedis(): void
+    {
+        // The winner commits through its claim while the loser is
+        // mid-resume: the loser's claim attempt is refused, the reread
+        // sees the winner's committed result, and the loser resolves it
+        // behind the fence — never a second derivation. This is the
+        // Verifier-side of the commit-returns-2 contract: the stale
+        // path cannot commit, and the loser resolves via reread.
+        $client = $this->redisOrSkip();
+        self::assertNotNull($client);
+        $identity = 'op-'.hash('sha256', 'loser-committed');
+        [$storage, $record, $token] = $this->issueAndSolveConsumed($client, $identity);
+
+        $winner = $storage->claimResumeDerivation($record->nonce);
+        self::assertIsString($winner);
+        self::assertTrue($storage->commitResultResume($record->nonce, true, $record->requestBinding, $winner), 'the winner commits while holding the claim');
+
+        $outcome = (new Verifier($storage, now: static fn (): int => self::ISSUED_AT))->resumeConsumedOperation($token, self::SECRET, $identity, 'login', '198.51.100.7');
+        self::assertTrue($outcome->isOk(), sprintf('the loser must resolve the winner\'s committed outcome, got %s', $outcome->code()));
+        self::assertTrue($outcome->fromStoredResult, 'the resolved outcome is the stored result, not a derivation');
+        self::assertSame($record->nonce, $outcome->nonce());
     }
 
     public function testAnEarlyVerifierReturnReleasesTheClaimOnRealRedis(): void

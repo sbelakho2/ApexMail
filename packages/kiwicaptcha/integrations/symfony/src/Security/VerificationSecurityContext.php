@@ -44,13 +44,25 @@ final class VerificationSecurityContext
     public function __construct(
         private readonly int $currentKid,
         private readonly string $currentSecret,
-        /** @var array<int|string, string> historical kid => secret map */
+        /** @var array<int, string> historical kid => secret map, canonicalized by the extension */
         private readonly array $historicalSecrets,
         /** @var list<int> revoked kid ids */
         private readonly array $revokedKids,
         private readonly ?string $issuer = null,
         private readonly ?string $region = null,
     ) {
+        // Defense-in-depth guard: canonicalization happens exactly once,
+        // in the extension, and is the single source of truth. A
+        // directly-constructed context must not accept non-int keys,
+        // which could alias ('02' vs 2) or collide with the current kid
+        // after a cast.
+        foreach ($this->historicalSecrets as $kid => $secret) {
+            if (!\is_int($kid)) {
+                throw new \InvalidArgumentException(
+                    'VerificationSecurityContext historical secrets must be keyed by canonical int kids'
+                );
+            }
+        }
     }
 
     /**
@@ -69,7 +81,7 @@ final class VerificationSecurityContext
 
         $keys = [];
         foreach ($this->historicalSecrets as $kid => $secret) {
-            $keys[(int) $kid] = $secret;
+            $keys[$kid] = $secret;
         }
         $keys[$this->currentKid] = $this->currentSecret;
         ksort($keys, SORT_NUMERIC);

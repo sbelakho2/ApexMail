@@ -72,4 +72,26 @@ final class KidRotationWiringTest extends TestCase
         self::assertSame([], $verifier->getArgument('revokedKids'));
         self::assertNull($verifier->getArgument('expectedIssuer'));
     }
+
+    public function testHistoricalSecretsReachTheVerifierAsCanonicalIntKeys(): void
+    {
+        // The extension canonicalizes secrets_by_kid once, so the
+        // verifier keyring is a pure array<int, string> — no textual kid
+        // alias can survive into the keyring the core resolves.
+        $container = $this->load([
+            'kid' => 6,
+            'secrets_by_kid' => [2 => str_repeat('b', 32), 5 => str_repeat('c', 32)],
+        ]);
+        $container->compile();
+
+        $secrets = $container->getDefinition('kiwi_captcha.verifier')->getArgument('secretsByKid');
+        self::assertSame(
+            [2 => str_repeat('b', 32), 5 => str_repeat('c', 32), 6 => str_repeat('a', 32)],
+            $secrets,
+            'the effective keyring merges the canonical historical map with the current signing key, kid-sorted'
+        );
+        foreach (array_keys($secrets) as $kid) {
+            self::assertIsInt($kid, 'every downstream consumer receives canonical int kid keys');
+        }
+    }
 }

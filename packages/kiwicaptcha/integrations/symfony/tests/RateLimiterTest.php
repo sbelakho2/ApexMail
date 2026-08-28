@@ -509,6 +509,190 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertArrayNotHasKey('kr_global', $pool->getValues(), 'no global cap -> no global item is ever written');
     }
 
+    // ── Transactional fallback decisions ─────────────────────────────────
+
+    public function testInMemoryGlobalSaturationDoesNotConsumeTheVictimAllowance(): void
+    {
+        // The hardening scenario: the former per-client-then-global
+        // fallback appended the victim's hit before the global check
+        // denied the request, so N denied attempts during global
+        // saturation consumed N of the victim's personal allowance. The
+        // combined decision must deny without writing anything.
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(2, 60, null, static function () use (&$clock): float {
+            return $clock;
+        }, 'pepper', null, 2);
+
+        self::assertSame(1, $limiter->check('198.51.100.1'), 'attacker A admission');
+        self::assertSame(1, $limiter->check('198.51.100.2'), 'attacker B admission fills the global cap');
+
+        $clock = 10_040.0; // still inside the window of the two admissions
+        $victim = '198.51.100.99';
+        for ($i = 0; $i < 5; $i++) {
+            self::assertSame(-1, $limiter->check($victim), 'the victim is denied by the GLOBAL cap, not by their own');
+        }
+        self::assertSame(-1, $limiter->check('198.51.100.3'), 'the global window is unchanged by the denied attempts: still full');
+
+        // The global window expires (the t=10000 admissions slide out at
+        // cutoff 10001), but the victim's would-be personal hits (at
+        // 10040) would still be inside the window — so the full allowance
+        // proves no personal hit was ever written.
+        $clock = 10_061.0;
+        self::assertSame(1, $limiter->check($victim), 'the victim still holds their FULL per-client allowance (2)');
+        self::assertSame(1, $limiter->check($victim), 'a second victim admission still fits the personal cap');
+        self::assertSame(0, $limiter->check($victim), 'the third victim request hits the per-client cap: the denied attempts consumed nothing');
+    }
+
+    public function testPsr6GlobalSaturationDoesNotConsumeTheVictimAllowance(): void
+    {
+        $pool = new ArrayAdapter();
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(2, 60, $pool, static function () use (&$clock): float {
+            return $clock;
+        }, 'pepper', null, 2);
+
+        self::assertSame(1, $limiter->check('198.51.100.1'));
+        self::assertSame(1, $limiter->check('198.51.100.2'));
+
+        $clock = 10_040.0;
+        $victim = '198.51.100.99';
+        for ($i = 0; $i < 5; $i++) {
+            self::assertSame(-1, $limiter->check($victim), 'the victim is denied by the shared GLOBAL cap');
+        }
+
+        // The denied attempts must write nothing: no per-client item for
+        // the victim (the pool holds exactly the two admitted clients
+        // plus the one global item) and no global hit. Read misses leave
+        // null entries, so filter them out before counting.
+        $values = array_filter($pool->getValues(), static fn ($v): bool => $v !== null);
+        self::assertCount(3, $values, 'denied attempts must not create a victim client item');
+        self::assertCount(2, unserialize($values['kr_global'])['t'], 'denied attempts must not add a global hit');
+        self::assertSame(-1, $limiter->check('198.51.100.3'), 'the shared global window is still full');
+
+        $clock = 10_061.0;
+        self::assertSame(1, $limiter->check($victim), 'the victim still holds their FULL per-client allowance');
+        self::assertSame(1, $limiter->check($victim));
+        self::assertSame(0, $limiter->check($victim), 'the denied attempts consumed nothing of the personal window');
+    }
+
+    public function testRotatedInMemoryGlobalSaturationDoesNotConsumeTheVictimAllowance(): void
+    {
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(
+            maxChallenges: 2,
+            windowSecs: 60,
+            now: static function () use (&$clock): float {
+                return $clock;
+            },
+            pepper: 'pepper',
+            globalMax: 2,
+            rateLimitRotationSecs: 60,
+        );
+
+        self::assertSame(1, $limiter->check('198.51.100.1'));
+        self::assertSame(1, $limiter->check('198.51.100.2'));
+
+        // 10040 is epoch 167 while the admissions sit in epoch 166: the
+        // victim's would-be hits would land in the current-epoch
+        // pseudonym and survive until 10100 — well past the global-window
+        // expiry at 10060.
+        $clock = 10_040.0;
+        $victim = '198.51.100.99';
+        for ($i = 0; $i < 5; $i++) {
+            self::assertSame(-1, $limiter->check($victim), 'the victim is denied by the global cap across the rotation boundary');
+        }
+        self::assertSame(-1, $limiter->check('198.51.100.3'), 'the global window survives the denied attempts');
+
+        $clock = 10_061.0;
+        self::assertSame(1, $limiter->check($victim), 'the victim still holds their FULL per-client allowance: the epoch-167 hits were never written');
+        self::assertSame(1, $limiter->check($victim));
+        self::assertSame(0, $limiter->check($victim));
+    }
+
+    public function testRotatedPsr6GlobalSaturationDoesNotConsumeTheVictimAllowance(): void
+    {
+        $pool = new ArrayAdapter();
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(
+            maxChallenges: 2,
+            windowSecs: 60,
+            pool: $pool,
+            now: static function () use (&$clock): float {
+                return $clock;
+            },
+            pepper: 'pepper',
+            globalMax: 2,
+            rateLimitRotationSecs: 60,
+        );
+
+        self::assertSame(1, $limiter->check('198.51.100.1'));
+        self::assertSame(1, $limiter->check('198.51.100.2'));
+
+        $clock = 10_040.0;
+        $victim = '198.51.100.99';
+        for ($i = 0; $i < 5; $i++) {
+            self::assertSame(-1, $limiter->check($victim), 'the victim is denied by the shared global cap across the rotation boundary');
+        }
+
+        $values = array_filter($pool->getValues(), static fn ($v): bool => $v !== null);
+        self::assertCount(3, $values, 'denied attempts must not create a victim client item in either epoch');
+        self::assertCount(2, unserialize($values['kr_global'])['t'], 'denied attempts must not add a global hit');
+        self::assertSame(-1, $limiter->check('198.51.100.3'), 'the shared global window is still full');
+
+        $clock = 10_061.0;
+        self::assertSame(1, $limiter->check($victim), 'the victim still holds their FULL per-client allowance');
+        self::assertSame(1, $limiter->check($victim));
+        self::assertSame(0, $limiter->check($victim));
+    }
+
+    public function testHitAtExactCutoffIsPrunedOnTheNextCheck(): void
+    {
+        // Redis prunes timestamps <= now - window (inclusive); the
+        // fallback prune predicates must retain only ts > cutoff (strictly
+        // greater), so an admission at exactly now - windowSecs has slid
+        // out at the boundary instant. Per-client path, local and PSR-6.
+        $clock = 10_000.0;
+        $local = new IssuanceRateLimiter(1, 60, null, static function () use (&$clock): float {
+            return $clock;
+        }, 'pepper');
+        self::assertSame(1, $local->check('198.51.100.7'), 'hit at t');
+        $clock = 10_060.0; // exactly t + window: cutoff == t
+        self::assertSame(1, $local->check('198.51.100.7'), 'the hit at the exact cutoff is pruned, matching the Redis inclusive prune');
+        self::assertSame(0, $local->check('198.51.100.7'), 'the fresh hit refills the cap');
+
+        $pool = new ArrayAdapter();
+        $clock = 10_000.0;
+        $shared = new IssuanceRateLimiter(1, 60, $pool, static function () use (&$clock): float {
+            return $clock;
+        }, 'pepper');
+        self::assertSame(1, $shared->check('198.51.100.7'));
+        $clock = 10_060.0;
+        self::assertSame(1, $shared->check('198.51.100.7'), 'PSR-6: the exact-cutoff hit is pruned');
+        self::assertSame(0, $shared->check('198.51.100.7'));
+    }
+
+    public function testGlobalHitAtExactCutoffIsPrunedOnTheNextCheck(): void
+    {
+        $clock = 10_000.0;
+        $local = new IssuanceRateLimiter(100, 60, null, static function () use (&$clock): float {
+            return $clock;
+        }, 'pepper', null, 1);
+        self::assertSame(1, $local->check('198.51.100.1'), 'the admission fills the global cap');
+        $clock = 10_060.0;
+        self::assertSame(1, $local->check('198.51.100.2'), 'the exact-cutoff global hit is pruned');
+        self::assertSame(-1, $local->check('198.51.100.3'), 'the fresh global hit refills the cap');
+
+        $pool = new ArrayAdapter();
+        $clock = 10_000.0;
+        $shared = new IssuanceRateLimiter(100, 60, $pool, static function () use (&$clock): float {
+            return $clock;
+        }, 'pepper', null, 1);
+        self::assertSame(1, $shared->check('198.51.100.1'));
+        $clock = 10_060.0;
+        self::assertSame(1, $shared->check('198.51.100.2'), 'PSR-6: the exact-cutoff global hit is pruned');
+        self::assertSame(-1, $shared->check('198.51.100.3'));
+    }
+
     // ── Redis backend (atomic, cross-worker) ──────────────────────────────
 
     private function requireRedisClient(): FakePredisClient

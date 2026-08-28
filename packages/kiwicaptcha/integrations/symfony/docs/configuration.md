@@ -91,9 +91,11 @@ is never forced) are the privacy contract; see
     # work unbounded, so keep this on in production.
     # rate_limit: 10
     # Deployment-GLOBAL rate limit (default 500 per window; 0 = disabled),
-    # enforced ATOMICALLY against Redis so ALL workers share one sliding
-    # window. Without a Redis client the global cap is not enforced (the
-    # in-memory/PSR-6 fallbacks are per-process/best-effort).
+    # enforced on every backend. Redis: exact distributed sliding window
+    # shared by all workers. PSR-6 pool: best-effort shared window (races
+    # can briefly exceed the cap). In-memory: exact per-process window (N
+    # workers can approach N x the cap). Global-only mode (rate_limit: 0)
+    # works on all backends.
     # rate_limit_global: 500
     # rate_limit_window_secs: 60            # sliding window (default 60)
     # rate_limit_cache: null                # optional PSR-6 pool service id
@@ -106,7 +108,11 @@ is never forced) are the privacy contract; see
     #                                       # Raw client IPs are never stored:
     #                                       # every key is a peppered HMAC of
     #                                       # the IP (rate_limit_pepper
-    #                                       # defaults to secret_key).
+    #                                       # defaults to secret_key). Set a
+    #                                       # dedicated stable pepper: routine
+    #                                       # signing-key rotation must not
+    #                                       # reset the per-client rate-limit
+    #                                       # memory.
     # Aggregate Argon2id verification concurrency cap (default 2; 0 =
     # unlimited). Each Argon2id verification allocates argon_m_kib of memory —
     # size this to available memory. With a Redis client the cap is enforced

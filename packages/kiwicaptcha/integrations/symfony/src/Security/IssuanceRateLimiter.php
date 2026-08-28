@@ -44,6 +44,18 @@ use Psr\Cache\CacheItemPoolInterface;
  * cap. `allow_local_global_limit_fallback` therefore means "per-process /
  * best-effort window", never "no global cap at all".
  *
+ * Transactional fallback decisions: on the non-Redis backends each request
+ * is ONE read-then-decide pass over the per-client and global windows —
+ * prune and read both, deny (0 or -1) without writing anything, or admit
+ * and commit both hits. A denial therefore never consumes the caller's
+ * own allowance (a victim refused during global saturation keeps their
+ * personal window untouched) and can never reset a window (pruning is
+ * idempotent: the next read re-prunes with a newer clock). The in-memory
+ * decision is exact; a generic PSR-6 pool cannot make the two item writes
+ * atomic across workers, so inter-worker races on the read-modify-write
+ * remain the documented best-effort weakness (the per-request semantics
+ * stay transactional).
+ *
  * Privacy: raw client IPs are never stored. Every key (Redis, PSR-6 and
  * in-memory) is a peppered HMAC of the IP, `hash_hmac('sha256', $ip,
  * $pepper)`, where the pepper defaults to the bundle secret key
@@ -310,21 +322,14 @@ LUA;
                 return $this->checkRedisRotated($identityPrev, $identityCur);
             }
 
-            // Non-Redis fallback: per-client window first (deny = 0), then
-            // the deployment-global window (deny = -1), mirroring the
-            // Redis script's check order. maxChallenges > 0 is guaranteed
-            // here (global-only short-circuited above).
-            $allowed = $this->pool !== null
-                ? $this->allowSharedTwoEpoch($identityPrev, $identityCur)
-                : $this->allowLocalTwoEpoch($identityPrev, $identityCur);
-            if (!$allowed) {
-                return 0;
-            }
-            if ($this->globalMax > 0 && !$this->allowGlobal()) {
-                return -1;
-            }
-
-            return 1;
+            // Non-Redis fallback: ONE transactional per-request decision
+            // over the per-client and deployment-global windows (deny = 0
+            // when the client is full, deny = -1 when the global is full),
+            // mirroring the Redis script's check order. maxChallenges > 0
+            // is guaranteed here (global-only short-circuited above).
+            return $this->pool !== null
+                ? $this->checkSharedTwoEpoch($identityPrev, $identityCur)
+                : $this->checkLocalTwoEpoch($identityPrev, $identityCur);
         }
 
         $key = hash_hmac('sha256', $identity, $this->pepper);
@@ -333,18 +338,11 @@ LUA;
             return $this->checkRedis($key);
         }
 
-        // Non-Redis fallback: per-client window first (deny = 0), then the
-        // deployment-global window (deny = -1), mirroring the Redis
-        // script's check order.
-        $allowed = $this->pool !== null ? $this->allowShared($key) : $this->allowLocal($key);
-        if (!$allowed) {
-            return 0;
-        }
-        if ($this->globalMax > 0 && !$this->allowGlobal()) {
-            return -1;
-        }
-
-        return 1;
+        // Non-Redis fallback: ONE transactional per-request decision over
+        // the per-client and deployment-global windows (deny = 0 when the
+        // client is full, deny = -1 when the global is full), mirroring
+        // the Redis script's check order.
+        return $this->pool !== null ? $this->checkShared($key) : $this->checkLocal($key);
     }
 
     private function epochIdentity(string $identity, int $epoch): string
@@ -423,79 +421,123 @@ LUA;
      * is ever computed or written. The window lives in the shared PSR-6
      * item when a pool is configured, otherwise in the process-local list;
      * it is rotation-independent by design (the global budget is shared by
-     * all clients and epochs).
+     * all clients and epochs). A denial writes nothing: the pruned state
+     * is idempotent (the next read re-prunes with a newer clock), so
+     * dropping the write can never reset the window.
      *
      * @return int 1 = allowed, -1 = global limit reached
      */
     private function checkLocalGlobalOnly(): int
     {
-        return $this->allowGlobal() ? 1 : -1;
+        $now = $this->now();
+
+        if ($this->pool !== null) {
+            $globalItem = $this->pool->getItem(self::GLOBAL_CACHE_KEY);
+            $globalState = $globalItem->isHit() ? $globalItem->get() : null;
+            $globalHits = $this->prune(\is_array($globalState) ? $this->timestamps($globalState) : [], $now);
+
+            if (\count($globalHits) >= $this->globalMax) {
+                return -1;
+            }
+            $globalHits[] = $now;
+            $this->saveWindow($globalItem, $globalHits);
+
+            return 1;
+        }
+
+        $globalHits = $this->prune($this->globalHits, $now);
+
+        if (\count($globalHits) >= $this->globalMax) {
+            return -1;
+        }
+        $globalHits[] = $now;
+        $this->globalHits = $globalHits;
+
+        return 1;
     }
 
     /**
-     * Enforce the deployment-global sliding window on the non-Redis
-     * backends: the shared PSR-6 item (`kr_global`) when a pool is
-     * configured, the process-local list otherwise. A denied request adds
-     * NO timestamp and does not reset the window (the pruned state is
-     * retained, mirroring the per-client deny behavior).
-     *
-     * Best-effort semantics: the in-process window is exact per process (N
-     * workers can reach ~N x cap), the shared PSR-6 window is cross-worker
-     * best-effort (a generic read-modify-write is not atomic, so concurrent
-     * requests may briefly exceed the cap). Only Redis is an exact
-     * distributed gate — see the class docblock.
+     * Transactional combined fallback decision (no rotation, in-memory):
+     * read and prune the per-client window, then read and prune the
+     * deployment-global window, in ONE pass per request. A denied request
+     * writes nothing — neither the client window nor the global window —
+     * so a victim refused by global saturation never consumes their own
+     * allowance. A denial can never reset a window either: pruning is
+     * idempotent, and the next read re-prunes with a newer clock.
+     * An admitted request commits both hits. The in-process decision is
+     * exact. Return codes match the Redis script: 1 = allowed, 0 =
+     * per-client full, -1 = global full.
      */
-    private function allowGlobal(): bool
-    {
-        if ($this->pool !== null) {
-            return $this->allowGlobalShared();
-        }
-
-        return $this->allowGlobalLocal();
-    }
-
-    private function allowGlobalLocal(): bool
+    private function checkLocal(string $key): int
     {
         $now = $this->now();
-        $hits = $this->prune($this->globalHits, $now);
+        $hits = $this->prune($this->hits[$key] ?? [], $now);
 
-        if (\count($hits) >= $this->globalMax) {
-            // Retain the pruned state on denial — clearing it would let a
-            // denied request reset the window and pass on the next call
-            // (a deterministic every-other-request bypass).
-            $this->globalHits = $hits;
-
-            return false;
+        if (\count($hits) >= $this->maxChallenges) {
+            return 0;
         }
+
+        $globalHits = [];
+        if ($this->globalMax > 0) {
+            $globalHits = $this->prune($this->globalHits, $now);
+            if (\count($globalHits) >= $this->globalMax) {
+                return -1;
+            }
+        }
+
         $hits[] = $now;
-        $this->globalHits = $hits;
+        $this->hits[$key] = $hits;
+        $globalHits[] = $now;
+        $this->globalHits = $globalHits;
 
-        return true;
+        return 1;
     }
 
-    private function allowGlobalShared(): bool
+    /**
+     * Transactional combined fallback decision (no rotation, shared PSR-6):
+     * same read-then-decide flow as {@see self::checkLocal()}, with the
+     * windows held in the pool. A denied request saves neither item; an
+     * admitted request saves both (the client item and the `kr_global`
+     * item). The per-request semantics are transactional, but a generic
+     * PSR-6 pool cannot make the two item writes atomic across workers:
+     * concurrent requests racing the read-modify-write may briefly exceed
+     * the caps (best-effort, documented in the class docblock). Only Redis
+     * is an exact distributed gate.
+     */
+    private function checkShared(string $key): int
     {
         $now = $this->now();
-        $item = $this->pool->getItem(self::GLOBAL_CACHE_KEY);
+
+        $item = $this->pool->getItem(self::cacheKey($key));
         $state = $item->isHit() ? $item->get() : null;
-        $hits = \is_array($state) ? $this->timestamps($state) : [];
-        $hits = $this->prune($hits, $now);
+        $hits = $this->prune(\is_array($state) ? $this->timestamps($state) : [], $now);
 
-        if (\count($hits) >= $this->globalMax) {
-            // Retain the pruned state on denial — clearing it would let a
-            // denied request reset the window and pass on the next call.
-            $item->set(['t' => $hits]);
-            $item->expiresAfter($this->windowSecs + 1);
-            $this->pool->save($item);
-
-            return false;
+        if (\count($hits) >= $this->maxChallenges) {
+            return 0;
         }
-        $hits[] = $now;
-        $item->set(['t' => $hits]);
-        $item->expiresAfter($this->windowSecs + 1);
-        $this->pool->save($item);
 
-        return true;
+        if ($this->globalMax > 0) {
+            $globalItem = $this->pool->getItem(self::GLOBAL_CACHE_KEY);
+            $globalState = $globalItem->isHit() ? $globalItem->get() : null;
+            $globalHits = $this->prune(\is_array($globalState) ? $this->timestamps($globalState) : [], $now);
+
+            if (\count($globalHits) >= $this->globalMax) {
+                return -1;
+            }
+
+            $hits[] = $now;
+            $this->saveWindow($item, $hits);
+
+            $globalHits[] = $now;
+            $this->saveWindow($globalItem, $globalHits);
+
+            return 1;
+        }
+
+        $hits[] = $now;
+        $this->saveWindow($item, $hits);
+
+        return 1;
     }
 
     /**
@@ -508,55 +550,90 @@ LUA;
     {
         $cutoff = $now - $this->windowSecs;
 
-        return array_values(array_filter(array_merge($a, $b), static fn (float $ts): bool => $ts >= $cutoff));
+        return array_values(array_filter(array_merge($a, $b), static fn (float $ts): bool => $ts > $cutoff));
     }
 
-    private function allowLocalTwoEpoch(string $identityPrev, string $identityCur): bool
+    /**
+     * Transactional combined fallback decision (epoch-rotated, in-memory):
+     * the previous- and current-epoch pseudonym windows are read, pruned
+     * and merged, then the deployment-global window is read and pruned, in
+     * ONE pass per request. Same deny-writes-nothing semantics as
+     * {@see self::checkLocal()}: a global-saturation denial never consumes
+     * the client's allowance in either epoch, and no denial can reset any
+     * window. New hits are written to the current epoch only; the global
+     * window is shared and never rotated.
+     */
+    private function checkLocalTwoEpoch(string $identityPrev, string $identityCur): int
     {
         $now = $this->now();
         $hits = $this->pruneTwo($this->hits[$identityPrev] ?? [], $this->hits[$identityCur] ?? [], $now);
+
         if (\count($hits) >= $this->maxChallenges) {
-            $windowSecs = $this->windowSecs;
-            $this->hits[$identityPrev] = array_values(array_filter($this->hits[$identityPrev] ?? [], static fn (float $ts): bool => $ts >= $now - $windowSecs));
-            $this->hits[$identityCur] = array_values(array_filter($this->hits[$identityCur] ?? [], static fn (float $ts): bool => $ts >= $now - $windowSecs));
-
-            return false;
+            return 0;
         }
-        $this->hits[$identityCur][] = $now;
 
-        return true;
+        $globalHits = [];
+        if ($this->globalMax > 0) {
+            $globalHits = $this->prune($this->globalHits, $now);
+            if (\count($globalHits) >= $this->globalMax) {
+                return -1;
+            }
+        }
+
+        $this->hits[$identityCur][] = $now;
+        $globalHits[] = $now;
+        $this->globalHits = $globalHits;
+
+        return 1;
     }
 
-    private function allowSharedTwoEpoch(string $identityPrev, string $identityCur): bool
+    /**
+     * Transactional combined fallback decision (epoch-rotated, shared
+     * PSR-6): same read-then-decide flow as
+     * {@see self::checkLocalTwoEpoch()} with the windows in the pool. A
+     * denied request saves NO item (neither the previous- nor the
+     * current-epoch client item, nor the `kr_global` item); an admitted
+     * request saves the current-epoch client item and the global item.
+     * Inter-worker races on the non-atomic read-modify-write are the
+     * documented best-effort weakness of any generic PSR-6 pool.
+     */
+    private function checkSharedTwoEpoch(string $identityPrev, string $identityCur): int
     {
         $now = $this->now();
-        $cacheKeyPrev = self::cacheKey($identityPrev);
-        $cacheKeyCur = self::cacheKey($identityCur);
 
-        $itemPrev = $this->pool->getItem($cacheKeyPrev);
-        $itemCur = $this->pool->getItem($cacheKeyCur);
-        $prevHits = $this->prune($this->timestamps(\is_array($itemPrev->isHit() ? $itemPrev->get() : null) ? $itemPrev->get() : []), $now);
-        $curHits = $this->prune($this->timestamps(\is_array($itemCur->isHit() ? $itemCur->get() : null) ? $itemCur->get() : []), $now);
+        $itemPrev = $this->pool->getItem(self::cacheKey($identityPrev));
+        $itemCur = $this->pool->getItem(self::cacheKey($identityCur));
+        $prevState = $itemPrev->isHit() ? $itemPrev->get() : null;
+        $curState = $itemCur->isHit() ? $itemCur->get() : null;
+        $prevHits = $this->prune(\is_array($prevState) ? $this->timestamps($prevState) : [], $now);
+        $curHits = $this->prune(\is_array($curState) ? $this->timestamps($curState) : [], $now);
 
         if (\count($prevHits) + \count($curHits) >= $this->maxChallenges) {
-            // Retain the pruned state on denial — clearing it would let a
-            // denied request reset the window and pass on the next call
-            // (a deterministic every-other-request bypass).
-            $itemPrev->set(['t' => $prevHits]);
-            $itemPrev->expiresAfter($this->windowSecs + 1);
-            $this->pool->save($itemPrev);
-            $itemCur->set(['t' => $curHits]);
-            $itemCur->expiresAfter($this->windowSecs + 1);
-            $this->pool->save($itemCur);
-
-            return false;
+            return 0;
         }
-        $curHits[] = $now;
-        $itemCur->set(['t' => $curHits]);
-        $itemCur->expiresAfter($this->windowSecs + 1);
-        $this->pool->save($itemCur);
 
-        return true;
+        if ($this->globalMax > 0) {
+            $globalItem = $this->pool->getItem(self::GLOBAL_CACHE_KEY);
+            $globalState = $globalItem->isHit() ? $globalItem->get() : null;
+            $globalHits = $this->prune(\is_array($globalState) ? $this->timestamps($globalState) : [], $now);
+
+            if (\count($globalHits) >= $this->globalMax) {
+                return -1;
+            }
+
+            $curHits[] = $now;
+            $this->saveWindow($itemCur, $curHits);
+
+            $globalHits[] = $now;
+            $this->saveWindow($globalItem, $globalHits);
+
+            return 1;
+        }
+
+        $curHits[] = $now;
+        $this->saveWindow($itemCur, $curHits);
+
+        return 1;
     }
 
     private function checkRedis(string $identity): int
@@ -579,49 +656,17 @@ LUA;
         return (int) $result;
     }
 
-    private function allowLocal(string $key): bool
+    /**
+     * Persist a window's hit timestamps into one cache item (shared by
+     * every admit path) with the item TTL one second past the window.
+     *
+     * @param list<float> $hits
+     */
+    private function saveWindow(\Psr\Cache\CacheItemInterface $item, array $hits): void
     {
-        $now = $this->now();
-        $hits = $this->hits[$key] ?? [];
-
-        $hits = $this->prune($hits, $now);
-
-        if (\count($hits) >= $this->maxChallenges) {
-            $this->hits[$key] = $hits;
-
-            return false;
-        }
-        $hits[] = $now;
-        $this->hits[$key] = $hits;
-
-        return true;
-    }
-
-    private function allowShared(string $key): bool
-    {
-        $cacheKey = self::cacheKey($key);
-
-        $item = $this->pool->getItem($cacheKey);
-        $state = $item->isHit() ? $item->get() : null;
-        $hits = \is_array($state) ? $this->timestamps($state) : [];
-
-        $now = $this->now();
-        $hits = $this->prune($hits, $now);
-
-        if (\count($hits) >= $this->maxChallenges) {
-            $item->set(['t' => $hits]);
-            $item->expiresAfter($this->windowSecs + 1);
-            $this->pool->save($item);
-
-            return false;
-        }
-        $hits[] = $now;
-
         $item->set(['t' => $hits]);
         $item->expiresAfter($this->windowSecs + 1);
         $this->pool->save($item);
-
-        return true;
     }
 
     /**
@@ -650,9 +695,14 @@ LUA;
      */
     private function prune(array $hits, float $now): array
     {
+        // Strictly-greater cutoff, matching Redis's inclusive
+        // `ZREMRANGEBYSCORE ... -inf (now - window)`: a hit at the exact
+        // boundary instant now - window has slid out of the window and is
+        // pruned. An inclusive (>=) predicate would keep it for the
+        // boundary instant and diverge from the Redis window.
         $cutoff = $now - $this->windowSecs;
 
-        return array_values(array_filter($hits, static fn (float $ts): bool => $ts >= $cutoff));
+        return array_values(array_filter($hits, static fn (float $ts): bool => $ts > $cutoff));
     }
 
     private function now(): float
