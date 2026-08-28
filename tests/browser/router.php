@@ -1052,6 +1052,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
     if (!is_array($body)) {
         parse_str($rawBody, $body);
     }
+    // Pre-decode diagnostic (fixture-only, hashes and lengths only,
+    // never token bytes): a failing Turnstile request that never reaches
+    // the core verifier (the provider response is invalid-input-response
+    // from the token decode) cannot be explained by the observer. Log
+    // the submitted response's length and sha256 plus the exact
+    // SolutionToken decode result, so a browser-token translation break
+    // is localizable in one line.
+    $preDecodeToken = (string) ($body['response'] ?? '');
+    $preDecode = null;
+    try {
+        $preDecodeToken = (string) SolutionToken::decode($preDecodeToken)->nonce;
+        $preDecode = 'ok';
+    } catch (\Throwable $e) {
+        $preDecode = get_class($e);
+    }
+    $GLOBALS['kiwi_last_siteverify_predecode'] = [
+        'response_len' => \strlen((string) ($body['response'] ?? '')),
+        'response_sha256' => hash('sha256', (string) ($body['response'] ?? '')),
+        'decode' => $preDecode,
+    ];
     header('Content-Type: application/json');
     header('Cache-Control: no-store, private, max-age=0');
     $nonce = (string) (explode('.', (string) base64_decode((string) ($body['response'] ?? ''), true))[0] ?? '');
@@ -1138,9 +1158,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
         // provider conversion, logged verbatim. The public provider
         // payload stays collapsed.
         $recorded = $GLOBALS['kiwi_last_siteverify_outcome'] ?? null;
+        $preDecode = $GLOBALS['kiwi_last_siteverify_predecode'] ?? null;
         $diagnostic = $recorded !== null
             ? sprintf('code=%s context=%s', $recorded['code'], json_encode($recorded['context']))
-            : 'no outcome recorded';
+            : ($preDecode !== null
+                ? sprintf('pre-decode: len=%d sha256=%s decode=%s', $preDecode['response_len'], $preDecode['response_sha256'], $preDecode['decode'])
+                : 'no outcome recorded');
         error_log(sprintf('kiwicaptcha-browser-fixture: siteverify internal outcome: %s (provider payload: %s)', $diagnostic, json_encode($payload)));
     }
     echo $response->getContent();

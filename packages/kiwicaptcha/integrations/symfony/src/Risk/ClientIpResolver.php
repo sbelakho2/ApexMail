@@ -242,7 +242,15 @@ final class ClientIpResolver
         foreach ($candidates as $candidate) {
             $canonical = self::canonicalIp($candidate);
             if ($canonical === null) {
-                continue;
+                // An invalid nearest-side hop terminates the trust
+                // chain: when walking outward from a trusted peer, an
+                // unparsable node means you cannot establish who lies
+                // beyond it. A `continue` here would let an appending
+                // intermediary contribute an invalid nearest token and
+                // then accept an older attacker-controlled address as
+                // the client; the walk falls back conservatively to the
+                // socket peer instead.
+                return null;
             }
             if (!IpUtils::checkIp($canonical, $effectiveTrust)) {
                 return $canonical;

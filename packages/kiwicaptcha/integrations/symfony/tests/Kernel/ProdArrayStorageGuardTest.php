@@ -155,7 +155,15 @@ final class ProdArrayStorageGuardTest extends TestCase
             [[
                 'secret_key' => str_repeat('a', 32),
                 'storage' => 'my.psr6.storage',
-                'risk' => ['redis' => ['ttl_margin_secs' => 90], 'siteverify_secrets' => ['compat-secret-42' => 'login']],
+                'risk' => [
+                    'redis' => ['ttl_margin_secs' => 90],
+                    // The siteverify surface cannot faithfully enforce a
+                    // post-solve scope: the mapped scope must have
+                    // post_solve_check disabled (enforced at compile
+                    // time).
+                    'scopes' => ['login' => ['id' => 1, 'post_solve_check' => false]],
+                    'siteverify_secrets' => ['compat-secret-42' => 'login'],
+                ],
             ]],
             $container,
         );
@@ -173,7 +181,7 @@ final class ProdArrayStorageGuardTest extends TestCase
                 'secret_key' => str_repeat('a', 32),
                 'storage' => 'my.psr6.storage',
                 'allow_best_effort_storage' => true,
-                'risk' => ['redis' => ['ttl_margin_secs' => 90], 'siteverify_secrets' => ['compat-secret-42' => 'login']],
+                'risk' => ['redis' => ['ttl_margin_secs' => 90], 'scopes' => ['login' => ['id' => 1, 'post_solve_check' => false]], 'siteverify_secrets' => ['compat-secret-42' => 'login']],
             ]],
             $container,
         );

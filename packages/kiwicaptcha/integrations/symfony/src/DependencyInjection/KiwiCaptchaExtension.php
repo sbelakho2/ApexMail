@@ -213,6 +213,23 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // after the signed challenge has expired, so short-lived
         // Siteverify profiles (e.g. 30s) are fully supported.
         if ($config['risk']['siteverify_secrets'] !== []) {
+            // The provider-compatible surface cannot faithfully enforce
+            // the native post-solve final disposition (adaptive
+            // reassessment, chain obligations, durable
+            // Pass/Deny/StepUp/ChainRequired): a siteverify secret must
+            // never map to a scope whose post-solve check is enabled —
+            // silently providing weaker semantics than the native path
+            // is exactly the control gap the config should refuse.
+            foreach ($config['risk']['siteverify_secrets'] as $svScope) {
+                $svPostSolve = $config['risk']['scopes'][$svScope]['post_solve_check'] ?? false;
+                if ($svPostSolve) {
+                    throw new \LogicException(sprintf(
+                        'kiwi_captcha.risk.siteverify_secrets: the expected scope "%s" has risk.scopes.%s.post_solve_check=true, but the provider-compatible Siteverify surface cannot faithfully enforce the native post-solve final disposition (adaptive reassessment, chain obligations, durable Pass/Deny/StepUp/ChainRequired). Map the secret to a scope with post_solve_check=false, disable post_solve_check for this scope, or serve the post-solve surface through the native validator instead.',
+                        $svScope,
+                        $svScope,
+                    ));
+                }
+            }
             $waiterBoundSecs = (int) SiteVerifyController::IDEMPOTENCY_WAIT_SECS;
             if ($config['argon2_lease_ms'] >= SiteVerifyIdempotencyStore::LEASE_SECONDS * 1000) {
                 throw new \LogicException(sprintf(
@@ -1087,6 +1104,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // server-side transaction input when no authority exists.
             ->setArgument('$bindingAuthority', $bindingAuthorityRef)
             ->setArgument('$defaultRequestBinding', $staticBinding)
+            // Adaptive-risk feedback: the provider surface feeds the same
+            // risk evidence as the native path (SolveSuccess repays the
+            // issuance debt only; failure classes enrich the model).
+            ->setArgument('$riskGateway', $riskConfig['enabled'] ? $riskGatewayRef : null)
             // The logical-operation identity of the redemption rides in
             // the consumed runtime state (written atomically with the
             // pending->consumed transition). The recovery gate on the

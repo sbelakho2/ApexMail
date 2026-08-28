@@ -61,7 +61,8 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
         // takeover/retry horizon.
         $container = $this->load([
             'challenge_ttl_secs' => 30,
-            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'enabled' => false, 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
+            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'enabled' => false, 'scopes' => ['login' => ['id' => 1, 'post_solve_check' => false]],
+                'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
         ]);
 
         self::assertTrue($container->hasDefinition('kiwi_captcha.config'));
@@ -74,6 +75,7 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
                 'redis' => ['ttl_margin_secs' => 90],
                 'enabled' => false,
                 'sitekeys' => ['sitekey-k' => ['ttl_secs' => 30]],
+                'scopes' => ['login' => ['id' => 1, 'post_solve_check' => false]],
                 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login'],
             ],
         ]);
@@ -109,6 +111,7 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
             'risk' => [
                 'redis' => ['ttl_margin_secs' => 90],
                 'sitekeys' => ['sitekey-k' => ['ttl_secs' => 30]],
+                'scopes' => ['login' => ['id' => 1, 'post_solve_check' => false]],
                 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login'],
             ],
         ]);
@@ -120,7 +123,8 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
         $this->expectExceptionMessage('ownership lease');
         $this->load([
             'argon2_lease_ms' => 60000,
-            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'enabled' => false, 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
+            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'enabled' => false, 'scopes' => ['login' => ['id' => 1, 'post_solve_check' => false]],
+                'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
         ]);
     }
 
@@ -137,6 +141,7 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
             'risk' => [
                 'redis' => ['ttl_margin_secs' => 90],
                 'enabled' => false,
+                'scopes' => ['login' => ['id' => 1, 'post_solve_check' => false]],
                 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login'],
             ],
         ]);
@@ -159,7 +164,8 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
         (new KiwiCaptchaExtension())->load([[
             'secret_key' => str_repeat('a', 32),
             'storage' => 'my.atomic.storage',
-            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'enabled' => false, 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
+            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'enabled' => false, 'scopes' => ['login' => ['id' => 1, 'post_solve_check' => false]],
+                'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
         ]], $container);
     }
 
@@ -181,7 +187,8 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
         (new KiwiCaptchaExtension())->load([[
             'secret_key' => str_repeat('a', 32),
             'storage' => 'my.identityless.storage',
-            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'enabled' => false, 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
+            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'enabled' => false, 'scopes' => ['login' => ['id' => 1, 'post_solve_check' => false]],
+                'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
         ]], $container);
     }
 
@@ -203,7 +210,8 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
         (new KiwiCaptchaExtension())->load([[
             'secret_key' => str_repeat('a', 32),
             'storage' => 'my.no.cleanup.storage',
-            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'enabled' => false, 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
+            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'enabled' => false, 'scopes' => ['login' => ['id' => 1, 'post_solve_check' => false]],
+                'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
         ]], $container);
     }
 
@@ -222,7 +230,8 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
         (new KiwiCaptchaExtension())->load([[
             'secret_key' => str_repeat('a', 32),
             'storage' => 'my.redis.storage',
-            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'enabled' => false, 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
+            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'enabled' => false, 'scopes' => ['login' => ['id' => 1, 'post_solve_check' => false]],
+                'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
         ]], $container);
 
         self::assertTrue($container->hasDefinition('kiwi_captcha.config'));
@@ -239,7 +248,8 @@ final class SiteVerifyRecoveryInvariantTest extends TestCase
         (new KiwiCaptchaExtension())->load([[
             'secret_key' => str_repeat('a', 32),
             'storage' => 'my.capable.storage',
-            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'enabled' => false, 'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
+            'risk' => ['redis' => ['ttl_margin_secs' => 90], 'enabled' => false, 'scopes' => ['login' => ['id' => 1, 'post_solve_check' => false]],
+                'siteverify_secrets' => [self::SITEVERIFY_SECRET => 'login']],
         ]], $container);
 
         self::assertTrue($container->hasDefinition('kiwi_captcha.config'));

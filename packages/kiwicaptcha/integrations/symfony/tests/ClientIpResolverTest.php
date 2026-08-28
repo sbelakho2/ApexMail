@@ -295,4 +295,28 @@ final class ClientIpResolverTest extends TestCase
         self::assertSame('2001:db8::1', $ip);
         Request::setTrustedProxies([], -1);
     }
+    public function testInvalidNearestHopTerminatesTheChainWalk(): void
+    {
+        // An invalid nearest-side hop breaks the trust chain: the walk
+        // cannot establish who lies beyond it, so the canonical IP falls
+        // back conservatively to the socket peer, never an older
+        // attacker-controlled address that an appending intermediary
+        // let through.
+        Request::setTrustedProxies(['10.0.0.0/8'], Request::HEADER_X_FORWARDED_FOR | Request::HEADER_FORWARDED);
+        $resolver = new ClientIpResolver(ClientIpResolver::MODE_SYMFONY_TRUSTED_PROXIES, ['10.0.0.0/8']);
+        $cases = [
+            'Forwarded' => ['for=203.0.113.66, for=unknown', 'for=203.0.113.66, for=_obfuscated', 'for=203.0.113.66, for="[bad]"', 'for=203.0.113.66, for="[2001:db8::1]:badport"'],
+            'X-Forwarded-For' => ['203.0.113.66, unknown'],
+        ];
+        foreach ($cases as $header => $values) {
+            foreach ($values as $value) {
+                $ip = $resolver->resolve($this->request('10.1.2.3', [$header => $value]));
+                self::assertSame('10.1.2.3', $ip, 'the invalid nearest hop "'.$value.'" must terminate the walk: the socket peer wins, never the older attacker address');
+            }
+        }
+        // A valid chain still resolves normally.
+        $ip = $resolver->resolve($this->request('10.1.2.3', ['Forwarded' => 'for=203.0.113.66, for=10.0.0.8']));
+        self::assertSame('203.0.113.66', $ip);
+        Request::setTrustedProxies([], -1);
+    }
 }

@@ -27,7 +27,7 @@
 --   KEYS[10] dedupe key (string)                 — event_id guard
 --
 -- ARGV:
---   [1]  event             RiskEventKind int (1..17)
+--   [1]  event             RiskEventKind int (1..21)
 --   [2]  scope             int (0 = unknown)
 --   [3]  now_ms            UNUSED — Redis TIME is the distributed state
 --                           clock authority (decay, hysteresis, cooldown and
@@ -84,6 +84,15 @@
 --                                 an individual visitor)
 --   RiskDenied (17)             → no state mutation (a risk decision that
 --                                 already denied must not be double-counted)
+--   ChallengeCancelled (21)     → risk-neutral (no state change): an
+--                                 issued challenge that was cancelled keeps
+--                                 its issue-debt contribution — the
+--                                 issued-and-abandoned signal decays
+--                                 naturally, and only an actual
+--                                 SolveSuccess repays it. The event kind
+--                                 stays for observability: cancellation is
+--                                 a resource-lifecycle operation, never a
+--                                 debt refund
 --
 -- Only PreIssue counts as a REQUEST for velocity purposes; feedback events
 -- mutate only their own channels.
@@ -220,6 +229,12 @@ local function apply_feedback(s, event, scope)
         -- deliberately nothing: the global state carries the pressure
     elseif event == 17 then       -- RiskDenied: already scored, no-op
         -- deliberately nothing
+    elseif event == 21 then       -- ChallengeCancelled: risk-neutral
+        -- Deliberately nothing: the issued-and-abandoned challenge keeps
+        -- its issue-debt contribution (the signal decays naturally; only
+        -- an actual SolveSuccess repays it). The event kind stays for
+        -- observability — the cancellation is a resource-lifecycle
+        -- operation, never a debt refund.
     end
 end
 

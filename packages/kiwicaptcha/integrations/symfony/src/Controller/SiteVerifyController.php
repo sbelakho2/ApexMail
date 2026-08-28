@@ -223,6 +223,17 @@ final class SiteVerifyController
          * the reconstructed provider payload.
          */
         private readonly ?\Closure $verifyOutcomeObserver = null,
+        /**
+         * Adaptive-risk feedback (wired by the container when risk is
+         * enabled): the provider surface feeds the same risk evidence as
+         * the native path. A successful solve repays the issuance debt,
+         * never manufacturing trust; malformed, replay and bad-proof
+         * outcomes contribute the appropriate risk evidence. The source
+         * identity derives from the canonical remote IP and scope (the
+         * same pseudonym machinery); the browser's continuity cookie is
+         * never needed here, matching the provider contract.
+         */
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway $riskGateway = null,
     ) {
         $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
         $this->recovery = $recovery ?? (new \KiwiCaptcha\ConsumedOutcomeRecovery($this->storage ?? new \KiwiCaptcha\Storage\ArrayStorage()));
@@ -929,6 +940,11 @@ final class SiteVerifyController
                 'operationIdentityPresent' => $operationFingerprint !== null,
             ]);
         }
+        // Risk feedback, the native parity: the outcome's error (null on
+        // success) maps to the same events the validator records —
+        // SolveSuccess repays the issuance debt only, and the failure
+        // classes enrich the model.
+        $this->riskGateway?->solveOutcome($expectedScope, $remoteIp, null, $outcome->error);
         } catch (\InvalidArgumentException) {
             // Defensive boundary: the remoteip was validated above, so
             // the core's IP canonicalization cannot throw here. An

@@ -2262,9 +2262,19 @@ impl ProductionVerifier {
             state.record.request_binding.as_deref(),
             &claim_guard.owner,
         );
-        claim_guard.release();
         match commit {
-            Ok(true) => outcome,
+            Ok(true) => {
+                // The script committed the result and deleted our
+                // claim: the guard is disarmed only here. On Ok(false)
+                // or Err the guard stays armed, so the Drop's
+                // compare-and-delete still releases our claim when it
+                // is still ours (an error before the Lua ran leaves the
+                // claim alive; an error after the script ran makes the
+                // compare-and-delete a harmless no-op; a moved owner is
+                // never touched).
+                claim_guard.release();
+                outcome
+            }
             Ok(false) => {
                 // Refused (ownership lost, or the record was no longer
                 // resultless): never the computed outcome — reread.
