@@ -210,7 +210,7 @@ mod http2_tests {
         let mut settings = BTreeMap::new();
 
         // Each setting is 6 bytes:2 bytes identifier, 4 bytes value
-        for chunk in payload.chunks_exact(6) {
+        for chunk in payload.as_chunks::<6>().0 {
             let id = u16::from_be_bytes([chunk[0], chunk[1]]);
             let value = u32::from_be_bytes([chunk[2], chunk[3], chunk[4], chunk[5]]);
             settings.insert(id, value);
