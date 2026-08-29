@@ -213,9 +213,22 @@ BEGIN
           AND tgt.relname = 'tenants'
           AND rel.relname = ANY (financial_tables)
     LOOP
+        -- NOTE: PostgreSQL has no `ALTER CONSTRAINT ... ON DELETE ...`
+        -- (ALTER CONSTRAINT only takes DEFERRABLE/NOT VALID — the parser
+        -- fails with "syntax error at or near ON"). Flip the action by
+        -- replacing the constraint: drop and re-add it as RESTRICT under
+        -- the SAME name, preserving its validation state. These FKs are all
+        -- single-column (tenant_id -> tenants.id); the loop's WHERE clause
+        -- selected exactly the tenants-targeting FKs of these tables.
         EXECUTE format(
-            'ALTER TABLE %I ALTER CONSTRAINT %I ON DELETE RESTRICT',
+            'ALTER TABLE %I DROP CONSTRAINT %I',
             fk.table_name, fk.conname
+        );
+        EXECUTE format(
+            'ALTER TABLE %I ADD CONSTRAINT %I FOREIGN KEY (tenant_id) '
+                'REFERENCES tenants(id) ON DELETE RESTRICT%s',
+            fk.table_name, fk.conname,
+            CASE WHEN fk.convalidated THEN '' ELSE ' NOT VALID' END
         );
         RAISE NOTICE '116: % on % now ON DELETE RESTRICT', fk.conname, fk.table_name;
     END LOOP;
