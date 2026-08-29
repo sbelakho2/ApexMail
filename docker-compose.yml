@@ -1191,7 +1191,11 @@ services:
   redis-exporter:
     image: oliver006/redis_exporter:v1.62.0
     container_name: apexmail-redis-exporter
-    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "REDIS_PASSWORD", "REDIS_PASSWORD_FILE", "/redis_exporter"]
+    # The redis_exporter image is FROM scratch (no shell): it reads the
+    # Docker secret itself via its native REDIS_PASSWORD_FILE env var — a
+    # /bin/sh wrapper entrypoint cannot execute here (OCI "exec /bin/sh:
+    # no such file or directory" aborts every compose up).
+    entrypoint: ["/redis_exporter"]
     restart: unless-stopped
     read_only: true
     security_opt:
@@ -1204,8 +1208,6 @@ services:
       # TrackingWalBacklog alert in deploy/alerting-rules.yml). A single
       # exact key — no SCAN pattern cost.
       REDIS_EXPORTER_CHECK_KEYS: "apexmail:events:pending"
-    volumes:
-      - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     networks:
       - apexmail_monitoring
       - apexmail_data_internal
