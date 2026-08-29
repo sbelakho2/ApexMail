@@ -723,6 +723,116 @@ services:
     logging: *default-logging
 
   # ===========================================================================
+  # COMPLIANCE SERVICE (audit log, DSR/GDPR automation, secrets rotation)
+  # ===========================================================================
+  # Internal-only service (port 3011 is NOT published): the control plane
+  # reaches it server-side over apexmail_backend (compliance:3011) with the
+  # COMPLIANCE_AUTH_TOKEN bearer token. Health: GET /health (liveness) and
+  # GET /health/ready (readiness; pings Postgres) — see the service contract
+  # header in crates/compliance/src/bin/server.rs.
+  # BUILD CONTRACT: the Dockerfile runtime target `compliance` (binary
+  # `compliance-server`, EXPOSE 3011) is owned by the mail-server code
+  # owners — this wiring follows the api-server/billing/sales-autopilot
+  # pattern (same build context, target named after the service).
+  compliance:
+    build:
+      context: .
+      dockerfile: services/mail-server/Dockerfile
+      target: compliance
+    restart: unless-stopped
+    # Chain (same as sales-autopilot): load-secret-env.sh bridges the
+    # compliance-specific Docker secrets to env, then the shared entrypoint
+    # wrapper bridges the DB/Redis/ClickHouse secrets and assembles
+    # DATABASE_URL / REDIS_URL from the DB_*/REDIS_* parts.
+    entrypoint:
+      - /bin/sh
+      - /usr/local/bin/load-secret-env.sh
+      - COMPLIANCE_AUTH_TOKEN
+      - COMPLIANCE_AUTH_TOKEN_FILE
+      - AUDIT_SIGNING_KEY
+      - AUDIT_SIGNING_KEY_FILE
+      - SECRETS_ENCRYPTION_KEY
+      - SECRETS_ENCRYPTION_KEY_FILE
+      - SECRETS_KDF_SALT
+      - SECRETS_KDF_SALT_FILE
+      - CONSENT_SIGNING_KEY
+      - CONSENT_SIGNING_KEY_FILE
+      - --
+      - /bin/sh
+      - /opt/apexmail/entrypoint-wrapper.sh
+      - compliance-server
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+      - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RUST_LOG: ${RUST_LOG:-info,compliance=debug}
+      # NODE_ENV=production (prod overlay) makes the service refuse an
+      # ephemeral AUDIT_SIGNING_KEY — dev keeps the inline defaults below.
+      NODE_ENV: ${NODE_ENV:-development}
+      # ── Database / Redis (URLs assembled by the entrypoint wrapper) ───────
+      DATABASE_URL: ""
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      # ── HTTP bind (internal compose network only) ─────────────────────────
+      COMPLIANCE_PORT: "3011"
+      # ── Auth / signing (DEV defaults; prod overlay mounts Docker secrets) ─
+      COMPLIANCE_AUTH_TOKEN: ${COMPLIANCE_AUTH_TOKEN:-dev-compliance-token-change-me}
+      AUDIT_SIGNING_KEY: ${AUDIT_SIGNING_KEY:-dev-audit-signing-key-change-me-32-bytes}
+      SECRETS_ENCRYPTION_KEY: ${COMPLIANCE_SECRETS_ENCRYPTION_KEY:-dev-compliance-secrets-encryption-key}
+      SECRETS_KDF_SALT: ${COMPLIANCE_SECRETS_KDF_SALT:-dev-compliance-secrets-kdf-salt}
+      CONSENT_SIGNING_KEY: ${COMPLIANCE_CONSENT_SIGNING_KEY:-dev-compliance-consent-signing-key-32b}
+      # ── Optional integration knobs ────────────────────────────────────────
+      CORS_ORIGIN: ${COMPLIANCE_CORS_ORIGIN:-}
+      GDPR_EXPORT_BASE_URL: ${GDPR_EXPORT_BASE_URL:-}
+      GDPR_VERIFY_BASE_URL: ${GDPR_VERIFY_BASE_URL:-}
+      AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-}
+      # ClickHouse GDPR erasure is OFF unless explicitly enabled.
+      GDPR_CLICKHOUSE_ERASURE_ENABLED: ${GDPR_CLICKHOUSE_ERASURE_ENABLED:-false}
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-apexmail}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
+      CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
+    healthcheck:
+      # Liveness shape mirrors the siblings (port probe); the binary also
+      # serves GET /health and GET /health/ready (DB ping).
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 3011"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - apexmail_backend
+      - apexmail_data_internal
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    read_only: true
+    tmpfs:
+      - /tmp
+    secrets:
+      - postgres_password
+      - redis_password
+      - clickhouse_password
+    logging: *default-logging
+
+  # ===========================================================================
   # DEVELOPMENT SMTP (Mailpit)
   # ===========================================================================
   mailpit:
@@ -821,6 +931,15 @@ services:
     volumes:
       - ./deploy/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - ./deploy/alerting-rules.yml:/etc/prometheus/alerting-rules.yml:ro
+      # F2 — every file listed in prometheus.yml `rule_files:` must be mounted
+      # at EXACTLY the path the config references (paths are relative to
+      # /etc/prometheus/). Missing rule files are silently ignored by
+      # Prometheus, which previously left four of the five files (every alert
+      # group they contain) unloaded.
+      - ./deploy/monitoring/alerts/certificate-expiry.yml:/etc/prometheus/monitoring/alerts/certificate-expiry.yml:ro
+      - ./deploy/monitoring/alerts/disk-space.yml:/etc/prometheus/monitoring/alerts/disk-space.yml:ro
+      - ./deploy/prometheus/alerts/api-alerts.yml:/etc/prometheus/prometheus/alerts/api-alerts.yml:ro
+      - ./deploy/prometheus/alerts/infrastructure-alerts.yml:/etc/prometheus/prometheus/alerts/infrastructure-alerts.yml:ro
       # Audit P + hardening: basic auth for the web UI/API. The mounted file
       # is the documented TEMPLATE; render-prometheus-web-config.sh renders
       # the live config to /tmp/prometheus-web.yml at container start from
@@ -888,10 +1007,18 @@ services:
     restart: unless-stopped
     depends_on:
       - prometheus
+    # F9 — the provisioned ClickHouse/PostgreSQL datasources interpolate
+    # ${CLICKHOUSE_PASSWORD} / ${POSTGRES_PASSWORD} from the container env.
+    # Bridge them from the SAME Docker secrets the clickhouse/postgres
+    # services consume (via load-secret-env.sh, the repo's standard _FILE
+    # bridge) instead of interpolating plaintext passwords into the compose
+    # file, then exec the stock image entrypoint (/run.sh).
+    entrypoint: ["/bin/sh", "/usr/local/bin/load-secret-env.sh", "CLICKHOUSE_PASSWORD", "CLICKHOUSE_PASSWORD_FILE", "POSTGRES_PASSWORD", "POSTGRES_PASSWORD_FILE", "--", "/run.sh"]
     volumes:
       - grafana_data:/var/lib/grafana
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./deploy/grafana/dashboards:/etc/grafana/dashboards:ro
+      - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     environment:
       GF_SECURITY_ADMIN_USER: ${GF_SECURITY_ADMIN_USER:-admin}
       # DEV-ONLY default: the base compose is the development stack. The
@@ -906,10 +1033,16 @@ services:
       # SECURITY: Disable anonymous access - all users must authenticate
       GF_AUTH_ANONYMOUS_ENABLED: false
       GF_INSTALL_PLUGINS: grafana-clickhouse-datasource
+      # Datasource credentials for the provisioning files above (F9).
+      CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
     ports:
       - "${GRAFANA_PORT:-127.0.0.1:3003}:3000"
     networks:
       - apexmail_monitoring
+      # The ClickHouse/PostgreSQL datasources point at clickhouse:8123 /
+      # postgres:5432 — both only exist on the data plane network.
+      - apexmail_data_internal
     profiles:
       - monitoring
     deploy:
@@ -924,6 +1057,9 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    secrets:
+      - clickhouse_password
+      - postgres_password
     logging: *default-logging
 
   # =========================================================================
@@ -1029,7 +1165,11 @@ services:
       - no-new-privileges:true
       - apparmor:docker-default
     environment:
-      DATA_SOURCE_URI: postgres:5432/${POSTGRES_DB:-apexmail}?sslmode=require
+      # F3 — sslmode=disable: the Postgres containers (postgres:16.8-alpine,
+      # default ssl=off) offer NO TLS; sslmode=require made every scrape fail
+      # ("server does not support SSL") so ALL pg_* metrics were dead. Host
+      # and DB name otherwise match the postgres service above.
+      DATA_SOURCE_URI: postgres:5432/${POSTGRES_DB:-apexmail}?sslmode=disable
       DATA_SOURCE_USER: ${POSTGRES_USER:-apexmail}
       DATA_SOURCE_PASS_FILE: /run/secrets/postgres_password
     volumes:
@@ -1240,7 +1380,10 @@ secrets:
 #
 #   Outbound-needs audit for the attached services (why each keeps another
 #   non-internal network when it needs egress):
-#     postgres, redis, clickhouse, mailstore, postgres-backup — no egress.
+#     postgres, redis, clickhouse, mailstore — no egress.
+#     postgres-backup / clickhouse-backup — data path only; their OFFSITE
+#       rsync egress rides the dedicated apexmail_backup_egress network
+#       defined in the production overlay (F1).
 #     api-server   — SES (AWS) egress      → frontend/backend kept.
 #     worker       — SES + outbound SMTP   → backend kept.
 #     mta          — inbound/outbound mail → frontend/backend kept.

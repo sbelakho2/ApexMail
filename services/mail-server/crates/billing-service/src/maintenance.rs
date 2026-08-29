@@ -649,14 +649,35 @@ async fn perform_month_end_closing(state: &AppState) -> Result<bool, String> {
     };
 
     // ------------------------------------------------------------------
-    // 1.  Check if a closing record already exists for this period.
+    // 0.  Serialize concurrent closings (Fix F5): the previous
+    //     check-then-insert ran across replicas/restarts — both passed the
+    //     NOT-EXISTS check and double-inserted month_end_closings rows (and
+    //     raced the invoice UPDATE). Take a pg advisory TRANSACTION lock
+    //     keyed on the period and re-check existence INSIDE the lock; no
+    //     schema change needed.
+    // ------------------------------------------------------------------
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
+
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("month_end_closing:{target_year}-{target_month:02}"))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to acquire month-end closing lock: {e}"))?;
+
+    // ------------------------------------------------------------------
+    // 1.  Check if a closing record already exists for this period
+    //     (re-checked under the advisory lock).
     // ------------------------------------------------------------------
     let already_closed: bool = sqlx::query_scalar::<_, Option<i64>>(
         "SELECT 1 FROM month_end_closings WHERE tax_year = $1 AND tax_month = $2 LIMIT 1",
     )
     .bind(target_year)
     .bind(target_month as i32)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|e| format!("Failed to check existing month-end closing: {e}"))?
     .is_some();
@@ -691,7 +712,7 @@ async fn perform_month_end_closing(state: &AppState) -> Result<bool, String> {
     )
     .bind(period_start)
     .bind(period_end)
-    .fetch_one(&state.db)
+    .fetch_one(&mut *tx)
     .await
     .map_err(|e| format!("Failed to count pending invoices: {e}"))?;
 
@@ -709,9 +730,13 @@ async fn perform_month_end_closing(state: &AppState) -> Result<bool, String> {
         .bind(closing_id)
         .bind(target_year)
         .bind(target_month as i32)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("Failed to record empty month-end closing: {e}"))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| format!("Failed to commit empty month-end closing: {e}"))?;
 
         info!(
             tax_year = target_year,
@@ -722,13 +747,9 @@ async fn perform_month_end_closing(state: &AppState) -> Result<bool, String> {
     }
 
     // ------------------------------------------------------------------
-    // 4.  Transaction: update invoices + insert closing record + audit.
+    // 4.  Inside the lock-held transaction from step 0: update invoices +
+    //     insert closing record + audit.
     // ------------------------------------------------------------------
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|e| format!("Failed to begin transaction: {e}"))?;
 
     // 4a. Mark all paid invoices in the target period as closed.
     let updated = sqlx::query(
@@ -1368,8 +1389,19 @@ pub(crate) async fn drain_pending_metering_events(
 
     for event in &valid_events {
         let guard_key = format!("meter:guard:{}", event.normalized_id);
-        let counter_key =
-            metering_counter_key(&event.tenant_id, &event.event_type, event.timestamp);
+        // Fix F2 — the recovered event must bump the SAME counter the quota
+        // gate enforces. The key is derived through the shared anchored-key
+        // selection (billing-cycle anchored for subscription tenants, UTC
+        // calendar month otherwise) — the old calendar-month key forked
+        // cycle-anchored tenants onto a second, never-enforced counter, so
+        // recovered events bypassed quota entirely.
+        let counter_key = crate::usage::enforced_counter_key_for_event_type(
+            &state.db,
+            &event.tenant_id,
+            &event.event_type,
+            event.timestamp,
+        )
+        .await;
         let pending_key = format!("meter:pending:{}", event.raw_id);
 
         // Only increment the counter if this event was newly inserted into
@@ -1556,14 +1588,6 @@ fn normalize_metering_event_id(raw_id: &str) -> Uuid {
     Uuid::from_bytes(bytes)
 }
 
-fn metering_counter_key(tenant_id: &str, event_type: &str, timestamp: DateTime<Utc>) -> String {
-    format!(
-        "meter:rt:{tenant_id}:{event_type}:{:04}-{:02}",
-        timestamp.year(),
-        timestamp.month()
-    )
-}
-
 #[derive(Debug, FromRow)]
 struct RetryCandidateRow {
     tenant_id: String,
@@ -1661,7 +1685,7 @@ async fn process_scheduled_retries(
             )
             .await?;
 
-            mark_payment_recovered(state, &row.tenant_id).await?;
+            mark_payment_recovered(state, &row.tenant_id, Some(invoice.id.as_str())).await?;
             Ok(())
         }
         .await;
@@ -2105,16 +2129,54 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
             credit_amount
         };
 
-        let created: bool = sqlx::query_scalar(
-            r#"
-            WITH existing_credit AS (
-                SELECT id
-                FROM sla_credits
-                WHERE tenant_id = $1
-                  AND period_month = $2
-                LIMIT 1
-            ),
-            insert_credit AS (
+        // Fix F5 — the previous NOT-EXISTS check-then-insert could
+        // double-run across replicas/restarts: two sweeps both saw no
+        // credit and both inserted (sla_credits has no unique constraint on
+        // (tenant_id, period_month)). Serialize with a pg advisory
+        // TRANSACTION lock keyed on (tenant, period) and re-check existence
+        // INSIDE the lock — no schema change needed.
+        let mut tx = state.db.begin().await.map_err(|error| {
+            format!(
+                "Failed to begin SLA credit transaction for {}: {error}",
+                candidate.tenant_id
+            )
+        })?;
+
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(format!(
+                "sla_credit:{}:{}-{:02}",
+                candidate.tenant_id,
+                period_month.year(),
+                period_month.month()
+            ))
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Failed to acquire SLA credit lock for {}: {error}",
+                    candidate.tenant_id
+                )
+            })?;
+
+        let already_credited: Option<i64> = sqlx::query_scalar(
+            "SELECT 1 FROM sla_credits WHERE tenant_id = $1 AND period_month = $2 LIMIT 1",
+        )
+        .bind(&candidate.tenant_id)
+        .bind(period_month)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!(
+                "Failed to re-check existing SLA credit for {}: {error}",
+                candidate.tenant_id
+            )
+        })?;
+
+        let created = if already_credited.is_some() {
+            false
+        } else {
+            sqlx::query(
+                r#"
                 INSERT INTO sla_credits (
                     id,
                     tenant_id,
@@ -2126,24 +2188,29 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
                     status,
                     created_at
                 )
-                SELECT gen_random_uuid(), $1, $2, $3, $4, $5, $6, 'pending', NOW()
-                WHERE NOT EXISTS (SELECT 1 FROM existing_credit)
-                RETURNING id
+                VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, 'pending', NOW())
+                "#,
             )
-            SELECT EXISTS (SELECT 1 FROM insert_credit)
-            "#,
-        )
-        .bind(&candidate.tenant_id)
-        .bind(period_month)
-        .bind(breach_percent)
-        .bind(credit_percent)
-        .bind(credit_amount)
-        .bind(&invoice_currency)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|error| {
+            .bind(&candidate.tenant_id)
+            .bind(period_month)
+            .bind(breach_percent)
+            .bind(credit_percent)
+            .bind(credit_amount)
+            .bind(&invoice_currency)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Failed to insert SLA credit for {}: {error}",
+                    candidate.tenant_id
+                )
+            })?;
+            true
+        };
+
+        tx.commit().await.map_err(|error| {
             format!(
-                "Failed to upsert SLA credit for {}: {error}",
+                "Failed to commit SLA credit transaction for {}: {error}",
                 candidate.tenant_id
             )
         })?;
@@ -2949,13 +3016,44 @@ fn release_reserved_cents_clamp(reserved: i64, released_total: i64) -> i64 {
     reserved.saturating_sub(released_total).max(0)
 }
 
+/// Fix F4 — record a payment recovery and restore healthy dunning state.
+///
+/// `invoice_id` scopes the recovery to that invoice's failure history: the
+/// tenant-level reset (dunning counters + status, tenant reactivation,
+/// queued-message release, cached-status invalidation) only happens when
+/// the tenant's most recent `payment_failed` event belongs to the settled
+/// invoice — a DIFFERENT invoice that is still failing keeps the tenant in
+/// dunning. The `payment_recovered` dunning event is always written (with
+/// the invoice id) so the settled invoice's history is complete either
+/// way. `None` restores the legacy unscoped blanket reset (used when no
+/// invoice context is available).
 pub(crate) async fn mark_payment_recovered(
     state: &AppState,
     tenant_id: &str,
+    invoice_id: Option<&str>,
 ) -> Result<(), String> {
-    sqlx::query(
+    let (reset_allowed, _dunning_reset): (bool, i64) = sqlx::query_as(
         r#"
-        WITH update_dunning AS (
+        WITH latest_failure AS (
+            SELECT invoice_id
+            FROM dunning_events
+            WHERE tenant_id = $1
+              AND event_type = 'payment_failed'
+            ORDER BY created_at DESC
+            LIMIT 1
+        ),
+        reset_allowed AS (
+            SELECT (
+                $2::text IS NULL
+                OR NOT EXISTS (
+                    SELECT 1
+                    FROM latest_failure
+                    WHERE invoice_id IS NOT NULL
+                      AND invoice_id <> $2::text
+                )
+            ) AS allowed
+        ),
+        update_dunning AS (
             UPDATE dunning_records
             SET status = 'healthy',
                 failed_payment_count = 0,
@@ -2966,17 +3064,19 @@ pub(crate) async fn mark_payment_recovered(
                 grace_period_ends_at = NULL,
                 updated_at = NOW()
             WHERE tenant_id = $1
+              AND (SELECT allowed FROM reset_allowed)
             RETURNING tenant_id
         ),
         log_recovery AS (
-            INSERT INTO dunning_events (id, tenant_id, event_type, created_at)
-            VALUES (gen_random_uuid(), $1, 'payment_recovered', NOW())
+            INSERT INTO dunning_events (id, tenant_id, event_type, invoice_id, created_at)
+            VALUES (gen_random_uuid(), $1, 'payment_recovered', $2, NOW())
             RETURNING tenant_id
         ),
         reactivate_tenant AS (
             UPDATE tenants
             SET status = 'active', updated_at = NOW()
             WHERE id = $1
+              AND (SELECT allowed FROM reset_allowed)
               AND NOT EXISTS (
                 SELECT 1
                 FROM abuse_reports ar
@@ -2985,13 +3085,27 @@ pub(crate) async fn mark_payment_recovered(
               )
             RETURNING id
         )
-        SELECT 1
+        SELECT (SELECT allowed FROM reset_allowed),
+               (SELECT COUNT(*)::bigint FROM update_dunning)
         "#,
     )
     .bind(tenant_id)
-    .execute(&state.db)
+    .bind(invoice_id)
+    .fetch_one(&state.db)
     .await
     .map_err(|error| format!("Failed to mark payment recovered for {tenant_id}: {error}"))?;
+
+    if !reset_allowed {
+        // The settled invoice recovered, but the tenant's latest failure is
+        // for a different invoice that is still unpaid — keep dunning,
+        // suspension and the queued-message hold exactly as they are.
+        info!(
+            tenant_id = %tenant_id,
+            invoice_id = ?invoice_id,
+            "payment recovered for one invoice; dunning kept active — a different invoice is still failing"
+        );
+        return Ok(());
+    }
 
     let released_count: i64 = sqlx::query_scalar(
         r#"

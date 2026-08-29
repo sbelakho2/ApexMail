@@ -2,6 +2,11 @@
 Webhooks Resource
 
 API operations for webhook management.
+
+The server's CreateWebhookRequest accepts exactly {url, events}
+(deny_unknown_fields) and returns the flat WebhookResponse
+{id, url, events, secret?, status, created_at, updated_at} — there is no
+{"webhook": ...} wrapper and no name/enabled fields.
 """
 
 from __future__ import annotations
@@ -19,6 +24,26 @@ if TYPE_CHECKING:
 # FIX-500-291: ID format validation
 _ID_REGEX = re.compile(r'^[a-zA-Z0-9_-]{1,128}$')
 
+# Event names the server accepts (webhooks.rs KNOWN_WEBHOOK_EVENTS). Any
+# other name is rejected with 422.
+KNOWN_WEBHOOK_EVENTS: tuple[str, ...] = (
+    "email.delivered",
+    "email.bounced",
+    "email.complained",
+    "message.sent",
+    "message.delivered",
+    "message.bounced",
+    "message.complained",
+    "message.opened",
+    "message.clicked",
+    "recipient.unsubscribed",
+    "placement_test.completed",
+    "bounce",
+    "complaint",
+    "inbound",
+    "*",
+)
+
 
 def _validate_id(resource_id: str, resource_name: str) -> None:
     """Validate resource ID format."""
@@ -30,7 +55,7 @@ def _validate_id(resource_id: str, resource_name: str) -> None:
 
 
 def _validate_webhook_url(url: str) -> None:
-    """FIX-500-292: Validate webhook URL is HTTPS (unless localhost)."""
+    """Validate webhook URL is HTTPS (unless localhost)."""
     parsed = urlparse(url)
     hostname = (parsed.hostname or "").lower()
     if parsed.scheme != "https":
@@ -39,6 +64,23 @@ def _validate_webhook_url(url: str) -> None:
                 f'Webhook URL must use HTTPS: "{url}". '
                 'HTTP is only allowed for localhost development.'
             )
+
+
+def _validate_events(events: list[str]) -> None:
+    """Reject unknown event names client-side — the server would 422."""
+    invalid = [event for event in events if event.strip() not in KNOWN_WEBHOOK_EVENTS]
+    if invalid:
+        raise ValidationError(
+            f"Unknown webhook event type(s): {', '.join(invalid)}. "
+            f"Valid events: {', '.join(KNOWN_WEBHOOK_EVENTS)}"
+        )
+
+
+def _parse_webhook(data: Any) -> Webhook:
+    """Parse the flat WebhookResponse (tolerating a legacy wrapper)."""
+    if isinstance(data, dict) and isinstance(data.get("webhook"), dict):
+        data = data["webhook"]
+    return Webhook(**data)
 
 
 class WebhooksResource:
@@ -50,7 +92,7 @@ class WebhooksResource:
     def create(
         self,
         *,
-        name: str,
+        name: Optional[str] = None,
         url: str,
         events: list[str],
         description: Optional[str] = None,
@@ -61,40 +103,34 @@ class WebhooksResource:
         """
         Create a new webhook.
 
+        Only {url, events} are transmitted — the API's CreateWebhookRequest
+        rejects anything else (the signing secret is generated server-side
+        and returned in the response). The legacy name/description/secret/
+        headers/enabled arguments are accepted for backwards compatibility
+        but ignored on the wire.
+
         Args:
-            name: Webhook name
+            name: Unused by the API (ignored).
             url: Webhook URL (must be HTTPS in production)
-            events: List of events to subscribe to
-            description: Optional description
-            secret: Optional secret for signature verification
-            headers: Optional custom headers
-            enabled: Whether webhook is enabled
+            events: Event names (KNOWN_WEBHOOK_EVENTS), e.g.
+                ["message.delivered", "email.bounced", "*"]
+            description: Unused by the API (ignored).
+            secret: Unused by the API (server-generated; ignored).
+            headers: Unused by the API (ignored).
+            enabled: Unused by the API (new webhooks are always "active").
 
         Returns:
-            Created webhook details
+            Created webhook (secret is present only in this response)
         """
         _validate_webhook_url(url)
+        _validate_events(events)
 
-        payload: dict[str, Any] = {
-            "name": name,
-            "url": url,
-            "events": events,
-            "enabled": enabled,
-        }
-
-        if description:
-            payload["description"] = description
-        if secret:
-            payload["secret"] = secret
-        if headers:
-            payload["headers"] = headers
-
-        data = self._client._request("POST", "/v1/webhooks", json=payload)
-        return Webhook(**data["webhook"])
+        data = self._client._request("POST", "/v1/webhooks", json={"url": url, "events": events})
+        return _parse_webhook(data)
 
     def get(self, webhook_id: str) -> Webhook:
         """
-        Get webhook details by ID.
+        Get webhook details by ID (flat WebhookResponse).
 
         Args:
             webhook_id: The webhook ID
@@ -104,7 +140,7 @@ class WebhooksResource:
         """
         _validate_id(webhook_id, 'webhook')
         data = self._client._request("GET", f"/v1/webhooks/{webhook_id}")
-        return Webhook(**data["webhook"])
+        return _parse_webhook(data)
 
     def list(
         self,
@@ -140,18 +176,26 @@ class WebhooksResource:
         description: Optional[str] = None,
         headers: Optional[dict[str, str]] = None,
         enabled: Optional[bool] = None,
+        status: Optional[str] = None,
     ) -> Webhook:
         """
         Update a webhook.
 
+        Transmits only {url, events, status} per the API's
+        UpdateWebhookRequest (status one of "active" | "paused" |
+        "disabled"); a boolean ``enabled`` is mapped to
+        active/paused for backwards compatibility. name/description/headers
+        are accepted but ignored.
+
         Args:
             webhook_id: The webhook ID to update
-            name: New name
+            name: Unused by the API (ignored).
             url: New URL
             events: New events list
-            description: New description
-            headers: New headers
-            enabled: New enabled status
+            description: Unused by the API (ignored).
+            headers: Unused by the API (ignored).
+            enabled: Mapped to status active/paused.
+            status: New status ("active" | "paused" | "disabled")
 
         Returns:
             Updated webhook details
@@ -160,25 +204,28 @@ class WebhooksResource:
 
         payload: dict[str, Any] = {}
 
-        if name is not None:
-            payload["name"] = name
         if url is not None:
             _validate_webhook_url(url)
             payload["url"] = url
         if events is not None:
+            _validate_events(events)
             payload["events"] = events
-        if description is not None:
-            payload["description"] = description
-        if headers is not None:
-            payload["headers"] = headers
-        if enabled is not None:
-            payload["enabled"] = enabled
+        resolved_status = status
+        if resolved_status is None and enabled is not None:
+            resolved_status = "active" if enabled else "paused"
+        if resolved_status is not None:
+            if resolved_status not in {"active", "paused", "disabled"}:
+                raise ValidationError(
+                    'status must be one of "active", "paused", "disabled" '
+                    f"(got {resolved_status!r})"
+                )
+            payload["status"] = resolved_status
 
         if not payload:
             raise ValidationError("Update payload must include at least one field")
 
         data = self._client._request("PUT", f"/v1/webhooks/{webhook_id}", json=payload)
-        return Webhook(**data["webhook"])
+        return _parse_webhook(data)
 
     def delete(self, webhook_id: str) -> None:
         """
@@ -190,20 +237,18 @@ class WebhooksResource:
         _validate_id(webhook_id, 'webhook')
         self._client._request("DELETE", f"/v1/webhooks/{webhook_id}")
 
-    def test(self, webhook_id: str, event_type: str = "message.delivered") -> dict[str, Any]:
+    def test(self, webhook_id: str) -> dict[str, Any]:
         """
-        Send a test event to a webhook.
+        Send a test event to a webhook (the server takes no body).
 
         Args:
             webhook_id: The webhook ID to test
-            event_type: The event type to simulate
 
         Returns:
-            Test result details
+            Test result: {success, status_code?, response_time_ms, error?}
         """
         _validate_id(webhook_id, 'webhook')
-        payload = {"eventType": event_type}
-        return self._client._request("POST", f"/v1/webhooks/{webhook_id}/test", json=payload)
+        return self._client._request("POST", f"/v1/webhooks/{webhook_id}/test")
 
 
 class AsyncWebhooksResource:
@@ -215,7 +260,7 @@ class AsyncWebhooksResource:
     async def create(
         self,
         *,
-        name: str,
+        name: Optional[str] = None,
         url: str,
         events: list[str],
         description: Optional[str] = None,
@@ -223,32 +268,20 @@ class AsyncWebhooksResource:
         headers: Optional[dict[str, str]] = None,
         enabled: bool = True,
     ) -> Webhook:
-        """Create a new webhook asynchronously."""
-        # FIX-500-292: Validate HTTPS URL
+        """Create a new webhook asynchronously.
+
+        Only {url, events} are transmitted (see the sync resource)."""
         _validate_webhook_url(url)
+        _validate_events(events)
 
-        payload: dict[str, Any] = {
-            "name": name,
-            "url": url,
-            "events": events,
-            "enabled": enabled,
-        }
-
-        if description:
-            payload["description"] = description
-        if secret:
-            payload["secret"] = secret
-        if headers:
-            payload["headers"] = headers
-
-        data = await self._client._request("POST", "/v1/webhooks", json=payload)
-        return Webhook(**data["webhook"])
+        data = await self._client._request("POST", "/v1/webhooks", json={"url": url, "events": events})
+        return _parse_webhook(data)
 
     async def get(self, webhook_id: str) -> Webhook:
-        """Get webhook details by ID asynchronously."""
+        """Get webhook details by ID asynchronously (flat response)."""
         _validate_id(webhook_id, 'webhook')
         data = await self._client._request("GET", f"/v1/webhooks/{webhook_id}")
-        return Webhook(**data["webhook"])
+        return _parse_webhook(data)
 
     async def list(
         self,
@@ -275,41 +308,42 @@ class AsyncWebhooksResource:
         description: Optional[str] = None,
         headers: Optional[dict[str, str]] = None,
         enabled: Optional[bool] = None,
+        status: Optional[str] = None,
     ) -> Webhook:
-        """Update a webhook asynchronously."""
+        """Update a webhook asynchronously ({url, events, status} on the wire)."""
         _validate_id(webhook_id, 'webhook')
         payload: dict[str, Any] = {}
 
-        if name is not None:
-            payload["name"] = name
         if url is not None:
             _validate_webhook_url(url)
             payload["url"] = url
         if events is not None:
+            _validate_events(events)
             payload["events"] = events
-        if description is not None:
-            payload["description"] = description
-        if headers is not None:
-            payload["headers"] = headers
-        if enabled is not None:
-            payload["enabled"] = enabled
+        resolved_status = status
+        if resolved_status is None and enabled is not None:
+            resolved_status = "active" if enabled else "paused"
+        if resolved_status is not None:
+            if resolved_status not in {"active", "paused", "disabled"}:
+                raise ValidationError(
+                    'status must be one of "active", "paused", "disabled" '
+                    f"(got {resolved_status!r})"
+                )
+            payload["status"] = resolved_status
 
         # FIX-500-293: Reject empty update payload
         if not payload:
             raise ValidationError('At least one field must be provided for update')
 
         data = await self._client._request("PUT", f"/v1/webhooks/{webhook_id}", json=payload)
-        return Webhook(**data["webhook"])
+        return _parse_webhook(data)
 
     async def delete(self, webhook_id: str) -> None:
         """Delete a webhook asynchronously."""
         _validate_id(webhook_id, 'webhook')
         await self._client._request("DELETE", f"/v1/webhooks/{webhook_id}")
 
-    async def test(
-        self, webhook_id: str, event_type: str = "message.delivered"
-    ) -> dict[str, Any]:
-        """Send a test event to a webhook asynchronously."""
+    async def test(self, webhook_id: str) -> dict[str, Any]:
+        """Send a test event to a webhook asynchronously (no body)."""
         _validate_id(webhook_id, 'webhook')
-        payload = {"eventType": event_type}
-        return await self._client._request("POST", f"/v1/webhooks/{webhook_id}/test", json=payload)
+        return await self._client._request("POST", f"/v1/webhooks/{webhook_id}/test")

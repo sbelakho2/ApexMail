@@ -129,6 +129,23 @@ fn resource_limit_script() -> &'static redis::Script {
     })
 }
 
+/// Redis key prefix for the workspace API-request rate limit.
+pub const WORKSPACE_API_RATE_LIMIT_PREFIX: &str = "workspace:api";
+
+/// Key parts (suffix, prefix) addressing the EXACT Redis key the workspace
+/// API-request rate limit writes:`workspace:api:{workspace_id}:api`.
+///
+/// Shared by the enforcement path ([`RateLimitService::check_workspace_quota`])
+/// and the status/reset endpoints so they can never drift apart again —
+/// previously the endpoints read/deleted `ratelimit:workspace:{ws}:api`, a
+/// phantom key that enforcement never writes.
+pub fn workspace_api_rate_limit_key_parts(workspace_id: &str) -> (String, &'static str) {
+    (
+        format!("{workspace_id}:api"),
+        WORKSPACE_API_RATE_LIMIT_PREFIX,
+    )
+}
+
 pub struct RateLimitService {
     redis: RedisPool,
 }
@@ -238,14 +255,14 @@ impl RateLimitService {
     ) -> anyhow::Result<RateLimitResult> {
         match metric {
             "api_requests_per_minute" => {
+                let (key, prefix) = workspace_api_rate_limit_key_parts(workspace_id);
                 let config = RateLimitConfig {
                     window_ms: 60_000,
                     max_requests: quota.api_requests_per_minute,
                     burst_limit: Some(quota.api_requests_per_minute / 10),
-                    key_prefix: Some("workspace:api".into()),
+                    key_prefix: Some(prefix.into()),
                 };
-                self.check_rate_limit(&format!("{}:api", workspace_id), &config)
-                    .await
+                self.check_rate_limit(&key, &config).await
             }
             "emails_per_month" => {
                 let config = RateLimitConfig {

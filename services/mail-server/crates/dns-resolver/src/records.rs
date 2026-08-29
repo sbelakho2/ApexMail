@@ -49,7 +49,11 @@ impl SpfRecord {
     /// Parse an SPF TXT record value.
     pub fn parse(txt: &str) -> Option<Self> {
         let txt = txt.trim();
-        if !txt.starts_with("v=spf1") {
+        // RFC 7208 §12/§4.5: the version term is exactly "v=spf1" followed
+        // by end-of-record or whitespace — "v=spf1evil" is NOT an SPF record
+        // (a plain starts_with accepted it and shadowed real records).
+        let after_version = txt.strip_prefix("v=spf1")?;
+        if !after_version.is_empty() && !after_version.starts_with(char::is_whitespace) {
             return None;
         }
 
@@ -338,6 +342,17 @@ mod tests {
     #[test]
     fn test_spf_parse_invalid() {
         assert!(SpfRecord::parse("not-an-spf-record").is_none());
+    }
+
+    #[test]
+    fn test_spf_parse_version_token_must_terminate() {
+        // "v=spf1" must be followed by end-of-record or whitespace; a
+        // glued-on suffix is not an SPF version term (RFC 7208 §12).
+        assert!(SpfRecord::parse("v=spf1evil include:_spf.example.com").is_none());
+        assert!(SpfRecord::parse("v=spf10 ip4:1.2.3.4 -all").is_none());
+        // Bare version and whitespace-delimited forms remain valid.
+        assert!(SpfRecord::parse("v=spf1").is_some());
+        assert!(SpfRecord::parse("v=spf1 ~all").is_some());
     }
 
     // ── DKIM ─────────────────────────────────────────────────────────

@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en" id="top" data-theme="apex">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="robots" content="noindex, nofollow" />
+  <title>Service Temporarily Unavailable | ApexMail</title>
+  <meta name="description" content="The ApexMail marketing site is temporarily unavailable. Please retry shortly." />
+  <!-- NOTE: this file is copied verbatim by Zola (static/), so it cannot use
+     Tera templating, and Tailwind utility classes are unavailable here
+     (tailwind.config.js only scans templates/, content/, and static/js/).
+     It therefore uses the hand-written component classes from
+     static/css/input.css (.btn-primary, .btn-secondary--invert) plus inline
+     styles bound to the site's CSS variables (--surface-*, --brand-*,
+     --font-*) so it stays visually consistent without generated utilities. -->
+  <link rel="stylesheet" href="/css/styles.css" />
+  <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+</head>
+<body style="margin: 0; font-family: var(--font-apex), ui-sans-serif, system-ui, sans-serif; background: rgb(var(--surface-950)); min-height: 100vh; display: flex; align-items: center; justify-content: center; color: rgb(var(--surface-100));">
+  <main style="max-width: 40rem; padding: 5rem 1.5rem; text-align: left;">
+    <p style="margin: 0 0 1rem; font-size: 0.875rem; font-weight: 700; letter-spacing: 0.3em; color: rgb(var(--brand-300));">50x</p>
+    <h1 style="margin: 0; font-family: var(--font-display), Georgia, serif; font-size: clamp(1.875rem, 4vw, 3rem); font-weight: 600; letter-spacing: -0.025em; color: rgb(var(--surface-50));">
+      The site is temporarily unavailable.
+    </h1>
+    <p style="margin: 1.5rem 0 0; font-size: 1.125rem; line-height: 1.6; color: rgb(var(--surface-300)); max-width: 36rem;">
+      Something went wrong on our side while serving this page. This is usually
+      brief &mdash; please retry in a few moments. Operational incidents, when
+      confirmed, are posted on the status page.
+    </p>
+    <div style="margin-top: 2.5rem; display: flex; flex-wrap: wrap; gap: 0.75rem;">
+      <a href="/" class="btn-primary">Back to apexmail.ee</a>
+      <a href="https://status.apexmail.ee" class="btn-secondary--invert">Check service status</a>
+    </div>
+    <p style="margin: 2.5rem 0 0; font-size: 0.75rem; color: rgb(var(--surface-500));">
+      Bel Consulting O&Uuml; &mdash; ApexMail, Tallinn, Estonia.
+    </p>
+  </main>
+</body>
+</html>

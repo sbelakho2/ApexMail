@@ -285,6 +285,27 @@ impl IpBlocklist {
 
         removed
     }
+
+    /// Remove all entries (exact and CIDR) that originate from `source`.
+    /// Used by per-source feed-refresh merging so a refreshed feed replaces
+    /// only its own entries (audit F6). Returns the number removed.
+    pub fn remove_source(&self, source: &str) -> usize {
+        let mut removed = 0;
+        self.exact.retain(|_, entry| {
+            let keep = !entry.source.eq_ignore_ascii_case(source);
+            if !keep {
+                removed += 1;
+            }
+            keep
+        });
+        let mut cidrs = self.cidrs.write();
+        let before = cidrs.len();
+        cidrs.retain(|range| !range.entry.source.eq_ignore_ascii_case(source));
+        removed += before - cidrs.len();
+        drop(cidrs);
+        *self.index.write() = None;
+        removed
+    }
 }
 
 impl Default for IpBlocklist {
@@ -613,6 +634,26 @@ impl Ipv6Blocklist {
 
         removed
     }
+
+    /// Remove all entries (exact and CIDR) that originate from `source`
+    /// (per-source refresh merging, audit F6).
+    pub fn remove_source(&self, source: &str) -> usize {
+        let mut removed = 0;
+        self.exact.retain(|_, entry| {
+            let keep = !entry.source.eq_ignore_ascii_case(source);
+            if !keep {
+                removed += 1;
+            }
+            keep
+        });
+        let mut cidrs = self.cidrs.write();
+        let before = cidrs.len();
+        cidrs.retain(|range| !range.entry.source.eq_ignore_ascii_case(source));
+        removed += before - cidrs.len();
+        drop(cidrs);
+        *self.index.write() = None;
+        removed
+    }
 }
 
 impl Default for Ipv6Blocklist {
@@ -841,6 +882,12 @@ impl UnifiedIpBlocklist {
     /// Remove expired entries from both blocklists
     pub fn purge_expired(&self) -> usize {
         self.v4.purge_expired() + self.v6.purge_expired()
+    }
+
+    /// Remove all entries (v4 and v6, exact and CIDR) that originate from
+    /// `source` (per-source refresh merging, audit F6).
+    pub fn remove_source(&self, source: &str) -> usize {
+        self.v4.remove_source(source) + self.v6.remove_source(source)
     }
 
     /// Optimize both blocklists for faster lookups

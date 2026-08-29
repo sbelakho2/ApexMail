@@ -40,6 +40,13 @@ const PRUNE_FREQUENCY_THRESHOLD: u64 = 2;
 /// Training rate limit:max training calls per minute per classifier.
 const MAX_TRAINING_PER_MINUTE: u64 = 100;
 
+/// Maximum tokens [`tokenize`] will return. Consistent with the validation
+/// cap ([`MAX_TOKENS_PER_SAMPLE`] rejects samples beyond 5 000 tokens) while
+/// bounding the token-vector ALLOCATION itself for adversarial
+/// multi-megabyte inputs — previously the full vector was materialized
+/// before validation ever ran.
+const MAX_TOKENIZE_OUTPUT: usize = 50_000;
+
 // ---------------------------------------------------------------------------
 // Validation error types
 // ---------------------------------------------------------------------------
@@ -461,23 +468,25 @@ fn tokenize(text: &str) -> Vec<String> {
     //    the split would glue punctuation substitutions onto neighboring
     //    words (normalize_leet_speak maps '!' → 'i', so "World!" would
     //    become "Worldi").
-    let unigrams: Vec<String> = stripped
-        .split(|c: char| !c.is_alphanumeric())
-        .filter_map(|w| {
-            let folded = crate::content_scorer::normalize_leet_speak(w);
-            let token = folded.to_lowercase();
-            if token.chars().count() >= 3 {
-                Some(token)
-            } else {
-                None
-            }
-        })
-        .collect();
+    let mut unigrams: Vec<String> = Vec::new();
+    for word in stripped.split(|c: char| !c.is_alphanumeric()) {
+        if unigrams.len() >= MAX_TOKENIZE_OUTPUT {
+            break; // bounded output (see MAX_TOKENIZE_OUTPUT docs)
+        }
+        let folded = crate::content_scorer::normalize_leet_speak(word);
+        let token = folded.to_lowercase();
+        if token.chars().count() >= 3 {
+            unigrams.push(token);
+        }
+    }
 
     let mut tokens = unigrams.clone();
 
     // Generate bigrams from adjacent unigrams
     for pair in unigrams.windows(2) {
+        if tokens.len() >= MAX_TOKENIZE_OUTPUT {
+            break;
+        }
         tokens.push(format!("{}_{}", pair[0], pair[1]));
     }
 
@@ -839,5 +848,29 @@ mod tests {
         classifier.learn_ham("meeting notes attached report");
         assert_eq!(classifier.total_samples(), 2);
         assert!(classifier.vocab_size() > 0);
+    }
+
+    // ── F10:bounded tokenize output ────────────────────────────────────
+
+    #[test]
+    fn test_tokenize_output_is_bounded() {
+        // ~60 000 unigrams would previously all be materialized (plus the
+        // bigrams) before validation rejected the sample; tokenize itself
+        // is now capped.
+        let huge = "abc ".repeat(60_000);
+        let tokens = tokenize(&huge);
+        assert!(
+            tokens.len() <= MAX_TOKENIZE_OUTPUT,
+            "tokenize must be bounded, got {}",
+            tokens.len()
+        );
+
+        // The validation cap still rejects the (bounded) token flood.
+        match BayesianModel::new().train_spam_validated(&huge) {
+            Err(TrainingError::TooManyTokens { count, max }) => {
+                assert!(count > max);
+            }
+            other => panic!("expected TooManyTokens, got {:?}", other.map(|_| ())),
+        }
     }
 }

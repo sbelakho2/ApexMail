@@ -1001,6 +1001,8 @@ mod middleware_tests {
                 body_size: 0,
                 tenant_id: None,
                 api_key_id: None,
+                challenge_id: None,
+                challenge_solution: None,
             };
             let _ = protector.evaluate(&ctx).await;
         }
@@ -1018,6 +1020,8 @@ mod middleware_tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
         let decision = protector.evaluate(&ctx).await;
         assert!(
@@ -1043,6 +1047,8 @@ mod middleware_tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
         let decision = protector.evaluate(&ctx).await;
         assert!(matches!(decision, ProtectionDecision::Allow));
@@ -1071,6 +1077,8 @@ mod middleware_tests {
                 body_size: 0,
                 tenant_id: None,
                 api_key_id: None,
+                challenge_id: None,
+                challenge_solution: None,
             };
             let decision = protector.evaluate(&ctx).await;
             assert!(matches!(decision, ProtectionDecision::Block));

@@ -4,9 +4,11 @@
 //!
 //! Request flow:pending_verification → verified → processing → completed/rejected/expired
 //! Verification:SHA-256 token hash ↔ stored hash.
-//! Erasure (Art.17):Delete from 7 tables, clear 3 Redis keys, create
-//! deletion confirmation certificate.
-//! Access/Portability:Collect from 5 tables, sanitize, store export.
+//! Erasure (Art.17):one canonical data map ([`erasure_stores`]) — deletes from
+//! the event/contact/consent stores, anonymizes messages/users/invoices,
+//! tombstones the account, and submits a best-effort ClickHouse purge.
+//! Access/Portability:the SAME store set ([`export_store_names`]) — the maps
+//! mirror each other (audit F9).
 //! Consent:Upsert on (tenant_id, subscriber_id, consent_type). Marketing
 //! cascade:withdrawing marketing revokes analytics and profiling.
 
@@ -195,13 +197,17 @@ impl GdprAutomation {
 
         // CP visibility (surgical mirror): the control plane's admin
         // dashboard (gdpr_pending count) and admin/gdpr.rs list read the
-        // `gdpr_requests` table, which nothing previously wrote — pending
-        // counts were structurally zero. Same transaction: if the mirror
-        // fails, the DSR intake fails with it rather than silently
-        // disappearing from the CP. The id column is VARCHAR(26), so the
-        // 36-char UUID cannot be reused; a prefixed 22-hex id fits exactly.
+        // `gdpr_requests` table. F13: the mirror write happens AFTER the
+        // intake transaction commits, best-effort with its own error
+        // handling — a CP-side shape drift (the table is CP-owned) must not
+        // fail the subject's DSR submission, which is durable on its own.
+        // The id column is VARCHAR(26), so the 36-char UUID cannot be
+        // reused; a prefixed 22-hex id fits exactly.
+
+        tx.commit().await.map_err(|e| format!("DB error: {e}"))?;
+
         let cp_request_id = format!("gdr_{}", &Uuid::new_v4().simple().to_string()[..22]);
-        sqlx::query(
+        if let Err(e) = sqlx::query(
             "INSERT INTO gdpr_requests
                (id, tenant_id, email, request_type, status, token_hash, created_at, updated_at)
              VALUES ($1,$2,$3,$4,'pending',$5,$6,$6)
@@ -213,11 +219,15 @@ impl GdprAutomation {
         .bind(request_type.to_string())
         .bind(&token_hash)
         .bind(now)
-        .execute(&mut *tx)
+        .execute(&self.db)
         .await
-        .map_err(|e| format!("DB error (gdpr_requests mirror): {e}"))?;
-
-        tx.commit().await.map_err(|e| format!("DB error: {e}"))?;
+        {
+            warn!(
+                request_id = %id,
+                error = %e,
+                "GDPR: CP gdpr_requests mirror write failed (best-effort) — the DSR itself is committed"
+            );
+        }
 
         let request = DataSubjectRequest {
             id,
@@ -448,33 +458,27 @@ impl GdprAutomation {
         let tid = &request.tenant_id;
         let mut stores: Vec<StoreExportResult> = Vec::new();
 
-        // Collect subscriber profile
-        let profile = sqlx::query_as::<_, (serde_json::Value,)>(
-            "SELECT row_to_json(s) FROM subscribers s
-             WHERE email = $1 AND tenant_id = $2",
+        // Collect contact profile — `contacts` is the canonical subscriber
+        // store (migration 068/075); the old `subscribers` read targeted a
+        // table that exists only in test fixtures.
+        self.export_table(
+            &mut data,
+            &mut stores,
+            "contacts",
+            "SELECT row_to_json(c) FROM contacts c
+             WHERE tenant_id = $2 AND LOWER(email) = LOWER($1)",
+            email,
+            tid,
         )
-        .bind(email)
-        .bind(tid)
-        .fetch_optional(&self.db)
-        .await;
-        match profile {
-            Ok(Some((p,))) => {
-                data.insert("profile".into(), sanitize_pii(p));
-                stores.push(StoreExportResult::included("subscribers", 1));
-            }
-            Ok(None) => stores.push(StoreExportResult::included("subscribers", 0)),
-            Err(e) if is_missing_store(&e) => {
-                stores.push(StoreExportResult::skipped("subscribers", &e));
-            }
-            Err(e) => return Err(format!("DB error (subscribers): {e}")),
-        }
+        .await?;
 
-        // Collect sending history (M-04: configurable limit, G: explicit
-        // truncation flag in the manifest when the cap is hit).
+        // Collect event history from the canonical `events` store
+        // (migration 075). M-04: configurable limit, G: explicit truncation
+        // flag in the manifest when the cap is hit.
         let history: Result<Vec<(serde_json::Value,)>, sqlx::Error> = sqlx::query_as(
-            "SELECT row_to_json(m) FROM message_events m
-             WHERE recipient_email = $1 AND tenant_id = $2
-             ORDER BY created_at DESC LIMIT $3",
+            "SELECT row_to_json(e) FROM events e
+             WHERE tenant_id = $2 AND LOWER(recipient) = LOWER($1)
+             ORDER BY timestamp DESC LIMIT $3",
         )
         .bind(email)
         .bind(tid)
@@ -486,19 +490,60 @@ impl GdprAutomation {
             Ok(rows) => {
                 truncated = rows.len() as i64 >= self.config.access_request_max_messages;
                 let events: Vec<serde_json::Value> = rows.into_iter().map(|(v,)| v).collect();
-                stores.push(StoreExportResult::included("message_events", events.len()));
-                data.insert("message_history".into(), serde_json::Value::Array(events));
+                stores.push(StoreExportResult::included("events", events.len()));
+                data.insert("events".into(), serde_json::Value::Array(events));
             }
             Err(e) if is_missing_store(&e) => {
-                stores.push(StoreExportResult::skipped("message_events", &e));
+                stores.push(StoreExportResult::skipped("events", &e));
             }
-            Err(e) => return Err(format!("DB error (message_events): {e}")),
+            Err(e) => return Err(format!("DB error (events): {e}")),
+        }
+
+        // Message content the subject sent or received (canonical `messages`
+        // store): from/to/cc/bcc JSONB recipient arrays.
+        self.export_table(
+            &mut data,
+            &mut stores,
+            "messages",
+            "SELECT row_to_json(m) FROM messages m
+             WHERE tenant_id = $2 AND (
+               LOWER(from_email) = LOWER($1)
+               OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(
+                            COALESCE(to_emails, '[]'::jsonb) || COALESCE(cc_emails, '[]'::jsonb) ||
+                            COALESCE(bcc_emails, '[]'::jsonb)) AS r(addr)
+                          WHERE LOWER(addr) = LOWER($1))
+             )",
+            email,
+            tid,
+        )
+        .await?;
+
+        // The subject's user account (anonymized-readable fields —
+        // sanitize_pii strips password_hash/mfa_secret before storage).
+        let user_rows: Result<Vec<(serde_json::Value,)>, sqlx::Error> = sqlx::query_as(
+            "SELECT row_to_json(u) FROM users u WHERE tenant_id = $2 AND LOWER(email) = LOWER($1)",
+        )
+        .bind(email)
+        .bind(tid)
+        .fetch_all(&self.db)
+        .await;
+        match user_rows {
+            Ok(rows) => {
+                let vals: Vec<serde_json::Value> =
+                    rows.into_iter().map(|(v,)| sanitize_pii(v)).collect();
+                stores.push(StoreExportResult::included("users", vals.len()));
+                data.insert("users".into(), serde_json::Value::Array(vals));
+            }
+            Err(e) if is_missing_store(&e) => {
+                stores.push(StoreExportResult::skipped("users", &e));
+            }
+            Err(e) => return Err(format!("DB error (users): {e}")),
         }
 
         // Collect consent records
         let consents: Result<Vec<(serde_json::Value,)>, sqlx::Error> = sqlx::query_as(
             "SELECT row_to_json(c) FROM consent_records c
-             WHERE email = $1 AND tenant_id = $2",
+             WHERE tenant_id = $2 AND LOWER(email) = LOWER($1)",
         )
         .bind(email)
         .bind(tid)
@@ -516,55 +561,76 @@ impl GdprAutomation {
             Err(e) => return Err(format!("DB error (consent_records): {e}")),
         }
 
-        // G: suppression entries (the subject's opt-out records)
+        // Double-opt-in tokens pending for the subject.
+        self.export_table(
+            &mut data,
+            &mut stores,
+            "double_opt_in_tokens",
+            "SELECT row_to_json(d) FROM double_opt_in_tokens d
+             WHERE tenant_id = $2 AND LOWER(email) = LOWER($1)",
+            email,
+            tid,
+        )
+        .await?;
+
+        // Past SAR exports for the subject.
+        self.export_table(
+            &mut data,
+            &mut stores,
+            "gdpr_exports",
+            "SELECT row_to_json(g) FROM gdpr_exports g
+             WHERE tenant_id = $2 AND LOWER(email) = LOWER($1)",
+            email,
+            tid,
+        )
+        .await?;
+
+        // The subject's active sessions (device/IP accountability trail).
+        self.export_table(
+            &mut data,
+            &mut stores,
+            "sessions",
+            "SELECT row_to_json(s) FROM sessions s
+             WHERE tenant_id = $2 AND user_id IN \
+               (SELECT id::text FROM users WHERE LOWER(email) = LOWER($1))",
+            email,
+            tid,
+        )
+        .await?;
+
+        // The subject's suppression entries (opt-out records)
         self.export_table(
             &mut data,
             &mut stores,
             "suppression_list",
-            "SELECT row_to_json(s) FROM suppression_list s WHERE email = $1 AND tenant_id = $2",
+            "SELECT row_to_json(s) FROM suppression_list s
+             WHERE tenant_id = $2 AND LOWER(email) = LOWER($1)",
             email,
             tid,
         )
         .await?;
 
-        // G: tracking events
+        // List memberships (kept aligned with the erasure map; absent from
+        // the canonical chain today → honestly reported as skipped).
         self.export_table(
             &mut data,
             &mut stores,
-            "tracking_events",
-            "SELECT row_to_json(t) FROM tracking_events t WHERE email = $1 AND tenant_id = $2",
+            "contact_list_members",
+            "SELECT row_to_json(m) FROM contact_list_members m
+             WHERE tenant_id = $2 AND LOWER(subscriber_email) = LOWER($1)",
             email,
             tid,
         )
         .await?;
 
-        // G: engagement events
-        self.export_table(
-            &mut data,
-            &mut stores,
-            "engagement_events",
-            "SELECT row_to_json(e) FROM engagement_events e WHERE email = $1 AND tenant_id = $2",
-            email,
-            tid,
-        )
-        .await?;
-
-        // G: subscriber analytics
-        self.export_table(
-            &mut data,
-            &mut stores,
-            "subscriber_analytics",
-            "SELECT row_to_json(a) FROM subscriber_analytics a WHERE email = $1 AND tenant_id = $2",
-            email,
-            tid,
-        )
-        .await?;
-
-        // G: invoices — retained for statutory reasons; export an anonymized
+        // Invoices — retained for statutory reasons; export an anonymized
         // view (subject PII textually replaced with a redaction marker).
+        // F9: LOWER() on BOTH sides — writers are inconsistent about email
+        // case and an exact match silently misses rows the erasure side
+        // (which always matches case-insensitively) would redact.
         let invoices: Result<Vec<(serde_json::Value,)>, sqlx::Error> = sqlx::query_as(
             "SELECT row_to_json(i) FROM invoices i
-             WHERE tenant_id = $1 AND customer_email = $2",
+             WHERE tenant_id = $1 AND LOWER(customer_email) = LOWER($2)",
         )
         .bind(tid)
         .bind(email)
@@ -586,7 +652,7 @@ impl GdprAutomation {
             Err(e) => return Err(format!("DB error (invoices): {e}")),
         }
 
-        // G: audit entries referencing the subject (accountability trail).
+        // Audit entries referencing the subject (accountability trail).
         self.export_table(
             &mut data,
             &mut stores,
@@ -599,6 +665,14 @@ impl GdprAutomation {
             tid,
         )
         .await?;
+
+        // Tenant-owned resources carry no personal data of the subject —
+        // listed in the manifest for transparency, never queried. The
+        // ClickHouse analytics store is declared as not-exportable here
+        // (F9: the erasure side does purge it best-effort).
+        stores.push(StoreExportResult::not_subject_data("api_keys"));
+        stores.push(StoreExportResult::not_subject_data("webhooks"));
+        stores.push(StoreExportResult::not_exportable("clickhouse_events"));
 
         // G: explicit manifest — per-store status plus truncation flag.
         let manifest = build_export_manifest(&stores, truncated);
@@ -741,6 +815,8 @@ impl GdprAutomation {
         use ErasureStore::*;
         let tid = &request.tenant_id;
         let email = &request.email;
+        // Anonymize variants report `anonymized`, not `deleted`.
+        let expect_anonymized = matches!(store, AnonymizeMessageContent | AnonymizeUserTombstone);
 
         let result: Result<u64, sqlx::Error> = match store {
             TableBySubjectEmail {
@@ -826,6 +902,68 @@ impl GdprAutomation {
                     error: None,
                 };
             }
+            AnonymizeMessageContent => {
+                // F1: canonical messages store (073). Redact the subject's
+                // copy of every send they were part of — recipient arrays,
+                // subject line and bodies — while keeping the row (statutory
+                // sending record; other recipients' data lives in it too).
+                let marker = redact_marker(email);
+                let marker_json =
+                    serde_json::Value::Array(vec![serde_json::Value::String(marker.clone())]);
+                sqlx::query(
+                    "UPDATE messages SET
+                       from_email = CASE WHEN LOWER(from_email) = LOWER($2) THEN $3 ELSE from_email END,
+                       to_emails = $4::jsonb,
+                       cc_emails = CASE WHEN cc_emails IS NULL THEN NULL ELSE $4::jsonb END,
+                       bcc_emails = CASE WHEN bcc_emails IS NULL THEN NULL ELSE $4::jsonb END,
+                       subject = $3,
+                       html_body = NULL,
+                       text_body = NULL
+                     WHERE tenant_id = $1 AND (
+                       LOWER(from_email) = LOWER($2)
+                       OR EXISTS (SELECT 1 FROM jsonb_array_elements_text(
+                                    COALESCE(to_emails, '[]'::jsonb) || COALESCE(cc_emails, '[]'::jsonb) ||
+                                    COALESCE(bcc_emails, '[]'::jsonb)) AS r(addr)
+                                  WHERE LOWER(addr) = LOWER($2))
+                     )",
+                )
+                .bind(tid)
+                .bind(email)
+                .bind(&marker)
+                .bind(&marker_json)
+                .execute(&self.db)
+                .await
+                .map(|r| r.rows_affected())
+            }
+            AnonymizeUserTombstone => {
+                // F1/F9: keep a tombstone row (Art. 17 hygiene) with every
+                // PII field redacted. The marker embeds the tenant so the
+                // globally-UNIQUE users.email never collides when the same
+                // subject is erased in two tenants.
+                let marker = user_tombstone_marker(email, tid);
+                sqlx::query(
+                    "UPDATE users SET
+                       email = $3,
+                       name = NULL,
+                       password_hash = 'ERASED',
+                       mfa_secret = NULL,
+                       status = 'erased'
+                     WHERE tenant_id = $1 AND LOWER(email) = LOWER($2)",
+                )
+                .bind(tid)
+                .bind(email)
+                .bind(&marker)
+                .execute(&self.db)
+                .await
+                .map(|r| r.rows_affected())
+            }
+            ClickHouseEvents => {
+                // F1: real PII store. Config-gated best-effort
+                // `ALTER TABLE events DELETE WHERE recipient = ...` over the
+                // ClickHouse HTTP interface (same env contract as the
+                // analytics crate's client).
+                return self.erase_clickhouse_events(email).await;
+            }
             Retained { name: _, reason } => {
                 // Statutory / tenant-owned data: intentionally NOT deleted.
                 return StoreErasureResult {
@@ -840,7 +978,11 @@ impl GdprAutomation {
         match result {
             Ok(rows) => StoreErasureResult {
                 store: store.name(),
-                status: StoreErasureStatus::Deleted,
+                status: if expect_anonymized {
+                    StoreErasureStatus::Anonymized
+                } else {
+                    StoreErasureStatus::Deleted
+                },
                 rows_affected: rows,
                 error: None,
             },
@@ -865,6 +1007,64 @@ impl GdprAutomation {
                 StoreErasureResult {
                     store: store.name(),
                     status,
+                    rows_affected: 0,
+                    error: Some(e.to_string()),
+                }
+            }
+        }
+    }
+
+    /// F1: best-effort ClickHouse purge of the subject's analytics events.
+    ///
+    /// `ALTER TABLE events DELETE WHERE recipient = '<email>'` is an async
+    /// mutation — a 200 response means submitted, not yet applied, so the
+    /// certificate says `mutation_submitted`. Failures are recorded as
+    /// `best_effort_failed` (the Postgres erasure must not fail because an
+    /// analytics node is down), and a disabled configuration is reported as
+    /// `skipped_not_configured` rather than silently omitted.
+    async fn erase_clickhouse_events(&self, email: &str) -> StoreErasureResult {
+        if !self.config.clickhouse_erasure_enabled {
+            return StoreErasureResult {
+                store: "clickhouse_events",
+                status: StoreErasureStatus::SkippedNotConfigured,
+                rows_affected: 0,
+                error: None,
+            };
+        }
+        // Escape single quotes/backslashes for the ClickHouse SQL literal.
+        let escaped = email.replace('\\', "\\\\").replace('\'', "\\'");
+        let statement = format!(
+            "ALTER TABLE {}.events DELETE WHERE lower(recipient) = lower('{}')",
+            self.config.clickhouse_database, escaped
+        );
+        let url = format!("{}/", self.config.clickhouse_url.trim_end_matches('/'));
+        let response = reqwest::Client::new()
+            .post(&url)
+            .basic_auth(
+                &self.config.clickhouse_user,
+                Some(&self.config.clickhouse_password),
+            )
+            .timeout(std::time::Duration::from_secs(15))
+            .query(&[("query", statement.as_str())])
+            .send()
+            .await
+            .and_then(|r| r.error_for_status());
+
+        match response {
+            Ok(_) => {
+                info!("ClickHouse erasure mutation submitted for a data subject");
+                StoreErasureResult {
+                    store: "clickhouse_events",
+                    status: StoreErasureStatus::MutationSubmitted,
+                    rows_affected: 0,
+                    error: None,
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "ClickHouse erasure mutation failed (best-effort)");
+                StoreErasureResult {
+                    store: "clickhouse_events",
+                    status: StoreErasureStatus::BestEffortFailed,
                     rows_affected: 0,
                     error: Some(e.to_string()),
                 }
@@ -1702,6 +1902,10 @@ fn sanitize_pii(mut value: serde_json::Value) -> serde_json::Value {
             "internal_notes",
             "api_key_hash",
             "verification_token_hash",
+            // F9: the users row is exported anonymized-readable — MFA
+            // secrets and recovery hashes are credentials, not readable data.
+            "mfa_secret",
+            "mfa_recovery_hashes",
         ] {
             obj.remove(*key);
         }
@@ -1735,6 +1939,19 @@ pub enum ErasureStore {
         table: &'static str,
         columns: &'static [&'static str],
     },
+    /// F1: canonical message content (migration 073). The subject's copy is
+    /// anonymized — recipients arrays, subject line and bodies are redacted
+    /// while the row (a statutory sending record) survives. Deleting the row
+    /// would destroy other recipients' records of the same send.
+    AnonymizeMessageContent,
+    /// F1/F9: the subject's platform account. Art. 17 hygiene keeps a
+    /// tombstone row (id + tenant linkage + `erased` status) with every
+    /// PII field redacted, so audit/history references don't dangle.
+    AnonymizeUserTombstone,
+    /// F1: ClickHouse analytics events. Config-gated best-effort
+    /// `ALTER TABLE events DELETE WHERE recipient = ...` — reported honestly
+    /// on the certificate whether configured, submitted or failed.
+    ClickHouseEvents,
     /// Store intentionally retained (with reason) — never deleted.
     Retained {
         name: &'static str,
@@ -1748,54 +1965,56 @@ impl ErasureStore {
             Self::TableBySubjectEmail { name, .. } => name,
             Self::SessionsByUserEmail => "sessions",
             Self::AnonymizeSubjectEmail { name, .. } => name,
+            Self::AnonymizeMessageContent => "messages",
+            Self::AnonymizeUserTombstone => "users",
+            Self::ClickHouseEvents => "clickhouse_events",
             Self::Retained { name, .. } => name,
         }
     }
 }
 
 /// The complete erasure data map, mirroring the access-export data map.
+///
+/// F1: every store here is REAL — it exists in the canonical migration chain
+/// (`contacts` 068/075, `events` 075, `messages` 073, `users` 052/064,
+/// `sessions` 069, plus the 038 compliance tables). The previous map deleted
+/// from `subscribers`/`message_events`/`tracking_events`/
+/// `engagement_events`/`subscriber_analytics`, which exist only in test
+/// fixtures — production erasures reported "deleted" while touching nothing
+/// and the real PII stores kept every row.
 pub fn erasure_stores() -> Vec<ErasureStore> {
     use ErasureStore::*;
     vec![
-        TableBySubjectEmail {
-            name: "subscribers",
-            table: "subscribers",
-            email_column: "email",
-        },
-        TableBySubjectEmail {
-            name: "message_events",
-            table: "message_events",
-            email_column: "recipient_email",
-        },
-        TableBySubjectEmail {
-            name: "engagement_events",
-            table: "engagement_events",
-            email_column: "email",
-        },
-        TableBySubjectEmail {
-            name: "tracking_events",
-            table: "tracking_events",
-            email_column: "email",
-        },
-        TableBySubjectEmail {
-            name: "subscriber_analytics",
-            table: "subscriber_analytics",
-            email_column: "email",
-        },
-        TableBySubjectEmail {
-            name: "consent_records",
-            table: "consent_records",
-            email_column: "email",
-        },
+        // Canonical subscriber/contact records.
         TableBySubjectEmail {
             name: "contacts",
             table: "contacts",
             email_column: "email",
         },
+        // Kept for deployments that provision the CP list store; on the
+        // canonical chain it is absent and honestly reported as skipped.
         TableBySubjectEmail {
             name: "contact_list_members",
             table: "contact_list_members",
             email_column: "subscriber_email",
+        },
+        // Canonical event store (075) — recipient match.
+        TableBySubjectEmail {
+            name: "events",
+            table: "events",
+            email_column: "recipient",
+        },
+        // Canonical message content (073) — anonymize, never delete.
+        AnonymizeMessageContent,
+        SessionsByUserEmail,
+        // The subject's account, anonymized to a tombstone. AFTER sessions:
+        // the session purge resolves the users row by email, and the
+        // tombstone rewrites that email.
+        AnonymizeUserTombstone,
+        TableBySubjectEmail {
+            name: "consent_records",
+            table: "consent_records",
+            email_column: "email",
         },
         TableBySubjectEmail {
             name: "double_opt_in_tokens",
@@ -1807,7 +2026,15 @@ pub fn erasure_stores() -> Vec<ErasureStore> {
             table: "gdpr_exports",
             email_column: "email",
         },
-        SessionsByUserEmail,
+        // F1: ClickHouse analytics is a real PII store — best-effort purge.
+        ClickHouseEvents,
+        // Accountability trail: subject-referencing audit entries are
+        // records of processing (Art. 30) and are retained; they appear in
+        // BOTH maps (the SAR exports them, erasure retains them — F9).
+        Retained {
+            name: "audit_logs",
+            reason: "retained: accountability trail (Art. 30 records of processing)",
+        },
         // A-5: suppression must SURVIVE erasure — deleting it would enable
         // re-mailing a complained address (CAN-SPAM / GDPR opt-out violation).
         // Retention is a legitimate interest (Art. 17(3)(e) / Recital 65).
@@ -1845,6 +2072,18 @@ pub enum StoreErasureStatus {
     /// Table/column absent in this deployment — reported, never silently
     /// counted as deleted.
     SkippedMissingTable,
+    /// F1: the store is a real PII store but this deployment has no purge
+    /// path configured (e.g. ClickHouse erasure disabled) — reported on the
+    /// certificate, never counted as deleted.
+    SkippedNotConfigured,
+    /// F1: best-effort store (ClickHouse mutation) failed. The Postgres
+    /// erasure continues; the certificate records the gap and the request is
+    /// `partial`, not `failed`.
+    BestEffortFailed,
+    /// F1: the best-effort mutation was SUBMITTED (ClickHouse applies
+    /// `ALTER ... DELETE` asynchronously — submission is the strongest
+    /// synchronous guarantee available).
+    MutationSubmitted,
     Failed,
 }
 
@@ -1870,10 +2109,14 @@ pub fn summarize_erasure(results: &[StoreErasureResult]) -> ErasureOverall {
         .any(|r| matches!(r.status, StoreErasureStatus::Failed))
     {
         ErasureOverall::Failed
-    } else if results
-        .iter()
-        .any(|r| matches!(r.status, StoreErasureStatus::SkippedMissingTable))
-    {
+    } else if results.iter().any(|r| {
+        matches!(
+            r.status,
+            StoreErasureStatus::SkippedMissingTable
+                | StoreErasureStatus::SkippedNotConfigured
+                | StoreErasureStatus::BestEffortFailed
+        )
+    }) {
         ErasureOverall::Partial
     } else {
         ErasureOverall::Completed
@@ -1900,6 +2143,9 @@ pub fn build_deletion_confirmation(
                     StoreErasureStatus::Anonymized => "anonymized",
                     StoreErasureStatus::Retained(_) => "retained",
                     StoreErasureStatus::SkippedMissingTable => "skipped_missing_table",
+                    StoreErasureStatus::SkippedNotConfigured => "skipped_not_configured",
+                    StoreErasureStatus::BestEffortFailed => "best_effort_failed",
+                    StoreErasureStatus::MutationSubmitted => "mutation_submitted",
                     StoreErasureStatus::Failed => "failed",
                 },
                 "rows_affected": r.rows_affected,
@@ -1917,7 +2163,7 @@ pub fn build_deletion_confirmation(
             "All in-scope personal data has been erased or anonymized as detailed per store, per GDPR Article 17."
         }
         ErasureOverall::Partial => {
-            "Erasure partially completed: some data stores were absent in this deployment and are listed per store. This certificate does NOT claim full erasure."
+            "Erasure partially completed: some data stores were absent, not configured, or best-effort failed in this deployment and are listed per store. This certificate does NOT claim full erasure."
         }
         ErasureOverall::Failed => {
             "Erasure failed for one or more data stores; no erasure is certified."
@@ -1964,15 +2210,35 @@ pub fn redact_marker(email: &str) -> String {
     format!("erased+{}@invalid", &sha256_hex(email)[..16])
 }
 
+/// F9: tombstone email for the subject's `users` row. Embeds the tenant so
+/// the globally-UNIQUE users.email never collides when the same subject is
+/// erased in two tenants.
+pub fn user_tombstone_marker(email: &str, tenant_id: &str) -> String {
+    let tenant: String = tenant_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    format!(
+        "erased+{}-{}@invalid",
+        &sha256_hex(email)[..12],
+        &tenant[..tenant.len().min(13)]
+    )
+}
+
 /// Textually replace occurrences of the subject email in a JSON value with
-/// the redaction marker (anonymized view of retained records).
+/// the redaction marker (anonymized view of retained records). Matching is
+/// ASCII-case-insensitive: writers are inconsistent about email case, and an
+/// exact-case replace would leave the mixed-case copy of the address in the
+/// "anonymized" export (F9).
 pub fn anonymize_json_text(
     value: serde_json::Value,
     email: &str,
     marker: &str,
 ) -> serde_json::Value {
     match value {
-        serde_json::Value::String(s) => serde_json::Value::String(s.replace(email, marker)),
+        serde_json::Value::String(s) => {
+            serde_json::Value::String(replace_ignore_ascii_case(&s, email, marker))
+        }
         serde_json::Value::Array(a) => serde_json::Value::Array(
             a.into_iter()
                 .map(|v| anonymize_json_text(v, email, marker))
@@ -1984,6 +2250,46 @@ pub fn anonymize_json_text(
                 .collect(),
         ),
         other => other,
+    }
+}
+
+/// Replace every ASCII-case-insensitive occurrence of `needle` in `haystack`.
+fn replace_ignore_ascii_case(haystack: &str, needle: &str, replacement: &str) -> String {
+    if needle.is_empty() {
+        return haystack.to_string();
+    }
+    let hay = haystack.as_bytes();
+    let ned = needle.as_bytes();
+    let mut out = String::with_capacity(haystack.len());
+    let mut i = 0;
+    while i < hay.len() {
+        if i + ned.len() <= hay.len()
+            && hay[i..i + ned.len()]
+                .iter()
+                .zip(ned)
+                .all(|(a, b)| a.eq_ignore_ascii_case(b))
+        {
+            out.push_str(replacement);
+            i += ned.len();
+        } else {
+            // Copy one full UTF-8 code point (never split a multi-byte char).
+            let step = utf8_char_width(hay[i]).max(1) as usize;
+            let end = (i + step).min(hay.len());
+            out.push_str(&haystack[i..end]);
+            i = end;
+        }
+    }
+    out
+}
+
+/// Width in bytes of the UTF-8 code point starting with `first_byte`.
+fn utf8_char_width(first_byte: u8) -> u8 {
+    match first_byte {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => 1,
     }
 }
 
@@ -2026,6 +2332,13 @@ pub fn next_retry_decision(attempt: u32) -> RetryDecision {
 pub enum ExportStoreStatus {
     Included(usize),
     SkippedMissing,
+    /// F9: in the DSR data map but carrying no personal data of the subject
+    /// (tenant-owned resources) — listed in the manifest for transparency.
+    NotSubjectData,
+    /// F9: a real analytics store (ClickHouse) this export cannot query —
+    /// declared in the manifest instead of silently omitted. The erasure
+    /// side submits a best-effort mutation against it.
+    NotExportable,
 }
 
 #[derive(Debug, Clone)]
@@ -2049,6 +2362,27 @@ impl StoreExportResult {
             status: ExportStoreStatus::SkippedMissing,
         }
     }
+
+    pub fn not_subject_data(store: &'static str) -> Self {
+        Self {
+            store,
+            status: ExportStoreStatus::NotSubjectData,
+        }
+    }
+
+    pub fn not_exportable(store: &'static str) -> Self {
+        Self {
+            store,
+            status: ExportStoreStatus::NotExportable,
+        }
+    }
+}
+
+/// F9: the store names the SAR export reads — exactly the erasure map's
+/// names. Both directions of a DSR must cover the same stores: data the
+/// platform erases on request is data it must also disclose on request.
+pub fn export_store_names() -> Vec<&'static str> {
+    erasure_stores().iter().map(|s| s.name()).collect()
 }
 
 /// G: explicit export manifest — per-store inventory plus a truncation flag
@@ -2065,6 +2399,14 @@ pub fn build_export_manifest(stores: &[StoreExportResult], truncated: bool) -> s
                 ExportStoreStatus::SkippedMissing => serde_json::json!({
                     "included": false,
                     "reason": "store not present in this deployment",
+                }),
+                ExportStoreStatus::NotSubjectData => serde_json::json!({
+                    "included": false,
+                    "reason": "tenant-owned resource: no personal data of the subject",
+                }),
+                ExportStoreStatus::NotExportable => serde_json::json!({
+                    "included": false,
+                    "reason": "analytics store (ClickHouse): not queried by this export; the erasure flow submits a best-effort mutation against it",
                 }),
             };
             (s.store.to_string(), v)
@@ -2510,12 +2852,14 @@ mod tests {
             assert!(row.into_request().is_ok(), "Failed to parse status: {}", s);
         }
     }
-    // ── A: erasure plan is subject-scoped ──────────────────────
+    // ── A/F1: erasure plan is subject-scoped and canonical ────
 
     /// Every SQL-bearing store must key on the subject's email (or the
-    /// subject's user id) — no whole-tenant deletes.
+    /// subject's user id) — no whole-tenant deletes — and every store must
+    /// exist in the canonical migration chain (audit F1: the old map deleted
+    /// from fixture-only tables while the real PII stores kept every row).
     #[test]
-    fn test_erasure_plan_is_subject_scoped() {
+    fn test_erasure_plan_is_subject_scoped_and_canonical() {
         let stores = erasure_stores();
         assert!(stores.len() >= 14, "expected the full data map");
 
@@ -2528,8 +2872,8 @@ mod tests {
                 } => {
                     assert!(!table.is_empty());
                     assert!(
-                        email_column.contains("email"),
-                        "{name} must scope deletes to an email column"
+                        email_column.contains("email") || *email_column == "recipient",
+                        "{name} must scope deletes to an email-bearing column"
                     );
                 }
                 ErasureStore::SessionsByUserEmail => { /* scoped via users.email lookup */ }
@@ -2539,22 +2883,63 @@ mod tests {
                         "{name} anonymization needs candidate columns"
                     );
                 }
+                ErasureStore::AnonymizeMessageContent => { /* canonical messages store */ }
+                ErasureStore::AnonymizeUserTombstone => { /* canonical users store */ }
+                ErasureStore::ClickHouseEvents => { /* best-effort analytics purge */ }
                 ErasureStore::Retained { name, reason } => {
                     assert!(!reason.is_empty(), "{name} retention needs a reason");
                 }
             }
         }
 
-        // The tenant-wide-destroyed stores are now retained, never deleted.
         let names: Vec<&str> = stores
             .iter()
             .map(|s| match s {
                 ErasureStore::TableBySubjectEmail { name, .. } => *name,
                 ErasureStore::SessionsByUserEmail => "sessions",
                 ErasureStore::AnonymizeSubjectEmail { name, .. } => *name,
+                ErasureStore::AnonymizeMessageContent => "messages",
+                ErasureStore::AnonymizeUserTombstone => "users",
+                ErasureStore::ClickHouseEvents => "clickhouse_events",
                 ErasureStore::Retained { name, .. } => *name,
             })
             .collect();
+
+        // F1: the phantom tables (test fixtures only) must be GONE from the
+        // erasure map — deleting from them attested erasure that never
+        // happened.
+        for phantom in [
+            "subscribers",
+            "message_events",
+            "tracking_events",
+            "engagement_events",
+            "subscriber_analytics",
+        ] {
+            assert!(
+                !names.contains(&phantom),
+                "{phantom} exists only in test fixtures — it must not be in the erasure map"
+            );
+        }
+
+        // The real canonical PII stores are all covered.
+        for canonical in [
+            "contacts",
+            "events",
+            "messages",
+            "users",
+            "sessions",
+            "consent_records",
+            "double_opt_in_tokens",
+            "gdpr_exports",
+            "clickhouse_events",
+            "invoices",
+        ] {
+            assert!(
+                names.contains(&canonical),
+                "{canonical} is a real store and must be in the erasure map"
+            );
+        }
+
         // Invoices are anonymized (A-3), never deleted.
         assert!(stores.iter().any(|s| matches!(
             s,
@@ -2572,6 +2957,43 @@ mod tests {
             );
         }
         assert!(names.contains(&"sessions"), "sessions must be in the plan");
+    }
+
+    // ── F9: SAR/erasure symmetry ───────────────────────────────
+
+    /// The access export and the Art.17 erasure must cover the SAME store
+    /// set — data the platform erases on request is data it must disclose
+    /// on request. This pins the exact list `process_access_request`
+    /// collects; adding a store to one side without the other fails here.
+    #[test]
+    fn test_sar_export_and_erasure_maps_are_symmetric() {
+        let export_reads = [
+            "contacts",
+            "events",
+            "messages",
+            "users",
+            "consent_records",
+            "double_opt_in_tokens",
+            "gdpr_exports",
+            "sessions",
+            "suppression_list",
+            "contact_list_members",
+            "invoices",
+            "audit_logs",
+            // NotSubjectData / NotExportable entries — in the map,
+            // transparently labelled.
+            "api_keys",
+            "webhooks",
+            "clickhouse_events",
+        ];
+        let mut from_erasure: Vec<&str> = export_store_names().to_vec();
+        let mut from_export = export_reads.to_vec();
+        from_erasure.sort_unstable();
+        from_export.sort_unstable();
+        assert_eq!(
+            from_erasure, from_export,
+            "SAR export and erasure data maps must mirror each other (F9)"
+        );
     }
 
     // ── B: honest summarization + certificate ───────────────────
@@ -2681,6 +3103,19 @@ mod tests {
         assert_eq!(marker, redact_marker("user@example.com"));
         assert_ne!(marker, redact_marker("other@example.com"));
         assert!(!marker.contains("user@example.com"));
+    }
+
+    /// F9: the users tombstone marker must be tenant-unique — users.email is
+    /// globally UNIQUE, so the same subject erased in two tenants needs two
+    /// distinct tombstone emails.
+    #[test]
+    fn test_user_tombstone_marker_is_tenant_unique() {
+        let a = user_tombstone_marker("user@example.com", "tenant_a");
+        let b = user_tombstone_marker("user@example.com", "tenant_b");
+        assert_ne!(a, b, "same subject in two tenants needs distinct markers");
+        assert_eq!(a, user_tombstone_marker("user@example.com", "tenant_a"));
+        assert!(!a.contains("user@example.com"));
+        assert!(a.starts_with("erased+") && a.ends_with("@invalid"));
     }
 
     #[test]

@@ -4,7 +4,9 @@ import com.fasterxml.jackson.core.type.TypeReference;
 
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 
 /**
  * Manage the suppression list.
@@ -22,12 +24,16 @@ public final class Suppressions {
     /**
      * Add a single email address to the suppression list.
      *
+     * <p>Transmits exactly {email, reason, source?} per the server's
+     * CreateSuppressionRequest (deny_unknown_fields) — the historical
+     * emails[] body was rejected by the API.
+     *
      * @param email  Email address to suppress
      * @param reason "unsubscribe" | "bounce" | "complaint" | "manual"
      */
     public Suppression add(String email, String reason) {
         return client.request("POST", "/v1/suppressions", Map.of(
-            "emails", List.of(email),
+            "email", email,
             "reason", reason != null ? reason : "manual"
         ), Suppression.class);
     }
@@ -40,43 +46,47 @@ public final class Suppressions {
     }
 
     /**
-     * Add multiple email addresses to the suppression list.
+     * Add multiple email addresses via the API's /bulk endpoint
+     * ({entries: [{email, reason}]}).
      *
      * @param emails List of email addresses
      * @param reason "unsubscribe" | "bounce" | "complaint" | "manual"
+     * @return {created, duplicates, invalid}
      */
-    public Suppression addBulk(List<String> emails, String reason) {
-        return client.request("POST", "/v1/suppressions", Map.of(
-            "emails", emails,
-            "reason", reason != null ? reason : "manual"
-        ), Suppression.class);
+    public BulkResponse addBulk(List<String> emails, String reason) {
+        String effectiveReason = reason != null ? reason : "manual";
+        List<Map<String, Object>> entries = new ArrayList<>(emails.size());
+        for (String email : emails) {
+            entries.add(Map.of("email", email, "reason", effectiveReason));
+        }
+        return client.request("POST", "/v1/suppressions/bulk", Map.of("entries", entries), BulkResponse.class);
     }
 
     /**
-     * List suppressed addresses.
+     * List suppressed addresses (the API returns a bare array).
      *
      * @param options  Optional: {@code reason}, {@code limit}, {@code offset}
      */
-    public SuppressionListResponse list(Map<String, Object> options) {
+    public List<Suppression> list(Map<String, Object> options) {
         String q = options != null && !options.isEmpty()
             ? "?" + buildQuery(options) : "";
         return client.request("GET", "/v1/suppressions" + q, null,
-            SuppressionListResponse.class);
+            new TypeReference<List<Suppression>>() {});
     }
 
-    public SuppressionListResponse list() {
+    public List<Suppression> list() {
         return list(null);
     }
 
     /**
      * Check whether a specific address is suppressed.
      *
-     * @return Response containing {@code suppressed: boolean}
+     * @return {email, suppressed, reason?}
      */
-    public SuppressionCheckResponse check(String email) {
+    public CheckResponse check(String email) {
         return client.request("GET",
             "/v1/suppressions/check/" + encode(email), null,
-            SuppressionCheckResponse.class);
+            CheckResponse.class);
     }
 
     /**
@@ -85,15 +95,15 @@ public final class Suppressions {
      * <p>This only removes the internal suppression record; it does NOT
      * re-subscribe an end-user to marketing communications.
      *
-     * @param id  The suppression entry ID (UUID)
+     * @param id  The suppression entry ID
      */
     public void delete(String id) {
         client.request("DELETE", "/v1/suppressions/" + encode(id), null, Void.class);
     }
 
-    /** Add suppressions in bulk using the API's batch endpoint. */
-    public Map<String, Object> bulk(Map<String, Object> params) {
-        return client.request("POST", "/v1/suppressions/bulk", params, new TypeReference<Map<String, Object>>() {});
+    /** Add suppressions in bulk with explicit entries ({email, reason}). */
+    public BulkResponse bulk(List<Map<String, Object>> entries) {
+        return client.request("POST", "/v1/suppressions/bulk", Map.of("entries", entries), BulkResponse.class);
     }
 
     private static String encode(String s) {
@@ -111,9 +121,22 @@ public final class Suppressions {
         return sb.toString();
     }
 
-    public record Suppression(String email, String reason, String createdAt) {}
+    /** The flat SuppressionResponse: {id, email, reason, source, created_at}. */
+    public record Suppression(
+        String id,
+        String email,
+        String reason,
+        String source,
+        @com.fasterxml.jackson.annotation.JsonProperty("created_at") String createdAt
+    ) {}
 
-    public record SuppressionCheckResponse(boolean suppressed, String reason, String createdAt) {}
+    /** The flat CheckResponse: {email, suppressed, reason?}. */
+    public record CheckResponse(
+        String email,
+        boolean suppressed,
+        String reason
+    ) {}
 
-    public record SuppressionListResponse(java.util.List<Suppression> suppressions, Map<String, Object> pagination) {}
+    /** The flat BulkSuppressResponse: {created, duplicates, invalid}. */
+    public record BulkResponse(int created, int duplicates, int invalid) {}
 }

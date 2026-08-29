@@ -17,9 +17,13 @@ Bel Consulting OÜ (nom commercial ApexMail) (« nous », « notre ») s'engage 
 
 ## 2. Données que nous collectons
 
-- **Données de compte :** nom, email, entreprise, adresse de facturation.
-- **Données d'utilisation :** appels API, volumes d'envoi d'emails, événements de livraison.
-- **Données techniques :** adresses IP, type de navigateur, informations sur l'appareil.
+- **Visiteurs du site (site marketing) :** adresse IP, type de navigateur et user agent, informations sur l'appareil, pages visitées, URL de provenance et horodatages — collectés automatiquement via les journaux d'accès du serveur. Le site marketing n'exécute aucun script d'analyse et n'intègre aucun pixel de suivi ni cookie publicitaire.
+- **Prospects :** nom, adresse email, nom de l'entreprise, numéro de téléphone (si fourni) et historique des communications, fournis via les formulaires de contact ou par email.
+- **Données de compte :** nom, email, entreprise, adresse de facturation, numéro de TVA, jetons de moyen de paiement (les données de carte sont traitées par Stripe et n'atteignent jamais nos serveurs), métadonnées de clés API, horodatages de connexion, adresses IP et entrées de journal d'audit.
+- **Données d'utilisation :** appels API, volumes d'envoi d'emails, événements de livraison et événements d'engagement (ouvertures et clics) pour les messages que vous envoyez.
+- **Données des destinataires (en tant que sous-traitant pour nos clients) :** adresses email et noms des destinataires, contenu des emails (objet, corps, en-têtes, pièces jointes) et métadonnées de livraison et d'engagement. Lorsque le suivi est activé par le client expéditeur, les événements d'ouverture et de clic enregistrent également l'adresse IP et le user agent du destinataire.
+- **Données techniques :** adresses IP (utilisées pour l'authentification, la limitation de débit et la prévention des fraudes et abus), type de navigateur, informations sur l'appareil.
+- **Traitement par IA :** lorsque vous utilisez les fonctions optionnelles assistées par IA, les objets et contenus de message que vous soumettez sont traités afin de produire l'analyse demandée (par exemple, des insights sur l'objet).
 
 ## 3. Base légale
 
@@ -48,8 +52,8 @@ Nous conservons les données personnelles uniquement aussi longtemps que nécess
 |---|---|
 | Données de compte | Durée du contrat + 30 jours |
 | Documents de facturation | 7 ans (droit comptable estonien) |
-| Contenu des emails | 30 jours (configurable jusqu'à 90 jours pour Enterprise) |
-| Journaux d'événements | 90 jours (730 jours pour Enterprise) |
+| Contenu des emails (corps, objet, en-têtes, pièces jointes) | 7 jours par défaut ; maximum dépendant du plan (de 1 jour en plan gratuit jusqu'à 365 jours en Enterprise) |
+| Journaux d'événements (événements de livraison, d'ouverture et de clic) | 30 jours par défaut ; maximum dépendant du plan (jusqu'à 365 jours en Enterprise) |
 | Tickets de support | 2 ans après résolution |
 
 Consultez notre [Politique de conservation des données](/compliance/#data-retention) pour plus de détails.

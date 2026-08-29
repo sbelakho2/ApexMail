@@ -1,7 +1,7 @@
 //! Public billing routes served by api-server.
 
 use axum::extract::{Path, Query, State};
-use axum::http::{header, HeaderValue, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -9,7 +9,7 @@ use billing_common::proration;
 use billing_service::{
     config::{BillingConfig, PaygPricing},
     plans,
-    types::{BillingInterval, Plan, PlanFeatures},
+    types::{BillingInterval, MeterEventType, Plan, PlanFeatures},
     usage,
 };
 use chrono::{Datelike, Months, NaiveTime, Utc};
@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use crate::error::{success, ApiError, ApiResponse};
 use crate::middleware::auth::AuthUser;
+use crate::routes::helpers::hash_token;
 use crate::state::AppState;
 
 const MINIMUM_MONTHLY_CHARGE_CENTS: i64 = 0;
@@ -30,6 +31,10 @@ const SELF_SERVE_CHECKOUT_PLAN_IDS: [&str; 4] = ["starter", "pro", "growth", "sc
 const DEFAULT_BILLING_CURRENCY: &str = "USD";
 const DEFAULT_NET_DAYS: i64 = 30;
 const USAGE_QUERY_CACHE_TTL_SECONDS: u64 = 30;
+/// How long an admin-credit Idempotency-Key stays claimed in Redis (F6).
+/// 48 h comfortably exceeds any reasonable retry window for an operator
+/// action while still allowing key reuse after that period.
+const ADMIN_CREDIT_IDEMPOTENCY_TTL_SECS: u64 = 48 * 60 * 60;
 const BILLING_COMPANY_NAME: &str = "Bel Consulting OÜ";
 const BILLING_COMPANY_TRADING_AS: &str = "ApexMail";
 const BILLING_COMPANY_STREET: &str = "Sakala 7-2";
@@ -593,6 +598,10 @@ struct AdminCreditBody {
     // the credit-granting handler does not read it.
     #[allow(dead_code)]
     expires_at: Option<String>,
+    // F6: idempotency now comes from the required Idempotency-Key header;
+    // the body field is only still accepted so old request payloads keep
+    // deserializing under deny_unknown_fields.
+    #[allow(dead_code)]
     idempotency_key: Option<String>,
 }
 
@@ -860,15 +869,7 @@ fn default_billing_interval() -> BillingInterval {
 }
 
 fn default_export_format() -> String {
-    "csv".to_string()
-}
-
-fn usage_realtime_counter_key(tenant_id: &str, metric: &str, now: chrono::DateTime<Utc>) -> String {
-    format!(
-        "meter:rt:{tenant_id}:{metric}:{}-{:02}",
-        now.year(),
-        now.month()
-    )
+    "csv".into()
 }
 
 fn validate_usage_alert_metric(metric: &str) -> bool {
@@ -2505,9 +2506,21 @@ async fn get_realtime_usage_counter(
             .into_response());
     }
 
+    let event_type = match metric.as_str() {
+        "emails_sent" => MeterEventType::EmailsSent,
+        _ => MeterEventType::ApiCalls,
+    };
+
+    // F7: read the counter the quota gate actually enforces. For subscribed
+    // tenants the gate meters the billing-cycle-anchored key
+    // (`meter:rt:...:c{year}-{month}`), not the calendar-month key, so the
+    // dashboard must ask billing-service for the exact enforced key instead
+    // of re-deriving (and drifting from) the key shape. Source fn:
+    // billing_service::usage::enforced_counter_key (exported for this
+    // exact purpose).
     let now = Utc::now();
-    let period = format!("{}-{:02}", now.year(), now.month());
-    let key = usage_realtime_counter_key(&auth.tenant_id, &metric, now);
+    let key = usage::enforced_counter_key(&state.db, &auth.tenant_id, event_type, now).await;
+    let period = usage_counter_period_label(&key);
     let mut conn = state.redis.get().await?;
     let value: Option<i64> = conn.get(&key).await.map_err(ApiError::from)?;
 
@@ -2516,6 +2529,28 @@ async fn get_realtime_usage_counter(
         "count": value.unwrap_or(0),
         "period": period,
     })))
+}
+
+/// Extract the period label from a realtime counter key. Anchored keys look
+/// like `meter:rt:{tenant}:{metric}:c2026-03` (note the `c` prefix on the
+/// cycle label); legacy calendar keys are `meter:rt:{tenant}:{metric}:2026-03`.
+/// The `c` is stripped so the label stays comparable across both shapes. A
+/// final segment that is not a `YYYY-MM` label (malformed key) falls back to
+/// the current calendar month.
+fn usage_counter_period_label(counter_key: &str) -> String {
+    let suffix = counter_key.rsplit(':').next().unwrap_or_default();
+    let label = suffix.strip_prefix('c').unwrap_or(suffix);
+    let bytes = label.as_bytes();
+    let looks_like_period = bytes.len() == 7
+        && bytes[..4].iter().all(|b| b.is_ascii_digit())
+        && bytes[4] == b'-'
+        && bytes[5..].iter().all(|b| b.is_ascii_digit());
+
+    if looks_like_period {
+        label.to_string()
+    } else {
+        format!("{}-{:02}", Utc::now().year(), Utc::now().month())
+    }
 }
 
 async fn estimate_payg_cost(
@@ -3291,6 +3326,7 @@ async fn admin_get_tenant_details(
 async fn admin_apply_credit(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     Path(tenant_id): Path<String>,
     Json(body): Json<AdminCreditBody>,
 ) -> Result<Response, ApiError> {
@@ -3305,15 +3341,66 @@ async fn admin_apply_credit(
             .into_response());
     }
 
-    let idempotency_key = body.idempotency_key.unwrap_or_else(|| {
-        format!(
-            "admin_credit_{}_{}_{}_{}",
-            admin_actor_id(&auth),
-            tenant_id,
-            Utc::now().timestamp_millis(),
-            Uuid::new_v4().simple(),
+    // F6: an explicit Idempotency-Key header is required. The previous
+    // default (timestamp + UUID) was unique per request, so a retried or
+    // duplicated admin credit was applied twice. The key is claimed via
+    // Redis SET NX before the money moves, and the existing `reference`
+    // column keeps storing it for auditability.
+    let idempotency_key = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|key| !key.is_empty())
+        .ok_or_else(|| {
+            ApiError::BadRequest(
+                "Idempotency-Key header is required for admin wallet credits".into(),
+            )
+        })?;
+    if idempotency_key.len() > 255 {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Idempotency-Key header must be at most 255 characters"
+            })),
         )
-    });
+            .into_response());
+    }
+
+    let claim_key = format!(
+        "apexmail:billing:admin_credit_idem:{tenant_id}:{}",
+        hash_token(idempotency_key)
+    );
+    let mut conn = state.redis.get().await.map_err(|error| {
+        tracing::error!(error = %error, tenant_id = %tenant_id, "admin credit idempotency claim Redis unavailable");
+        ApiError::ServiceUnavailable(
+            "idempotency enforcement is temporarily unavailable".into(),
+        )
+    })?;
+    let claimed: Option<String> = deadpool_redis::redis::cmd("SET")
+        .arg(&claim_key)
+        .arg("1")
+        .arg("NX")
+        .arg("EX")
+        .arg(ADMIN_CREDIT_IDEMPOTENCY_TTL_SECS)
+        .query_async(&mut conn)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, tenant_id = %tenant_id, "admin credit idempotency claim failed");
+            ApiError::ServiceUnavailable(
+                "idempotency enforcement is temporarily unavailable".into(),
+            )
+        })?;
+    if claimed.is_none() {
+        // Fail closed: this is a money-minting endpoint, so when uniqueness
+        // cannot be verified the duplicate is rejected rather than applied.
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "This Idempotency-Key has already been used for a credit on this tenant"
+            })),
+        )
+            .into_response());
+    }
 
     let transaction = sqlx::query_as::<_, LegacyWalletTransactionRow>(
         r#"
@@ -3325,7 +3412,7 @@ async fn admin_apply_credit(
         ),
         updated_wallet AS (
             UPDATE wallets
-            SET balance = balance + $1::int4, updated_at = NOW()
+            SET balance = balance + $1::int8, updated_at = NOW()
             WHERE tenant_id = $2
             RETURNING id AS wallet_id, tenant_id, balance
         ),
@@ -3338,7 +3425,7 @@ async fn admin_apply_credit(
                 tenant_id,
                 wallet_id,
                 'credit',
-                $1::int4,
+                $1::int8,
                 balance,
                 $3,
                 $4,
@@ -3355,7 +3442,7 @@ async fn admin_apply_credit(
     .bind(body.amount)
     .bind(&tenant_id)
     .bind(format!("Admin credit: {}", body.reason))
-    .bind(&idempotency_key)
+    .bind(idempotency_key)
     .fetch_one(&state.db)
     .await?;
 
@@ -4512,13 +4599,27 @@ mod tests {
     }
 
     #[test]
-    fn billing_routes_realtime_counter_key_uses_month_bucket() {
-        let now = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 3, 9, 12, 30, 0)
-            .single()
-            .expect("valid timestamp");
+    fn billing_routes_realtime_period_label_follows_enforced_key_shape() {
+        // F7: the read path delegates key selection to
+        // billing_service::usage::enforced_counter_key. Whatever key that
+        // returns, the reported period must be the label embedded in the
+        // key — cycle-anchored (`:c2026-03`) and calendar (`:2026-03`)
+        // shapes both reduce to `2026-03`.
         assert_eq!(
-            usage_realtime_counter_key("tenant_123", "emails_sent", now),
-            "meter:rt:tenant_123:emails_sent:2026-03"
+            usage_counter_period_label("meter:rt:tenant_123:emails_sent:c2026-03"),
+            "2026-03"
+        );
+        assert_eq!(
+            usage_counter_period_label("meter:rt:tenant_123:api_calls:2026-03"),
+            "2026-03"
+        );
+        // Degenerate key (no period segment): the last segment is the
+        // metric, NOT a period — fall back to the current calendar month
+        // instead of reporting the metric name as the period.
+        let now = Utc::now();
+        assert_eq!(
+            usage_counter_period_label("meter:rt:tenant_123:emails_sent"),
+            format!("{}-{:02}", now.year(), now.month())
         );
     }
 

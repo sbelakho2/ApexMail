@@ -377,21 +377,14 @@ impl EmailAuthenticator {
         }
 
         let lookup = match self.fetch_dmarc(domain).await {
-            DmarcLookup::None => match registrable_domain(domain) {
-                Some(org) if org != domain.to_ascii_lowercase() => {
-                    match self.fetch_dmarc(&org).await {
-                        DmarcLookup::Record(mut record) => {
-                            // The message comes from a subdomain of the record owner:
-                            // sp= applies when present, otherwise p= (RFC 7489 §6.6.3).
-                            record.policy = dmarc_effective_policy(&record, domain, &org);
-                            record.subdomain_policy = None;
-                            DmarcLookup::Record(record)
-                        }
-                        other => other,
-                    }
-                }
-                _ => DmarcLookup::None,
-            },
+            DmarcLookup::None => self.org_domain_fallback(domain, DmarcLookup::None).await,
+            // A malformed record at the exact From domain still gets the
+            // org-domain fallback: the registrable domain may publish the
+            // record the subdomain fumbled.
+            DmarcLookup::PermError => {
+                self.org_domain_fallback(domain, DmarcLookup::PermError)
+                    .await
+            }
             other => other,
         };
 
@@ -401,6 +394,29 @@ impl EmailAuthenticator {
             self.dmarc_cache.insert(domain.to_string(), lookup);
         }
         lookup
+    }
+
+    /// Organizational (registrable) domain fallback shared by the "no record"
+    /// and "malformed record" outcomes at the exact From domain (RFC 7489
+    /// §6.6.3). When the registrable domain differs and publishes a record,
+    /// that record applies (with the effective sp=/p= policy); otherwise the
+    /// original outcome (`original`) stands.
+    async fn org_domain_fallback(&self, domain: &str, original: DmarcLookup) -> DmarcLookup {
+        match registrable_domain(domain) {
+            Some(org) if org != domain.to_ascii_lowercase() => {
+                match self.fetch_dmarc(&org).await {
+                    DmarcLookup::Record(mut record) => {
+                        // The message comes from a subdomain of the record owner:
+                        // sp= applies when present, otherwise p= (RFC 7489 §6.6.3).
+                        record.policy = dmarc_effective_policy(&record, domain, &org);
+                        record.subdomain_policy = None;
+                        DmarcLookup::Record(record)
+                    }
+                    other => other,
+                }
+            }
+            _ => original,
+        }
     }
 
     /// Fetch and parse a single `_dmarc.{domain}` TXT record.
@@ -541,13 +557,12 @@ fn disposition_for(
     }
 
     // C:DMARC lookup transiently failed (timeout/SERVFAIL — distinct from
-    // NXDOMAIN) while NEITHER SPF nor DKIM passed. The message cannot be
-    // authenticated: tempfail (451) so the sender retries, instead of
-    // fail-open accepting a potentially spoofed message.
+    // NXDOMAIN) while NEITHER SPF nor DKIM passed an ALIGNED check. The
+    // message cannot be authenticated: tempfail (451) so the sender retries,
+    // instead of fail-open accepting a potentially spoofed message.
     if config.enforce_dmarc
         && results.dmarc.result == DmarcVerdict::TempError
-        && results.spf.result != SpfVerdict::Pass
-        && !results.dkim.iter().any(|d| d.result == DkimVerdict::Pass)
+        && !tempfail_gate_aligned_pass(results)
     {
         return MessageDisposition::TempFail;
     }
@@ -568,6 +583,24 @@ fn disposition_for(
     }
 
     MessageDisposition::Accept
+}
+
+/// Whether an ALIGNED SPF or DKIM pass authenticates the message for the
+/// DMARC tempfail gate (RFC 7489 §3.1).
+///
+/// During TempError no policy record exists, so `aspf=`/`adkim=` are unknown
+/// and the record-driven alignment booleans are all false — alignment is
+/// therefore re-evaluated here with the RFC's default relaxed mode. Only an
+/// aligned pass counts: a pass on an unrelated domain authenticates that
+/// domain, not the (attacker-controlled) RFC 5322 From domain.
+fn tempfail_gate_aligned_pass(results: &AuthenticationResults) -> bool {
+    let from = results.dmarc.domain.as_str();
+    (results.spf.result == SpfVerdict::Pass
+        && domains_aligned(from, &results.spf.domain, DmarcAlignmentMode::Relaxed))
+        || results.dkim.iter().any(|d| {
+            d.result == DkimVerdict::Pass
+                && domains_aligned(from, &d.domain, DmarcAlignmentMode::Relaxed)
+        })
 }
 
 fn map_spf_result(r: &SpfResult) -> SpfVerdict {
@@ -751,7 +784,15 @@ fn domains_aligned(from_domain: &str, auth_domain: &str, mode: DmarcAlignmentMod
         // Strict: exact match after lowercasing (RFC 7489 §6.6.1).
         DmarcAlignmentMode::Strict => from == auth,
         // Relaxed: same registrable domain after stripping subdomain labels.
-        DmarcAlignmentMode::Relaxed => registrable_domain(&from) == registrable_domain(&auth),
+        // Two domains with NO registrable domain (single-label hosts,
+        // suffix-only names) are never aligned: `None == None` fail-open
+        // counted unrelated hosts as aligned.
+        DmarcAlignmentMode::Relaxed => {
+            match (registrable_domain(&from), registrable_domain(&auth)) {
+                (Some(from_org), Some(auth_org)) => from_org == auth_org,
+                (None, _) | (_, None) => false,
+            }
+        }
     }
 }
 
@@ -1036,6 +1077,26 @@ mod tests {
     }
 
     #[test]
+    fn test_domains_aligned_relaxed_fails_closed_without_registrable_domain() {
+        // Both domains lack a registrable domain (single-label hosts): the
+        // old `None == None` comparison counted them as aligned even when
+        // they were unrelated hosts.
+        assert!(!domains_aligned(
+            "intranet",
+            "localhost",
+            DmarcAlignmentMode::Relaxed
+        ));
+        // Missing registrable domains never align, even when identical —
+        // relaxed must not be more permissive than the strict-mode
+        // fail-closed posture for unregistrable names.
+        assert!(!domains_aligned(
+            "localhost",
+            "localhost",
+            DmarcAlignmentMode::Relaxed
+        ));
+    }
+
+    #[test]
     fn test_extract_from_domain_uses_from_header() {
         // RFC 5322 From header must drive DMARC, never the envelope domain.
         let raw = b"From: Attacker <attacker@evil.com>\r\nTo: victim@example.com\r\nSubject: hi\r\n\r\nbody\r\n";
@@ -1297,6 +1358,84 @@ mod tests {
         );
         assert_eq!(
             disposition_for(&config, &results),
+            MessageDisposition::Accept
+        );
+    }
+
+    // ── tempfail gate requires an ALIGNED pass (RFC 7489 §3.1) ────────────
+
+    fn temp_error_results(
+        from_domain: &str,
+        spf: SpfVerdict,
+        spf_domain: &str,
+        dkim: DkimVerdict,
+        dkim_domain: &str,
+    ) -> AuthenticationResults {
+        AuthenticationResults {
+            spf: spf_outcome(spf, spf_domain),
+            dkim: vec![dkim_outcome(dkim, dkim_domain)],
+            dmarc: DmarcOutcome {
+                result: DmarcVerdict::TempError,
+                domain: from_domain.into(),
+                policy: DmarcPolicy::None,
+                alignment: DmarcAlignment {
+                    spf: false,
+                    dkim: false,
+                },
+            },
+            auth_results_header: String::new(),
+        }
+    }
+
+    #[test]
+    fn dmarc_temperror_with_unaligned_spf_pass_tempfails() {
+        // From example.com but MAIL FROM (and the SPF pass) on evil.com: the
+        // pass authenticates evil.com, not the From domain — it must not
+        // lift the tempfail gate.
+        let results = temp_error_results(
+            "example.com",
+            SpfVerdict::Pass,
+            "evil.com",
+            DkimVerdict::None,
+            "evil.com",
+        );
+        assert_eq!(
+            disposition_for(&enforced_config(), &results),
+            MessageDisposition::TempFail,
+            "an UNALIGNED SPF pass is not authentication for the From domain"
+        );
+    }
+
+    #[test]
+    fn dmarc_temperror_with_unaligned_dkim_pass_tempfails() {
+        let results = temp_error_results(
+            "example.com",
+            SpfVerdict::Fail,
+            "evil.com",
+            DkimVerdict::Pass,
+            "evil.com",
+        );
+        assert_eq!(
+            disposition_for(&enforced_config(), &results),
+            MessageDisposition::TempFail,
+            "an UNALIGNED DKIM pass is not authentication for the From domain"
+        );
+    }
+
+    #[test]
+    fn dmarc_temperror_with_relaxed_aligned_spf_pass_accepts() {
+        // No policy record is available during TempError, so the gate
+        // evaluates alignment at the RFC default (relaxed): a subdomain
+        // envelope pass still authenticates the From domain.
+        let results = temp_error_results(
+            "example.com",
+            SpfVerdict::Pass,
+            "mail.example.com",
+            DkimVerdict::None,
+            "mail.example.com",
+        );
+        assert_eq!(
+            disposition_for(&enforced_config(), &results),
             MessageDisposition::Accept
         );
     }

@@ -457,6 +457,10 @@ impl SubmissionServer {
                     reply!("530 5.7.0 Must issue STARTTLS first\r\n");
                 } else if authenticated {
                     reply!("503 5.5.1 Already authenticated\r\n");
+                } else if mail_from.is_some() {
+                    // RFC 4954 §4: AUTH is not permitted during a mail
+                    // transaction (mirror of the inbound server's guard).
+                    reply!("503 5.5.1 AUTH not permitted during a mail transaction\r\n");
                 } else if mech == "LOGIN" {
                     match self.handle_auth_login(stream, initial_response, ip).await {
                         AuthOutcome::Success(email, _account_id) => {

@@ -129,3 +129,11 @@ cargo_output.txt
 # ─── Misc ─────────────────────────────────────────────────────────────────────
 .vercel/
 .zcode/
+
+# ─── deploy/tests validator report artifacts (F14: captured into ci/runs/<ts>/) ──
+deploy/tests/.contrast-check-report.json
+deploy/tests/.html-validation-report.json
+deploy/tests/.seo-validation-report.json
+
+# content voice-check report artifact (generated)
+deploy/tests/.content-voice-report.json

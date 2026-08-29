@@ -12,8 +12,8 @@ use governor::{
 use moka::sync::Cache;
 use std::num::NonZeroU32;
 use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tracing::debug;
 
 use crate::config::{KeyedConfig, RateLimitConfig};
@@ -22,6 +22,73 @@ use crate::types::Decision;
 /// Default tombstone cooldown: a key evicted from the LRU cache re-enters
 /// with an EMPTY budget for this long after eviction.
 pub const DEFAULT_EVICTION_TOMBSTONE_TTL: Duration = Duration::from_secs(60);
+
+/// Per-key governor plus the consumption tracking needed to report REAL
+/// remaining quota (F14).
+///
+/// A bare governor exposes no token count, so `KeyedRateLimiter` used to
+/// report the full burst for every allowed decision — callers could not
+/// see a key approaching exhaustion. `consumed` approximates the tokens
+/// outstanding in the current window; it is decayed at the steady refill
+/// rate and clamped at 0, so `remaining = burst - consumed` tracks the
+/// real bucket.
+#[derive(Debug)]
+struct KeyState {
+    limiter: RateLimiter<NotKeyed, InMemoryState, DefaultClock>,
+    /// Tokens consumed in the current window (refill-decayed, ≥ 0).
+    consumed: AtomicI64,
+    /// Wall clock of the last refill decay.
+    last_decay: Mutex<Instant>,
+}
+
+impl KeyState {
+    fn new(quota: Quota, pre_drained: bool, burst: u32) -> Self {
+        let limiter = RateLimiter::direct(quota);
+        let state = Self {
+            limiter,
+            consumed: AtomicI64::new(0),
+            last_decay: Mutex::new(Instant::now()),
+        };
+        if pre_drained {
+            // Tombstone penalty (fix J): the governor bucket is emptied by
+            // draining `burst` checks, and the consumption tracker must
+            // AGREE — otherwise F14's `remaining` would report a budget the
+            // limiter does not have.
+            for _ in 0..burst {
+                let _ = state.limiter.check();
+            }
+            state.consumed.store(i64::from(burst), Ordering::Relaxed);
+        }
+        state
+    }
+
+    /// F14:decay the consumed approximation by tokens refilled since the
+    /// last decay (steady `rps`, floored, clamped at 0).
+    fn decay(&self, rps: u32) {
+        let mut last = self.last_decay.lock().unwrap_or_else(|e| e.into_inner());
+        let elapsed = last.elapsed();
+        if elapsed.is_zero() {
+            return;
+        }
+        let refilled = (elapsed.as_secs_f64() * f64::from(rps)).floor() as i64;
+        if refilled > 0 {
+            let prev = self.consumed.fetch_sub(refilled, Ordering::Relaxed);
+            if prev - refilled < 0 {
+                self.consumed.store(0, Ordering::Relaxed);
+            }
+            *last = Instant::now();
+        }
+    }
+
+    fn record(&self, n: u32) {
+        self.consumed.fetch_add(i64::from(n), Ordering::Relaxed);
+    }
+
+    fn remaining(&self, burst: u32) -> u64 {
+        let consumed = self.consumed.load(Ordering::Relaxed).max(0) as u64;
+        u64::from(burst).saturating_sub(consumed)
+    }
+}
 
 /// Multi-tenant rate limiter that creates per-key governor instances.
 ///
@@ -36,7 +103,7 @@ pub const DEFAULT_EVICTION_TOMBSTONE_TTL: Duration = Duration::from_secs(60);
 /// cache and re-enter with a drained limiter (empty budget, refilling at
 /// the steady rate) until the tombstone expires.
 pub struct KeyedRateLimiter {
-    limiters: Cache<String, Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>>>,
+    limiters: Cache<String, Arc<KeyState>>,
     /// Recently-created keys, TTL-bounded. A cache miss for a key that is
     /// still present here means the key was LRU-evicted (not new) — the
     /// re-created limiter starts empty (tombstone penalty).
@@ -106,18 +173,26 @@ impl KeyedRateLimiter {
     }
 
     /// Check rate limit for a specific key.
+    ///
+    /// F14:`remaining` reports the key's REAL post-check budget (tracked
+    /// consumption, refill-decayed) instead of always the full burst.
     pub fn check(&self, key: &str) -> Decision {
         self.total_checks.fetch_add(1, Ordering::Relaxed);
 
-        let limiter = self.get_or_create(key);
-        match limiter.check() {
+        let burst = self.config.effective_burst().get();
+        let rps = self.config.requests_per_second.get();
+        let state = self.get_or_create(key);
+        match state.limiter.check() {
             Ok(()) => {
                 metrics::counter!("rate_limiter_requests_total", "strategy" => "keyed", "decision" => "allowed").increment(1);
+                state.decay(rps);
+                state.record(1);
                 Decision::Allowed {
-                    remaining: self.config.effective_burst().get() as u64,
+                    remaining: state.remaining(burst),
                 }
             }
             Err(not_until) => {
+                state.decay(rps);
                 self.total_denied.fetch_add(1, Ordering::Relaxed);
                 metrics::counter!("rate_limiter_requests_total", "strategy" => "keyed", "decision" => "denied").increment(1);
                 metrics::counter!("rate_limiter_blocked_total", "strategy" => "keyed").increment(1);
@@ -131,18 +206,24 @@ impl KeyedRateLimiter {
     /// Check rate limit for `n` requests for a key (batch).
     pub fn check_n(&self, key: &str, n: u32) -> Decision {
         self.total_checks.fetch_add(1, Ordering::Relaxed);
+        let burst = self.config.effective_burst().get();
+        let rps = self.config.requests_per_second.get();
         let Some(n_nz) = NonZeroU32::new(n) else {
+            let state = self.get_or_create(key);
+            state.decay(rps);
             return Decision::Allowed {
-                remaining: self.config.effective_burst().get() as u64,
+                remaining: state.remaining(burst),
             };
         };
 
-        let limiter = self.get_or_create(key);
-        match limiter.check_n(n_nz) {
+        let state = self.get_or_create(key);
+        match state.limiter.check_n(n_nz) {
             Ok(Ok(())) => {
                 metrics::counter!("rate_limiter_requests_total", "strategy" => "keyed_batch", "decision" => "allowed").increment(n as u64);
+                state.decay(rps);
+                state.record(n);
                 Decision::Allowed {
-                    remaining: self.config.effective_burst().get() as u64,
+                    remaining: state.remaining(burst),
                 }
             }
             // n can never fit in the burst: wait = time to accumulate n tokens
@@ -208,11 +289,11 @@ impl KeyedRateLimiter {
     /// re-created limiter starts EMPTY (all burst tokens drained) instead
     /// of handing the client a full fresh budget. Without this, rotating
     /// `max_keys` distinct keys granted a full burst on every revisit.
-    fn get_or_create(&self, key: &str) -> Arc<RateLimiter<NotKeyed, InMemoryState, DefaultClock>> {
+    fn get_or_create(&self, key: &str) -> Arc<KeyState> {
         // Use get (non-creating) first to check if the key exists.
         // This avoids unnecessary key_count increments for existing keys.
-        if let Some(limiter) = self.limiters.get(key) {
-            return limiter.clone();
+        if let Some(state) = self.limiters.get(key) {
+            return state;
         }
 
         // Key not in the limiter cache. If we saw it recently (tombstone
@@ -229,26 +310,18 @@ impl KeyedRateLimiter {
         // Key not found — create a new limiter and try to insert.
         let burst = self.config.effective_burst();
         let quota = Quota::per_second(self.config.requests_per_second).allow_burst(burst);
-        let new_limiter = Arc::new(RateLimiter::direct(quota));
-        if was_evicted_recently {
-            // Drain the full burst: `check` consumes one token per allowed
-            // call and never consumes future refill, so exactly `burst`
-            // calls empty the bucket. It then refills at the steady rate.
-            for _ in 0..burst.get() {
-                let _ = new_limiter.check();
-            }
-        }
+        let new_state = Arc::new(KeyState::new(quota, was_evicted_recently, burst.get()));
 
         // Use get_with to atomically insert if still absent, or return
         // existing value if another thread inserted concurrently.
-        let limiter = self.limiters.get_with(key.to_string(), || {
+        let state = self.limiters.get_with(key.to_string(), || {
             self.key_count.fetch_add(1, Ordering::Relaxed);
-            new_limiter
+            new_state
         });
         // (Re)record the key so a later eviction is detectable. Re-inserting
         // also refreshes the TTL for live keys.
         self.seen_keys.insert(key.to_string(), ());
-        limiter
+        state
     }
 }
 
@@ -450,6 +523,42 @@ mod tests {
         let limiter = KeyedRateLimiter::from_params(10, 5, 1000);
         assert!(limiter.check_n("key_a", 3).is_allowed());
         assert!(limiter.check_n("key_a", 0).is_allowed()); // 0 always allowed
+    }
+
+    // ── F14:remaining must reflect real per-key consumption ──────────
+    // (rps=1 so the refill decay needs a full second — counts are
+    // deterministic across adjacent statements.)
+
+    #[test]
+    fn test_keyed_remaining_falls_per_key() {
+        // Previously every allowed decision reported the FULL burst —
+        // callers could not see a key approaching exhaustion.
+        let limiter = KeyedRateLimiter::from_params(1, 5, 1000);
+        assert_eq!(limiter.check("key_a").remaining(), 4, "burst 5, 1 consumed");
+        assert_eq!(limiter.check("key_a").remaining(), 3);
+        assert_eq!(
+            limiter.check("key_b").remaining(),
+            4,
+            "keys track consumption independently"
+        );
+    }
+
+    #[test]
+    fn test_keyed_remaining_reaches_zero_at_exhaustion() {
+        let limiter = KeyedRateLimiter::from_params(1, 2, 1000);
+        assert_eq!(limiter.check("key_a").remaining(), 1);
+        assert_eq!(limiter.check("key_a").remaining(), 0);
+        assert!(limiter.check("key_a").is_denied(), "drained key must deny");
+    }
+
+    #[test]
+    fn test_keyed_remaining_batch_consumes_n() {
+        let limiter = KeyedRateLimiter::from_params(1, 5, 1000);
+        let d = limiter.check_n("key_a", 3);
+        assert!(d.is_allowed());
+        assert_eq!(d.remaining(), 2, "burst 5 minus a 3-token batch");
+        // Zero-batch must not consume.
+        assert_eq!(limiter.check_n("key_a", 0).remaining(), 2);
     }
 
     #[test]

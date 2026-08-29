@@ -232,6 +232,20 @@ pub struct ChallengeRecord {
     /// records: `#[serde(default)]`.
     #[serde(default)]
     pub hostname: Option<String>,
+    /// The server-issued decoy (honeypot) form-field name armed for this
+    /// challenge (see [`DECOY_FIELD_POOL`]). `None` = no decoy armed (the
+    /// default, and the shape every pre-decoy record carries). The name is
+    /// an authenticated v2 canonical field — the FINAL segment
+    /// `|<decoy_field>`, appended after the `kid` (the v2 canonical
+    /// signing input, documented below) — so a stored/tampered record
+    /// cannot change or drop it without breaking the signature.
+    ///
+    /// Wire-compatible both directions: the JSON key is absent when `None`
+    /// (`skip_serializing_if`), so pre-decoy writers and readers keep
+    /// their exact byte format, and a decoy-armed record simply carries
+    /// one extra string key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoy_field: Option<String>,
     /// Key identifier of the signing secret this challenge was issued with.
     /// The final v2 canonical field (`|<kid>` after the issuer);
     /// a verifier configured with a `secrets_by_kid` map selects the signing
@@ -422,6 +436,19 @@ pub fn binding_tag(nonce: &str, ip: &str, secret: &str) -> Result<String, SignEr
     if secret.len() < 16 {
         return Err(SignError::KeyTooShort);
     }
+    binding_tag_with_keys(nonce, ip, &DerivedKeys::from_master(secret, None))
+}
+
+/// The nonce-bound IP binding tag computed with an ALREADY derived
+/// IP-binding key — the cached-HKDF seam for the production verifier,
+/// which derives the purpose keys once per key id (see
+/// [`crate::keys::DerivedKeys`]) instead of re-running HKDF on every
+/// check. Identical output to [`binding_tag`] for the same master secret.
+pub(crate) fn binding_tag_with_keys(
+    nonce: &str,
+    ip: &str,
+    derived: &DerivedKeys,
+) -> Result<String, SignError> {
     let addr: IpAddr = ip.parse().map_err(|_| SignError::InvalidIp)?;
     let (family, canonical_bytes) = match addr {
         IpAddr::V4(v4) => (0x04u8, v4.octets().to_vec()),
@@ -430,7 +457,6 @@ pub fn binding_tag(nonce: &str, ip: &str, secret: &str) -> Result<String, SignEr
             None => (0x06u8, v6.octets().to_vec()),
         },
     };
-    let derived = DerivedKeys::from_master(secret, None);
     let key = derived.ip_bind_key();
     let mut mac = HmacSha256::new_from_slice(key).map_err(|_| SignError::KeyTooShort)?;
     mac.update(b"kiwicaptcha/ip-bind/v2");
@@ -490,8 +516,38 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 /// `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`.
 /// `region`, `request_binding` and `issuer` render as the empty segment when
 /// unset; `kid` is the final field, appended after the issuer.
+///
+/// # The decoy-field extension (round-97)
+///
+/// When the issuer arms a decoy (honeypot) form field
+/// (`issue_challenge_with_decoy`), the field name is appended as ONE extra
+/// final segment after the `kid`:
+///
+/// ```text
+/// v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
+///   target_bits|salt|min_duration_ms|region|policy_version|request_binding|
+///   issuer|kid|decoy_field
+/// ```
+///
+/// - `decoy_field` is the literal decoy name (e.g. `company_website`), drawn
+///   from [`DECOY_FIELD_POOL`], so it can never contain the `|` separator
+///   (the pool alphabet is `[a-z_]`; validation accepts `[A-Za-z0-9_-]`
+///   only, 1..=64 bytes).
+/// - The segment is appended ONLY when a decoy is armed. `None` renders
+///   NOTHING extra — the canonical string is byte-identical to the
+///   pre-extension format, so outstanding challenges and cross-language
+///   records keep verifying unchanged across the upgrade, and the extension
+///   is invisible until a deployment opts in.
+/// - PHP parity (exact recipe for the PHP core): build the same 18-field
+///   base string, then append `'|' . $decoyField` if and only if the record
+///   carries a non-null `decoy_field`; sign/HMAC-verify the result with the
+///   HKDF-derived challenge key (`K_challenge`) exactly as before. The
+///   stored record JSON carries the optional string key `decoy_field`
+///   (absent when null — not a JSON `null` key); the client-facing
+///   challenge response carries the optional key `decoy_field` with the
+///   same value.
 pub(crate) fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
-    format!(
+    let base = format!(
         "v2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         record.nonce,
         record.scope,
@@ -510,7 +566,11 @@ pub(crate) fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
         record.request_binding.as_deref().unwrap_or(""),
         record.issuer.as_deref().unwrap_or(""),
         record.kid
-    )
+    );
+    match record.decoy_field.as_deref() {
+        Some(decoy) => format!("{base}|{decoy}"),
+        None => base,
+    }
 }
 
 /// Sign a canonical input with the secret key, returning a hex HMAC tag
@@ -583,6 +643,21 @@ pub fn verify_signature_v2(
     verify_canonical_v2(&canonical_signing_input_v2(record), signature, secret_key)
 }
 
+/// Verify a v2 signature with an ALREADY derived challenge-signing key —
+/// the cached-HKDF seam for the production verifier (the purpose keys are
+/// derived once per key id, see [`crate::keys::DerivedKeys`]). Identical
+/// verdicts to [`verify_signature_v2`] for the same master secret; same
+/// constant-time guarantee (the full HMAC tag is processed regardless of
+/// the inputs' relationship to the expected value).
+#[cfg(feature = "redis")] // the production verifier (redis_verify) is the sole consumer
+pub(crate) fn verify_signature_v2_with_keys(
+    record: &ChallengeRecord,
+    signature: &str,
+    derived: &DerivedKeys,
+) -> Result<bool, SignError> {
+    verify_canonical_v2_with_keys(&canonical_signing_input_v2(record), signature, derived)
+}
+
 fn verify_canonical(canonical: &str, signature: &str, secret_key: &str) -> Result<bool, SignError> {
     if secret_key.len() < 16 {
         return Err(SignError::KeyTooShort);
@@ -614,6 +689,21 @@ fn verify_canonical_v2(
     if secret_key.len() < 16 {
         return Err(SignError::KeyTooShort);
     }
+    verify_canonical_v2_with_keys(
+        canonical,
+        signature,
+        &DerivedKeys::from_master(secret_key, None),
+    )
+}
+
+/// The v2 canonical-input verification core operating on derived keys —
+/// shared by [`verify_canonical_v2`] (deriving) and
+/// [`verify_signature_v2_with_keys`] (cached).
+fn verify_canonical_v2_with_keys(
+    canonical: &str,
+    signature: &str,
+    derived: &DerivedKeys,
+) -> Result<bool, SignError> {
     // Exact 64-hex-char signature pre-bound before any
     // hex::decode allocation.
     if signature.len() != 64 {
@@ -623,7 +713,6 @@ fn verify_canonical_v2(
         Some(bytes) => bytes,
         None => return Ok(false), // malformed signature can never match
     };
-    let derived = DerivedKeys::from_master(secret_key, None);
     let key = derived.challenge_key();
     let mut mac = HmacSha256::new_from_slice(key).map_err(|_| SignError::KeyTooShort)?;
     mac.update(canonical.as_bytes());
@@ -739,6 +828,54 @@ pub const MAX_PARALLELISM: u32 = 4;
 /// Expected hashes a browser solver can attempt per second (SHA-256, WASM).
 /// Used to derive the per-challenge minimum solve duration.
 pub const SHA256_SOLVER_HASHES_PER_SEC: f64 = 5e9;
+
+/// The server-side pool of decoy (honeypot) form-field names. When a
+/// deployment arms the decoy surface ([`issue_challenge_with_decoy`]), the
+/// issuer picks one name uniformly at random (CSPRNG) per issuance: the
+/// names look like ordinary optional form fields a generic bot filler
+/// would populate, while a human never sees them (the widget driver
+/// renders the chosen name as a hidden, never-auto-filled text input).
+///
+/// The pool alphabet is deliberately `[a-z_]` — a subset of the
+/// `[A-Za-z0-9_-]{1,64}` shape the widget driver accepts and of the
+/// validation alphabet here, so no pool name can ever smuggle the `|`
+/// canonical-payload separator or any other structurally meaningful
+/// character. PHP maintains the identical pool (same names, same order);
+/// the picked name is authenticated by the v2 signature, so the two cores
+/// never need to agree on the PICK, only on the pool's alphabet and the
+/// canonical-format extension documented on
+/// [`canonical_signing_input_v2`].
+pub const DECOY_FIELD_POOL: &[&str] = &[
+    "company_website",
+    "fax_number",
+    "secondary_phone",
+    "office_extension",
+    "alternate_email",
+    "home_address_line",
+    "middle_name",
+    "assistant_name",
+    "department_code",
+    "backup_phone",
+];
+
+/// Whether `s` is a conforming decoy (honeypot) field name: 1..=64 bytes of
+/// `[A-Za-z0-9_-]` — the exact shape the widget driver validates before
+/// rendering the hidden input. The alphabet excludes `|`, so a decoy name
+/// can never alter the structure of the v2 canonical signing input.
+pub(crate) fn valid_decoy_field_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Pick a random decoy field name from [`DECOY_FIELD_POOL`] with the
+/// CSPRNG (never a weak/insecure fallback — an RNG failure propagates to
+/// the caller as [`SignError::Rng`], exactly like the nonce/salt draws).
+fn pick_decoy_field() -> Result<&'static str, SignError> {
+    let byte = security_random::<1>().map_err(|_| SignError::Rng)?[0];
+    Ok(DECOY_FIELD_POOL[byte as usize % DECOY_FIELD_POOL.len()])
+}
 
 /// Expected hashes per second for the Argon2id wasm solver at moderate memory
 /// (8-64 MiB). Used to derive the per-challenge minimum solve duration.
@@ -882,6 +1019,68 @@ pub fn issue_challenge(
     active_solves: u64,
     request_binding: Option<&str>,
 ) -> Result<Issued, SignError> {
+    issue_challenge_inner(
+        config,
+        scope,
+        client_ip,
+        now_unix,
+        now_ns,
+        active_solves,
+        request_binding,
+        false,
+    )
+}
+
+/// Issue a challenge with the decoy (honeypot) surface armed — the
+/// issuance-side switch of the risk engine's honeypot/decoy signals
+/// (`DecoyFieldSubmitted`, `honeypot_hit`). Identical to
+/// [`issue_challenge`] in every other respect (same wire format, same
+/// signing, same storage); when `arm_decoy_field` is true the issuer picks
+/// a random field name from the server-side [`DECOY_FIELD_POOL`] (CSPRNG;
+/// a fresh independent pick per issuance, so two challenges never share a
+/// predictable decoy), sets it on the client-facing
+/// [`IssuedChallenge::decoy_field`] (the widget driver renders the hidden
+/// input from that key) AND on the stored record's authenticated
+/// `decoy_field`, signed into the v2 canonical input as the final
+/// `|<decoy_field>` segment — a client cannot strip or swap the decoy
+/// without breaking the signature the verifier re-checks. `false` behaves
+/// exactly like [`issue_challenge`] (no decoy, byte-identical canonical
+/// string).
+#[allow(clippy::too_many_arguments)]
+pub fn issue_challenge_with_decoy(
+    config: &ChallengeConfig,
+    scope: &str,
+    client_ip: &str,
+    now_unix: u64,
+    now_ns: u64,
+    active_solves: u64,
+    request_binding: Option<&str>,
+    arm_decoy_field: bool,
+) -> Result<Issued, SignError> {
+    issue_challenge_inner(
+        config,
+        scope,
+        client_ip,
+        now_unix,
+        now_ns,
+        active_solves,
+        request_binding,
+        arm_decoy_field,
+    )
+}
+
+/// The shared issuance body (see the [`issue_challenge`] contract).
+#[allow(clippy::too_many_arguments)]
+fn issue_challenge_inner(
+    config: &ChallengeConfig,
+    scope: &str,
+    client_ip: &str,
+    now_unix: u64,
+    now_ns: u64,
+    active_solves: u64,
+    request_binding: Option<&str>,
+    arm_decoy_field: bool,
+) -> Result<Issued, SignError> {
     if !valid_identifier(scope, 128) {
         return Err(SignError::InvalidScope);
     }
@@ -999,6 +1198,15 @@ pub fn issue_challenge(
     // `base64(canonical).hex_tag` — same structure as v1. The signature is
     // computed with the HKDF-derived challenge key, never the
     // master secret directly.
+    //
+    // The decoy (honeypot) field name, when armed, is picked BEFORE the
+    // canonical input is built: it is an authenticated issuance parameter
+    // (the final `|<decoy_field>` segment), signed like every other.
+    let decoy_field: Option<String> = if arm_decoy_field {
+        Some(pick_decoy_field()?.to_string())
+    } else {
+        None
+    };
     let mut record = ChallengeRecord {
         nonce: nonce.clone(),
         scope: scope.to_string(),
@@ -1023,6 +1231,7 @@ pub fn issue_challenge(
         request_binding: request_binding.map(str::to_string),
         issuer: config.issuer.clone(),
         kid: config.kid,
+        decoy_field: decoy_field.clone(),
     };
     let canonical = canonical_signing_input_v2(&record);
     let signature = sign_canonical_v2(&canonical, &config.secret_key)?;
@@ -1043,6 +1252,7 @@ pub fn issue_challenge(
         prefix: record.prefix.clone(),
         algorithm,
         min_duration_ms,
+        decoy_field,
     };
 
     Ok(Issued {
@@ -1851,6 +2061,304 @@ mod tests {
 
             policy_version: 1,
         }
+    }
+
+    // ── decoy (honeypot) field issuance ──────────────────────────────
+
+    #[test]
+    fn decoy_field_issuance_arms_a_signed_pool_name() {
+        // Armed: the client-facing token and the stored record both carry
+        // a pool name, the canonical input ends with the `|<name>` segment,
+        // and the signature verifies over that exact extended input.
+        let issued = issue_challenge_with_decoy(
+            &profile_base_config(),
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+            true,
+        )
+        .unwrap();
+        let decoy = issued.challenge.decoy_field.clone().expect("decoy armed");
+        assert!(
+            DECOY_FIELD_POOL.contains(&decoy.as_str()),
+            "the decoy name must come from the server-side pool (got {decoy})"
+        );
+        assert!(valid_decoy_field_name(&decoy));
+        assert_eq!(issued.record.decoy_field.as_deref(), Some(decoy.as_str()));
+
+        let canonical = canonical_signing_input_v2(&issued.record);
+        assert!(
+            canonical.ends_with(&format!("|{decoy}")),
+            "the decoy name must be the FINAL canonical segment: {canonical}"
+        );
+        assert_eq!(
+            canonical.split('|').count(),
+            19,
+            "v2 canonical input: 18 base fields + the decoy segment"
+        );
+        // The signature covers the extended input (verifies as issued).
+        let sig = crate::verify::signature_from_challenge(&issued.record);
+        assert!(verify_signature_v2(&issued.record, sig, "test-key-16-bytes!").unwrap());
+        // The client-decodable challenge string carries it too (the
+        // canonical payload IS the pre-image of the challenge base64).
+        let (payload, _sig) = issued
+            .record
+            .challenge
+            .rsplit_once('.')
+            .expect("challenge is base64.signature");
+        let decoded = B64.decode(payload).expect("challenge payload decodes");
+        assert!(String::from_utf8_lossy(&decoded).ends_with(&decoy));
+
+        // Two armed issuances pick independently (a fresh CSPRNG draw per
+        // challenge; across a handful of issuances at least two names
+        // appear — the picks must not collapse to a constant).
+        let mut seen = std::collections::HashSet::new();
+        for i in 0..40u64 {
+            let issued = issue_challenge_with_decoy(
+                &profile_base_config(),
+                "login",
+                "1.2.3.4",
+                1_000_000 + i,
+                1_700_000_000_000_000 + i * 1_000,
+                0,
+                None,
+                true,
+            )
+            .unwrap();
+            seen.insert(issued.challenge.decoy_field.clone().unwrap());
+            if seen.len() >= 2 {
+                break;
+            }
+        }
+        assert!(
+            seen.len() >= 2,
+            "per-issuance decoy picks must vary across challenges"
+        );
+    }
+
+    #[test]
+    fn decoy_field_disabled_keeps_the_old_wire_and_canonical_format() {
+        // The plain path (and the explicit false arm) issues NO decoy: the
+        // canonical string keeps the exact pre-extension shape (18 fields,
+        // kid last — byte-identical), and neither JSON surface carries the
+        // key.
+        for issued in [
+            issue_challenge(
+                &profile_base_config(),
+                "login",
+                "1.2.3.4",
+                1_000_000,
+                1_700_000_000_000_000,
+                0,
+                None,
+            )
+            .unwrap(),
+            issue_challenge_with_decoy(
+                &profile_base_config(),
+                "login",
+                "1.2.3.4",
+                1_000_000,
+                1_700_000_000_000_000,
+                0,
+                None,
+                false,
+            )
+            .unwrap(),
+        ] {
+            assert!(issued.challenge.decoy_field.is_none());
+            assert!(issued.record.decoy_field.is_none());
+            let canonical = canonical_signing_input_v2(&issued.record);
+            assert_eq!(
+                canonical.split('|').count(),
+                18,
+                "the base v2 canonical input stays 18 fields (no decoy segment)"
+            );
+            assert!(
+                canonical.ends_with(&issued.record.kid.to_string()),
+                "kid stays the final field when no decoy is armed"
+            );
+            let record_json = serde_json::to_value(&issued.record).unwrap();
+            assert!(
+                record_json.get("decoy_field").is_none(),
+                "the record key is absent when no decoy is armed (old byte format)"
+            );
+            let challenge_json = serde_json::to_value(&issued.challenge).unwrap();
+            assert!(challenge_json.get("decoy_field").is_none());
+        }
+    }
+
+    #[test]
+    fn decoy_field_serde_round_trips_both_ways() {
+        // Record: absent key → None (old payload), present key → Some, and
+        // None never serializes the key.
+        let armed = issue_challenge_with_decoy(
+            &profile_base_config(),
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+            true,
+        )
+        .unwrap();
+        let json = serde_json::to_string(&armed.record).unwrap();
+        assert!(json.contains("\"decoy_field\""));
+        let back: ChallengeRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.decoy_field, armed.record.decoy_field);
+
+        let mut plain = armed.record.clone();
+        plain.decoy_field = None;
+        let plain_json = serde_json::to_string(&plain).unwrap();
+        assert!(!plain_json.contains("decoy_field"));
+        let plain_back: ChallengeRecord = serde_json::from_str(&plain_json).unwrap();
+        assert!(plain_back.decoy_field.is_none());
+
+        // IssuedChallenge: same two-way wire compatibility.
+        let cj = serde_json::to_string(&armed.challenge).unwrap();
+        assert!(cj.contains("\"decoy_field\""));
+        let cback: crate::token::IssuedChallenge = serde_json::from_str(&cj).unwrap();
+        assert_eq!(cback.decoy_field, armed.challenge.decoy_field);
+        let mut cplain = armed.challenge.clone();
+        cplain.decoy_field = None;
+        let cplain_json = serde_json::to_string(&cplain).unwrap();
+        assert!(!cplain_json.contains("decoy_field"));
+        let cplain_back: crate::token::IssuedChallenge =
+            serde_json::from_str(&cplain_json).unwrap();
+        assert!(cplain_back.decoy_field.is_none());
+    }
+
+    #[test]
+    fn decoy_field_is_covered_by_the_signature() {
+        // Any change to the authenticated decoy name breaks the signature:
+        // renaming it, stripping it from an armed record, or splicing one
+        // onto an unarmed record all fail the v2 verification.
+        let armed = issue_challenge_with_decoy(
+            &profile_base_config(),
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+            true,
+        )
+        .unwrap();
+        let sig = crate::verify::signature_from_challenge(&armed.record);
+        let secret = "test-key-16-bytes!";
+        assert!(verify_signature_v2(&armed.record, sig, secret).unwrap());
+
+        // Renamed.
+        let mut renamed = armed.record.clone();
+        let other = DECOY_FIELD_POOL
+            .iter()
+            .find(|n| Some(n.to_string()) != renamed.decoy_field)
+            .unwrap()
+            .to_string();
+        renamed.decoy_field = Some(other);
+        assert!(!verify_signature_v2(&renamed, sig, secret).unwrap());
+
+        // Stripped (the client-cannot-remove-it property).
+        let mut stripped = armed.record.clone();
+        stripped.decoy_field = None;
+        assert!(!verify_signature_v2(&stripped, sig, secret).unwrap());
+
+        // Spliced onto an unarmed, unsigned-for-decoy record.
+        let plain = issue_challenge(
+            &profile_base_config(),
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+        let plain_sig = crate::verify::signature_from_challenge(&plain.record);
+        let mut spliced = plain.record.clone();
+        spliced.decoy_field = Some(DECOY_FIELD_POOL[0].to_string());
+        assert!(!verify_signature_v2(&spliced, plain_sig, secret).unwrap());
+    }
+
+    #[test]
+    fn validate_record_rejects_a_non_conforming_decoy_name() {
+        // The stored-record validator enforces the issuer's decoy alphabet
+        // ([A-Za-z0-9_-], 1..=64): the separator `|`, an identifier-shaped
+        // `.` and an over-long name are all malformed — none can alter the
+        // canonical segment structure.
+        let armed = issue_challenge_with_decoy(
+            &profile_base_config(),
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+            true,
+        )
+        .unwrap();
+        for bad in ["company|website", "company.website", &"x".repeat(65), ""] {
+            let mut record = armed.record.clone();
+            record.decoy_field = Some(bad.to_string());
+            assert_eq!(
+                crate::verify::validate_record(&record).unwrap_err(),
+                crate::verify::VerifyError::MalformedRecord,
+                "decoy name {bad:?} must be malformed"
+            );
+        }
+        // The armed record itself stays valid.
+        assert!(crate::verify::validate_record(&armed.record).is_ok());
+    }
+
+    #[test]
+    fn decoy_armed_challenge_verifies_end_to_end() {
+        // A full verify_solution pass on a decoy-armed record: the decoy
+        // is transparent to the solver/verifier (it only widens the signed
+        // input).
+        let issued = issue_challenge_with_decoy(
+            &profile_base_config(),
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+            true,
+        )
+        .unwrap();
+        let mut record = issued.record;
+        let counter = crate::verify::solve_for_test(&record).unwrap();
+        let mut ctx = crate::verify::VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
+            revoked_kids: None,
+            counter,
+            duration_ms: 5000,
+            now_unix: Some(&mut || 1_000_001),
+            now_ns: 1_700_000_005_000_000,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
+            client_ip: Some("1.2.3.4"),
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        assert!(
+            matches!(
+                crate::verify::verify_solution(&mut ctx),
+                crate::verify::VerifyOutcome::Valid { .. }
+            ),
+            "a decoy-armed challenge must verify normally"
+        );
     }
 
     #[test]

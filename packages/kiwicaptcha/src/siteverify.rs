@@ -230,6 +230,7 @@ mod tests {
             request_binding: None,
             issuer: None,
             kid: 1,
+            decoy_field: None,
         };
         let _ = &mut record;
         let resp = siteverify_response(
@@ -237,6 +238,7 @@ mod tests {
                 nonce: "n".into(),
                 request_binding: None,
                 from_stored_result: false,
+                solve_duration_ms: None,
             },
             Some(&record),
         );

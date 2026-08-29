@@ -244,19 +244,32 @@ pub fn transpile(
 ///
 /// Security:
 /// - String values are HTML-escaped (`&`, `<`, `>`, `"`, `'`) before
-///   substitution so props can never inject markup. Only props whose leaf
-///   key ends with `_html` (explicitly-trusted pre-rendered fragments) are
-///   substituted raw.
+///   substitution so props can never inject markup — INCLUDING props whose
+///   leaf key ends with `_html`. Raw substitution of `*_html` values now
+///   requires the renderer's explicit trust:pass the allowlist of trusted
+///   prop paths via [`resolve_placeholders_with_trust`] (backed by
+///   `SandboxConfig::trusted_html_props`, empty by default — F8).
 /// - After substitution, every `href`/`src` attribute value is checked in
 ///   ALL quoting styles: only `http:`/`https:` schemes (and scheme-less
 ///   relative URLs) are allowed; anything else is neutralized to `#`.
 /// - `<meta http-equiv=refresh>` and remote `<link rel=stylesheet>` are
-///   stripped.
+///   stripped. This pass applies to trusted-raw values too.
 ///
 /// Missing merge fields resolve to the empty string (see
 /// [`resolve_placeholders_reported`] for a configurable fallback).
 pub fn resolve_placeholders(html: &str, props: &serde_json::Value) -> String {
     resolve_placeholders_reported(html, props, "").html
+}
+
+/// [`resolve_placeholders`] with an explicit allowlist of trusted `*_html`
+/// prop paths (F8). Paths in `trusted_html_props` are substituted raw when
+/// their leaf key ends with `_html`; every other value is escaped.
+pub fn resolve_placeholders_with_trust(
+    html: &str,
+    props: &serde_json::Value,
+    trusted_html_props: &[String],
+) -> String {
+    resolve_placeholders_reported_with_trust(html, props, "", trusted_html_props).html
 }
 
 /// Outcome of placeholder resolution: the substituted HTML plus one warning
@@ -268,17 +281,29 @@ pub struct ResolveOutcome {
 }
 
 /// [`resolve_placeholders`] with a configurable missing-field fallback and a
-/// warnings list.
+/// warnings list. No trusted-HTML paths (see
+/// [`resolve_placeholders_reported_with_trust`]).
 pub fn resolve_placeholders_reported(
     html: &str,
     props: &serde_json::Value,
     missing_fallback: &str,
 ) -> ResolveOutcome {
+    resolve_placeholders_reported_with_trust(html, props, missing_fallback, &[])
+}
+
+/// [`resolve_placeholders_reported`] with an explicit allowlist of trusted
+/// `*_html` prop paths (F8).
+pub fn resolve_placeholders_reported_with_trust(
+    html: &str,
+    props: &serde_json::Value,
+    missing_fallback: &str,
+    trusted_html_props: &[String],
+) -> ResolveOutcome {
     let mut warnings: Vec<String> = Vec::new();
     let substituted = PLACEHOLDER_RE
         .replace_all(html, |caps: &regex::Captures| {
             let key = &caps[1];
-            match resolve_prop(props, key) {
+            match resolve_prop(props, key, trusted_html_props) {
                 Some(value) => value,
                 None => {
                     if warnings
@@ -390,12 +415,20 @@ fn escape_html(s: &str) -> String {
     out
 }
 
-/// Trusted prop paths: leaf key ends with `_html` — documented convention for
-/// pre-rendered fragments the template author intentionally injects raw.
-fn is_trusted_html_path(path: &str) -> bool {
+/// Trusted prop paths (F8):a path is substituted RAW only when
+/// 1. its leaf key ends with `_html` (the documented naming convention for
+///    pre-rendered fragments), AND
+/// 2. it appears EXPLICITLY in the renderer's allowlist
+///    (`SandboxConfig::trusted_html_props`, empty by default).
+///
+/// The old behaviour trusted ANY `*_html` prop unconditionally, so a
+/// `<script>` smuggled into any `*_html` merge field bypassed all escaping
+/// into email bodies and previews.
+fn is_trusted_html_path(path: &str, allowlist: &[String]) -> bool {
     path.rsplit('.')
         .next()
         .is_some_and(|leaf| leaf.ends_with("_html"))
+        && allowlist.iter().any(|trusted| trusted == path)
 }
 
 /// Resolve a prop to its raw string value (no escaping).
@@ -414,10 +447,15 @@ fn resolve_prop_raw(props: &serde_json::Value, path: &str) -> Option<String> {
     }
 }
 
-/// Resolve a prop for interpolation into HTML: escaped unless trusted.
-fn resolve_prop(props: &serde_json::Value, path: &str) -> Option<String> {
+/// Resolve a prop for interpolation into HTML:escaped unless explicitly
+/// trusted (see [`is_trusted_html_path`]).
+fn resolve_prop(
+    props: &serde_json::Value,
+    path: &str,
+    trusted_html_props: &[String],
+) -> Option<String> {
     resolve_prop_raw(props, path).map(|raw| {
-        if is_trusted_html_path(path) {
+        if is_trusted_html_path(path, trusted_html_props) {
             raw
         } else {
             escape_html(&raw)
@@ -1096,12 +1134,79 @@ mod tests {
         assert!(!result.contains("<script"));
     }
 
+    /// F8:`*_html` props are escaped by DEFAULT — raw substitution now
+    /// requires the renderer's explicit allowlist (empty by default), so a
+    /// `<script>` smuggled into any `*_html` merge field can no longer
+    /// bypass escaping into email bodies/previews.
     #[test]
-    fn test_trusted_html_prop_is_not_escaped() {
+    fn test_trusted_html_prop_is_escaped_by_default() {
         let html = "<div>{{ body_html }}</div>";
         let props = serde_json::json!({"body_html": "<strong>ok</strong>"});
         let result = resolve_placeholders(html, &props);
+        assert_eq!(result, "<div>&lt;strong&gt;ok&lt;/strong&gt;</div>");
+        assert!(!result.contains("<strong>"), "{result}");
+
+        // Hostile payload stays inert even though the leaf ends in `_html`.
+        let props = serde_json::json!({"body_html": "<script>alert(1)</script>"});
+        let result = resolve_placeholders(html, &props);
+        assert!(!result.contains("<script"), "{result}");
+    }
+
+    /// F8:an explicitly allowlisted `*_html` path is substituted raw, and
+    /// the post-substitution sanitize pass still applies to it.
+    #[test]
+    fn test_allowlisted_html_prop_is_raw_but_sanitized() {
+        let html = "<div>{{ body_html }}</div>";
+        let props = serde_json::json!({"body_html": "<strong>ok</strong>"});
+        let trusted = vec!["body_html".to_string()];
+        let result = resolve_placeholders_with_trust(html, &props, &trusted);
         assert_eq!(result, "<div><strong>ok</strong></div>");
+
+        // Trusted-raw is still scheme-sanitized (the href/src pass runs on
+        // the substituted output regardless of trust — F8):a javascript:
+        // URL inside an allowlisted raw fragment is neutralized to "#".
+        let html = "<div>{{ link_html }}</div>";
+        let props = serde_json::json!({"link_html": r#"<a href="javascript:alert(1)">y</a>"#});
+        let trusted_both = vec!["body_html".to_string(), "link_html".to_string()];
+        let result = resolve_placeholders_with_trust(html, &props, &trusted_both);
+        assert!(
+            !result.to_ascii_lowercase().contains("href=\"javascript"),
+            "{result}"
+        );
+        assert!(result.contains("href=\"#\""), "{result}");
+        assert!(result.contains(">y</a>"), "{result}");
+    }
+
+    /// F8:the allowlist is exact-path — a listed path does NOT open the
+    /// `*_html` bypass for other paths, and non-`_html` paths stay escaped
+    /// even when (mistakenly) allowlisted.
+    #[test]
+    fn test_allowlist_is_exact_path_and_requires_html_leaf() {
+        let trusted = vec!["article.body_html".to_string()];
+
+        // Allowlisted nested path → raw.
+        let html = "<div>{{ article.body_html }}</div>";
+        let props = serde_json::json!({"article": {"body_html": "<em>x</em>"}});
+        assert_eq!(
+            resolve_placeholders_with_trust(html, &props, &trusted),
+            "<div><em>x</em></div>"
+        );
+
+        // Same leaf, different parent → NOT allowlisted → escaped.
+        let html = "<div>{{ other.body_html }}</div>";
+        let props = serde_json::json!({"other": {"body_html": "<em>x</em>"}});
+        assert_eq!(
+            resolve_placeholders_with_trust(html, &props, &trusted),
+            "<div>&lt;em&gt;x&lt;/em&gt;</div>"
+        );
+
+        // Non-`_html` leaf stays escaped even if listed.
+        let trusted_any = vec!["name".to_string()];
+        let props = serde_json::json!({"name": "<b>Bob</b>"});
+        assert_eq!(
+            resolve_placeholders_with_trust("Hi {{ name }}", &props, &trusted_any),
+            "Hi &lt;b&gt;Bob&lt;/b&gt;"
+        );
     }
 
     #[test]

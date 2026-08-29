@@ -14,6 +14,74 @@ use super::classifier::classify;
 use super::types::{ActionType, ClassificationResult, InboundMessage, ReplyClassification};
 use crate::common::{ProcessorResult, ReplyHandlerConfig};
 
+/// Age at which a reply-handler claim is considered stale and may be
+/// reclaimed by any worker. Mirrors the analytics processor's 10-minute
+/// stale-claim window (see `AnalyticsProcessor::fetch_events`).
+pub const CLAIM_STALENESS: &str = "10 minutes";
+
+/// Claim query for inbound replies (F2:timestamped claim).
+///
+/// The claim is `processing = true, processing_at = NOW()`; rows whose
+/// claim is older than [`CLAIM_STALENESS`] are reclaimed, so a worker that
+/// died between claiming and finishing can no longer strand a message in
+/// `processing = true` forever (the previous bare boolean had no expiry).
+/// The `{claim_staleness}` placeholder is substituted with the interval
+/// built from [`CLAIM_STALENESS`] at fetch time.
+const FETCH_MESSAGES_SQL: &str = r#"
+            UPDATE inbound_messages
+            SET processing = true, processing_at = NOW()
+            WHERE id IN (
+                SELECT id
+                FROM inbound_messages
+                WHERE processed_at IS NULL
+                  AND (
+                      processing = false
+                      OR processing_at < NOW() - {claim_staleness}
+                  )
+                ORDER BY received_at ASC
+                LIMIT $1
+                FOR UPDATE SKIP LOCKED
+            )
+            RETURNING
+                id, tenant_id as "tenantId", lead_id as "leadId",
+                from_email as "fromEmail", to_email as "toEmail",
+                COALESCE(subject, '') as subject,
+                -- O-16.5: Truncate body fields at the SQL level to enforce max_reply_size
+                LEFT(body_text, $2::int) as "bodyText",
+                LEFT(body_html, $2::int) as "bodyHtml",
+                headers, received_at as "receivedAt",
+                processed_at as "processedAt", classification
+        "#;
+
+/// The stale-claim reclaim bound as a SQL interval expression, derived
+/// from [`CLAIM_STALENESS`] so the two can never drift.
+fn claim_staleness_interval() -> String {
+    format!("interval '{CLAIM_STALENESS}'")
+}
+
+/// Completion write (F2): clears the claim fully — `processing_at = NULL`
+/// next to `processing = false`, mirroring the analytics processor's
+/// `reset_processing`.
+const MARK_PROCESSED_SQL: &str = r#"
+            UPDATE inbound_messages
+            SET processed_at = NOW(),
+                processing = false,
+                processing_at = NULL,
+                classification = $1,
+                classification_confidence = $2,
+                suggested_action = $3,
+                action_taken = $4
+            WHERE id = $5
+        "#;
+
+/// Reset a stale/failed claim (F2): release the row for immediate re-claim
+/// instead of waiting out [`CLAIM_STALENESS`].
+const RESET_CLAIM_SQL: &str = r#"
+            UPDATE inbound_messages
+            SET processing = false, processing_at = NULL
+            WHERE id = $1 AND processing = true
+        "#;
+
 /// Reply handler processor.
 pub struct ReplyHandler {
     db: PgPool,
@@ -35,12 +103,33 @@ impl ReplyHandler {
         }
     }
 
+    /// Ensure the timestamped-claim column exists (F2).
+    ///
+    /// `inbound_messages` historically carried only the bare `processing`
+    /// boolean (no expiry). The timestamped claim needs `processing_at`,
+    /// which the migration chain only added to `analytics_queue`. Schema
+    /// changes are owned by SQL migrations, but the claim cannot be made
+    /// expirable without the column, so — exactly like migration 088's own
+    /// guarded reconciliation ALTERs — the column is added idempotently
+    /// (`IF NOT EXISTS`) at startup. On an already-migrated database this
+    /// is a no-op.
+    async fn ensure_timestamped_claim_column(&self) -> ProcessorResult<()> {
+        sqlx::query(
+            "ALTER TABLE inbound_messages ADD COLUMN IF NOT EXISTS processing_at TIMESTAMPTZ",
+        )
+        .execute(&self.db)
+        .await?;
+        Ok(())
+    }
+
     /// Start the processor.
     pub async fn start(self: Arc<Self>) -> ProcessorResult<()> {
         info!(
             concurrency = self.config.base.concurrency,
             "Starting reply handler"
         );
+
+        self.ensure_timestamped_claim_column().await?;
 
         self.is_running.store(true, Ordering::SeqCst);
         self.poll_loop().await;
@@ -89,8 +178,20 @@ impl ReplyHandler {
                 }
                 Ok(messages) => {
                     for msg in messages {
+                        let msg_id = msg.id.clone();
                         if let Err(e) = self.process_message(msg).await {
-                            error!(error = %e, "Failed to process message");
+                            error!(msg_id = %msg_id, error = %e, "Failed to process message");
+                            // F2:release the claim immediately so the row is
+                            // retried on the next poll instead of waiting out
+                            // the staleness window (mirrors the analytics
+                            // processor's reset_processing).
+                            if let Err(reset_err) = self.reset_claim(&msg_id).await {
+                                error!(
+                                    msg_id = %msg_id,
+                                    error = %reset_err,
+                                    "Failed to reset processing claim; the stale-claim reclaim in fetch_messages will recover it"
+                                );
+                            }
                         }
                     }
                     sleep(Duration::from_millis(100)).await;
@@ -104,36 +205,33 @@ impl ReplyHandler {
     }
 
     /// Fetch unprocessed inbound messages (O-16.5: with size truncation).
+    ///
+    /// F2:the claim is TIMESTAMPED (`processing_at = NOW()`), and rows
+    /// whose claim is older than [`CLAIM_STALENESS`] are reclaimed —
+    /// mirroring the analytics processor's stale-claim pattern — so a
+    /// crashed worker can no longer strand a reply in `processing = true`
+    /// forever.
     async fn fetch_messages(&self, limit: usize) -> ProcessorResult<Vec<InboundMessage>> {
-        let messages = sqlx::query_as::<_, InboundMessage>(
-            r#"
-            UPDATE inbound_messages
-            SET processing = true
-            WHERE id IN (
-                SELECT id
-                FROM inbound_messages
-                WHERE processed_at IS NULL AND processing = false
-                ORDER BY received_at ASC
-                LIMIT $1
-                FOR UPDATE SKIP LOCKED
-            )
-            RETURNING
-                id, tenant_id as "tenantId", lead_id as "leadId",
-                from_email as "fromEmail", to_email as "toEmail",
-                COALESCE(subject, '') as subject,
-                -- O-16.5: Truncate body fields at the SQL level to enforce max_reply_size
-                LEFT(body_text, $2::int) as "bodyText",
-                LEFT(body_html, $2::int) as "bodyHtml",
-                headers, received_at as "receivedAt",
-                processed_at as "processedAt", classification
-            "#,
-        )
-        .bind(limit as i64)
-        .bind(self.config.max_reply_size as i64)
-        .fetch_all(&self.db)
-        .await?;
+        let claim_sql =
+            FETCH_MESSAGES_SQL.replace("{claim_staleness}", &claim_staleness_interval());
+        let messages = sqlx::query_as::<_, InboundMessage>(&claim_sql)
+            .bind(limit as i64)
+            .bind(self.config.max_reply_size as i64)
+            .fetch_all(&self.db)
+            .await?;
 
         Ok(messages)
+    }
+
+    /// F2:release a claim on a message whose processing failed, so the next
+    /// poll retries it immediately (no need to wait out the staleness
+    /// window).
+    async fn reset_claim(&self, msg_id: &str) -> ProcessorResult<()> {
+        sqlx::query(RESET_CLAIM_SQL)
+            .bind(msg_id)
+            .execute(&self.db)
+            .await?;
+        Ok(())
     }
 
     /// Process a single inbound message.
@@ -199,25 +297,14 @@ impl ReplyHandler {
         };
 
         // Update the message record
-        sqlx::query(
-            r#"
-            UPDATE inbound_messages
-            SET processed_at = NOW(),
-                processing = false,
-                classification = $1,
-                classification_confidence = $2,
-                suggested_action = $3,
-                action_taken = $4
-            WHERE id = $5
-            "#,
-        )
-        .bind(classification.classification.as_str())
-        .bind(classification.confidence)
-        .bind(serde_json::to_value(&classification.suggested_action)?)
-        .bind(&action_taken)
-        .bind(&msg.id)
-        .execute(&self.db)
-        .await?;
+        sqlx::query(MARK_PROCESSED_SQL)
+            .bind(classification.classification.as_str())
+            .bind(classification.confidence)
+            .bind(serde_json::to_value(&classification.suggested_action)?)
+            .bind(&action_taken)
+            .bind(&msg.id)
+            .execute(&self.db)
+            .await?;
 
         // If there's a lead, update lead status
         if let Some(ref lead_id) = msg.lead_id {
@@ -363,5 +450,63 @@ impl ReplyHandler {
         .await?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // F2:the claim must be timestamped AND expirable. These pin the SQL
+    // shape (same technique as queue-provider's provider.rs tests) so the
+    // stale-claim reclaim cannot silently regress.
+    #[test]
+    fn claim_is_timestamped() {
+        assert!(
+            FETCH_MESSAGES_SQL.contains("SET processing = true, processing_at = NOW()"),
+            "the claim must stamp processing_at"
+        );
+    }
+
+    #[test]
+    fn stale_claims_are_reclaimed() {
+        assert!(
+            FETCH_MESSAGES_SQL.contains("processing = false")
+                && FETCH_MESSAGES_SQL.contains("OR processing_at < NOW()"),
+            "fetch must reclaim rows whose claim expired, not filter on the bare boolean"
+        );
+        assert_eq!(CLAIM_STALENESS, "10 minutes");
+        // The template substitutes the interval from CLAIM_STALENESS, so
+        // the window can never drift from the documented constant.
+        assert!(FETCH_MESSAGES_SQL.contains("{claim_staleness}"));
+        let interval = claim_staleness_interval();
+        assert_eq!(interval, "interval '10 minutes'");
+        assert!(
+            FETCH_MESSAGES_SQL
+                .replace("{claim_staleness}", &interval)
+                .contains("processing_at < NOW() - interval '10 minutes'"),
+            "the substituted reclaim window must match CLAIM_STALENESS"
+        );
+    }
+
+    #[test]
+    fn unclaimed_rows_are_still_eligible() {
+        // New rows (never claimed) must remain fetchable: the OR arm covers
+        // processing = false rows regardless of processing_at.
+        assert!(FETCH_MESSAGES_SQL.contains("WHERE processed_at IS NULL"));
+        assert!(FETCH_MESSAGES_SQL.contains("FOR UPDATE SKIP LOCKED"));
+    }
+
+    #[test]
+    fn completion_and_reset_clear_the_claim_fully() {
+        assert!(
+            MARK_PROCESSED_SQL.contains("processing = false")
+                && MARK_PROCESSED_SQL.contains("processing_at = NULL"),
+            "completion must clear the timestamped claim"
+        );
+        assert!(
+            RESET_CLAIM_SQL.contains("SET processing = false, processing_at = NULL"),
+            "reset must release the claim for immediate re-claim"
+        );
     }
 }

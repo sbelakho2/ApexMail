@@ -47,6 +47,13 @@ impl std::fmt::Display for DlpAction {
     }
 }
 
+/// Hard cap on total bytes scanned per body:up to this many bytes are
+/// scanned in `max_scan_size` chunks covering the FULL body; beyond it the
+/// head and tail are scanned and the middle is explicitly reported as
+/// unscanned. Scaled from the configured chunk size (10 × `max_scan_size`,
+/// i.e. 10 MiB with the default 1 MiB config).
+const MAX_TOTAL_SCAN_CHUNKS: usize = 10;
+
 /// The DLP engine
 pub struct DlpEngine {
     config: DlpConfig,
@@ -86,20 +93,45 @@ impl DlpEngine {
             })
             .unwrap_or(false);
 
-        // Oversized bodies:scan BOTH the head and the tail (half the budget
-        // each). Scanning only the head allowed senders to push sensitive
-        // content past the truncation point to evade detection entirely.
+        // Oversized bodies are scanned in `max_scan_size` chunks across the
+        // FULL body up to `MAX_TOTAL_SCAN_CHUNKS × max_scan_size` bytes.
+        // The previous head+tail-only truncation left the entire middle of
+        // multi-MiB bodies unscanned — senders could park sensitive content
+        // just past the head window and evade detection entirely. Only
+        // bodies beyond the hard cap fall back to head+tail (with an
+        // explicit unscanned-middle note in the summary).
         let truncated = body.len() > self.config.max_scan_size;
-        let scan_text: String = if truncated {
-            let half = self.config.max_scan_size / 2;
+        let total_scan_cap = self
+            .config
+            .max_scan_size
+            .saturating_mul(MAX_TOTAL_SCAN_CHUNKS);
+        let overflow = body.len() > total_scan_cap;
+        let mut chunks_scanned = 1usize;
+        let scan_text: String = if overflow {
+            let half = total_scan_cap / 2;
             let head_end = body.floor_char_boundary(half);
             let tail_start = body.ceil_char_boundary(body.len().saturating_sub(half));
+            chunks_scanned = MAX_TOTAL_SCAN_CHUNKS;
             format!(
-                "{}\n[DLP:content truncated — scanned first and last {} KiB]\n{}",
+                "{}\n[DLP:content exceeds {} bytes — scanned first and last {} KiB, middle unscanned]\n{}",
                 &body[..head_end],
+                total_scan_cap,
                 half / 1024,
                 &body[tail_start..]
             )
+        } else if truncated {
+            let mut parts: Vec<&str> = Vec::with_capacity(MAX_TOTAL_SCAN_CHUNKS + 1);
+            let mut start = 0usize;
+            while start < body.len() {
+                let end =
+                    body.ceil_char_boundary((start + self.config.max_scan_size).min(body.len()));
+                parts.push(&body[start..end]);
+                start = end;
+            }
+            chunks_scanned = parts.len();
+            // A newline separator keeps PII/policy patterns from matching
+            // across a chunk seam.
+            parts.join("\n")
         } else {
             body.to_string()
         };
@@ -163,10 +195,15 @@ impl DlpEngine {
             summary_parts.push(format!("Policy: \"{}\"", pm.keyword));
         }
 
-        if truncated {
+        if overflow {
             summary_parts.push(format!(
-                "Content exceeded {} bytes — scanned head and tail only",
-                self.config.max_scan_size
+                "Content exceeded {} bytes (hard cap) — scanned first and last {} KiB only, middle unscanned",
+                total_scan_cap, total_scan_cap / 2 / 1024
+            ));
+        } else if truncated {
+            summary_parts.push(format!(
+                "Content exceeded {} bytes — scanned in {} chunk(s) covering the full body",
+                self.config.max_scan_size, chunks_scanned
             ));
         }
 
@@ -500,10 +537,85 @@ mod tests {
                 .any(|f| f.pii_type == PiiType::Ssn),
             "PII past the truncation point must still be detected via tail scan"
         );
+        // Updated for chunked scanning (F2):the full body is now scanned in
+        // chunks instead of head+tail-only, so the summary notes the chunked
+        // coverage of the whole body.
         assert!(
-            verdict.summary.contains("head and tail"),
-            "summary must flag truncated scanning: {}",
+            verdict.summary.contains("chunk"),
+            "summary must flag chunked scanning: {}",
             verdict.summary
+        );
+    }
+
+    #[test]
+    fn test_oversized_body_middle_is_scanned() {
+        // F2:the MIDDLE of an oversized body used to be silently skipped by
+        // head+tail truncation — PII parked there evaded detection.
+        let config = DlpConfig {
+            max_scan_size: 8 * 1024,
+            ..Default::default()
+        };
+        let engine = DlpEngine::with_config(config);
+
+        let filler = "lorem ipsum dolor sit amet ".repeat(1_000); // ~27 KiB
+        let middle_secret = "SSN middle marker: 123-45-6789 ";
+        // Place the secret well past the first chunk and well before the end.
+        let body = format!("{filler}{middle_secret}{filler}",);
+        assert!(body.len() > 3 * 8 * 1024);
+        let verdict = engine.scan_body(&body);
+        assert!(
+            verdict
+                .pii_findings
+                .iter()
+                .any(|f| f.pii_type == PiiType::Ssn),
+            "PII in the middle of an oversized body must be detected (summary: {})",
+            verdict.summary
+        );
+    }
+
+    #[test]
+    fn test_body_beyond_hard_cap_falls_back_to_head_and_tail() {
+        // Beyond 10 × max_scan_size the head+tail fallback returns, with an
+        // explicit note that the middle is unscanned.
+        let config = DlpConfig {
+            max_scan_size: 1024,
+            ..Default::default()
+        };
+        let engine = DlpEngine::with_config(config);
+        let cap = 1024 * MAX_TOTAL_SCAN_CHUNKS;
+
+        let filler = "lorem ipsum dolor sit amet ";
+        // Body larger than the hard cap, with a secret in the tail half.
+        let mut body = filler.repeat(cap / filler.len() + 100);
+        body.push_str("SSN tail: 123-45-6789");
+        assert!(body.len() > cap);
+        let verdict = engine.scan_body(&body);
+        assert!(
+            verdict
+                .pii_findings
+                .iter()
+                .any(|f| f.pii_type == PiiType::Ssn),
+            "tail PII must be detected in the head+tail fallback"
+        );
+        assert!(
+            verdict.summary.contains("middle unscanned"),
+            "summary must be explicit about the unscanned middle: {}",
+            verdict.summary
+        );
+
+        // And a secret in the dropped middle region is (correctly) not found
+        // — the note documents that gap rather than claiming a full scan.
+        let head = filler.repeat(100);
+        let secret = "SSN dropped middle: 123-45-6789";
+        let tail = filler.repeat(cap / filler.len() + 100);
+        let body = format!("{head}{secret}{tail}");
+        let verdict = engine.scan_body(&body);
+        assert!(
+            !verdict
+                .pii_findings
+                .iter()
+                .any(|f| f.pii_type == PiiType::Ssn),
+            "middle-region PII beyond the cap must not be claimed as scanned"
         );
     }
 }

@@ -12,14 +12,17 @@ datasources:
     uid: ClickHouse
     type: grafana-clickhouse-datasource
     access: proxy
-    url: https://clickhouse:8443
+    # F9 — the ClickHouse container serves PLAIN HTTP on :8123 (see
+    # deploy/clickhouse + CLICKHOUSE_URL: http://clickhouse:8123 everywhere
+    # else); there is no TLS listener on 8443, so the old https://clickhouse:8443
+    # datasource could never connect.
+    url: http://clickhouse:8123
     jsonData:
       defaultDatabase: apexmail
       username: apexmail
-      protocol: https
-      port: 8443
+      protocol: http
+      port: 8123
       server: clickhouse
-      tlsSkipVerify: false
     secureJsonData:
       password: ${CLICKHOUSE_PASSWORD}
     editable: false
@@ -31,7 +34,9 @@ datasources:
     database: apexmail
     user: apexmail
     jsonData:
-      sslmode: require
+      # The Postgres containers run ssl=off (no TLS listener) — sslmode
+      # 'require' can never handshake (same root cause as F3).
+      sslmode: disable
       postgresVersion: 1600
     secureJsonData:
       password: ${POSTGRES_PASSWORD}

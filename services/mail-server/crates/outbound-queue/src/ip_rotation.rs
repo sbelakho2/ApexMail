@@ -40,18 +40,36 @@ pub enum IpHealth {
 }
 
 /// Per-IP daily usage counters for warmup enforcement.
+///
+/// `day_start` is interior-mutable so the day rollover can advance it through
+/// the shared `&self` used on the send path (`can_send`/`record_send`).
 #[derive(Debug)]
 pub struct IpDailyCounters {
     pub sends_today: AtomicU64,
-    pub day_start: DateTime<Utc>,
+    day_start: parking_lot::Mutex<DateTime<Utc>>,
 }
 
 impl IpDailyCounters {
     pub fn new() -> Self {
         Self {
             sends_today: AtomicU64::new(0),
-            day_start: Utc::now(),
+            day_start: parking_lot::Mutex::new(Utc::now()),
         }
+    }
+
+    /// Test constructor: counters whose current window began at `day_start`
+    /// (used to simulate multi-day warmup without sleeping).
+    #[cfg(test)]
+    pub fn with_day_start(day_start: DateTime<Utc>) -> Self {
+        Self {
+            sends_today: AtomicU64::new(0),
+            day_start: parking_lot::Mutex::new(day_start),
+        }
+    }
+
+    /// Timestamp the current counting window began at.
+    pub fn current_day_start(&self) -> DateTime<Utc> {
+        *self.day_start.lock()
     }
 
     pub fn increment(&self) -> u64 {
@@ -63,11 +81,24 @@ impl IpDailyCounters {
     }
 
     /// Reset if the current day has changed.
+    ///
+    /// The rollover ALSO advances `day_start` to `now`. The previous code only
+    /// cleared `sends_today`: because `day_start` stayed on day 0, EVERY
+    /// subsequent call on a later day matched the "new day" predicate and
+    /// reset the counter again — the daily warmup limit was never enforced
+    /// after day 0 (each `maybe_reset` call re-zeroed the counter).
     pub fn maybe_reset(&self) {
-        let now = Utc::now();
-        // Compare ordinal day — if it's a new day, reset.
-        if now.date_naive() != self.day_start.date_naive() {
+        self.maybe_reset_at(Utc::now());
+    }
+
+    /// `maybe_reset` with an injectable clock (tests simulate day rollover).
+    pub fn maybe_reset_at(&self, now: DateTime<Utc>) {
+        let mut day_start = self.day_start.lock();
+        // Compare ordinal day — if it's a new day, reset AND advance the
+        // window so later same-day calls are no-ops.
+        if now.date_naive() != day_start.date_naive() {
             self.sends_today.store(0, Ordering::Relaxed);
+            *day_start = now;
         }
     }
 }
@@ -629,6 +660,67 @@ mod tests {
             "clock-skewed IP must get day-0 limit, not u64::MAX"
         );
         assert_eq!(ip_mut.health, IpHealth::Warming, "still warming");
+    }
+
+    #[test]
+    fn test_daily_limit_enforced_on_day_two() {
+        // F-rollover: simulate an IP allocated two days ago whose day-2
+        // window already started (counters.day_start two days back). The
+        // first maybe_reset() legitimately opens a new day — but it must also
+        // ADVANCE day_start, otherwise every later maybe_reset() call (i.e.
+        // every can_send/record_send) re-zeroed sends_today and the daily
+        // limit was never enforced after day 0.
+        let two_days_ago = Utc::now() - chrono::Duration::days(2);
+        let counters = IpDailyCounters::with_day_start(two_days_ago);
+        let ip = OutboundIp {
+            addr: IpAddr::V4(Ipv4Addr::new(10, 0, 0, 7)),
+            health: IpHealth::Warming,
+            tenant_id: None,
+            allocated_at: two_days_ago,
+            daily_limit: Some(50),
+            counters,
+        };
+
+        // Day 2 opens: counter resets, window advances to today.
+        ip.counters.maybe_reset();
+        assert_eq!(ip.counters.current(), 0, "new day must reset the counter");
+        assert_eq!(
+            ip.counters.current_day_start().date_naive(),
+            Utc::now().date_naive(),
+            "rollover must advance day_start to the new day"
+        );
+
+        // The full day-2 budget of 50 sends is granted …
+        for _ in 0..50 {
+            assert!(
+                ip.record_send(),
+                "day-2 budget (50) must be grantable after rollover"
+            );
+        }
+        // … and the 51st is REJECTED. Under the old bug every record_send()
+        // first called maybe_reset(), which re-zeroed the counter (day_start
+        // never advanced), so this 51st send would have been allowed.
+        assert!(
+            !ip.record_send(),
+            "daily limit must be enforced on day 2 (sends_today must not reset every call)"
+        );
+        assert!(!ip.can_send(), "exhausted IP must stop accepting sends");
+
+        // A same-day maybe_reset() must be a no-op (day already advanced).
+        // NOTE: record_send increments even when it DENIES, so the counter
+        // now reads 51 — the invariant is that a same-day reset leaves the
+        // value untouched, whatever it is.
+        let after_denial = ip.counters.current();
+        ip.counters.maybe_reset();
+        assert_eq!(
+            ip.counters.current(),
+            after_denial,
+            "same-day maybe_reset must not re-zero sends_today"
+        );
+        assert!(
+            after_denial >= 50,
+            "50 granted sends (plus the denied increment) must be accounted"
+        );
     }
 
     #[test]

@@ -45,11 +45,17 @@ pub enum ArcChainStatus {
 
 /// Generate a new ARC header set for a message.
 ///
+/// `message_headers` is the RAW header block: canonicalization/hashing
+/// operate on raw octets (see [`canonicalize_header_relaxed`]) so 8-bit
+/// header bytes reach the digest unchanged — a lossy UTF-8 decode would
+/// rewrite them as U+FFFD and no external verifier could reconstruct the
+/// seal.
+///
 /// `chain_key_lookup` resolves the public keys of the previous ARC sets'
 /// domains so the Chain Validation Status (`cv=`) reflects real RFC 8617
 /// cryptographic verification instead of failing closed.
 pub fn generate_arc_headers(
-    message_headers: &str, // #123:Raw message headers for AMS signing
+    message_headers: &[u8], // #123:Raw message headers for AMS signing
     message_body: &[u8],
     auth_result: &ArcAuthResult,
     config: &ArcSigningConfig,
@@ -100,16 +106,18 @@ pub fn generate_arc_headers(
     let canonicalized_headers = extract_signing_headers(message_headers, &h_list);
     // The AMS header is signed in its relaxed-canonicalized form so that any
     // header folding/whitespace variant verifies identically.
-    let canonicalized_ams = canonicalize_header_relaxed(&ams_template);
-    let ams_signing_input = if canonicalized_headers.is_empty() {
-        canonicalized_ams.clone()
+    let canonicalized_ams = canonicalize_header_relaxed(ams_template.as_bytes());
+    let mut ams_signing_input = canonicalized_headers;
+    if ams_signing_input.is_empty() {
+        ams_signing_input = canonicalized_ams.clone();
     } else {
-        format!("{}\r\n{}", canonicalized_headers, canonicalized_ams)
-    };
+        ams_signing_input.extend_from_slice(b"\r\n");
+        ams_signing_input.extend_from_slice(&canonicalized_ams);
+    }
 
     let ams_sig = {
         use rsa::signature::{SignatureEncoding, Signer};
-        let sig = signing_key.sign(ams_signing_input.as_bytes());
+        let sig = signing_key.sign(&ams_signing_input);
         B64.encode(sig.to_bytes())
     };
     let ams = format!("{ams_template}{ams_sig}");
@@ -138,22 +146,32 @@ pub fn generate_arc_headers(
     // #124:Build proper seal signing input per RFC 8617 §5.1.1/§5.1.2.
     // On a valid prior chain the AS covers all previous ARC sets plus the
     // current AAR/AMS; on a broken chain (§5.1.2) it covers only the current set.
-    let mut seal_signing_parts = Vec::new();
+    let mut seal_signing_parts: Vec<Vec<u8>> = Vec::new();
     if chain_validation == "pass" {
         for prev in existing_chain {
-            seal_signing_parts.push(canonicalize_header_relaxed(&prev.authentication_results));
-            seal_signing_parts.push(canonicalize_header_relaxed(&prev.message_signature));
-            seal_signing_parts.push(canonicalize_header_relaxed(&prev.seal));
+            seal_signing_parts.push(canonicalize_header_relaxed(
+                prev.authentication_results.as_bytes(),
+            ));
+            seal_signing_parts.push(canonicalize_header_relaxed(
+                prev.message_signature.as_bytes(),
+            ));
+            seal_signing_parts.push(canonicalize_header_relaxed(prev.seal.as_bytes()));
         }
     }
-    seal_signing_parts.push(canonicalize_header_relaxed(&aar));
-    seal_signing_parts.push(canonicalize_header_relaxed(&ams));
-    seal_signing_parts.push(canonicalize_header_relaxed(&seal_template));
-    let seal_signing_input = seal_signing_parts.join("\r\n");
+    seal_signing_parts.push(canonicalize_header_relaxed(aar.as_bytes()));
+    seal_signing_parts.push(canonicalize_header_relaxed(ams.as_bytes()));
+    seal_signing_parts.push(canonicalize_header_relaxed(seal_template.as_bytes()));
+    let mut seal_signing_input = Vec::new();
+    for (i, part) in seal_signing_parts.iter().enumerate() {
+        if i > 0 {
+            seal_signing_input.extend_from_slice(b"\r\n");
+        }
+        seal_signing_input.extend_from_slice(part);
+    }
 
     let seal_sig = {
         use rsa::signature::{SignatureEncoding, Signer};
-        let sig = signing_key.sign(seal_signing_input.as_bytes());
+        let sig = signing_key.sign(&seal_signing_input);
         B64.encode(sig.to_bytes())
     };
     let seal = format!("{seal_template}{seal_sig}");
@@ -168,13 +186,16 @@ pub fn generate_arc_headers(
 
 /// Validate an ARC chain (RFC 8617 §5) with full cryptographic verification.
 ///
+/// `message_headers` is the RAW header block (octet-exact hashing — see
+/// [`generate_arc_headers`]).
+///
 /// `key_lookup(domain, selector)` returns the DKIM public key for the AMS/AS
 /// `d=`/`s=` pair. Any unresolvable key, malformed header, or failed
 /// signature makes the whole chain `Fail` (RFC 8617 §5.2.1 – all failures
 /// are permanent; the validator fails closed on any error).
 pub fn verify_arc_chain(
     arc_sets: &[ArcSet],
-    message_headers: &str,
+    message_headers: &[u8],
     message_body: &[u8],
     key_lookup: &dyn Fn(&str, &str) -> Option<RsaPublicKey>,
 ) -> ArcChainStatus {
@@ -281,13 +302,13 @@ pub fn verify_arc_chain(
 
 /// Validate an ARC chain without a key source (fails closed: no keys → no Pass).
 pub fn validate_arc_chain(arc_sets: &[ArcSet]) -> ArcChainStatus {
-    verify_arc_chain(arc_sets, "", b"", &|_, _| None)
+    verify_arc_chain(arc_sets, b"", b"", &|_, _| None)
 }
 
 /// Verify one AMS signature (RFC 8617 §4.1.2, DKIM-formatted).
 fn verify_ams(
     set: &ArcSet,
-    message_headers: &str,
+    message_headers: &[u8],
     message_body: &[u8],
     key_lookup: &dyn Fn(&str, &str) -> Option<RsaPublicKey>,
 ) -> bool {
@@ -336,14 +357,16 @@ fn verify_ams(
         .filter(|n| !n.is_empty())
         .collect();
     let canonicalized_headers = extract_signing_headers(message_headers, &h_names);
-    let canonicalized_ams = canonicalize_header_relaxed(&strip_b_signature(header));
-    let signing_input = if canonicalized_headers.is_empty() {
-        canonicalized_ams
+    let canonicalized_ams = canonicalize_header_relaxed(strip_b_signature(header).as_bytes());
+    let mut signing_input = canonicalized_headers;
+    if signing_input.is_empty() {
+        signing_input = canonicalized_ams;
     } else {
-        format!("{}\r\n{}", canonicalized_headers, canonicalized_ams)
-    };
+        signing_input.extend_from_slice(b"\r\n");
+        signing_input.extend_from_slice(&canonicalized_ams);
+    }
 
-    verify_rsa_sha256(public_key, signing_input.as_bytes(), sig_b64)
+    verify_rsa_sha256(public_key, &signing_input, sig_b64)
 }
 
 /// Verify one ARC-Seal signature (RFC 8617 §5.1.1).
@@ -374,18 +397,34 @@ fn verify_seal(
 
     // RFC 8617 §5.1.1: prior sets (AAR, AMS, AS per instance, increasing order)
     // + current AAR + current AMS + AS with empty b=.
-    let mut parts = Vec::new();
+    let mut parts: Vec<Vec<u8>> = Vec::new();
     for prev in &arc_sets[..idx] {
-        parts.push(canonicalize_header_relaxed(&prev.authentication_results));
-        parts.push(canonicalize_header_relaxed(&prev.message_signature));
-        parts.push(canonicalize_header_relaxed(&prev.seal));
+        parts.push(canonicalize_header_relaxed(
+            prev.authentication_results.as_bytes(),
+        ));
+        parts.push(canonicalize_header_relaxed(
+            prev.message_signature.as_bytes(),
+        ));
+        parts.push(canonicalize_header_relaxed(prev.seal.as_bytes()));
     }
-    parts.push(canonicalize_header_relaxed(&set.authentication_results));
-    parts.push(canonicalize_header_relaxed(&set.message_signature));
-    parts.push(canonicalize_header_relaxed(&strip_b_signature(header)));
-    let signing_input = parts.join("\r\n");
+    parts.push(canonicalize_header_relaxed(
+        set.authentication_results.as_bytes(),
+    ));
+    parts.push(canonicalize_header_relaxed(
+        set.message_signature.as_bytes(),
+    ));
+    parts.push(canonicalize_header_relaxed(
+        strip_b_signature(header).as_bytes(),
+    ));
+    let mut signing_input = Vec::new();
+    for (i, part) in parts.iter().enumerate() {
+        if i > 0 {
+            signing_input.extend_from_slice(b"\r\n");
+        }
+        signing_input.extend_from_slice(part);
+    }
 
-    verify_rsa_sha256(public_key, signing_input.as_bytes(), sig_b64)
+    verify_rsa_sha256(public_key, &signing_input, sig_b64)
 }
 
 /// Verify an RSA-SHA256 PKCS#1 v1.5 signature.
@@ -432,11 +471,15 @@ fn strip_b_signature(header_line: &str) -> String {
 
 /// Parse ARC headers from raw header block.
 /// #127:Handles RFC 2822 header folding (continuation lines starting with whitespace).
+///
+/// Parsing-only (chain detection): ARC field names, tags and base64 are
+/// ASCII, so the lossy decode of the unfolded block cannot hide an existing
+/// chain. The DIGEST path never goes through here — it hashes raw octets.
 pub fn parse_arc_headers(raw_headers: &str) -> Vec<ArcSet> {
     let mut sets: std::collections::BTreeMap<u32, ArcSet> = std::collections::BTreeMap::new();
 
     // #127:Unfold headers first – join continuation lines starting with whitespace
-    let unfolded = unfold_headers(raw_headers);
+    let unfolded = unfold_headers_str(raw_headers);
 
     for line in unfolded.split("\r\n") {
         let line = line.trim();
@@ -572,15 +615,35 @@ fn canonicalize_body_relaxed(body: &[u8]) -> Vec<u8> {
     result
 }
 
-/// #123:Canonicalize a single header field (relaxed algorithm per RFC 6376 §3.4.2).
-fn canonicalize_header_relaxed(header_line: &str) -> String {
-    if let Some((name, value)) = header_line.split_once(':') {
-        let canon_name = name.trim().to_lowercase();
-        let canon_value = value.split_whitespace().collect::<Vec<_>>().join(" ");
-        format!("{}:{}", canon_name, canon_value)
-    } else {
-        header_line.to_string()
+/// #123:Canonicalize a single header field (relaxed algorithm per RFC 6376
+/// §3.4.2), on RAW OCTETS: lowercase the field name, delete WSP around the
+/// colon, collapse WSP runs (including folding CR/LF) to a single SP and
+/// drop trailing WSP. 8-bit bytes pass through untouched — a lossy UTF-8
+/// decode would rewrite them as U+FFFD and change the digest input (the
+/// same discipline [`canonicalize_body_relaxed`] applies).
+fn canonicalize_header_relaxed(header_line: &[u8]) -> Vec<u8> {
+    let Some((name, value)) = split_once_byte(header_line, b':') else {
+        return header_line.to_vec();
+    };
+    let name = trim_wsp(name);
+    let mut out = Vec::with_capacity(header_line.len());
+    out.extend(name.iter().map(|b| b.to_ascii_lowercase()));
+    out.push(b':');
+    let mut pending_space = false;
+    let mut emitted = false;
+    for &b in value {
+        if matches!(b, b' ' | b'\t' | b'\r' | b'\n') {
+            pending_space = true;
+        } else {
+            if pending_space && emitted {
+                out.push(b' ');
+            }
+            pending_space = false;
+            emitted = true;
+            out.push(b);
+        }
     }
+    out
 }
 
 /// Extract and canonicalize the headers listed in the h= tag (RFC 6376
@@ -588,10 +651,10 @@ fn canonicalize_header_relaxed(header_line: &str) -> String {
 /// selects the BOTTOM-MOST header instance not yet consumed. A repeated
 /// name therefore walks up the header block (last instance first), and an
 /// external verifier can reconstruct the exact same signing input from the
-/// wire headers.
-fn extract_signing_headers(raw_headers: &str, h_list: &[&str]) -> String {
+/// wire headers. Operates on raw octets so 8-bit header values survive.
+fn extract_signing_headers(raw_headers: &[u8], h_list: &[&str]) -> Vec<u8> {
     let unfolded = unfold_headers(raw_headers);
-    let lines: Vec<&str> = unfolded.split("\r\n").collect();
+    let lines: Vec<&[u8]> = split_crlf(&unfolded);
     let mut consumed = vec![false; lines.len()];
     let mut result = Vec::new();
 
@@ -599,17 +662,25 @@ fn extract_signing_headers(raw_headers: &str, h_list: &[&str]) -> String {
         let lower_name = name.to_lowercase();
         let found = lines.iter().enumerate().rev().find(|(i, line)| {
             !consumed[*i]
-                && line
-                    .split_once(':')
-                    .is_some_and(|(hdr_name, _)| hdr_name.trim().to_lowercase() == lower_name)
+                && split_once_byte(line, b':').is_some_and(|(hdr_name, _)| {
+                    let trimmed = trim_wsp(hdr_name);
+                    trimmed.len() == lower_name.len()
+                        && trimmed
+                            .iter()
+                            .zip(lower_name.as_bytes())
+                            .all(|(a, b)| a.to_ascii_lowercase() == *b)
+                })
         });
         if let Some((i, line)) = found {
             consumed[i] = true;
-            result.push(canonicalize_header_relaxed(line));
+            if !result.is_empty() {
+                result.extend_from_slice(b"\r\n");
+            }
+            result.extend_from_slice(&canonicalize_header_relaxed(line));
         }
     }
 
-    result.join("\r\n")
+    result
 }
 
 /// #126:Extract the value of a specific tag (e.g. "b", "cv") from an ARC header.
@@ -625,22 +696,69 @@ fn extract_tag_value<'a>(header: &'a str, tag: &str) -> Option<&'a str> {
     None
 }
 
-/// #127:Unfold RFC 2822 headers (join continuation lines starting with whitespace).
-fn unfold_headers(raw: &str) -> String {
-    let mut result = String::with_capacity(raw.len());
-    for line in raw.split("\r\n") {
-        if line.starts_with(' ') || line.starts_with('\t') {
+/// #127:Unfold RFC 2822 headers (join continuation lines starting with
+/// whitespace) — on RAW OCTETS so 8-bit header bytes survive into the
+/// digest input. Parsing-only callers decode the unfolded block lossily via
+/// [`unfold_headers_str`] (ARC field names and tags are ASCII).
+fn unfold_headers(raw: &[u8]) -> Vec<u8> {
+    let mut result: Vec<u8> = Vec::with_capacity(raw.len());
+    for line in raw.split(|&b| b == b'\n') {
+        let line = line.strip_suffix(b"\r").unwrap_or(line);
+        if line.first() == Some(&b' ') || line.first() == Some(&b'\t') {
             // Continuation line – replace fold with single space
-            result.push(' ');
-            result.push_str(line.trim_start());
+            result.push(b' ');
+            result.extend_from_slice(trim_start_wsp(line));
         } else {
             if !result.is_empty() {
-                result.push_str("\r\n");
+                result.extend_from_slice(b"\r\n");
             }
-            result.push_str(line);
+            result.extend_from_slice(line);
         }
     }
     result
+}
+
+/// Lossy (parse-only) variant of [`unfold_headers`] for `&str` callers.
+fn unfold_headers_str(raw: &str) -> String {
+    String::from_utf8_lossy(&unfold_headers(raw.as_bytes())).into_owned()
+}
+
+/// Split at the first occurrence of `sep` (the `&[u8]` analogue of
+/// `str::split_once`).
+fn split_once_byte(bytes: &[u8], sep: u8) -> Option<(&[u8], &[u8])> {
+    let pos = bytes.iter().position(|&b| b == sep)?;
+    Some((&bytes[..pos], &bytes[pos + 1..]))
+}
+
+/// Split on CRLF line terminators, tolerating a lone LF.
+fn split_crlf(bytes: &[u8]) -> Vec<&[u8]> {
+    bytes
+        .split(|&b| b == b'\n')
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .collect()
+}
+
+/// Trim ASCII WSP (SP/HTAB) from both ends.
+fn trim_wsp(bytes: &[u8]) -> &[u8] {
+    trim_end_wsp(trim_start_wsp(bytes))
+}
+
+/// Trim ASCII WSP (SP/HTAB) from the start.
+fn trim_start_wsp(bytes: &[u8]) -> &[u8] {
+    let mut i = 0;
+    while i < bytes.len() && matches!(bytes[i], b' ' | b'\t') {
+        i += 1;
+    }
+    &bytes[i..]
+}
+
+/// Trim ASCII WSP (SP/HTAB) from the end.
+fn trim_end_wsp(bytes: &[u8]) -> &[u8] {
+    let mut end = bytes.len();
+    while end > 0 && matches!(bytes[end - 1], b' ' | b'\t') {
+        end -= 1;
+    }
+    &bytes[..end]
 }
 
 // ── tests ──────────────────────────────────────────────────────────────────────
@@ -724,9 +842,12 @@ mod tests {
 
     #[test]
     fn test_unfold_headers() {
-        let raw = "From: test@example.com\r\nARC-Seal: i=1;\r\n\tcv=none;\r\n\tb=abc";
+        let raw = b"From: test@example.com\r\nARC-Seal: i=1;\r\n\tcv=none;\r\n\tb=abc";
         let unfolded = unfold_headers(raw);
-        assert!(unfolded.contains("ARC-Seal: i=1; cv=none; b=abc"));
+        assert_eq!(
+            unfolded,
+            b"From: test@example.com\r\nARC-Seal: i=1; cv=none; b=abc".to_vec()
+        );
     }
 
     #[test]
@@ -790,15 +911,50 @@ mod tests {
         // selects the BOTTOM-MOST unconsumed instance of that field. A
         // duplicated name therefore walks UP the header block (r3, then
         // r2), and a verifier can reconstruct the exact signing input.
-        let raw = "Received: r1\r\nTo: t1\r\nReceived: r2\r\nReceived: r3";
+        let raw = b"Received: r1\r\nTo: t1\r\nReceived: r2\r\nReceived: r3";
         let selected = extract_signing_headers(raw, &["received", "to", "received"]);
-        assert_eq!(selected, "received:r3\r\nto:t1\r\nreceived:r2");
+        assert_eq!(selected, b"received:r3\r\nto:t1\r\nreceived:r2".to_vec());
         // A single occurrence of the name takes the bottom-most instance.
-        assert_eq!(extract_signing_headers(raw, &["received"]), "received:r3");
+        assert_eq!(
+            extract_signing_headers(raw, &["received"]),
+            b"received:r3".to_vec()
+        );
         // Exhausting the instances stops selecting (r3, r2 then nothing).
         assert_eq!(
             extract_signing_headers(raw, &["received", "received", "received"]),
-            "received:r3\r\nreceived:r2\r\nreceived:r1"
+            b"received:r3\r\nreceived:r2\r\nreceived:r1".to_vec()
+        );
+    }
+
+    // ── F-7: header canonicalization is byte-exact for 8-bit headers ──────
+
+    #[test]
+    fn relaxed_header_canonicalization_is_byte_exact_for_invalid_utf8() {
+        // RFC 6376 §3.4.2: relaxed header canonicalization operates on RAW
+        // OCTETS. An 8-bit Subject value (0xE9 …) must reach the hasher
+        // unchanged — the previous &str pipeline ran the whole header block
+        // through from_utf8_lossy, replacing each invalid octet with a
+        // 3-byte U+FFFD sequence and breaking every externally verified seal.
+        assert_eq!(
+            canonicalize_header_relaxed(b"Subject: caf\xe9  du  "),
+            b"subject:caf\xe9 du".to_vec(),
+            "WSP collapses byte-wise; the 8-bit octet survives unchanged"
+        );
+        // Folding CR/LF inside a header value is removed like WSP; WSP
+        // around the colon is deleted.
+        assert_eq!(
+            canonicalize_header_relaxed(b"Subject:\r\n\tcaf\xe9"),
+            b"subject:caf\xe9".to_vec()
+        );
+    }
+
+    #[test]
+    fn signing_header_extraction_preserves_8bit_octets() {
+        let raw = b"From: a@b.c\r\nSubject: caf\xe9  x\r\n";
+        assert_eq!(
+            extract_signing_headers(raw, &["subject"]),
+            b"subject:caf\xe9 x".to_vec(),
+            "the selected header's digest input must carry the raw 0xE9 octet"
         );
     }
 
@@ -837,7 +993,7 @@ mod tests {
         }
     }
 
-    const TEST_HEADERS: &str = "From: alice@example.com\r\nTo: bob@example.org\r\nSubject: hello\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\nMessage-ID: <abc@example.com>";
+    const TEST_HEADERS: &[u8] = b"From: alice@example.com\r\nTo: bob@example.org\r\nSubject: hello\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\nMessage-ID: <abc@example.com>";
 
     fn test_keys() -> (RsaPrivateKey, RsaPublicKey) {
         let mut rng = rsa::rand_core::OsRng;
@@ -875,6 +1031,33 @@ mod tests {
 
         let status = verify_arc_chain(&[set], TEST_HEADERS, b"Hello world\r\n", &lookup);
         assert_eq!(status, ArcChainStatus::Pass);
+    }
+
+    #[test]
+    fn arc_seal_over_8bit_headers_verifies_on_raw_octets() {
+        // F-7: the seal must be computed over the RAW header octets. The
+        // Subject carries 0xE9 (invalid UTF-8); the round trip only holds
+        // when neither side rewrites it via from_utf8_lossy.
+        let (private_key, public_key) = test_keys();
+        let config = test_config(private_key);
+        let lookup = test_lookup(public_key);
+
+        let headers: &[u8] = b"From: alice@example.com\r\nTo: bob@example.org\r\nSubject: caf\xe9!\r\nDate: Thu, 1 Jan 2026 00:00:00 +0000\r\nMessage-ID: <abc@example.com>";
+        let set = generate_arc_headers(
+            headers,
+            b"Hello world\r\n",
+            &test_auth_result(),
+            &config,
+            &[],
+            &lookup,
+        )
+        .expect("generate ARC set over 8-bit headers");
+
+        assert_eq!(
+            verify_arc_chain(&[set], headers, b"Hello world\r\n", &lookup),
+            ArcChainStatus::Pass,
+            "the AMS h= selection must have hashed the raw 0xE9 octet"
+        );
     }
 
     #[test]

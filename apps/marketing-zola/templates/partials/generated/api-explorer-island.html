@@ -20,8 +20,11 @@
     </div>
     <form method="post" action="{{ explorer_api }}" class="grid gap-0 xl:grid-cols-[1fr_1fr] border-t border-surface-800">
       <div class="border-b border-surface-800 xl:border-b-0 xl:border-r p-4 sm:p-6">
-        <p class="mb-3 text-xs font-bold tracking-[0.05em] text-surface-600">Request Composer <span class="ml-2 font-normal tracking-[0.16em] text-surface-500">JSON payload</span></p>
-        <textarea name="body" rows="10" spellcheck="false" class="w-full min-h-[14rem] bg-surface-900 text-white font-mono text-xs rounded-sm p-4 border border-surface-800 focus:border-brand-500/50 focus:outline-none resize-y">{
+        {# Accessible name for the request textarea (design/a11y audit):
+           a real <label for=...> like the contact forms use — the old bare
+           <p> heading left the JSON textarea unnamed for screen readers. #}
+        <label for="explorer-send-request-body" class="mb-3 block text-xs font-bold tracking-[0.05em] text-surface-600">Request Composer <span class="ml-2 font-normal tracking-[0.16em] text-surface-500">JSON payload for POST /v1/messages</span></label>
+        <textarea id="explorer-send-request-body" name="body" rows="10" spellcheck="false" class="w-full min-h-[14rem] bg-surface-900 text-white font-mono text-xs rounded-sm p-4 border border-surface-800 focus:border-brand-500/50 focus:outline-none resize-y">{
   "from": "sandbox@example.com",
   "to": "user@example.com",
   "subject": "Hello from ApexMail",
@@ -83,8 +86,8 @@
     </div>
     <form method="post" action="{{ explorer_api }}" class="grid gap-0 xl:grid-cols-[1fr_1fr] border-t border-surface-800">
       <div class="border-b border-surface-800 xl:border-b-0 xl:border-r p-4 sm:p-6">
-        <p class="mb-3 text-xs font-bold tracking-[0.05em] text-surface-600">Request Composer <span class="ml-2 font-normal tracking-[0.16em] text-surface-500">JSON payload</span></p>
-        <textarea name="body" rows="6" spellcheck="false" class="w-full min-h-[8rem] bg-surface-900 text-white font-mono text-xs rounded-sm p-4 border border-surface-800 focus:border-brand-500/50 focus:outline-none resize-y">{
+        <label for="explorer-domain-request-body" class="mb-3 block text-xs font-bold tracking-[0.05em] text-surface-600">Request Composer <span class="ml-2 font-normal tracking-[0.16em] text-surface-500">JSON payload for POST /v1/domains</span></label>
+        <textarea id="explorer-domain-request-body" name="body" rows="6" spellcheck="false" class="w-full min-h-[8rem] bg-surface-900 text-white font-mono text-xs rounded-sm p-4 border border-surface-800 focus:border-brand-500/50 focus:outline-none resize-y">{
   "name": "shop.example.com"
 }</textarea>
         <input type="hidden" name="lane" value="add_domain">

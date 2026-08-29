@@ -153,6 +153,18 @@ async fn count_rows(state: &AppState, sql: &str, binds: &[String]) -> i64 {
     }
 }
 
+/// Escape `\`, `%` and `_` so user input is matched literally by LIKE/ILIKE.
+pub(crate) fn escape_like(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// Incremental WHERE builder with correct positional binds ($1, $2, …).
 struct WhereBuilder {
     clauses: Vec<String>,
@@ -175,10 +187,16 @@ impl WhereBuilder {
     }
 
     /// Bind `col ILIKE '%' || $n || '%'` (case-insensitive contains).
+    ///
+    /// LIKE metacharacters in the user-supplied value are escaped so a search
+    /// for `%` or `_` matches those literal characters instead of expanding
+    /// into a wildcard that scans the whole table.
     fn ilike(&mut self, col: &str, value: &str) -> &mut Self {
-        self.binds.push(value.to_string());
-        self.clauses
-            .push(format!("{col} ILIKE '%' || ${} || '%'", self.binds.len()));
+        self.binds.push(escape_like(value));
+        self.clauses.push(format!(
+            "{col} ILIKE '%' || ${} || '%' ESCAPE '\\'",
+            self.binds.len()
+        ));
         self
     }
 
@@ -1854,16 +1872,18 @@ async fn cp_tenants(state: &AppState, q: &ListQuery) -> ListPageData {
 async fn cp_operators(state: &AppState, q: &ListQuery) -> ListPageData {
     // role IN ('admin','owner') with an optional ILIKE across email/name —
     // written directly because the builder models single-column equality.
+    // LIKE metacharacters in the search are escaped (audit F7), matching
+    // WhereBuilder::ilike.
     let where_clause = if q.search.is_empty() {
         "role IN ('admin', 'owner')".to_string()
     } else {
-        "role IN ('admin', 'owner') AND (email ILIKE '%' || $1 || '%' OR COALESCE(name, '') ILIKE '%' || $1 || '%')"
+        "role IN ('admin', 'owner') AND (email ILIKE '%' || $1 || '%' ESCAPE '\\' OR COALESCE(name, '') ILIKE '%' || $1 || '%' ESCAPE '\\')"
             .to_string()
     };
     let binds: Vec<String> = if q.search.is_empty() {
         Vec::new()
     } else {
-        vec![q.search.clone()]
+        vec![escape_like(&q.search)]
     };
 
     let total = count_rows(
@@ -2060,9 +2080,10 @@ async fn cp_audit(state: &AppState, q: &ListQuery) -> ListPageData {
     let mut clauses: Vec<String> = Vec::new();
     let mut binds: Vec<String> = Vec::new();
     if !q.search.is_empty() {
-        binds.push(q.search.clone());
+        // Escaped + ESCAPE-claused like the CSV export (audit F7).
+        binds.push(escape_like(&q.search));
         clauses.push(format!(
-            "(action ILIKE '%' || ${} || '%' OR user_id ILIKE '%' || ${} || '%' OR resource_type ILIKE '%' || ${} || '%')",
+            "(action ILIKE '%' || ${} || '%' ESCAPE '\\' OR user_id ILIKE '%' || ${} || '%' ESCAPE '\\' OR resource_type ILIKE '%' || ${} || '%' ESCAPE '\\')",
             binds.len(),
             binds.len(),
             binds.len()
@@ -3079,26 +3100,37 @@ pub(crate) async fn load_campaign_detail(
 }
 
 /// Count a list's contacts with an optional segment filter (all /
-/// subscribed / unsubscribed / bounced) for the recipients wiring.
+/// subscribed / unsubscribed / bounced) for the recipients wiring. The
+/// segment is a BIND (audit F8), never string-interpolated SQL.
 pub(crate) async fn count_list_recipients_filtered(
     db: &sqlx::PgPool,
     tenant: &str,
     list_id: &str,
     segment: &str,
 ) -> Option<i64> {
-    let status_clause = if segment == "all" {
-        String::new()
-    } else {
-        format!(" AND c.status = '{segment}'")
-    };
-    sqlx::query_scalar(&format!(
+    if segment == "all" {
+        return sqlx::query_scalar(
+            "SELECT COUNT(*)::bigint
+             FROM list_subscribers ls
+             JOIN contacts c ON c.id = ls.contact_id
+             WHERE ls.list_id = $1::uuid AND c.tenant_id = $2",
+        )
+        .bind(list_id)
+        .bind(tenant)
+        .fetch_optional(db)
+        .await
+        .ok()
+        .flatten();
+    }
+    sqlx::query_scalar(
         "SELECT COUNT(*)::bigint
          FROM list_subscribers ls
          JOIN contacts c ON c.id = ls.contact_id
-         WHERE ls.list_id = $1::uuid AND c.tenant_id = $2{status_clause}"
-    ))
+         WHERE ls.list_id = $1::uuid AND c.tenant_id = $2 AND c.status = $3",
+    )
     .bind(list_id)
     .bind(tenant)
+    .bind(segment)
     .fetch_optional(db)
     .await
     .ok()
@@ -3254,11 +3286,27 @@ mod tests {
             .eq("tenant_id", "t_1")
             .ilike("name", "spring")
             .eq("status", "draft");
+        // The ILIKE clause carries the ESCAPE qualifier (working-tree
+        // wildcard-escape fix) and the bind is the escaped pattern.
         assert_eq!(
             where_sql.build(),
-            "tenant_id = $1 AND name ILIKE '%' || $2 || '%' AND status = $3"
+            "tenant_id = $1 AND name ILIKE '%' || $2 || '%' ESCAPE '\\' AND status = $3"
         );
         assert_eq!(where_sql.binds, vec!["t_1", "spring", "draft"]);
+    }
+
+    #[test]
+    fn like_metacharacters_are_escaped_in_bindings() {
+        // A search for `%` or `_` must match those literal characters, not
+        // expand into a whole-table wildcard (audit F7's shared helper).
+        assert_eq!(escape_like("100%"), "100\\%");
+        assert_eq!(escape_like("a_b"), "a\\_b");
+        assert_eq!(escape_like("back\\slash"), "back\\\\slash");
+        assert_eq!(escape_like("plain"), "plain");
+        let mut where_sql = WhereBuilder::new();
+        where_sql.ilike("name", "100%");
+        assert_eq!(where_sql.binds, vec!["100\\%"]);
+        assert_eq!(where_sql.build(), "name ILIKE '%' || $1 || '%' ESCAPE '\\'");
     }
 
     #[test]

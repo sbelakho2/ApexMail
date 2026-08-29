@@ -112,6 +112,10 @@ const DEFAULT_GLOBAL_RATE_PER_SECOND: u64 = 50;
 const DEFAULT_DOMAIN_RATE_PER_SECOND: u64 = 10;
 const DEFAULT_TENANT_RATE_PER_SECOND: u64 = 20;
 const DEFAULT_MAX_CONCURRENT_EMAILS: usize = 50;
+/// F1:requeue delay for rows deferred by send-rate enforcement. The rate
+/// windows are 1s wide; ~2s covers the window plus scheduling margin so the
+/// next poll re-delivers without wasting an attempt.
+const SEND_RATE_RETRY_DELAY_SECS: i64 = 2;
 
 impl Default for QueueConfig {
     fn default() -> Self {
@@ -170,12 +174,12 @@ impl QueueConfig {
 /// exhausted the bucket after ~10 entries and permanently failed the rest
 /// of the batch.
 ///
-/// Admission checks at ENQUEUE time are now DRY-RUNS: [`RateWindow::check`]
+/// Admission checks at ENQUEUE time are DRY-RUNS: [`RateWindow::check`]
 /// computes the remaining quota in the current 1s window from the SENDS
-/// recorded via [`RateWindow::record`] (called at delivery time in
-/// [`EmailQueue::process_email`]) without committing anything. Bulk
-/// enqueues therefore never drain quota, while the per-second pace is
-/// still enforced against actual outbound sends.
+/// consumed at delivery time ([`RateWindow::try_consume`], called per
+/// recipient before SMTP dispatch in [`EmailQueue::process_email`]) without
+/// committing anything. Bulk enqueues therefore never drain quota, while
+/// the per-second pace is enforced (F1) against actual outbound sends.
 #[derive(Debug, Default)]
 struct RateWindow {
     /// Maximum events per sliding 1-second window. 0 = unlimited.
@@ -223,17 +227,32 @@ impl RateWindow {
         Self::conforming_count(events.get(key), now) < self.limit
     }
 
-    /// Record an actual send against the window (delivery-time consumption).
-    fn record(&self, key: &str) {
+    /// Atomic check-AND-consume: returns `true` and records the event when
+    /// one more event still conforms in the current window, `false` without
+    /// recording otherwise. The check and the push happen under the same
+    /// lock, so concurrent consumers cannot jointly exceed `limit` — this is
+    /// the delivery-time enforcement primitive (F1) used before SMTP dispatch.
+    fn try_consume(&self, key: &str) -> bool {
         if self.is_unlimited() {
-            return;
+            return true;
         }
         let now = Instant::now();
         let mut events = self.events.lock().unwrap_or_else(|e| e.into_inner());
+        // Bound the key map (stale keys pruned before a NEW key is admitted)
+        // so a pathological number of distinct domains/tenants cannot grow
+        // memory without limit.
         if events.len() >= RATE_WINDOW_MAX_KEYS && !events.contains_key(key) {
             events.retain(|_, q| Self::conforming_count(Some(q), now) > 0);
         }
         let queue = events.entry(key.to_string()).or_default();
+        if queue
+            .iter()
+            .filter(|t| now.duration_since(**t) < RATE_WINDOW)
+            .count() as u64
+            >= self.limit
+        {
+            return false;
+        }
         queue.push_back(now);
         while queue
             .front()
@@ -241,6 +260,7 @@ impl RateWindow {
         {
             queue.pop_front();
         }
+        true
     }
 }
 
@@ -447,15 +467,84 @@ impl EmailQueue {
         RateLimitDecision::Allowed
     }
 
-    /// Record a delivery against the rate windows (send-time consumption).
-    /// Called once per message the processor actually attempts to send.
-    fn record_send_rate(&self, to_addresses: &[String], tenant_id: Option<&str>) {
-        self.global_window.record("__global__");
-        for domain in to_addresses {
-            self.domain_window.record(&Self::extract_domain(domain));
+    /// Delivery-time send-rate enforcement (F1).
+    ///
+    /// Atomically check-AND-consume one send's worth of quota from the
+    /// global, per-domain and per-tenant windows (in that order). Returns
+    /// [`RateLimitDecision::Allowed`] when the send may proceed — the quota
+    /// is already consumed — or the exceeded variant, in which case NOTHING
+    /// was sent and the caller must REQUEUE the row with a small delay
+    /// (see [`EmailQueue::mark_send_rate_limited`]) rather than drop it.
+    ///
+    /// Consume order matters: when a later window denies, the tokens already
+    /// consumed from earlier windows are NOT rolled back. That is strictly
+    /// conservative — the leaked tokens expire with the 1-second window and
+    /// can only slow the pace slightly, never exceed it. Enqueue admission
+    /// ([`EmailQueue::check_rate_limits`]) remains a pure dry-run.
+    fn acquire_send_rate(
+        &self,
+        to_addresses: &[String],
+        tenant_id: Option<&str>,
+    ) -> RateLimitDecision {
+        if !self.global_window.try_consume("__global__") {
+            return RateLimitDecision::GlobalExceeded;
         }
-        self.tenant_window
-            .record(tenant_id.unwrap_or("__no_tenant__"));
+
+        let mut domains: Vec<String> = to_addresses
+            .iter()
+            .map(|addr| Self::extract_domain(addr))
+            .collect();
+        domains.sort();
+        domains.dedup();
+        for domain in &domains {
+            if !self.domain_window.try_consume(domain) {
+                return RateLimitDecision::DomainExceeded(domain.clone());
+            }
+        }
+
+        let tenant_key = tenant_id.unwrap_or("__no_tenant__");
+        if !self.tenant_window.try_consume(tenant_key) {
+            return RateLimitDecision::TenantExceeded;
+        }
+
+        RateLimitDecision::Allowed
+    }
+
+    /// F1: render an enforcement decision as the distinguishable error the
+    /// batch loop routes to [`EmailQueue::mark_send_rate_limited`] instead
+    /// of `mark_failed` (rate-limit defers must not consume an attempt).
+    fn send_rate_limited_error(&self, decision: RateLimitDecision) -> anyhow::Error {
+        let detail = match decision {
+            RateLimitDecision::GlobalExceeded => {
+                format!("global (max {} msg/s)", self.config.global_rate_per_second)
+            }
+            RateLimitDecision::DomainExceeded(domain) => format!(
+                "domain '{}' (max {} msg/s)",
+                domain, self.config.domain_rate_per_second
+            ),
+            RateLimitDecision::TenantExceeded => {
+                format!("tenant (max {} msg/s)", self.config.tenant_rate_per_second)
+            }
+            RateLimitDecision::Allowed => "allowed".to_string(),
+        };
+        anyhow::anyhow!("send_rate_limited: {detail}")
+    }
+
+    /// F1:true when an error produced by [`Self::send_rate_limited_error`].
+    fn is_send_rate_limited(error_str: &str) -> bool {
+        error_str.starts_with("send_rate_limited:")
+    }
+
+    /// Base retry delay for the given NEXT attempt number (1-based), from
+    /// the configured `retry_delays` ladder. #113:falls back to a sane
+    /// constant when `retry_delays` is empty (avoids the integer underflow
+    /// of indexing into an empty vec).
+    fn retry_delay_for_attempt(&self, next_attempt: i32) -> Duration {
+        if self.config.retry_delays.is_empty() {
+            return Duration::from_secs(DEFAULT_QUEUE_EMPTY_RETRY_FALLBACK_SECS);
+        }
+        let delay_index = (next_attempt - 1).max(0) as usize;
+        self.config.retry_delays[delay_index.min(self.config.retry_delays.len() - 1)]
     }
 
     /// Initialize queue tables
@@ -840,14 +929,23 @@ impl EmailQueue {
     }
 
     /// Mark email as sent
+    ///
+    /// F4:fenced on the processing claim (`status = 'processing'`, the state
+    /// [`EmailQueue::fetch_pending`] flips rows into). An unfenced UPDATE
+    /// let a stale worker overwrite whatever happened after its lease
+    /// expired — most notably flipping a row the user had CANCELLED (or a
+    /// new owner had already finalized) back to 'sent'. A zero-row update
+    /// now means this worker lost the row; it is logged and skipped (the
+    /// current owner decides its fate).
     pub async fn mark_sent(&self, id: &Uuid) -> Result<()> {
-        timeout(
+        let result = timeout(
             Duration::from_secs(30),
             sqlx::query(
                 r#"
                 UPDATE email_queue
-                SET status = 'sent', sent_at = NOW(), updated_at = NOW()
-                WHERE id = $1
+                SET status = 'sent', sent_at = NOW(), updated_at = NOW(),
+                    locked_until = NULL
+                WHERE id = $1 AND status = 'processing'
             "#,
             )
             .bind(id)
@@ -855,6 +953,14 @@ impl EmailQueue {
         )
         .await
         .map_err(|_| anyhow::anyhow!("mark_sent query timed out after 30s"))??;
+
+        if result.rows_affected() == 0 {
+            warn!(
+                email_id = %id,
+                "mark_sent fenced out — row is no longer claimed by this worker; write skipped"
+            );
+            return Ok(());
+        }
 
         debug!(email_id = %id, "Email marked as sent");
         Ok(())
@@ -865,84 +971,77 @@ impl EmailQueue {
     /// `to_addresses` is narrowed to the rejected set and scheduled for
     /// retry (attempts+1). When attempts are exhausted the row fails
     /// permanently with the rejected recipients preserved on it.
-    async fn requeue_rejected_recipients(&self, id: &Uuid, rejected: &[String]) -> Result<()> {
-        let email = timeout(
-            Duration::from_secs(30),
-            sqlx::query("SELECT attempts, max_attempts FROM email_queue WHERE id = $1")
-                .bind(id)
-                .fetch_one(&self.pool),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("requeue_rejected SELECT timed out after 30s"))??;
-
-        let attempts: i32 = email.get("attempts");
-        let max_attempts: i32 = email.get("max_attempts");
-        let new_attempts = attempts + 1;
+    ///
+    /// F4:single fenced UPDATE — the attempts increment is ATOMIC
+    /// (`attempts = attempts + 1`, no client-side read-modify-write, which
+    /// lost concurrent increments and let rows outlive `max_attempts`) and
+    /// the defer/fail decision is derived from the row's actual new count
+    /// inside the same statement. The `status = 'processing'` fence matches
+    /// the fetch_pending claim, so a stale worker cannot requeue a row a
+    /// new owner has re-claimed.
+    async fn requeue_rejected_recipients(
+        &self,
+        id: &Uuid,
+        attempts: i32,
+        rejected: &[String],
+    ) -> Result<()> {
         let error = format!(
             "partial acceptance: rejected recipients kept for retry: {}",
             rejected.join(", ")
         );
+        // The retry delay index is chosen from the claim-time attempt
+        // snapshot; correctness (increment + terminal decision) is fully
+        // server-side, so a racing increment can only shift the delay one
+        // step, never revive an exhausted row. F6:±20% jitter.
+        let delay_secs = jittered_retry_delay_secs(self.retry_delay_for_attempt(attempts + 1), id);
+        let delay_interval = format!("{} seconds", delay_secs);
 
-        if new_attempts < max_attempts {
-            let delay = if self.config.retry_delays.is_empty() {
-                Duration::from_secs(DEFAULT_QUEUE_EMPTY_RETRY_FALLBACK_SECS)
-            } else {
-                let delay_index = (new_attempts - 1).max(0) as usize;
-                let delay_index = delay_index.min(self.config.retry_delays.len() - 1);
-                self.config.retry_delays[delay_index]
-            };
-            let chrono_delay = chrono::Duration::from_std(delay)
-                .unwrap_or_else(|_| chrono::Duration::seconds(300));
-            let next_retry = Utc::now() + chrono_delay;
-
-            timeout(
-                Duration::from_secs(30),
-                sqlx::query(
-                    r#"
-                    UPDATE email_queue
-                    SET status = 'deferred', to_addresses = $2, attempts = $3,
-                        last_error = $4, next_retry_at = $5, locked_until = NULL,
-                        updated_at = NOW()
-                    WHERE id = $1
-                "#,
-                )
-                .bind(id)
-                .bind(rejected)
-                .bind(new_attempts)
-                .bind(&error)
-                .bind(next_retry)
-                .execute(&self.pool),
+        let row = timeout(
+            Duration::from_secs(30),
+            sqlx::query(
+                r#"
+                UPDATE email_queue
+                SET attempts = attempts + 1,
+                    status = CASE WHEN attempts + 1 < max_attempts
+                                  THEN 'deferred' ELSE 'failed' END,
+                    to_addresses = $2,
+                    last_error = $3,
+                    next_retry_at = CASE WHEN attempts + 1 < max_attempts
+                                         THEN NOW() + $4::interval
+                                         ELSE NULL END,
+                    locked_until = NULL,
+                    updated_at = NOW()
+                WHERE id = $1 AND status = 'processing'
+                RETURNING status, attempts
+            "#,
             )
-            .await
-            .map_err(|_| anyhow::anyhow!("requeue_rejected UPDATE timed out after 30s"))??;
+            .bind(id)
+            .bind(rejected)
+            .bind(&error)
+            .bind(&delay_interval)
+            .fetch_optional(&self.pool),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("requeue_rejected UPDATE timed out after 30s"))??;
 
+        let Some(row) = row else {
+            warn!(
+                email_id = %id,
+                "requeue_rejected_recipients fenced out — row no longer claimed by this worker"
+            );
+            return Ok(());
+        };
+
+        let status: String = row.get("status");
+        let new_attempts: i32 = row.get("attempts");
+        if status == "deferred" {
             warn!(
                 email_id = %id,
                 rejected = rejected.len(),
                 attempts = new_attempts,
-                next_retry = %next_retry,
                 "Partial acceptance: row requeued for the rejected recipients only"
             );
         } else {
-            timeout(
-                Duration::from_secs(30),
-                sqlx::query(
-                    r#"
-                    UPDATE email_queue
-                    SET status = 'failed', to_addresses = $2, attempts = $3,
-                        last_error = $4, locked_until = NULL, updated_at = NOW()
-                    WHERE id = $1
-                "#,
-                )
-                .bind(id)
-                .bind(rejected)
-                .bind(new_attempts)
-                .bind(&error)
-                .execute(&self.pool),
-            )
-            .await
-            .map_err(|_| anyhow::anyhow!("requeue_rejected FAIL UPDATE timed out after 30s"))??;
-
             error!(
                 email_id = %id,
                 rejected = ?rejected,
@@ -1165,6 +1264,10 @@ impl EmailQueue {
     /// Mark email as deferred due to provider reputation throttle.
     /// Unlike `mark_failed(defer=true)`, this does NOT increment `attempts`,
     /// so reputation-driven backoff cannot cause permanent failures.
+    ///
+    /// Fenced on the processing claim (`status = 'processing'`, matching
+    /// [`EmailQueue::fetch_pending`]) so a stale worker whose lease expired
+    /// cannot defer a row the current owner is sending.
     pub async fn mark_throttled(&self, id: &Uuid, reason: &str) -> Result<()> {
         // Short-ish retry delay — re-check reputation soon.  60 seconds is
         // longer than ProviderThrottle's cache TTL so the next look will
@@ -1179,7 +1282,7 @@ impl EmailQueue {
                     last_error = $2,
                     next_retry_at = $3,
                     updated_at = NOW()
-                WHERE id = $1
+                WHERE id = $1 AND status = 'processing'
                 "#,
             )
             .bind(id)
@@ -1192,105 +1295,135 @@ impl EmailQueue {
         Ok(())
     }
 
-    /// Mark email as failed
-    pub async fn mark_failed(&self, id: &Uuid, error: &str, defer: bool) -> Result<()> {
-        let email = timeout(
+    /// F1:requeue a row deferred by send-rate enforcement.
+    ///
+    /// The rate windows are 1 second wide, so the delay is deliberately tiny
+    /// (~2s) — the row returns to the deliverable set on the next poll
+    /// instead of being dropped or punished with a full retry backoff. Like
+    /// [`EmailQueue::mark_throttled`] this does NOT increment `attempts`
+    /// (a pace limit is not a delivery failure) and is fenced on
+    /// `status = 'processing'` so a stale worker cannot defer a row a new
+    /// owner has re-claimed.
+    pub async fn mark_send_rate_limited(&self, id: &Uuid, reason: &str) -> Result<()> {
+        let next_retry = Utc::now() + chrono::Duration::seconds(SEND_RATE_RETRY_DELAY_SECS);
+        timeout(
             Duration::from_secs(30),
             sqlx::query(
                 r#"
-                SELECT attempts, max_attempts, from_address FROM email_queue WHERE id = $1
+                UPDATE email_queue
+                SET status = 'deferred',
+                    last_error = $2,
+                    next_retry_at = $3,
+                    locked_until = NULL,
+                    updated_at = NOW()
+                WHERE id = $1 AND status = 'processing'
+                "#,
+            )
+            .bind(id)
+            .bind(reason)
+            .bind(next_retry)
+            .execute(&self.pool),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("mark_send_rate_limited query timed out after 30s"))??;
+        Ok(())
+    }
+
+    /// Mark email as failed
+    ///
+    /// F4:single fenced UPDATE — `attempts` is incremented ATOMICALLY
+    /// (`attempts = attempts + 1`; the previous SELECT-then-UPDATE was a
+    /// client-side read-modify-write that lost concurrent increments and
+    /// let rows be retried past `max_attempts`), and the defer-vs-fail
+    /// decision is derived from the row's actual post-increment count
+    /// inside the same statement. `attempts` (the claim-time snapshot) is
+    /// used ONLY to pick the retry-delay index. The
+    /// `status = 'processing'` fence matches the fetch_pending claim, so a
+    /// stale worker whose lease expired cannot finalize a row now owned by
+    /// another worker.
+    pub async fn mark_failed(
+        &self,
+        id: &Uuid,
+        attempts: i32,
+        error: &str,
+        defer: bool,
+    ) -> Result<()> {
+        // F6:±20% jitter (deterministic per row) on the retry delay to
+        // avoid synchronized retry thundering herds.
+        let delay_secs = jittered_retry_delay_secs(self.retry_delay_for_attempt(attempts + 1), id);
+        let delay_interval = format!("{} seconds", delay_secs);
+
+        let row = timeout(
+            Duration::from_secs(30),
+            sqlx::query(
+                r#"
+                UPDATE email_queue
+                SET attempts = attempts + 1,
+                    status = CASE WHEN $2::boolean AND attempts + 1 < max_attempts
+                                  THEN 'deferred' ELSE 'failed' END,
+                    last_error = $3,
+                    next_retry_at = CASE WHEN $2::boolean AND attempts + 1 < max_attempts
+                                         THEN NOW() + $4::interval
+                                         ELSE NULL END,
+                    locked_until = NULL,
+                    updated_at = NOW()
+                WHERE id = $1 AND status = 'processing'
+                RETURNING status, attempts, from_address
             "#,
             )
             .bind(id)
-            .fetch_one(&self.pool),
+            .bind(defer)
+            .bind(error)
+            .bind(&delay_interval)
+            .fetch_optional(&self.pool),
         )
         .await
-        .map_err(|_| anyhow::anyhow!("mark_failed SELECT timed out after 30s"))??;
+        .map_err(|_| anyhow::anyhow!("mark_failed UPDATE timed out after 30s"))??;
 
-        let attempts: i32 = email.get("attempts");
-        let max_attempts: i32 = email.get("max_attempts");
-        let from_address: String = email.get("from_address");
-        let new_attempts = attempts + 1;
+        let Some(row) = row else {
+            warn!(
+                email_id = %id,
+                "mark_failed fenced out — row no longer claimed by this worker; write skipped"
+            );
+            return Ok(());
+        };
 
-        if defer && new_attempts < max_attempts {
-            // #113:Guard against empty retry_delays causing integer underflow
-            let delay = if self.config.retry_delays.is_empty() {
-                Duration::from_secs(DEFAULT_QUEUE_EMPTY_RETRY_FALLBACK_SECS)
-            } else {
-                let delay_index = (new_attempts - 1).max(0) as usize;
-                let delay_index = delay_index.min(self.config.retry_delays.len() - 1);
-                self.config.retry_delays[delay_index]
-            };
-            let chrono_delay = chrono::Duration::from_std(delay)
-                .unwrap_or_else(|_| chrono::Duration::seconds(300)); // fallback:5 minutes
-            let next_retry = Utc::now() + chrono_delay;
+        let status: String = row.get("status");
+        let new_attempts: i32 = row.get("attempts");
+        let from_address: String = row.get("from_address");
 
-            timeout(
-                Duration::from_secs(30),
-                sqlx::query(
-                    r#"
-                    UPDATE email_queue
-                    SET status = 'deferred', attempts = $2, last_error = $3,
-                        next_retry_at = $4, updated_at = NOW()
-                    WHERE id = $1
-                "#,
-                )
-                .bind(id)
-                .bind(new_attempts)
-                .bind(error)
-                .bind(next_retry)
-                .execute(&self.pool),
-            )
-            .await
-            .map_err(|_| anyhow::anyhow!("mark_failed defer UPDATE timed out after 30s"))??;
-
+        if status == "deferred" {
             warn!(
                 email_id = %id,
                 attempts = new_attempts,
-                next_retry = %next_retry,
+                retry_delay_secs = delay_secs,
                 "Email deferred for retry"
             );
-        } else {
-            timeout(
-                Duration::from_secs(30),
-                sqlx::query(
-                    r#"
-                    UPDATE email_queue
-                    SET status = 'failed', attempts = $2, last_error = $3, updated_at = NOW()
-                    WHERE id = $1
-                "#,
-                )
-                .bind(id)
-                .bind(new_attempts)
-                .bind(error)
-                .execute(&self.pool),
-            )
-            .await
-            .map_err(|_| anyhow::anyhow!("mark_failed permanent UPDATE timed out after 30s"))??;
+            return Ok(());
+        }
 
-            error!(email_id = %id, error = error, "Email permanently failed");
+        error!(email_id = %id, error = error, "Email permanently failed");
 
-            // MI-008 / DB-14: Move bounce notifications to the dead-letter queue.
-            // For non-bounce permanently failed emails, apply configurable sampling
-            // (dead_letter_sample_rate, default 1%) to provide a forensic trail
-            // without filling the dead-letter queue with routine failures.
-            // Uses deterministic hash-based sampling to avoid depending on `rand`.
-            let is_bounce = Self::is_bounce_email(&from_address);
-            let sample = !is_bounce
-                && self.config.dead_letter_sample_rate > 0.0
-                && Self::sample_dead_letter(id, self.config.dead_letter_sample_rate);
-            if is_bounce || sample {
-                if sample {
-                    debug!(email_id = %id, sample_rate = self.config.dead_letter_sample_rate,
-                        "Sampling non-bounce failure for dead-letter queue");
-                }
-                if let Err(e) = self.move_to_dead_letter(id, error).await {
-                    error!(
-                        email_id = %id,
-                        dead_letter_error = %e,
-                        "Failed to move email to dead-letter queue"
-                    );
-                }
+        // MI-008 / DB-14: Move bounce notifications to the dead-letter queue.
+        // For non-bounce permanently failed emails, apply configurable sampling
+        // (dead_letter_sample_rate, default 1%) to provide a forensic trail
+        // without filling the dead-letter queue with routine failures.
+        // Uses deterministic hash-based sampling to avoid depending on `rand`.
+        let is_bounce = Self::is_bounce_email(&from_address);
+        let sample = !is_bounce
+            && self.config.dead_letter_sample_rate > 0.0
+            && Self::sample_dead_letter(id, self.config.dead_letter_sample_rate);
+        if is_bounce || sample {
+            if sample {
+                debug!(email_id = %id, sample_rate = self.config.dead_letter_sample_rate,
+                    "Sampling non-bounce failure for dead-letter queue");
+            }
+            if let Err(e) = self.move_to_dead_letter(id, error).await {
+                error!(
+                    email_id = %id,
+                    dead_letter_error = %e,
+                    "Failed to move email to dead-letter queue"
+                );
             }
         }
 
@@ -1326,9 +1459,21 @@ impl EmailQueue {
             }
         }
 
-        // Consume send-rate quota at DELIVERY time (not enqueue time) so
-        // bulk enqueues never drain the windows.
-        self.record_send_rate(&email.to_addresses, email.tenant_id.as_deref());
+        // F1:ENFORCE the send-rate limits at delivery time (not enqueue
+        // time, so bulk enqueues never drain the windows). This atomically
+        // checks-and-consumes global/domain/tenant quota per recipient
+        // BEFORE SMTP dispatch; when a window is exhausted the send is not
+        // attempted and the row is requeued with a small delay by
+        // `mark_send_rate_limited` (see the `send_rate_limited:` branch in
+        // `process_batch`) — never dropped, never charged an attempt.
+        match self.acquire_send_rate(&email.to_addresses, email.tenant_id.as_deref()) {
+            RateLimitDecision::Allowed => {}
+            decision @ (RateLimitDecision::GlobalExceeded
+            | RateLimitDecision::DomainExceeded(_)
+            | RateLimitDecision::TenantExceeded) => {
+                return Err(self.send_rate_limited_error(decision));
+            }
+        }
 
         // Extract custom headers from JSON
         let headers: Option<std::collections::HashMap<String, String>> =
@@ -1413,7 +1558,7 @@ impl EmailQueue {
                         // Wait for drain to complete with timeout
                         match drain_fut.as_mut() {
                             Some(rx) => rx.await.ok(),
-                            None => Some(std::future::pending::<()>().await),
+                            None => std::future::pending::<Option<()>>().await,
                         };
                     }
                 }, if draining => {
@@ -1530,11 +1675,15 @@ impl EmailQueue {
         // while still allowing pipeline parallelism within a batch.
         let max_concurrent = self.config.max_concurrent_emails;
         // Pre-build futures to avoid HRTB issues with async closures in stream combinators.
+        // The claim-time `attempts` snapshot travels with the result so the
+        // fenced writers can pick the retry-delay index (the authoritative
+        // increment happens server-side — F4).
         let futs: Vec<_> = scheduled
             .into_iter()
             .map(|email| async move {
+                let attempts = email.attempts;
                 let result = self.process_email(email).await;
-                (email.id, result)
+                (email.id, attempts, result)
             })
             .collect();
         let results: Vec<_> = futures::stream::iter(futs)
@@ -1542,7 +1691,7 @@ impl EmailQueue {
             .collect()
             .await;
 
-        for (email_id, result) in results {
+        for (email_id, attempts, result) in results {
             match result {
                 Ok(DeliveryOutcome::Delivered) => {
                     // A failure marking ONE email as sent must not abort the
@@ -1561,7 +1710,10 @@ impl EmailQueue {
                     // the row deliverable for ONLY the rejected recipients
                     // (attempts+1, bounded by max_attempts). No data path may
                     // mark 4xx-rejected recipients as sent.
-                    if let Err(e) = self.requeue_rejected_recipients(&email_id, &rejected).await {
+                    if let Err(e) = self
+                        .requeue_rejected_recipients(&email_id, attempts, &rejected)
+                        .await
+                    {
                         error!(
                             email_id = %email_id,
                             error = %e,
@@ -1582,10 +1734,30 @@ impl EmailQueue {
                         }
                         continue;
                     }
+                    // F1:send-rate defers requeue with a tiny delay (the
+                    // windows are 1s wide) and never consume an attempt.
+                    if Self::is_send_rate_limited(&error_str) {
+                        info!(
+                            email_id = %email_id,
+                            reason = %error_str,
+                            "Send-rate limit hit — requeueing with a short delay"
+                        );
+                        if let Err(mark_err) =
+                            self.mark_send_rate_limited(&email_id, &error_str).await
+                        {
+                            error!(
+                                email_id = %email_id,
+                                error = %mark_err,
+                                "Failed to requeue rate-limited email (lease/reaper will recover the row)"
+                            );
+                        }
+                        continue;
+                    }
                     let is_temporary = Self::is_temporary_error(&error_str);
 
-                    if let Err(mark_err) =
-                        self.mark_failed(&email_id, &error_str, is_temporary).await
+                    if let Err(mark_err) = self
+                        .mark_failed(&email_id, attempts, &error_str, is_temporary)
+                        .await
                     {
                         error!(
                             email_id = %email_id,
@@ -1600,7 +1772,15 @@ impl EmailQueue {
         Ok(())
     }
 
-    /// Get queue statistics
+    /// Get queue statistics.
+    ///
+    /// F12:the COUNT FILTER predicates are bounded so the query no longer
+    /// full-scans the table's entire history:
+    /// - `sent` / `failed` cover **today** (`created_at >= NOW() - 1 day`) —
+    ///   the gRPC surface reports them as `sent_today` / `failed_today`;
+    /// - `pending` / `processing` / `deferred` (queue depth) cover a
+    ///   **7-day** window — anything deliverable yet older than that is
+    ///   beyond every retry ladder and operationally dead.
     pub async fn get_stats(&self) -> Result<QueueStats> {
         let row = timeout(
             Duration::from_secs(30),
@@ -1609,10 +1789,11 @@ impl EmailQueue {
                 SELECT
                     COUNT(*) FILTER (WHERE status = 'pending') as pending,
                     COUNT(*) FILTER (WHERE status = 'processing') as processing,
-                    COUNT(*) FILTER (WHERE status = 'sent') as sent,
-                    COUNT(*) FILTER (WHERE status = 'failed') as failed,
+                    COUNT(*) FILTER (WHERE status = 'sent' AND created_at >= NOW() - interval '1 day') as sent,
+                    COUNT(*) FILTER (WHERE status = 'failed' AND created_at >= NOW() - interval '1 day') as failed,
                     COUNT(*) FILTER (WHERE status = 'deferred') as deferred
                 FROM email_queue
+                WHERE created_at >= NOW() - interval '7 days'
             "#,
             )
             .fetch_one(&self.pool),
@@ -1676,6 +1857,11 @@ impl EmailQueue {
 }
 
 /// Queue statistics
+///
+/// Observation windows (F12, see [`EmailQueue::get_stats`]): `sent` and
+/// `failed` count rows created **in the last day** (the gRPC surface
+/// reports them as today's figures); `pending`/`processing`/`deferred`
+/// count rows created **in the last 7 days**.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueueStats {
     pub pending: u64,
@@ -1701,6 +1887,20 @@ impl QueueStats {
             metrics::gauge!("apexmail_email_queue_depth", "status" => status).set(depth as f64);
         }
     }
+}
+
+/// F6:apply ±20% jitter to a retry delay, deterministic per row id (no RNG
+/// state on the hot path; identical inputs always map to the same output,
+/// which keeps tests reproducible). The hash spread maps onto the
+/// [0.80, 1.20] multiplier band.
+fn jittered_retry_delay_secs(base: Duration, id: &Uuid) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut hasher);
+    let spread = (hasher.finish() % 41) as f64 / 100.0; // 0.00..=0.40
+    let factor = 0.8 + spread; // 0.80..=1.20
+    let jittered = base.as_secs_f64() * factor;
+    // Never jitter a non-zero base down to zero.
+    jittered.round().max(1.0) as u64
 }
 
 /// Detect the type of bounce based on from_address and subject.
@@ -2095,9 +2295,7 @@ mod tests {
     fn batch_sql_single_row() {
         let sql = validate_batch_sql(1);
         // 14 columns = 13 placeholders + 'pending' literal.
-        assert!(
-            sql.contains("($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, $10, $11, $12, $13)")
-        );
+        assert!(sql.contains("($1, $2, $3, $4, $5, $6, $7, 'pending', $8, $9, $10, $11, $12, $13)"));
         assert!(sql.contains("RETURNING id"));
         // Should not have a second row
         assert!(!sql.contains("$14"));
@@ -2179,13 +2377,17 @@ mod tests {
         assert!(EmailQueue::is_temporary_error(
             "Resources temporarily unavailable"
         ));
+        assert!(EmailQueue::is_temporary_error("421 4.7.0 Try again later"));
         assert!(EmailQueue::is_temporary_error(
-            "421 4.7.0 Try again later"
+            "MAIL FROM failed: 450 mailbox busy"
         ));
-        assert!(EmailQueue::is_temporary_error("MAIL FROM failed: 450 mailbox busy"));
-        assert!(EmailQueue::is_temporary_error("DATA failed: 451 4.3.0 queue full"));
+        assert!(EmailQueue::is_temporary_error(
+            "DATA failed: 451 4.3.0 queue full"
+        ));
         // Generic 4xx reply code as a standalone token.
-        assert!(EmailQueue::is_temporary_error("Message rejected: 452 out of memory"));
+        assert!(EmailQueue::is_temporary_error(
+            "Message rejected: 452 out of memory"
+        ));
     }
 
     #[test]
@@ -2196,10 +2398,14 @@ mod tests {
         assert!(!EmailQueue::is_temporary_error(
             "MAIL FROM failed: 550 5.7.1 spf reject"
         ));
-        assert!(!EmailQueue::is_temporary_error("Invalid recipient: no-at-sign"));
+        assert!(!EmailQueue::is_temporary_error(
+            "Invalid recipient: no-at-sign"
+        ));
         // 5xx codes must not be misclassified even with a stray 4 in a token
         // longer than 3 digits.
-        assert!(!EmailQueue::is_temporary_error("550 5.1.1 user unknown (14 tries)"));
+        assert!(!EmailQueue::is_temporary_error(
+            "550 5.1.1 user unknown (14 tries)"
+        ));
     }
 
     // -----------------------------------------------------------------------
@@ -2214,21 +2420,178 @@ mod tests {
         for _ in 0..100 {
             assert!(window.check("example.com"));
         }
-        // Quota is only consumed by recorded sends.
-        window.record("example.com");
-        window.record("example.com");
-        assert!(!window.check("example.com"), "2 recorded sends exhaust a 2/s quota");
-        assert!(window.check("other.com"), "per-domain windows are independent");
+        // Quota is only consumed by delivery-time consumptions.
+        assert!(window.try_consume("example.com"));
+        assert!(window.try_consume("example.com"));
+        assert!(
+            !window.check("example.com"),
+            "2 consumed sends exhaust a 2/s quota"
+        );
+        assert!(
+            window.check("other.com"),
+            "per-domain windows are independent"
+        );
     }
 
     #[test]
     fn rate_window_zero_limit_is_unlimited() {
         let window = RateWindow::new(0);
         for _ in 0..1000 {
-            window.record("k");
+            assert!(window.try_consume("k"));
         }
         assert!(window.is_unlimited());
         assert!(window.check("k"));
+    }
+
+    #[test]
+    fn rate_window_try_consume_enforces_limit_atomically() {
+        let window = RateWindow::new(3);
+        // Exactly N consumptions pass, the N+1th is refused — and refusal
+        // must not record an event (the window is not drained by denies).
+        assert!(window.try_consume("k"));
+        assert!(window.try_consume("k"));
+        assert!(window.try_consume("k"));
+        assert!(!window.try_consume("k"), "limit of 3/s must deny the 4th");
+        // Still denied on the next probe — denies did not consume quota,
+        // but neither did they free any.
+        assert!(!window.try_consume("k"));
+        // Other keys are independent.
+        assert!(window.try_consume("other"));
+    }
+
+    /// Builds an EmailQueue without a live database (lazy pool) — the
+    /// send-rate decision path is pure in-memory state, so it is testable.
+    fn queue_for_rate_tests(global: u64, domain: u64, tenant: u64) -> EmailQueue {
+        let pool = PgPool::connect_lazy("postgres://localhost/outbound-queue-test").unwrap();
+        let config = QueueConfig {
+            global_rate_per_second: global,
+            domain_rate_per_second: domain,
+            tenant_rate_per_second: tenant,
+            ..QueueConfig::default()
+        };
+        EmailQueue::new(pool, config, SmtpSender::new("test.example".into()))
+    }
+
+    #[tokio::test]
+    async fn send_rate_limit_causes_requeue_decision_beyond_limit() {
+        // F1:a configured global limit of 2 msg/s: the first two dispatch
+        // admissions are Allowed (and consume quota), the third is denied —
+        // process_email returns a `send_rate_limited:` error which the
+        // batch loop routes to mark_send_rate_limited (requeue with a
+        // short delay) instead of dispatching or failing the row.
+        let queue = queue_for_rate_tests(2, 0, 0);
+        let to = vec!["a@example.com".to_string()];
+
+        let first = queue.acquire_send_rate(&to, Some("t1"));
+        assert_eq!(first, RateLimitDecision::Allowed);
+
+        let second = queue.acquire_send_rate(&to, Some("t1"));
+        assert_eq!(second, RateLimitDecision::Allowed);
+
+        let third = queue.acquire_send_rate(&to, Some("t1"));
+        assert_eq!(
+            third,
+            RateLimitDecision::GlobalExceeded,
+            "beyond the configured 2/s the send must be refused (requeued, not dispatched)"
+        );
+
+        // The refusal is rendered as the distinguishable requeue error.
+        let err = queue.send_rate_limited_error(third);
+        assert!(EmailQueue::is_send_rate_limited(&err.to_string()));
+        assert!(err.to_string().contains("send_rate_limited: global"));
+        // Unrelated errors must NOT be classified as rate-limit requeues.
+        assert!(!EmailQueue::is_send_rate_limited(
+            "all recipients rejected: a@b.com"
+        ));
+    }
+
+    #[tokio::test]
+    async fn send_rate_limit_enforced_per_domain_and_tenant() {
+        let queue = queue_for_rate_tests(0, 1, 0);
+        let a = vec!["x@a.com".to_string()];
+        let b = vec!["y@b.com".to_string()];
+        assert_eq!(
+            queue.acquire_send_rate(&a, None),
+            RateLimitDecision::Allowed
+        );
+        assert_eq!(
+            queue.acquire_send_rate(&a, None),
+            RateLimitDecision::DomainExceeded("a.com".to_string()),
+            "1/s per-domain limit must deny the second same-domain send"
+        );
+        assert_eq!(
+            queue.acquire_send_rate(&b, None),
+            RateLimitDecision::Allowed,
+            "other domains are unaffected"
+        );
+
+        let queue = queue_for_rate_tests(0, 0, 1);
+        assert_eq!(
+            queue.acquire_send_rate(&a, Some("tenant-1")),
+            RateLimitDecision::Allowed
+        );
+        assert_eq!(
+            queue.acquire_send_rate(&a, Some("tenant-1")),
+            RateLimitDecision::TenantExceeded,
+            "1/s per-tenant limit must deny the second same-tenant send"
+        );
+        assert_eq!(
+            queue.acquire_send_rate(&a, Some("tenant-2")),
+            RateLimitDecision::Allowed,
+            "other tenants are unaffected"
+        );
+    }
+
+    #[test]
+    fn retry_delay_jitter_stays_within_20_percent() {
+        // F6:for every row id the jittered delay stays within ±20% of the
+        // base (and a non-zero base never collapses to zero).
+        let base = Duration::from_secs(60);
+        let mut saw_below_base = false;
+        let mut saw_above_base = false;
+        for _ in 0..200 {
+            let id = Uuid::new_v4();
+            let jittered = jittered_retry_delay_secs(base, &id);
+            assert!(
+                (48..=72).contains(&jittered),
+                "jittered delay {jittered}s outside [48,72] (±20% of 60s)"
+            );
+            saw_below_base |= jittered < 60;
+            saw_above_base |= jittered > 60;
+        }
+        assert!(
+            saw_below_base && saw_above_base,
+            "jitter must actually spread on both sides of the base"
+        );
+        // Deterministic per (id): same input, same output.
+        let id = Uuid::new_v4();
+        assert_eq!(
+            jittered_retry_delay_secs(base, &id),
+            jittered_retry_delay_secs(base, &id)
+        );
+    }
+
+    #[tokio::test]
+    async fn retry_delay_ladder_picks_index_and_falls_back() {
+        let queue = queue_for_rate_tests(0, 0, 0);
+        assert_eq!(queue.retry_delay_for_attempt(1), Duration::from_secs(60));
+        assert_eq!(queue.retry_delay_for_attempt(3), Duration::from_secs(1_800));
+        // Beyond the ladder: clamp to the last entry.
+        assert_eq!(
+            queue.retry_delay_for_attempt(99),
+            Duration::from_secs(21_600)
+        );
+        // Empty ladder: safe fallback instead of an index panic (#113).
+        let pool = PgPool::connect_lazy("postgres://localhost/outbound-queue-test").unwrap();
+        let config = QueueConfig {
+            retry_delays: Vec::new(),
+            ..QueueConfig::default()
+        };
+        let empty = EmailQueue::new(pool, config, SmtpSender::new("test.example".into()));
+        assert_eq!(
+            empty.retry_delay_for_attempt(1),
+            Duration::from_secs(DEFAULT_QUEUE_EMPTY_RETRY_FALLBACK_SECS)
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2252,11 +2615,7 @@ mod tests {
         // 1 accepted + 1 temp-rejected: the row must stay deliverable for the
         // rejected recipient (previously it was marked sent and the 4xx'd
         // recipient silently dropped).
-        let result = send_result(
-            true,
-            vec!["ok@example.com"],
-            vec!["tempfail@example.com"],
-        );
+        let result = send_result(true, vec!["ok@example.com"], vec!["tempfail@example.com"]);
         assert_eq!(
             classify_partial_acceptance(&result),
             DeliveryOutcome::PartiallyDelivered {
@@ -2268,7 +2627,10 @@ mod tests {
     #[test]
     fn full_acceptance_is_delivered() {
         let result = send_result(true, vec!["a@example.com", "b@example.com"], vec![]);
-        assert_eq!(classify_partial_acceptance(&result), DeliveryOutcome::Delivered);
+        assert_eq!(
+            classify_partial_acceptance(&result),
+            DeliveryOutcome::Delivered
+        );
     }
 
     #[test]
@@ -2312,7 +2674,9 @@ mod tests {
         ));
         assert!(EmailQueue::is_temporary_error("RCPT failed: 431 busy"));
         // …while digit-suffixed identifiers no longer do.
-        assert!(!EmailQueue::is_temporary_error("hard reject for invoice 45212"));
+        assert!(!EmailQueue::is_temporary_error(
+            "hard reject for invoice 45212"
+        ));
         // 5xx codes must not be misclassified.
         assert!(!EmailQueue::is_temporary_error(
             "all recipients rejected: a@b.com (response: 550 no such user)"

@@ -1,7 +1,10 @@
 package ee.apexmail;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+
 import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -20,41 +23,60 @@ public final class Templates {
     /**
      * Create a template.
      *
-     * <p>Required: {@code name}, {@code subject}, {@code html}.
-     * Optional: {@code engine}, {@code text}, {@code schema}.
+     * <p>Transmits exactly {name, subject, html_body, text_body?} per the
+     * server's CreateTemplateRequest (deny_unknown_fields). Legacy keys
+     * {@code html} / {@code text} are mapped; {@code slug}, {@code engine}
+     * and {@code schema} inputs are ignored (the API has no such fields).
+     *
+     * <p>Required: {@code name}, {@code subject}, {@code html} (or
+     * {@code html_body}).
      */
-    public TemplateResponse create(Map<String, Object> params) {
-        return client.request("POST", "/v1/templates", params, TemplateResponse.class);
+    public Template create(Map<String, Object> params) {
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        putIfPresent(body, "name", params.get("name"));
+        putIfPresent(body, "subject", params.get("subject"));
+        putIfPresent(body, "html_body", firstNonNull(params.get("html_body"), params.get("html")));
+        putIfPresent(body, "text_body", firstNonNull(params.get("text_body"), params.get("text")));
+        if (body.size() < 3 || body.get("html_body") == null) {
+            throw new IllegalArgumentException("name, subject, and html (html_body) are required");
+        }
+        return client.request("POST", "/v1/templates", body, Template.class);
     }
 
-    /**
-     * List templates.
-     *
-     * @param options  Optional: {@code limit}, {@code offset}
-     */
-    public TemplateListResponse list(Map<String, Object> options) {
+    /** List templates (the API returns a bare array). */
+    public List<Template> list(Map<String, Object> options) {
         String q = options != null && !options.isEmpty()
             ? "?" + buildQuery(options) : "";
-        return client.request("GET", "/v1/templates" + q, null, TemplateListResponse.class);
+        return client.request("GET", "/v1/templates" + q, null,
+            new TypeReference<List<Template>>() {});
     }
 
-    public TemplateListResponse list() {
+    public List<Template> list() {
         return list(null);
     }
 
-    /** Get a template by ID. */
-    public TemplateResponse get(String id) {
-        return client.request("GET", "/v1/templates/" + encode(id), null, TemplateResponse.class);
+    /** Get a template by ID (flat TemplateResponse). */
+    public Template get(String id) {
+        return client.request("GET", "/v1/templates/" + encode(id), null, Template.class);
     }
 
-    /** Get a template by its unique slug. */
-    public TemplateResponse getBySlug(String slug) {
-        return client.request("GET", "/v1/templates/slug/" + encode(slug), null, TemplateResponse.class);
-    }
-
-    /** Update a template. A new version is created automatically. */
-    public TemplateResponse update(String id, Map<String, Object> params) {
-        return client.request("PUT", "/v1/templates/" + encode(id), params, TemplateResponse.class);
+    /**
+     * Update a template. A new version is created automatically.
+     *
+     * <p>Transmits only {name?, subject?, html_body?, text_body?} per the
+     * server's UpdateTemplateRequest; legacy html/text keys are mapped and
+     * unknown keys (engine, schema, slug) are ignored.
+     */
+    public Template update(String id, Map<String, Object> params) {
+        Map<String, Object> body = new java.util.LinkedHashMap<>();
+        putIfPresent(body, "name", params.get("name"));
+        putIfPresent(body, "subject", params.get("subject"));
+        putIfPresent(body, "html_body", firstNonNull(params.get("html_body"), params.get("html")));
+        putIfPresent(body, "text_body", firstNonNull(params.get("text_body"), params.get("text")));
+        if (body.isEmpty()) {
+            throw new IllegalArgumentException("Update payload must include at least one field");
+        }
+        return client.request("PUT", "/v1/templates/" + encode(id), body, Template.class);
     }
 
     /** Delete a template and all its versions. */
@@ -63,8 +85,8 @@ public final class Templates {
     }
 
     /** Duplicate a template, creating a copy with a new ID. */
-    public TemplateResponse duplicate(String id) {
-        return client.request("POST", "/v1/templates/" + encode(id) + "/duplicate", null, TemplateResponse.class);
+    public Template duplicate(String id) {
+        return client.request("POST", "/v1/templates/" + encode(id) + "/duplicate", null, Template.class);
     }
 
     /**
@@ -73,9 +95,9 @@ public final class Templates {
      * @param id      Template ID
      * @param version The version number to roll back to
      */
-    public TemplateResponse rollback(String id, int version) {
+    public Template rollback(String id, int version) {
         return client.request("POST", "/v1/templates/" + encode(id) + "/rollback",
-            Map.of("version", version), TemplateResponse.class);
+            Map.of("version", version), Template.class);
     }
 
     /**
@@ -90,6 +112,16 @@ public final class Templates {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
+
+    private static void putIfPresent(Map<String, Object> body, String key, Object value) {
+        if (value != null) {
+            body.put(key, value);
+        }
+    }
+
+    private static Object firstNonNull(Object first, Object second) {
+        return first != null ? first : second;
+    }
 
     private static String encode(String s) {
         return URLEncoder.encode(s, StandardCharsets.UTF_8);
@@ -106,21 +138,27 @@ public final class Templates {
         return sb.toString();
     }
 
+    /**
+     * The flat TemplateResponse: {id, name, subject, html_body, text_body,
+     * version, status, created_at, updated_at}. The API has no slug or
+     * engine fields and no by-slug route.
+     */
     public record Template(
         String id,
         String name,
-        String slug,
         String subject,
-        String engine,
-        Integer currentVersion,
-        Boolean isActive,
-        String createdAt,
-        String updatedAt
+        @com.fasterxml.jackson.annotation.JsonProperty("html_body") String htmlBody,
+        @com.fasterxml.jackson.annotation.JsonProperty("text_body") String textBody,
+        int version,
+        String status,
+        @com.fasterxml.jackson.annotation.JsonProperty("created_at") String createdAt,
+        @com.fasterxml.jackson.annotation.JsonProperty("updated_at") String updatedAt
     ) {}
 
-    public record TemplateResponse(Template template) {}
-
-    public record TemplateListResponse(java.util.List<Template> templates, Map<String, Object> pagination) {}
-
-    public record RenderResponse(String html, String text, String subject) {}
+    /** Rendered output ({subject, html, text?}). */
+    public record RenderResponse(
+        String subject,
+        String html,
+        String text
+    ) {}
 }

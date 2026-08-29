@@ -45,7 +45,7 @@ Nous traitons les données conformément à notre [Politique de confidentialité
 
 ## 7. Conditions de paiement
 
-Les frais sont facturés mensuellement ou annuellement selon votre choix. Les prix publiés sont en USD. Les taxes applicables sont déterminées selon les règles applicables à la facture et au pays de facturation.
+Les frais sont facturés mensuellement ou annuellement selon votre choix. Les prix publiés sont en EUR. Les taxes applicables sont déterminées selon les règles applicables à la facture et au pays de facturation.
 
 ### 7.1 Renouvellement automatique
 

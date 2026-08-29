@@ -66,6 +66,42 @@ fn safe_ratio(numerator: i64, denominator: i64) -> f64 {
     }
 }
 
+// ─── F4: bounded analytics date ranges ─────────────────────────
+
+/// Maximum allowed width of an analytics `from`/`to` range.
+const ANALYTICS_MAX_RANGE_DAYS: i64 = 366;
+
+/// Earliest allowed analytics `from` (2020-01-01T00:00:00Z): the platform
+/// holds no data before this date, and unbounded lower bounds turn the
+/// range scans into expensive full-history scans.
+fn analytics_earliest_from() -> DateTime<Utc> {
+    DateTime::from_timestamp(1_577_836_800, 0).expect("2020-01-01T00:00:00Z is a valid timestamp")
+}
+
+/// Resolve and bound an analytics date range (F4).
+///
+/// - Defaults are unchanged: `from` = now−30d, `to` = now.
+/// - `from` is floored at 2020-01-01.
+/// - The width is capped at 366 days. An over-wide range is rejected with
+///   400 rather than silently clamped, so callers see that their requested
+///   window was not honored instead of receiving partial data.
+fn resolve_analytics_range(
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> Result<(DateTime<Utc>, DateTime<Utc>), ApiError> {
+    let from = from.unwrap_or_else(|| Utc::now() - TimeDelta::days(30));
+    let to = to.unwrap_or_else(Utc::now);
+
+    let from = from.max(analytics_earliest_from());
+    if to - from > TimeDelta::days(ANALYTICS_MAX_RANGE_DAYS) {
+        return Err(ApiError::BadRequest(format!(
+            "date range too wide: from/to must span at most {ANALYTICS_MAX_RANGE_DAYS} days"
+        )));
+    }
+
+    Ok((from, to))
+}
+
 fn volume_query_for_interval(interval: &str) -> &'static str {
     match interval {
         "hour" => {
@@ -216,10 +252,7 @@ async fn dashboard(
 ) -> Result<Json<ApiResponse<DashboardResponse>>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
-    let from = params
-        .from
-        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
-    let to = params.to.unwrap_or_else(Utc::now);
+    let (from, to) = resolve_analytics_range(params.from, params.to)?;
 
     let row = sqlx::query_as::<_, DashboardCountsRow>(
         "SELECT
@@ -270,10 +303,7 @@ async fn volume(
 ) -> Result<Json<ApiResponse<Vec<VolumePoint>>>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
-    let from = params
-        .from
-        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
-    let to = params.to.unwrap_or_else(Utc::now);
+    let (from, to) = resolve_analytics_range(params.from, params.to)?;
 
     let rows = sqlx::query_as::<_, VolumeRow>(volume_query_for_interval(&params.interval))
         .bind(&auth.tenant_id)
@@ -301,10 +331,7 @@ async fn engagement(
 ) -> Result<Json<ApiResponse<EngagementResponse>>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
-    let from = params
-        .from
-        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
-    let to = params.to.unwrap_or_else(Utc::now);
+    let (from, to) = resolve_analytics_range(params.from, params.to)?;
 
     let totals = sqlx::query_as::<_, EngagementTotalsRow>(
         "SELECT
@@ -367,10 +394,7 @@ async fn deliverability(
 ) -> Result<Json<ApiResponse<DeliverabilityResponse>>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
-    let from = params
-        .from
-        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
-    let to = params.to.unwrap_or_else(Utc::now);
+    let (from, to) = resolve_analytics_range(params.from, params.to)?;
 
     let row = sqlx::query_as::<_, DeliverabilityRow>(
         "SELECT
@@ -420,10 +444,7 @@ async fn export(
 ) -> Result<Json<ApiResponse<ExportResponse>>, ApiError> {
     require_scopes(&auth, &["analytics:read"])?;
 
-    let from = params
-        .from
-        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
-    let to = params.to.unwrap_or_else(Utc::now);
+    let (from, to) = resolve_analytics_range(params.from, params.to)?;
     let format = params.format.clone();
     let job_id = uuid::Uuid::new_v4();
 
@@ -872,10 +893,7 @@ async fn export_pdf(
 
     require_scopes(&auth, &["analytics:read"])?;
 
-    let from = params
-        .from
-        .unwrap_or_else(|| Utc::now() - chrono::Duration::days(30));
-    let to = params.to.unwrap_or_else(Utc::now);
+    let (from, to) = resolve_analytics_range(params.from, params.to)?;
 
     // Gather summary data for the PDF template
     let summary: Option<DashboardRow> = sqlx::query_as(
@@ -1044,6 +1062,49 @@ mod tests {
         assert_eq!(resp.bounce_rate, 0.1);
         assert_eq!(resp.complaint_rate, 5.0 / 90.0);
         assert_eq!(resp.inbox_rate, 0.85);
+    }
+
+    // ── F4: bounded analytics ranges ────────────────────────────
+
+    #[test]
+    fn test_resolve_analytics_range_defaults_to_thirty_days() {
+        let (from, to) = resolve_analytics_range(None, None).expect("default range must resolve");
+        let width = to - from;
+        assert!(width > TimeDelta::days(29), "default width was {width:?}");
+        assert!(width <= TimeDelta::days(30) + TimeDelta::minutes(1));
+    }
+
+    #[test]
+    fn test_resolve_analytics_range_floors_from_at_2020() {
+        let from = DateTime::from_timestamp(0, 0).unwrap(); // 1970
+        let to = DateTime::from_timestamp(0, 0).unwrap() + TimeDelta::days(30);
+        let (from, _) =
+            resolve_analytics_range(Some(from), Some(to)).expect("pre-2020 range must resolve");
+        assert_eq!(from, analytics_earliest_from());
+    }
+
+    #[test]
+    fn test_resolve_analytics_range_rejects_over_wide_range() {
+        // from is floored to 2020-01-01; a `to` more than 366 days later must
+        // be rejected with 400 instead of running an unbounded scan.
+        let from = analytics_earliest_from();
+        let to = from + TimeDelta::days(400);
+        match resolve_analytics_range(Some(from), Some(to)) {
+            Err(ApiError::BadRequest(message)) => {
+                assert!(message.contains("366"), "message was: {message}");
+            }
+            other => panic!("expected BadRequest for 400-day range, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_resolve_analytics_range_accepts_366_day_range() {
+        let from = analytics_earliest_from() + TimeDelta::days(365);
+        let to = from + TimeDelta::days(366);
+        let (resolved_from, resolved_to) =
+            resolve_analytics_range(Some(from), Some(to)).expect("366-day range must resolve");
+        assert_eq!(resolved_from, from);
+        assert_eq!(resolved_to, to);
     }
 
     #[test]

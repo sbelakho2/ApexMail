@@ -159,6 +159,14 @@ run_cargo_tests() {
 # database actually runs — the ephemeral database must be provisioned from
 # the SAME chain or the suite validates a schema that does not exist.
 apply_test_schema() {
+    # Dry-run (selftest) safety: ci_ephem_postgres only ECHOES its docker run
+    # in dry-run mode, so no container exists to resolve a port from — the
+    # real build/port/migrate steps are skipped and the suite's DB-dependent
+    # lanes degrade exactly like the CI_TEST_DB=none path.
+    if ci_dry; then
+        ci_info "dry-run: ephemeral schema application skipped (no postgres container)"
+        return "$CI_EXIT_OK"
+    fi
     ci_info "building the migrator (canonical chain embedded at compile time)"
     # sqlx::migrate! embeds via include_dir; some cargo versions miss new
     # files in the tracked dir on incremental rebuilds — force a rebuild so a

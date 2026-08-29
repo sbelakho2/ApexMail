@@ -537,7 +537,14 @@ async fn send_message(
             ])
         })?;
 
-    let quota_reservation = reserve_email_quota(&state, &auth.tenant_id).await?;
+    // Admission-time quota gate: meter one unit per delivery recipient
+    // (to + cc + bcc), not one per message — each recipient becomes its own
+    // email_queue row that is delivered (and billed) separately. The Lua
+    // check-and-increment in record_with_quota_check is atomic for the whole
+    // quantity, so an insufficient quota rejects the entire request with 403
+    // before anything is queued and without partially consuming quota (F1).
+    let quota_reservation =
+        reserve_email_quota(&state, &auth.tenant_id, quota_quantity_for_request(&body)).await?;
 
     // Idempotency key for the send — stored in the dedicated column so the
     // UNIQUE(tenant_id, idempotency_key) index is enforced inside the insert
@@ -713,7 +720,17 @@ async fn send_batch(
             continue;
         }
 
-        let quota_reservation = match reserve_email_quota(&state, &auth.tenant_id).await {
+        // Per-recipient metering, same as single sends: the reservation covers
+        // every delivery recipient of this batch item in one atomic quantity
+        // (F1). Insufficient quota rejects just this item — the reservation is
+        // all-or-nothing, so no partial quota is consumed.
+        let quota_reservation = match reserve_email_quota(
+            &state,
+            &auth.tenant_id,
+            quota_quantity_for_request(msg),
+        )
+        .await
+        {
             Ok(reservation) => reservation,
             Err(ApiError::Forbidden(message)) => {
                 rejected += 1;
@@ -1227,15 +1244,29 @@ async fn validate_send_with_domain_cache(
 struct QuotaReservation {
     event_id: Uuid,
     recorded_at: DateTime<Utc>,
+    /// Number of metered units this reservation holds. Every delivery
+    /// recipient (to + cc + bcc) becomes its own email_queue row that is
+    /// delivered separately, so quota must be metered per recipient, not per
+    /// message (F1).
+    quantity: i64,
+}
+
+/// Metered quantity for a send request: the number of delivery recipients.
+/// Each recipient is enqueued as a separate email_queue row, so this is the
+/// number of sends the tenant will actually consume.
+fn quota_quantity_for_request(body: &SendMessageRequest) -> i64 {
+    delivery_recipients(body).len() as i64
 }
 
 async fn reserve_email_quota(
     state: &AppState,
     tenant_id: &str,
+    quantity: i64,
 ) -> Result<QuotaReservation, ApiError> {
     let reservation = QuotaReservation {
         event_id: Uuid::new_v4(),
         recorded_at: Utc::now(),
+        quantity,
     };
 
     let quota = billing_service::usage::record_with_quota_check(
@@ -1243,7 +1274,7 @@ async fn reserve_email_quota(
         &state.redis,
         tenant_id,
         MeterEventType::EmailsSent,
-        1,
+        quantity,
         Some(reservation.event_id),
         None,
     )
@@ -1351,7 +1382,7 @@ async fn rollback_email_quota(
         &state.redis,
         tenant_id,
         MeterEventType::EmailsSent,
-        1,
+        reservation.quantity,
         reservation.event_id,
         reservation.recorded_at,
     )
@@ -1527,7 +1558,14 @@ mod tests {
         let tenant_id = insert_test_tenant(&pool, "message-queue").await;
         let domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
 
-        let scheduled_at = Utc::now() + chrono::Duration::minutes(15);
+        // Postgres TIMESTAMPTZ keeps microsecond precision; an untruncated
+        // Utc::now() carries nanoseconds that cannot survive the round-trip
+        // and fail the equality assertions below on any sub-µs clock read
+        // (this is the exact failure that stalled the deploy-host pipeline).
+        let scheduled_at = chrono::DateTime::<chrono::Utc>::from_timestamp_micros(
+            (Utc::now() + chrono::Duration::minutes(15)).timestamp_micros(),
+        )
+        .expect("timestamp_micros is always representable as a DateTime");
         let body = SendMessageRequest {
             from: "sender@example.com".into(),
             to: vec!["to@example.com".into()],
@@ -1864,9 +1902,73 @@ Bcc: victim@example.com"@example.com"#
         let reservation = QuotaReservation {
             event_id: Uuid::new_v4(),
             recorded_at: Utc::now(),
+            quantity: 3,
         };
         let debug_str = format!("{:?}", reservation);
         assert!(debug_str.contains("event_id"));
+    }
+
+    // ── Per-recipient quota metering (F1) ───────────────────────
+
+    #[test]
+    fn test_quota_quantity_counts_all_delivery_recipients() {
+        // to + cc + bcc each produce one email_queue row, so the metered
+        // quantity must be the combined recipient count, not 1.
+        let body = SendMessageRequest {
+            from: "sender@example.com".into(),
+            to: vec!["a@example.com".into(), "b@example.com".into()],
+            cc: Some(vec!["c@example.com".into()]),
+            bcc: Some(vec!["d@example.com".into(), "e@example.com".into()]),
+            subject: "Test".into(),
+            html: None,
+            text: Some("hi".into()),
+            tags: None,
+            metadata: None,
+            scheduled_at: None,
+        };
+        assert_eq!(quota_quantity_for_request(&body), 5);
+    }
+
+    #[test]
+    fn test_quota_quantity_minimum_is_one_for_valid_request() {
+        let body = SendMessageRequest {
+            from: "sender@example.com".into(),
+            to: vec!["a@example.com".into()],
+            cc: None,
+            bcc: None,
+            subject: "Test".into(),
+            html: None,
+            text: Some("hi".into()),
+            tags: None,
+            metadata: None,
+            scheduled_at: None,
+        };
+        // A validated request always has at least one `to` recipient, so the
+        // metered quantity is never zero (record_with_quota_check rejects
+        // quantity <= 0 with InvalidQuantity).
+        assert_eq!(quota_quantity_for_request(&body), 1);
+    }
+
+    #[test]
+    fn test_quota_quantity_matches_enqueued_queue_rows() {
+        // The quantity must equal the number of email_queue rows
+        // insert_message_and_queue creates for the same request.
+        let body = SendMessageRequest {
+            from: "sender@example.com".into(),
+            to: vec!["to@example.com".into()],
+            cc: Some(vec!["cc@example.com".into()]),
+            bcc: Some(vec!["bcc@example.com".into()]),
+            subject: "Test".into(),
+            html: None,
+            text: Some("hi".into()),
+            tags: None,
+            metadata: None,
+            scheduled_at: None,
+        };
+        assert_eq!(
+            quota_quantity_for_request(&body) as usize,
+            delivery_recipients(&body).len()
+        );
     }
 
     #[tokio::test]

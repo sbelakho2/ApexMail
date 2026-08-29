@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Page Not Found | ApexMail</title>
+  <meta name="description" content="The page you requested could not be found.">
+  <meta name="robots" content="noindex, nofollow">
+  <!--
+    F15 — edge-served branded 404 for apexmail.ee / www.apexmail.ee.
+    Self-contained (inline styles only, zero scripts, zero external assets) so
+    it renders identically whether the marketing container is up or not; the
+    palette mirrors the Zola 404 template (surface-950 background, brand-300
+    accent, white heading). Served by the nginx edge from
+    /var/www/apexmail-error-pages (see deploy/nginx/nginx.conf).
+  -->
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: rgb(9 9 11);
+      color: rgb(212 212 216);
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      min-height: 70vh;
+      display: flex;
+      align-items: center;
+    }
+    section { position: relative; width: 100%; max-width: 56rem; margin: 0 auto; padding: 5rem 1.5rem; }
+    .glow { position: absolute; inset: 0; background: radial-gradient(circle at top, rgba(220, 38, 38, 0.1), transparent 60%); pointer-events: none; }
+    .eyebrow { margin-bottom: 1rem; font-size: 0.875rem; font-weight: 600; letter-spacing: 0.3em; color: rgb(252 165 165); }
+    h1 { color: #fff; font-size: clamp(2.25rem, 5vw, 3rem); font-weight: 600; letter-spacing: -0.025em; max-width: 42rem; }
+    p.lead { margin-top: 1.5rem; font-size: 1.125rem; line-height: 1.7; max-width: 36rem; }
+    .actions { margin-top: 2.5rem; display: flex; flex-wrap: wrap; gap: 0.75rem; }
+    a.btn {
+      display: inline-block; padding: 0.625rem 1.25rem; border-radius: 0.5rem;
+      text-decoration: none; font-weight: 600; font-size: 0.95rem; border: 1px solid transparent;
+    }
+    a.primary { background: rgb(220 38 38); color: #fff; }
+    a.primary:hover { background: rgb(185 28 28); }
+    a.ghost { border-color: rgb(63 63 70); color: #fff; }
+    a.ghost:hover { border-color: rgb(161 161 170); }
+    footer { margin-top: 2.5rem; font-size: 0.75rem; color: rgb(113 113 122); }
+    footer a { color: rgb(252 165 165); }
+  </style>
+</head>
+<body>
+  <section>
+    <div class="glow"></div>
+    <p class="eyebrow">404</p>
+    <h1>This page is gone, but the platform is still here.</h1>
+    <p class="lead">The URL may be outdated or mistyped. Use one of the primary entry points below to get back to pricing, docs, or the application.</p>
+    <div class="actions">
+      <a class="btn primary" href="/pricing/">View Pricing</a>
+      <a class="btn ghost" href="/docs/">Read Docs</a>
+      <a class="btn ghost" href="https://app.apexmail.ee/login">Open Console</a>
+    </div>
+    <footer>Or visit the <a href="/docs/">full documentation index</a>.</footer>
+  </section>
+</body>
+</html>

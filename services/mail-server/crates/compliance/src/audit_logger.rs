@@ -58,7 +58,14 @@ impl AuditLogger {
             .clone()
     }
 
-    /// Initialize by loading last hashes from DB.
+    /// Initialize by loading last hashes from the live table AND the archive.
+    ///
+    /// F12: the chain head used to be loaded from `audit_logs` only — once a
+    /// chain was fully archived (the retention trim's normal outcome), a
+    /// restart found no head and the next append built on `previous_hash =
+    /// NULL`, silently forking the chain. The archive is part of the chain
+    /// (verify/export already span both tables, E-2). Deployments without an
+    /// archive table fall back to the live-only head.
     pub async fn initialize(&self) -> Result<(), String> {
         sqlx::query(
             "CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant_timestamp ON audit_logs (tenant_id, timestamp DESC)",
@@ -67,17 +74,34 @@ impl AuditLogger {
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
-        let rows: Vec<(Option<String>, String)> = sqlx::query_as(
-            "SELECT tenant_id, hash FROM audit_logs a
-             WHERE timestamp = (
-               SELECT MAX(timestamp) FROM audit_logs b
-               WHERE COALESCE(b.tenant_id, 'global') = COALESCE(a.tenant_id, 'global')
-             )
-             ORDER BY timestamp DESC",
+        let rows: Vec<(Option<String>, String)> = match sqlx::query_as(
+            "SELECT DISTINCT ON (COALESCE(tenant_id, 'global')) tenant_id, hash
+             FROM (
+               SELECT tenant_id, timestamp, hash FROM audit_logs
+               UNION ALL
+               SELECT tenant_id, timestamp, hash FROM audit_logs_archive
+             ) entries
+             ORDER BY COALESCE(tenant_id, 'global'), timestamp DESC",
         )
         .fetch_all(&self.db)
         .await
-        .map_err(|e| format!("DB error: {e}"))?;
+        {
+            Ok(rows) => rows,
+            Err(e) if is_undefined_table(&e) => {
+                tracing::warn!(
+                    "audit_logs_archive absent — chain heads loaded from the live table only"
+                );
+                sqlx::query_as(
+                    "SELECT DISTINCT ON (COALESCE(tenant_id, 'global')) tenant_id, hash
+                     FROM audit_logs
+                     ORDER BY COALESCE(tenant_id, 'global'), timestamp DESC",
+                )
+                .fetch_all(&self.db)
+                .await
+                .map_err(|e| format!("DB error: {e}"))?
+            }
+            Err(e) => return Err(format!("DB error: {e}")),
+        };
 
         let mut map = self.last_hashes.write().await;
         for (tenant_id, hash) in rows {
@@ -664,22 +688,55 @@ impl AuditLogger {
     /// Rows that failed to copy (e.g. pre-existing conflicting archive rows)
     /// are preserved in the live table — they no longer vanish from
     /// verify/export.
+    ///
+    /// F5 (legal-hold aware): rows belonging to tenants with an active
+    /// `tenants.legal_hold` are never archived away — removing them from the
+    /// live (or any) table under a hold is evidence spoliation. Rows with a
+    /// NULL tenant_id cannot be attributed and are KEPT whenever any hold is
+    /// active (fall back to keep). Both the copy and the delete apply the
+    /// same exclusion, so held rows simply stay live.
     pub async fn archive(&self, older_than: DateTime<Utc>) -> Result<i64, String> {
+        // Held tenants, best-effort: no tenants table / no legal_hold column
+        // (pre-121) → no exclusion possible, behave as before.
+        let held: Option<Vec<String>> =
+            match sqlx::query_scalar("SELECT id FROM tenants WHERE legal_hold = true")
+                .fetch_all(&self.db)
+                .await
+            {
+                Ok(ids) => Some(ids),
+                Err(e) if is_undefined_table(&e) => None,
+                Err(e) if is_undefined_column(&e) => None,
+                Err(e) => return Err(format!("DB error (legal hold lookup): {e}")),
+            };
+        // `tenant_id IS NOT NULL AND tenant_id <> ALL($2)`: NULL-tenant rows
+        // are excluded too while any hold is active.
+        let any_held = held.as_ref().is_some_and(|ids| !ids.is_empty());
+        let not_held = if any_held {
+            " AND (a.tenant_id IS NOT NULL AND a.tenant_id <> ALL($2))"
+        } else {
+            ""
+        };
+        let bind_held = if any_held { held.as_ref() } else { None };
+
         let mut tx = self
             .db
             .begin()
             .await
             .map_err(|e| format!("DB error: {e}"))?;
 
-        let result = sqlx::query(
+        let copy_sql = format!(
             "INSERT INTO audit_logs_archive
-             SELECT * FROM audit_logs WHERE timestamp < $1
-             ON CONFLICT DO NOTHING",
-        )
-        .bind(older_than)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
+             SELECT * FROM audit_logs a WHERE a.timestamp < $1{not_held}
+             ON CONFLICT DO NOTHING"
+        );
+        let mut copy = sqlx::query(&copy_sql).bind(older_than);
+        if let Some(ids) = bind_held {
+            copy = copy.bind(ids);
+        }
+        let result = copy
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
 
         let archived = result.rows_affected() as i64;
 
@@ -687,18 +744,22 @@ impl AuditLogger {
         // same chain hash. A pre-existing conflicting archive row (different
         // content) means the copy did NOT verifiably happen for that row —
         // the live original is preserved.
-        sqlx::query(
+        let delete_sql = format!(
             "DELETE FROM audit_logs a
-             WHERE a.timestamp < $1
+             WHERE a.timestamp < $1{not_held}
                AND EXISTS (
                  SELECT 1 FROM audit_logs_archive b
                  WHERE b.id = a.id AND b.hash = a.hash
-               )",
-        )
-        .bind(older_than)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("DB error: {e}"))?;
+               )"
+        );
+        let mut delete = sqlx::query(&delete_sql).bind(older_than);
+        if let Some(ids) = bind_held {
+            delete = delete.bind(ids);
+        }
+        delete
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
 
         tx.commit().await.map_err(|e| format!("DB error: {e}"))?;
 
@@ -820,6 +881,23 @@ impl AuditLogger {
 }
 
 // ─── Export Result ──────────────────────────────────────────────
+
+/// Postgres undefined_table (42P01).
+fn is_undefined_table(err: &sqlx::Error) -> bool {
+    err.as_database_error()
+        .and_then(|d| d.code())
+        .map(|c| c == "42P01")
+        .unwrap_or(false)
+}
+
+/// Postgres undefined_column (42703) — e.g. `tenants.legal_hold` before
+/// migration 121 on a runtime-provisioned database.
+fn is_undefined_column(err: &sqlx::Error) -> bool {
+    err.as_database_error()
+        .and_then(|d| d.code())
+        .map(|c| c == "42703")
+        .unwrap_or(false)
+}
 
 #[derive(Debug, Clone)]
 pub struct ExportResult {

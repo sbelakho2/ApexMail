@@ -48,7 +48,7 @@ async fn list_crm_leads(
     Query(params): Query<CrmLeadsQuery>,
 ) -> Result<Json<Vec<CrmLead>>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     // Check table exists
     let exists: Option<(bool,)> = sqlx::query_as(

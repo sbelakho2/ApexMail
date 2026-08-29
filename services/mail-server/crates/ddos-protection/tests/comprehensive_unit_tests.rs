@@ -1104,6 +1104,8 @@ mod fingerprint_fix_tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         }
     }
 

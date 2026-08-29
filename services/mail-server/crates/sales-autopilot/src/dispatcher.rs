@@ -72,115 +72,27 @@ pub type QuotaFuture<'a, T> = std::pin::Pin<Box<dyn std::future::Future<Output =
 
 /// Production quota gateway.
 ///
-/// # Integration point (precise)
-///
-/// This is a faithful LOCAL mirror of `billing_service::usage::
-/// record_with_quota_check` / `rollback_usage_record`
-/// (crates/billing-service/src/usage.rs): same Redis counter keys
-/// (`meter:rt:{tenant}:emails_sent:{Y}-{M}`), same dedup keys
-/// (`meter:dedup:{event_id}`), same check-and-increment Lua semantics, same
-/// `metering_events` persistence, same plan-limit resolution SQL. It exists
-/// because the billing-service crate currently does not compile in this
-/// working tree (uncommitted WIP in an untracked `usage_ingest.rs` wired
-/// through a modified `lib.rs`) and this crate must not edit sibling crates.
-///
-/// **When billing-service compiles again**, replace the bodies of
-/// [`QuotaGateway::reserve`] and [`QuotaGateway::rollback`] below with direct
-/// calls to `billing_service::usage::record_with_quota_check(...)` /
-/// `rollback_usage_record(...)` (exactly what api-server's messages.rs does)
-/// and delete the private helpers in this block — the keys and persisted
-/// rows are already identical, so the swap is seamless.
+/// Calls the REAL billing gate — `billing_service::usage::
+/// record_with_quota_check` / `rollback_usage_record` — the exact functions
+/// api-server's REST send path (crates/api-server/src/routes/messages.rs)
+/// uses. (This block used to be a local mirror of those functions, kept
+/// only while billing-service did not compile; the mirror's UTC
+/// calendar-month counter key diverged from the billing gate's
+/// billing-cycle-anchored key, silently doubling the effective email limit
+/// for subscribed tenants — audit F1. Depending on the real implementation
+/// means one quota gate for the whole platform: anchored counter keys,
+/// override-aware plan limits with per-plan builtin fallbacks,
+/// `metering_events` persistence, the per-event audit-log append and
+/// reservation compensation on failure.)
 #[derive(Debug, Clone)]
 pub struct BillingQuotaGateway {
     db: PgPool,
     redis: deadpool_redis::Pool,
 }
 
-/// Email quota fallback when the plan row exists but has a NULL email
-/// limit — matches the billing service's builtin free-plan seed
-/// (`builtin_quota_limits` in billing-service/src/plans.rs).
-const FALLBACK_EMAIL_LIMIT: i64 = 30_000;
-
-/// Same check-and-increment Lua as billing-service `QUOTA_CHECK_AND_INCR_LUA`.
-const QUOTA_CHECK_AND_INCR_LUA: &str = r#"
-local current = tonumber(redis.call('GET', KEYS[1]) or '0')
-local lim     = tonumber(ARGV[1])
-local qty     = tonumber(ARGV[2])
-local ttl     = tonumber(ARGV[3])
-if lim >= 0 and current + qty > lim then
-    return -1
-end
-local new_val = redis.call('INCRBY', KEYS[1], qty)
-redis.call('EXPIRE', KEYS[1], ttl)
-return new_val
-"#;
-
-/// Billing keeps counters for 40 days.
-const METER_TTL_SECS: i64 = 40 * 86_400;
-
-/// Mirror of billing-service `usage_counter_key` (calendar-month window).
-fn usage_counter_key(tenant_id: &str, at: chrono::DateTime<Utc>) -> String {
-    use chrono::Datelike;
-    format!(
-        "meter:rt:{}:emails_sent:{}-{:02}",
-        tenant_id,
-        at.year(),
-        at.month()
-    )
-}
-
-/// Mirror of billing-service `usage_dedup_key`.
-fn usage_dedup_key(event_id: Uuid) -> String {
-    format!("meter:dedup:{event_id}")
-}
-
-/// Mirror of billing-service `TENANT_PLAN_LIMITS_SQL` (override-aware).
-const TENANT_PLAN_LIMITS_SQL: &str = r#"
-        SELECT t.plan as plan_name,
-               p.email_limit
-        FROM tenants t
-        LEFT JOIN plan_overrides po
-          ON po.tenant_id = t.id
-         AND po.active = true
-         AND (po.expires_at IS NULL OR po.expires_at > NOW())
-        LEFT JOIN plans p ON p.name = COALESCE(po.plan, t.plan)
-        WHERE t.id = $1
-        "#;
-
 impl BillingQuotaGateway {
     pub fn new(db: PgPool, redis: deadpool_redis::Pool) -> Self {
         Self { db, redis }
-    }
-
-    /// Mirror of billing-service `rollback_quota_reservation`: atomically
-    /// decrement the counter and drop the dedup key.
-    async fn rollback_reservation(
-        &self,
-        tenant_id: &str,
-        event_id: Uuid,
-        recorded_at: DateTime<Utc>,
-    ) -> Result<(), SalesError> {
-        let mut conn =
-            self.redis.get().await.map_err(|e| {
-                SalesError::ServiceUnavailable(format!("quota redis unavailable: {e}"))
-            })?;
-        let counter_key = usage_counter_key(tenant_id, recorded_at);
-        let dedup_key = usage_dedup_key(event_id);
-        let _: () = redis::pipe()
-            .atomic()
-            .cmd("INCRBY")
-            .arg(&counter_key)
-            .arg(-1i64)
-            .ignore()
-            .cmd("DEL")
-            .arg(&dedup_key)
-            .ignore()
-            .query_async(&mut *conn)
-            .await
-            .map_err(|e| {
-                SalesError::Internal(anyhow::anyhow!("quota rollback redis error: {e}"))
-            })?;
-        Ok(())
     }
 }
 
@@ -191,84 +103,35 @@ impl QuotaGateway for BillingQuotaGateway {
             let event_id = Uuid::new_v4();
             let recorded_at = Utc::now();
 
-            // Plan limit resolution (mirror of resolve_plan_limits):
-            // unknown tenant ⇒ limit 0 (deny), like the billing service.
-            let row: Option<(String, Option<i64>)> = sqlx::query_as(TENANT_PLAN_LIMITS_SQL)
-                .bind(&tenant_id)
-                .fetch_optional(&self.db)
-                .await
-                .map_err(|e| {
-                    tracing::error!(error = %e, tenant_id = %tenant_id, "quota plan lookup failed");
-                    SalesError::ServiceUnavailable(
-                        "billing quota enforcement is temporarily unavailable".into(),
-                    )
-                })?;
-            let limit = match row {
-                Some((_, email_limit)) => email_limit.unwrap_or(FALLBACK_EMAIL_LIMIT),
-                None => 0,
-            };
-
-            let mut conn = self.redis.get().await.map_err(|e| {
-                tracing::error!(error = %e, tenant_id = %tenant_id, "quota redis unavailable");
+            // The real billing gate: billing-cycle-anchored counter key,
+            // override-aware plan limits (NULL limits fall back to the
+            // per-plan builtin seeds — billing_service::usage::
+            // resolve_plan_limits / plans::builtin_quota_limits, replacing
+            // this crate's old hard-coded 30 000 fallback), atomic
+            // check-and-increment reservation, `metering_events` persistence
+            // WITH the per-event audit-log append, and compensation when
+            // persistence fails. Unknown tenants are denied (limit 0).
+            let result = billing_service::usage::record_with_quota_check(
+                &self.db,
+                &self.redis,
+                &tenant_id,
+                billing_service::types::MeterEventType::EmailsSent,
+                1,
+                Some(event_id),
+                Some(serde_json::json!({ "source": "sales-autopilot" })),
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, tenant_id = %tenant_id, "quota reservation failed");
                 SalesError::ServiceUnavailable(
                     "billing quota enforcement is temporarily unavailable".into(),
                 )
             })?;
 
-            // Atomic check-and-increment reservation.
-            let new_val: i64 = redis::Script::new(QUOTA_CHECK_AND_INCR_LUA)
-                .key(usage_counter_key(&tenant_id, recorded_at))
-                .arg(limit)
-                .arg(1i64)
-                .arg(METER_TTL_SECS)
-                .invoke_async(&mut *conn)
-                .await
-                .map_err(|e| {
-                    tracing::error!(error = %e, tenant_id = %tenant_id, "quota redis EVAL failed");
-                    SalesError::ServiceUnavailable(
-                        "billing quota enforcement is temporarily unavailable".into(),
-                    )
-                })?;
-
-            if new_val < 0 {
-                // Counter NOT incremented on denial (see the Lua script).
+            if !result.allowed {
+                // Counter NOT incremented on denial (billing's Lua gate).
                 return Err(SalesError::QuotaExhausted(tenant_id));
             }
-
-            // Persist the metering event (source of truth for invoices).
-            // On failure the reservation is compensated, exactly like
-            // billing-service's persist step.
-            let persisted = sqlx::query(
-                "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata) \
-                 VALUES ($1, $2, 'emails_sent', 1, $3, $4) \
-                 ON CONFLICT (id) DO NOTHING",
-            )
-            .bind(event_id)
-            .bind(&tenant_id)
-            .bind(recorded_at)
-            .bind(serde_json::json!({"source": "sales-autopilot"}))
-            .execute(&self.db)
-            .await;
-
-            if let Err(e) = persisted {
-                if let Err(rollback_err) = self
-                    .rollback_reservation(&tenant_id, event_id, recorded_at)
-                    .await
-                {
-                    tracing::error!(error = %rollback_err, "quota reservation leak after metering persist failure");
-                }
-                return Err(SalesError::Database(e.to_string()));
-            }
-
-            // Mark the event as durably persisted (dedup key), mirroring
-            // billing-service's post-persist SET.
-            let _: Result<(), _> = redis::cmd("SET")
-                .arg(usage_dedup_key(event_id))
-                .arg("1")
-                .arg("EX")
-                .arg(METER_TTL_SECS)
-                .query_async(&mut *conn)
-                .await;
 
             Ok(QuotaReservation {
                 event_id,
@@ -285,14 +148,22 @@ impl QuotaGateway for BillingQuotaGateway {
         let tenant_id = tenant_id.to_string();
         let reservation = reservation.clone();
         Box::pin(async move {
-            sqlx::query("DELETE FROM metering_events WHERE id = $1")
-                .bind(reservation.event_id)
-                .execute(&self.db)
-                .await
-                .map_err(|e| SalesError::Database(e.to_string()))?;
-
-            self.rollback_reservation(&tenant_id, reservation.event_id, reservation.recorded_at)
-                .await
+            // The real billing rollback: deletes the metering event, appends
+            // the rollback audit record, decrements the anchored counter and
+            // drops the dedup key.
+            billing_service::usage::rollback_usage_record(
+                &self.db,
+                &self.redis,
+                &tenant_id,
+                billing_service::types::MeterEventType::EmailsSent,
+                1,
+                reservation.event_id,
+                reservation.recorded_at,
+            )
+            .await
+            .map_err(|e| {
+                SalesError::ServiceUnavailable(format!("failed to release quota reservation: {e}"))
+            })
         })
     }
 }

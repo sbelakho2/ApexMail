@@ -50,6 +50,8 @@ const (
 
 var apiKeyPattern = regexp.MustCompile(`^am_(live|test)_[A-Za-z0-9]{16,}$`)
 var emailPattern = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
+// Control characters (C0 + DEL) stripped from caller-supplied header values.
+var controlCharRegex = regexp.MustCompile(`[\x00-\x1F\x7F]`)
 
 // Client is the root ApexMail API client. Use New() to create one.
 type Client struct {
@@ -234,8 +236,13 @@ func validateSendEmailRequest(req *SendEmailRequest) error {
 	if req.Subject == "" {
 		return fmt.Errorf("apexmail: subject is required")
 	}
-	if req.HTML == "" && req.Text == "" && req.TemplateID == "" {
-		return fmt.Errorf("apexmail: html, text, or templateId is required")
+	if req.HTML == "" && req.Text == "" {
+		// The API's SendMessageRequest has no templateId field, so a
+		// template-only request cannot be serialized into a valid body.
+		if req.TemplateID != "" {
+			return fmt.Errorf("apexmail: html or text body is required (templateId is not supported by the send API)")
+		}
+		return fmt.Errorf("apexmail: html or text is required")
 	}
 	return nil
 }
@@ -270,6 +277,16 @@ func newUUID4() (string, error) {
 }
 
 // WebhookSignatureOptions configures webhook signature verification.
+//
+// The platform (worker-processors/src/webhook/processor.rs) delivers:
+//
+//	X-ApexMail-Signature: sha256=<hex hmac>
+//	X-ApexMail-Timestamp: <milliseconds since epoch>
+//
+// and signs the exact string "{timestamp_millis}.{payload}". Pass the
+// X-ApexMail-Timestamp header in Timestamp; milliseconds are auto-detected
+// (and checked against time.Now().UnixMilli()) while the signed string
+// always uses the timestamp digits verbatim.
 type WebhookSignatureOptions struct {
 	Payload   []byte
 	Signature string
@@ -277,6 +294,10 @@ type WebhookSignatureOptions struct {
 	Timestamp string
 	Tolerance time.Duration
 }
+
+// msDetectionCutoff: timestamps above this cannot be epoch seconds
+// (2001-09-09); below it they cannot be epoch milliseconds.
+const msDetectionCutoff = int64(1_000_000_000_000)
 
 // VerifyWebhookSignature validates a webhook payload signature using HMAC-SHA256.
 func VerifyWebhookSignature(opts WebhookSignatureOptions) bool {
@@ -286,7 +307,7 @@ func VerifyWebhookSignature(opts WebhookSignatureOptions) bool {
 
 	timestamp, signature := parseWebhookSignature(opts.Signature)
 	if opts.Timestamp != "" {
-		timestamp = opts.Timestamp
+		timestamp = strings.TrimSpace(opts.Timestamp)
 	}
 	if timestamp == "" || signature == "" {
 		return false
@@ -299,11 +320,20 @@ func VerifyWebhookSignature(opts WebhookSignatureOptions) bool {
 	if opts.Tolerance <= 0 {
 		opts.Tolerance = 5 * time.Minute
 	}
-	if absInt64(time.Now().Unix()-ts) > int64(opts.Tolerance.Seconds()) {
+	// Auto-detect seconds vs milliseconds: the platform sends milliseconds.
+	now := time.Now().Unix()
+	tolerance := int64(opts.Tolerance.Seconds())
+	if ts > msDetectionCutoff {
+		now = time.Now().UnixMilli()
+		tolerance *= 1000
+	}
+	if absInt64(now-ts) > tolerance {
 		return false
 	}
 
-	signedPayload := fmt.Sprintf("%d.%s", ts, opts.Payload)
+	// Sign with the timestamp digits EXACTLY as delivered (milliseconds on
+	// the platform path) — never a normalized form.
+	signedPayload := timestamp + "." + string(opts.Payload)
 	mac := hmac.New(sha256.New, []byte(opts.Secret))
 	_, _ = mac.Write([]byte(signedPayload))
 	expected := hex.EncodeToString(mac.Sum(nil))
@@ -354,11 +384,19 @@ func (c *Client) do(ctx context.Context, method, path string, body, out interfac
 		return apiKeyErr
 	}
 
-	// Wrap the context with the configured per-request timeout so that
-	// the entire request lifecycle (including retry sleeps) has a bounded
-	// deadline, even when callers pass context.Background().
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	// Duplicate-side-effect protection (SDK-B, matching the PHP SDK): every
+	// mutating POST with a body that has no caller-supplied key gets a UUID
+	// generated BEFORE the retry loop, so all attempts of this logical
+	// operation present the same key and the server can deduplicate.
+	if len(idempotencyKey) == 0 || idempotencyKey[0] == "" {
+		if method == http.MethodPost && body != nil {
+			key, err := newUUID4()
+			if err != nil {
+				return err
+			}
+			idempotencyKey = []string{key}
+		}
+	}
 
 	var bodyBytes []byte
 	if body != nil {
@@ -378,8 +416,22 @@ func (c *Client) do(ctx context.Context, method, path string, body, out interfac
 		if len(bodyBytes) > 0 {
 			bodyReader = bytes.NewReader(bodyBytes)
 		}
-		req, err := http.NewRequestWithContext(ctx, method, baseURL+path, bodyReader)
+
+		// Per-ATTEMPT request timeout (F9): the configured timeout bounds a
+		// single HTTP request, not the whole retry loop. Wrapping the loop
+		// (including the retry sleeps) meant an honored Retry-After of e.g.
+		// 60s could never execute inside a 30s budget — the retry was
+		// canceled mid-sleep and surfaced as a generic NetworkError.
+		reqCtx := ctx
+		var cancel context.CancelFunc
+		if timeout > 0 {
+			reqCtx, cancel = context.WithTimeout(ctx, timeout)
+		}
+		req, err := http.NewRequestWithContext(reqCtx, method, baseURL+path, bodyReader)
 		if err != nil {
+			if cancel != nil {
+				cancel()
+			}
 			return &NetworkError{Message: "create request: " + err.Error(), Cause: err}
 		}
 		req.Header.Set("X-API-Key", apiKey)
@@ -388,13 +440,21 @@ func (c *Client) do(ctx context.Context, method, path string, body, out interfac
 			req.Header.Set("Content-Type", "application/json")
 		}
 		if len(idempotencyKey) > 0 && idempotencyKey[0] != "" {
-			req.Header.Set("X-Idempotency-Key", idempotencyKey[0])
+			// Header injection: strip control bytes from caller-supplied keys.
+			safeKey := controlCharRegex.ReplaceAllString(idempotencyKey[0], "")
+			if len(safeKey) > 128 {
+				safeKey = safeKey[:128]
+			}
+			req.Header.Set("X-Idempotency-Key", safeKey)
 		}
 
 		resp, err := httpClient.Do(req)
+		if cancel != nil {
+			cancel()
+		}
 		if err != nil {
 			if attempt < defaultMaxRetries {
-				if sleepErr := sleepWithContext(ctx, calculateBackoff(attempt)); sleepErr != nil {
+				if sleepErr := sleepWithContext(ctx, jitteredDelay(calculateBackoff(attempt))); sleepErr != nil {
 					return &NetworkError{Message: "request canceled", Cause: sleepErr}
 				}
 				continue
@@ -412,11 +472,16 @@ func (c *Client) do(ctx context.Context, method, path string, body, out interfac
 
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= http.StatusInternalServerError {
 			if attempt < defaultMaxRetries {
-				if sleepErr := sleepWithContext(ctx, retryDelay(resp, attempt)); sleepErr != nil {
+				// The sleep runs on the PARENT context (no timeout wrapper),
+				// so an honored Retry-After — capped at maxRetryAfterDelay —
+				// can actually elapse before the next attempt.
+				if sleepErr := sleepWithContext(ctx, jitteredDelay(retryDelay(resp, attempt))); sleepErr != nil {
 					return &NetworkError{Message: "request canceled", Cause: sleepErr}
 				}
 				continue
 			}
+			// Final 429 attempt: surface as the typed RateLimitError (via
+			// classifyAPIError below), never a generic NetworkError.
 		}
 
 		if resp.StatusCode >= 400 {
@@ -509,9 +574,14 @@ func capRetryDelay(delay time.Duration) time.Duration {
 
 // calculateBackoff computes quadratic backoff: baseDelay * attempt²,
 // capped at defaultMaxBackoff. Used when no Retry-After header is present.
+//
+// attempt is the retry NUMBER about to run (0 = first retry): the first
+// retry uses attempt 1 — a 0-based exponent produced a 0s delay, an
+// immediate hammer at a server that had just said "slow down" (matching
+// the PHP SDK's computeRetryDelay(max(1, attempt)) fix).
 func calculateBackoff(attempt int) time.Duration {
-	if attempt < 0 {
-		attempt = 0
+	if attempt < 1 {
+		attempt = 1
 	}
 	if attempt > 20 {
 		attempt = 20
@@ -521,6 +591,26 @@ func calculateBackoff(attempt int) time.Duration {
 		return defaultMaxBackoff
 	}
 	return delay
+}
+
+// jitteredDelay applies up to ±20% jitter so clients retrying in lockstep
+// spread out (thundering herd). The delay is never shortened by more than
+// 20%, so an honored Retry-After window is preserved.
+func jitteredDelay(delay time.Duration) time.Duration {
+	if delay <= 0 {
+		return 0
+	}
+	jitter := delay / 5
+	var delta int64
+	if jitter > 0 {
+		// crypto/rand is already imported; math/rand needs seeding care, so
+		// derive a small random factor from crypto/rand.
+		var b [1]byte
+		if _, err := rand.Read(b[:]); err == nil {
+			delta = int64(b[0]%201) - 100 // -100..100 → -100%..100% of jitter
+		}
+	}
+	return time.Duration(int64(delay) + delta*int64(jitter)/100)
 }
 
 func sleepWithContext(ctx context.Context, delay time.Duration) error {
@@ -759,22 +849,80 @@ type Pagination struct {
 type EmailsAPI struct{ client *Client }
 
 // SendEmailRequest is the request body for sending a single email.
+//
+// The struct keeps its historical input shape (EmailAddress values,
+// TemplateID, Priority, ...) for backwards compatibility, but the wire
+// payload (MarshalJSON) matches the server's SendMessageRequest exactly
+// (messages.rs, deny_unknown_fields): from/to/cc/bcc are serialized as
+// BARE address strings and only API-accepted fields are emitted. Inputs
+// the API rejects — display names, ReplyTo, TemplateID/TemplateData,
+// Attachments, Priority — are validated as inputs but never serialized.
 type SendEmailRequest struct {
 	From         EmailAddress   `json:"from"`
 	To           []EmailAddress `json:"to"`
 	CC           []EmailAddress `json:"cc,omitempty"`
 	BCC          []EmailAddress `json:"bcc,omitempty"`
-	ReplyTo      *EmailAddress  `json:"replyTo,omitempty"`
+	ReplyTo      *EmailAddress  `json:"replyTo,omitempty"` // unused-input: not sent
 	Subject      string         `json:"subject"`
 	HTML         string         `json:"html,omitempty"`
 	Text         string         `json:"text,omitempty"`
-	TemplateID   string         `json:"templateId,omitempty"`
-	TemplateData interface{}    `json:"templateData,omitempty"`
-	Attachments  []Attachment   `json:"attachments,omitempty"`
+	TemplateID   string         `json:"templateId,omitempty"`   // unused-input: not sent
+	TemplateData interface{}    `json:"templateData,omitempty"` // unused-input: not sent
+	Attachments  []Attachment   `json:"attachments,omitempty"`  // unused-input: not sent
 	Tags         []string       `json:"tags,omitempty"`
-	Priority     string         `json:"priority,omitempty"`
-	ScheduledAt  string         `json:"scheduledAt,omitempty"`
+	Priority     string         `json:"priority,omitempty"`    // unused-input: not sent
+	ScheduledAt  string         `json:"scheduled_at,omitempty"` // wire: snake_case
 	Metadata     interface{}    `json:"metadata,omitempty"`
+}
+
+// sendMessagePayload mirrors the server's SendMessageRequest serde shape
+// exactly (deny_unknown_fields — any extra key is a 422).
+type sendMessagePayload struct {
+	From        string      `json:"from"`
+	To          []string    `json:"to"`
+	CC          []string    `json:"cc,omitempty"`
+	BCC         []string    `json:"bcc,omitempty"`
+	Subject     string      `json:"subject"`
+	HTML        string      `json:"html,omitempty"`
+	Text        string      `json:"text,omitempty"`
+	Tags        []string    `json:"tags,omitempty"`
+	Metadata    interface{} `json:"metadata,omitempty"`
+	ScheduledAt string      `json:"scheduled_at,omitempty"`
+}
+
+// MarshalJSON serializes the exact SendMessageRequest wire shape.
+func (r *SendEmailRequest) MarshalJSON() ([]byte, error) {
+	payload := sendMessagePayload{
+		From:        r.From.Email,
+		To:          addressListToStrings(r.To),
+		CC:          addressListToStrings(r.CC),
+		BCC:         addressListToStrings(r.BCC),
+		Subject:     r.Subject,
+		HTML:        r.HTML,
+		Text:        r.Text,
+		Tags:        r.Tags,
+		Metadata:    r.Metadata,
+		ScheduledAt: r.ScheduledAt,
+	}
+	if payload.To == nil {
+		payload.To = []string{}
+	}
+	return json.Marshal(payload)
+}
+
+// addressListToStrings flattens EmailAddress values (keeping only the
+// address — the API has no display-name field) and plain strings.
+func addressListToStrings(addresses []EmailAddress) []string {
+	if len(addresses) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(addresses))
+	for _, address := range addresses {
+		if address.Email != "" {
+			out = append(out, address.Email)
+		}
+	}
+	return out
 }
 
 // SendOptions configures optional behavior for Emails.Send.
@@ -906,37 +1054,42 @@ func (a *EmailsAPI) Batch(ctx context.Context, req *BatchSendRequest, opts ...Se
 	return &resp, err
 }
 
-// EmailDetail is the full email object returned by the API.
+// EmailDetail is the full email object returned by the API — the flat
+// MessageDetail payload of GET /v1/messages/:id: {id, from (bare address
+// string), to (string array), subject, status, tags, metadata,
+// scheduled_at, sent_at, created_at}.
 type EmailDetail struct {
-	ID          string   `json:"id"`
-	Status      string   `json:"status"`
-	From        string   `json:"fromEmail"`
-	Subject     string   `json:"subject"`
-	Tags        []string `json:"tags"`
-	CreatedAt   string   `json:"createdAt"`
-	SentAt      string   `json:"sentAt,omitempty"`
-	DeliveredAt string   `json:"deliveredAt,omitempty"`
-	OpenedAt    string   `json:"openedAt,omitempty"`
-	ClickedAt   string   `json:"clickedAt,omitempty"`
+	ID          string          `json:"id"`
+	From        string          `json:"from"`
+	To          []string        `json:"to"`
+	Subject     string          `json:"subject"`
+	Status      string          `json:"status"`
+	Tags        []string        `json:"tags,omitempty"`
+	Metadata    json.RawMessage `json:"metadata,omitempty"`
+	ScheduledAt string          `json:"scheduled_at,omitempty"`
+	CreatedAt   string          `json:"created_at"`
+	SentAt      string          `json:"sent_at,omitempty"`
 }
 
-// GetEmailResponse wraps a single email resource.
-type GetEmailResponse struct {
-	Message EmailDetail `json:"message"`
-}
+// GetEmailResponse is the historical wrapper shape.
+//
+// Deprecated: the API returns the flat MessageDetail object (no
+// {"message": ...} wrapper); Get returns *EmailDetail directly.
+type GetEmailResponse = EmailDetail
 
-// Get retrieves an email by its ID.
-func (a *EmailsAPI) Get(ctx context.Context, id string) (*GetEmailResponse, error) {
-	var resp GetEmailResponse
+// Get retrieves an email by its ID (flat MessageDetail).
+func (a *EmailsAPI) Get(ctx context.Context, id string) (*EmailDetail, error) {
+	var resp EmailDetail
 	err := a.client.do(ctx, http.MethodGet, "/v1/messages/"+url.PathEscape(id), nil, &resp)
 	return &resp, err
 }
 
-// MessageQueueResponse is returned by queue-oriented message actions.
+// MessageQueueResponse is returned by queue-oriented message actions
+// ({id, status, created_at}).
 type MessageQueueResponse struct {
 	ID        string `json:"id"`
 	Status    string `json:"status"`
-	CreatedAt string `json:"createdAt"`
+	CreatedAt string `json:"created_at"`
 }
 
 // Cancel stops a queued or scheduled email before delivery.
@@ -949,19 +1102,34 @@ func (a *EmailsAPI) Cancel(ctx context.Context, id string) (*MessageQueueRespons
 	return &resp, err
 }
 
-// ListEmailsOptions filters for the List endpoint.
+// ListEmailsOptions filters for the List endpoint. The server's
+// ListMessagesQuery accepts {limit, offset, cursor, status, sort_by} only.
 type ListEmailsOptions struct {
 	Status string
 	Limit  *int
 	Offset int
 	Cursor string
-	Tag    string
+	Tag    string // Deprecated: not accepted by the API; not sent.
+	SortBy string
 }
 
-// ListEmailsResponse holds a paginated list of emails.
+// ListEmailsResponse holds a paginated list of emails. The API returns
+// {"data": [MessageDetail...], "meta": {...}} — after envelope unwrap the
+// payload is a bare array, which UnmarshalJSON accepts (as well as the
+// historical {"messages": ...} object shape).
 type ListEmailsResponse struct {
 	Messages   []EmailDetail `json:"messages"`
 	Pagination Pagination    `json:"pagination"`
+}
+
+// UnmarshalJSON accepts the API's bare array payload or the object form.
+func (r *ListEmailsResponse) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		return json.Unmarshal(trimmed, &r.Messages)
+	}
+	type alias ListEmailsResponse
+	return json.Unmarshal(trimmed, (*alias)(r))
 }
 
 // List retrieves a paginated list of emails for the tenant.
@@ -979,8 +1147,8 @@ func (a *EmailsAPI) List(ctx context.Context, opts ...ListEmailsOptions) (*ListE
 	if o.Status != "" {
 		values.Set("status", o.Status)
 	}
-	if o.Tag != "" {
-		values.Set("tag", o.Tag)
+	if o.SortBy != "" {
+		values.Set("sort_by", o.SortBy)
 	}
 	query := "?" + values.Encode()
 	var resp ListEmailsResponse
@@ -991,23 +1159,29 @@ func (a *EmailsAPI) List(ctx context.Context, opts ...ListEmailsOptions) (*ListE
 // DomainsAPI provides methods for managing sending domains.
 type DomainsAPI struct{ client *Client }
 
-// Domain is the domain resource.
+// Domain matches the server's flat DomainResponse: {id, name, status,
+// ses_verified, spf_verified, dkim_verified, dmarc_verified,
+// return_path_verified, created_at}.
 type Domain struct {
-	ID           string `json:"id"`
-	Domain       string `json:"domain"`
-	Status       string `json:"status"`
-	HealthStatus string `json:"healthStatus"`
-	VerifiedAt   string `json:"verifiedAt,omitempty"`
-	CreatedAt    string `json:"createdAt"`
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	Status             string `json:"status"`
+	SESVerified        bool   `json:"ses_verified"`
+	SPFVerified        bool   `json:"spf_verified"`
+	DKIMVerified       bool   `json:"dkim_verified"`
+	DMARCVerified      bool   `json:"dmarc_verified"`
+	ReturnPathVerified bool   `json:"return_path_verified"`
+	CreatedAt          string `json:"created_at"`
 }
 
-// DNSRecord represents a single DNS record required for domain verification.
+// DNSRecord represents a single DNS record required for domain verification
+// (domains.rs DnsRecord: {record_type, hostname, value, priority?}).
 type DNSRecord struct {
-	Type     string `json:"type"`
-	Name     string `json:"name"`
+	Type     string `json:"record_type"`
+	Name     string `json:"hostname"`
 	Value    string `json:"value"`
 	Priority int    `json:"priority,omitempty"`
-	Verified bool   `json:"verified"`
+	Verified bool   `json:"verified,omitempty"`
 }
 
 // Envelope represents the SMTP delivery envelope with authentication results.
@@ -1020,40 +1194,61 @@ type Envelope struct {
 	Timestamp string   `json:"timestamp"`
 }
 
-// CreateDomainRequest is the request body for adding a new domain.
+// CreateDomainRequest is the request body for adding a new domain. The
+// server's CreateDomainRequest accepts exactly {name} (deny_unknown_fields).
 type CreateDomainRequest struct {
-	Domain string `json:"domain"`
+	Domain string `json:"name"`
 }
 
-// CreateDomainResponse wraps the newly created domain.
-type CreateDomainResponse struct {
-	Domain     Domain      `json:"domain"`
-	DNSRecords []DNSRecord `json:"dnsRecords"`
+// marshalCreateDomain emits the exact {name} wire shape regardless of the
+// struct's field naming.
+func (r *CreateDomainRequest) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Name string `json:"name"`
+	}{Name: r.Domain})
 }
 
-// GetDomainResponse wraps a single domain.
-type GetDomainResponse struct {
-	Domain Domain `json:"domain"`
-}
+// CreateDomainResponse is the historical wrapper shape.
+//
+// Deprecated: the API returns the flat DomainResponse; Create returns
+// *Domain directly.
+type CreateDomainResponse = Domain
 
-// Create adds a new domain and returns the DNS records to configure.
-func (a *DomainsAPI) Create(ctx context.Context, req *CreateDomainRequest) (*CreateDomainResponse, error) {
-	var resp CreateDomainResponse
+// GetDomainResponse is the historical wrapper shape.
+//
+// Deprecated: the API returns the flat DomainResponse; Get returns *Domain
+// directly.
+type GetDomainResponse = Domain
+
+// Create adds a new domain (body {name}) and returns the created domain.
+func (a *DomainsAPI) Create(ctx context.Context, req *CreateDomainRequest) (*Domain, error) {
+	var resp Domain
 	err := a.client.do(ctx, http.MethodPost, "/v1/domains", req, &resp)
 	return &resp, err
 }
 
-// Get retrieves a domain by its ID.
-func (a *DomainsAPI) Get(ctx context.Context, id string) (*GetDomainResponse, error) {
-	var resp GetDomainResponse
+// Get retrieves a domain by its ID (flat DomainResponse).
+func (a *DomainsAPI) Get(ctx context.Context, id string) (*Domain, error) {
+	var resp Domain
 	err := a.client.do(ctx, http.MethodGet, "/v1/domains/"+url.PathEscape(id), nil, &resp)
 	return &resp, err
 }
 
-// ListDomainsResponse holds a paginated list of domains.
+// ListDomainsResponse holds a list of domains. The API returns a bare
+// array (no envelope); UnmarshalJSON accepts both shapes.
 type ListDomainsResponse struct {
 	Domains    []Domain   `json:"domains"`
 	Pagination Pagination `json:"pagination"`
+}
+
+// UnmarshalJSON accepts the API's bare array payload or the object form.
+func (r *ListDomainsResponse) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		return json.Unmarshal(trimmed, &r.Domains)
+	}
+	type alias ListDomainsResponse
+	return json.Unmarshal(trimmed, (*alias)(r))
 }
 
 // List retrieves all domains for the tenant.
@@ -1063,10 +1258,15 @@ func (a *DomainsAPI) List(ctx context.Context) (*ListDomainsResponse, error) {
 	return &resp, err
 }
 
-// VerifyDomainResponse is returned by DomainsAPI.Verify.
+// VerifyDomainResponse matches the server's VerifyResponse: {domain,
+// spf_verified, dkim_verified, dmarc_verified, return_path_verified, status}.
 type VerifyDomainResponse struct {
-	Verified bool   `json:"verified"`
-	Message  string `json:"message"`
+	Domain             string `json:"domain"`
+	SPFVerified        bool   `json:"spf_verified"`
+	DKIMVerified       bool   `json:"dkim_verified"`
+	DMARCVerified      bool   `json:"dmarc_verified"`
+	ReturnPathVerified bool   `json:"return_path_verified"`
+	Status             string `json:"status"`
 }
 
 // Verify triggers DNS verification for the given domain ID.
@@ -1081,59 +1281,111 @@ func (a *DomainsAPI) Delete(ctx context.Context, id string) error {
 	return a.client.do(ctx, http.MethodDelete, "/v1/domains/"+url.PathEscape(id), nil, nil)
 }
 
-// DomainHealthResponse contains SPF/DKIM/DMARC/blacklist status.
-type DomainHealthResponse struct {
-	SPF       string `json:"spf"`
-	DKIM      string `json:"dkim"`
-	DMARC     string `json:"dmarc"`
-	Blacklist string `json:"blacklist"`
-	Healthy   bool   `json:"healthy"`
-}
+// DomainHealthResponse is the historical health shape.
+//
+// Deprecated: the API has no GET /:id/health endpoint. GET /:id itself
+// carries the health information (spf/dkim/dmarc/return_path verification
+// booleans), so Health returns *Domain.
+type DomainHealthResponse = Domain
 
-// Health checks the deliverability health of a domain (SPF/DKIM/DMARC/blacklist).
-func (a *DomainsAPI) Health(ctx context.Context, id string) (*DomainHealthResponse, error) {
-	var resp DomainHealthResponse
-	err := a.client.do(ctx, http.MethodGet, "/v1/domains/"+url.PathEscape(id)+"/health", nil, &resp)
-	return &resp, err
+// Health checks the deliverability health of a domain. The API has no
+// /health subpath — this maps to GET /v1/domains/:id, whose
+// DomainResponse contains the SPF/DKIM/DMARC/return-path verification
+// state.
+func (a *DomainsAPI) Health(ctx context.Context, id string) (*Domain, error) {
+	return a.Get(ctx, id)
 }
 
 // WebhooksAPI provides methods for managing event webhooks.
 type WebhooksAPI struct{ client *Client }
 
-// Webhook is the webhook resource.
+// KnownWebhookEvents lists the event names the server accepts
+// (webhooks.rs KNOWN_WEBHOOK_EVENTS) — anything else is a 422.
+var KnownWebhookEvents = []string{
+	"email.delivered",
+	"email.bounced",
+	"email.complained",
+	"message.sent",
+	"message.delivered",
+	"message.bounced",
+	"message.complained",
+	"message.opened",
+	"message.clicked",
+	"recipient.unsubscribed",
+	"placement_test.completed",
+	"bounce",
+	"complaint",
+	"inbound",
+	"*",
+}
+
+// Webhook matches the server's flat WebhookResponse: {id, url, events,
+// secret (only at creation/rotation), status, created_at, updated_at}.
+// There is no name/enabled field — status is "active" | "paused" | "disabled".
 type Webhook struct {
 	ID        string   `json:"id"`
 	URL       string   `json:"url"`
 	Events    []string `json:"events"`
-	Active    bool     `json:"active"`
-	CreatedAt string   `json:"createdAt"`
+	Secret    string   `json:"secret,omitempty"`
+	Status    string   `json:"status"`
+	CreatedAt string   `json:"created_at"`
+	UpdatedAt string   `json:"updated_at"`
 }
 
-// CreateWebhookRequest is the request body for creating a webhook.
+// CreateWebhookRequest is the request body for creating a webhook. The
+// server's CreateWebhookRequest accepts exactly {url, events}
+// (deny_unknown_fields); the signing secret is generated server-side and
+// returned in the create response. Secret is accepted for backwards
+// compatibility but NOT serialized.
 type CreateWebhookRequest struct {
 	URL    string   `json:"url"`
 	Events []string `json:"events"`
-	Secret string   `json:"secret,omitempty"`
+	Secret string   `json:"secret,omitempty"` // unused-input: not sent
 }
 
-// CreateWebhookResponse wraps a created webhook.
-type CreateWebhookResponse struct {
-	Webhook Webhook `json:"webhook"`
+// MarshalJSON emits the exact {url, events} wire shape.
+func (r *CreateWebhookRequest) MarshalJSON() ([]byte, error) {
+	events := r.Events
+	if events == nil {
+		events = []string{}
+	}
+	return json.Marshal(struct {
+		URL    string   `json:"url"`
+		Events []string `json:"events"`
+	}{URL: r.URL, Events: events})
 }
 
-// ListWebhooksResponse wraps a list of webhooks.
+// CreateWebhookResponse is the historical wrapper shape.
+//
+// Deprecated: the API returns the flat WebhookResponse; Create returns
+// *Webhook directly.
+type CreateWebhookResponse = Webhook
+
+// ListWebhooksResponse holds a list of webhooks. The API returns a bare
+// array (no envelope); UnmarshalJSON accepts both shapes.
 type ListWebhooksResponse struct {
 	Webhooks []Webhook `json:"webhooks"`
 }
 
-// GetWebhookResponse wraps a single webhook.
-type GetWebhookResponse struct {
-	Webhook Webhook `json:"webhook"`
+// UnmarshalJSON accepts the API's bare array payload or the object form.
+func (r *ListWebhooksResponse) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		return json.Unmarshal(trimmed, &r.Webhooks)
+	}
+	type alias ListWebhooksResponse
+	return json.Unmarshal(trimmed, (*alias)(r))
 }
 
-// Create registers a new webhook endpoint.
-func (a *WebhooksAPI) Create(ctx context.Context, req *CreateWebhookRequest) (*CreateWebhookResponse, error) {
-	var resp CreateWebhookResponse
+// GetWebhookResponse is the historical wrapper shape.
+//
+// Deprecated: the API returns the flat WebhookResponse; Get returns *Webhook
+// directly.
+type GetWebhookResponse = Webhook
+
+// Create registers a new webhook endpoint ({url, events} on the wire).
+func (a *WebhooksAPI) Create(ctx context.Context, req *CreateWebhookRequest) (*Webhook, error) {
+	var resp Webhook
 	err := a.client.do(ctx, http.MethodPost, "/v1/webhooks", req, &resp)
 	return &resp, err
 }
@@ -1145,29 +1397,52 @@ func (a *WebhooksAPI) List(ctx context.Context) (*ListWebhooksResponse, error) {
 	return &resp, err
 }
 
-// Get retrieves a webhook by its ID.
-func (a *WebhooksAPI) Get(ctx context.Context, id string) (*GetWebhookResponse, error) {
-	var resp GetWebhookResponse
+// Get retrieves a webhook by its ID (flat WebhookResponse).
+func (a *WebhooksAPI) Get(ctx context.Context, id string) (*Webhook, error) {
+	var resp Webhook
 	err := a.client.do(ctx, http.MethodGet, "/v1/webhooks/"+url.PathEscape(id), nil, &resp)
 	return &resp, err
 }
 
-// UpdateWebhookRequest is the request body for updating a webhook.
+// UpdateWebhookRequest is the request body for updating a webhook. The
+// server's UpdateWebhookRequest accepts {url?, events?, status?} with
+// status one of "active" | "paused" | "disabled". Active (bool) is a
+// backwards-compatible input mapped to status active/paused; Secret is not
+// sent (secrets are server-managed via /rotate-secret).
 type UpdateWebhookRequest struct {
 	URL    string   `json:"url,omitempty"`
 	Events []string `json:"events,omitempty"`
-	Secret string   `json:"secret,omitempty"`
-	Active *bool    `json:"active,omitempty"`
+	Secret string   `json:"secret,omitempty"` // unused-input: not sent
+	Active *bool    `json:"active,omitempty"` // mapped to status
+	Status string   `json:"status,omitempty"` // "active" | "paused" | "disabled"
 }
 
-// UpdateWebhookResponse wraps an updated webhook.
-type UpdateWebhookResponse struct {
-	Webhook Webhook `json:"webhook"`
+// MarshalJSON emits the exact {url, events, status} wire shape.
+func (r *UpdateWebhookRequest) MarshalJSON() ([]byte, error) {
+	status := r.Status
+	if status == "" && r.Active != nil {
+		if *r.Active {
+			status = "active"
+		} else {
+			status = "paused"
+		}
+	}
+	return json.Marshal(struct {
+		URL     string   `json:"url,omitempty"`
+		Events  []string `json:"events,omitempty"`
+		Status  string   `json:"status,omitempty"`
+	}{URL: r.URL, Events: r.Events, Status: status})
 }
 
-// Update modifies a webhook's URL, event subscriptions, or active status.
-func (a *WebhooksAPI) Update(ctx context.Context, id string, req *UpdateWebhookRequest) (*UpdateWebhookResponse, error) {
-	var resp UpdateWebhookResponse
+// UpdateWebhookResponse is the historical wrapper shape.
+//
+// Deprecated: the API returns the flat WebhookResponse; Update returns
+// *Webhook directly.
+type UpdateWebhookResponse = Webhook
+
+// Update modifies a webhook's URL, event subscriptions, or status.
+func (a *WebhooksAPI) Update(ctx context.Context, id string, req *UpdateWebhookRequest) (*Webhook, error) {
+	var resp Webhook
 	err := a.client.do(ctx, http.MethodPut, "/v1/webhooks/"+url.PathEscape(id), req, &resp)
 	return &resp, err
 }
@@ -1177,87 +1452,123 @@ func (a *WebhooksAPI) Delete(ctx context.Context, id string) error {
 	return a.client.do(ctx, http.MethodDelete, "/v1/webhooks/"+url.PathEscape(id), nil, nil)
 }
 
-// Test sends a signed test event to a registered webhook endpoint.
-func (a *WebhooksAPI) Test(ctx context.Context, id string) (map[string]interface{}, error) {
-	var resp map[string]interface{}
-	err := a.client.do(ctx, http.MethodPost, "/v1/webhooks/"+url.PathEscape(id)+"/test", map[string]interface{}{}, &resp)
-	return resp, err
+// TestWebhookResponse matches the server's TestWebhookResponse: {success,
+// status_code?, response_time_ms, error?}.
+type TestWebhookResponse struct {
+	Success        bool    `json:"success"`
+	StatusCode     *uint16 `json:"status_code,omitempty"`
+	ResponseTimeMs uint64  `json:"response_time_ms"`
+	Error          string  `json:"error,omitempty"`
+}
+
+// Test sends a signed test event to a registered webhook endpoint. The
+// server takes no body.
+func (a *WebhooksAPI) Test(ctx context.Context, id string) (*TestWebhookResponse, error) {
+	var resp TestWebhookResponse
+	err := a.client.do(ctx, http.MethodPost, "/v1/webhooks/"+url.PathEscape(id)+"/test", nil, &resp)
+	return &resp, err
+}
+
+// RotateSecret rotates the webhook's signing secret and returns the
+// webhook with the new secret (POST /v1/webhooks/:id/rotate-secret).
+func (a *WebhooksAPI) RotateSecret(ctx context.Context, id string) (*Webhook, error) {
+	var resp Webhook
+	err := a.client.do(ctx, http.MethodPost, "/v1/webhooks/"+url.PathEscape(id)+"/rotate-secret", nil, &resp)
+	return &resp, err
 }
 
 // TemplatesAPI provides methods for managing email templates.
 type TemplatesAPI struct{ client *Client }
 
-// Template is the template resource.
+// Template matches the server's flat TemplateResponse: {id, name, subject,
+// html_body, text_body, version, status, created_at, updated_at}.
 type Template struct {
-	ID             string `json:"id"`
-	Name           string `json:"name"`
-	Slug           string `json:"slug"`
-	Subject        string `json:"subject"`
-	Engine         string `json:"engine"`
-	CurrentVersion int    `json:"currentVersion"`
-	IsActive       bool   `json:"isActive"`
-	CreatedAt      string `json:"createdAt"`
-	UpdatedAt      string `json:"updatedAt"`
+	ID        string  `json:"id"`
+	Name      string  `json:"name"`
+	Subject   string  `json:"subject"`
+	HTMLBody  string  `json:"html_body"`
+	TextBody  string  `json:"text_body,omitempty"`
+	Version   int     `json:"version"`
+	Status    string  `json:"status"`
+	CreatedAt string  `json:"created_at"`
+	UpdatedAt string  `json:"updated_at"`
 }
 
-// CreateTemplateRequest is the request body for creating a template.
+// CreateTemplateRequest is the request body for creating a template. The
+// server's CreateTemplateRequest accepts exactly {name, subject,
+// html_body, text_body?} (deny_unknown_fields). The struct keeps its
+// historical fields (HTML/Text/Slug/Engine/DefaultData) as inputs, but
+// only the API-accepted subset is serialized.
 type CreateTemplateRequest struct {
 	Name        string                 `json:"name"`
-	Slug        string                 `json:"slug,omitempty"`
+	Slug        string                 `json:"slug,omitempty"`   // unused-input: not sent
 	Subject     string                 `json:"subject"`
-	HTML        string                 `json:"html,omitempty"`
-	Text        string                 `json:"text,omitempty"`
-	Engine      string                 `json:"engine,omitempty"`
-	DefaultData map[string]interface{} `json:"defaultData,omitempty"`
+	HTML        string                 `json:"html_body"` // wire: html_body
+	Text        string                 `json:"text_body,omitempty"`
+	Engine      string                 `json:"engine,omitempty"`      // unused-input: not sent
+	DefaultData map[string]interface{} `json:"defaultData,omitempty"` // unused-input: not sent
 }
 
-// CreateTemplateResponse wraps a created template.
-type CreateTemplateResponse struct {
-	Template Template `json:"template"`
+// MarshalJSON emits the exact {name, subject, html_body, text_body?} shape.
+func (r *CreateTemplateRequest) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Name      string `json:"name"`
+		Subject   string `json:"subject"`
+		HTMLBody  string `json:"html_body"`
+		TextBody  string `json:"text_body,omitempty"`
+	}{Name: r.Name, Subject: r.Subject, HTMLBody: r.HTML, TextBody: r.Text})
 }
 
-// Create registers a new email template.
-func (a *TemplatesAPI) Create(ctx context.Context, req *CreateTemplateRequest) (*CreateTemplateResponse, error) {
-	var resp CreateTemplateResponse
+// CreateTemplateResponse is the historical wrapper shape.
+//
+// Deprecated: the API returns the flat TemplateResponse; Create returns
+// *Template directly.
+type CreateTemplateResponse = Template
+
+// Create registers a new email template ({name, subject, html_body,
+// text_body?} on the wire).
+func (a *TemplatesAPI) Create(ctx context.Context, req *CreateTemplateRequest) (*Template, error) {
+	var resp Template
 	err := a.client.do(ctx, http.MethodPost, "/v1/templates", req, &resp)
 	return &resp, err
 }
 
-// GetTemplateResponse wraps a template.
-type GetTemplateResponse struct {
-	Template Template `json:"template"`
-}
+// GetTemplateResponse is the historical wrapper shape.
+//
+// Deprecated: the API returns the flat TemplateResponse; Get returns
+// *Template directly.
+type GetTemplateResponse = Template
 
-// Get retrieves a template by its ID.
-func (a *TemplatesAPI) Get(ctx context.Context, id string) (*GetTemplateResponse, error) {
-	var resp GetTemplateResponse
+// Get retrieves a template by its ID (flat TemplateResponse).
+func (a *TemplatesAPI) Get(ctx context.Context, id string) (*Template, error) {
+	var resp Template
 	err := a.client.do(ctx, http.MethodGet, "/v1/templates/"+url.PathEscape(id), nil, &resp)
 	return &resp, err
 }
 
-// GetTemplateBySlugResponse wraps a template fetched by slug.
-type GetTemplateBySlugResponse struct {
-	Template Template `json:"template"`
-}
-
-// GetBySlug retrieves a template by its unique slug.
-func (a *TemplatesAPI) GetBySlug(ctx context.Context, slug string) (*GetTemplateBySlugResponse, error) {
-	var resp GetTemplateBySlugResponse
-	err := a.client.do(ctx, http.MethodGet, "/v1/templates/slug/"+url.PathEscape(slug), nil, &resp)
-	return &resp, err
-}
-
-// ListTemplatesOptions filters for the Templates.List endpoint.
+// ListTemplatesOptions filters for the Templates.List endpoint
+// ({limit, offset, cursor} only on the server).
 type ListTemplatesOptions struct {
 	Limit  *int
 	Offset int
 	Cursor string
 }
 
-// ListTemplatesResponse holds a paginated list of templates.
+// ListTemplatesResponse holds a list of templates. The API returns a bare
+// array (no envelope); UnmarshalJSON accepts both shapes.
 type ListTemplatesResponse struct {
 	Templates  []Template `json:"templates"`
 	Pagination Pagination `json:"pagination"`
+}
+
+// UnmarshalJSON accepts the API's bare array payload or the object form.
+func (r *ListTemplatesResponse) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		return json.Unmarshal(trimmed, &r.Templates)
+	}
+	type alias ListTemplatesResponse
+	return json.Unmarshal(trimmed, (*alias)(r))
 }
 
 // List retrieves a paginated list of templates.
@@ -1278,31 +1589,44 @@ func (a *TemplatesAPI) List(ctx context.Context, opts ...ListTemplatesOptions) (
 	return &resp, err
 }
 
-// UpdateTemplateRequest is the request body for updating a template.
+// UpdateTemplateRequest is the request body for updating a template. The
+// server's UpdateTemplateRequest accepts {name?, subject?, html_body?,
+// text_body?}; legacy fields are kept as unused inputs.
 type UpdateTemplateRequest struct {
 	Name        string                 `json:"name,omitempty"`
 	Subject     string                 `json:"subject,omitempty"`
-	HTML        string                 `json:"html,omitempty"`
-	Text        string                 `json:"text,omitempty"`
-	Engine      string                 `json:"engine,omitempty"`
-	DefaultData map[string]interface{} `json:"defaultData,omitempty"`
+	HTML        string                 `json:"html_body,omitempty"`
+	Text        string                 `json:"text_body,omitempty"`
+	Engine      string                 `json:"engine,omitempty"`      // unused-input: not sent
+	DefaultData map[string]interface{} `json:"defaultData,omitempty"` // unused-input: not sent
 }
 
-// UpdateTemplateResponse wraps an updated template.
-type UpdateTemplateResponse struct {
-	Template Template `json:"template"`
+// MarshalJSON emits the exact {name?, subject?, html_body?, text_body?} shape.
+func (r *UpdateTemplateRequest) MarshalJSON() ([]byte, error) {
+	return json.Marshal(struct {
+		Name      string `json:"name,omitempty"`
+		Subject   string `json:"subject,omitempty"`
+		HTMLBody  string `json:"html_body,omitempty"`
+		TextBody  string `json:"text_body,omitempty"`
+	}{Name: r.Name, Subject: r.Subject, HTMLBody: r.HTML, TextBody: r.Text})
 }
+
+// UpdateTemplateResponse is the historical wrapper shape.
+//
+// Deprecated: the API returns the flat TemplateResponse; Update returns
+// *Template directly.
+type UpdateTemplateResponse = Template
 
 // Update modifies a template. A new version is created automatically.
-func (a *TemplatesAPI) Update(ctx context.Context, id string, req *UpdateTemplateRequest) (*UpdateTemplateResponse, error) {
-	var resp UpdateTemplateResponse
+func (a *TemplatesAPI) Update(ctx context.Context, id string, req *UpdateTemplateRequest) (*Template, error) {
+	var resp Template
 	err := a.client.do(ctx, http.MethodPut, "/v1/templates/"+url.PathEscape(id), req, &resp)
 	return &resp, err
 }
 
 // Duplicate creates a copy of a template with a new ID.
-func (a *TemplatesAPI) Duplicate(ctx context.Context, id string) (*CreateTemplateResponse, error) {
-	var resp CreateTemplateResponse
+func (a *TemplatesAPI) Duplicate(ctx context.Context, id string) (*Template, error) {
+	var resp Template
 	err := a.client.do(ctx, http.MethodPost, "/v1/templates/"+url.PathEscape(id)+"/duplicate", nil, &resp)
 	return &resp, err
 }
@@ -1313,8 +1637,8 @@ type RollbackTemplateRequest struct {
 }
 
 // Rollback rolls back a template to a previous version.
-func (a *TemplatesAPI) Rollback(ctx context.Context, id string, version int) (*UpdateTemplateResponse, error) {
-	var resp UpdateTemplateResponse
+func (a *TemplatesAPI) Rollback(ctx context.Context, id string, version int) (*Template, error) {
+	var resp Template
 	err := a.client.do(ctx, http.MethodPost, "/v1/templates/"+url.PathEscape(id)+"/rollback",
 		&RollbackTemplateRequest{Version: version}, &resp)
 	return &resp, err
@@ -1330,10 +1654,11 @@ type RenderTemplateRequest struct {
 	Variables map[string]interface{} `json:"variables"`
 }
 
-// RenderTemplateResponse is returned by Templates.Render.
+// RenderTemplateResponse is returned by Templates.Render
+// ({subject, html, text?}).
 type RenderTemplateResponse struct {
 	HTML    string `json:"html"`
-	Text    string `json:"text"`
+	Text    string `json:"text,omitempty"`
 	Subject string `json:"subject"`
 }
 
@@ -1350,38 +1675,116 @@ func (a *TemplatesAPI) Render(ctx context.Context, id string, data map[string]in
 // SuppressionsAPI provides methods for managing the suppression list.
 type SuppressionsAPI struct{ client *Client }
 
-// AddSuppressionRequest adds one or more emails to the suppression list.
+// AddSuppressionRequest adds email address(es) to the suppression list.
+//
+// The server's CreateSuppressionRequest accepts exactly {email: string,
+// reason: string, source?: string} for ONE address (deny_unknown_fields —
+// the historical emails[] body was rejected). A single entry POSTs one
+// request; multiple entries use the /bulk endpoint with
+// {entries: [{email, reason}]}.
 type AddSuppressionRequest struct {
 	Emails []string `json:"emails"`
 	Reason string   `json:"reason"`
+	Source string   `json:"source,omitempty"`
+}
+
+// createSuppressionPayload is the exact CreateSuppressionRequest wire shape.
+type createSuppressionPayload struct {
+	Email  string `json:"email"`
+	Reason string `json:"reason"`
+	Source string `json:"source,omitempty"`
+}
+
+// MarshalJSON emits the single-email wire shape when exactly one address
+// is present (the common case). Multi-email requests are routed to Bulk
+// by Add and never marshal through here.
+func (r *AddSuppressionRequest) MarshalJSON() ([]byte, error) {
+	email := ""
+	if len(r.Emails) > 0 {
+		email = r.Emails[0]
+	}
+	return json.Marshal(createSuppressionPayload{Email: email, Reason: r.Reason, Source: r.Source})
+}
+
+// BulkSuppressionEntry is one {email, reason} entry of a bulk request.
+type BulkSuppressionEntry struct {
+	Email  string `json:"email"`
+	Reason string `json:"reason"`
+}
+
+// bulkSuppressionsWire is the exact BulkSuppressRequest wire shape.
+type bulkSuppressionsWire struct {
+	Entries []BulkSuppressionEntry `json:"entries"`
+}
+
+// BulkSuppressionsResponse matches the server's BulkSuppressResponse:
+// {created, duplicates, invalid}.
+type BulkSuppressionsResponse struct {
+	Created    int `json:"created"`
+	Duplicates int `json:"duplicates"`
+	Invalid    int `json:"invalid"`
 }
 
 // Add adds one or more email addresses to the suppression list.
 // reason should be "unsubscribe", "bounce", "complaint", or "manual".
-func (a *SuppressionsAPI) Add(ctx context.Context, req *AddSuppressionRequest) error {
-	return a.client.do(ctx, http.MethodPost, "/v1/suppressions", req, nil)
+// A single email POSTs {email, reason, source?}; multiple emails use the
+// /v1/suppressions/bulk endpoint.
+func (a *SuppressionsAPI) Add(ctx context.Context, req *AddSuppressionRequest) (*BulkSuppressionsResponse, error) {
+	if req == nil || len(req.Emails) == 0 {
+		return nil, fmt.Errorf("apexmail: at least one email is required")
+	}
+	if len(req.Emails) == 1 {
+		err := a.client.do(ctx, http.MethodPost, "/v1/suppressions", req, nil)
+		if err != nil {
+			return nil, err
+		}
+		return &BulkSuppressionsResponse{Created: 1}, nil
+	}
+
+	entries := make([]BulkSuppressionEntry, 0, len(req.Emails))
+	for _, email := range req.Emails {
+		entries = append(entries, BulkSuppressionEntry{Email: email, Reason: req.Reason})
+	}
+	var resp BulkSuppressionsResponse
+	err := a.client.do(ctx, http.MethodPost, "/v1/suppressions/bulk", bulkSuppressionsWire{Entries: entries}, &resp)
+	return &resp, err
 }
 
-// ListSuppressionsOptions filters for the Suppressions.List endpoint.
+// ListSuppressionsOptions filters for the Suppressions.List endpoint
+// ({limit, offset, cursor, reason} only on the server).
 type ListSuppressionsOptions struct {
 	Reason string
 	Limit  *int
 	Offset int
 	Cursor string
-	Tag    string
+	Tag    string // Deprecated: not accepted by the API; not sent.
 }
 
-// Suppression is a suppressed email address record.
+// Suppression matches the server's SuppressionResponse: {id, email,
+// reason, source, created_at}.
 type Suppression struct {
+	ID        string `json:"id"`
 	Email     string `json:"email"`
 	Reason    string `json:"reason"`
-	CreatedAt string `json:"createdAt"`
+	Source    string `json:"source"`
+	CreatedAt string `json:"created_at"`
 }
 
-// ListSuppressionsResponse holds a paginated list of suppressed addresses.
+// ListSuppressionsResponse holds a list of suppressed addresses. The API
+// returns a bare array (no envelope); UnmarshalJSON accepts both shapes.
 type ListSuppressionsResponse struct {
 	Suppressions []Suppression `json:"suppressions"`
 	Pagination   Pagination    `json:"pagination"`
+}
+
+// UnmarshalJSON accepts the API's bare array payload or the object form.
+func (r *ListSuppressionsResponse) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '[' {
+		return json.Unmarshal(trimmed, &r.Suppressions)
+	}
+	type alias ListSuppressionsResponse
+	return json.Unmarshal(trimmed, (*alias)(r))
 }
 
 // List retrieves a paginated list of suppressed addresses.
@@ -1399,20 +1802,18 @@ func (a *SuppressionsAPI) List(ctx context.Context, opts ...ListSuppressionsOpti
 	if o.Reason != "" {
 		values.Set("reason", o.Reason)
 	}
-	if o.Tag != "" {
-		values.Set("tag", o.Tag)
-	}
 	query := "?" + values.Encode()
 	var resp ListSuppressionsResponse
 	err := a.client.do(ctx, http.MethodGet, "/v1/suppressions"+query, nil, &resp)
 	return &resp, err
 }
 
-// CheckSuppressionResponse indicates whether an email address is suppressed.
+// CheckSuppressionResponse matches the server's CheckResponse: {email,
+// suppressed, reason?}.
 type CheckSuppressionResponse struct {
+	Email      string `json:"email"`
 	Suppressed bool   `json:"suppressed"`
 	Reason     string `json:"reason,omitempty"`
-	CreatedAt  string `json:"createdAt,omitempty"`
 }
 
 // Check whether a specific email address is on the suppression list.
@@ -1428,18 +1829,26 @@ func (a *SuppressionsAPI) Delete(ctx context.Context, id string) error {
 }
 
 // BulkSuppressionsRequest is the request body for bulk suppression changes.
-type BulkSuppressionsRequest struct {
-	Entries []map[string]interface{} `json:"entries"`
+//
+// Deprecated: use []BulkSuppressionEntry with BulkEntries — this legacy
+// shape accepted arbitrary maps; the API's BulkEntry is exactly
+// {email, reason} (deny_unknown_fields).
+type BulkSuppressionsRequest = bulkSuppressionsWire
+
+// Bulk adds suppressions through the API bulk endpoint
+// ({entries: [{email, reason}]}).
+func (a *SuppressionsAPI) Bulk(ctx context.Context, req *BulkSuppressionsRequest) (*BulkSuppressionsResponse, error) {
+	return a.BulkEntries(ctx, req.Entries)
 }
 
-// BulkSuppressionsResponse is a flexible bulk suppression response payload.
-type BulkSuppressionsResponse map[string]interface{}
-
-// Bulk adds suppressions through the API bulk endpoint.
-func (a *SuppressionsAPI) Bulk(ctx context.Context, req *BulkSuppressionsRequest) (BulkSuppressionsResponse, error) {
+// BulkEntries adds suppressions in bulk with the exact BulkEntry shape.
+func (a *SuppressionsAPI) BulkEntries(ctx context.Context, entries []BulkSuppressionEntry) (*BulkSuppressionsResponse, error) {
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("apexmail: at least one entry is required")
+	}
 	var resp BulkSuppressionsResponse
-	err := a.client.do(ctx, http.MethodPost, "/v1/suppressions/bulk", req, &resp)
-	return resp, err
+	err := a.client.do(ctx, http.MethodPost, "/v1/suppressions/bulk", bulkSuppressionsWire{Entries: entries}, &resp)
+	return &resp, err
 }
 
 // EventsAPI provides methods for querying email delivery events.
@@ -1589,13 +1998,37 @@ func eventAggregateQuery(opts ...EventAggregateOptions) string {
 // APIKeysAPI provides API key management helpers.
 type APIKeysAPI struct{ client *Client }
 
-// CreateAPIKeyRequest is the request body for creating an API key.
+// CreateAPIKeyRequest is the request body for creating an API key. The
+// server's CreateApiKeyRequest (auth.rs) accepts exactly {name,
+// scopes: string[], expires_in_days?} — scopes is REQUIRED (use an empty
+// slice for a key with no scopes). ExpiresAt is a legacy input and is not
+// sent.
 type CreateAPIKeyRequest struct {
-	Name      string `json:"name"`
-	ExpiresAt string `json:"expiresAt,omitempty"`
+	Name          string   `json:"name"`
+	Scopes        []string `json:"scopes"`
+	ExpiresInDays *int     `json:"expires_in_days,omitempty"`
+	ExpiresAt     string   `json:"expiresAt,omitempty"` // unused-input: not sent
 }
 
-// APIKeyResponse is a flexible API-key response payload.
+// MarshalJSON emits the exact {name, scopes, expires_in_days?} wire shape.
+func (r *CreateAPIKeyRequest) MarshalJSON() ([]byte, error) {
+	scopes := r.Scopes
+	if scopes == nil {
+		scopes = []string{}
+	}
+	var expires *int
+	if r.ExpiresInDays != nil {
+		expires = r.ExpiresInDays
+	}
+	return json.Marshal(struct {
+		Name          string   `json:"name"`
+		Scopes        []string `json:"scopes"`
+		ExpiresInDays *int     `json:"expires_in_days,omitempty"`
+	}{Name: r.Name, Scopes: scopes, ExpiresInDays: expires})
+}
+
+// APIKeyResponse is a flexible API-key response payload. The real create
+// response is {id, key, key_prefix, name, scopes, created_at, expires_at?}.
 type APIKeyResponse map[string]interface{}
 
 // ListAPIKeysOptions configures API key list pagination.
@@ -1605,10 +2038,11 @@ type ListAPIKeysOptions struct {
 	Cursor string
 }
 
-// ListAPIKeysResponse is a flexible API-key list response payload.
+// ListAPIKeysResponse is a flexible API-key list response payload (the
+// API returns a bare array of ApiKeyInfo objects).
 type ListAPIKeysResponse map[string]interface{}
 
-// Create creates a new API key.
+// Create creates a new API key ({name, scopes, expires_in_days?}).
 func (a *APIKeysAPI) Create(ctx context.Context, req *CreateAPIKeyRequest) (APIKeyResponse, error) {
 	if req == nil || strings.TrimSpace(req.Name) == "" {
 		return nil, fmt.Errorf("apexmail: api key name is required")
@@ -1644,13 +2078,20 @@ func (a *APIKeysAPI) Revoke(ctx context.Context, id string) error {
 }
 
 // AnalyticsAPI provides aggregate analytics helpers.
+//
+// The analytics API exposes typed subpaths only (there is no GET
+// /v1/analytics): /dashboard, /volume, /engagement, /deliverability,
+// /subject-line (POST) and /export. Every GET subpath accepts exactly
+// {from, to, interval} (interval: hour | day | week | month).
 type AnalyticsAPI struct{ client *Client }
 
 // AnalyticsOptions configures analytics queries.
 type AnalyticsOptions struct {
-	From    string
-	To      string
-	GroupBy string
+	From     string
+	To       string
+	Interval string // hour | day | week | month
+	// Deprecated legacy filters — not accepted by the API; not sent.
+	GroupBy string // mapped to Interval by the deprecated Get
 	Tag     string
 	Domain  string
 }
@@ -1658,34 +2099,134 @@ type AnalyticsOptions struct {
 // AnalyticsResponse is a flexible analytics response payload.
 type AnalyticsResponse map[string]interface{}
 
-// Get fetches analytics with required from/to and optional filters.
-func (a *AnalyticsAPI) Get(ctx context.Context, opts ...AnalyticsOptions) (AnalyticsResponse, error) {
+func (a *AnalyticsAPI) analyticsQuery(options AnalyticsOptions) (string, error) {
+	interval := options.Interval
+	if interval == "" && options.GroupBy != "" {
+		interval = options.GroupBy
+	}
+	switch interval {
+	case "", "hour", "day", "week", "month":
+	default:
+		return "", fmt.Errorf("apexmail: interval must be one of hour, day, week, month (got %q)", interval)
+	}
+	query := url.Values{}
+	if options.From != "" {
+		query.Set("from", options.From)
+	}
+	if options.To != "" {
+		query.Set("to", options.To)
+	}
+	if interval != "" {
+		query.Set("interval", interval)
+	}
+	if encoded := query.Encode(); encoded != "" {
+		return "?" + encoded, nil
+	}
+	return "", nil
+}
+
+func (a *AnalyticsAPI) analyticsGet(ctx context.Context, subpath string, options AnalyticsOptions) (AnalyticsResponse, error) {
+	query, err := a.analyticsQuery(options)
+	if err != nil {
+		return nil, err
+	}
+	var out AnalyticsResponse
+	err = a.client.do(ctx, http.MethodGet, "/v1/analytics/"+subpath+query, nil, &out)
+	return out, err
+}
+
+// Dashboard fetches dashboard counters: {total_sent, total_delivered,
+// total_bounced, total_opened, total_clicked, delivery_rate, open_rate,
+// click_rate}.
+func (a *AnalyticsAPI) Dashboard(ctx context.Context, opts ...AnalyticsOptions) (AnalyticsResponse, error) {
 	var options AnalyticsOptions
 	if len(opts) > 0 {
 		options = opts[0]
 	}
-	if options.From == "" || options.To == "" {
-		return nil, fmt.Errorf("apexmail: analytics requires both 'from' and 'to' date parameters")
+	return a.analyticsGet(ctx, "dashboard", options)
+}
+
+// Volume fetches the volume timeseries: [{date, sent, delivered, bounced}].
+func (a *AnalyticsAPI) Volume(ctx context.Context, opts ...AnalyticsOptions) (AnalyticsResponse, error) {
+	var options AnalyticsOptions
+	if len(opts) > 0 {
+		options = opts[0]
+	}
+	return a.analyticsGet(ctx, "volume", options)
+}
+
+// Engagement fetches engagement rates plus a timeseries: {open_rate,
+// click_rate, unsubscribe_rate, timeseries}.
+func (a *AnalyticsAPI) Engagement(ctx context.Context, opts ...AnalyticsOptions) (AnalyticsResponse, error) {
+	var options AnalyticsOptions
+	if len(opts) > 0 {
+		options = opts[0]
+	}
+	return a.analyticsGet(ctx, "engagement", options)
+}
+
+// Deliverability fetches deliverability rates: {delivery_rate,
+// bounce_rate, complaint_rate, inbox_rate}.
+func (a *AnalyticsAPI) Deliverability(ctx context.Context, opts ...AnalyticsOptions) (AnalyticsResponse, error) {
+	var options AnalyticsOptions
+	if len(opts) > 0 {
+		options = opts[0]
+	}
+	return a.analyticsGet(ctx, "deliverability", options)
+}
+
+// SubjectLineResponse wraps the analyzer's score payload.
+type SubjectLineResponse map[string]interface{}
+
+// AnalyzeSubjectLine analyzes a subject line (POST /subject-line with body
+// {subject}).
+func (a *AnalyticsAPI) AnalyzeSubjectLine(ctx context.Context, subject string) (SubjectLineResponse, error) {
+	if strings.TrimSpace(subject) == "" {
+		return nil, fmt.Errorf("apexmail: subject is required")
+	}
+	var out SubjectLineResponse
+	err := a.client.do(ctx, http.MethodPost, "/v1/analytics/subject-line",
+		struct {
+			Subject string `json:"subject"`
+		}{Subject: subject}, &out)
+	return out, err
+}
+
+// ExportResponse matches the server's ExportResponse: {job_id?,
+// download_url?, status}.
+type ExportResponse struct {
+	JobID       *string `json:"job_id"`
+	DownloadURL *string `json:"download_url"`
+	Status      string  `json:"status"`
+}
+
+// Export starts an analytics export job (GET /export with {from, to,
+// format}).
+func (a *AnalyticsAPI) Export(ctx context.Context, from, to, format string) (*ExportResponse, error) {
+	if format == "" {
+		format = "json"
 	}
 	query := url.Values{}
-	query.Set("from", options.From)
-	query.Set("to", options.To)
-	if options.GroupBy != "" {
-		query.Set("groupBy", options.GroupBy)
+	query.Set("format", format)
+	if from != "" {
+		query.Set("from", from)
 	}
-	if options.Tag != "" {
-		query.Set("tag", options.Tag)
+	if to != "" {
+		query.Set("to", to)
 	}
-	if options.Domain != "" {
-		query.Set("domain", options.Domain)
-	}
-	path := "/v1/analytics"
-	if encoded := query.Encode(); encoded != "" {
-		path += "?" + encoded
-	}
-	var out AnalyticsResponse
-	err := a.client.do(ctx, http.MethodGet, path, nil, &out)
-	return out, err
+	var out ExportResponse
+	err := a.client.do(ctx, http.MethodGet, "/v1/analytics/export?"+query.Encode(), nil, &out)
+	return &out, err
+}
+
+// Get is the historical analytics entry point.
+//
+// Deprecated: GET /v1/analytics does not exist on the API. Use the typed
+// subpath methods (Dashboard/Volume/Engagement/Deliverability). Kept as a
+// thin alias of Dashboard for backwards compatibility; GroupBy is mapped
+// to interval, Tag/Domain are ignored.
+func (a *AnalyticsAPI) Get(ctx context.Context, opts ...AnalyticsOptions) (AnalyticsResponse, error) {
+	return a.Dashboard(ctx, opts...)
 }
 
 func optInt(v *int, def int) int {

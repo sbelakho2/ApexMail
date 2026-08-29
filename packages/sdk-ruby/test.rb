@@ -123,7 +123,8 @@ t.queue_response({ 'domain' => { 'id' => 'dom_1', 'domain' => 'mail.example.com'
 api = ApexMail::DomainsAPI.new(t)
 resp = api.create(domain: 'mail.example.com')
 expect('create() POST /v1/domains',        t.calls[0][:method] == 'POST' && t.calls[0][:path] == '/v1/domains')
-expect('create() body has domain field',   t.calls[0][:body][:domain] == 'mail.example.com')
+expect('create() body has name field (CreateDomainRequest takes {name})', t.calls[0][:body][:name] == 'mail.example.com')
+expect('create() sends no domain key',            t.calls[0][:body].key?(:domain) == false)
 expect('create() returns domain id',       resp.dig('domain', 'domain') == 'mail.example.com')
 
 t = FakeTransport.new
@@ -155,7 +156,7 @@ t = FakeTransport.new
 t.queue_response({ 'spf' => 'pass', 'dkim' => 'pass', 'dmarc' => 'pass', 'healthy' => true })
 api = ApexMail::DomainsAPI.new(t)
 resp = api.health('dom_1')
-expect('health() GET /v1/domains/dom_1/health', t.calls[0][:method] == 'GET' && t.calls[0][:path] == '/v1/domains/dom_1/health')
+expect('health() maps to GET /v1/domains/:id (no /health endpoint)', t.calls[0][:method] == 'GET' && t.calls[0][:path] == '/v1/domains/dom_1')
 expect('health() returns healthy field',        resp.key?('healthy'))
 
 # ── Webhook tests ─────────────────────────────────────────────────────────

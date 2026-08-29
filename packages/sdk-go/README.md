@@ -60,10 +60,14 @@ res, err := client.Emails.Send(ctx, &apexmail.SendEmailRequest{
 	Text:    "Hello World",             // Optional plain text
 	CC:      []apexmail.EmailAddress{{Email: "cc@example.com"}},  // Optional
 	BCC:     []apexmail.EmailAddress{{Email: "bcc@example.com"}}, // Optional
-	ReplyTo: apexmail.EmailAddress{Email: "support@example.com"}, // Optional
-	Tags: []string{"category:welcome"},
-	ScheduledAt: "2024-01-15T10:00:00Z", // Optional
+	Tags: []string{"welcome"},                    // Optional (string list)
+	ScheduledAt: "2026-01-15T10:00:00Z", // Optional (scheduled_at on the wire)
 })
+
+// NOTE: the API's SendMessageRequest accepts bare address strings only.
+// EmailAddress values are serialized as their address (display names are
+// ignored), and ReplyTo/TemplateID/Priority/Attachments are validated as
+// inputs but never transmitted (the server rejects them with 422).
 
 // Batch send (up to 1000 emails)
 res, err := client.Emails.Batch(ctx, &apexmail.BatchSendRequest{

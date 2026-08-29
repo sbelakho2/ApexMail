@@ -2,7 +2,6 @@
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
-use uuid::Uuid;
 
 use crate::types::Template;
 
@@ -13,7 +12,7 @@ impl TemplatesRepo {
     /// Create a new template.
     pub async fn create(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         name: &str,
         subject: &str,
         html_body: &str,
@@ -24,7 +23,7 @@ impl TemplatesRepo {
              VALUES ($1, $2, $3, $4, $5, $6, 1, 'draft', NOW(), NOW()) \
              RETURNING id, tenant_id, name, subject, html_body, text_body, version, status, created_at, updated_at"
         )
-        .bind(Uuid::new_v4())
+        .bind(crate::types::short_id('t'))
         .bind(tenant_id)
         .bind(name)
         .bind(subject)
@@ -37,8 +36,8 @@ impl TemplatesRepo {
     /// Find a template by ID.
     pub async fn find_by_id(
         pool: &PgPool,
-        tenant_id: Uuid,
-        id: Uuid,
+        tenant_id: &str,
+        id: &str,
     ) -> Result<Option<Template>, sqlx::Error> {
         sqlx::query_as::<_, Template>(
             "SELECT id, tenant_id, name, subject, html_body, text_body, version, status, created_at, updated_at \
@@ -54,7 +53,7 @@ impl TemplatesRepo {
     /// #224:Added limit/offset and excluded html_body for listing (use find_by_id for full)
     pub async fn list(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Template>, sqlx::Error> {
@@ -75,10 +74,10 @@ impl TemplatesRepo {
     /// Uses `(updated_at, id)` tuple comparison since templates orders by `updated_at DESC`.
     pub async fn list_keyset(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         limit: i64,
         cursor_updated_at: Option<DateTime<Utc>>,
-        cursor_id: Option<Uuid>,
+        cursor_id: Option<&str>,
     ) -> Result<Vec<Template>, sqlx::Error> {
         let limit = limit.clamp(1, 200);
         let fetch_limit = limit + 1;
@@ -114,8 +113,8 @@ impl TemplatesRepo {
     /// Update a template (bumps version).
     pub async fn update(
         pool: &PgPool,
-        tenant_id: Uuid,
-        id: Uuid,
+        tenant_id: &str,
+        id: &str,
         name: &str,
         subject: &str,
         html_body: &str,
@@ -137,7 +136,7 @@ impl TemplatesRepo {
     }
 
     /// Delete a template.
-    pub async fn delete(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> Result<bool, sqlx::Error> {
+    pub async fn delete(pool: &PgPool, tenant_id: &str, id: &str) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM templates WHERE id = $1 AND tenant_id = $2")
             .bind(id)
             .bind(tenant_id)
@@ -149,7 +148,7 @@ impl TemplatesRepo {
     /// Find a template by name (e.g. for slug-based references).
     pub async fn find_by_name(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         name: &str,
     ) -> Result<Option<Template>, sqlx::Error> {
         sqlx::query_as::<_, Template>(
@@ -172,8 +171,8 @@ mod tests {
     #[test]
     fn test_template_draft() {
         let t = Template {
-            id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            id: crate::types::short_id('t'),
+            tenant_id: crate::types::short_id('t'),
             name: "welcome".into(),
             subject: "Welcome to {{company}}".into(),
             html_body: "<h1>Hello {{name}}</h1>".into(),
@@ -190,8 +189,8 @@ mod tests {
     #[test]
     fn test_template_version_bump() {
         let t = Template {
-            id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            id: crate::types::short_id('t'),
+            tenant_id: crate::types::short_id('t'),
             name: "receipt".into(),
             subject: "Your receipt".into(),
             html_body: "<p>Thanks</p>".into(),

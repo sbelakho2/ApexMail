@@ -8,8 +8,9 @@ use governor::{
     Quota, RateLimiter,
 };
 use std::num::NonZeroU32;
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tracing::debug;
 
 use crate::config::RateLimitConfig;
@@ -24,6 +25,13 @@ pub struct GovernorLimiter {
     /// retry-after for batch requests that can never fit in the burst.
     rps: u32,
     jitter: Option<Duration>,
+    /// F14:tokens consumed in the current window (approximation — decayed
+    /// at the steady refill rate, clamped at 0). Shared across clones so
+    /// the reported `remaining` reflects real consumption instead of
+    /// always reporting the full burst.
+    consumed: Arc<AtomicI64>,
+    /// Wall clock of the last refill decay applied to `consumed`.
+    last_decay: Arc<Mutex<Instant>>,
 }
 
 impl GovernorLimiter {
@@ -38,6 +46,8 @@ impl GovernorLimiter {
             burst,
             rps: config.requests_per_second.get(),
             jitter: config.jitter_duration(),
+            consumed: Arc::new(AtomicI64::new(0)),
+            last_decay: Arc::new(Mutex::new(Instant::now())),
         }
     }
 
@@ -47,19 +57,55 @@ impl GovernorLimiter {
         Self::new(&config)
     }
 
+    /// F14:decay the consumed-token approximation by the tokens refilled
+    /// since the last decay (steady `rps` rate, floored, clamped at 0).
+    fn decay_consumed(&self) {
+        let mut last = self.last_decay.lock().unwrap_or_else(|e| e.into_inner());
+        let elapsed = last.elapsed();
+        if elapsed.is_zero() {
+            return;
+        }
+        let refilled = (elapsed.as_secs_f64() * f64::from(self.rps)).floor() as i64;
+        if refilled > 0 {
+            let prev = self.consumed.fetch_sub(refilled, Ordering::Relaxed);
+            if prev - refilled < 0 {
+                self.consumed.store(0, Ordering::Relaxed);
+            }
+            *last = Instant::now();
+        }
+    }
+
+    /// F14:record `n` allowed requests against the consumption tracker.
+    fn record_consumed(&self, n: u32) {
+        self.consumed.fetch_add(i64::from(n), Ordering::Relaxed);
+    }
+
+    /// F14:tokens remaining after the recorded consumption. For an unused
+    /// limiter this equals the burst — the true remaining of a full bucket;
+    /// the burst is only reported when nothing has been consumed.
+    fn remaining(&self) -> u64 {
+        let consumed = self.consumed.load(Ordering::Relaxed).max(0) as u64;
+        (self.burst.get() as u64).saturating_sub(consumed)
+    }
+
     /// Check if a single request is allowed.
-    /// #229:Note:`remaining` is approximate (burst capacity) as Governor doesn't expose actual count
+    ///
+    /// F14/#229:`remaining` used to ALWAYS report the full burst because
+    /// governor exposes no token count — callers could not see exhaustion
+    /// approaching. Consumption is now tracked (decayed at the refill
+    /// rate), so `remaining` is the real post-check budget.
     pub fn check(&self) -> Decision {
         match self.limiter.check() {
             Ok(()) => {
                 metrics::counter!("rate_limiter_requests_total", "strategy" => "governor", "decision" => "allowed").increment(1);
-                // Governor doesn't expose remaining directly; approximate from burst.
-                // For accurate remaining counts, use sliding_window limiter instead.
+                self.decay_consumed();
+                self.record_consumed(1);
                 Decision::Allowed {
-                    remaining: self.burst.get() as u64,
+                    remaining: self.remaining(),
                 }
             }
             Err(not_until) => {
+                self.decay_consumed();
                 metrics::counter!("rate_limiter_requests_total", "strategy" => "governor", "decision" => "denied").increment(1);
                 metrics::counter!("rate_limiter_blocked_total", "strategy" => "governor")
                     .increment(1);
@@ -76,16 +122,21 @@ impl GovernorLimiter {
     /// Check if `n` requests are allowed (batch check).
     pub fn check_n(&self, n: u32) -> Decision {
         match NonZeroU32::new(n) {
-            None => Decision::Allowed {
-                remaining: self.burst.get() as u64,
-            },
+            None => {
+                self.decay_consumed();
+                Decision::Allowed {
+                    remaining: self.remaining(),
+                }
+            }
             Some(n) => {
                 let rps = self.rps;
                 match self.limiter.check_n(n) {
                     Ok(Ok(())) => {
                         metrics::counter!("rate_limiter_requests_total", "strategy" => "governor_batch", "decision" => "allowed").increment(n.get() as u64);
+                        self.decay_consumed();
+                        self.record_consumed(n.get());
                         Decision::Allowed {
-                            remaining: self.burst.get() as u64,
+                            remaining: self.remaining(),
                         }
                     }
                     Err(_insufficient) => {
@@ -243,5 +294,66 @@ mod tests {
             }
             other => panic!("expected denied, got {other:?}"),
         }
+    }
+
+    // ── F14:remaining must reflect real consumption ──────────────────
+    //
+    // All use rps=1 so the consumed-tracker decay (which refills at the
+    // rps rate) needs a FULL second of wall time — adjacent statements
+    // execute in microseconds, so the counts are deterministic.
+
+    #[test]
+    fn test_remaining_falls_with_each_allowed_check() {
+        // Previously `remaining` always reported the full burst — callers
+        // could not see exhaustion approaching.
+        let limiter = GovernorLimiter::from_params(1, 5);
+        assert_eq!(limiter.check().remaining(), 4, "burst 5, 1 consumed");
+        assert_eq!(limiter.check().remaining(), 3);
+        assert_eq!(limiter.check().remaining(), 2);
+    }
+
+    #[test]
+    fn test_remaining_reaches_zero_at_exhaustion() {
+        let limiter = GovernorLimiter::from_params(1, 3);
+        for expected in [2u64, 1, 0] {
+            let d = limiter.check();
+            assert!(d.is_allowed());
+            assert_eq!(d.remaining(), expected);
+        }
+        // Fully drained: the next check is denied.
+        assert!(limiter.check().is_denied());
+    }
+
+    #[test]
+    fn test_remaining_batch_consumes_n() {
+        let limiter = GovernorLimiter::from_params(1, 5);
+        let d = limiter.check_n(3);
+        assert!(d.is_allowed());
+        assert_eq!(d.remaining(), 2, "burst 5 minus a 3-token batch");
+        // Zero-batch must not consume.
+        assert_eq!(limiter.check_n(0).remaining(), 2);
+    }
+
+    #[test]
+    fn test_remaining_recovers_with_refill() {
+        // Drain fully (remaining 0, denied), wait for the 1rps steady
+        // refill, then an allowed check consumes exactly the refilled
+        // token — remaining reports 0 again, proving the tracker follows
+        // the refill rather than sticking at the drained value.
+        let limiter = GovernorLimiter::from_params(1, 2);
+        assert_eq!(limiter.check().remaining(), 1);
+        assert_eq!(limiter.check().remaining(), 0);
+        assert!(limiter.check().is_denied());
+        std::thread::sleep(Duration::from_millis(1_200));
+        let d = limiter.check();
+        assert!(
+            d.is_allowed(),
+            "refill at 1rps must recover a token within 1.2s"
+        );
+        assert_eq!(
+            d.remaining(),
+            0,
+            "the single refilled token was just consumed"
+        );
     }
 }

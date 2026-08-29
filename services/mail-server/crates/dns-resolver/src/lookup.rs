@@ -18,6 +18,8 @@ pub enum DnsError {
     ResolveFailed(String),
     #[error("No records found for {0}")]
     NoRecords(String),
+    #[error("Multiple SPF records found for {0} (RFC 7208 §4.5 permerror)")]
+    MultipleSpfRecords(String),
     #[error("Timeout resolving {0}")]
     Timeout(String),
     #[error("Invalid domain: {0}")]
@@ -190,16 +192,28 @@ impl DnsLookup {
     }
 
     /// Lookup SPF record for a domain, preserving the TXT lookup TTL.
+    ///
+    /// RFC 7208 §4.5: a domain publishing MORE THAN ONE SPF record is a
+    /// permanent error — check_host() cannot proceed. This surfaces as
+    /// [`DnsError::MultipleSpfRecords`] instead of the old first-wins pick,
+    /// so grading/verification UIs can report the misconfiguration. (The
+    /// SMTP accept path uses mail-auth; these lookups feed the graders.)
     pub async fn lookup_spf_with_ttl(
         &self,
         domain: &str,
     ) -> Result<Option<DnsLookupResult<SpfRecord>>, DnsError> {
         let txts = self.lookup_txt_with_ttl(domain).await?;
-        Ok(txts
+        let mut parsed = txts
             .records
             .iter()
-            .find_map(|txt| SpfRecord::parse(txt))
-            .map(|record| DnsLookupResult::new(record, txts.ttl)))
+            .filter_map(|txt| SpfRecord::parse(txt))
+            .collect::<Vec<_>>()
+            .into_iter();
+        match (parsed.next(), parsed.next()) {
+            (None, _) => Ok(None),
+            (Some(record), None) => Ok(Some(DnsLookupResult::new(record, txts.ttl))),
+            (Some(_), Some(_)) => Err(DnsError::MultipleSpfRecords(domain.to_string())),
+        }
     }
 
     /// Lookup DKIM record for a selector._domainkey.domain.
@@ -326,18 +340,18 @@ impl DnsLookup {
         Ok(names)
     }
 
-    /// Validate that a domain has MX or A records (can receive email).
+    /// Validate that a domain has MX or A/AAAA records (can receive email).
     ///
     /// Distinguishes definitive answers from transient failures: only a
-    /// definitive "no MX and no A" is reported as [`Deliverability::No`]
-    /// (safe to negative-cache); a SERVFAIL/timeout/network error on BOTH
-    /// lookups is [`Deliverability::Transient`] — swallowing it as a plain
+    /// definitive "no MX and no A/AAAA" is reported as [`Deliverability::No`]
+    /// (safe to negative-cache); a SERVFAIL/timeout/network error on ANY of
+    /// the lookups is [`Deliverability::Transient`] — swallowing it as a plain
     /// `Ok(false)` used to let the caller cache a false "undeliverable"
     /// verdict under the POSITIVE TTL.
     pub async fn can_receive_email(&self, domain: &str) -> Deliverability {
         // Check MX first. A definitive no-records answer falls through to
-        // the implicit-MX (A) check per RFC 5321 §5.1; a transient failure
-        // does not.
+        // the implicit-MX (A/AAAA) check per RFC 5321 §5.1; a transient
+        // failure does not.
         match self.resolver.mx_lookup(domain).await {
             Ok(response) => {
                 let has_mx = response
@@ -351,8 +365,17 @@ impl DnsLookup {
             Err(err) if is_definitive_no_records(&err) => {}
             Err(_) => return Deliverability::Transient,
         }
-        // Fall back to A record (implicit MX per RFC 5321).
+        // Fall back to implicit MX per RFC 5321 §5.1: the domain itself must
+        // have an A OR AAAA address. IPv6-only domains are deliverable, so a
+        // definitive no-A is not a "No" until the AAAA family has been
+        // checked too; a transient failure on either family stays Transient.
         match self.resolver.ipv4_lookup(domain).await {
+            Ok(response) if !response.answers().is_empty() => return Deliverability::Yes,
+            Ok(_) => {}
+            Err(err) if is_definitive_no_records(&err) => {}
+            Err(_) => return Deliverability::Transient,
+        }
+        match self.resolver.ipv6_lookup(domain).await {
             Ok(response) if !response.answers().is_empty() => Deliverability::Yes,
             Ok(_) => Deliverability::No,
             Err(err) if is_definitive_no_records(&err) => Deliverability::No,
@@ -364,13 +387,13 @@ impl DnsLookup {
 /// Deliverability outcome of [`DnsLookup::can_receive_email`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Deliverability {
-    /// MX or implicit-MX (A) records exist — the domain can receive mail.
+    /// MX or implicit-MX (A/AAAA) records exist — the domain can receive mail.
     Yes,
-    /// Definitively no MX and no A records (NXDOMAIN/NODATA) — a definitive
-    /// negative answer the caller may negative-cache.
+    /// Definitively no MX and no A/AAAA records (NXDOMAIN/NODATA) — a
+    /// definitive negative answer the caller may negative-cache.
     No,
-    /// The lookup transiently failed (timeout/SERVFAIL/network) on both MX
-    /// and A — the caller must surface an error and cache NOTHING.
+    /// The lookup transiently failed (timeout/SERVFAIL/network) on any of
+    /// MX/A/AAAA — the caller must surface an error and cache NOTHING.
     Transient,
 }
 

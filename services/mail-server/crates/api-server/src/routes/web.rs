@@ -17,7 +17,7 @@
 //! | Endpoint | Approach |
 //! |---|---|
 //! | `/web/auth/login`, `/web/auth/logout` | direct reimplementation (bcrypt/argon verify + RS256 session JWT identical to the JSON route) |
-//! | `/web/auth/mfa/verify` | multi-step SSR form: challenge is an HMAC-signed short-lived cookie; TOTP verified via `apexmail_lib::mfa` |
+//! | `/web/auth/mfa/verify` | multi-step SSR form: challenge is an HMAC-signed short-lived cookie; TOTP verified via the hardened `routes::auth::verify_totp_code_guarded` (lockout + replay guard) |
 //! | `/web/auth/signup` | mirrored tenant+user provisioning from the JSON register flow (bcrypt hash, pending verification metadata) |
 //! | `/web/auth/forgot-password`, `/web/auth/reset-password` | token hash stored in `users.metadata` exactly like the JSON flow (reset emails are enqueued by the worker; the response never enumerates accounts) |
 //! | `/web/auth/change-password`, `/web/account/profile` | direct SQL updates |
@@ -526,14 +526,33 @@ fn csrf_from(form: &HashMap<String, String>) -> Option<&str> {
         .filter(|t| !t.is_empty())
 }
 
-/// Validate the form's embedded CSRF token. On failure the caller redirects
-/// back with a friendly "session expired" flash — never a 403 JSON dump.
-fn check_csrf(form: &HashMap<String, String>, config: &Config) -> Result<(), &'static str> {
-    match csrf_from(form) {
-        Some(token) => validate_csrf_token(token, &config.csrf_secret)
-            .map_err(|_| "Your session expired. Reload the page and try again."),
-        None => Err("Your session expired. Reload the page and try again."),
+/// Name of the double-submit CSRF cookie — the same cookie the JSON
+/// surface's `validate_session_csrf` compares against and that GET
+/// /v1/auth/csrf (and every SSR page render) mints alongside the token.
+pub const FORM_CSRF_COOKIE_NAME: &str = "csrf_token";
+
+/// Validate the form's embedded CSRF token under the double-submit cookie
+/// contract (the same pattern the JSON surface enforces in
+/// `validate_session_csrf`): the hidden `_csrf` input must carry a
+/// timestamped, HMAC-signed token AND match the `csrf_token` cookie the
+/// page render minted alongside it. A token harvested from the public
+/// /v1/auth/csrf endpoint alone is therefore useless — the attacker cannot
+/// plant the matching cookie in the victim's browser. On failure the caller
+/// redirects back with a friendly "session expired" flash — never a 403
+/// JSON dump.
+fn check_csrf(
+    form: &HashMap<String, String>,
+    headers: &HeaderMap,
+    config: &Config,
+) -> Result<(), &'static str> {
+    const EXPIRED: &str = "Your session expired. Reload the page and try again.";
+    let token = csrf_from(form).ok_or(EXPIRED)?;
+    let cookie = cookie_value(headers, FORM_CSRF_COOKIE_NAME).ok_or(EXPIRED)?;
+    // Constant-time comparison, mirroring validate_session_csrf.
+    if !apexmail_lib::timing_safe_compare(token, cookie) {
+        return Err(EXPIRED);
     }
+    validate_csrf_token(token, &config.csrf_secret).map_err(|_| EXPIRED)
 }
 
 fn field(form: &HashMap<String, String>, key: &str) -> String {
@@ -570,8 +589,9 @@ fn verify_login_challenge(config: &Config, token: &str, user_id: &str, email: &s
 /// Per-account MFA brute-force bound (the SSR verify step): 10 wrong codes
 /// per 15-minute window locks the account out of the challenge step — a
 /// 6-digit TOTP must not be guessable without limit once the password is
-/// known. Redis outages fail OPEN (no counter, no lock) so logins keep
-/// working; the challenge cookie's own 5-minute TTL bounds the exposure.
+/// known. Redis outages fail over to a bounded in-process counter (see
+/// [`mfa_fallback`]) so the brute-force bound survives Redis loss; the
+/// challenge cookie's own 5-minute TTL additionally bounds the exposure.
 const MFA_VERIFY_MAX_ATTEMPTS: i64 = 10;
 const MFA_VERIFY_WINDOW_SECS: u64 = 15 * 60;
 
@@ -579,22 +599,96 @@ fn mfa_verify_failure_key(user_id: &str) -> String {
     format!("apexmail:mfa_verify_failures:{user_id}")
 }
 
+/// In-process MFA failure counter used ONLY while Redis is unavailable
+/// (audit F11): a bounded map keyed by the challenge's user id, windowed
+/// like the Redis key. Without it, a Redis outage removed the brute-force
+/// bound entirely (fail open). The bound keeps the map small: expired
+/// windows are pruned on every touch, and a map still over the cap after
+/// pruning is dropped wholesale (fresh windows restart — availability
+/// wins, but never unbounded memory).
+mod mfa_fallback {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    /// Same shape as the Redis regime: `count` wrong codes inside the window.
+    struct Window {
+        count: i64,
+        started: Instant,
+    }
+
+    /// Upper bound on tracked challenges (defense against key flooding).
+    const MAX_KEYS: usize = 4096;
+    /// Window length — mirrors MFA_VERIFY_WINDOW_SECS.
+    const WINDOW_SECS: u64 = 15 * 60;
+
+    fn store() -> &'static Mutex<HashMap<String, Window>> {
+        static STORE: std::sync::OnceLock<Mutex<HashMap<String, Window>>> =
+            std::sync::OnceLock::new();
+        STORE.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn prune_expired(map: &mut HashMap<String, Window>) {
+        map.retain(|_, window| window.started.elapsed().as_secs() < WINDOW_SECS);
+    }
+
+    /// `true` when the challenge has hit the attempt cap in this window.
+    pub fn locked(key: &str) -> bool {
+        let Ok(map) = store().lock() else {
+            return false;
+        };
+        map.get(key).is_some_and(|window| {
+            window.started.elapsed().as_secs() < WINDOW_SECS
+                && window.count >= super::MFA_VERIFY_MAX_ATTEMPTS
+        })
+    }
+
+    /// Record one wrong code (starts a fresh window on first failure).
+    pub fn record_failure(key: &str) {
+        let Ok(mut map) = store().lock() else {
+            return;
+        };
+        prune_expired(&mut map);
+        if map.len() >= MAX_KEYS && !map.contains_key(key) {
+            // Cap reached without room: restart from a clean slate rather
+            // than growing without bound.
+            map.clear();
+        }
+        let window = map.entry(key.to_string()).or_insert(Window {
+            count: 0,
+            started: Instant::now(),
+        });
+        if window.started.elapsed().as_secs() >= WINDOW_SECS {
+            window.count = 0;
+            window.started = Instant::now();
+        }
+        window.count += 1;
+    }
+
+    /// Clear the counter (successful verify).
+    pub fn clear(key: &str) {
+        if let Ok(mut map) = store().lock() {
+            map.remove(key);
+        }
+    }
+}
+
 async fn mfa_verify_locked(state: &AppState, user_id: &str) -> bool {
+    let key = mfa_verify_failure_key(user_id);
     let Ok(mut conn) = state.redis.get().await else {
-        return false;
+        // Redis unavailable: the in-process counter keeps the bound (F11).
+        return mfa_fallback::locked(&key);
     };
-    let failures: Option<i64> =
-        redis::AsyncCommands::get(&mut *conn, mfa_verify_failure_key(user_id))
-            .await
-            .ok();
+    let failures: Option<i64> = redis::AsyncCommands::get(&mut *conn, &key).await.ok();
     failures.is_some_and(|count| count >= MFA_VERIFY_MAX_ATTEMPTS)
 }
 
 async fn record_mfa_verify_failure(state: &AppState, user_id: &str) {
+    let key = mfa_verify_failure_key(user_id);
     let Ok(mut conn) = state.redis.get().await else {
+        mfa_fallback::record_failure(&key);
         return;
     };
-    let key = mfa_verify_failure_key(user_id);
     let count: Result<i64, _> = redis::cmd("INCR").arg(&key).query_async(&mut *conn).await;
     if count.is_ok_and(|value| value == 1) {
         let _: Result<(), _> = redis::cmd("EXPIRE")
@@ -606,9 +700,10 @@ async fn record_mfa_verify_failure(state: &AppState, user_id: &str) {
 }
 
 async fn clear_mfa_verify_failures(state: &AppState, user_id: &str) {
+    let key = mfa_verify_failure_key(user_id);
+    mfa_fallback::clear(&key);
     if let Ok(mut conn) = state.redis.get().await {
-        let _: Result<(), _> =
-            redis::AsyncCommands::del(&mut *conn, mfa_verify_failure_key(user_id)).await;
+        let _: Result<(), _> = redis::AsyncCommands::del(&mut *conn, &key).await;
     }
 }
 
@@ -625,12 +720,49 @@ async fn revoke_user_sessions(state: &AppState, tenant_id: &str, user_id: &str) 
 }
 
 /// Extract a cookie value from a Cookie header.
-fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+pub(crate) fn cookie_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())?
         .split(';')
         .find_map(|chunk| chunk.trim().strip_prefix(&format!("{name}=")))
+}
+
+/// The form CSRF token resolved for a GET render (double-submit, audit F4).
+///
+/// A still-valid `csrf_token` cookie on the request is REUSED so pages
+/// already open in other tabs keep working (minting per render would
+/// rotate the cookie under their forms); otherwise a fresh token is minted
+/// and `minted` tells the caller to set the matching cookie on the
+/// response. The SAME token is embedded into the page's hidden `_csrf`
+/// inputs, so the POST-side `check_csrf` cookie comparison passes.
+pub(crate) struct FormCsrfToken {
+    pub token: String,
+    pub minted: bool,
+}
+
+pub(crate) fn form_csrf_for_render(headers: &HeaderMap, config: &Config) -> FormCsrfToken {
+    if let Some(raw) = cookie_value(headers, FORM_CSRF_COOKIE_NAME) {
+        if validate_csrf_token(raw, &config.csrf_secret).is_ok() {
+            return FormCsrfToken {
+                token: raw.to_string(),
+                minted: false,
+            };
+        }
+    }
+    FormCsrfToken {
+        token: ui_foundation::csrf::generate_csrf_token(&config.csrf_secret),
+        minted: true,
+    }
+}
+
+/// `Set-Cookie` value for the double-submit form CSRF token (same shape as
+/// the public GET /v1/auth/csrf endpoint mints for the JSON surface).
+pub(crate) fn form_csrf_set_cookie(token: &str, config: &Config) -> String {
+    format!(
+        "{FORM_CSRF_COOKIE_NAME}={token}; HttpOnly; Path=/; Max-Age=3600; SameSite=Strict{}",
+        if is_secure(config) { "; Secure" } else { "" },
+    )
 }
 
 // ─── Pending-MFA setup cookie (signed, short-lived) ─────────────
@@ -802,6 +934,19 @@ impl FormFieldMap {
         self.values.is_empty() && self.errors.is_empty() && self.secrets.is_empty()
     }
 
+    /// The view-layer mirror handed to ui-foundation's render pass
+    /// (`render_route_with_form_fields`): the GET render calls this with
+    /// the map decoded from this cookie so stored fields re-populate,
+    /// per-field errors render, and reveal-once secrets display.
+    pub fn into_view_data(self) -> ui_foundation::view_data::FormFieldData {
+        ui_foundation::view_data::FormFieldData {
+            form_id: self.form_id,
+            values: self.values,
+            errors: self.errors,
+            secrets: self.secrets,
+        }
+    }
+
     fn encode(&self, secret: &str) -> String {
         use base64::Engine;
         use hmac::{Hmac, Mac};
@@ -945,20 +1090,11 @@ impl ParsedForm {
         self.field("csv")
     }
 
-    /// CSRF check against the parsed pairs (same contract as check_csrf).
-    fn check_csrf(&self, config: &Config) -> Result<(), &'static str> {
-        match self
-            .pairs
-            .iter()
-            .rev()
-            .find(|(n, _)| n == "_csrf")
-            .map(|(_, v)| v.as_str())
-            .filter(|t| !t.is_empty())
-        {
-            Some(token) => validate_csrf_token(token, &config.csrf_secret)
-                .map_err(|_| "Your session expired. Reload the page and try again."),
-            None => Err("Your session expired. Reload the page and try again."),
-        }
+    /// CSRF check against the parsed pairs (same contract as check_csrf,
+    /// including the double-submit cookie binding).
+    fn check_csrf(&self, headers: &HeaderMap, config: &Config) -> Result<(), &'static str> {
+        let form: HashMap<String, String> = self.pairs.iter().cloned().collect();
+        check_csrf(&form, headers, config)
     }
 }
 
@@ -1434,18 +1570,20 @@ fn html_escape_text(value: &str) -> String {
 }
 
 /// Compose a full authenticated web page from list data (stub path —
-/// the view layer replaces this with a dedicated page function).
+/// the view layer replaces this with a dedicated page function). The
+/// CSRF token is the caller-resolved double-submit token (audit F4) so
+/// the embedded `_csrf` inputs match the `csrf_token` cookie.
 fn web_data_page(
     path: &str,
     list: &ui_foundation::view_data::ListPageData,
     noun: &str,
     flash: &[FlashMessage],
-    config: &Config,
+    csrf_token: &str,
 ) -> String {
     let mut inner = stub_flash_banner(flash);
     inner.push_str(&ui_foundation::leptos_views::data_list_page(list, noun));
-    let csrf = ui_foundation::csrf::generate_csrf_token(&config.csrf_secret);
-    let layout = ui_foundation::leptos_views::web_dashboard_layout_with_csrf(&inner, path, &csrf);
+    let layout =
+        ui_foundation::leptos_views::web_dashboard_layout_with_csrf(&inner, path, csrf_token);
     ui_foundation::leptos_views::web_root_layout(&layout)
 }
 
@@ -1455,17 +1593,16 @@ fn cp_data_page(
     list: &ui_foundation::view_data::ListPageData,
     noun: &str,
     flash: &[FlashMessage],
-    config: &Config,
+    csrf_token: &str,
 ) -> String {
     let mut inner = stub_flash_banner(flash);
     inner.push_str(&ui_foundation::leptos_views::data_list_page(list, noun));
-    let csrf = ui_foundation::csrf::generate_csrf_token(&config.csrf_secret);
     let layout = ui_foundation::leptos_views::control_plane_app_layout_with_title(
         &inner,
         "Control Plane",
         "ApexMail administration and monitoring.",
         path,
-        &csrf,
+        csrf_token,
     );
     ui_foundation::leptos_views::control_plane_root_layout(&layout)
 }
@@ -1652,7 +1789,7 @@ async fn form_cp_login(
 ) -> Response {
     let email = field(&form, "email").trim().to_string();
     let password = field(&form, "password");
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/login", &state.config);
     }
     if email.is_empty() || password.is_empty() {
@@ -1784,7 +1921,7 @@ async fn perform_password_login(
     let password = field(&form, "password");
     let return_to = safe_return_to(&form, default_return_to);
 
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/login", &state.config);
     }
     if email.is_empty() || password.is_empty() {
@@ -1863,7 +2000,7 @@ async fn form_mfa_verify(
     let email = field(&form, "email").trim().to_string();
     let code = field(&form, "code").trim().to_string();
     let return_to = safe_return_to(&form, "/dashboard");
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/login", &state.config);
     }
     let challenge_cookie = headers
@@ -1933,7 +2070,13 @@ async fn form_mfa_verify(
             // (CRIT-10); decrypt then verify the TOTP code.
             let aad = format!("user_id={}", user.id).into_bytes();
             match apexmail_lib::secret_at_rest::decrypt_at_rest(&encrypted, &aad) {
-                Ok(secret) => apexmail_lib::mfa::verify_totp_code(&secret, &code),
+                Ok(secret) => {
+                    // Hardened verifier (F3): the shared lockout state +
+                    // single-use replay guard the JSON surface uses, so a
+                    // console MFA code is bounded and never replayable.
+                    crate::routes::auth::verify_totp_code_guarded(&state.redis, &secret, &code)
+                        .await
+                }
                 Err(_) => false,
             }
         }
@@ -1987,6 +2130,7 @@ async fn form_mfa_verify(
 
 async fn form_signup(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let name = field_truncated(&form, "name", 120);
@@ -1995,7 +2139,7 @@ async fn form_signup(
     let password = field(&form, "password");
     let plan = field(&form, "plan");
 
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/signup", &state.config);
     }
     if name.is_empty() || company.is_empty() {
@@ -2116,8 +2260,12 @@ async fn form_signup(
             urlencode(&verification_token),
             urlencode(&email),
         );
+        // The address is attacker-controllable text interpolated into HTML
+        // (audit F9): valid_email permits `<>"`, so escape it for the HTML
+        // body — the link itself is URL-encoded already.
+        let email_html = html_escape_text(&email);
         let html_body = format!(
-            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"/></head><body style=\"font-family:ui-monospace,monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px\"><h2>Verify Your ApexMail Account</h2><p>Finish setting up <strong>{email}</strong> by confirming this email address.</p><p><a href=\"{verification_link}\" style=\"display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;text-decoration:none;font-weight:700\">Verify email</a></p><p style=\"font-size:13px;color:#71717a\">This link expires in 24 hours.</p></body></html>"
+            "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"/></head><body style=\"font-family:ui-monospace,monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px\"><h2>Verify Your ApexMail Account</h2><p>Finish setting up <strong>{email_html}</strong> by confirming this email address.</p><p><a href=\"{verification_link}\" style=\"display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;text-decoration:none;font-weight:700\">Verify email</a></p><p style=\"font-size:13px;color:#71717a\">This link expires in 24 hours.</p></body></html>"
         );
         let text_body = format!(
             "Verify Your ApexMail Account\n\nConfirm {email} by visiting: {verification_link}\n\nThis link expires in 24 hours."
@@ -2167,10 +2315,11 @@ async fn form_signup(
 
 async fn form_forgot_password(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let email = field(&form, "email").trim().to_lowercase();
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/forgot-password", &state.config);
     }
     if !valid_email(&email) {
@@ -2224,8 +2373,11 @@ async fn form_forgot_password(
                 urlencode(&token),
                 urlencode(&email),
             );
+            // Audit F9: same HTML escaping of the interpolated address as
+            // the signup verification body.
+            let email_html = html_escape_text(&email);
             let html_body = format!(
-                "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"/></head><body style=\"font-family:ui-monospace,monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px\"><h2>Reset Your Password</h2><p>We received a request to reset the password for <strong>{email}</strong>.</p><p><a href=\"{reset_link}\" style=\"display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;text-decoration:none;font-weight:700\">Reset Password</a></p><p style=\"font-size:13px;color:#71717a\">This link expires in 1 hour. If you didn't request a password reset, you can safely ignore this email.</p></body></html>"
+                "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"/></head><body style=\"font-family:ui-monospace,monospace;line-height:1.6;color:#09090b;max-width:560px;margin:0 auto;padding:24px\"><h2>Reset Your Password</h2><p>We received a request to reset the password for <strong>{email_html}</strong>.</p><p><a href=\"{reset_link}\" style=\"display:inline-block;padding:12px 28px;background:#dc2626;color:#fff;text-decoration:none;font-weight:700\">Reset Password</a></p><p style=\"font-size:13px;color:#71717a\">This link expires in 1 hour. If you didn't request a password reset, you can safely ignore this email.</p></body></html>"
             );
             let text_body = format!(
                 "Reset Your Password\n\nWe received a request to reset the password for {email}.\n\nReset your password by visiting: {reset_link}\n\nThis link expires in 1 hour."
@@ -2263,6 +2415,7 @@ async fn form_forgot_password(
 
 async fn form_reset_password(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let email = field(&form, "email").trim().to_lowercase();
@@ -2274,7 +2427,7 @@ async fn form_reset_password(
         urlencode(&token),
         urlencode(&email)
     );
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/forgot-password", &state.config);
     }
     if token.is_empty() || email.is_empty() {
@@ -2397,10 +2550,11 @@ async fn form_reset_password(
 
 async fn form_logout(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     // CSRF is enforced even for logout (cookie-authenticated write).
-    let friendly = check_csrf(&form, &state.config).err();
+    let friendly = check_csrf(&form, &headers, &state.config).err();
     if let Some(message) = friendly {
         return redirect_error(message, "/dashboard", &state.config);
     }
@@ -2430,9 +2584,10 @@ async fn form_logout(
 async fn form_profile_update(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/settings/profile", &state.config);
     }
     let name = field_truncated(&form, "name", 120);
@@ -2458,9 +2613,10 @@ async fn form_profile_update(
 async fn form_change_password(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/settings/profile", &state.config);
     }
     let current = field(&form, "current_password");
@@ -2530,7 +2686,7 @@ async fn form_mfa_setup(
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let back = safe_return_to(&form, "/cp/security");
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, &back, &state.config);
     }
     let Some(user_id) = user.user_id.clone() else {
@@ -2587,7 +2743,7 @@ async fn form_mfa_confirm(
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let back = safe_return_to(&form, "/cp/security");
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, &back, &state.config);
     }
     let code = field(&form, "code").trim().to_string();
@@ -2608,7 +2764,10 @@ async fn form_mfa_confirm(
             &state.config,
         );
     }
-    if !apexmail_lib::mfa::verify_totp_code(&setup.secret, &code) {
+    // Hardened verifier (F3) — the same lockout + replay guard as the JSON
+    // confirm-setup route, so a code used to confirm enrollment is
+    // single-use and repeated wrong codes lock the pending secret.
+    if !crate::routes::auth::verify_totp_code_guarded(&state.redis, &setup.secret, &code).await {
         return redirect_error(
             "That code did not match. Check your authenticator and try again.",
             &back,
@@ -2751,9 +2910,10 @@ async fn generate_totp_secret_and_uri(
 async fn form_impersonate_end(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/cp", &state.config);
     }
     if !is_system_tenant(&state, &user.tenant_id).await {
@@ -2781,14 +2941,56 @@ async fn form_impersonate_end(
 async fn form_api_key_create(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/settings/api-keys", &state.config);
+    }
+    // Scope gate (F2, parity with the JSON `POST /v1/api-keys` route):
+    // minting credential material requires an api-keys:write-capable
+    // session. Console session scopes come from the caller's role
+    // (`scopes_for_role`), so admin/owner ("*") pass transparently and
+    // every lesser role is turned away with a flash, not a JSON error.
+    if crate::middleware::auth::require_scopes(&user, &["api-keys:write"]).is_err() {
+        return redirect_error(
+            "You do not have permission to create API keys.",
+            "/settings/api-keys",
+            &state.config,
+        );
     }
     let name = field_truncated(&form, "name", 100);
     if name.is_empty() {
         return redirect_error("Give the key a name.", "/settings/api-keys", &state.config);
+    }
+    // Same per-tenant key ceiling as the JSON surface (F2), counted before
+    // insert. The count query failing fails CLOSED (generic error flash) —
+    // never insert past the limit.
+    let existing_keys: Result<(i64,), _> =
+        sqlx::query_as("SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1")
+            .bind(user.tenant_id.as_str())
+            .fetch_one(&state.db)
+            .await;
+    match existing_keys {
+        Ok((count,)) if count >= crate::routes::auth::MAX_API_KEYS_PER_TENANT => {
+            return redirect_error(
+                &format!(
+                    "API key limit reached: maximum {} keys per workspace.",
+                    crate::routes::auth::MAX_API_KEYS_PER_TENANT
+                ),
+                "/settings/api-keys",
+                &state.config,
+            );
+        }
+        Err(error) => {
+            tracing::error!(error = %error, "web api-key count check failed");
+            return redirect_error(
+                "Could not create the key. Try again.",
+                "/settings/api-keys",
+                &state.config,
+            );
+        }
+        _ => {}
     }
     let id = apexmail_lib::id::generate_id("", 26);
     let secret = format!("amk_{}", Uuid::new_v4().simple());
@@ -2859,7 +3061,7 @@ async fn form_webhook_create(
             return redirect_error(message, "/settings/webhooks", &state.config);
         }
     };
-    if let Err(message) = form.check_csrf(&state.config) {
+    if let Err(message) = form.check_csrf(&headers, &state.config) {
         return redirect_error(message, "/settings/webhooks", &state.config);
     }
     let mut fields = FormFieldMap::new("webhook-create");
@@ -2963,9 +3165,10 @@ const MAX_OPEN_INVITATIONS_PER_TENANT: i64 = 50;
 async fn form_team_invite(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/settings/team", &state.config);
     }
     // Privilege gate: only owner/admin sessions may invite, decided by the
@@ -3085,9 +3288,10 @@ async fn form_team_invite(
 async fn form_billing_checkout(
     State(state): State<AppState>,
     axum::Extension(_user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/settings/billing", &state.config);
     }
     let plan = field(&form, "plan");
@@ -3112,9 +3316,10 @@ async fn form_billing_checkout(
 async fn form_billing_portal(
     State(state): State<AppState>,
     axum::Extension(_user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/settings/billing", &state.config);
     }
     redirect_success(
@@ -3129,9 +3334,10 @@ async fn form_billing_portal(
 async fn form_contact_create(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/contacts/new", &state.config);
     }
     let email = field(&form, "email").trim().to_lowercase();
@@ -3167,9 +3373,10 @@ async fn form_contact_create(
 async fn form_list_create(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/lists/new", &state.config);
     }
     let name = field_truncated(&form, "name", 120);
@@ -3199,9 +3406,10 @@ async fn form_list_create(
 async fn form_list_update(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/lists", &state.config);
     }
     let name = field_truncated(&form, "name", 120);
@@ -3232,9 +3440,10 @@ async fn form_list_update(
 async fn form_domain_create(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/domains/new", &state.config);
     }
     let name = field(&form, "name").trim().to_lowercase();
@@ -3289,9 +3498,10 @@ async fn form_domain_create(
 async fn form_template_create(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/templates/new", &state.config);
     }
     let name = field_truncated(&form, "name", 120);
@@ -3334,9 +3544,10 @@ async fn form_template_create(
 async fn form_campaign_create(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/campaigns/new", &state.config);
     }
     let name = field_truncated(&form, "name", 120);
@@ -3406,22 +3617,25 @@ async fn form_campaign_create(
 async fn form_campaign_preview(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     // CSRF is enforced like every other authenticated POST — a bad token
     // bounces back to the editor with a flash instead of rendering the
     // (attacker-supplied) body.
     let back = safe_return_to(&form, "/campaigns");
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, &back, &state.config);
     }
     let _ = user;
     let html_body = field(&form, "html_body");
     let page = ui_foundation::leptos_views::web_campaign_preview_page(&html_body);
-    Html(page).into_response()
+    // Preview CSP (audit F5): the global middleware's `default-src 'none'`
+    // would block the previewed email's inline styles and remote images.
+    // The preview response path allows style/img while keeping script-src
+    // 'none' and stripping scripts, exactly like every other page.
+    crate::app::preview_html_response(page)
 }
-
-use axum::response::Html;
 
 /// POST /web/campaigns/update — the campaign editor's save action. Updates
 /// the existing row in place (scoped to the caller's tenant); editing no
@@ -3429,9 +3643,10 @@ use axum::response::Html;
 async fn form_campaign_update(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/campaigns", &state.config);
     }
     let id = field(&form, "id");
@@ -3493,9 +3708,10 @@ async fn form_campaign_update(
 async fn form_placement_create(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/inbox-placement/new", &state.config);
     }
     let name = field_truncated(&form, "name", 120);
@@ -3545,9 +3761,10 @@ async fn form_placement_create(
 async fn form_dedicated_ip_request(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/settings/dedicated-ips", &state.config);
     }
     let region = field_truncated(&form, "region", 40);
@@ -3639,14 +3856,15 @@ async fn web_domain_detail(
     .await
     {
         Some(list) => {
+            let form_csrf = form_csrf_for_render(&headers, &state.config);
             let html = web_data_page(
                 &format!("/domains/{id}"),
                 &list,
                 "record",
                 &flash,
-                &state.config,
+                &form_csrf.token,
             );
-            html_page_response(html, !flash.is_empty(), &state.config)
+            html_page_response(html, &form_csrf, !flash.is_empty(), &state.config)
         }
         None => redirect_error(
             "That domain could not be found in this workspace.",
@@ -3663,10 +3881,11 @@ async fn form_domain_verify(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let back = format!("/domains/{}", urlencode(&id));
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, &back, &state.config);
     }
     if Uuid::parse_str(&id).is_err() {
@@ -3744,14 +3963,15 @@ async fn web_campaign_detail(
     match data::load_campaign_detail(&state.db, user.tenant_id.as_str(), &id).await {
         Some(detail) => {
             let list = detail.to_list_page();
+            let form_csrf = form_csrf_for_render(&headers, &state.config);
             let html = web_data_page(
                 &format!("/campaigns/{id}"),
                 &list,
                 "action",
                 &flash,
-                &state.config,
+                &form_csrf.token,
             );
-            html_page_response(html, !flash.is_empty(), &state.config)
+            html_page_response(html, &form_csrf, !flash.is_empty(), &state.config)
         }
         None => redirect_error(
             "That campaign could not be found in this workspace.",
@@ -3845,10 +4065,11 @@ async fn form_campaign_start(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let back = format!("/campaigns/{}", urlencode(&id));
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, &back, &state.config);
     }
     if Uuid::parse_str(&id).is_err() {
@@ -3942,10 +4163,11 @@ async fn form_campaign_pause(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let back = format!("/campaigns/{}", urlencode(&id));
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, &back, &state.config);
     }
     campaign_transition(
@@ -3965,10 +4187,11 @@ async fn form_campaign_resume(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let back = format!("/campaigns/{}", urlencode(&id));
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, &back, &state.config);
     }
     campaign_transition(
@@ -4018,10 +4241,11 @@ async fn form_campaign_recipients(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let back = format!("/campaigns/{}", urlencode(&id));
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, &back, &state.config);
     }
     if Uuid::parse_str(&id).is_err() {
@@ -4153,7 +4377,7 @@ async fn form_contacts_import(
         Ok(form) => form,
         Err(message) => return redirect_error(message, back, &state.config),
     };
-    if let Err(message) = form.check_csrf(&state.config) {
+    if let Err(message) = form.check_csrf(&headers, &state.config) {
         return redirect_error(message, back, &state.config);
     }
     let csv_text = form.csv_text();
@@ -4298,6 +4522,7 @@ async fn form_contacts_import(
 async fn form_template_update(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let id = field(&form, "id");
@@ -4309,7 +4534,7 @@ async fn form_template_update(
     } else {
         format!("/templates/{}", urlencode(&id))
     };
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, &back, &state.config);
     }
     let mut fields = FormFieldMap::new("template-update");
@@ -4405,10 +4630,11 @@ async fn form_template_update(
 async fn form_template_preview(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     let back = safe_return_to(&form, "/templates");
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, &back, &state.config);
     }
     let mut html_body = field(&form, "html_body");
@@ -4430,7 +4656,8 @@ async fn form_template_preview(
         return redirect_error("Add some HTML content to preview.", &back, &state.config);
     }
     let page = ui_foundation::leptos_views::web_campaign_preview_page(&html_body);
-    Html(page).into_response()
+    // Same preview CSP exception as the campaign preview (audit F5).
+    crate::app::preview_html_response(page)
 }
 
 // ─── SSR fallback + response helpers ──────────────────────────────
@@ -4444,14 +4671,30 @@ fn static_ssr_fallback(
     config: &Config,
 ) -> Response {
     let flash = flash_from_headers(headers, config);
-    match ui_foundation::axum_router::render_route_with_flash(
+    // Failed-POST field map (audit F2): decode and hand to the render pass
+    // so re-populated inputs / per-field errors / secret chips display.
+    let field_map = decode_form_fields_from_headers(headers, &config.csrf_secret);
+    let field_data = field_map.as_ref().map(|map| map.clone().into_view_data());
+    let form_csrf = form_csrf_for_render(headers, config);
+    match ui_foundation::axum_router::render_route_with_form_fields_and_csrf(
         surface,
         path,
         None,
         Some(config.csrf_secret.as_str()),
         &flash,
+        None,
+        field_data.as_ref(),
+        Some(form_csrf.token.as_str()),
     ) {
-        Some(html) => html_page_response(html, !flash.is_empty(), config),
+        Some((html, _embedded_token)) => {
+            let mut response = html_page_response(html, &form_csrf, !flash.is_empty(), config);
+            if field_map.is_some() {
+                if let Ok(value) = form_fields_clear_cookie(is_secure(config)).parse() {
+                    response.headers_mut().append(header::SET_COOKIE, value);
+                }
+            }
+            response
+        }
         None => (
             StatusCode::NOT_FOUND,
             [(header::LOCATION, "/dashboard".to_string())],
@@ -4461,14 +4704,27 @@ fn static_ssr_fallback(
     }
 }
 
-/// HTML response with flash-cookie clearing (mirrors the render path).
-fn html_page_response(html: String, clear_flash: bool, config: &Config) -> Response {
+/// HTML response with flash-cookie clearing (mirrors the render path) plus
+/// the double-submit CSRF cookie (audit F4): the page was rendered with
+/// `form_csrf.token` embedded, and a freshly minted token gets its matching
+/// `csrf_token` cookie set here.
+fn html_page_response(
+    html: String,
+    form_csrf: &FormCsrfToken,
+    clear_flash: bool,
+    config: &Config,
+) -> Response {
     let mut response = (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/html; charset=utf-8".to_string())],
         html,
     )
         .into_response();
+    if form_csrf.minted {
+        if let Ok(value) = form_csrf_set_cookie(&form_csrf.token, config).parse() {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
     if clear_flash {
         if let Ok(value) = ui_foundation::flash::flash_clear_cookie(is_secure(config)).parse() {
             response.headers_mut().append(header::SET_COOKIE, value);
@@ -4484,9 +4740,10 @@ fn html_page_response(html: String, clear_flash: bool, config: &Config) -> Respo
 async fn form_confirm_destructive(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/dashboard", &state.config);
     }
     let intent = field(&form, "intent");
@@ -4653,9 +4910,10 @@ async fn bulk_delete_confirm(
     form: HashMap<String, String>,
     scope: &str,
     intent: &str,
+    headers: HeaderMap,
 ) -> Response {
     let back = format!("/{scope}");
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, &back, &state.config);
     }
     let ids = parse_bulk_ids(&field(&form, "ids"));
@@ -4669,17 +4927,35 @@ async fn bulk_delete_confirm(
 async fn form_campaigns_delete_bulk(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    bulk_delete_confirm(state, user, form, "campaigns", "delete-campaigns-bulk").await
+    bulk_delete_confirm(
+        state,
+        user,
+        form,
+        "campaigns",
+        "delete-campaigns-bulk",
+        headers,
+    )
+    .await
 }
 
 async fn form_contacts_delete_bulk(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    bulk_delete_confirm(state, user, form, "contacts", "delete-contacts-bulk").await
+    bulk_delete_confirm(
+        state,
+        user,
+        form,
+        "contacts",
+        "delete-contacts-bulk",
+        headers,
+    )
+    .await
 }
 
 /// POST /web/lists/delete-bulk — the lists page's bulk action, routed
@@ -4687,9 +4963,10 @@ async fn form_contacts_delete_bulk(
 async fn form_lists_delete_bulk(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    bulk_delete_confirm(state, user, form, "lists", "delete-lists-bulk").await
+    bulk_delete_confirm(state, user, form, "lists", "delete-lists-bulk", headers).await
 }
 
 // ─── CSV exports (server-rendered downloads) ─────────────────────
@@ -4746,8 +5023,13 @@ async fn form_audit_export(
     } else {
         let mut clauses: Vec<String> = Vec::new();
         if !search.is_empty() {
+            // LIKE metacharacters are escaped (audit F7): a search for `%`
+            // or `_` must match those literal characters, not expand into a
+            // whole-table wildcard — same treatment WhereBuilder::ilike and
+            // the audit list apply.
             clauses.push(
-                "(action ILIKE '%' || $1 || '%' OR user_id ILIKE '%' || $1 || '%' OR resource_type ILIKE '%' || $1 || '%')".to_string(),
+                "(action ILIKE '%' || $1 || '%' ESCAPE '\\' OR user_id ILIKE '%' || $1 || '%' ESCAPE '\\' OR resource_type ILIKE '%' || $1 || '%' ESCAPE '\\')"
+                    .to_string(),
             );
         }
         if let Some(days) = days {
@@ -4758,7 +5040,7 @@ async fn form_audit_export(
     let binds: Vec<String> = if search.is_empty() {
         Vec::new()
     } else {
-        vec![search.to_string()]
+        vec![data::escape_like(search)]
     };
     // Live audit_logs columns: timestamp/created_at, action,
     // resource_type, user_id (there is no outcome/status/resource).
@@ -4809,11 +5091,23 @@ fn csv_response(body: String, filename: &str) -> Response {
         .into_response()
 }
 
+/// CSV cell escaping. Besides RFC 4180 quoting, spreadsheet formula
+/// injection is neutralized (audit F6): a cell whose value STARTS with a
+/// formula trigger (`=`, `+`, `-`, `@`) — or a tab/CR, which Excel and
+/// Google Sheets also honor as a formula introducer — is prefixed with a
+/// single quote so the cell renders as text instead of executing when the
+/// export is opened. Contact/audit data is user- and operator-influenced,
+/// so every cell passes through here.
 fn csv_escape(value: &str) -> String {
-    if value.contains(',') || value.contains('"') || value.contains('\n') {
-        format!("\"{}\"", value.replace('"', "\"\""))
+    let formula_safe = if value.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        format!("'{value}")
     } else {
         value.to_string()
+    };
+    if formula_safe.contains(',') || formula_safe.contains('"') || formula_safe.contains('\n') {
+        format!("\"{}\"", formula_safe.replace('"', "\"\""))
+    } else {
+        formula_safe
     }
 }
 
@@ -4822,9 +5116,10 @@ fn csv_escape(value: &str) -> String {
 async fn form_admin_tenant_create(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/tenants/new", &state.config);
     }
     let name = field_truncated(&form, "name", 120);
@@ -4898,9 +5193,10 @@ async fn form_admin_tenant_create(
 async fn form_admin_operator_create(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/operators/new", &state.config);
     }
     let email = field(&form, "email").trim().to_lowercase();
@@ -4956,9 +5252,10 @@ async fn form_admin_operator_create(
 async fn form_sales_discovery(
     State(state): State<AppState>,
     axum::Extension(_user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/sales", &state.config);
     }
     let sources: Vec<String> = field(&form, "sources")
@@ -4985,9 +5282,10 @@ async fn form_sales_discovery(
 async fn form_sales_outreach(
     State(state): State<AppState>,
     axum::Extension(_user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/sales", &state.config);
     }
     let lead_ids: Vec<String> = form
@@ -5017,9 +5315,10 @@ async fn form_sales_outreach(
 async fn form_sales_leads_update(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/sales", &state.config);
     }
     let lead_ids: Vec<String> = form
@@ -5078,9 +5377,10 @@ async fn form_sales_leads_update(
 async fn form_admin_alert_ack(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/alerts", &state.config);
     }
     let id = field(&form, "id");
@@ -5124,9 +5424,10 @@ async fn form_admin_alert_ack(
 async fn form_admin_alert_ack_bulk(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/alerts", &state.config);
     }
     let mut ids: Vec<String> = parse_bulk_ids(&field(&form, "ids"));
@@ -5182,9 +5483,10 @@ async fn form_admin_tenant_suspend(
     State(state): State<AppState>,
     axum::Extension(_user): axum::Extension<AuthUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/tenants", &state.config);
     }
     let row: Option<(String,)> = sqlx::query_as("SELECT status FROM tenants WHERE id = $1")
@@ -5212,9 +5514,10 @@ async fn form_admin_tenant_resume(
     State(state): State<AppState>,
     axum::Extension(_user): axum::Extension<AuthUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/tenants", &state.config);
     }
     let result = sqlx::query(
@@ -5253,9 +5556,10 @@ async fn form_admin_tenant_delete(
     State(state): State<AppState>,
     axum::Extension(_user): axum::Extension<AuthUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/tenants", &state.config);
     }
     let exists: Option<(String,)> = sqlx::query_as("SELECT id::text FROM tenants WHERE id = $1")
@@ -5297,8 +5601,9 @@ async fn web_admin_domain_transfer(
             let flash = flash_from_headers(&headers, &state.config);
             let list = data::transfer_suggestion_page(&suggestion);
             let path = format!("/web/admin/domains/{}/transfer", urlencode(&domain));
-            let html = cp_data_page(&path, &list, "signal", &flash, &state.config);
-            html_page_response(html, !flash.is_empty(), &state.config)
+            let form_csrf = form_csrf_for_render(&headers, &state.config);
+            let html = cp_data_page(&path, &list, "signal", &flash, &form_csrf.token);
+            html_page_response(html, &form_csrf, !flash.is_empty(), &state.config)
         }
         Err(error) => redirect_error(
             &format!("Transfer check could not run: {error}"),
@@ -5314,10 +5619,11 @@ async fn web_admin_domain_transfer(
 async fn form_admin_domain_transfer(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
     use crate::routes::admin::domains::{admin_transfer_domain, AdminTransferDomainRequest};
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/domains", &state.config);
     }
     let domain = field(&form, "domain").trim().to_ascii_lowercase();
@@ -5399,9 +5705,10 @@ fn sales_engine_base_url_for(config: &Config) -> Option<String> {
 async fn form_sales_discovery_run(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/sales", &state.config);
     }
     let sources: Vec<String> = field(&form, "sources")
@@ -5490,9 +5797,10 @@ async fn form_sales_discovery_run(
 async fn form_sales_outreach_launch(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/sales", &state.config);
     }
     let lead_ids: Vec<String> = form
@@ -5692,9 +6000,10 @@ async fn form_admin_gdpr_transition(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
     Path(id): Path<String>,
+    headers: HeaderMap,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &state.config) {
+    if let Err(message) = check_csrf(&form, &headers, &state.config) {
         return redirect_error(message, "/compliance/gdpr", &state.config);
     }
     let target = field(&form, "status").trim().to_string();
@@ -6163,6 +6472,92 @@ mod tests {
     }
 
     #[test]
+    fn csv_escaping_neutralizes_formula_triggers() {
+        // Audit F6: a cell leading with = + - @ (or tab/CR) would execute as
+        // a formula in Excel/Sheets when the export is opened — it must be
+        // forced to text with a leading single quote.
+        assert_eq!(csv_escape("=SUM(A1:A9)"), "'=SUM(A1:A9)");
+        assert_eq!(csv_escape("+1/0"), "'+1/0");
+        assert_eq!(csv_escape("-2+3"), "'-2+3");
+        assert_eq!(csv_escape("@cmd|' /C calc'"), "'@cmd|' /C calc'");
+        assert_eq!(csv_escape("\t=A1"), "'\t=A1");
+        assert_eq!(csv_escape("\rJUNK"), "'\rJUNK");
+        // Only the FIRST character matters: mid-cell characters stay as-is.
+        assert_eq!(csv_escape("a-b=c"), "a-b=c");
+        // Quoting still applies around the neutralized value.
+        assert_eq!(csv_escape("=1,2"), "\"'=1,2\"");
+    }
+
+    #[test]
+    fn check_csrf_binds_the_form_token_to_the_double_submit_cookie() {
+        // Audit F4: the hidden `_csrf` input must be backed by the matching
+        // `csrf_token` cookie — a token harvested from the public
+        // /v1/auth/csrf endpoint alone must not validate a foreign form.
+        let config = test_config();
+        let token = ui_foundation::csrf::generate_csrf_token(&config.csrf_secret);
+        let mut form = HashMap::new();
+        form.insert("_csrf".to_string(), token.clone());
+
+        // No cookie at all → rejected.
+        assert!(check_csrf(&form, &HeaderMap::new(), &config).is_err());
+
+        // A different cookie value → rejected (constant-time mismatch).
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            "csrf_token=someone-elses-token".parse().unwrap(),
+        );
+        assert!(check_csrf(&form, &headers, &config).is_err());
+
+        // The matching pair → accepted (timestamp/HMAC still enforced).
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("csrf_token={token}").parse().unwrap(),
+        );
+        assert!(check_csrf(&form, &headers, &config).is_ok());
+
+        // A token signed with another secret is rejected even when the
+        // cookie matches it.
+        let foreign = ui_foundation::csrf::generate_csrf_token("other-secret");
+        let mut form = HashMap::new();
+        form.insert("_csrf".to_string(), foreign.clone());
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("csrf_token={foreign}").parse().unwrap(),
+        );
+        assert!(check_csrf(&form, &headers, &config).is_err());
+    }
+
+    #[test]
+    fn mfa_fallback_counter_keeps_the_bruteforce_bound_without_redis() {
+        // Audit F11: Redis loss used to remove the lockout bound entirely.
+        // The in-process counter keeps it (keyed, windowed, bounded).
+        let key = mfa_verify_failure_key("mfa-fallback-unit-user");
+        mfa_fallback::clear(&key);
+        assert!(!mfa_fallback::locked(&key));
+
+        for _ in 0..MFA_VERIFY_MAX_ATTEMPTS {
+            mfa_fallback::record_failure(&key);
+        }
+        assert!(
+            mfa_fallback::locked(&key),
+            "the attempt cap holds through a Redis outage"
+        );
+
+        // A successful verify clears the window.
+        mfa_fallback::clear(&key);
+        assert!(!mfa_fallback::locked(&key));
+
+        // Unrelated challenges are not locked by this one's failures.
+        mfa_fallback::record_failure(&key);
+        assert!(!mfa_fallback::locked(&mfa_verify_failure_key(
+            "mfa-fallback-unit-other"
+        )));
+    }
+
+    #[test]
     fn mfa_setup_cookie_roundtrips_and_binds_the_user() {
         let config = test_config();
         let secret = "JBSWY3DPEHPK3PXP";
@@ -6383,6 +6778,57 @@ mod tests {
         assert!(cookies
             .iter()
             .any(|cookie| cookie.starts_with("apexmail_form_fields=")));
+    }
+
+    #[test]
+    fn form_field_map_round_trips_into_the_rendered_form() {
+        // Audit F2: the encode→decode round trip must land in the RENDERED
+        // page — stored values re-populate their inputs, per-field errors
+        // render under the controls, and reveal-once secrets display.
+        let config = test_config();
+        let mut map = FormFieldMap::new("webhook-create");
+        map.set("url", "https://example.com/hook");
+        map.error("url", "Enter an https URL.");
+        map.secret("Webhook signing secret (shown once)", "whsec_deadbeef");
+
+        let cookie = form_fields_set_cookie(&map, &config.csrf_secret, false);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            cookie
+                .split_once(';')
+                .unwrap()
+                .0
+                .to_string()
+                .parse()
+                .unwrap(),
+        );
+        let decoded =
+            decode_form_fields_from_headers(&headers, &config.csrf_secret).expect("decodes");
+        let fields = decoded.into_view_data();
+
+        let html = ui_foundation::axum_router::render_route_with_form_fields(
+            "web",
+            "/settings/webhooks",
+            None,
+            Some(&config.csrf_secret),
+            &[],
+            None,
+            Some(&fields),
+        )
+        .expect("settings/webhooks renders");
+        assert!(
+            html.contains("value=\"https://example.com/hook\""),
+            "the submitted value re-populates its input"
+        );
+        assert!(
+            html.contains("Enter an https URL."),
+            "the per-field error renders under the control"
+        );
+        assert!(
+            html.contains("whsec_deadbeef"),
+            "the reveal-once secret renders as a chip"
+        );
     }
 
     // ─── Multi-value form parsing ─────────────────────────────────
@@ -6822,12 +7268,24 @@ mod tests {
         }
 
         fn post_form(uri: &str, body: &str) -> Request<Body> {
-            Request::builder()
+            // Audit F4 (double-submit CSRF): when the body carries a `_csrf`
+            // token, attach the matching `csrf_token` cookie exactly as a
+            // browser would after a page render minted the pair. The value
+            // in the body is already URL-encoded, and CSRF tokens are
+            // URL-safe base64 + '.', so it passes through unchanged.
+            let csrf_cookie = body
+                .split('&')
+                .find_map(|pair| pair.strip_prefix("_csrf="))
+                .filter(|token| !token.is_empty())
+                .map(|token| format!("csrf_token={token}"));
+            let mut builder = Request::builder()
                 .method("POST")
                 .uri(uri)
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from(body.to_string()))
-                .unwrap()
+                .header("content-type", "application/x-www-form-urlencoded");
+            if let Some(cookie) = csrf_cookie {
+                builder = builder.header("cookie", cookie);
+            }
+            builder.body(Body::from(body.to_string())).unwrap()
         }
 
         /// Flash messages from a response's Set-Cookie headers.

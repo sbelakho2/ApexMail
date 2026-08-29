@@ -23,7 +23,7 @@ impl ApiKeysRepo {
     /// Create a new API key.
     pub async fn create(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         name: &str,
         key_hash: &str,
         key_prefix: &str,
@@ -48,7 +48,7 @@ impl ApiKeysRepo {
     /// #226:Added limit/offset parameters
     pub async fn list(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<ApiKey>, sqlx::Error> {
@@ -66,7 +66,7 @@ impl ApiKeysRepo {
     }
 
     /// Delete an API key (scoped to tenant).
-    pub async fn delete(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> Result<bool, sqlx::Error> {
+    pub async fn delete(pool: &PgPool, tenant_id: &str, id: Uuid) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM api_keys WHERE id = $1 AND tenant_id = $2")
             .bind(id)
             .bind(tenant_id)
@@ -100,7 +100,7 @@ mod tests {
     fn test_api_key_mock_construction() {
         let key = ApiKey {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            tenant_id: crate::types::short_id('t'),
             name: "CI Key".into(),
             key_hash: "sha256_deadbeef".into(),
             key_prefix: "am_live_abc".into(),

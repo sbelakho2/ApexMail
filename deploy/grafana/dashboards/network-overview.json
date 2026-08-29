@@ -1,5 +1,7 @@
 {
-  "annotations": {"list": []},
+  "annotations": {
+    "list": []
+  },
   "editable": false,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -7,29 +9,80 @@
   "links": [],
   "panels": [
     {
-      "datasource": {"type": "prometheus", "uid": "Prometheus"},
-      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
       "id": 1,
-      "targets": [{"expr": "probe_success{job=~\"blackbox|blackbox-smtp|blackbox-dns\"}", "legendFormat": "{{ job }} {{ instance }}", "refId": "A"}],
+      "targets": [
+        {
+          "expr": "probe_success{job=~\"blackbox.*\"}",
+          "legendFormat": "{{ job }} {{ instance }}",
+          "refId": "A"
+        }
+      ],
       "title": "External Probe Success",
       "type": "timeseries"
     },
     {
-      "datasource": {"type": "prometheus", "uid": "Prometheus"},
-      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}, "unit": "s"}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
       "id": 2,
-      "targets": [{"expr": "probe_duration_seconds{job=~\"blackbox|blackbox-smtp|blackbox-dns\"}", "legendFormat": "{{ job }} {{ instance }}", "refId": "A"}],
+      "targets": [
+        {
+          "expr": "probe_duration_seconds{job=~\"blackbox.*\"}",
+          "legendFormat": "{{ job }} {{ instance }}",
+          "refId": "A"
+        }
+      ],
       "title": "External Probe Duration",
       "type": "timeseries"
     }
   ],
   "refresh": "30s",
   "schemaVersion": 39,
-  "tags": ["apexmail", "network"],
-  "templating": {"list": []},
-  "time": {"from": "now-6h", "to": "now"},
+  "tags": [
+    "apexmail",
+    "network"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "timezone": "browser",
   "title": "Network Overview",
   "uid": "apexmail-network-overview",

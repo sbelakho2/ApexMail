@@ -468,6 +468,14 @@ pub fn build_app(state: AppState) -> Router {
     let public = Router::<AppState>::new()
         .route("/assets/globals.css", get(browser_globals_css))
         .route("/verify-email", get(browser_verify_email_page))
+        // Path-param twin (F5/CWE-598): verification emails link to the
+        // root-relative `/verify-email/{token}` so the token never rides
+        // the query string. The `?token=` variant above keeps working for
+        // already-sent links.
+        .route(
+            "/verify-email/:token",
+            get(browser_verify_email_page_by_path),
+        )
         // Permanent redirects for the legacy /legal/* paths (previously
         // interim HTML meta-refresh pages served by ui-foundation).
         .route("/legal/terms", get(legal_terms_redirect))
@@ -568,7 +576,8 @@ pub fn build_app(state: AppState) -> Router {
             state.clone(),
             crate::middleware::cp_auth::require_cp_auth,
         ))
-        .layer(axum::middleware::from_fn(
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
             auth::require_system_tenant_middleware,
         ));
 
@@ -754,8 +763,9 @@ async fn security_headers(
 /// - immutable build artifacts (`/css`, `/js`, `/fonts`, `/images`):
 ///   `public, max-age=31536000, immutable`;
 /// - site-level files that change per build but must still be cacheable
-///   (`/manifest.json`, `/sitemap.xml`, `/robots.txt`, icons,
-///   autoconfig): `public, max-age=3600` (revalidated hourly).
+///   (`/manifest.json`, `/sitemap.xml`, `/robots.txt`, icons, the SSR
+///   pages' `/assets/globals.css`, autoconfig): `public, max-age=3600`
+///   (revalidated hourly).
 fn static_asset_cache_control(path: &str) -> HeaderValue {
     let immutable = path.starts_with("/css/")
         || path.starts_with("/js/")
@@ -763,7 +773,12 @@ fn static_asset_cache_control(path: &str) -> HeaderValue {
         || path.starts_with("/images/");
     let cacheable_file = matches!(
         path,
-        "/manifest.json" | "/sitemap.xml" | "/robots.txt" | "/icon.svg" | "/favicon.ico"
+        "/manifest.json"
+            | "/sitemap.xml"
+            | "/robots.txt"
+            | "/icon.svg"
+            | "/favicon.ico"
+            | "/assets/globals.css"
     ) || path.starts_with("/.well-known/")
         || path == "/mail/config-v1.1.xml";
     if immutable {
@@ -807,11 +822,31 @@ fn browser_html_response(html: String) -> Response {
     // ui_foundation's render pass strips them for marketing static docs and
     // this final defensive pass guarantees it even for hand-written HTML.
     // The CSP pins `script-src 'none'` so nothing could execute regardless.
+    html_response_with_csp(html, browser_csp_header())
+}
+
+/// Browser HTML response for campaign/template PREVIEWS (audit F5): the
+/// previewed body is user-authored email HTML whose inline `style=`
+/// attributes and remote images are the point of the preview, so the page
+/// CSP allows inline styles and https/data images — while keeping the
+/// zero-JS posture (`script-src 'none'`, scripts stripped) and denying
+/// everything else `default-src 'none'` leaves.
+pub(crate) fn preview_html_response(html: String) -> Response {
+    html_response_with_csp(html, preview_csp_header())
+}
+
+fn preview_csp_header() -> HeaderValue {
+    HeaderValue::from_static(
+        "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; img-src https: data:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; style-src-attr 'unsafe-inline'; script-src 'none'; frame-src 'none'; object-src 'none'",
+    )
+}
+
+fn html_response_with_csp(html: String, csp: HeaderValue) -> Response {
     let html = ui_foundation::axum_router::strip_executable_scripts(&html);
     let mut response = Html(html).into_response();
     response
         .headers_mut()
-        .insert("Content-Security-Policy", browser_csp_header());
+        .insert("Content-Security-Policy", csp);
     response
 }
 
@@ -984,6 +1019,28 @@ async fn browser_verify_email_page(
     headers: HeaderMap,
     Query(params): Query<BrowserVerifyEmailQuery>,
 ) -> Response {
+    render_browser_verify_email(&state, &headers, params.token, params.email).await
+}
+
+/// `GET /verify-email/{token}` — path-param variant of the branded
+/// verify-email page. Only the token moves into the path; an optional
+/// `?email=` still rides the query for display context.
+async fn browser_verify_email_page_by_path(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    headers: HeaderMap,
+    Path(token): Path<String>,
+    Query(params): Query<BrowserVerifyEmailQuery>,
+) -> Response {
+    // The path token wins; a stray `?token=` from an old link is ignored.
+    render_browser_verify_email(&state, &headers, Some(token), params.email).await
+}
+
+async fn render_browser_verify_email(
+    state: &AppState,
+    headers: &HeaderMap,
+    token: Option<String>,
+    email: Option<String>,
+) -> Response {
     let host = headers.get(HOST).and_then(|value| value.to_str().ok());
     if !state.config.is_explicit_web_host(host) {
         return branded_not_found(&state.config, host);
@@ -991,12 +1048,12 @@ async fn browser_verify_email_page(
     let surface = "web";
 
     let mut query_params: Vec<(&str, String)> = Vec::new();
-    if let Some(email) = params.email.as_deref() {
+    if let Some(email) = email.as_deref() {
         query_params.push(("email", email.to_owned()));
     }
 
-    if let Some(token) = params.token.as_deref() {
-        match routes::auth::verify_email_token(&state, token).await {
+    if let Some(token) = token.as_deref() {
+        match routes::auth::verify_email_token(state, token).await {
             Ok(result) => {
                 query_params.push(("status", "success".into()));
                 query_params.push(("message", result.message));
@@ -1056,17 +1113,32 @@ fn render_ui_response(
         .and_then(|value| value.to_str().ok())
         .map(|cookies| routes::web::decode_flash_from_cookie_header(cookies, &config.csrf_secret))
         .unwrap_or_default();
-    let html =
-        ui_router::render_route_with_flash(surface, uri.path(), uri.query(), csrf_secret, &flash)?;
+    // Failed-POST field map (values / per-field errors / reveal-once
+    // secrets) decodes here so the re-rendered form is repopulated.
+    let field_map = routes::web::decode_form_fields_from_headers(headers, &config.csrf_secret);
+    let field_data = field_map.as_ref().map(|map| map.clone().into_view_data());
+    // Double-submit CSRF (audit F4): reuse the request's still-valid token
+    // so open tabs keep working, else mint one and set the cookie below.
+    let form_csrf = routes::web::form_csrf_for_render(headers, config);
+    let (html, _embedded_token) = ui_router::render_route_with_form_fields_and_csrf(
+        surface,
+        uri.path(),
+        uri.query(),
+        csrf_secret,
+        &flash,
+        None,
+        field_data.as_ref(),
+        Some(form_csrf.token.as_str()),
+    )?;
     let html = apply_recorded_consent_state(html, headers);
     let mut response = browser_html_response(html);
-    if !flash.is_empty() {
-        if let Ok(value) =
-            ui_foundation::flash::flash_clear_cookie(config.environment.is_production()).parse()
-        {
-            response.headers_mut().append(header::SET_COOKIE, value);
-        }
-    }
+    append_render_cookies(
+        &mut response,
+        &form_csrf,
+        !flash.is_empty(),
+        field_map.is_some(),
+        config,
+    );
     Some(response)
 }
 
@@ -1098,6 +1170,14 @@ async fn render_ui_response_with_state(
             routes::web::decode_flash_from_cookie_header(cookies, &state.config.csrf_secret)
         })
         .unwrap_or_default();
+    // Failed-POST field map (values / per-field errors / reveal-once
+    // secrets) decodes here so the re-rendered form is repopulated.
+    let field_map =
+        routes::web::decode_form_fields_from_headers(headers, &state.config.csrf_secret);
+    let field_data = field_map.as_ref().map(|map| map.clone().into_view_data());
+    // Double-submit CSRF (audit F4): reuse the request's still-valid token
+    // so open tabs keep working, else mint one and set the cookie below.
+    let form_csrf = routes::web::form_csrf_for_render(headers, &state.config);
 
     // Control-plane pages (other than the login) are operator-only: a
     // customer session is bounced to the CP login, mirroring the
@@ -1145,25 +1225,61 @@ async fn render_ui_response_with_state(
         _ => None,
     };
 
-    let html = ui_router::render_route_with_data(
+    let (html, _embedded_token) = ui_router::render_route_with_form_fields_and_csrf(
         surface,
         uri.path(),
         uri.query(),
         csrf_secret,
         &flash,
         route_data.as_ref(),
+        field_data.as_ref(),
+        Some(form_csrf.token.as_str()),
     )?;
     let html = apply_recorded_consent_state(html, headers);
     let mut response = browser_html_response(html);
-    if !flash.is_empty() {
+    append_render_cookies(
+        &mut response,
+        &form_csrf,
+        !flash.is_empty(),
+        field_map.is_some(),
+        &state.config,
+    );
+    Some(response)
+}
+
+/// Set the response cookies every browser GET render owes:
+///
+/// - the double-submit `csrf_token` cookie when this render minted a fresh
+///   token (reused tokens already have their cookie on the browser);
+/// - the flash clear cookie when a flash banner was just rendered;
+/// - the form field-map clear cookie when the failed-POST field map was
+///   just consumed into the re-rendered form (one PRG round trip).
+fn append_render_cookies(
+    response: &mut Response,
+    form_csrf: &routes::web::FormCsrfToken,
+    clear_flash: bool,
+    clear_fields: bool,
+    config: &Config,
+) {
+    if form_csrf.minted {
+        if let Ok(value) = routes::web::form_csrf_set_cookie(&form_csrf.token, config).parse() {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
+    if clear_flash {
         if let Ok(value) =
-            ui_foundation::flash::flash_clear_cookie(state.config.environment.is_production())
-                .parse()
+            ui_foundation::flash::flash_clear_cookie(config.environment.is_production()).parse()
         {
             response.headers_mut().append(header::SET_COOKIE, value);
         }
     }
-    Some(response)
+    if clear_fields {
+        if let Ok(value) =
+            routes::web::form_fields_clear_cookie(config.environment.is_production()).parse()
+        {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
 }
 
 /// CP paths reachable without a system-tenant session.
@@ -1210,10 +1326,19 @@ fn ui_route_requires_auth(surface: &str, path: &str) -> bool {
     // web `/inbox-placement*` path that is missing from the manifest must
     // still redirect unauthenticated visitors to login. Failing OPEN here
     // would let new (or forgotten) operator/placement routes render for
-    // anonymous users.
+    // anonymous users. The same holds for the web console's dynamic detail
+    // and editor routes (`/lists/{id}`, `/templates/{id}/edit`) that the
+    // fallback renders directly but the manifest does not enumerate — an
+    // anonymous GET there previously fell through to the static demo page
+    // (audit F3) instead of the documented 303 `/login?next=…` contract.
     match surface {
         "control-plane" => path == "/cp" || path.starts_with("/cp/"),
-        "web" => path == "/inbox-placement" || path.starts_with("/inbox-placement/"),
+        "web" => {
+            path == "/inbox-placement"
+                || path.starts_with("/inbox-placement/")
+                || path.starts_with("/lists/")
+                || path.starts_with("/templates/")
+        }
         _ => false,
     }
 }
@@ -2277,6 +2402,14 @@ mod tests {
             "control-plane",
             "/cp/some-future-page"
         ));
+        // Audit F3: the fallback-rendered dynamic console routes (list
+        // detail/edit, template editor) are authenticated pages the
+        // manifest does not enumerate — anonymous GETs previously fell
+        // through to the static demo data instead of the 303 login
+        // contract.
+        assert!(ui_route_requires_auth("web", "/lists/l_vip"));
+        assert!(ui_route_requires_auth("web", "/lists/l_vip/edit"));
+        assert!(ui_route_requires_auth("web", "/templates/t_1/edit"));
         // Unrelated unknown web routes still render anonymously (404/public).
         assert!(!ui_route_requires_auth("web", "/definitely-not-protected"));
         // The marketing-zola /inbox-placement marketing page stays public.
@@ -2284,6 +2417,105 @@ mod tests {
             "marketing-zola",
             "/inbox-placement"
         ));
+    }
+
+    #[tokio::test]
+    async fn anonymous_dynamic_console_pages_redirect_to_login() {
+        // Audit F3 (end to end): every fallback-rendered authenticated web
+        // page bounces anonymous visitors with the documented 303
+        // `/login?next=…` — never the static demo page.
+        let app = test_app().await;
+        for path in ["/lists/l_vip", "/lists/l_vip/edit", "/templates/t_1/edit"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(Method::GET)
+                        .uri(path)
+                        .header(HOST, "app.apexmail.ee")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::SEE_OTHER,
+                "{path} must redirect anonymous visitors to login"
+            );
+            let location = response
+                .headers()
+                .get(header::LOCATION)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            assert!(
+                location.starts_with("/login?next="),
+                "{path} redirected to {location} instead of /login?next=…"
+            );
+        }
+    }
+
+    #[test]
+    fn preview_csp_allows_styles_and_images_but_no_scripts() {
+        // Audit F5: previews must render their inline styles and remote
+        // images, while keeping the zero-JS posture.
+        let csp_value = preview_csp_header();
+        let csp = csp_value.to_str().unwrap();
+        assert!(csp.contains("style-src 'self' 'unsafe-inline'"));
+        assert!(csp.contains("img-src https: data:"));
+        assert!(csp.contains("script-src 'none'"));
+        assert!(csp.contains("default-src 'none'"));
+    }
+
+    #[tokio::test]
+    async fn browser_render_mints_the_double_submit_csrf_pair() {
+        // Audit F4: the rendered page's hidden `_csrf` input must match the
+        // `csrf_token` cookie minted on the same response.
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("app.apexmail.ee"));
+        let uri: Uri = "/login".parse().unwrap();
+
+        let response =
+            render_ui_response(&test_config(), &headers, &uri, &Method::GET).expect("renders");
+        let set_cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let cookie_token = set_cookie
+            .split(';')
+            .next()
+            .and_then(|pair| pair.strip_prefix("csrf_token="))
+            .expect("the render mints the csrf_token cookie")
+            .to_string();
+        assert!(set_cookie.contains("HttpOnly"));
+
+        let body = response_body_string(response).await;
+        assert!(
+            body.contains("_csrf") && body.contains(&format!("value=\"{cookie_token}\"")),
+            "the hidden _csrf input must carry the cookie-matching token"
+        );
+
+        // A still-valid cookie on the NEXT request is reused (open tabs keep
+        // working) instead of being rotated.
+        let mut headers = HeaderMap::new();
+        headers.insert(HOST, HeaderValue::from_static("app.apexmail.ee"));
+        headers.insert(
+            header::COOKIE,
+            format!("csrf_token={cookie_token}").parse().unwrap(),
+        );
+        let response =
+            render_ui_response(&test_config(), &headers, &uri, &Method::GET).expect("renders");
+        assert!(
+            response.headers().get(header::SET_COOKIE).is_none(),
+            "a reused token must not re-set the cookie"
+        );
+        let body = response_body_string(response).await;
+        assert!(
+            body.contains("_csrf") && body.contains(&format!("value=\"{cookie_token}\"")),
+            "the reused token is the one embedded in the page"
+        );
     }
 
     #[tokio::test]
@@ -2667,6 +2899,39 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(verify_unknown_host.status(), StatusCode::NOT_FOUND);
+
+        // Path-param twin (F5/CWE-598): the token rides the path, not the
+        // query string. An over-length token is rejected by
+        // `verify_email_token` BEFORE any database access, so asserting its
+        // rendered message proves the path token reaches the verifier —
+        // without needing an external database — and the branded page still
+        // renders. An unknown host stays a branded 404.
+        let oversized_token = "t".repeat(129);
+        let verify_path_response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/verify-email/{oversized_token}"))
+                    .header(HOST, "app.apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(verify_path_response.status(), StatusCode::OK);
+        let verify_path_body = response_body_string(verify_path_response).await;
+        assert!(verify_path_body.contains("invalid verification token"));
+
+        let verify_path_unknown_host = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/verify-email/{oversized_token}"))
+                    .header(HOST, "unexpected.example.com")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(verify_path_unknown_host.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -2887,13 +3152,19 @@ mod tests {
         // authenticated router — any customer session could create tenants
         // and operators. The branch now rides require_system_tenant_middleware
         // exactly like /v1/admin/*: a customer-tenant AuthUser (even with
-        // the wildcard scope every tenant admin holds) is forbidden.
+        // the wildcard scope every tenant admin holds) is rejected.
+        let state = test_state_app().await;
         let gated = Router::new()
             .route("/web/admin/tenants", post(|| async { "created" }))
-            .layer(axum::middleware::from_fn(
+            .route("/v1/admin/tenants", post(|| async { "created" }))
+            .layer(axum::middleware::from_fn_with_state(
+                state.clone(),
                 crate::middleware::auth::require_system_tenant_middleware,
             ));
 
+        // Browser surface (audit F1): a customer session posting a CP form
+        // gets the web stack's PRG treatment — 303 to /login with a signed
+        // flash cookie, never a raw JSON 403 dump.
         let mut request = Request::post("/web/admin/tenants")
             .body(Body::empty())
             .unwrap();
@@ -2909,11 +3180,54 @@ mod tests {
         let response = gated.clone().oneshot(request).await.unwrap();
         assert_eq!(
             response.status(),
-            StatusCode::FORBIDDEN,
-            "a customer session must be forbidden from /web/admin/*"
+            StatusCode::SEE_OTHER,
+            "a customer session must be PRG-bounced from /web/admin/*"
+        );
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "/login",
+            "the bounce target is the CP login"
+        );
+        let set_cookie = response
+            .headers()
+            .get(header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            set_cookie.contains("apexmail_flash="),
+            "the rejection carries a friendly flash, got: {set_cookie}"
+        );
+        let flash =
+            routes::web::decode_flash_from_cookie_header(set_cookie, &state.config.csrf_secret);
+        assert!(
+            flash
+                .iter()
+                .any(|message| message.text.contains("restricted to ApexMail operators")),
+            "the flash names the privilege boundary, got: {flash:?}"
         );
 
-        // System-tenant operators pass the gate.
+        // JSON surface: the same rejection stays a 403 ApiError.
+        let mut request = Request::post("/v1/admin/tenants")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(crate::middleware::auth::AuthUser {
+                tenant_id: "01HCUSTOMERTENANT0abcdefgh".into(),
+                user_id: Some("00000000-0000-0000-0000-000000000001".into()),
+                api_key_id: None,
+                session_id: None,
+                scopes: vec!["*".into()],
+            });
+        let response = gated.clone().oneshot(request).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "a customer session must be forbidden from /v1/admin/*"
+        );
+
+        // System-tenant operators pass the gate: the literal `system`
+        // sentinel (static API keys)…
         let mut request = Request::post("/web/admin/tenants")
             .body(Body::empty())
             .unwrap();
@@ -2926,8 +3240,50 @@ mod tests {
                 session_id: None,
                 scopes: vec!["*".into()],
             });
-        let response = gated.oneshot(request).await.unwrap();
+        let response = gated.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+
+        // …and the SEEDED system tenant id (audit F1): a slug-aware
+        // membership lookup must admit the operator the CP login actually
+        // mints. The lookup needs a reachable database (with the seeded
+        // tenants row) — without one the gate must fail CLOSED (reject),
+        // never silently admit an unresolvable tenant.
+        if test_db_reachable(&state.db).await {
+            sqlx::query(
+                "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+                 VALUES ('system_internal_tenant01', 'ApexMail', 'system', 'free', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .execute(&state.db)
+            .await
+            .expect("seed system tenant");
+        }
+        let mut request = Request::post("/web/admin/tenants")
+            .body(Body::empty())
+            .unwrap();
+        request
+            .extensions_mut()
+            .insert(crate::middleware::auth::AuthUser {
+                tenant_id: "system_internal_tenant01".into(),
+                user_id: Some("00000000-0000-0000-0000-000000000002".into()),
+                api_key_id: None,
+                session_id: None,
+                scopes: vec!["*".into()],
+            });
+        let response = gated.oneshot(request).await.unwrap();
+        if test_db_reachable(&state.db).await {
+            assert_eq!(
+                response.status(),
+                StatusCode::OK,
+                "the seeded system tenant must pass the slug-aware gate"
+            );
+        } else {
+            assert_eq!(
+                response.status(),
+                StatusCode::SEE_OTHER,
+                "without a database the gate fails closed, not open"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3058,6 +3414,9 @@ mod tests {
             .oneshot(
                 Request::post("/web/auth/reset-password")
                     .header("content-type", "application/x-www-form-urlencoded")
+                    // Double-submit CSRF (audit F4): the form token must be
+                    // backed by the matching csrf_token cookie.
+                    .header("cookie", format!("csrf_token={csrf}"))
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -3081,6 +3440,7 @@ mod tests {
             .oneshot(
                 Request::post("/web/auth/reset-password")
                     .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("csrf_token={csrf}"))
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -3170,6 +3530,7 @@ mod tests {
             .oneshot(
                 Request::post("/web/auth/reset-password")
                     .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("csrf_token={csrf}"))
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -3200,6 +3561,7 @@ mod tests {
             .oneshot(
                 Request::post("/web/auth/reset-password")
                     .header("content-type", "application/x-www-form-urlencoded")
+                    .header("cookie", format!("csrf_token={csrf}"))
                     .body(Body::from(body))
                     .unwrap(),
             )
@@ -3529,10 +3891,25 @@ mod tests {
     }
 
     /// Seed a system-tenant operator and return (user_id, email, password).
+    ///
+    /// The tenant id is the SEEDED system tenant (`system_internal_tenant01`,
+    /// migration 072) — not the literal `system` sentinel — so every gate on
+    /// this fixture exercises the slug-aware membership check (audit F1)
+    /// the CP login uses. A tenants row with slug `system` backs the
+    /// membership.
     async fn cp_gate_seed_operator(
         db: &sqlx::PgPool,
         mfa_enabled: bool,
     ) -> (String, String, String) {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
+             VALUES ('system_internal_tenant01', 'ApexMail', 'system', 'free', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW())
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .execute(db)
+        .await
+        .expect("seed system tenant");
+
         let email = format!("cp-gate-{}@apexmail.ee", uuid::Uuid::new_v4().simple());
         let password = "Sup3r#SecurePass".to_string();
         let hash = bcrypt::hash(&password, bcrypt::DEFAULT_COST).expect("bcrypt hash");
@@ -3540,7 +3917,7 @@ mod tests {
         sqlx::query(
             "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
                                 email_verified, mfa_enabled, metadata, created_at, updated_at)
-             VALUES ($1, 'system', $2, 'CP Op', $3, 'owner', 'active', true, $4, '{}'::jsonb, NOW(), NOW())",
+             VALUES ($1, 'system_internal_tenant01', $2, 'CP Op', $3, 'owner', 'active', true, $4, '{}'::jsonb, NOW(), NOW())",
         )
         .bind(user_id)
         .bind(&email)
@@ -3608,6 +3985,7 @@ mod tests {
                 Request::post("/web/cp/login")
                     .header("content-type", "application/x-www-form-urlencoded")
                     .header(HOST, "admin.apexmail.ee")
+                    .header("cookie", format!("csrf_token={csrf}"))
                     .body(Body::from(format!(
                         "email={}&password={}&_csrf={csrf}",
                         urlencode(email),
@@ -3763,7 +4141,9 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
         let claims = crate::middleware::auth::JwtClaims {
             sub: user_id.clone(),
-            tenant_id: "system".into(),
+            // The seeded system tenant id (slug-aware gate, audit F1) — the
+            // literal `system` sentinel is only for static API keys.
+            tenant_id: "system_internal_tenant01".into(),
             scopes: vec!["*".into()],
             exp: now + 3600,
             iat: now,

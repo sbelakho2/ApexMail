@@ -613,33 +613,43 @@ impl SpamEngine {
     /// Train the per-tenant Bayesian classifier with a spam sample.
     /// The classifier map is LRU-bounded (MAX_TENANT_CLASSIFIERS) so a
     /// multi-tenant deployment cannot grow it without bound.
-    pub fn train_tenant_spam(&self, tenant_id: &str, text: &str) {
-        let mut classifiers = self.tenant_classifiers.write();
-        let mut order = self.tenant_order.write();
-        let classifier = classifiers
-            .entry(tenant_id.to_string())
-            .or_insert_with(|| BayesianClassifier::new(BayesianModel::default()));
-        classifier.learn_spam(text);
-        order.push_back(tenant_id.to_string());
-        while classifiers.len() > MAX_TENANT_CLASSIFIERS {
-            if let Some(oldest) = order.pop_front() {
-                classifiers.remove(&oldest);
-            } else {
-                break;
-            }
-        }
+    ///
+    /// F9:tenant training routes through the VALIDATED learning path —
+    /// entropy check, per-sample token cap, rate limiting (each tenant has
+    /// its own classifier, hence its own per-minute budget), and vocabulary
+    /// pruning on the tenant model — exactly like the global
+    /// [`Self::train_spam`]. The legacy unvalidated path let a tenant
+    /// poison its own model with adversarial input unchecked.
+    pub fn train_tenant_spam(&self, tenant_id: &str, text: &str) -> Result<(), TrainingError> {
+        self.train_tenant(tenant_id, text, TrainingLabel::Spam)
     }
 
     /// Train the per-tenant Bayesian classifier with a ham sample
-    /// (LRU-bounded, see [`Self::train_tenant_spam`]).
-    pub fn train_tenant_ham(&self, tenant_id: &str, text: &str) {
+    /// (LRU-bounded, validated — see [`Self::train_tenant_spam`]).
+    pub fn train_tenant_ham(&self, tenant_id: &str, text: &str) -> Result<(), TrainingError> {
+        self.train_tenant(tenant_id, text, TrainingLabel::Ham)
+    }
+
+    /// Shared validated per-tenant training. The classifier entry is only
+    /// refreshed in the LRU ring when the sample was actually ingested.
+    fn train_tenant(
+        &self,
+        tenant_id: &str,
+        text: &str,
+        label: TrainingLabel,
+    ) -> Result<(), TrainingError> {
         let mut classifiers = self.tenant_classifiers.write();
         let mut order = self.tenant_order.write();
         let classifier = classifiers
             .entry(tenant_id.to_string())
             .or_insert_with(|| BayesianClassifier::new(BayesianModel::default()));
-        classifier.learn_ham(text);
-        order.push_back(tenant_id.to_string());
+        let result = match label {
+            TrainingLabel::Spam => classifier.learn_spam_validated(text),
+            TrainingLabel::Ham => classifier.learn_ham_validated(text),
+        };
+        if result.is_ok() {
+            order.push_back(tenant_id.to_string());
+        }
         while classifiers.len() > MAX_TENANT_CLASSIFIERS {
             if let Some(oldest) = order.pop_front() {
                 classifiers.remove(&oldest);
@@ -647,6 +657,7 @@ impl SpamEngine {
                 break;
             }
         }
+        result
     }
 
     /// Check DMARC policy enforcement from auth_results header.
@@ -967,7 +978,9 @@ mod tests {
     fn test_tenant_classifier_map_is_bounded() {
         let engine = SpamEngine::new();
         for i in 0..(MAX_TENANT_CLASSIFIERS + 50) {
-            engine.train_tenant_spam(&format!("tenant-{i}"), "buy pills now");
+            engine
+                .train_tenant_spam(&format!("tenant-{i}"), "buy pills now")
+                .expect("valid sample must train");
         }
         let count = engine.tenant_classifiers.read().len();
         assert!(
@@ -975,6 +988,85 @@ mod tests {
             "tenant classifier map must be LRU-bounded, got {}",
             count
         );
+    }
+
+    // ── F9:tenant training goes through the validated path ──────────────
+
+    #[test]
+    fn test_tenant_training_rejects_adversarial_samples() {
+        let engine = SpamEngine::new();
+
+        // Low-entropy adversarial input is rejected by the validated path.
+        let low_entropy = "aaaaaaaaaaaaaaaaaaaaaa".repeat(10);
+        let err = engine
+            .train_tenant_spam("tenant-1", &low_entropy)
+            .expect_err("low-entropy sample must be rejected");
+        assert!(
+            matches!(err, crate::bayesian::TrainingError::LowEntropy { .. }),
+            "unexpected error: {err:?}"
+        );
+
+        // Excessive token counts are rejected too.
+        let flood = "uniqueword ".repeat(10_000);
+        let err = engine
+            .train_tenant_ham("tenant-1", &flood)
+            .expect_err("token flood must be rejected");
+        assert!(
+            matches!(err, crate::bayesian::TrainingError::TooManyTokens { .. }),
+            "unexpected error: {err:?}"
+        );
+
+        // …and the tenant model was NOT modified by the rejected samples.
+        let samples = engine
+            .tenant_classifiers
+            .read()
+            .get("tenant-1")
+            .map(|c| c.total_samples())
+            .unwrap_or(0);
+        assert_eq!(samples, 0, "rejected samples must not be ingested");
+
+        // A legitimate sample still trains.
+        engine
+            .train_tenant_spam("tenant-1", "buy cheap pills online pharmacy")
+            .expect("valid sample must train");
+        let samples = engine
+            .tenant_classifiers
+            .read()
+            .get("tenant-1")
+            .map(|c| c.total_samples())
+            .unwrap_or(0);
+        assert_eq!(samples, 1);
+    }
+
+    #[test]
+    fn test_tenant_training_is_rate_limited_per_tenant() {
+        // Each tenant classifier carries its own per-minute budget (the
+        // validated path's rate limiter) — a single tenant cannot train
+        // unbounded, and exhausting one tenant's budget does not affect
+        // another tenant.
+        let engine = SpamEngine::new();
+        let mut rate_limited = false;
+        for i in 0..150 {
+            if engine
+                .train_tenant_spam(
+                    "tenant-flood",
+                    &format!("spam sample number {i} unique words"),
+                )
+                .is_err()
+            {
+                rate_limited = true;
+                break;
+            }
+        }
+        assert!(
+            rate_limited,
+            "per-tenant training must hit the rate limit within 150 calls/min"
+        );
+
+        // The other tenant still has its full budget.
+        engine
+            .train_tenant_spam("tenant-other", "regular legitimate training sample")
+            .expect("other tenant must not share the flooded budget");
     }
 
     #[test]

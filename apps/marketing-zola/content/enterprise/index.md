@@ -19,7 +19,7 @@ Enterprise is a contractual email-delivery offering for organizations that need 
 | Included email volume | 5,000,000 emails/month |
 | API calls | Unlimited |
 | Domains and team members | Unlimited |
-| Retention | 730 days |
+| Event retention | 365 days |
 | Dedicated IPs | 10 included |
 | Access controls | SAML SSO and audit logs |
 | Support level | Dedicated |

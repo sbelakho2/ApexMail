@@ -1160,8 +1160,18 @@ pub fn require_scopes(user: &AuthUser, required: &[&str]) -> Result<(), ApiError
 /// entire platform. This helper is the system-tenant gate that, combined with
 /// the `"*"` scope check performed by [`require_scopes`], ensures only platform
 /// staff reach control-plane handlers.
-pub fn require_system_tenant(auth: &AuthUser) -> Result<(), ApiError> {
-    if auth.tenant_id != "system" {
+///
+/// Slug-aware (audit F1): the seeded system tenant's id is
+/// `system_internal_tenant01` (migration 072), not the literal `system`
+/// sentinel (which only static API keys carry). The literal comparison
+/// rejected every operator minted through the CP login, 403-ing every CP
+/// POST. Membership now resolves through the SAME slug-aware check the CP
+/// login gate uses (`routes::web::is_system_tenant`): the `system` literal
+/// or a tenants row whose slug is `system`. A database error fails CLOSED.
+pub async fn require_system_tenant(state: &AppState, auth: &AuthUser) -> Result<(), ApiError> {
+    if auth.tenant_id != "system"
+        && !crate::routes::web::is_system_tenant(state, &auth.tenant_id).await
+    {
         return Err(ApiError::Forbidden(
             "control-plane access requires system tenant".into(),
         ));
@@ -1175,14 +1185,50 @@ pub fn require_system_tenant(auth: &AuthUser) -> Result<(), ApiError> {
 /// present in request extensions. Intended for the control-plane (`/v1/admin/*`)
 /// router so the tenant-admin wildcard scope `"*"` cannot be used to reach
 /// platform administration endpoints.
+///
+/// Browser surfaces (`/web/*` paths) get the web stack's PRG treatment on
+/// rejection (audit F1): a signed flash cookie + 303 to the login page, the
+/// same way `web_form_rejection_middleware` and the CP login gate render
+/// errors — never a raw JSON 403 dump to a browser.
 pub async fn require_system_tenant_middleware(
+    axum::extract::State(state): axum::extract::State<AppState>,
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> Result<axum::response::Response, ApiError> {
+    let is_browser_path = req.uri().path().starts_with("/web/");
     let auth_user = req.extensions().get::<AuthUser>().cloned().ok_or_else(|| {
         ApiError::Unauthorized("authentication required for control-plane access".into())
     })?;
-    require_system_tenant(&auth_user)?;
+    if let Err(error) = require_system_tenant(&state, &auth_user).await {
+        if is_browser_path {
+            tracing::warn!(
+                tenant_id = %auth_user.tenant_id,
+                path = %req.uri().path(),
+                "non-system session rejected from the control-plane form surface"
+            );
+            use axum::response::IntoResponse as _;
+            let mut response = (
+                axum::http::StatusCode::SEE_OTHER,
+                [(axum::http::header::LOCATION, "/login")],
+            )
+                .into_response();
+            if let Ok(cookie) = ui_foundation::flash::flash_set_cookie(
+                &[ui_foundation::flash::FlashMessage::error(
+                    "Control-plane access is restricted to ApexMail operators.",
+                )],
+                &state.config.csrf_secret,
+                state.config.environment.is_production(),
+            )
+            .parse()
+            {
+                response
+                    .headers_mut()
+                    .append(axum::http::header::SET_COOKIE, cookie);
+            }
+            return Ok(response);
+        }
+        return Err(error);
+    }
     Ok(next.run(req).await)
 }
 

@@ -22,12 +22,19 @@ impl ReplicationService {
     // ── Replica Status ─────────────────────────────────────
 
     /// Query pg_stat_replication for all connected replicas.
+    ///
+    /// `lag_ms` is computed from `replay_lag` in the SAME query — the
+    /// service is connected to the primary, whose `pg_stat_replication`
+    /// view carries each replica's replay lag directly. Previously
+    /// `lag_ms` was hard-coded `None`, so monitoring recorded 0.0 for
+    /// every replica and health was always reported as true.
     pub async fn get_replicas(&self) -> Result<Vec<ReplicaInfo>, String> {
         let rows: Vec<ReplicaRow> = sqlx::query_as::<_, ReplicaRow>(
             "SELECT pid, application_name, client_addr::text,
                     state, sent_lsn::text, write_lsn::text,
                     flush_lsn::text, replay_lsn::text, sync_state,
-                    pg_wal_lsn_diff(sent_lsn, replay_lsn)::bigint AS lag_bytes
+                    pg_wal_lsn_diff(sent_lsn, replay_lsn)::bigint AS lag_bytes,
+                    (EXTRACT(EPOCH FROM replay_lag) * 1000)::float8 AS lag_ms
              FROM pg_stat_replication",
         )
         .fetch_all(&self.pool)
@@ -279,6 +286,8 @@ struct ReplicaRow {
     replay_lsn: Option<String>,
     sync_state: Option<String>,
     lag_bytes: Option<i64>,
+    /// Replay lag in milliseconds from pg_stat_replication.replay_lag.
+    lag_ms: Option<f64>,
 }
 
 impl ReplicaRow {
@@ -294,7 +303,7 @@ impl ReplicaRow {
             replay_lsn: self.replay_lsn,
             sync_state: self.sync_state.unwrap_or_else(|| "async".into()),
             lag_bytes: self.lag_bytes,
-            lag_ms: None, // Computed separately
+            lag_ms: self.lag_ms,
         }
     }
 }
@@ -417,11 +426,15 @@ mod tests {
             replay_lsn: None,
             sync_state: Some("async".into()),
             lag_bytes: Some(0),
+            lag_ms: Some(12.5),
         };
         let info = row.into_info();
         assert_eq!(info.pid, 42);
         assert_eq!(info.state, "streaming");
         assert_eq!(info.sync_state, "async");
+        // lag_ms now flows through from pg_stat_replication.replay_lag
+        // instead of being hard-coded to None.
+        assert_eq!(info.lag_ms, Some(12.5));
     }
 
     #[test]

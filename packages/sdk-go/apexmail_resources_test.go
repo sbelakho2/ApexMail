@@ -66,22 +66,29 @@ func TestAPIKeysCreateUsesAuthEndpoint(t *testing.T) {
 	}
 }
 
-func TestAnalyticsGetBuildsQuery(t *testing.T) {
+func TestAnalyticsDashboardUsesRealSubpath(t *testing.T) {
 	t.Parallel()
 
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			t.Fatalf("expected GET, got %s", r.Method)
 		}
-		if r.URL.Path != "/v1/analytics" {
+		// The API exposes typed subpaths only — GET /v1/analytics does not exist.
+		if r.URL.Path != "/v1/analytics/dashboard" {
 			t.Fatalf("unexpected path: %s", r.URL.Path)
 		}
-		if r.URL.Query().Get("groupBy") != "day" || r.URL.Query().Get("tag") != "welcome" {
+		// AnalyticsQuery accepts exactly {from, to, interval}.
+		if r.URL.Query().Get("from") != "2026-01-01" || r.URL.Query().Get("to") != "2026-01-31" || r.URL.Query().Get("interval") != "day" {
 			t.Fatalf("unexpected query: %s", r.URL.RawQuery)
+		}
+		for _, unsupported := range []string{"groupBy", "tag", "domain"} {
+			if r.URL.Query().Get(unsupported) != "" {
+				t.Fatalf("unsupported query parameter %q sent: %s", unsupported, r.URL.RawQuery)
+			}
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"stats":{"sent":10}}`))
+		_, _ = w.Write([]byte(`{"data":{"total_sent":10,"delivery_rate":1.0}}`))
 	}))
 	defer server.Close()
 
@@ -89,11 +96,35 @@ func TestAnalyticsGetBuildsQuery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create client: %v", err)
 	}
-	response, err := client.Analytics.Get(context.Background(), AnalyticsOptions{From: "2026-01-01", To: "2026-01-31", GroupBy: "day", Tag: "welcome"})
+	response, err := client.Analytics.Dashboard(context.Background(), AnalyticsOptions{From: "2026-01-01", To: "2026-01-31", Interval: "day"})
 	if err != nil {
-		t.Fatalf("get analytics: %v", err)
+		t.Fatalf("dashboard analytics: %v", err)
 	}
-	if response["stats"] == nil {
+	if response["total_sent"] == nil {
 		t.Fatalf("unexpected response: %#v", response)
+	}
+}
+
+func TestAnalyticsGetDeprecatedAliasHitsDashboard(t *testing.T) {
+	t.Parallel()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/analytics/dashboard" {
+			t.Fatalf("unexpected path: %s", r.URL.Path)
+		}
+		if r.URL.Query().Get("interval") != "day" {
+			t.Fatalf("groupBy must map to interval, got query: %s", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":{"total_sent":0}}`))
+	}))
+	defer server.Close()
+
+	client, err := New("am_live_1234567890abcdef", Config{BaseURL: server.URL, HTTPClient: server.Client()})
+	if err != nil {
+		t.Fatalf("create client: %v", err)
+	}
+	if _, err := client.Analytics.Get(context.Background(), AnalyticsOptions{From: "2026-01-01", To: "2026-01-31", GroupBy: "day", Tag: "welcome"}); err != nil {
+		t.Fatalf("get analytics alias: %v", err)
 	}
 }

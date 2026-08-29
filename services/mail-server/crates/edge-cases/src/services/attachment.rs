@@ -108,20 +108,25 @@ impl AttachmentService {
         // 3. Detect MIME type from magic bytes
         let detected_mime = detect_from_magic_bytes(&attachment.content);
 
-        // 4. MIME type blocklist
+        // 4. MIME type blocklist — decided on BOTH the declared and the
+        // detected type (F4): block if EITHER is on the blocklist. The
+        // previous logic preferred the declared Content-Type, so an EXE with
+        // a spoofed `Content-Type: application/pdf` sailed past the
+        // executable blocklist.
+        let blocked_mime = [attachment.content_type.as_deref(), detected_mime]
+            .into_iter()
+            .flatten()
+            .find(|mime| self.limits.blocked_mime_types.iter().any(|b| b == mime));
+
+        if let Some(blocked) = blocked_mime {
+            errors.push(format!("Blocked MIME type: {blocked}"));
+        }
+
         let effective_mime = attachment
             .content_type
             .as_deref()
             .or(detected_mime)
             .unwrap_or("application/octet-stream");
-        if self
-            .limits
-            .blocked_mime_types
-            .iter()
-            .any(|b| b == effective_mime)
-        {
-            errors.push(format!("Blocked MIME type: {effective_mime}"));
-        }
 
         // 5. MIME mismatch warning
         if let (Some(declared), Some(detected)) =
@@ -588,5 +593,92 @@ mod tests {
         ));
         assert!(is_compatible_mime("application/octet-stream", "image/png"));
         assert!(!is_compatible_mime("image/png", "image/jpeg"));
+    }
+
+    // ── F4:blocklist must consult declared AND detected MIME types ──
+
+    fn test_service() -> AttachmentService {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://fake:fake@localhost:1/fake")
+            .expect("lazy pool never connects");
+        let clamav = ClamAVConfig {
+            enabled: false,
+            ..ClamAVConfig::default()
+        };
+        AttachmentService::new(pool, AttachmentLimits::default(), clamav)
+    }
+
+    #[tokio::test]
+    async fn test_exe_magic_with_declared_pdf_is_blocked() {
+        // EXE magic bytes + declared application/pdf: the detected type is on
+        // the blocklist, so the attachment must be blocked even though the
+        // declared type is benign. Previously the declared type won and the
+        // executable passed validation.
+        let service = test_service();
+        let attachment = Attachment {
+            filename: "invoice.pdf".into(),
+            content_type: Some("application/pdf".into()),
+            content: b"MZ\x90\x00\x03\x00\x00\x00\x04\x00".to_vec(),
+            size: 10,
+            disposition: "attachment".into(),
+            content_id: None,
+        };
+
+        let result = service.validate_attachment(&attachment).await;
+        assert!(
+            !result.is_valid,
+            "EXE magic under a declared PDF must be blocked: {:?}",
+            result.errors
+        );
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("application/x-msdownload")));
+        // The declared/detected mismatch is still surfaced as a warning.
+        assert!(result
+            .warnings
+            .iter()
+            .any(|w| w.contains("declared=application/pdf")));
+    }
+
+    #[tokio::test]
+    async fn test_declared_blocked_mime_is_blocked_even_with_clean_magic() {
+        // Declared type on the blocklist blocks regardless of what the magic
+        // bytes look like (unknown bytes here).
+        let service = test_service();
+        let attachment = Attachment {
+            filename: "payload.bin".into(),
+            content_type: Some("application/x-dosexec".into()),
+            content: b"\x00\x01\x02\x03randomdata".to_vec(),
+            size: 16,
+            disposition: "attachment".into(),
+            content_id: None,
+        };
+
+        let result = service.validate_attachment(&attachment).await;
+        assert!(!result.is_valid);
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("application/x-dosexec")));
+    }
+
+    #[tokio::test]
+    async fn test_clean_png_declared_and_detected_allowed() {
+        // Neither declared nor detected type is blocked → valid, no mismatch.
+        let service = test_service();
+        let attachment = Attachment {
+            filename: "photo.png".into(),
+            content_type: Some("image/png".into()),
+            content: vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A],
+            size: 8,
+            disposition: "inline".into(),
+            content_id: None,
+        };
+
+        let result = service.validate_attachment(&attachment).await;
+        assert!(result.is_valid, "clean PNG must pass: {:?}", result.errors);
+        assert!(result.warnings.is_empty());
     }
 }

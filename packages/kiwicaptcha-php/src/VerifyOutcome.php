@@ -18,6 +18,17 @@ namespace KiwiCaptcha;
  * application generated this nonce at issuance and must present it again
  * on the final protected POST, correlating the result with the exact
  * application transaction.
+ *
+ * A valid outcome additionally exposes the server-measured solve
+ * duration via {@see self::solveDurationMs()}: the span between the
+ * record's signed issuance clock (issued_at_ns) and the verification
+ * receipt, computed WITHOUT trusting any client-reported timing (the
+ * token's durationMs is forgeable and never consulted). Null when no
+ * duration was measurable — a record without issued_at_ns, or a receipt
+ * preceding issuance within the verifier's clock-skew tolerance (see
+ * the Verifier docblock) — and for every non-valid outcome; absent
+ * always meant "unmeasurable" in older consumers, so the field is
+ * purely additive.
  */
 final class VerifyOutcome
 {
@@ -28,12 +39,13 @@ final class VerifyOutcome
         public readonly ?string $nonce,
         public readonly ?string $requestBinding,
         public readonly bool $fromStoredResult = false,
+        public readonly ?int $solveDurationMs = null,
     ) {
     }
 
-    public static function valid(?string $nonce = null, ?string $requestBinding = null, bool $fromStoredResult = false): self
+    public static function valid(?string $nonce = null, ?string $requestBinding = null, bool $fromStoredResult = false, ?int $solveDurationMs = null): self
     {
-        return new self(true, null, null, $nonce, $requestBinding, $fromStoredResult);
+        return new self(true, null, null, $nonce, $requestBinding, $fromStoredResult, $solveDurationMs);
     }
 
 
@@ -74,6 +86,24 @@ final class VerifyOutcome
     public function requestBinding(): ?string
     {
         return $this->requestBinding;
+    }
+
+    /**
+     * The server-measured solve duration in milliseconds when the
+     * outcome is valid AND a duration was measurable, else null.
+     *
+     * The value is the gap between the record's issued_at_ns and the
+     * verification receipt clock — unforgeable behavioral evidence the
+     * risk layer can consume as a graded signal (the client-reported
+     * duration never feeds it). Null on every non-valid outcome, for a
+     * record whose issuance clock is unknown, and for a receipt that
+     * precedes issuance within the verifier's clock-skew tolerance,
+     * where the elapsed time cannot be measured reliably (mirroring the
+     * semantics of the verifier's minimum-duration floor).
+     */
+    public function solveDurationMs(): ?int
+    {
+        return $this->solveDurationMs;
     }
 
     /**

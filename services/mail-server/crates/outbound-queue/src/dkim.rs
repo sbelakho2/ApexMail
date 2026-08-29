@@ -198,9 +198,7 @@ impl DkimSigner {
     /// header NAMES — which are ASCII by definition — go through &str.
     pub fn sign(&self, message: &[u8]) -> Result<String> {
         // Split headers and body on the first empty line (CRLF CRLF).
-        let header_end = message
-            .windows(4)
-            .position(|w| w == b"\r\n\r\n");
+        let header_end = message.windows(4).position(|w| w == b"\r\n\r\n");
         let (headers_section, body): (&[u8], &[u8]) = match header_end {
             Some(pos) => (&message[..pos], &message[pos + 4..]),
             None => (message, &[]),
@@ -247,17 +245,16 @@ impl DkimSigner {
         for header_name in &signed_headers {
             // header_name is already lowercased from #111 fix above
             if let Some(value) = headers.get(header_name.as_str()) {
-                headers_to_hash.extend_from_slice(&self.canonicalize_header_relaxed(
-                    header_name,
-                    value,
-                ));
+                headers_to_hash
+                    .extend_from_slice(&self.canonicalize_header_relaxed(header_name, value));
             }
         }
 
         // Add DKIM-Signature header for signing:// #109:Only lowercase the header name per relaxed canonicalization (RFC 6376 §3.4.2)
         // Do NOT lowercase the header value — bh= contains case-sensitive base64
         let dkim_value_canonical = dkim_header.split_whitespace().collect::<Vec<_>>().join(" ");
-        headers_to_hash.extend_from_slice(format!("dkim-signature:{}", dkim_value_canonical).as_bytes());
+        headers_to_hash
+            .extend_from_slice(format!("dkim-signature:{}", dkim_value_canonical).as_bytes());
 
         // Sign
         let signing_key: SigningKey<Sha256> = SigningKey::new(self.private_key.clone());
@@ -282,7 +279,10 @@ impl DkimSigner {
             } else if let Some(colon_pos) = line.iter().position(|&b| b == b':') {
                 // Save previous header
                 if !current_name.is_empty() {
-                    headers.insert(current_name.to_lowercase(), std::mem::take(&mut current_value));
+                    headers.insert(
+                        current_name.to_lowercase(),
+                        std::mem::take(&mut current_value),
+                    );
                 }
                 // Start new header. Header names are ASCII; lossy conversion
                 // never rewrites them.
@@ -484,10 +484,7 @@ mod tests {
             b" indented\r\n"
         );
         // Tabs collapse like spaces.
-        assert_eq!(
-            signer.canonicalize_body_relaxed(b"a\t\tb\r\n"),
-            b"a b\r\n"
-        );
+        assert_eq!(signer.canonicalize_body_relaxed(b"a\t\tb\r\n"), b"a b\r\n");
         // Empty body → single CRLF.
         assert_eq!(signer.canonicalize_body_relaxed(b""), b"\r\n");
         // Body of only empty lines → single CRLF.

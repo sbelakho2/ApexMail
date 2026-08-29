@@ -109,7 +109,7 @@ class EmailsResourceTests(unittest.TestCase):
         )
 
         self.assertEqual(response.id, "msg_single")
-        self.assertEqual(client.calls[0]["json"]["scheduledAt"], scheduled_at.isoformat())
+        self.assertEqual(client.calls[0]["json"]["scheduled_at"], scheduled_at.isoformat())
 
     def test_batch_threads_idempotency_key(self) -> None:
         client = FakeClient()
@@ -141,7 +141,7 @@ class AsyncEmailsResourceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(response.id, "msg_single")
-        self.assertEqual(client.calls[0]["json"]["scheduledAt"], scheduled_at.isoformat())
+        self.assertEqual(client.calls[0]["json"]["scheduled_at"], scheduled_at.isoformat())
 
     async def test_batch_threads_idempotency_key(self) -> None:
         client = FakeAsyncClient()

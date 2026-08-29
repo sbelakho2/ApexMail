@@ -21,6 +21,7 @@ set -eu
 
 VERIFY_SERVICES="api-server mta imap-server mailstore worker enterprise tracking
                  observability marketing status-server billing-service sales-autopilot
+                 compliance
                  postgres-backup clickhouse-backup nginx certbot postgres redis clickhouse
                  prometheus grafana loki alertmanager tempo otel-collector
                  node-exporter blackbox-exporter postgres-exporter redis-exporter

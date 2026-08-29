@@ -76,10 +76,88 @@ impl AttachmentKind {
             Self::Ooxml
         } else if data.starts_with(b"{\\rtf") {
             Self::Rtf
+        } else if bom_encoding(data).is_some() {
+            // UTF-16/UTF-32 text carries a BOM but never validates as UTF-8 —
+            // without this branch it lands in Unknown and is lossy-decoded
+            // into replacement-character noise.
+            Self::PlainText
         } else if data.is_ascii() || std::str::from_utf8(data).is_ok() {
             Self::PlainText
         } else {
             Self::Unknown
+        }
+    }
+}
+
+/// Whether the data is a legacy OLE compound document (old `.doc`/`.xls`/
+/// `.ppt` files). These are text-bearing containers our zero-dep extractor
+/// cannot read, so their contents are unverified (see
+/// [`EXTRACTION_FAILED_RISK_FLOOR`]).
+fn is_ole_container(data: &[u8]) -> bool {
+    data.starts_with(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1])
+}
+
+/// Recognized BOM encodings (excluding plain UTF-8, which `from_utf8`
+/// already handles).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BomEncoding {
+    Utf16Le,
+    Utf16Be,
+    Utf32Le,
+    Utf32Be,
+}
+
+/// BOM-sniff UTF-16/UTF-32. The 4-byte UTF-32 BOMs share their prefix with
+/// the 2-byte UTF-16 BOMs, so they must be tested first.
+fn bom_encoding(data: &[u8]) -> Option<BomEncoding> {
+    match data {
+        [0xFF, 0xFE, 0x00, 0x00, ..] => Some(BomEncoding::Utf32Le),
+        [0x00, 0x00, 0xFE, 0xFF, ..] => Some(BomEncoding::Utf32Be),
+        [0xFF, 0xFE, ..] => Some(BomEncoding::Utf16Le),
+        [0xFE, 0xFF, ..] => Some(BomEncoding::Utf16Be),
+        _ => None,
+    }
+}
+
+/// Decode BOM-marked UTF-16/UTF-32 text. Returns `None` when the data has no
+/// such BOM or does not decode cleanly (callers fall back to UTF-8/lossy).
+fn decode_bom_text(data: &[u8]) -> Option<String> {
+    let (encoding, bom_len) = match bom_encoding(data)? {
+        BomEncoding::Utf16Le => (BomEncoding::Utf16Le, 2),
+        BomEncoding::Utf16Be => (BomEncoding::Utf16Be, 2),
+        BomEncoding::Utf32Le => (BomEncoding::Utf32Le, 4),
+        BomEncoding::Utf32Be => (BomEncoding::Utf32Be, 4),
+    };
+    let payload = &data[bom_len..];
+    match encoding {
+        BomEncoding::Utf16Le | BomEncoding::Utf16Be => {
+            let little_endian = encoding == BomEncoding::Utf16Le;
+            let units: Vec<u16> = payload
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|c| {
+                    if little_endian {
+                        u16::from_le_bytes(*c)
+                    } else {
+                        u16::from_be_bytes(*c)
+                    }
+                })
+                .collect();
+            String::from_utf16(&units).ok()
+        }
+        BomEncoding::Utf32Le | BomEncoding::Utf32Be => {
+            let little_endian = encoding == BomEncoding::Utf32Le;
+            let mut out = String::with_capacity(payload.len() / 4);
+            for chunk in payload.as_chunks::<4>().0 {
+                let word = if little_endian {
+                    u32::from_le_bytes(*chunk)
+                } else {
+                    u32::from_be_bytes(*chunk)
+                };
+                out.push(char::from_u32(word)?);
+            }
+            Some(out)
         }
     }
 }
@@ -124,6 +202,18 @@ fn extract_text(data: &[u8], kind: AttachmentKind) -> (String, bool, String) {
 }
 
 fn extract_plaintext(data: &[u8]) -> (String, bool, String) {
+    // BOM-marked UTF-16/UTF-32 first: decoded as UTF-8 these files are
+    // replacement-character noise and every PII regex silently misses.
+    if let Some(text) = decode_bom_text(data) {
+        let note = match bom_encoding(data) {
+            Some(BomEncoding::Utf16Le) => "Plain text (UTF-16LE, BOM-sniffed)",
+            Some(BomEncoding::Utf16Be) => "Plain text (UTF-16BE, BOM-sniffed)",
+            Some(BomEncoding::Utf32Le) => "Plain text (UTF-32LE, BOM-sniffed)",
+            Some(BomEncoding::Utf32Be) => "Plain text (UTF-32BE, BOM-sniffed)",
+            None => unreachable!("decode_bom_text only succeeds with a BOM"),
+        };
+        return (text, false, note.into());
+    }
     match std::str::from_utf8(data) {
         Ok(s) => (s.to_string(), false, "Plain text extraction".into()),
         Err(_) => {
@@ -313,9 +403,17 @@ const MAX_PDF_STREAMS_EXAMINED: usize = 256;
 /// [`MAX_PDF_STREAMS_EXAMINED`] — observable metric for operators.
 pub static PDF_STREAM_CAP_HITS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// Risk floor applied when a text-bearing attachment yields no extractable
-/// text:contents are unverified, so policy — not a silent Allow — decides.
+/// Risk floor applied when a text-bearing attachment yields no — or an
+/// implausibly small amount of — extractable text:contents are unverified,
+/// so policy — not a silent Allow — decides.
 const EXTRACTION_FAILED_RISK_FLOOR: f64 = 3.0;
+
+/// Coverage heuristic denominator:extracted text below 1 byte per this many
+/// bytes of attachment is "implausibly little" for a text-bearing container
+/// (a 1 MiB PDF containing a single decoy character, for example). One
+/// decoy character must not turn "we could not read this" into a clean
+/// Allow.
+const MIN_TEXT_COVERAGE_PER_BYTES: u64 = 100;
 
 /// Zero-dep PDF text extraction.
 /// Scans for text objects between BT (Begin Text) and ET (End Text) operators
@@ -639,17 +737,31 @@ impl DlpEngine {
         let (text, partial, note) = extract_text(data, kind);
         let extracted_len = text.len();
 
+        // Container formats whose contents we cannot fully read: PDF/OOXML/
+        // RTF by kind, plus legacy OLE compound documents (.doc/.xls/.ppt)
+        // which are text-bearing binaries our zero-dep extractor cannot
+        // parse. For these, "no text" or "almost no text" means UNVERIFIED
+        // contents, not a clean pass.
+        let container_like = matches!(
+            kind,
+            AttachmentKind::Pdf | AttachmentKind::Ooxml | AttachmentKind::Rtf
+        ) || is_ole_container(data);
+
+        // Coverage heuristic:extracted text bytes vs attachment size. Below
+        // 1 byte per MIN_TEXT_COVERAGE_PER_BYTES the extraction is treated as
+        // failed even though it produced output.
+        let low_coverage = !text.is_empty()
+            && (extracted_len as u64).saturating_mul(MIN_TEXT_COVERAGE_PER_BYTES)
+                < data.len() as u64;
+
         // Run DLP scan on extracted text
         let dlp_verdict = if text.is_empty() {
-            // Text-bearing formats that yield NO extractable text are a
-            // red flag (compressed/obfuscated content our extractor cannot
-            // read). Silently returning Allow here would let PII sail
-            // through inside content we failed to decode — instead apply a
-            // risk floor so policy (thresholds) decides the outcome.
-            if matches!(
-                kind,
-                AttachmentKind::Pdf | AttachmentKind::Ooxml | AttachmentKind::Rtf
-            ) {
+            if container_like {
+                // Text-bearing formats that yield NO extractable text are a
+                // red flag (compressed/obfuscated content our extractor cannot
+                // read). Silently returning Allow here would let PII sail
+                // through inside content we failed to decode — instead apply a
+                // risk floor so policy (thresholds) decides the outcome.
                 DlpVerdict {
                     risk_score: EXTRACTION_FAILED_RISK_FLOOR,
                     action: DlpAction::Audit,
@@ -672,6 +784,26 @@ impl DlpEngine {
                     summary: format!("No text extracted from attachment (kind={kind:?})"),
                 }
             }
+        } else if container_like && (low_coverage || partial) {
+            // Some text came out, but it covers an implausibly small share of
+            // the file or the extraction was partial. Scan what we have, then
+            // raise the verdict to the unverified-contents floor — findings
+            // below the floor would read as "verified clean" when most of the
+            // attachment was never decoded.
+            let mut verdict = self.scan(&text, recipient_domain);
+            let coverage_pct = (extracted_len as f64 / data.len() as f64 * 100.0).round();
+            if verdict.risk_score < EXTRACTION_FAILED_RISK_FLOOR {
+                verdict.risk_score = EXTRACTION_FAILED_RISK_FLOOR;
+                verdict.action = DlpAction::Audit;
+            }
+            verdict.summary = format!(
+                "{}; extraction covers only ~{coverage_pct}% of the {}-byte attachment \
+                 (partial={partial}) — risk floor {EXTRACTION_FAILED_RISK_FLOOR} applied, \
+                 contents partially unverified ({note})",
+                verdict.summary,
+                data.len()
+            );
+            verdict
         } else {
             self.scan(&text, recipient_domain)
         };
@@ -1079,5 +1211,144 @@ mod tests {
             AttachmentKind::Ooxml,
             "magic bytes must win over the extension for containers"
         );
+    }
+
+    // ── F1:extraction-coverage risk floor ─────────────────────────────
+
+    #[test]
+    fn test_pdf_decoy_single_char_gets_risk_floor() {
+        // A PDF with ONE extractable character plus a large opaque payload
+        // must not read as "verified clean" — the floor applies.
+        let engine = DlpEngine::new();
+        let mut pdf = b"%PDF-1.7\nBT\n(x) Tj\nET\n".to_vec();
+        pdf.extend(
+            [0x00, 0xAB, 0xCD, 0xEF]
+                .iter()
+                .cycle()
+                .copied()
+                .take(128 * 1024),
+        );
+        let result = engine.scan_attachment(&pdf, Some("doc.pdf"), None);
+        assert_eq!(result.kind, AttachmentKind::Pdf);
+        assert!(
+            result.dlp_verdict.risk_score >= 3.0,
+            "implausibly low text coverage must apply the risk floor, got {} ({})",
+            result.dlp_verdict.risk_score,
+            result.dlp_verdict.summary
+        );
+        assert!(
+            result
+                .dlp_verdict
+                .summary
+                .contains("contents partially unverified"),
+            "summary must state the contents are partially unverified: {}",
+            result.dlp_verdict.summary
+        );
+    }
+
+    #[test]
+    fn test_pdf_normal_coverage_stays_clean() {
+        // Sanity:a tiny PDF whose extracted text covers a plausible share of
+        // the file is scanned normally (no floor when nothing is suspicious).
+        let engine = DlpEngine::new();
+        let pdf = b"%PDF-1.4\nBT\n(Hello there, this is a normal document) Tj\nET";
+        let result = engine.scan_attachment(pdf, Some("doc.pdf"), None);
+        assert!(
+            result.dlp_verdict.risk_score < 3.0,
+            "well-covered PDF must not hit the floor, got {} ({})",
+            result.dlp_verdict.risk_score,
+            result.dlp_verdict.summary
+        );
+    }
+
+    // ── F3:UTF-16/UTF-32 BOM decoding ─────────────────────────────────
+
+    #[test]
+    fn test_utf16le_credit_card_detected() {
+        let engine = DlpEngine::new();
+        let text = "Card number: 4111111111111111";
+        let mut data = vec![0xFF, 0xFE]; // UTF-16LE BOM
+        for unit in text.encode_utf16() {
+            data.extend_from_slice(&unit.to_le_bytes());
+        }
+        let result = engine.scan_attachment(&data, Some("notes.txt"), None);
+        assert_eq!(result.kind, AttachmentKind::PlainText);
+        assert!(!result.partial_extraction);
+        assert!(
+            result
+                .dlp_verdict
+                .pii_findings
+                .iter()
+                .any(|f| f.pii_type == crate::pii::PiiType::CreditCard),
+            "credit card inside UTF-16LE text must be detected (text: {:?})",
+            result.extraction_note
+        );
+    }
+
+    #[test]
+    fn test_utf16be_and_utf32_bom_decode() {
+        let text = "SSN: 123-45-6789";
+        let engine = DlpEngine::new();
+
+        // UTF-16BE
+        let mut be = vec![0xFE, 0xFF];
+        for unit in text.encode_utf16() {
+            be.extend_from_slice(&unit.to_be_bytes());
+        }
+        let result = engine.scan_attachment(&be, Some("a.txt"), None);
+        assert_eq!(result.kind, AttachmentKind::PlainText);
+        assert!(!result.dlp_verdict.pii_findings.is_empty());
+
+        // UTF-32LE
+        let mut le32 = vec![0xFF, 0xFE, 0x00, 0x00];
+        for c in text.chars() {
+            le32.extend_from_slice(&(c as u32).to_le_bytes());
+        }
+        let result = engine.scan_attachment(&le32, Some("b.txt"), None);
+        assert_eq!(result.kind, AttachmentKind::PlainText);
+        assert!(!result.dlp_verdict.pii_findings.is_empty());
+    }
+
+    #[test]
+    fn test_utf16_ssn_detected_via_extract_plaintext() {
+        let text = "SSN: 123-45-6789";
+        let mut data = vec![0xFF, 0xFE];
+        for unit in text.encode_utf16() {
+            data.extend_from_slice(&unit.to_le_bytes());
+        }
+        let (decoded, partial, note) = extract_plaintext(&data);
+        assert!(!partial);
+        assert!(note.contains("UTF-16LE"), "note: {note}");
+        assert!(decoded.contains("123-45-6789"), "decoded: {decoded}");
+    }
+
+    // ── F3:OLE compound documents ─────────────────────────────────────
+
+    #[test]
+    fn test_ole_doc_gets_unverified_risk_floor() {
+        // Legacy .doc/.xls (OLE compound files) are undecodable text-bearing
+        // binaries — a clean Allow would assert we verified contents we
+        // never read.
+        let engine = DlpEngine::new();
+        let mut doc = vec![0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1];
+        doc.extend(std::iter::repeat_n(0x41u8, 4096)); // opaque payload
+        let result = engine.scan_attachment(&doc, Some("legacy.doc"), None);
+        assert_eq!(result.kind, AttachmentKind::Unknown);
+        assert!(result.partial_extraction);
+        assert!(
+            result.dlp_verdict.risk_score >= 3.0,
+            "OLE container must get the unverified-contents floor, got {} ({})",
+            result.dlp_verdict.risk_score,
+            result.dlp_verdict.summary
+        );
+    }
+
+    #[test]
+    fn test_ole_magic_detected() {
+        assert!(is_ole_container(&[
+            0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0x00
+        ]));
+        assert!(!is_ole_container(b"%PDF-1.4"));
+        assert!(!is_ole_container(&[0xFF, 0xFE, 0x00, 0x00]));
     }
 }

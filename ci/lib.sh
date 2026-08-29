@@ -155,10 +155,55 @@ ci_lock_release() {
     if [ "${CI_LOCK_MODE:-}" = flock ] && command -v flock >/dev/null 2>&1; then
         flock -u 9 2>/dev/null || true
     else
-        rm -rf "$LOCK_DIR/$CI_LOCK_NAME.dir" 2>/dev/null || true
+        rm -rf "${CI_LOCK_DIR_PATH:-$LOCK_DIR/$CI_LOCK_NAME.dir}" 2>/dev/null || true
     fi
     CI_LOCK_NAME=''
+    CI_LOCK_DIR_PATH=''
     return "$CI_EXIT_OK"
+}
+
+# ci_lock_file_acquire <absolute-lock-file> <wait_seconds>
+#   F5 — acquire an ABSOLUTE lock file path instead of a name under LOCK_DIR.
+#   Used by ci/pipeline.sh to hold the SAME lock deploy/scripts/deploy.sh
+#   takes (${APEXMAIL_DEPLOY_LOCK:-/opt/apexmail/.deploy.lock}) so pipeline
+#   runs and manual deploys are mutually exclusive. Release via the same
+#   ci_lock_release (the mkdir fallback records its absolute dir in
+#   CI_LOCK_DIR_PATH).
+ci_lock_file_acquire() {
+    _lfa_file=$1
+    _lfa_wait=${2:-0}
+    # Best effort: an unwritable location fails below at open time (which is
+    # reported by the caller as lock-not-acquired rather than a hard crash).
+    mkdir -p "$(dirname "$_lfa_file")" 2>/dev/null || true
+    if command -v flock >/dev/null 2>&1; then
+        # shellcheck disable=SC2094  # fd 9 is intentionally held open for the lock
+        eval "exec 9>>\"\$_lfa_file\"" || return 1
+        if flock -w "$_lfa_wait" 9; then
+            CI_LOCK_NAME=$(basename "$_lfa_file" | sed 's/\.lock$//')
+            CI_LOCK_MODE=flock
+            return "$CI_EXIT_OK"
+        fi
+        return 1
+    fi
+    _lfa_dir="${_lfa_file}.dir"
+    _lfa_deadline=$(( $(date +%s) + _lfa_wait ))
+    while :; do
+        if mkdir "$_lfa_dir" 2>/dev/null; then
+            printf '%s\n' $$ >"$_lfa_dir/pid" 2>/dev/null || true
+            CI_LOCK_NAME=$(basename "$_lfa_file" | sed 's/\.lock$//')
+            CI_LOCK_MODE=mkdir
+            CI_LOCK_DIR_PATH="$_lfa_dir"
+            return "$CI_EXIT_OK"
+        fi
+        _lfa_pid=$(cat "$_lfa_dir/pid" 2>/dev/null || printf '')
+        if [ -n "$_lfa_pid" ] && ! kill -0 "$_lfa_pid" 2>/dev/null; then
+            ci_warn "removing stale lock '$_lfa_file' (pid $_lfa_pid gone)"
+            rm -rf "$_lfa_dir"
+            continue
+        fi
+        [ "$(date +%s)" -ge "$_lfa_deadline" ] && return 1
+        sleep 1
+    done
 }
 
 # --- timeouts -------------------------------------------------------------------

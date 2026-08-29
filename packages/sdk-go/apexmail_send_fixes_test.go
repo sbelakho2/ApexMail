@@ -287,8 +287,14 @@ func TestRetryDelayHonorsRetryAfterInFull(t *testing.T) {
 	if got := retryDelay(resp(""), 2); got != 2*time.Second {
 		t.Fatalf("no Retry-After: expected quadratic backoff 2s, got %v", got)
 	}
-	if got := retryDelay(resp("garbage"), 0); got != 0 {
-		t.Fatalf("garbage Retry-After: expected backoff 0s, got %v", got)
+	// F8: the first retry uses attempt 1, so the backoff floor is 500ms —
+	// a 0-based exponent produced a 0s delay (an immediate hammer at a
+	// server that had just said "slow down").
+	if got := retryDelay(resp(""), 0); got != 500*time.Millisecond {
+		t.Fatalf("no Retry-After, first retry: expected backoff floor 500ms, got %v", got)
+	}
+	if got := retryDelay(resp("garbage"), 0); got != 500*time.Millisecond {
+		t.Fatalf("garbage Retry-After: expected backoff floor 500ms, got %v", got)
 	}
 }
 

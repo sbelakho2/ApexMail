@@ -105,6 +105,8 @@ mod floating_point_edge_cases {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         // Rapid-fire requests to get ~0 inter-arrival times
@@ -214,6 +216,8 @@ mod boundary_conditions {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         let info = tracker.track(&ctx);
@@ -625,6 +629,8 @@ mod concurrency_tests {
                         body_size: 0,
                         tenant_id: None,
                         api_key_id: None,
+                        challenge_id: None,
+                        challenge_solution: None,
                     };
 
                     for _ in 0..100 {
@@ -738,6 +744,8 @@ mod integration_edge_cases {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         // Should allow first request
@@ -766,6 +774,8 @@ mod integration_edge_cases {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         // Should be blocked

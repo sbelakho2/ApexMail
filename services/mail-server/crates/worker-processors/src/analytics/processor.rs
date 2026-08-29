@@ -751,6 +751,15 @@ impl AnalyticsProcessor {
     }
 
     /// Run hourly aggregation from events table.
+    ///
+    /// F7:the rollup upserts ADDITIVELY (`= analytics_hourly.x +
+    /// EXCLUDED.x`), exactly like the flush path's `write_aggregations` —
+    /// the previous `= EXCLUDED.x` REPLACE semantics made the two writers
+    /// clobber each other depending on ordering (a late flush after this
+    /// rollup added on top of replaced totals, and this rollup wiped
+    /// flush-written counts). The rollup also groups `campaign_id` — the
+    /// flush path maintains campaign-keyed buckets, which the old
+    /// `NULL as campaign_id` rollup neither reconciled nor represented.
     async fn run_hourly_aggregation(&self) -> ProcessorResult<()> {
         info!("Running hourly aggregation");
 
@@ -783,7 +792,7 @@ impl AnalyticsProcessor {
                 'anh_' || gen_random_uuid(),
                 tenant_id,
                 domain_id,
-                NULL as campaign_id,
+                campaign_id,
                 $1,
                 $2,
                 COUNT(*) FILTER (WHERE event_type = 'sent'),
@@ -798,17 +807,17 @@ impl AnalyticsProcessor {
                 NOW()
             FROM events
             WHERE timestamp >= $1 AND timestamp < $2
-            GROUP BY tenant_id, domain_id
+            GROUP BY tenant_id, domain_id, campaign_id
             ON CONFLICT (tenant_id, COALESCE(domain_id, ''), COALESCE(campaign_id, ''), period_start)
             DO UPDATE SET
-                sent = EXCLUDED.sent,
-                delivered = EXCLUDED.delivered,
-                opened = EXCLUDED.opened,
-                clicked = EXCLUDED.clicked,
-                bounced = EXCLUDED.bounced,
-                unsubscribed = EXCLUDED.unsubscribed,
-                complained = EXCLUDED.complained,
-                failed = EXCLUDED.failed,
+                sent = analytics_hourly.sent + EXCLUDED.sent,
+                delivered = analytics_hourly.delivered + EXCLUDED.delivered,
+                opened = analytics_hourly.opened + EXCLUDED.opened,
+                clicked = analytics_hourly.clicked + EXCLUDED.clicked,
+                bounced = analytics_hourly.bounced + EXCLUDED.bounced,
+                unsubscribed = analytics_hourly.unsubscribed + EXCLUDED.unsubscribed,
+                complained = analytics_hourly.complained + EXCLUDED.complained,
+                failed = analytics_hourly.failed + EXCLUDED.failed,
                 updated_at = NOW()
             "#,
         )
@@ -844,5 +853,66 @@ mod tests {
         assert_eq!(stats.clicked, 1);
         assert_eq!(stats.bounced, 1);
         assert_eq!(stats.failed, 0);
+    }
+
+    /// F7:both analytics_hourly writers (the flush path's batch upsert in
+    /// `write_aggregations` and the hourly rollup in
+    /// `run_hourly_aggregation`) must upsert ADDITIVELY, and the rollup
+    /// must group campaign_id consistently with the flush path. The old
+    /// split (flush additive, rollup REPLACE) made the two clobber each
+    /// other depending on write ordering. Pinned on the SQL text because
+    /// the crate's test harness has no live database (same technique as
+    /// queue-provider's provider.rs SQL-shape tests).
+    #[test]
+    fn analytics_hourly_upserts_are_additive_and_campaign_consistent() {
+        let source = include_str!("processor.rs");
+        let metrics = [
+            "sent",
+            "delivered",
+            "opened",
+            "clicked",
+            "bounced",
+            "unsubscribed",
+            "complained",
+            "failed",
+        ];
+
+        // Both upserts conflict on the same key shape. The count is 3:
+        // the flush upsert + the rollup upsert + this test's own literal
+        // above (same convention as queue-provider's fenced-UPDATE test).
+        let conflict_key =
+            "ON CONFLICT (tenant_id, COALESCE(domain_id, ''), COALESCE(campaign_id, ''), period_start)";
+        assert_eq!(
+            source.match_indices(conflict_key).count(),
+            3,
+            "expected 2 upserts (flush + rollup) + 1 test literal, found {}",
+            source.match_indices(conflict_key).count()
+        );
+
+        // Every metric of BOTH upserts is additive…
+        for metric in metrics {
+            let additive = format!("{metric} = analytics_hourly.{metric} + EXCLUDED.{metric}");
+            assert_eq!(
+                source.match_indices(&additive).count(),
+                2,
+                "both upserts must additively update {metric}"
+            );
+            // …and no REPLACE-form assignment survives anywhere.
+            let replacing = format!("{metric} = EXCLUDED.{metric},");
+            assert!(
+                !source.contains(&replacing),
+                "{metric} must not be REPLACED by the rollup (clobbering semantics)"
+            );
+        }
+
+        // The rollup groups campaign_id like the flush path's C:/DC keys.
+        assert!(
+            source.contains("GROUP BY tenant_id, domain_id, campaign_id"),
+            "hourly rollup must group campaign_id consistently with the flush path"
+        );
+        assert!(
+            !source.contains("GROUP BY tenant_id, domain_id\n"),
+            "the campaign-less rollup grouping must not remain"
+        );
     }
 }

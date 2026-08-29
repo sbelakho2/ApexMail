@@ -229,4 +229,23 @@ final class Config
             && $len <= $maxBytes
             && \preg_match('/^[A-Za-z0-9._:-]+$/D', $value) === 1;
     }
+
+    /**
+     * Whether $value is a conforming decoy (honeypot) field name: 1..=64
+     * bytes of `[A-Za-z0-9_-]` — the exact shape the widget driver
+     * validates before rendering the hidden input. The alphabet excludes
+     * `|` (and `.`/`:`), so a decoy name can never alter the structure of
+     * the v2 canonical signing input. Mirrors the Rust
+     * `valid_decoy_field_name`; shared by the Issuer's pool draw and the
+     * Verifier's stored-record validation (the malformed-record fail
+     * closed).
+     */
+    public static function isValidDecoyFieldName(string $value): bool
+    {
+        $len = \strlen($value);
+
+        return $len >= 1
+            && $len <= 64
+            && \preg_match('/^[A-Za-z0-9_-]+$/D', $value) === 1;
+    }
 }

@@ -169,7 +169,8 @@ validate_repo_gates() {
 
 image_name_guard() {
     _canonical="api-server mta imap-server mailstore worker enterprise tracking-service
-                observability marketing status-server billing-service sales-autopilot migrator"
+                observability marketing status-server billing-service sales-autopilot
+                compliance migrator"
     _third_party="nginx: certbot/certbot: prodrigestivill/postgres-backup-local:
                  postgres: redis: clickhouse/clickhouse-server:"
     _errs=0
@@ -352,15 +353,44 @@ zola_gates() {
             python3 tools/validate_legal_identity.py --build-dir apps/marketing-zola/public
     fi
 
-    # advisory site-quality validators (html-validation / accessibility / seo).
+    # Site-quality validators (html-validation / accessibility / seo — F14).
     # (They are not +x in the tree — the workflows chmod'ed them; use bash.)
+    #
+    # Gate wiring (F14): each script WRITES a JSON report next to itself
+    # (.contrast-check-report.json / .html-validation-report.json /
+    # .seo-validation-report.json) AND exits non-zero when it records
+    # critical violations — the enforcement exists at the script level. This
+    # stage additionally:
+    #   * HARD-FAILS when a validator ran but produced no report (the
+    #     artifact contract) and preserves every report under $RUN_DIR;
+    #   * enforces the scripts' exit codes (ci_check, non-zero exit on
+    #     violations) when CI_MARKETING_VALIDATION=required. Default is
+    #     `advisory`: these are heuristic grep/awk checkers with a known
+    #     false-positive backlog on the current marketing build, and the
+    #     AUTHORITATIVE pixel-verified a11y gate is
+    #     tools/contrast-audit/gate.sh (REQUIRED, ci/stages/test.sh).
     BUILD_DIR=apps/marketing-zola/public
-    [ -f deploy/tests/contrast-check.sh ] && \
-        ci_check_advisory "WCAG contrast" env BUILD_DIR=$BUILD_DIR bash deploy/tests/contrast-check.sh
-    [ -f deploy/tests/html-validate.sh ] && \
-        ci_check_advisory "HTML validation" env BUILD_DIR=$BUILD_DIR bash deploy/tests/html-validate.sh
-    [ -f deploy/tests/seo-validate.sh ] && \
-        ci_check_advisory "SEO validation" env BUILD_DIR=$BUILD_DIR bash deploy/tests/seo-validate.sh
+    _mv_gate() {
+        _mvg_script=$1 _mvg_label=$2 _mvg_report=$3
+        _mvg_rc=0
+        if [ "$CI_MARKETING_VALIDATION" = required ]; then
+            ci_check "$_mvg_label" env BUILD_DIR=$BUILD_DIR bash "deploy/tests/$_mvg_script" \
+                || _mvg_rc=$CI_EXIT_FAIL
+        else
+            ci_check_advisory "$_mvg_label" env BUILD_DIR=$BUILD_DIR bash "deploy/tests/$_mvg_script"
+        fi
+        if [ -f "deploy/tests/$_mvg_report" ]; then
+            cp "deploy/tests/$_mvg_report" "$RUN_DIR/$_mvg_report" \
+                && ci_info "report artifact: $RUN_DIR/$_mvg_report"
+        else
+            ci_err "validator $_mvg_script produced no report (deploy/tests/$_mvg_report) — the artifact contract is broken"
+            return "$CI_EXIT_FAIL"
+        fi
+        return "$_mvg_rc"
+    }
+    [ -f deploy/tests/contrast-check.sh ] && { _mv_gate contrast-check.sh "WCAG contrast (heuristic)" .contrast-check-report.json || return "$CI_EXIT_FAIL"; }
+    [ -f deploy/tests/html-validate.sh ] && { _mv_gate html-validate.sh "HTML validation" .html-validation-report.json || return "$CI_EXIT_FAIL"; }
+    [ -f deploy/tests/seo-validate.sh ] && { _mv_gate seo-validate.sh "SEO validation" .seo-validation-report.json || return "$CI_EXIT_FAIL"; }
     return "$CI_EXIT_OK"
 }
 

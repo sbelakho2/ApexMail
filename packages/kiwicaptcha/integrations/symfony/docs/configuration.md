@@ -111,7 +111,22 @@ is never forced) are the privacy contract; see
     #                                       # (Symfony Cache ArrayAdapter or
     #                                       # a subclass) is REFUSED in
     #                                       # production, since its items
-    #                                       # live per process. Without a
+    #                                       # live per process. The class
+    #                                       # check resolves parameter-
+    #                                       # indirected ids
+    #                                       # ('%kiwi.rate_pool%'), alias
+    #                                       # chains, parent-declared pools
+    #                                       # and %param% classes; a pool id
+    #                                       # still unresolvable to a class
+    #                                       # at compile time FAILS CLOSED
+    #                                       # in production — reference a
+    #                                       # concrete pool service id. The
+    #                                       # pool items are namespaced per
+    #                                       # deployment (empty namespace
+    #                                       # keeps the legacy shapes), so
+    #                                       # deployments sharing one pool
+    #                                       # keep independent budgets.
+    #                                       # Without a
     #                                       # pool, the fallback is a
     #                                       # per-object in-memory window:
     #                                       # temporal cross-request limiting

@@ -299,7 +299,7 @@ async fn create_ticket(
     Json(body): Json<CreateTicketRequest>,
 ) -> Result<(StatusCode, Json<Ticket>), ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     if body.subject.trim().is_empty() || body.description.trim().is_empty() {
         return Err(ApiError::Validation(vec![
@@ -341,7 +341,7 @@ async fn list_tickets(
     Query(params): Query<TicketsQuery>,
 ) -> Result<Json<Vec<Ticket>>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     let limit = params.limit.clamp(1, 100);
     let offset = params.offset.max(0);
@@ -442,7 +442,7 @@ async fn add_reply(
     Json(body): Json<AddReplyRequest>,
 ) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     if body.content.trim().is_empty() {
         return Err(ApiError::Validation(vec!["content is required".into()]));
@@ -500,7 +500,7 @@ async fn update_ticket(
     Json(body): Json<UpdateTicketRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     if body.status.is_none() && body.priority.is_none() && body.assignee.is_none() {
         return Err(ApiError::Validation(vec!["No fields to update".into()]));

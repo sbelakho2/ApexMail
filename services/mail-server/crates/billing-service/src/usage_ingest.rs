@@ -29,9 +29,15 @@
 //! (migration 104) is inserted in the same transaction as the metering
 //! event, so re-runs and crash-restarts can never double-record a day.
 //!
-//! Fractional quantities (hours, GB) are recorded as whole units rounded
-//! half-up (SQL `ROUND` on positive numerics), matching the platform's
-//! other money/quantity math.
+//! Fractional quantities (GB) are recorded as whole units with a
+//! deterministic cross-day carry: each sweep meters
+//! `FLOOR(cumulative source total through the day) − already-metered whole
+//! units from this source` (see [`sweep_tenant_cost_quantities`]), so
+//! sub-unit usage like 0.4 GB/day accumulates instead of being rounded away
+//! — while every stored quantity stays a whole unit (consumers such as the
+//! `/usage` report display `SUM(quantity)` verbatim). `dedicated_ip_hours`
+//! keeps the per-day half-up SQL `ROUND` (lifecycle-interval overlap in
+//! hours).
 
 use std::collections::HashMap;
 
@@ -475,8 +481,24 @@ async fn sweep_dedicated_ip_hours(
 
 /// Derive `storage_gb_hours` (`storage_gb * 24`) and `bandwidth_gb` for
 /// `day` from the platform's own cost-tracking table (`tenant_costs`,
-/// migration 022). DECIMAL values are rounded half-up to whole units
-/// SQL-side.
+/// migration 022).
+///
+/// Fix F9 — sub-unit accumulation. Rounding each day independently
+/// (`ROUND(storage_gb * 24)`, `ROUND(bandwidth_gb)`) discarded fractional
+/// usage forever: a tenant burning 0.4 GB/day metered 0 — every day,
+/// forever. Consumers were traced before choosing the mechanism: nothing
+/// multiplies these quantities back (invoice PAYG pricing reads
+/// `tenant_costs`' cost columns, enterprise contracts sum `emails_sent`,
+/// the daily reconciliation reads `emails_sent`/`emails_delivered`), but
+/// the `/usage` report surfaces `SUM(quantity)` per event type verbatim to
+/// users, so metering in milli-units would silently change the displayed
+/// unit. The remainder is therefore accumulated deterministically, keyed by
+/// (tenant, resource) across days, WITHOUT new state: each sweep meters
+/// `FLOOR(cumulative source total through the day) − already-metered whole
+/// units from this source` (clamped at ≥ 0). The daily deltas telescope to
+/// `floor(total)` exactly, so 0.4 GB/day meters 0, 0, 1, 0, 1, ... instead
+/// of all zeroes. All arithmetic is SQL-side DECIMAL → BIGINT; no Rust
+/// float path.
 async fn sweep_tenant_cost_quantities(
     pool: &PgPool,
     day: NaiveDate,
@@ -484,13 +506,35 @@ async fn sweep_tenant_cost_quantities(
 ) -> Result<(i64, i64), sqlx::Error> {
     let storage_rows: Vec<TenantCountRow> = sqlx::query_as(
         r#"
-        SELECT tenant_id, ROUND(storage_gb * 24)::bigint AS quantity
-        FROM tenant_costs
-        WHERE recorded_at = $1
-          AND storage_gb > 0
+        WITH active_today AS (
+            SELECT DISTINCT tenant_id
+            FROM tenant_costs
+            WHERE recorded_at = $1
+              AND (storage_gb > 0 OR bandwidth_gb > 0)
+        ),
+        cumulative AS (
+            SELECT tenant_id, FLOOR(SUM(storage_gb) * 24)::bigint AS units
+            FROM tenant_costs
+            WHERE recorded_at <= $1
+              AND storage_gb > 0
+            GROUP BY tenant_id
+        ),
+        metered AS (
+            SELECT tenant_id, COALESCE(SUM(quantity), 0)::bigint AS metered
+            FROM metering_events
+            WHERE event_type = 'storage_gb_hours'
+              AND metadata->>'source' = $2
+            GROUP BY tenant_id
+        )
+        SELECT a.tenant_id,
+               GREATEST(c.units - COALESCE(m.metered, 0), 0)::bigint AS quantity
+        FROM active_today a
+        JOIN cumulative c ON c.tenant_id = a.tenant_id
+        LEFT JOIN metered m ON m.tenant_id = a.tenant_id
         "#,
     )
     .bind(day)
+    .bind(SOURCE_TENANT_COSTS)
     .fetch_all(pool)
     .await?;
 
@@ -506,13 +550,35 @@ async fn sweep_tenant_cost_quantities(
 
     let bandwidth_rows: Vec<TenantCountRow> = sqlx::query_as(
         r#"
-        SELECT tenant_id, ROUND(bandwidth_gb)::bigint AS quantity
-        FROM tenant_costs
-        WHERE recorded_at = $1
-          AND bandwidth_gb > 0
+        WITH active_today AS (
+            SELECT DISTINCT tenant_id
+            FROM tenant_costs
+            WHERE recorded_at = $1
+              AND (storage_gb > 0 OR bandwidth_gb > 0)
+        ),
+        cumulative AS (
+            SELECT tenant_id, FLOOR(SUM(bandwidth_gb))::bigint AS units
+            FROM tenant_costs
+            WHERE recorded_at <= $1
+              AND bandwidth_gb > 0
+            GROUP BY tenant_id
+        ),
+        metered AS (
+            SELECT tenant_id, COALESCE(SUM(quantity), 0)::bigint AS metered
+            FROM metering_events
+            WHERE event_type = 'bandwidth_gb'
+              AND metadata->>'source' = $2
+            GROUP BY tenant_id
+        )
+        SELECT a.tenant_id,
+               GREATEST(c.units - COALESCE(m.metered, 0), 0)::bigint AS quantity
+        FROM active_today a
+        JOIN cumulative c ON c.tenant_id = a.tenant_id
+        LEFT JOIN metered m ON m.tenant_id = a.tenant_id
         "#,
     )
     .bind(day)
+    .bind(SOURCE_TENANT_COSTS)
     .fetch_all(pool)
     .await?;
 

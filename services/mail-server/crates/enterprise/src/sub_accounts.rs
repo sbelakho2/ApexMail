@@ -27,6 +27,13 @@ impl SubAccountService {
     }
 
     /// Create a sub-account
+    ///
+    /// F10 (quota race): the count-then-insert pair ran on the pool, so two
+    /// concurrent creates for the same parent both counted N, both passed the
+    /// limit check and both inserted — the quota silently drifted. The whole
+    /// sequence now runs in ONE transaction that takes a per-parent advisory
+    /// xact lock BEFORE the count: creators for the same parent serialise,
+    /// the count is exact, and the lock releases at commit.
     #[allow(clippy::too_many_arguments)]
     pub async fn create(
         &self,
@@ -38,15 +45,32 @@ impl SubAccountService {
         volume_limit: Option<i64>,
         inherit_parent_settings: bool,
     ) -> Result<ApiResult<SubAccount>, String> {
-        // Check sub-account limit
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| format!("Begin sub-account create: {e}"))?;
+
+        // Serialize quota checks per parent. pg_advisory_xact_lock(bigint)
+        // is released automatically at commit/rollback — no unlock path to
+        // forget. hashtext keeps the key stable and parent-scoped.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(&parent_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("Lock parent for sub-account create: {e}"))?;
+
         let count: (i64,) =
             sqlx::query_as("SELECT COUNT(*) FROM ent_sub_accounts WHERE parent_id = $1")
                 .bind(&parent_id)
-                .fetch_one(&self.db)
+                .fetch_one(&mut *tx)
                 .await
                 .map_err(|e| format!("Count sub-accounts: {e}"))?;
 
         if count.0 >= self.max_sub_accounts as i64 {
+            // Drop the transaction (rolling back and releasing the advisory
+            // lock) before reporting the quota rejection.
+            drop(tx);
             return Ok(ApiResult::err(
                 format!("Maximum sub-accounts ({}) reached", self.max_sub_accounts),
                 "QUOTA_EXCEEDED",
@@ -59,11 +83,15 @@ impl SubAccountService {
              VALUES ($1,$2,$3,'active',$4,$5,$6,$7,0,$8,NOW(),NOW())
              RETURNING *"
         )
-        .bind(id) .bind(&parent_id).bind(name).bind(email)
-        .bind(domain).bind(plan).bind(volume_limit).bind(inherit_parent_settings)
-        .fetch_one(&self.db)
-        .await
-        .map_err(|e| format!("Create sub-account: {e}"))?;
+            .bind(id) .bind(&parent_id).bind(name).bind(email)
+            .bind(domain).bind(plan).bind(volume_limit).bind(inherit_parent_settings)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| format!("Create sub-account: {e}"))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| format!("Commit sub-account create: {e}"))?;
 
         info!(parent_id = %parent_id, sub_id = %id, name = name, "Sub-account created");
         Ok(ApiResult::ok(row))

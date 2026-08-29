@@ -17,6 +17,14 @@
 //! • Dedup via Redis SETNX (EX 86400, open; EX 1 s, rapid clicks) — the key
 //! is rolled back (DEL) when the subsequent WAL enqueue fails, so a failed
 //! enqueue never swallows the client's retry as a "duplicate".
+//! • Unsubscribes are durable-or-failed (F2):when the suppression INSERT
+//! fails, a pending-retry record is RPUSH'd to
+//! `apexmail:suppressions:pending` (drained by the flush loop with the
+//! same retry budget as events) AND the caller gets an error — never a
+//! silent success without the suppression row.
+//! • GDPR:client IPs are masked at every persistence boundary (Postgres
+//! events, ClickHouse ingest — IPv4 → /24, IPv6 → /48 via
+//! `analytics::ip_mask`); full IPs remain only in transient paths.
 
 use std::{
     sync::{
@@ -62,6 +70,11 @@ const MAX_FLUSH_BATCH: usize = 500;
 /// The pool's keyPrefix is `tracking:` so the effective key is
 /// `tracking:apexmail:events:pending`.
 pub const REDIS_WAL_KEY: &str = "apexmail:events:pending";
+
+/// F2:Redis list holding suppression inserts that failed and must be
+/// retried (durable-or-failed unsubscribes). Same RPUSH/drain lifecycle as
+/// the event WAL above.
+pub const REDIS_SUPPRESSION_RETRY_KEY: &str = "apexmail:suppressions:pending";
 
 /// Atomic Lua drain:reads up to N items from the front of the list and
 /// simultaneously trims them, all in a single Redis operation — no interleave
@@ -165,6 +178,9 @@ pub struct ClickHouseEventRow {
     pub recipient_domain: String,
     pub link_id: String,
     pub user_agent: String,
+    /// GDPR:stored MASKED (IPv4 → /24, IPv6 → /48). The column stays String
+    /// but carries the truncated network form, never the full client IP
+    /// (see `analytics::ip_mask`).
     pub ip_address: String,
     pub country: String,
     pub device_type: String,
@@ -182,6 +198,11 @@ impl ClickHouseEventRow {
     /// (stable, so per-recipient grouping keeps working) plus a truncated
     /// `a***@domain` form for human debugging. Postgres remains the
     /// system-of-record for raw recipients.
+    ///
+    /// GDPR:the client IP is masked at this ingest boundary (IPv4 → /24,
+    /// IPv6 → /48 via `analytics::ip_mask`) — the OLAP store's 730-day TTL
+    /// makes a full address disproportionate personal data. The transient
+    /// WAL entry keeps the full IP until the flush.
     pub fn from_tracking_event(ev: &TrackingEvent) -> Self {
         let ts = ev.timestamp;
         let timestamp = time::OffsetDateTime::from_unix_timestamp(ts.timestamp())
@@ -198,7 +219,8 @@ impl ClickHouseEventRow {
             recipient_domain: recipient_domain(&ev.recipient),
             link_id: ev.link_id.clone().unwrap_or_default(),
             user_agent: ev.user_agent.clone().unwrap_or_default(),
-            ip_address: ev.ip_address.clone().unwrap_or_default(),
+            ip_address: analytics::ip_mask::mask_ip_opt(ev.ip_address.as_deref())
+                .unwrap_or_default(),
             country: String::new(),
             device_type: String::new(),
             campaign_id: String::new(),
@@ -303,6 +325,10 @@ impl EventProcessor {
                                         } else {
                                             consecutive_failures = 0;
                                         }
+                                        // F2:re-attempt pending suppression retries on the
+                                        // same cadence (they only exist when Postgres was
+                                        // down, so this is a no-op in steady state).
+                                        this.drain_suppression_retries().await;
                                     }
                 // Shutdown signal received
                                     _ = this.shutdown.notified() => {
@@ -437,6 +463,12 @@ impl EventProcessor {
 
     /// Record an unsubscribe event into the Redis WAL and immediately add the
     /// recipient to the suppression list (GDPR / CAN-SPAM requirement).
+    ///
+    /// F2:durable-or-failed — the suppression row (or a persisted
+    /// pending-retry record in Redis) is a precondition for success. When the
+    /// suppression INSERT fails, the failure is enqueued for retry AND an
+    /// error is returned so the HTTP route answers 5xx and the MUA retries
+    /// the one-click POST (RFC 8058). No silent success without suppression.
     pub async fn record_unsubscribe(&self, data: UnsubscribeData) -> Result<()> {
         let metadata = data
             .category
@@ -468,8 +500,25 @@ impl EventProcessor {
         };
 
         self.enqueue_event(&event).await?;
-        self.add_to_suppression_list(&event.tenant_id, &event.recipient, category.as_deref())
-            .await;
+        if let Err(sup_err) = self
+            .add_to_suppression_list(&event.tenant_id, &event.recipient, category.as_deref())
+            .await
+        {
+            // Persist the pending suppression so a background retry re-attempts
+            // it (F2). Redis failures here are CRITICAL:the row exists
+            // neither in Postgres nor in the retry queue.
+            if let Err(retry_err) = self
+                .enqueue_suppression_retry(&event.tenant_id, &event.recipient, category.as_deref())
+                .await
+            {
+                error!(
+                    error = %retry_err,
+                    tenant_id = %event.tenant_id,
+                    "CRITICAL: suppression insert failed AND retry enqueue failed — suppression NOT persisted anywhere"
+                );
+            }
+            return Err(sup_err.context("suppression insert failed (retry enqueued)"));
+        }
 
         Ok(())
     }
@@ -630,9 +679,14 @@ impl EventProcessor {
         let mut tx = self.db.begin().await.context("begin transaction")?;
 
         for chunk in events.chunks(MAX_PER_CHUNK) {
-            // Use sqlx query_builder for safe parameterization
+            // Use sqlx query_builder for safe parameterization.
+            // GDPR:the persisted `ip_address` is the MASKED form (IPv4 → /24,
+            // IPv6 → /48) — the events table retains rows for years and a
+            // full client IP is personal data (see `analytics::ip_mask`).
+            // The full IP lives only in transient paths (Redis WAL between
+            // flushes, rate limiting, SSE Pub/Sub).
             let mut builder = sqlx::QueryBuilder::<sqlx::Postgres>::new(
-                "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, link_id, link_url, user_agent, ip_address, timestamp) "
+                "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, link_id, link_url, user_agent, ip_address, timestamp) ",
             );
             builder.push_values(chunk, |mut b, ev| {
                 b.push_bind(ev.id.clone())
@@ -643,7 +697,7 @@ impl EventProcessor {
                     .push_bind(ev.link_id.clone())
                     .push_bind(ev.link_url.clone())
                     .push_bind(ev.user_agent.clone())
-                    .push_bind(ev.ip_address.clone())
+                    .push_bind(analytics::ip_mask::mask_ip_opt(ev.ip_address.as_deref()))
                     .push_bind(ev.timestamp);
             });
             builder.push(" ON CONFLICT (id) DO NOTHING");
@@ -802,50 +856,67 @@ impl EventProcessor {
 
     // ── Suppression list ──────────────────────────────────────────────
 
-    async fn add_to_suppression_list(&self, tenant_id: &str, email: &str, category: Option<&str>) {
+    /// Insert (upsert) the suppression row. Idempotent:both branches are
+    /// `ON CONFLICT … DO UPDATE`, so an MUA retry or a concurrent duplicate
+    /// (F1's record-then-dedup window) converges to the same row.
+    async fn insert_suppression_row(
+        &self,
+        sup_id: &str,
+        tenant_id: &str,
+        email: &str,
+        category: Option<&str>,
+    ) -> Result<()> {
         let email_lc = email.to_lowercase();
+        if let Some(cat) = category {
+            sqlx::query(
+                r#"
+                INSERT INTO subscription_preferences (id, tenant_id, email, category, subscribed, updated_at)
+                VALUES ($1, $2, $3, $4, false, NOW())
+                ON CONFLICT (tenant_id, email, category) DO UPDATE SET
+                    subscribed = false, updated_at = NOW()
+                "#,
+            )
+            .bind(sup_id)
+            .bind(tenant_id)
+            .bind(&email_lc)
+            .bind(cat)
+            .execute(&self.db)
+            .await
+            .context("insert subscription_preferences")?;
+        } else {
+            sqlx::query(
+                r#"
+                INSERT INTO suppressions (id, tenant_id, email, reason, subtype, created_at)
+                VALUES ($1, $2, $3, 'unsubscribe', 'one-click', NOW())
+                ON CONFLICT (tenant_id, email) DO UPDATE SET
+                    reason = 'unsubscribe', subtype = 'one-click', updated_at = NOW()
+                "#,
+            )
+            .bind(sup_id)
+            .bind(tenant_id)
+            .bind(&email_lc)
+            .execute(&self.db)
+            .await
+            .context("insert suppression")?;
+        }
+        Ok(())
+    }
+
+    /// Add the recipient to the suppression list; `Err` when the row did not
+    /// land (F2 — the caller turns this into a 5xx + retry). The Redis
+    /// `suppression:added` fan-out fires only on success, so subscribers of
+    /// that channel never see a suppression that does not exist.
+    async fn add_to_suppression_list(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        category: Option<&str>,
+    ) -> Result<()> {
         let sup_id = new_id("sup");
+        let email_lc = email.to_lowercase();
 
-        let result: Result<()> = async {
-            if let Some(cat) = category {
-                sqlx::query(
-                    r#"
-                    INSERT INTO subscription_preferences (id, tenant_id, email, category, subscribed, updated_at)
-                    VALUES ($1, $2, $3, $4, false, NOW())
-                    ON CONFLICT (tenant_id, email, category) DO UPDATE SET
-                        subscribed = false, updated_at = NOW()
-                    "#,
-                )
-                .bind(&sup_id)
-                .bind(tenant_id)
-                .bind(&email_lc)
-                .bind(cat)
-                .execute(&self.db)
-                .await
-                .context("insert subscription_preferences")?;
-            } else {
-                sqlx::query(
-                    r#"
-                    INSERT INTO suppressions (id, tenant_id, email, reason, subtype, created_at)
-                    VALUES ($1, $2, $3, 'unsubscribe', 'one-click', NOW())
-                    ON CONFLICT (tenant_id, email) DO UPDATE SET
-                        reason = 'unsubscribe', subtype = 'one-click', updated_at = NOW()
-                    "#,
-                )
-                .bind(&sup_id)
-                .bind(tenant_id)
-                .bind(&email_lc)
-                .execute(&self.db)
-                .await
-                .context("insert suppression")?;
-            }
-            Ok(())
-        }
-        .await;
-
-        if let Err(e) = result {
-            error!(error = %e, "Failed to add suppression, event still recorded");
-        }
+        self.insert_suppression_row(&sup_id, tenant_id, email, category)
+            .await?;
 
         // Fire-and-forget Redis publish (F-217)
         let payload = serde_json::json!({
@@ -869,6 +940,114 @@ impl EventProcessor {
                 }
             }
         });
+
+        Ok(())
+    }
+
+    // ── Suppression retry queue (F2) ──────────────────────────────────
+
+    /// Persist a pending suppression retry:RPUSH a record to the retry list
+    /// so a Postgres outage never loses a compliance-critical suppression.
+    /// The record is durable in Redis (AOF) exactly like the event WAL.
+    async fn enqueue_suppression_retry(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        category: Option<&str>,
+    ) -> Result<()> {
+        let entry = build_suppression_retry_entry(tenant_id, email, category);
+        let mut conn = self
+            .redis
+            .get()
+            .await
+            .context("redis pool get (suppression retry)")?;
+        redis::cmd("RPUSH")
+            .arg(REDIS_SUPPRESSION_RETRY_KEY)
+            .arg(&entry)
+            .query_async::<()>(&mut *conn)
+            .await
+            .context("RPUSH suppression retry")?;
+        warn!(
+            tenant_id = tenant_id,
+            "Suppression insert failed — pending retry enqueued"
+        );
+        Ok(())
+    }
+
+    /// Drain pending suppression retries:attempt each insert again;
+    /// successes are dropped from the queue, failures are re-pushed with a
+    /// bumped retry counter (poison-dropped after [`MAX_EVENT_RETRIES`],
+    /// mirroring the event WAL). Runs off the flush loop's tick so a down
+    /// Postgres is retried with the same backoff cadence.
+    async fn drain_suppression_retries(&self) {
+        let raw: Vec<String> = match self.redis.get().await {
+            Ok(mut conn) => match self
+                .drain_script
+                .key(REDIS_SUPPRESSION_RETRY_KEY)
+                .arg(MAX_FLUSH_BATCH as i64)
+                .invoke_async(&mut *conn)
+                .await
+            {
+                Ok(entries) => entries,
+                Err(e) => {
+                    warn!(error = %e, "Suppression retry drain failed (Redis)");
+                    return;
+                }
+            },
+            Err(e) => {
+                warn!(error = %e, "Suppression retry drain failed (Redis pool)");
+                return;
+            }
+        };
+
+        if raw.is_empty() {
+            return;
+        }
+
+        for entry in &raw {
+            let Some(retry) = parse_suppression_retry(entry) else {
+                warn!(
+                    raw = &entry[..entry.len().min(100)],
+                    "Unparseable suppression retry entry dropped"
+                );
+                continue;
+            };
+            match self
+                .insert_suppression_row(
+                    &new_id("sup"),
+                    &retry.tenant_id,
+                    &retry.email,
+                    retry.category.as_deref(),
+                )
+                .await
+            {
+                Ok(()) => {
+                    info!(
+                        tenant_id = %retry.tenant_id,
+                        attempt = retry.retries + 1,
+                        "Pending suppression retry succeeded"
+                    );
+                }
+                Err(e) => match bump_suppression_retry(entry) {
+                    Some(requeued) => {
+                        if let Ok(mut conn) = self.redis.get().await {
+                            let _: Result<(), _> = redis::cmd("RPUSH")
+                                .arg(REDIS_SUPPRESSION_RETRY_KEY)
+                                .arg(&requeued)
+                                .query_async(&mut *conn)
+                                .await;
+                        }
+                        warn!(error = %e, tenant_id = %retry.tenant_id, "Suppression retry failed — re-queued");
+                    }
+                    None => {
+                        error!(
+                            tenant_id = %retry.tenant_id,
+                            "CRITICAL: pending suppression dropped after max retries — operator intervention required"
+                        );
+                    }
+                },
+            }
+        }
     }
 
     // ── Redis counter helpers ─────────────────────────────────────────
@@ -1093,6 +1272,51 @@ fn bump_envelope_retries(raw: &str) -> Option<String> {
         });
         Some(envelope.to_string())
     }
+}
+
+// ── Suppression retry records (F2) ────────────────────────────────────────────
+
+/// A pending suppression insert queued for retry. Serialized with camelCase
+/// keys like the event envelopes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuppressionRetry {
+    pub tenant_id: String,
+    pub email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// Retry attempts already made (0 on first enqueue).
+    pub retries: u64,
+}
+
+/// Serialize a fresh (retries = 0) suppression retry record.
+fn build_suppression_retry_entry(tenant_id: &str, email: &str, category: Option<&str>) -> String {
+    serde_json::to_string(&SuppressionRetry {
+        tenant_id: tenant_id.to_string(),
+        email: email.to_string(),
+        category: category.map(str::to_string),
+        retries: 0,
+    })
+    .unwrap_or_default()
+}
+
+/// Parse a queued suppression retry record. `None` for unparseable entries
+/// (dropped by the drain loop with a warning).
+fn parse_suppression_retry(raw: &str) -> Option<SuppressionRetry> {
+    serde_json::from_str(raw).ok()
+}
+
+/// Bump the retry counter, returning the re-queued record string. Returns
+/// `None` when the record has already been retried
+/// [`MAX_EVENT_RETRIES`] times (poison — dropped with a CRITICAL log; a
+/// suppression is compliance-critical, so the drop is loud).
+fn bump_suppression_retry(raw: &str) -> Option<String> {
+    let mut record: SuppressionRetry = serde_json::from_str(raw).ok()?;
+    if record.retries >= MAX_EVENT_RETRIES as u64 {
+        return None;
+    }
+    record.retries += 1;
+    serde_json::to_string(&record).ok()
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -1348,9 +1572,79 @@ mod tests {
         let row = ClickHouseEventRow::from_tracking_event(&event);
 
         assert_eq!(row.event_type, "unsubscribed");
-        assert_eq!(row.ip_address, "1.2.3.4");
+        // GDPR (F3):the OLAP row carries the masked /24 network, not the
+        // full client IP.
+        assert_eq!(row.ip_address, "1.2.3.0");
         assert_eq!(row.link_id, "");
         assert!(row.metadata.contains("marketing"));
+    }
+
+    /// GDPR (F3):IPv6 source addresses are truncated to /48 at the ingest
+    /// boundary.
+    #[test]
+    fn clickhouse_row_masks_ipv6_to_48() {
+        let event = TrackingEvent {
+            id: "evt_3".into(),
+            event_type: EventType::Opened,
+            tenant_id: "t1".into(),
+            message_id: "m1".into(),
+            recipient: "u@example.com".into(),
+            link_id: None,
+            link_url: None,
+            unsubscribe_reason: None,
+            user_agent: None,
+            ip_address: Some("2001:db8:a:b:c:d:e:f".into()),
+            timestamp: Utc::now(),
+            metadata: None,
+        };
+        let row = ClickHouseEventRow::from_tracking_event(&event);
+        assert_eq!(row.ip_address, "2001:db8:a::");
+    }
+
+    // ── Suppression retry records (F2) ────────────────────────────────
+
+    #[test]
+    fn suppression_retry_entry_roundtrips() {
+        let entry = build_suppression_retry_entry("t1", "User@Example.com", Some("marketing"));
+        let parsed = parse_suppression_retry(&entry).expect("entry must parse");
+        assert_eq!(parsed.tenant_id, "t1");
+        assert_eq!(parsed.email, "User@Example.com");
+        assert_eq!(parsed.category.as_deref(), Some("marketing"));
+        assert_eq!(parsed.retries, 0);
+
+        let bare = build_suppression_retry_entry("t1", "a@b.com", None);
+        let parsed = parse_suppression_retry(&bare).expect("entry must parse");
+        assert!(parsed.category.is_none());
+        // The category key is omitted entirely (skip_serializing_if).
+        assert!(!bare.contains("category"), "{bare}");
+    }
+
+    #[test]
+    fn suppression_retry_bump_increments_and_caps() {
+        let entry = build_suppression_retry_entry("t1", "a@b.com", None);
+        let bumped = bump_suppression_retry(&entry).expect("first bump");
+        assert_eq!(parse_suppression_retry(&bumped).unwrap().retries, 1);
+
+        let twice = bump_suppression_retry(&bumped).expect("second bump");
+        assert_eq!(parse_suppression_retry(&twice).unwrap().retries, 2);
+
+        // At the poison budget the record is dropped (None), mirroring the
+        // event WAL behaviour.
+        let maxed = serde_json::to_string(&SuppressionRetry {
+            tenant_id: "t1".into(),
+            email: "a@b.com".into(),
+            category: None,
+            retries: MAX_EVENT_RETRIES as u64,
+        })
+        .unwrap();
+        assert!(bump_suppression_retry(&maxed).is_none());
+    }
+
+    #[test]
+    fn suppression_retry_parse_rejects_garbage() {
+        assert!(parse_suppression_retry("not json").is_none());
+        assert!(parse_suppression_retry("{}").is_none());
+        assert!(bump_suppression_retry("not json").is_none());
     }
 
     // ── Live-server integration (ignored by default) ────────────────────
@@ -1451,7 +1745,7 @@ mod tests {
         assert_eq!(row.0, "example.com");
         assert_eq!(row.1, "link_e2e_click_1");
         assert_eq!(row.2, "E2E-Test");
-        assert_eq!(row.3, "203.0.113.7");
+        assert_eq!(row.3, "203.0.113.0"); // GDPR:masked at ingest (F3)
         assert!(row.4.contains("integration"));
 
         // Best-effort cleanup (mutation is async; this run is already done).

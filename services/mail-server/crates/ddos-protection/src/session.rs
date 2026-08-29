@@ -362,6 +362,8 @@ mod tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         let info = tracker.track(&ctx);
@@ -410,6 +412,8 @@ mod tests {
                 body_size: 0,
                 tenant_id: None,
                 api_key_id: None,
+                challenge_id: None,
+                challenge_solution: None,
             };
             tracker.track(&ctx);
             // Hard invariant at every step
@@ -439,6 +443,8 @@ mod tests {
                 body_size: 0,
                 tenant_id: None,
                 api_key_id: None,
+                challenge_id: None,
+                challenge_solution: None,
             };
             tracker.track(&ctx);
         }

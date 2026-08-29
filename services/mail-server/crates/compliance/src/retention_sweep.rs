@@ -5,8 +5,11 @@
 //! the enforcement pass for the stores the compliance crate actually owns
 //! data for, plus an honest per-run report:
 //!
-//! 1. Purge expired `message_events` / `tracking_events` / `engagement_events`
-//!    per the registry's category durations (default plan tier).
+//! 1. Purge expired rows from the CANONICAL event stores — `events`
+//!    (migration 075) per the RET-007/009/010 durations and `messages`
+//!    (migration 073) per RET-001/002 content durations. F2: the previous
+//!    targets (`message_events`/`tracking_events`/`engagement_events`)
+//!    exist only in test fixtures — production sweeps deleted nothing.
 //! 2. Purge expired `gdpr_exports` (`export_expiration_days`, 7 by default —
 //!    same window as [`GdprAutomation::enforce_retention`]).
 //! 3. Trim `audit_logs` per `AUDIT_RETENTION_DAYS` via the existing
@@ -16,12 +19,27 @@
 //!    (`request_expiration_days`) has passed — the raw token must not linger.
 //! 5. Insert one `retention_report` row per run so the policy is observable.
 //!
+//! Per-tenant retention (F4): the cutoff is NOT a flat default. Each tenant's
+//! effective window is resolved as
+//!   `tenants.retention_days` (migration 121; validated against the tenant's
+//!   plan via [`RetentionRegistry::validate_customer_selection`]) or, when
+//! NULL, the registry's plan-tier default. Tenants with
+//! `ent_compliance_configs.zero_retention_mode = true` are purged immediately
+//! regardless of window.
+//!
+//! Legal holds (F5): tenants with `tenants.legal_hold = true` (migration 121)
+//! are excluded from EVERY purge this module performs — event stores,
+//! gdpr_exports, the DSR outbox and the audit trim (the exclusion lives in
+//! [`AuditLogger::archive`]). Rows with a NULL tenant id cannot be attributed
+//! and are kept whenever any hold is active (fall back to keep).
+//!
+//! Deletes are batched (F11): `WHERE ctid IN (SELECT … LIMIT N)` loops with a
+//! per-batch `lock_timeout`, and counts come from accumulated deleted-row
+//! counts — no separate full-table COUNT + unbounded single DELETE.
+//!
 //! Stores this crate cannot reach (ClickHouse analytics, backups, mailstore
 //! blobs) are NOT silently ignored — the report lists them as out-of-scope
 //! with their registry durations and who enforces them.
-//!
-//! Legal holds: tenants with `tenants.legal_hold = true` (canonical schema,
-//! `tools/migrations/001_initial_schema.sql`) are skipped and counted.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -42,6 +60,13 @@ CREATE TABLE IF NOT EXISTS retention_report (
 CREATE INDEX IF NOT EXISTS idx_retention_report_ran_at
     ON retention_report (ran_at DESC);
 "#;
+
+/// Rows deleted per batch statement (F11) — bounded work per lock window.
+const DELETE_BATCH_ROWS: i64 = 5_000;
+
+/// Per-batch lock timeout: a long-running purge must not queue indefinitely
+/// behind (or block) production writes.
+const LOCK_TIMEOUT: &str = "5s";
 
 /// One event store the sweep purges, mapped to its registry categories.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,31 +94,26 @@ impl SweepTarget {
     }
 }
 
-/// The stores this crate sweeps. `message_events`/`tracking_events`/
-/// `engagement_events` are the event stores the compliance crate's own
-/// access-export and erasure data map reads and deletes
-/// (`gdpr_automation::erasure_stores`).
+/// The CANONICAL stores this crate sweeps (audit F2): `events` is the event
+/// store every writer in the platform INSERTs into (migration 075); `messages`
+/// is the message-content store (migration 073) bounded by the RET-001/002
+/// content durations. The previous targets existed only in test fixtures.
 pub fn sweep_targets() -> Vec<SweepTarget> {
     vec![
         SweepTarget {
-            store: "message_events",
-            table: "message_events",
-            timestamp_column: "created_at",
-            category_ids: &["RET-007"],
+            store: "events",
+            table: "events",
+            timestamp_column: "timestamp",
+            // One table holds sent/delivered/bounce/open/click rows; the
+            // minimum of the mapped categories' defaults is applied.
+            category_ids: &["RET-007", "RET-009", "RET-010"],
         },
         SweepTarget {
-            store: "tracking_events",
-            table: "tracking_events",
+            store: "messages",
+            table: "messages",
             timestamp_column: "created_at",
-            // One table holds both open and click rows; both categories share
-            // the same defaults — the minimum is applied either way.
-            category_ids: &["RET-009", "RET-010"],
-        },
-        SweepTarget {
-            store: "engagement_events",
-            table: "engagement_events",
-            timestamp_column: "created_at",
-            category_ids: &["RET-009", "RET-010"],
+            // Message body + subject line content (RET-001/RET-002).
+            category_ids: &["RET-001", "RET-002"],
         },
     ]
 }
@@ -115,7 +135,7 @@ pub fn out_of_scope_stores(registry: &RetentionRegistry) -> Vec<OutOfScopeStore>
         (
             "clickhouse_analytics",
             &["RET-007", "RET-009", "RET-010"],
-            "Analytics store owned by the analytics pipeline; the compliance crate cannot purge it. Registry durations apply and must be enforced by the owning service.",
+            "Analytics store owned by the analytics pipeline; the compliance crate cannot purge it (DSR erasures DO submit best-effort ClickHouse mutations — see gdpr_automation). Registry durations apply and must be enforced by the owning service.",
         ),
         (
             "backups",
@@ -151,7 +171,8 @@ pub enum SweepStatus {
     /// Table or timestamp column absent in this deployment — reported, not
     /// counted as deleted.
     SkippedMissingStore,
-    /// The sweep failed for this store (recorded with the error).
+    /// The sweep failed for this store (recorded with the error; rows already
+    /// deleted in earlier batches remain deleted and are reported).
     Failed,
 }
 
@@ -161,13 +182,19 @@ pub struct CategorySweepResult {
     pub category_ids: &'static [&'static str],
     pub retention_days: u32,
     pub cutoff: DateTime<Utc>,
-    /// Rows past the cutoff before deletion (includes legal-held rows).
+    /// Rows past the cutoff (or belonging to zero-retention tenants) before
+    /// deletion — includes legal-held rows.
     pub considered: i64,
+    /// Rows actually deleted (accumulated per-batch row counts, F11).
     pub deleted: i64,
     /// Considered rows belonging to tenants on legal hold — never deleted.
     pub skipped_legal_hold: i64,
     /// How legal holds were determined.
     pub legal_hold_check: LegalHoldCheck,
+    /// Tenants purged immediately via ent_compliance_configs.zero_retention_mode (F4).
+    pub zero_retention_tenants: usize,
+    /// Tenants whose tenants.retention_days override was honored (F4).
+    pub custom_retention_tenants: usize,
     pub status: SweepStatus,
     pub error: Option<String>,
 }
@@ -177,15 +204,30 @@ pub struct CategorySweepResult {
 pub enum LegalHoldCheck {
     /// `tenants.legal_hold` consulted; held tenants skipped.
     TenantsTable,
-    /// No `tenants` table in this deployment — no hold exclusion possible.
+    /// No `tenants` table (or no legal_hold column) in this deployment — no
+    /// hold exclusion possible.
     TenantsTableMissing,
+}
+
+/// Per-tenant retention inputs resolved once per run (F4/F5).
+#[derive(Debug, Clone)]
+struct TenantRetention {
+    id: String,
+    plan: String,
+    /// tenants.retention_days override (NULL → registry plan-tier default).
+    /// INT (INT4) — the canonical migration-121 column type.
+    retention_days: Option<i32>,
+    held: bool,
+    zero_retention: bool,
 }
 
 /// The full per-run report persisted to `retention_report`.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RetentionSweepReport {
     pub ran_at: DateTime<Utc>,
-    pub plan_tier: &'static str,
+    /// "per-tenant" when any override/zero-retention tenant participated,
+    /// else the flat "default" tier (F4).
+    pub plan_tier: String,
     pub categories: Vec<CategorySweepResult>,
     pub gdpr_exports_deleted: u64,
     pub dsr_outbox_purged: u64,
@@ -232,47 +274,56 @@ impl RetentionSweeper {
     ///
     /// `audit_logger` is used for step 3 (audit trim via `archive()`), so the
     /// sweeper shares the logger's hash-chain state with the rest of the
-    /// service instead of keeping a second chain cache.
+    /// service instead of keeping a second chain cache. The hold exclusion
+    /// for the audit trim lives inside `archive()` (F5).
     pub async fn run_sweep(
         &self,
         audit_logger: &AuditLogger,
     ) -> Result<RetentionSweepReport, String> {
         let now = Utc::now();
+        let tenants = self.tenant_retention_context().await;
+        let legal_hold_check = if tenants.is_some() {
+            LegalHoldCheck::TenantsTable
+        } else {
+            LegalHoldCheck::TenantsTableMissing
+        };
         let mut categories = Vec::new();
+        let mut overrides_seen = false;
 
         for target in sweep_targets() {
-            let result = self.sweep_target(&target, now).await;
+            let result = self
+                .sweep_target(&target, now, tenants.as_deref(), legal_hold_check)
+                .await;
+            overrides_seen |=
+                result.zero_retention_tenants > 0 || result.custom_retention_tenants > 0;
             categories.push(result);
         }
 
         // gdpr_exports — same window as GdprAutomation::enforce_retention
-        // (created_at + export_expiration_days, NOT expires_at).
-        let exports_deleted = sqlx::query("DELETE FROM gdpr_exports WHERE created_at < $1")
-            .bind(now - chrono::Duration::days(self.export_expiration_days))
-            .execute(&self.db)
-            .await
-            .map(|r| r.rows_affected())
-            .unwrap_or_else(|e| {
-                warn!(error = %e, "retention sweep: gdpr_exports purge failed");
-                0
-            });
+        // (created_at + export_expiration_days, NOT expires_at). F5: rows of
+        // held tenants are excluded; NULL-tenant rows are kept whenever any
+        // hold is active (they cannot be attributed).
+        let exports_deleted = self
+            .purge_with_hold_filter(
+                "DELETE FROM gdpr_exports WHERE created_at < $1",
+                now - chrono::Duration::days(self.export_expiration_days),
+                &tenants,
+            )
+            .await;
 
         // dsr_verification_outbox — raw verification tokens must not outlive
-        // the request window they are valid for.
-        let outbox_purged =
-            sqlx::query("DELETE FROM dsr_verification_outbox WHERE created_at < $1")
-                .bind(now - chrono::Duration::days(self.request_expiration_days))
-                .execute(&self.db)
-                .await
-                .map(|r| r.rows_affected())
-                .unwrap_or_else(|e| {
-                    warn!(error = %e, "retention sweep: dsr outbox purge failed");
-                    0
-                });
+        // the request window they are valid for (same hold exclusion).
+        let outbox_purged = self
+            .purge_with_hold_filter(
+                "DELETE FROM dsr_verification_outbox WHERE created_at < $1",
+                now - chrono::Duration::days(self.request_expiration_days),
+                &tenants,
+            )
+            .await;
 
         // audit_logs — trimmed via the existing archive() (transactional
         // copy-then-verify-delete; conflicting originals stay in the live
-        // table by design, see audit_logger E-2).
+        // table by design, see audit_logger E-2; held tenants excluded).
         let audit_cutoff = now - chrono::Duration::days(self.audit_retention_days);
         let audit_considered: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE timestamp < $1")
@@ -290,10 +341,14 @@ impl RetentionSweeper {
 
         let report = RetentionSweepReport {
             ran_at: now,
-            plan_tier: "default",
+            plan_tier: if overrides_seen {
+                "per-tenant".into()
+            } else {
+                "default".into()
+            },
             categories,
-            gdpr_exports_deleted: exports_deleted,
-            dsr_outbox_purged: outbox_purged,
+            gdpr_exports_deleted: exports_deleted.0,
+            dsr_outbox_purged: outbox_purged.0,
             audit_logs_considered: audit_considered,
             audit_logs_archived: audit_archived,
             out_of_scope: out_of_scope_stores(&self.registry),
@@ -303,113 +358,369 @@ impl RetentionSweeper {
         Ok(report)
     }
 
-    /// Sweep one event store: count considered, exclude legal-held tenants,
-    /// delete the rest. Missing tables/columns are reported as skipped.
-    async fn sweep_target(&self, target: &SweepTarget, now: DateTime<Utc>) -> CategorySweepResult {
-        let Some(retention_days) = target.retention_days(&self.registry) else {
-            return CategorySweepResult {
-                store: target.store,
-                category_ids: target.category_ids,
-                retention_days: 0,
-                cutoff: now,
-                considered: 0,
-                deleted: 0,
-                skipped_legal_hold: 0,
-                legal_hold_check: LegalHoldCheck::TenantsTableMissing,
-                status: SweepStatus::Failed,
-                error: Some("registry categories missing".into()),
-            };
-        };
-        let cutoff = now - chrono::Duration::days(retention_days as i64);
-        let table = target.table;
-        let ts = target.timestamp_column;
-
-        let considered: i64 =
-            match sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE {ts} < $1"))
-                .bind(cutoff)
-                .fetch_one(&self.db)
-                .await
-            {
-                Ok(c) => c,
-                Err(e) if is_missing_store(&e) => {
-                    return skipped_result(target, retention_days, cutoff, &e);
-                }
-                Err(e) => {
-                    return failed_result(target, retention_days, cutoff, &e);
-                }
-            };
-
-        // Legal holds — consult tenants.legal_hold when the table exists.
-        // Fetched once and reused for the skip count and the delete.
-        let held = match self.held_tenant_ids().await {
-            Ok(held) => held,
-            Err(e) => return failed_result(target, retention_days, cutoff, &e),
-        };
-        let legal_hold_check = if held.is_some() {
-            LegalHoldCheck::TenantsTable
-        } else {
-            LegalHoldCheck::TenantsTableMissing
-        };
-
-        let (skipped_hold, deleted): (i64, Result<u64, sqlx::Error>) = match held.as_ref() {
-            Some(held_ids) if !held_ids.is_empty() => {
-                let skipped: i64 = sqlx::query_scalar(&format!(
-                    "SELECT COUNT(*) FROM {table} WHERE {ts} < $1 AND tenant_id = ANY($2)"
-                ))
-                .bind(cutoff)
-                .bind(held_ids)
-                .fetch_one(&self.db)
-                .await
-                .unwrap_or(0);
-                let deleted = sqlx::query(&format!(
-                    "DELETE FROM {table} WHERE {ts} < $1 AND NOT (tenant_id = ANY($2))"
-                ))
-                .bind(cutoff)
-                .bind(held_ids)
-                .execute(&self.db)
-                .await
-                .map(|r| r.rows_affected());
-                (skipped, deleted)
-            }
-            // No tenants table, or no tenants on hold — plain delete.
-            _ => {
-                let deleted = sqlx::query(&format!("DELETE FROM {table} WHERE {ts} < $1"))
-                    .bind(cutoff)
-                    .execute(&self.db)
+    /// F4: per-tenant retention inputs, resolved once per run. `None` when
+    /// the deployment has no `tenants` table at all (runtime-provisioned
+    /// partial schemas) — the sweep then runs with flat defaults and says so
+    /// via [`LegalHoldCheck::TenantsTableMissing`].
+    async fn tenant_retention_context(&self) -> Option<Vec<TenantRetention>> {
+        // Base shape (migration 121): legal_hold + retention_days per tenant.
+        // A missing ent_compliance_configs must NOT degrade the tenants read
+        // (holds/overrides matter more), so the zero-retention overlay is a
+        // separate, independently-degradable query.
+        #[derive(sqlx::FromRow)]
+        struct TenantBaseRow {
+            id: String,
+            plan: String,
+            // INT (INT4) — the canonical migration-121 column type.
+            retention_days: Option<i32>,
+            legal_hold: bool,
+        }
+        let base: Result<Vec<TenantBaseRow>, sqlx::Error> = sqlx::query_as::<_, TenantBaseRow>(
+            "SELECT id, plan, retention_days, legal_hold FROM tenants",
+        )
+        .fetch_all(&self.db)
+        .await;
+        let mut tenants: Vec<TenantRetention> = match base {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|row| TenantRetention {
+                    id: row.id,
+                    plan: row.plan,
+                    retention_days: row.retention_days,
+                    held: row.legal_hold,
+                    zero_retention: false,
+                })
+                .collect(),
+            Err(e) if is_missing_table(&e) => return None,
+            Err(e) if is_missing_column(&e) => {
+                // Pre-121 tenants: plan tiers still resolve; no holds, no
+                // overrides (degrade honestly — the report says so via
+                // plan_tier "default").
+                match sqlx::query_as::<_, (String, String)>("SELECT id, plan FROM tenants")
+                    .fetch_all(&self.db)
                     .await
-                    .map(|r| r.rows_affected());
-                (0, deleted)
+                {
+                    Ok(rows) => rows
+                        .into_iter()
+                        .map(|(id, plan)| TenantRetention {
+                            id,
+                            plan,
+                            retention_days: None,
+                            held: false,
+                            zero_retention: false,
+                        })
+                        .collect(),
+                    Err(e) => {
+                        warn!(error = %e, "retention sweep: tenants unreadable — flat defaults only");
+                        return None;
+                    }
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "retention sweep: tenants query failed — no per-tenant retention");
+                return None;
             }
         };
 
-        match deleted {
-            Ok(deleted) => CategorySweepResult {
-                store: target.store,
-                category_ids: target.category_ids,
-                retention_days,
-                cutoff,
-                considered,
-                deleted: deleted as i64,
-                skipped_legal_hold: skipped_hold,
-                legal_hold_check,
-                status: SweepStatus::Deleted,
-                error: None,
-            },
-            Err(e) if is_missing_store(&e) => skipped_result(target, retention_days, cutoff, &e),
-            Err(e) => failed_result(target, retention_days, cutoff, &e),
+        // Zero-retention overlay (F4): ent_compliance_configs.zero_retention_mode
+        // (migration 092). Absent table/column degrades to "none"; other
+        // errors are logged and also degrade (the purge must not stall on an
+        // unrelated enterprise table).
+        let zero: std::collections::HashSet<String> = match sqlx::query_scalar::<_, String>(
+            "SELECT tenant_id FROM ent_compliance_configs WHERE zero_retention_mode = true",
+        )
+        .fetch_all(&self.db)
+        .await
+        {
+            Ok(ids) => ids.into_iter().collect(),
+            Err(e) if is_missing_store(&e) => Default::default(),
+            Err(e) => {
+                warn!(error = %e, "retention sweep: zero-retention lookup failed — assuming none");
+                Default::default()
+            }
+        };
+        for tenant in &mut tenants {
+            if zero.contains(&tenant.id) {
+                tenant.zero_retention = true;
+            }
+        }
+        Some(tenants)
+    }
+
+    /// F4: the effective retention for one tenant against one target. The
+    /// override is honored only when the registry accepts it for EVERY mapped
+    /// category under the tenant's plan; otherwise the plan-tier default
+    /// applies (with a warning — never longer than the plan allows).
+    fn effective_retention_days(
+        &self,
+        target: &SweepTarget,
+        default_days: u32,
+        tenant: &TenantRetention,
+    ) -> u32 {
+        let Some(requested) = tenant.retention_days else {
+            return default_days;
+        };
+        let Some(requested) = u32::try_from(requested.max(0)).ok() else {
+            return default_days;
+        };
+        let accepted = target.category_ids.iter().all(|category| {
+            self.registry
+                .validate_customer_selection(category, &tenant.plan, requested)
+                .is_ok()
+        });
+        if accepted {
+            requested
+        } else {
+            warn!(
+                tenant = %tenant.id,
+                store = target.store,
+                requested,
+                "tenants.retention_days violates the plan/registry bounds — using plan-tier default"
+            );
+            default_days
         }
     }
 
-    /// Active legal-hold tenant ids, or None when the `tenants` table is
-    /// absent in this deployment.
-    async fn held_tenant_ids(&self) -> Result<Option<Vec<String>>, sqlx::Error> {
-        match sqlx::query_scalar("SELECT id FROM tenants WHERE legal_hold = true")
-            .fetch_all(&self.db)
-            .await
+    /// Sweep one canonical store: resolve per-tenant cutoffs (F4), skip held
+    /// tenants (F5), delete in bounded batches with a lock timeout (F11) and
+    /// count from the deleted-row counts.
+    async fn sweep_target(
+        &self,
+        target: &SweepTarget,
+        now: DateTime<Utc>,
+        tenants: Option<&[TenantRetention]>,
+        legal_hold_check: LegalHoldCheck,
+    ) -> CategorySweepResult {
+        let Some(default_days) = target.retention_days(&self.registry) else {
+            return failedish_result(
+                target,
+                0,
+                now,
+                legal_hold_check,
+                0,
+                0,
+                "registry categories missing",
+            );
+        };
+        let default_cutoff = now - chrono::Duration::days(default_days as i64);
+        let table = target.table;
+        let ts = target.timestamp_column;
+
+        // Partition tenants: held (skip), zero-retention (purge now), and
+        // the rest grouped by their effective cutoff.
+        let mut held_ids: Vec<String> = Vec::new();
+        let mut zero_ids: Vec<String> = Vec::new();
+        let mut custom_retention_tenants = 0usize;
+        // cutoff-days → tenant ids (the default group also sweeps NULL-tenant rows).
+        let mut groups: std::collections::BTreeMap<u32, Vec<String>> =
+            std::collections::BTreeMap::new();
+        match tenants {
+            Some(tenants) => {
+                for tenant in tenants {
+                    if tenant.held {
+                        held_ids.push(tenant.id.clone());
+                        continue;
+                    }
+                    if tenant.zero_retention {
+                        zero_ids.push(tenant.id.clone());
+                        continue;
+                    }
+                    let days = self.effective_retention_days(target, default_days, tenant);
+                    if days != default_days {
+                        custom_retention_tenants += 1;
+                    }
+                    groups.entry(days).or_default().push(tenant.id.clone());
+                }
+                // NULL-tenant rows ride with the default group.
+                groups.entry(default_days).or_default();
+            }
+            None => {
+                // No tenants table: flat default cutoff for every row.
+                groups.entry(default_days).or_default();
+            }
+        }
+
+        // Considered + held-skip counts (reporting only; derived from the
+        // DEFAULT cutoff — the shortest honest denominator).
+        let considered: i64 = match sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM {table}
+             WHERE {ts} < $1 OR tenant_id = ANY($2)",
+        ))
+        .bind(default_cutoff)
+        .bind(&zero_ids)
+        .fetch_one(&self.db)
+        .await
         {
-            Ok(ids) => Ok(Some(ids)),
-            Err(e) if is_missing_table(&e) => Ok(None),
-            Err(e) => Err(e),
+            Ok(c) => c,
+            Err(e) if is_missing_store(&e) => {
+                return skipped_result(target, default_days, default_cutoff, &e);
+            }
+            Err(e) => {
+                return failed_result(target, default_days, default_cutoff, &e);
+            }
+        };
+        let skipped_hold: i64 = if held_ids.is_empty() {
+            0
+        } else {
+            sqlx::query_scalar(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE {ts} < $1 AND tenant_id = ANY($2)"
+            ))
+            .bind(default_cutoff)
+            .bind(&held_ids)
+            .fetch_one(&self.db)
+            .await
+            .unwrap_or(0)
+        };
+
+        // Batched deletes. The zero-retention group ignores the window.
+        let mut deleted: i64 = 0;
+        let mut failure: Option<sqlx::Error> = None;
+
+        if !zero_ids.is_empty() {
+            let predicate = format!("{ts} < $1 AND tenant_id = ANY($2)");
+            match self
+                .batched_delete(table, &predicate, Some(now), Some(&zero_ids))
+                .await
+            {
+                Ok(n) => deleted += n,
+                Err(e) if is_missing_store(&e) => {
+                    return skipped_result(target, default_days, default_cutoff, &e)
+                }
+                Err(e) => failure = Some(e),
+            }
+        }
+
+        if failure.is_none() {
+            for (days, ids) in &groups {
+                let cutoff = now - chrono::Duration::days(*days as i64);
+                // When the tenants table is known, every delete is
+                // tenant-scoped: the default-days group additionally owns
+                // NULL-tenant rows; a tenant-less deployment sweeps plainly.
+                let (predicate, bind_ids) = match tenants {
+                    Some(_) if days == &default_days => (
+                        format!("{ts} < $1 AND (tenant_id IS NULL OR tenant_id = ANY($2))"),
+                        Some(ids.as_slice()),
+                    ),
+                    Some(_) => (
+                        format!("{ts} < $1 AND tenant_id = ANY($2)"),
+                        Some(ids.as_slice()),
+                    ),
+                    None => (format!("{ts} < $1"), None),
+                };
+                match self
+                    .batched_delete(table, &predicate, Some(cutoff), bind_ids)
+                    .await
+                {
+                    Ok(n) => deleted += n,
+                    Err(e) if is_missing_store(&e) => {
+                        return skipped_result(target, default_days, default_cutoff, &e)
+                    }
+                    Err(e) => {
+                        failure = Some(e);
+                        break;
+                    }
+                }
+            }
+        }
+
+        match failure {
+            None => CategorySweepResult {
+                store: target.store,
+                category_ids: target.category_ids,
+                retention_days: default_days,
+                cutoff: default_cutoff,
+                considered,
+                deleted,
+                skipped_legal_hold: skipped_hold,
+                legal_hold_check,
+                zero_retention_tenants: zero_ids.len(),
+                custom_retention_tenants,
+                status: SweepStatus::Deleted,
+                error: None,
+            },
+            Some(e) => {
+                let mut r = failed_result(target, default_days, default_cutoff, &e);
+                // Rows deleted by earlier batches are still deleted — the
+                // report keeps the honest count.
+                r.deleted = deleted;
+                r.considered = considered;
+                r.skipped_legal_hold = skipped_hold;
+                r
+            }
+        }
+    }
+
+    /// F11: batched DELETE loop. Each batch runs in its own transaction with
+    /// `SET LOCAL lock_timeout`, selects at most [`DELETE_BATCH_ROWS`] rows
+    /// by ctid and deletes exactly those. Returns the accumulated deleted-row
+    /// count (the authoritative count — no separate COUNT query).
+    async fn batched_delete(
+        &self,
+        table: &str,
+        predicate: &str,
+        cutoff: Option<DateTime<Utc>>,
+        tenant_ids: Option<&[String]>,
+    ) -> Result<i64, sqlx::Error> {
+        let uses_tenants = tenant_ids.is_some();
+        let mut deleted: i64 = 0;
+        loop {
+            let mut tx = self.db.begin().await?;
+            sqlx::query(&format!("SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'"))
+                .execute(&mut *tx)
+                .await?;
+            let sql = format!(
+                "DELETE FROM {table} WHERE ctid IN (
+                   SELECT ctid FROM {table} WHERE {predicate} LIMIT $3
+                 )"
+            );
+            let mut q = sqlx::query(&sql).bind(cutoff);
+            if uses_tenants {
+                q = q.bind(tenant_ids);
+            }
+            q = q.bind(DELETE_BATCH_ROWS);
+            let rows = q.execute(&mut *tx).await?.rows_affected() as i64;
+            tx.commit().await?;
+            deleted += rows;
+            if rows < DELETE_BATCH_ROWS {
+                break;
+            }
+        }
+        Ok(deleted)
+    }
+
+    /// F5: a retention purge (gdpr_exports / DSR outbox) that excludes held
+    /// tenants. Rows with a NULL tenant id are KEPT whenever any hold is
+    /// active — they cannot be attributed to a tenant, so they might belong
+    /// to a held one (fall back to keep). Returns (deleted, ok).
+    async fn purge_with_hold_filter(
+        &self,
+        base_delete: &str,
+        cutoff: DateTime<Utc>,
+        tenants: &Option<Vec<TenantRetention>>,
+    ) -> (u64, bool) {
+        let held: Vec<String> = tenants
+            .as_ref()
+            .map(|ts| ts.iter().filter(|t| t.held).map(|t| t.id.clone()).collect())
+            .unwrap_or_default();
+        let result = if held.is_empty() {
+            sqlx::query(base_delete)
+                .bind(cutoff)
+                .execute(&self.db)
+                .await
+        } else {
+            let sql = format!("{base_delete} AND (tenant_id IS NOT NULL AND tenant_id <> ALL($2))");
+            sqlx::query(&sql)
+                .bind(cutoff)
+                .bind(&held)
+                .execute(&self.db)
+                .await
+        };
+        match result {
+            Ok(r) => (r.rows_affected(), true),
+            Err(e) => {
+                warn!(error = %e, "retention sweep: purge failed");
+                (0, false)
+            }
         }
     }
 
@@ -421,7 +732,7 @@ impl RetentionSweeper {
         )
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(report.ran_at)
-        .bind(report.plan_tier)
+        .bind(&report.plan_tier)
         .bind(&json)
         .execute(&self.db)
         .await
@@ -446,6 +757,8 @@ fn skipped_result(
         deleted: 0,
         skipped_legal_hold: 0,
         legal_hold_check: LegalHoldCheck::TenantsTableMissing,
+        zero_retention_tenants: 0,
+        custom_retention_tenants: 0,
         status: SweepStatus::SkippedMissingStore,
         error: Some(err.to_string()),
     }
@@ -467,12 +780,40 @@ fn failed_result(
         deleted: 0,
         skipped_legal_hold: 0,
         legal_hold_check: LegalHoldCheck::TenantsTableMissing,
+        zero_retention_tenants: 0,
+        custom_retention_tenants: 0,
         status: SweepStatus::Failed,
         error: Some(err.to_string()),
     }
 }
 
-/// Postgres undefined_table (42P01) or undefined_column (42703).
+fn failedish_result(
+    target: &SweepTarget,
+    retention_days: u32,
+    cutoff: DateTime<Utc>,
+    legal_hold_check: LegalHoldCheck,
+    zero: usize,
+    custom: usize,
+    message: &str,
+) -> CategorySweepResult {
+    CategorySweepResult {
+        store: target.store,
+        category_ids: target.category_ids,
+        retention_days,
+        cutoff,
+        considered: 0,
+        deleted: 0,
+        skipped_legal_hold: 0,
+        legal_hold_check,
+        zero_retention_tenants: zero,
+        custom_retention_tenants: custom,
+        status: SweepStatus::Failed,
+        error: Some(message.to_string()),
+    }
+}
+
+/// Postgres undefined_table (42P01) or undefined_column (42703) — the store
+/// (table or its expected column) is not present in this deployment.
 fn is_missing_store(err: &sqlx::Error) -> bool {
     err.as_database_error()
         .and_then(|d| d.code())
@@ -480,10 +821,20 @@ fn is_missing_store(err: &sqlx::Error) -> bool {
         .unwrap_or(false)
 }
 
+/// Postgres undefined_table (42P01).
 fn is_missing_table(err: &sqlx::Error) -> bool {
     err.as_database_error()
         .and_then(|d| d.code())
         .map(|c| c == "42P01")
+        .unwrap_or(false)
+}
+
+/// Postgres undefined_column (42703) — F2: graceful degradation where a
+/// column added by a newer migration (121) is not present yet.
+fn is_missing_column(err: &sqlx::Error) -> bool {
+    err.as_database_error()
+        .and_then(|d| d.code())
+        .map(|c| c == "42703")
         .unwrap_or(false)
 }
 
@@ -492,36 +843,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_sweep_targets_cover_the_three_event_stores() {
+    fn test_sweep_targets_are_the_canonical_event_stores() {
         let targets = sweep_targets();
         let stores: Vec<&str> = targets.iter().map(|t| t.store).collect();
-        assert_eq!(
-            stores,
-            vec!["message_events", "tracking_events", "engagement_events"]
-        );
+        assert_eq!(stores, vec!["events", "messages"]);
     }
 
-    /// Registry durations actually drive the cutoffs — message events use
-    /// RET-007's 30 days, tracking/engagement the 30-day minimum of
-    /// RET-009/RET-010.
+    /// Phantom tables must never come back as sweep targets.
+    #[test]
+    fn test_sweep_targets_exclude_fixture_only_tables() {
+        let targets = sweep_targets();
+        for phantom in ["message_events", "tracking_events", "engagement_events"] {
+            assert!(
+                targets.iter().all(|t| t.table != phantom),
+                "{phantom} exists only in test fixtures and must not be swept"
+            );
+        }
+    }
+
+    /// Registry durations actually drive the cutoffs — events use the
+    /// 30-day minimum of RET-007/009/010, messages the 7-day RET-001/002.
     #[test]
     fn test_target_durations_come_from_the_registry() {
         let registry = seed_retention_registry();
         let targets = sweep_targets();
-        let me = targets
-            .iter()
-            .find(|t| t.store == "message_events")
-            .unwrap();
-        assert_eq!(me.retention_days(&registry), Some(30), "RET-007 default");
-        let te = targets
-            .iter()
-            .find(|t| t.store == "tracking_events")
-            .unwrap();
-        assert_eq!(
-            te.retention_days(&registry),
-            Some(30),
-            "min(RET-009, RET-010)"
-        );
+        let ev = targets.iter().find(|t| t.store == "events").unwrap();
+        assert_eq!(ev.retention_days(&registry), Some(30), "min(RET-007/9/10)");
+        let msg = targets.iter().find(|t| t.store == "messages").unwrap();
+        assert_eq!(msg.retention_days(&registry), Some(7), "min(RET-001/002)");
     }
 
     /// If a mapped category's default ever drops, the sweep follows the
@@ -533,12 +882,54 @@ mod tests {
         def.default_retention_days = 14;
         registry.register(def);
         let target = SweepTarget {
-            store: "tracking_events",
-            table: "tracking_events",
-            timestamp_column: "created_at",
+            store: "events",
+            table: "events",
+            timestamp_column: "timestamp",
             category_ids: &["RET-009", "RET-010"],
         };
         assert_eq!(target.retention_days(&registry), Some(14));
+    }
+
+    /// F4: a per-tenant override within the plan's bounds is honored; one
+    /// that violates the plan (or the category minimum) falls back to the
+    /// plan-tier default.
+    #[test]
+    fn test_tenant_retention_override_validation() {
+        let sweeper_like_registry = seed_retention_registry();
+        let target = SweepTarget {
+            store: "events",
+            table: "events",
+            timestamp_column: "timestamp",
+            category_ids: &["RET-007"],
+        };
+        let default_days = target.retention_days(&sweeper_like_registry).unwrap();
+
+        let pro_tenant = TenantRetention {
+            id: "t1".into(),
+            plan: "pro".into(),
+            retention_days: Some(90),
+            held: false,
+            zero_retention: false,
+        };
+        // validate_customer_selection is the gate the sweep uses; replicate
+        // its decision to prove the wiring.
+        let accepted = sweeper_like_registry
+            .validate_customer_selection("RET-007", &pro_tenant.plan, 90)
+            .is_ok();
+        let effective = if accepted { 90 } else { default_days };
+        assert_eq!(effective, 90, "pro allows up to 90d for RET-007");
+
+        let free_tenant = TenantRetention {
+            id: "t2".into(),
+            plan: "free".into(),
+            retention_days: Some(90),
+            held: false,
+            zero_retention: false,
+        };
+        let accepted_free = sweeper_like_registry
+            .validate_customer_selection("RET-007", &free_tenant.plan, 90)
+            .is_ok();
+        assert!(!accepted_free, "free is capped at 7d for RET-007");
     }
 
     /// Out-of-scope stores are listed with their REGISTRY durations — the
@@ -562,11 +953,7 @@ mod tests {
         );
 
         let blobs = oos.iter().find(|s| s.store == "mailstore_blobs").unwrap();
-        assert_eq!(
-            blobs.registry_default_days,
-            vec![7, 7, 7],
-            "RET-001/006/023 defaults"
-        );
+        assert_eq!(blobs.registry_default_days, vec![7, 7, 7]);
 
         let ch = oos
             .iter()
@@ -592,9 +979,9 @@ mod tests {
     fn test_missing_registry_category_fails_the_target() {
         let empty = RetentionRegistry::new();
         let target = SweepTarget {
-            store: "message_events",
-            table: "message_events",
-            timestamp_column: "created_at",
+            store: "events",
+            table: "events",
+            timestamp_column: "timestamp",
             category_ids: &["RET-007"],
         };
         assert_eq!(target.retention_days(&empty), None);

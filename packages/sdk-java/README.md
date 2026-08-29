@@ -36,7 +36,7 @@ public class Main {
 
         Emails.SendResponse response = client.emails().send(Map.of(
             "from", "hello@yourdomain.com",
-            "to", "user@example.com",
+            "to", java.util.List.of("user@example.com"),
             "subject", "Welcome to ApexMail!",
             "html", "<h1>Hello World</h1><p>Your email was sent successfully.</p>"
         ));
@@ -66,7 +66,8 @@ import java.util.Map;
 // Send a single email
 Emails.SendResponse response = client.emails().send(Map.of(
     "from", "hello@example.com",
-    "to", "user@example.com",
+    // "to" must be a LIST of address strings — the API takes Vec<String>.
+    "to", java.util.List.of("user@example.com"),
     "subject", "Hello",
     "html", "<p>Hello World</p>",
     "text", "Hello World"
@@ -74,8 +75,8 @@ Emails.SendResponse response = client.emails().send(Map.of(
 
 // Batch send (up to 1000 emails)
 Emails.BatchResponse batch = client.emails().batch(List.of(
-    Map.of("from", "hello@example.com", "to", "user1@example.com", "subject", "Hi", "html", "<p>Hello</p>"),
-    Map.of("from", "hello@example.com", "to", "user2@example.com", "subject", "Hi", "html", "<p>Hello</p>")
+    Map.of("from", "hello@example.com", "to", List.of("user1@example.com"), "subject", "Hi", "html", "<p>Hello</p>"),
+    Map.of("from", "hello@example.com", "to", List.of("user2@example.com"), "subject", "Hi", "html", "<p>Hello</p>")
 ));
 
 // Get email status

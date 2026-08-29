@@ -9,8 +9,10 @@ SECURITY: Implements HTTPS enforcement, retry logic, and masked API key repr.
 from __future__ import annotations
 
 import asyncio
+import random
 import re
 import time
+import uuid as _uuid
 from datetime import timezone
 from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Callable, Optional
@@ -55,6 +57,20 @@ MAX_RETRY_AFTER_SECONDS = 120.0
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 API_KEY_PATTERN = re.compile(r'^am_(live|test)_[a-zA-Z0-9]{16,}$')
+
+
+def auto_idempotency_key(method: str, json: Optional[dict]) -> Optional[str]:
+    """Duplicate-side-effect protection for mutating POSTs (SDK-B).
+
+    A POST that times out AFTER the server processed it retries blind —
+    creating a second webhook/template/API key. Every non-idempotent
+    request with a body gets a UUID generated BEFORE the retry loop, so
+    all attempts of the same logical operation present the same key and
+    the server can deduplicate. Mirrors sdk-php Client.php's behavior.
+    """
+    if method.upper() == "POST" and json is not None:
+        return str(_uuid.uuid4())
+    return None
 
 
 class BaseClient:
@@ -127,7 +143,11 @@ class BaseClient:
 
     def _get_headers(self, idempotency_key: Optional[str] = None) -> dict[str, str]:
         if idempotency_key:
-            return {"X-Idempotency-Key": idempotency_key}
+            # Header injection: strip control characters (CR/LF/NUL) from
+            # caller-supplied keys before they reach the transport.
+            safe_key = "".join(ch for ch in idempotency_key if ord(ch) >= 0x20 and ord(ch) != 0x7F)
+            if safe_key:
+                return {"X-Idempotency-Key": safe_key[:128]}
         return {}
 
     def _parse_retry_after(self, retry_after: Optional[str]) -> Optional[float]:
@@ -150,8 +170,24 @@ class BaseClient:
                 return None
 
     def _calculate_backoff(self, attempt: int) -> float:
-        """Calculate bounded quadratic backoff: baseDelay * attempt²."""
-        return min(DEFAULT_INITIAL_BACKOFF * (attempt * attempt), DEFAULT_MAX_BACKOFF)
+        """Calculate bounded quadratic backoff: baseDelay * attempt².
+
+        `attempt` is the retry NUMBER about to run (0 = first retry). The
+        first retry uses attempt 1 — a 0-based exponent produced a 0s delay,
+        hammering a server that had just asked us to slow down.
+        """
+        effective_attempt = max(1, attempt)
+        return min(DEFAULT_INITIAL_BACKOFF * (effective_attempt * effective_attempt), DEFAULT_MAX_BACKOFF)
+
+    @staticmethod
+    def _add_jitter(delay: float) -> float:
+        """Apply up to ±20% jitter so clients retrying in lockstep spread out.
+
+        The delay is never shortened by more than 20%, so an honored
+        Retry-After window is preserved.
+        """
+        jitter = delay * 0.2
+        return delay + random.uniform(-jitter, jitter)
 
     def _ensure_response_size(self, response: httpx.Response) -> None:
         content = response.content
@@ -357,7 +393,9 @@ class ApexMail(BaseClient):
         Responses are consumed as a stream and capped at max_response_bytes
         while reading (SDK-G).
         """
-        headers = self._get_headers(idempotency_key)
+        headers = self._get_headers(
+            idempotency_key if idempotency_key is not None else auto_idempotency_key(method, json)
+        )
         last_exception: Optional[Exception] = None
         started_at = time.monotonic()
 
@@ -375,7 +413,7 @@ class ApexMail(BaseClient):
 
                 delay = self._retry_delay(response, attempt)
                 if delay is not None:
-                    self._sleep(delay)
+                    self._sleep(self._add_jitter(delay))
                     continue
 
                 return self._handle_response(response)
@@ -383,7 +421,7 @@ class ApexMail(BaseClient):
             except (httpx.TimeoutException, httpx.NetworkError) as e:
                 last_exception = e
                 if attempt < self.max_retries:
-                    self._sleep(self._calculate_backoff(attempt))
+                    self._sleep(self._add_jitter(self._calculate_backoff(attempt)))
                     continue
                 raise self._build_exception_from_httpx_error(e, attempt) from e
 
@@ -489,7 +527,9 @@ class AsyncApexMail(BaseClient):
         Responses are consumed as a stream and capped at max_response_bytes
         while reading (SDK-G).
         """
-        headers = self._get_headers(idempotency_key)
+        headers = self._get_headers(
+            idempotency_key if idempotency_key is not None else auto_idempotency_key(method, json)
+        )
         last_exception: Optional[Exception] = None
         started_at = time.monotonic()
 
@@ -507,7 +547,7 @@ class AsyncApexMail(BaseClient):
 
                 delay = self._retry_delay(response, attempt)
                 if delay is not None:
-                    await asyncio.sleep(delay)
+                    await asyncio.sleep(self._add_jitter(delay))
                     continue
 
                 return self._handle_response(response)
@@ -515,7 +555,7 @@ class AsyncApexMail(BaseClient):
             except (httpx.TimeoutException, httpx.NetworkError) as e:
                 last_exception = e
                 if attempt < self.max_retries:
-                    await asyncio.sleep(self._calculate_backoff(attempt))
+                    await asyncio.sleep(self._add_jitter(self._calculate_backoff(attempt)))
                     continue
                 raise self._build_exception_from_httpx_error(e, attempt) from e
 

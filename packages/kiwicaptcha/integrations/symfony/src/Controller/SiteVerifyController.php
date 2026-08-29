@@ -964,8 +964,10 @@ final class SiteVerifyController
         // Risk feedback, the native parity: the outcome's error (null on
         // success) maps to the same events the validator records —
         // SolveSuccess repays the issuance debt only, and the failure
-        // classes enrich the model.
-        $this->riskGateway?->solveOutcome($expectedScope, $remoteIp, null, $outcome->error);
+        // classes enrich the model. The measured solve duration rides
+        // along (null-safe through the core's additive solve-duration
+        // surface, see RiskGateway::solveDurationMsOf()).
+        $this->riskGateway?->solveOutcome($expectedScope, $remoteIp, null, $outcome->error, null, \BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway::solveDurationMsOf($outcome));
         } catch (\InvalidArgumentException) {
             // Defensive boundary: the remoteip was validated above, so
             // the core's IP canonicalization cannot throw here. An

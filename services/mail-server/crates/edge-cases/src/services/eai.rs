@@ -91,25 +91,14 @@ impl EAIService {
     ) -> anyhow::Result<ParsedEmail> {
         let email = email.trim();
 
-        // Handle "Name <email>" format
-        let (name, addr) = if let Some(start) = email.find('<') {
-            if let Some(end) = email.find('>') {
-                let name = email[..start].trim().trim_matches('"');
-                let addr = &email[start + 1..end];
-                (
-                    if name.is_empty() {
-                        display_name.map(|s| s.to_string())
-                    } else {
-                        Some(name.to_string())
-                    },
-                    addr.to_string(),
-                )
-            } else {
-                (display_name.map(|s| s.to_string()), email.to_string())
-            }
-        } else {
-            (display_name.map(|s| s.to_string()), email.to_string())
-        };
+        // Handle "Name <email>" format.
+        //
+        // Security (F1): the closing '>' must be found STRICTLY after the
+        // opening '<'. The previous code took the FIRST '>' anywhere in the
+        // string, so an adversarial input like `"><a@b>"` (where '>' precedes
+        // '<') produced the reversed slice `email[start+1..end]` and PANICKED.
+        // Malformed bracket placements are now rejected with an error.
+        let (name, addr) = split_display_email(email, display_name)?;
 
         // Split at last @
         let (local_part, domain) = addr
@@ -424,6 +413,51 @@ impl EAIService {
 
 // ── helpers ────────────────────────────────────────────────────────────────────
 
+/// Split a `"Display Name <addr@example.com>"` form into
+/// `(display name, address)`.
+///
+/// Security (F1): the closing `>` must appear strictly AFTER the opening
+/// `<`. A `>` before the `<` (e.g. `"><a@b>"`), or trailing garbage after
+/// the closing `>`, is malformed and returns an error instead of computing
+/// a reversed (panicking) byte slice. When no `<` is present — or the `<`
+/// is never closed — the whole (trimmed) input is treated as the address,
+/// matching the previous lenient behavior.
+fn split_display_email(
+    email: &str,
+    display_name: Option<&str>,
+) -> anyhow::Result<(Option<String>, String)> {
+    let Some(start) = email.find('<') else {
+        return Ok((display_name.map(str::to_string), email.to_string()));
+    };
+
+    // A '>' before the '<' can never delimit the bracketed address.
+    if let Some(gt) = email[..start].find('>') {
+        anyhow::bail!("malformed email address: '>' at index {gt} precedes '<'");
+    }
+
+    // Find the closing '>' strictly after the '<'.
+    let Some(end) = email[start + 1..].find('>').map(|off| start + 1 + off) else {
+        return Ok((display_name.map(str::to_string), email.to_string()));
+    };
+
+    // Only trailing whitespace may follow the closing '>'; anything else is
+    // smuggling extra content past the address.
+    if !email[end + 1..].trim().is_empty() {
+        anyhow::bail!("malformed email address: unexpected content after '>'");
+    }
+
+    let name = email[..start].trim().trim_matches('"');
+    let addr = &email[start + 1..end];
+    Ok((
+        if name.is_empty() {
+            display_name.map(str::to_string)
+        } else {
+            Some(name.to_string())
+        },
+        addr.to_string(),
+    ))
+}
+
 /// NFC Unicode normalization (Rust strings are UTF-8; we use unicode-normalization).
 fn unicode_normalize_nfc(s: &str) -> String {
     s.nfc().collect()
@@ -534,5 +568,76 @@ mod tests {
             EAIService::build_rcpt_to_command(&addr, true),
             "RCPT TO:<user@xn --r8jz45g.jp>"
         );
+    }
+
+    // ── F1:adversarial bracket placement must error, never panic ──
+
+    #[test]
+    fn test_split_display_email_adversarial_inputs_error_not_panic() {
+        // `"><a@b>"` previously sliced email[start+1..end] with end < start+1
+        // and PANICKED on a remote-controlled input.
+        for input in [
+            "\"><a@b>",      // '>' before '<' (the original panic input)
+            ">a@b<",         // bare '>' before the '<'
+            "\"x>y\" <a@b>", // '>' inside the name, before '<'
+            "<a@b>trailing", // garbage after the closing '>'
+            "<a@b>x<y>",     // second bracket pair after the address
+        ] {
+            let result = split_display_email(input, None);
+            assert!(
+                result.is_err(),
+                "adversarial input {input:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn test_split_display_email_valid_forms() {
+        let (name, addr) =
+            split_display_email("Alice <alice@example.com>", None).expect("valid display form");
+        assert_eq!(name.as_deref(), Some("Alice"));
+        assert_eq!(addr, "alice@example.com");
+
+        let (name, addr) =
+            split_display_email("<bob@example.com>", Some("Fallback")).expect("bracket-only form");
+        assert_eq!(name.as_deref(), Some("Fallback"));
+        assert_eq!(addr, "bob@example.com");
+
+        let (name, addr) =
+            split_display_email("carol@example.com", None).expect("bare address form");
+        assert_eq!(name, None);
+        assert_eq!(addr, "carol@example.com");
+
+        // Unterminated '<': whole input kept as the address (lenient legacy
+        // behavior — downstream domain validation rejects it).
+        let (_, addr) = split_display_email("<dan@example.com", None).expect("unterminated");
+        assert_eq!(addr, "<dan@example.com");
+    }
+
+    #[tokio::test]
+    async fn test_parse_email_address_adversarial_input_is_err() {
+        // Service-level regression for the F1 remote panic: `"><a@b>"` must
+        // produce an error through the full parse path, never a panic.
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://fake:fake@localhost:1/fake")
+            .expect("lazy pool never connects");
+        let redis = deadpool_redis::Config::from_url("redis://localhost:1")
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("redis pool");
+        let service = EAIService::new(pool, redis);
+
+        for input in ["\"><a@b>", ">a@b<", "<a@b>trailing"] {
+            let result = service.parse_email_address(input, None).await;
+            assert!(result.is_err(), "{input:?} must be rejected, not panic");
+        }
+
+        let parsed = service
+            .parse_email_address("Alice <alice@example.com>", None)
+            .await
+            .expect("valid address parses");
+        assert_eq!(parsed.address.local_part, "alice");
+        assert_eq!(parsed.address.domain, "example.com");
+        assert_eq!(parsed.display_name.as_deref(), Some("Alice"));
     }
 }

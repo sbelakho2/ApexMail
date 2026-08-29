@@ -12,7 +12,7 @@ impl SuppressionsRepo {
     /// Add an email to the suppression list.
     pub async fn create(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         email: &str,
         reason: &str,
         source: &str,
@@ -23,7 +23,7 @@ impl SuppressionsRepo {
              ON CONFLICT (tenant_id, email) DO UPDATE SET reason = EXCLUDED.reason, source = EXCLUDED.source \
              RETURNING id, tenant_id, email, reason, source, created_at"
         )
-        .bind(Uuid::new_v4())
+        .bind(crate::types::short_id('s'))
         .bind(tenant_id)
         .bind(email)
         .bind(reason)
@@ -35,7 +35,7 @@ impl SuppressionsRepo {
     /// Find suppression entry by email.
     pub async fn find_by_email(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         email: &str,
     ) -> Result<Option<Suppression>, sqlx::Error> {
         sqlx::query_as::<_, Suppression>(
@@ -52,7 +52,7 @@ impl SuppressionsRepo {
     /// #221:Added limit/offset parameters to prevent unbounded queries
     pub async fn list(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Suppression>, sqlx::Error> {
@@ -70,7 +70,7 @@ impl SuppressionsRepo {
     }
 
     /// Remove an email from the suppression list.
-    pub async fn delete(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> Result<bool, sqlx::Error> {
+    pub async fn delete(pool: &PgPool, tenant_id: &str, id: Uuid) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM suppressions WHERE id = $1 AND tenant_id = $2")
             .bind(id)
             .bind(tenant_id)
@@ -82,7 +82,7 @@ impl SuppressionsRepo {
     /// Check whether an email is suppressed (fast boolean check).
     pub async fn is_suppressed(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         email: &str,
     ) -> Result<bool, sqlx::Error> {
         let row: (bool,) = sqlx::query_as(
@@ -98,7 +98,7 @@ impl SuppressionsRepo {
     /// Bulk-create suppressions (upsert).
     pub async fn bulk_create(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         entries: &[(&str, &str, &str)], // (email, reason, source)
     ) -> Result<Vec<Suppression>, sqlx::Error> {
         // #213:Return early on empty input to avoid invalid SQL
@@ -133,7 +133,7 @@ impl SuppressionsRepo {
         let mut q = sqlx::query_as::<_, Suppression>(&query);
         for (email, reason, source) in entries {
             q = q
-                .bind(Uuid::new_v4())
+                .bind(crate::types::short_id('s'))
                 .bind(tenant_id)
                 .bind(*email)
                 .bind(*reason)
@@ -153,8 +153,8 @@ mod tests {
     #[test]
     fn test_suppression_mock() {
         let s = Suppression {
-            id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            id: crate::types::short_id('s'),
+            tenant_id: crate::types::short_id('s'),
             email: "bounced@example.com".into(),
             reason: "hard_bounce".into(),
             source: "system".into(),
@@ -166,8 +166,8 @@ mod tests {
     #[test]
     fn test_suppression_manual_source() {
         let s = Suppression {
-            id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            id: crate::types::short_id('s'),
+            tenant_id: crate::types::short_id('s'),
             email: "unsubscribed@example.com".into(),
             reason: "unsubscribe".into(),
             source: "manual".into(),

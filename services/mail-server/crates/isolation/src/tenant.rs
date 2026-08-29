@@ -110,7 +110,11 @@ fn sanitize_identifier(id: &str) -> String {
         })
         .collect();
     if s.len() > 63 {
-        s[..63].to_string()
+        // Truncate on a char boundary — identifiers keep Unicode
+        // alphanumerics (e.g. Cyrillic), and slicing at byte 63 could split
+        // a multi-byte character and panic.
+        let end = s.floor_char_boundary(63);
+        s[..end].to_string()
     } else {
         s
     }
@@ -795,6 +799,30 @@ mod tests {
     fn test_sanitize_identifier_length() {
         let long = "a".repeat(100);
         assert_eq!(sanitize_identifier(&long).len(), 63);
+    }
+
+    #[test]
+    fn test_sanitize_identifier_multibyte_truncates_on_char_boundary() {
+        // F13 regression:identifiers keep Unicode alphanumerics, so byte
+        // 63 can land mid-character — `s[..63]` panicked there. Truncation
+        // must back off to a char boundary.
+        let multibyte = "д".repeat(40); // 40 × 2-byte chars = 80 bytes
+        assert!(multibyte.len() > 63);
+        let sanitized = sanitize_identifier(&multibyte);
+        assert!(
+            sanitized.len() <= 63,
+            "result must be at most 63 bytes, got {}",
+            sanitized.len()
+        );
+        // …and it must be valid UTF-8 on a char boundary (chars intact).
+        assert_eq!(sanitized.chars().count(), sanitized.len() / 2);
+        assert!(sanitized.chars().all(|c| c == 'д'));
+
+        // Sanity:the previous code panicked exactly here.
+        let exactly_splitting = format!("{}{}", "a".repeat(62), "д");
+        assert_eq!(exactly_splitting.len(), 64); // byte 63 splits the 'д'
+        let sanitized = sanitize_identifier(&exactly_splitting);
+        assert_eq!(sanitized, "a".repeat(62));
     }
 
     #[test]

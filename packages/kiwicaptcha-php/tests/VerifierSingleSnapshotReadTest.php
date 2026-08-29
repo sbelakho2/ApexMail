@@ -138,6 +138,44 @@ final class VerifierSingleSnapshotReadTest extends TestCase
         self::assertSame([], $client->evals, 'the replay must resolve from the snapshot envelope with no Lua');
     }
 
+    public function testMissingClientIpRetryPathPerformsExactlyOneGet(): void
+    {
+        // (d) The MissingClientIp cheap-failure retry path — a bound
+        // challenge verified without a client IP, whose record is kept
+        // for the retry with the IP — answers from the runtime snapshot
+        // alone: exactly one GET, no second retained-state read through
+        // consumedState(), and no Lua at all. The fused cleanup is
+        // deliberately skipped for this failure, so the retained-state
+        // tri-state must come from the snapshot (the round-95 pattern).
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed');
+        }
+        $prefix = 'missing-ip-';
+        $client = new FakePredisClient();
+        [$storage, $record, $token] = $this->issueAndSolve($client, $prefix);
+        $client->gets = 0;
+        $client->getKeys = [];
+        $client->evals = [];
+
+        $outcome = $this->verifier($storage)->verify($token, Vectors::SECRET, 'login', null);
+
+        self::assertSame(VerifyError::MissingClientIp, $outcome->error, 'a bound challenge without a client IP fails closed as MissingClientIp');
+        self::assertSame(1, $client->gets, 'the MissingClientIp retry path must read the record exactly once');
+        self::assertSame([$prefix.$record->nonce], $client->getKeys, 'the single GET targets the record key');
+        self::assertSame([], $client->evals, 'the kept record is never touched by Lua');
+
+        // The record survives for the retry with the IP, and that retry
+        // then succeeds normally.
+        $retry = $this->verifier($storage)->verify(
+            $token,
+            Vectors::SECRET,
+            'login',
+            self::CLIENT_IP,
+            nowNs: $record->issuedAtNs + 1_000_000,
+        );
+        self::assertTrue($retry->isOk(), sprintf('the retry with the IP must verify, got %s', $retry->code()));
+    }
+
     public function testCancelledVerificationPerformsExactlyOneGetAndNoLua(): void
     {
         // (c) A cancelled-record verification answers RecordNotFound from

@@ -95,8 +95,7 @@ fn init_tracing(log_level: &str) -> Option<TracingGuard> {
         }
     }
     // Fallback: structured JSON logging
-    let filter =
-        EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(log_level));
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -294,7 +293,7 @@ async fn main() -> Result<()> {
                     env_err
                 );
                 // Try default path as last resort
-                let default_path = format!("/etc/apexmail/dkim/{}.pem", &cli.from_domain);
+                let default_path = format!("/etc/apexmail/dkim/{}.pem", cli.from_domain);
                 DkimSigner::from_file(&cli.from_domain, &cli.dkim_selector, &default_path)
                     .await
                     .map(|s| (s, format!("default path: {}", default_path)))

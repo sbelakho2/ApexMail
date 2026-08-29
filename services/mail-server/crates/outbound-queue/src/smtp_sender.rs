@@ -789,9 +789,7 @@ impl SmtpSender {
             // RSET and read response (#104:avoid stream desync)
             stream.write_all(b"RSET\r\n").await?;
             response.clear();
-            if let Err(error) =
-                read_smtp_reply(stream, &mut response, timeout_duration).await
-            {
+            if let Err(error) = read_smtp_reply(stream, &mut response, timeout_duration).await {
                 warn!(error = %error, "Failed to read SMTP response after RSET");
             }
             return Ok(SmtpSendResult {
@@ -1407,7 +1405,11 @@ where
 /// continuation line so the stream stays in sync. Reading a single line
 /// here used to desynchronize the session whenever a server answered
 /// multiline (e.g. "250-2.1.0 sender OK\r\n250 2.1.5 recipient OK\r\n").
-async fn read_smtp_reply<S>(stream: &mut S, response: &mut String, timeout_duration: Duration) -> Result<usize>
+async fn read_smtp_reply<S>(
+    stream: &mut S,
+    response: &mut String,
+    timeout_duration: Duration,
+) -> Result<usize>
 where
     S: AsyncRead + Unpin,
 {

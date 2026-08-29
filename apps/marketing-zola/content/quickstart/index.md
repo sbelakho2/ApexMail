@@ -167,37 +167,38 @@ AWS detects newly published DNS records.
 
 Choose your integration method:
 
-### Option A: SDK (recommended for production)
+### Option A: SDK (build from source)
 
-**Python:**
+> **Not yet on public registries.** The ApexMail SDKs are **not yet published to PyPI, pkg.go.dev, Packagist, RubyGems, or Maven Central** — `pip install apexmail`, `go get github.com/apexmail/apexmail-go`, and `composer require apexmail/apexmail-php` will fail until the first stable release. Until then, install from the monorepo source and pin to a specific commit, and **verify the source you vendor** before shipping it. See [SDKs](/docs/sdks/) for the per-language status.
+
+All SDKs live in the [ApexMail monorepo](https://github.com/Bel-Consulting-OU/ApexMail) under `packages/`:
+
 ```bash
-pip install apexmail
+git clone https://github.com/Bel-Consulting-OU/ApexMail.git
+cd ApexMail
 ```
 
-**Go:**
+**Python** (`packages/sdk-python` — install from the local path, or vendor the directory):
+
 ```bash
-go get github.com/apexmail/apexmail-go
+pip install ./packages/sdk-python
 ```
 
-**PHP:**
+**Go** (`packages/sdk-go` — pin the module to the vendored source with a `replace` directive):
+
 ```bash
-composer require apexmail/apexmail-php
+go mod edit -replace github.com/apexmail/apexmail-go=./packages/sdk-go
+go mod tidy
 ```
 
-**Ruby:**
-```ruby
-# Gemfile
-gem 'apexmail'
+**PHP** (`packages/sdk-php` — point Composer at the local directory):
+
+```bash
+composer config repositories.apexmail path ./packages/sdk-php
+composer require apexmail/apexmail-php:@dev
 ```
 
-**Java (Maven):**
-```xml
-<dependency>
-  <groupId>ee.apexmail</groupId>
-  <artifactId>apexmail-java</artifactId>
-  <version>1.0.0</version>
-</dependency>
-```
+**Ruby** (`packages/sdk-ruby`) and **Java** (`packages/sdk-java`): build from the monorepo directory; each package's README has its build and test instructions.
 
 ### Option B: cURL (quick test)
 
@@ -242,16 +243,15 @@ from apexmail import ApexMail
 
 client = ApexMail(api_key=os.environ["APEXMAIL_API_KEY"])
 
-response = client.messages.send(
+response = client.emails.send(
     from_="hello@yourdomain.com",
-    to=["your-email@example.com"],
+    to="your-email@example.com",
     subject="Hello from ApexMail Quickstart",
     text="Your first transactional email via ApexMail!",
     html="<h1>Hello from ApexMail</h1><p>Your first transactional email!</p>",
-    message_type="transactional",
 )
 
-print(f"Message queued: {response.id}, status: {response.status}")
+print(f"Email queued! ID: {response.id}")
 ```
 
 **Expected response:**

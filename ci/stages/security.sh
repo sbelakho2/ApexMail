@@ -152,6 +152,12 @@ _trivy_sbom() {
 # 2. sqlx migrate run (x2)    — the chain applies to a CLEAN database and is
 #                               idempotent on a current schema, exactly the
 #                               two assertions the GitHub workflow made.
+# F7 — same include_dir staleness fix as ci/stages/test.sh apply_test_schema:
+# sqlx::migrate! embeds via include_dir; some cargo versions miss new files
+# in the tracked dir on incremental rebuilds, so a freshly added migration
+# can be silently absent from a cached migrator binary. Force a rebuild of
+# the crate before EVERY `cargo run -p migrator` here (dry-run + both
+# fallback applies).
 # NOTE (2026-08-21): the chain currently FAILS from scratch at migration 109
 # (see ci/README.md § "Known pipeline findings"); CI_MIGRATION_CHECK=advisory
 # downgrades this check until the migration is fixed.
@@ -159,7 +165,8 @@ migration_validation() {
     ci_info "migration validation (ephemeral postgres)"
     ci_docker_ok || { ci_warn "docker unavailable — migration validation skipped"; return "$CI_EXIT_OK"; }
 
-    # (1) embedded migration set lists cleanly
+    # (1) embedded migration set lists cleanly (touch: see the F7 note above)
+    touch "$WS/crates/migrator/src/main.rs"
     (cd "$WS" && ci_check "migrator --dry-run" cargo run --locked -p migrator -- --dry-run) \
         || return "$CI_EXIT_FAIL"
 
@@ -180,9 +187,12 @@ migration_validation() {
     else
         ci_warn "sqlx-cli missing — falling back to the migrator binary \
 (fresh-DB NULL-decode bug applies; install sqlx-cli via ci/install.sh)"
+        # touch again before EACH cargo run (see the F7 note above)
+        touch "$WS/crates/migrator/src/main.rs"
         (cd "$WS" && DATABASE_URL="$_mv_url" ci_check "migrator apply (clean DB)" \
             cargo run --locked -p migrator) || _mv_rc=1
         [ "$_mv_rc" -ne 0 ] || {
+            touch "$WS/crates/migrator/src/main.rs"
             (cd "$WS" && DATABASE_URL="$_mv_url" ci_check "migrator apply (idempotency)" \
                 cargo run --locked -p migrator) || _mv_rc=1
         }

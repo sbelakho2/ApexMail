@@ -37,6 +37,9 @@ observability-service = { path = "../observability-service" }
 
 # Utils
 chrono.workspace = true
+# IANA timezone resolution for tenant-local send-time optimization (F5).
+# Same version already used by billing-service — not a new workspace dep.
+chrono-tz = "0.10"
 uuid.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true

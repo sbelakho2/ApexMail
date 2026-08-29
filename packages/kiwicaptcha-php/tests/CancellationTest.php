@@ -241,9 +241,9 @@ final class CancellationTest extends TestCase
 
         $storage->cancel($nonce);
 
-        $evals = array_values(array_filter($client->calls, fn ($c) => $c[0] === 'EVAL'));
-        self::assertNotEmpty($evals, 'cancel must go through eval for Predis');
-        self::assertStringContainsString('cancel transition', (string) $evals[array_key_last($evals)][1][0], 'the atomic cancel-transition Lua must be used');
+        $evals = $client->evals;
+        self::assertNotEmpty($evals, 'cancel must go through the Lua script for Predis (EVALSHA after the SCRIPT LOAD warm-up)');
+        self::assertStringContainsString('cancel transition', $evals[array_key_last($evals)]['script'], 'the atomic cancel-transition Lua must be used');
     }
 
     public function testRedisStorageCancellationPreservesTheKeyTtl(): void

@@ -46,7 +46,7 @@ async fn list_operators(
     auth: AuthUser,
 ) -> Result<Json<Vec<OperatorRow>>, ApiError> {
     require_scopes(&auth, &["*"])?;
-    require_system_tenant(&auth)?;
+    require_system_tenant(&state, &auth).await?;
     let rows = sqlx::query_as::<_, OperatorRow>(
         "SELECT id, email, role, \
          COALESCE(mfa_enabled, false) AS mfa_enabled, created_at \
@@ -64,7 +64,7 @@ async fn create_operator(
     Json(body): Json<CreateOperatorRequest>,
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["*"])?;
-    require_system_tenant(&auth)?;
+    require_system_tenant(&state, &auth).await?;
     let role = body.role.as_deref().unwrap_or("admin");
     // Reject arbitrary role strings — only admin/owner may be assigned.
     if !VALID_OPERATOR_ROLES.contains(&role) {
@@ -99,7 +99,7 @@ async fn delete_operator(
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["*"])?;
-    require_system_tenant(&auth)?;
+    require_system_tenant(&state, &auth).await?;
     // users.id is VARCHAR(26) (ULID-like), not UUID — bind as text, no ::uuid cast.
     let result = sqlx::query("DELETE FROM users WHERE id = $1 AND role IN ('admin', 'owner')")
         .bind(&id)

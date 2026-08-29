@@ -29,7 +29,10 @@
 #     absent, e.g. deploy stages on a dev machine), 124 = timeout.
 #   * combined output is captured (capped) into ci/runs/<ts>/stages/<name>.log.
 #
-# Concurrency: one run at a time (flock when available, mkdir lock otherwise).
+# Concurrency: one run at a time — the pipeline takes THE SAME lock as a
+# manual deploy/scripts/deploy.sh run (${APEXMAIL_DEPLOY_LOCK:-/opt/apexmail/
+# .deploy.lock}; flock when available, mkdir lock otherwise) so the two
+# deploy paths can never interleave (F5).
 # The systemd timer polls every 5 min; while a run is in progress the next
 # tick exits 0 immediately instead of queueing.
 # =============================================================================
@@ -162,12 +165,32 @@ cmd_run() {
     done
     [ -n "$_run_list" ] || ci_die "no stages selected (check --stages/--skip)"
 
-    # --- concurrency lock -----------------------------------------------------
+    # --- concurrency lock (F5: the SAME lock deploy/scripts/deploy.sh takes) --
+    # Canonical path: /opt/apexmail/.deploy.lock (APEXMAIL_DEPLOY_LOCK
+    # overrides BOTH sides — deploy.sh resolves the identical variable).
+    # Previously the pipeline locked ci/runs/.locks/pipeline.lock while a
+    # manual deploy.sh held /opt/apexmail/.deploy.lock: the two were NOT
+    # mutual, so a pipeline run and a hotfix deploy could interleave the
+    # build, the migrator and `compose up`.
+    # On hosts where the canonical dir cannot be created/written (e.g. a dev
+    # machine without /opt/apexmail — deploy.sh cannot run there anyway),
+    # fall back to a repo-local lock so concurrent pipeline runs still
+    # exclude each other.
     if [ "$_force" = 1 ]; then
-        ci_warn "--force: running without the pipeline lock"
-    elif ! ci_lock_acquire pipeline "$_lock_wait"; then
-        ci_info "another pipeline run holds the lock — nothing to do"
-        exit "$CI_EXIT_OK"
+        ci_warn "--force: running without the deploy lock"
+    else
+        APEXMAIL_DEPLOY_LOCK="${APEXMAIL_DEPLOY_LOCK:-${CI_DEPLOY_DIR:-/opt/apexmail}/.deploy.lock}"
+        _lock_dir=$(dirname "$APEXMAIL_DEPLOY_LOCK")
+        if ! mkdir -p "$_lock_dir" 2>/dev/null || [ ! -w "$_lock_dir" ]; then
+            ci_warn "deploy lock dir not writable ($_lock_dir) — using repo-local lock (not mutual with deploy.sh, which cannot run on this host)"
+            APEXMAIL_DEPLOY_LOCK="$LOCK_DIR/deploy.lock"
+            mkdir -p "$LOCK_DIR"
+        fi
+        export APEXMAIL_DEPLOY_LOCK
+        if ! ci_lock_file_acquire "$APEXMAIL_DEPLOY_LOCK" "$_lock_wait"; then
+            ci_info "another run holds the deploy lock ($APEXMAIL_DEPLOY_LOCK) — nothing to do"
+            exit "$CI_EXIT_OK"
+        fi
     fi
 
     prepare_run() {

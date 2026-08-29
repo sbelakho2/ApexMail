@@ -104,6 +104,22 @@ fn default_top_k() -> usize {
     10
 }
 
+/// F11:top_k must be 1..=100. Unbounded top_k cloned the whole-corpus
+/// min-heap per search request (a trivially triggerable memory/CPU spike);
+/// values outside the range are rejected with 400.
+const MAX_TOP_K: usize = 100;
+
+/// F11:validate a requested top_k (1..=100 inclusive).
+fn validate_top_k(top_k: usize) -> Result<(), &'static str> {
+    if top_k == 0 {
+        Err("top_k must be at least 1")
+    } else if top_k > MAX_TOP_K {
+        Err("top_k must be at most 100")
+    } else {
+        Ok(())
+    }
+}
+
 /// Maximum number of texts accepted per /embed batch. Unbounded batches let
 /// a single request monopolize the inference sidecar.
 const MAX_EMBED_BATCH: usize = 256;
@@ -178,6 +194,13 @@ async fn search_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<SearchRequest>,
 ) -> (StatusCode, Json<serde_json::Value>) {
+    // F11:reject out-of-range top_k before touching the heap.
+    if let Err(msg) = validate_top_k(req.top_k) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": msg })),
+        );
+    }
     let mut results = state
         .vector_store
         .search(&req.vector, req.top_k, &req.tenant_id);
@@ -245,6 +268,26 @@ mod tests {
             service_token: "test-key".into(),
         });
         let _router = router(state);
+    }
+
+    /// F11:top_k is clamped to 1..=100 — 0 and >100 are rejected.
+    #[test]
+    fn test_validate_top_k_range() {
+        assert!(validate_top_k(0).is_err(), "top_k=0 must be rejected");
+        assert!(validate_top_k(1).is_ok(), "top_k=1 is the minimum");
+        assert!(validate_top_k(10).is_ok());
+        assert!(
+            validate_top_k(MAX_TOP_K).is_ok(),
+            "top_k=100 is the maximum"
+        );
+        assert!(validate_top_k(101).is_err(), "top_k=101 must be rejected");
+        assert!(validate_top_k(usize::MAX).is_err());
+        // Error messages guide the caller.
+        assert_eq!(validate_top_k(0).unwrap_err(), "top_k must be at least 1");
+        assert_eq!(
+            validate_top_k(500).unwrap_err(),
+            "top_k must be at most 100"
+        );
     }
 
     #[test]

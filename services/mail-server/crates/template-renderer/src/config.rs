@@ -46,6 +46,13 @@ pub struct SandboxConfig {
     /// Max rendered HTML length
     #[serde(default = "default_max_output_len")]
     pub max_output_length: usize,
+    /// F8:prop paths whose `*_html` values are trusted to substitute RAW
+    /// (pre-rendered HTML fragments). Empty by default — every value,
+    /// including `*_html` ones, is HTML-escaped unless its exact path is
+    /// listed here. The `*_html` leaf-name convention is still required for
+    /// a listed path to take effect.
+    #[serde(default)]
+    pub trusted_html_props: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -149,6 +156,7 @@ mod tests {
                 max_memory_bytes: 64 * 1024 * 1024,
                 max_source_length: 512 * 1024,
                 max_output_length: 2 * 1024 * 1024,
+                trusted_html_props: Vec::new(),
             },
             cache: CacheConfig {
                 max_entries: 1000,
@@ -179,6 +187,25 @@ mod tests {
         assert_eq!(cfg.sandbox.timeout_ms, 3000);
         assert_eq!(cfg.sandbox.max_memory_bytes, default_max_memory());
         assert_eq!(cfg.cache.max_entries, default_cache_max());
+        // F8:the trusted `*_html` allowlist defaults to EMPTY (all escaped).
+        assert!(cfg.sandbox.trusted_html_props.is_empty());
+    }
+
+    /// F8:explicitly listed `*_html` paths are honoured; unknown fields in
+    /// the sandbox section are still rejected.
+    #[test]
+    fn test_config_deserialize_trusted_html_props() {
+        let json = r#"{
+            "db": { "url": "postgres://localhost/test" },
+            "server": { "host": "0.0.0.0", "port": 8080 },
+            "sandbox": { "trusted_html_props": ["article.body_html"] },
+            "cache": {}
+        }"#;
+        let cfg: RendererConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            cfg.sandbox.trusted_html_props,
+            vec!["article.body_html".to_string()]
+        );
     }
 
     #[test]

@@ -17,6 +17,11 @@ use crate::config::PlacementConfig;
 /// a placement test is meant to measure. Sending from the seed account itself
 /// (previous behaviour) measured nothing: providers always trust self-mail.
 ///
+/// F4:`from_email` must belong to one of the tenant's VERIFIED sending
+/// domains — enforced at `create_test` (see
+/// `PlacementEngine::ensure_from_domain_verified`); the relay itself accepts
+/// arbitrary From headers, so that check is the spoofing gate.
+///
 /// The subject embeds the unique [`test_id`] so the IMAP poller can locate the
 /// message later.
 ///

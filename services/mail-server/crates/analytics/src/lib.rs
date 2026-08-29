@@ -8,6 +8,7 @@ pub mod config;
 pub mod email_hash;
 pub mod engagement_trust;
 pub mod inbox_placement;
+pub mod ip_mask;
 pub mod query_engine;
 pub mod reconciliation;
 pub mod reply_tracking;

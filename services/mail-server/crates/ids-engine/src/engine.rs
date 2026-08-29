@@ -441,10 +441,36 @@ impl IdsEngine {
         removed
     }
 
+    /// Start the engine's background maintenance (audit F9 wiring).
+    ///
+    /// `IdsEngine::new` is a synchronous constructor, so it cannot spawn the
+    /// cleanup task itself and there is no async construction path in this
+    /// crate. `start()` wraps [`Self::run_cleanup_loop`] with a sane
+    /// 30-second interval; call it once from any async context after
+    /// wrapping the engine in an `Arc`:
+    ///
+    /// ```rust,ignore
+    /// let engine = Arc::new(IdsEngine::new(config)?);
+    /// let cleanup = engine.clone().start();
+    /// ```
+    ///
+    /// **Wiring dependency:** integrations that construct the engine (e.g.
+    /// the api-server) must call `start()` (or `run_cleanup_loop`) once.
+    /// Until then the tracker's hard capacity cap is the only memory bound
+    /// and stale entries linger up to `max_connections`.
+    /// The returned [`tokio::task::JoinHandle`] can be aborted to stop the
+    /// background loop on shutdown.
+    pub fn start(self: std::sync::Arc<Self>) -> tokio::task::JoinHandle<()> {
+        self.run_cleanup_loop(30)
+    }
+
     /// Spawn a background Tokio task that calls [`Self::cleanup`] every
     /// `interval_secs` seconds.
     /// Without this (or equivalent external scheduling), the connection tracker
-    /// and alert rate-limit map grow unboundedly for long-lived processes.
+    /// and alert rate-limit map grow unboundedly for long-lived processes
+    /// (the table is now hard-capped at `max_connections` between cleanups —
+    /// see `ConnectionTracker` — but stale entries still accumulate up to
+    /// that cap without this loop).
     /// The returned [`tokio::task::JoinHandle`] can be aborted by the caller
     /// to stop the background loop on shutdown.
     /// Requires the engine to be wrapped in an `Arc` so the task can hold an

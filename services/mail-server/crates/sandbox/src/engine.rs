@@ -148,6 +148,39 @@ impl Default for SlotState {
 
 static ANALYZER_SLOTS: std::sync::OnceLock<AnalyzerSlotTracker> = std::sync::OnceLock::new();
 
+/// F11:drive `fut` to completion on the shared analyzer runtime WITHOUT
+/// panicking when the caller is itself inside a Tokio runtime.
+///
+/// `Runtime::block_on` panics ("cannot block the current thread from within
+/// a runtime") when invoked from an async worker thread, which made the
+/// sync `analyze()` API unusable from async callers (MTA handlers, any
+/// `#[tokio::test]`). When no ambient runtime exists (pure sync caller) the
+/// future is driven directly. When one does, the wait hops to a
+/// short-lived driver thread that is joined immediately — safe under BOTH
+/// multi-thread and current_thread runtimes (`tokio::task::block_in_place`
+/// panics on current_thread, and `#[tokio::test]` defaults to exactly that
+/// flavor). The analyzer pool itself stays shared and bounded; the driver
+/// thread never outlives the call.
+fn blocking_wait<F>(runtime: &tokio::runtime::Runtime, fut: F) -> F::Output
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
+    if tokio::runtime::Handle::try_current().is_err() {
+        // Sync caller: no ambient runtime, blocking is fine.
+        runtime.block_on(fut)
+    } else {
+        // Async caller: block a dedicated (joined) thread instead of the
+        // caller's worker thread.
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| runtime.block_on(fut))
+                .join()
+                .expect("sandbox analyzer driver thread must not panic")
+        })
+    }
+}
+
 fn analyzer_slots() -> &'static AnalyzerSlotTracker {
     ANALYZER_SLOTS.get_or_init(AnalyzerSlotTracker::default)
 }
@@ -402,7 +435,10 @@ impl SandboxEngine {
             analyzer.analyze(&data, filename.as_deref())
         });
 
-        let joined = runtime.block_on(async {
+        // F11:driven via blocking_wait — safe from both sync callers and
+        // callers already inside a Tokio runtime (nested block_on used to
+        // panic there).
+        let joined = blocking_wait(runtime, async {
             match tokio::time::timeout(timeout_duration, task).await {
                 Ok(Ok(finding)) => Ok(finding),
                 Ok(Err(error)) => Err(format!("dynamic analyzer task failed: {error}")),
@@ -695,6 +731,46 @@ mod tests {
             result,
             Err(SandboxError::AnalysisError(message)) if message.contains("timed out")
         ));
+    }
+
+    /// F11:the sync `analyze()` API must be callable from INSIDE a Tokio
+    /// runtime without panicking. `#[tokio::test]` defaults to the
+    /// CURRENT-THREAD runtime flavor — the harshest context for the old
+    /// nested `runtime.block_on` (which panicked with "cannot block the
+    /// current thread from within a runtime" from any async caller, and
+    /// where `block_in_place` would panic too). The dynamic-analyzer path
+    /// is exercised so the blocking wait is really hit.
+    #[tokio::test]
+    async fn analyze_from_async_context_must_not_panic() {
+        struct MockDynamicAsyncFriendly;
+        impl DynamicAnalyzer for MockDynamicAsyncFriendly {
+            fn analyze(
+                &self,
+                _data: &[u8],
+                _filename: Option<&str>,
+            ) -> Option<DynamicAnalysisFinding> {
+                Some(DynamicAnalysisFinding {
+                    id: "DYNAMIC_ASYNC".into(),
+                    description: "finding produced while caller is async".into(),
+                    risk: 4.0,
+                    decision: DynamicDecision::Flag,
+                })
+            }
+        }
+
+        let engine = SandboxEngine::with_dynamic_analyzer(
+            SandboxConfig::default(),
+            Arc::new(MockDynamicAsyncFriendly),
+        );
+
+        let verdict = engine.analyze(b"hello", Some("readme.txt"));
+        // (No unwrap: this crate denies clippy::unwrap_used.)
+        let verdict = match verdict {
+            Ok(v) => v,
+            Err(e) => panic!("sync analyze() from an async context must succeed, got {e:?}"),
+        };
+        assert!(verdict.decision == "QUARANTINE" || verdict.decision == "ALLOW");
+        assert!(verdict.findings.iter().any(|f| f.id == "DYNAMIC_ASYNC"));
     }
 
     struct MockDynamicStuck;

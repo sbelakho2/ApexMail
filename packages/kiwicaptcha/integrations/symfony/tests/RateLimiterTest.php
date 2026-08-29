@@ -371,6 +371,88 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame(1, $limiter->check('198.51.100.3'), 'the shared global window slid: the cap is free');
     }
 
+    public function testPsr6NamespacedLimitersOverOneSharedPoolKeepIndependentBudgets(): void
+    {
+        // Round-97: the PSR-6 fallback keys ignored the constructor
+        // namespace, so two deployments sharing one pool contended on the
+        // one literal `kr_global` item (and on identical per-client items
+        // when the peppers matched). The namespace now keys both PSR-6
+        // families, so each deployment keeps its own global budget and
+        // its own per-client items over the SAME pool.
+        $pool = new ArrayAdapter();
+        $clock = 10_000.0;
+        $now = static function () use (&$clock): float {
+            return $clock;
+        };
+        $a = new IssuanceRateLimiter(100, 60, $pool, $now, 'pepper', null, 2, 'deployment-a');
+        $b = new IssuanceRateLimiter(100, 60, $pool, $now, 'pepper', null, 2, 'deployment-b');
+
+        // Deployment A exhausts its own global budget of 2 ...
+        self::assertSame(1, $a->check('198.51.100.1'));
+        self::assertSame(1, $a->check('198.51.100.2'));
+        self::assertSame(-1, $a->check('198.51.100.3'), 'deployment A hits ITS global cap');
+
+        // ... while deployment B keeps a fully independent budget over
+        // the same shared pool: two more admissions of its own.
+        self::assertSame(1, $b->check('198.51.100.1'), 'deployment B has its own global budget — A\'s saturation never denies B');
+        self::assertSame(1, $b->check('198.51.100.2'));
+        self::assertSame(-1, $b->check('198.51.100.3'), 'deployment B now hits its own cap');
+
+        // The two deployments never shared an item: each wrote its own
+        // global item and its own per-client items; the key families are
+        // disjoint (and neither ever touches the legacy `kr_global`).
+        // The namespace segment is PSR-6-safe ('-' folds to '_').
+        $keys = array_keys($pool->getValues());
+        self::assertContains('kr_global_deployment_a', $keys, 'deployment A has its own dedicated global item');
+        self::assertContains('kr_global_deployment_b', $keys, 'deployment B has its own dedicated global item');
+        self::assertNotContains('kr_global', $keys, 'a namespaced deployment never touches the legacy literal item');
+        foreach ($keys as $key) {
+            self::assertMatchesRegularExpression('/^kr_(global_)?[A-Za-z0-9_.]+(_[0-9a-f]+)?$/', (string) $key, 'every PSR-6 key stays within the PSR-6 guaranteed character set');
+            self::assertLessThanOrEqual(64, \strlen((string) $key), 'every PSR-6 key stays within the 64-character support floor');
+        }
+        // The per-client items are distinct per deployment even for the
+        // same client IP and the same pepper (the identity hex tail
+        // matches — same HMAC — but the namespace segment differs, so
+        // the items never merge). Exactly four client windows carry
+        // state (two admitted per deployment); a bare denied read
+        // registers only a null-valued key in this adapter, never a
+        // window, so only the stateful items count.
+        $statefulKeys = array_keys($withState = array_filter($pool->getValues(), static fn ($v): bool => $v !== null));
+        $clientKeys = array_values(array_filter($statefulKeys, static fn (string $k): bool => !str_starts_with($k, 'kr_global')));
+        self::assertCount(4, array_unique($clientKeys), 'two distinct admitted client windows per deployment, never shared');
+        $suffixes = array_map(static fn (string $k): string => (string) strrchr($k, '_'), $clientKeys);
+        self::assertCount(2, array_unique($suffixes), 'the same two client identities appear exactly once per deployment');
+        self::assertCount(6, $withState, 'exactly two admitted client windows per deployment plus the two global items carry state');
+
+        // The budget separation is real state, not key cosmetics: A is
+        // still saturated after B's admissions.
+        self::assertSame(-1, $a->check('198.51.100.4'));
+    }
+
+    public function testPsr6EmptyNamespaceKeepsTheLegacyKeyShapes(): void
+    {
+        // Back-compat: an empty namespace (the constructor default, and
+        // every pre-namespace deployment) keeps the exact legacy item
+        // shapes — `kr_global` and `kr_` + 60 hex.
+        $pool = new ArrayAdapter();
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(100, 60, $pool, static function () use (&$clock): float {
+            return $clock;
+        }, 'pepper', null, 2, '');
+
+        self::assertSame(1, $limiter->check('198.51.100.1'));
+        self::assertSame(1, $limiter->check('198.51.100.2'));
+
+        $keys = array_keys($pool->getValues());
+        self::assertContains('kr_global', $keys);
+        foreach ($keys as $key) {
+            if ($key === 'kr_global') {
+                continue;
+            }
+            self::assertMatchesRegularExpression('/^kr_[0-9a-f]{60}$/', (string) $key, 'the empty namespace keeps the kr_ + 60-hex legacy shape');
+        }
+    }
+
     public function testInMemoryGlobalOnlyModeEnforcesGlobalWindow(): void
     {
         // maxChallenges = 0, redis = null: the unpatched behavior allowed

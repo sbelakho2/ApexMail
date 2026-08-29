@@ -157,7 +157,26 @@ impl BackupService {
     /// # Encryption key validation at startup
     /// Validates encryption key size on construction to fail fast rather than
     /// failing mid-backup when encrypt_backup is called.
+    ///
+    /// In production configurations a missing `BACKUP_ENCRYPTION_KEY` is a
+    /// hard error (fail closed):without it backups — and their local
+    /// staging copies — are written in plaintext.
     pub fn new(pool: PgPool, config: Arc<Config>) -> Result<Self, String> {
+        // Fail closed in production when no encryption key is configured.
+        if config.environment == "production"
+            && config
+                .backup
+                .encryption_key
+                .as_ref()
+                .is_none_or(|key| key.is_empty())
+        {
+            return Err(
+                "BACKUP_ENCRYPTION_KEY is required in production — refusing to start \
+                 with plaintext backups (set a 32-byte key)"
+                    .into(),
+            );
+        }
+
         // Validate encryption key at startup if configured
         if let Some(ref key) = config.backup.encryption_key {
             if key.len() != ENCRYPTION_KEY_SIZE {
@@ -447,23 +466,8 @@ impl BackupService {
 
         let started = Utc::now();
 
-        // Download backup from storage
-        let location = backup.location.clone().ok_or("Backup location not set")?;
-        let stored_payload = self.download_from_storage(&location).await?;
-        let compressed_data = decode_backup_payload(
-            stored_payload,
-            backup.encrypted,
-            self.config.backup.encryption_key.as_deref(),
-        )?;
-
-        // Decompress the backup data
-        use flate2::read::GzDecoder;
-        use std::io::Read;
-        let mut decoder = GzDecoder::new(&compressed_data[..]);
-        let mut decompressed = Vec::with_capacity(compressed_data.len().saturating_mul(2));
-        decoder
-            .read_to_end(&mut decompressed)
-            .map_err(|e| format!("Decompress failed: {e}"))?;
+        // Download, decrypt, decompress (shared with PITR).
+        let decompressed = self.load_backup_payload(&backup).await?;
 
         // Verify checksum
         if let Some(expected_checksum) = &backup.checksum {
@@ -500,6 +504,12 @@ impl BackupService {
     }
 
     /// Upload backup data to storage.
+    ///
+    /// Staging hygiene (F8):the `/tmp` staging copy is only written when it
+    /// is actually needed — as a fallback when the remote upload fails, or
+    /// when no remote is configured (dev local-fallback mode). After a
+    /// successful upload any stale staging copy is removed so retention
+    /// gaps cannot accumulate plaintext-ish leftovers.
     async fn upload_to_storage(&self, location: &str, data: &[u8]) -> Result<(), String> {
         if let Some(path) = location.strip_prefix("s3://") {
             let parts: Vec<&str> = path.splitn(2, '/').collect();
@@ -509,13 +519,7 @@ impl BackupService {
 
             let key = parts[1];
             let local_dir = "/tmp/apexmail-backups";
-            tokio::fs::create_dir_all(local_dir)
-                .await
-                .map_err(|e| format!("Create local backup directory: {e}"))?;
-            let local_path = format!("{}/{}", local_dir, key.replace('/', "_"));
-            tokio::fs::write(&local_path, data)
-                .await
-                .map_err(|e| format!("Write local backup: {e}"))?;
+            let staging_path = format!("{}/{}", local_dir, key.replace('/', "_"));
 
             if let Ok(base) = std::env::var("BACKUP_PRESIGNED_URL_BASE") {
                 let url = format!("{}/{}", base.trim_end_matches('/'), key);
@@ -528,13 +532,39 @@ impl BackupService {
                     .map_err(|e| format!("S3 upload failed: {e}"))?;
 
                 if !response.status().is_success() {
+                    // Upload failed — write the staging copy as a recovery
+                    // fallback so the payload is not lost, then surface the
+                    // error to the caller.
+                    tokio::fs::create_dir_all(local_dir)
+                        .await
+                        .map_err(|e| format!("Create local backup directory: {e}"))?;
+                    if let Err(e) = tokio::fs::write(&staging_path, data).await {
+                        warn!(path = %staging_path, error = %e, "Failed to write upload-failure staging copy");
+                    }
                     return Err(format!("S3 upload returned status: {}", response.status()));
                 }
-            } else {
-                info!(path = %local_path, "Stored backup payload using local fallback path");
-            }
 
-            Ok(())
+                // Success:remove any stale staging copy from earlier
+                // attempts/dev runs so /tmp does not accumulate payloads
+                // that retention never cleans.
+                if let Err(e) = tokio::fs::remove_file(&staging_path).await {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        warn!(path = %staging_path, error = %e, "Failed to remove staging copy after upload");
+                    }
+                }
+                Ok(())
+            } else {
+                // No remote configured:the local staging copy IS the storage
+                // (dev/test fallback) — it is needed.
+                tokio::fs::create_dir_all(local_dir)
+                    .await
+                    .map_err(|e| format!("Create local backup directory: {e}"))?;
+                tokio::fs::write(&staging_path, data)
+                    .await
+                    .map_err(|e| format!("Write local backup: {e}"))?;
+                info!(path = %staging_path, "Stored backup payload using local fallback path");
+                Ok(())
+            }
         } else if let Some(path) = location.strip_prefix("file://") {
             if let Some(parent) = std::path::Path::new(path).parent() {
                 tokio::fs::create_dir_all(parent)
@@ -746,7 +776,40 @@ impl BackupService {
         Ok(())
     }
 
+    /// Download, decrypt, and decompress a backup's payload. Shared by
+    /// `restore` and `pitr` so both run the exact same real sequence.
+    async fn load_backup_payload(&self, backup: &Backup) -> Result<Vec<u8>, String> {
+        let location = backup
+            .location
+            .clone()
+            .ok_or_else(|| "Backup location not set".to_string())?;
+        let stored_payload = self.download_from_storage(&location).await?;
+        let compressed_data = decode_backup_payload(
+            stored_payload,
+            backup.encrypted,
+            self.config.backup.encryption_key.as_deref(),
+        )?;
+
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+        let mut decoder = GzDecoder::new(&compressed_data[..]);
+        let mut decompressed = Vec::with_capacity(compressed_data.len().saturating_mul(2));
+        decoder
+            .read_to_end(&mut decompressed)
+            .map_err(|e| format!("Decompress failed: {e}"))?;
+        Ok(decompressed)
+    }
+
     /// Point in time recovery.
+    ///
+    /// F5:this runs the REAL restore sequence for the base backup (download
+    /// → decrypt → decompress → per-table restore → verification) instead of
+    /// verifying the current database and claiming success. WAL replay up to
+    /// `target_time` requires external tooling (a WAL archive plus
+    /// `restore_command`/recovery configuration) which this crate does not
+    /// bundle — that step is reported as unsupported, and because a base
+    /// restore alone is not a PITR to the requested timestamp, `success` is
+    /// `false` with an explicit message rather than a false success.
     pub async fn pitr(&self, target_time: chrono::DateTime<Utc>) -> Result<RestoreResult, String> {
         // Find the latest full backup before target_time
         let row: Option<BackupRow> = sqlx::query_as::<_, BackupRow>(
@@ -767,21 +830,76 @@ impl BackupService {
             .ok_or("No full backup found before target time")?;
 
         info!(backup_id = %backup.id, target = %target_time, "PITR starting");
+        let started = Utc::now();
+        let tables = backup.tables_included.clone().unwrap_or_default();
 
-        let tables = backup.tables_included.unwrap_or_default();
+        let unsupported = |detail: String| -> RestoreResult {
+            RestoreResult {
+                success: false,
+                backup_id: backup.id,
+                restored_tables: tables.clone(),
+                duration_ms: (Utc::now() - started).num_milliseconds().max(0),
+                verification: None,
+                message: Some(format!(
+                    "PITR to {target_time} NOT completed — unsupported/failed step: {detail}"
+                )),
+            }
+        };
+
+        // Real sequence:download → decrypt → decompress.
+        let decompressed = match self.load_backup_payload(&backup).await {
+            Ok(data) => data,
+            Err(e) => return Ok(unsupported(format!("base backup retrieval ({e})"))),
+        };
+
+        // Checksum verification (same as restore()).
+        if let Some(expected_checksum) = &backup.checksum {
+            let mut hasher = Sha256::new();
+            hasher.update(&decompressed);
+            let actual_checksum = format!("{:x}", hasher.finalize());
+            if &actual_checksum != expected_checksum {
+                return Ok(unsupported(format!(
+                    "checksum mismatch (expected {expected_checksum}, got {actual_checksum})"
+                )));
+            }
+        }
+
+        // Real sequence:per-table restore.
+        for table in &tables {
+            if let Err(e) = self.restore_table(table, &decompressed).await {
+                return Ok(unsupported(format!("restore of table {table} ({e})")));
+            }
+        }
+
         let verification = self.verify_restore(&tables).await?;
 
+        // WAL replay to the exact target time requires external WAL archive
+        // tooling (recovery_target_time / restore_command) that this crate
+        // does not provide — reported honestly, and it keeps `success`
+        // false because a base restore is not a PITR.
+        let duration_ms = (Utc::now() - started).num_milliseconds().max(0);
+        let base_ok = verification.checksum_match && verification.constraint_valid;
         Ok(RestoreResult {
-            success: true,
+            success: false,
             backup_id: backup.id,
             restored_tables: tables,
-            duration_ms: 0,
+            duration_ms,
             verification: Some(verification),
-            message: Some(format!("PITR to {target_time} completed")),
+            message: Some(format!(
+                "PITR to {target_time} incomplete — base backup {} restored (checks passed: \
+                 {base_ok}), but WAL replay to the target time is unsupported here (requires \
+                 external WAL archive tooling)",
+                backup.id
+            )),
         })
     }
 
     /// Run post-restore verification checks.
+    ///
+    /// All checks query actual database state and can genuinely fail; a
+    /// check whose query errors counts as NOT verified (fail closed) —
+    /// previously errors defaulted to `true` and two of the checks mapped
+    /// any row count to `true` (`.map(|_| true)`), making them vacuous.
     async fn verify_restore(&self, tables: &[String]) -> Result<VerificationResult, String> {
         let mut tables_verified = 0u32;
         let mut rows_verified = 0u64;
@@ -805,7 +923,8 @@ impl BackupService {
             }
         }
 
-        // Check 1:index health
+        // Check 1:index health — an abundance of never-scanned indexes after
+        // a restore hints at broken/dropped index usage.
         let index_ok: bool = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM pg_stat_user_indexes WHERE idx_scan = 0",
         )
@@ -814,28 +933,42 @@ impl BackupService {
         .ok()
         .flatten()
         .map(|c| c < 100)
-        .unwrap_or(true);
+        .unwrap_or(false);
 
-        // Check 2:constraint validity
+        // Check 2:constraint validity — real validity is "no constraint is
+        // marked NOT VALID" (pg_constraint.convalidated), not merely "CHECK
+        // constraints exist".
         let constraint_ok: bool = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(*) FROM information_schema.table_constraints WHERE constraint_type = 'CHECK'"
+            "SELECT COUNT(*) FROM pg_constraint WHERE NOT convalidated",
         )
         .fetch_optional(&self.pool)
         .await
         .ok()
         .flatten()
-        .map(|_| true)
-        .unwrap_or(true);
+        .map(|invalid_count| invalid_count == 0)
+        .unwrap_or(false);
 
-        // Check 3:sequence validity
-        let sequence_ok: bool =
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM information_schema.sequences")
-                .fetch_optional(&self.pool)
-                .await
-                .ok()
-                .flatten()
-                .map(|_| true)
-                .unwrap_or(true);
+        // Check 3:sequence validity — a sequence is dangling (invalid after
+        // a restore) when nothing owns it as a column default. Counting all
+        // sequences (the old check) said nothing about validity.
+        let sequence_ok: bool = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM pg_sequences s
+             WHERE NOT EXISTS (
+                SELECT 1 FROM pg_depend d
+                JOIN pg_class seq ON seq.oid = d.objid
+                WHERE d.classid = 'pg_class'::regclass
+                  AND d.refclassid = 'pg_class'::regclass
+                  AND d.refobjsubid > 0
+                  AND seq.relkind = 'S'
+                  AND seq.relname = s.sequencename
+             )",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|dangling| dangling == 0)
+        .unwrap_or(false);
 
         let checksum_match = tables_verified as usize == tables.len();
 
@@ -918,9 +1051,78 @@ impl BackupService {
 
     // ── Retention / Cleanup ────────────────────────────────
 
+    /// Remove a stored backup object from remote storage and/or the local
+    /// staging area. Used by `enforce_retention` so expired backups do not
+    /// live on in object storage after their catalog rows are deleted.
+    async fn delete_from_storage(&self, location: &str) -> Result<(), String> {
+        if let Some(path) = location.strip_prefix("s3://") {
+            let parts: Vec<&str> = path.splitn(2, '/').collect();
+            if parts.len() != 2 {
+                return Err(format!("Invalid S3 location: {}", location));
+            }
+            let key = parts[1];
+
+            // Always drop the local staging copy for this object.
+            let staging_path = format!("/tmp/apexmail-backups/{}", key.replace('/', "_"));
+            if let Err(e) = tokio::fs::remove_file(&staging_path).await {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    warn!(path = %staging_path, error = %e, "Failed to remove staging copy");
+                }
+            }
+
+            // Remove the stored object when a storage endpoint is configured.
+            if let Ok(base) = std::env::var("BACKUP_PRESIGNED_URL_BASE") {
+                let url = format!("{}/{}", base.trim_end_matches('/'), key);
+                let response = self
+                    .http_client
+                    .delete(url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("S3 delete failed: {e}"))?;
+                // 404 is success — the object is already gone.
+                if !response.status().is_success() && response.status().as_u16() != 404 {
+                    return Err(format!("S3 delete returned status: {}", response.status()));
+                }
+            }
+            Ok(())
+        } else if let Some(path) = location.strip_prefix("file://") {
+            tokio::fs::remove_file(path)
+                .await
+                .map_err(|e| format!("Remove file backup: {e}"))
+        } else {
+            Err(format!("Unknown storage location scheme: {}", location))
+        }
+    }
+
     /// Remove expired backups beyond the retention period.
+    ///
+    /// F8:expired backups are also removed from the storage backend (via
+    /// [`Self::delete_from_storage`]) — previously only the catalog rows
+    /// were deleted and the stored objects (plus `/tmp` staging copies)
+    /// accumulated forever.
     pub async fn enforce_retention(&self) -> Result<u64, String> {
         let days = self.config.backup.retention_days as i64;
+
+        // Which backups are expiring (id + location) BEFORE deleting rows.
+        let expired: Vec<(Uuid, Option<String>)> = sqlx::query_as(
+            "SELECT id, location FROM ha_backups WHERE status = 'completed'
+             AND completed_at < NOW() - make_interval(days => $1)",
+        )
+        .bind(days)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| format!("List expired backups: {e}"))?;
+
+        // Best-effort object removal — a failure is logged and the catalog
+        // delete still proceeds (the row is already past retention).
+        for (id, location) in &expired {
+            if let Some(location) = location {
+                if let Err(e) = self.delete_from_storage(location).await {
+                    warn!(backup_id = %id, error = %e, "Failed to remove stored backup object");
+                }
+            }
+        }
+
         let res = sqlx::query(
             "DELETE FROM ha_backups WHERE status = 'completed'
              AND completed_at < NOW() - make_interval(days => $1)",
@@ -1216,5 +1418,123 @@ mod tests {
         assert_eq!(ENCRYPTION_NONCE_SIZE, 12);
         assert_eq!(ENCRYPTION_KEY_SIZE, 32);
         assert_eq!(ENCRYPTION_MAGIC_BYTES, b"APEXENC1");
+    }
+
+    // ── F8:production must configure an encryption key (fail closed) ────
+
+    #[test]
+    fn test_backup_service_requires_encryption_key_in_production() {
+        let mut cfg = Config::from_env();
+        cfg.environment = "production".into();
+        cfg.backup.encryption_key = None;
+        let err = match BackupService::new(test_pool(), Arc::new(cfg)) {
+            Err(e) => e,
+            Ok(_) => panic!("production without BACKUP_ENCRYPTION_KEY must fail closed"),
+        };
+        assert!(
+            err.contains("BACKUP_ENCRYPTION_KEY"),
+            "error must name the missing setting: {err}"
+        );
+
+        // …and a valid key is accepted.
+        let mut cfg = Config::from_env();
+        cfg.environment = "production".into();
+        cfg.backup.encryption_key = Some("12345678901234567890123456789012".into());
+        assert!(BackupService::new(test_pool(), Arc::new(cfg)).is_ok());
+    }
+
+    #[test]
+    fn test_delete_from_storage_removes_local_file() {
+        test_runtime().block_on(async {
+            let svc = BackupService::new(test_pool(), test_config())
+                .expect("test config should have valid encryption key");
+            let path = std::env::temp_dir().join(format!("apex-backup-{}", Uuid::new_v4()));
+            tokio::fs::write(&path, b"payload")
+                .await
+                .expect("write temp backup file");
+            let location = format!("file://{}", path.display());
+            svc.delete_from_storage(&location)
+                .await
+                .expect("delete file-backed backup");
+            assert!(
+                !tokio::fs::try_exists(&path).await.unwrap_or(true),
+                "stored object must be removed"
+            );
+
+            // Unknown schemes surface as errors, not silent no-ops.
+            assert!(svc.delete_from_storage("ftp://example/x").await.is_err());
+        });
+    }
+
+    // ── F5:PITR must never report a false success ──────────────────────
+
+    #[test]
+    fn test_pitr_with_unreachable_db_is_an_error_not_a_success() {
+        test_runtime().block_on(async {
+            let svc = BackupService::new(test_pool(), test_config())
+                .expect("test config should have valid encryption key");
+            // The lazy fake pool cannot run the backup-selection query: the
+            // result is an Err — never a RestoreResult with success=true.
+            let res = svc.pitr(Utc::now()).await;
+            assert!(
+                res.is_err(),
+                "PITR with an unreachable DB must be an error, got {res:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn test_pitr_reports_unsupported_wal_replay_honestly() {
+        // Gated on a real database (same convention as the failover crate
+        // tests):with a completed full backup present, PITR performs the
+        // base-restore sequence and MUST report success=false with the
+        // unsupported WAL-replay step spelled out.
+        let Ok(url) = std::env::var("HA_TEST_DATABASE_URL") else {
+            eprintln!("skipping: HA_TEST_DATABASE_URL not set");
+            return;
+        };
+        test_runtime().block_on(async {
+            let pool = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(2)
+                .connect(&url)
+                .await
+                .expect("connect HA_TEST_DATABASE_URL");
+            let svc = BackupService::new(pool.clone(), test_config())
+                .expect("test config should have valid encryption key");
+
+            let id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO ha_backups
+                 (id, backup_type, status, size_bytes, location, encrypted, compressed, started_at, completed_at)
+                 VALUES ($1, 'full', 'completed', 10, 'file:///tmp/does-not-exist-backup', false, true, NOW() - INTERVAL '1 hour', NOW())",
+            )
+            .bind(id)
+            .execute(&pool)
+            .await
+            .expect("seed backup row");
+
+            let result = svc
+                .pitr(Utc::now() - chrono::Duration::seconds(1))
+                .await
+                .expect("pitr result");
+            assert!(
+                !result.success,
+                "PITR must not claim success without the full sequence: {:?}",
+                result.message
+            );
+            assert!(
+                result
+                    .message
+                    .as_deref()
+                    .is_some_and(|m| m.contains("NOT completed") && m.contains("unsupported")),
+                "message must name the unsupported/failed step explicitly: {:?}",
+                result.message
+            );
+
+            let _ = sqlx::query("DELETE FROM ha_backups WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await;
+        });
     }
 }

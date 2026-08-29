@@ -205,8 +205,12 @@ client.api_keys.revoke("key_ghi789")
 
 **Package:** `apexmail`
 
+> **Not yet published.** The ApexMail SDKs are not yet on public package registries (PyPI, pkg.go.dev, Packagist, RubyGems, Maven Central) — the registry install below will fail until the first stable release. Until then, install from the monorepo source and pin to a specific commit, and verify the source you vendor before shipping it. See the Quickstart's *Install the SDK* step for per-language source-install commands.
+
+Source install (monorepo root):
+
 ```bash
-pip install apexmail
+pip install ./packages/sdk-python
 ```
 
 **Requirements:** Python ≥ 3.9
@@ -370,8 +374,12 @@ Rate limit information is returned in response headers (`X-RateLimit-Limit`, `X-
 
 **Module:** `github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go`
 
+> **Not yet published.** The ApexMail SDKs are not yet on public package registries (PyPI, pkg.go.dev, Packagist, RubyGems, Maven Central) — the registry install below will fail until the first stable release. Until then, install from the monorepo source and pin to a specific commit, and verify the source you vendor before shipping it. See the Quickstart's *Install the SDK* step for per-language source-install commands.
+
+Source install — vendor `packages/sdk-go` (e.g. via a Go `replace` directive pinned to a commit):
+
 ```bash
-go get github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go
+go mod edit -replace github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go=./packages/sdk-go
 ```
 
 **Requirements:** Go 1.21+. No external dependencies — uses only the Go standard library.
@@ -435,10 +443,9 @@ domains, _ := client.Domains.List(ctx)
 
 **Gem:** `apexmail`
 
-```bash
-gem install apexmail
-# or add to Gemfile: gem 'apexmail'
-```
+> **Not yet published.** The ApexMail SDKs are not yet on public package registries (PyPI, pkg.go.dev, Packagist, RubyGems, Maven Central) — the registry install below will fail until the first stable release. Until then, install from the monorepo source and pin to a specific commit, and verify the source you vendor before shipping it. See the Quickstart's *Install the SDK* step for per-language source-install commands.
+
+Source install — vendor `packages/sdk-ruby` and load it via `$LOAD_PATH`/Bundler `path:` gem pinned to a commit.
 
 **Requirements:** Ruby ≥ 3.0. No gem dependencies.
 
@@ -573,8 +580,13 @@ try {
 
 **Package:** `apexmail/apexmail-php` (Packagist)
 
+> **Not yet published.** The ApexMail SDKs are not yet on public package registries (PyPI, pkg.go.dev, Packagist, RubyGems, Maven Central) — the registry install below will fail until the first stable release. Until then, install from the monorepo source and pin to a specific commit, and verify the source you vendor before shipping it. See the Quickstart's *Install the SDK* step for per-language source-install commands.
+
+Source install — Composer path repository pinned to a commit:
+
 ```bash
-composer require apexmail/apexmail-php
+composer config repositories.apexmail path ./packages/sdk-php
+composer require apexmail/apexmail-php:@dev
 ```
 
 **Requirements:** PHP ≥ 8.1. No external dependencies — uses only native PHP 8 features (fibers, typed properties, enums).

@@ -2,7 +2,12 @@
   "title": "ApexMail SLO / SLI Compliance",
   "uid": "apexmail-slo-compliance",
   "description": "SLO/SLI dashboard tracking error rate, latency (p50/p95/p99), availability against 99.9% uptime target, and burn rate",
-  "tags": ["apexmail", "slo", "sli", "compliance"],
+  "tags": [
+    "apexmail",
+    "slo",
+    "sli",
+    "compliance"
+  ],
   "schemaVersion": 39,
   "version": 1,
   "timezone": "utc",
@@ -11,10 +16,20 @@
     {
       "title": "API Availability (30d Rolling)",
       "type": "stat",
-      "gridPos": { "h": 6, "w": 6, "x": 0, "y": 0 },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
       "options": {
         "orientation": "auto",
-        "reduceOptions": { "values": false, "calcs": ["mean"] },
+        "reduceOptions": {
+          "values": false,
+          "calcs": [
+            "mean"
+          ]
+        },
         "textMode": "auto",
         "colorMode": "value",
         "graphMode": "area",
@@ -26,10 +41,22 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "red", "value": 0.99 },
-              { "color": "yellow", "value": 0.998 },
-              { "color": "green", "value": 0.999 }
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.99
+              },
+              {
+                "color": "yellow",
+                "value": 0.998
+              },
+              {
+                "color": "green",
+                "value": 0.999
+              }
             ]
           },
           "min": 0,
@@ -39,17 +66,31 @@
       "targets": [
         {
           "expr": "1 - (sum(increase(apexmail_http_requests_total{job=\"apexmail-api\",status=~\"5..\"}[30d])) / clamp_min(sum(increase(apexmail_http_requests_total{job=\"apexmail-api\"}[30d])), 1))",
-          "legendFormat": "Availability"
+          "legendFormat": "tracking WAL depth"
         }
       ]
     },
     {
       "title": "Error Rate (5xx / Total)",
       "type": "timeseries",
-      "gridPos": { "h": 6, "w": 10, "x": 6, "y": 0 },
+      "gridPos": {
+        "h": 6,
+        "w": 10,
+        "x": 6,
+        "y": 0
+      },
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "fieldConfig": {
         "defaults": {
@@ -58,12 +99,24 @@
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 0.01 },
-              { "color": "red", "value": 0.05 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.01
+              },
+              {
+                "color": "red",
+                "value": 0.05
+              }
             ]
           },
-          "custom": { "lineInterpolation": "smooth", "showPoints": "never" }
+          "custom": {
+            "lineInterpolation": "smooth",
+            "showPoints": "never"
+          }
         }
       },
       "targets": [
@@ -76,21 +129,47 @@
     {
       "title": "API Latency - p50 / p95 / p99",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "custom": { "lineInterpolation": "smooth", "showPoints": "never" },
+          "custom": {
+            "lineInterpolation": "smooth",
+            "showPoints": "never"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 0.5 },
-              { "color": "red", "value": 1.0 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.5
+              },
+              {
+                "color": "red",
+                "value": 1.0
+              }
             ]
           }
         }
@@ -113,24 +192,52 @@
     {
       "title": "Availability (Uptime) - 99.9% Target",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
       "options": {
-        "legend": { "calcs": ["mean"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
+        "legend": {
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
           "min": 0.95,
           "max": 1,
-          "custom": { "lineInterpolation": "smooth", "showPoints": "never" },
+          "custom": {
+            "lineInterpolation": "smooth",
+            "showPoints": "never"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "red", "value": null },
-              { "color": "red", "value": 0.99 },
-              { "color": "yellow", "value": 0.998 },
-              { "color": "green", "value": 0.999 }
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.99
+              },
+              {
+                "color": "yellow",
+                "value": 0.998
+              },
+              {
+                "color": "green",
+                "value": 0.999
+              }
             ]
           }
         }
@@ -149,22 +256,47 @@
     {
       "title": "SLO Burn Rate (Multi-window)",
       "type": "timeseries",
-      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 14 },
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 14
+      },
       "options": {
-        "legend": { "calcs": ["mean"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
+        "legend": {
+          "calcs": [
+            "mean"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "fieldConfig": {
         "defaults": {
           "unit": "percentunit",
           "min": 0,
-          "custom": { "lineInterpolation": "smooth", "showPoints": "never" },
+          "custom": {
+            "lineInterpolation": "smooth",
+            "showPoints": "never"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 0.9 },
-              { "color": "red", "value": 0.95 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 0.9
+              },
+              {
+                "color": "red",
+                "value": 0.95
+              }
             ]
           }
         }
@@ -187,15 +319,32 @@
     {
       "title": "Request Throughput",
       "type": "timeseries",
-      "gridPos": { "h": 6, "w": 12, "x": 0, "y": 22 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 22
+      },
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "fieldConfig": {
         "defaults": {
           "unit": "reqps",
-          "custom": { "lineInterpolation": "smooth", "showPoints": "never" }
+          "custom": {
+            "lineInterpolation": "smooth",
+            "showPoints": "never"
+          }
         }
       },
       "targets": [
@@ -214,31 +363,57 @@
       ]
     },
     {
-      "title": "Email Delivery Latency (p95)",
+      "title": "Tracking WAL Depth (delivery pipeline backlog)",
       "type": "timeseries",
-      "gridPos": { "h": 6, "w": 12, "x": 12, "y": 22 },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 22
+      },
       "options": {
-        "legend": { "calcs": ["mean", "max"], "displayMode": "table", "placement": "bottom" },
-        "tooltip": { "mode": "multi" }
+        "legend": {
+          "calcs": [
+            "mean",
+            "max"
+          ],
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
       },
       "fieldConfig": {
         "defaults": {
           "unit": "s",
-          "custom": { "lineInterpolation": "smooth", "showPoints": "never" },
+          "custom": {
+            "lineInterpolation": "smooth",
+            "showPoints": "never"
+          },
           "thresholds": {
             "mode": "absolute",
             "steps": [
-              { "color": "green", "value": null },
-              { "color": "yellow", "value": 60 },
-              { "color": "red", "value": 300 }
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 60
+              },
+              {
+                "color": "red",
+                "value": 300
+              }
             ]
           }
         }
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.95, sum(rate(apexmail_email_delivery_duration_seconds_bucket[5m])) by (le))",
-          "legendFormat": "Delivery p95"
+          "expr": "redis_key_size{job=\"redis\",key=\"apexmail:events:pending\"}",
+          "legendFormat": "tracking WAL depth"
         }
       ]
     }

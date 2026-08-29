@@ -53,6 +53,17 @@ use Psr\Cache\CacheItemPoolInterface;
  * exactly one concurrent consumer wins). The Verifier emits a one-time
  * deprecation warning when constructed with a non-atomic backend;
  * consumers that need strict single-use must refuse it outright.
+ *
+ * Fail-closed saves: PSR-6 permits `save()` to report failure without
+ * raising. The two writes whose silent loss would corrupt the one-shot
+ * model refuse it — `store()` throws
+ * {@see StorageWriteException} before the challenge is returned (a
+ * challenge whose record never landed would 404 at verify time), and
+ * `consume()` throws instead of reporting itself the consume winner
+ * while the record stays pending (a sequential replay window; the
+ * Verifier maps the throw onto its typed indeterminate outcome).
+ * `commitResult()` keeps its boolean contract and simply returns the
+ * `save()` result, as before.
  */
 final class Psr6Storage implements StorageInterface, NonAtomicStorageInterface
 {
@@ -89,7 +100,14 @@ final class Psr6Storage implements StorageInterface, NonAtomicStorageInterface
         $item = $this->pool->getItem(self::key($record->nonce));
         $item->set($record->toArray() + ['state' => 'pending', 'consumed_result' => null, 'operation_identity' => null]);
         $item->expiresAfter(max(1, $record->expiresAt - time()));
-        $this->pool->save($item);
+        if (!$this->pool->save($item)) {
+            // Fail closed: PSR-6 permits save() to report failure
+            // without raising. Returning normally would hand the client
+            // a challenge no verifier can ever find (a guaranteed
+            // verify-time RecordNotFound); the caller learns the
+            // issuance failed before the challenge is returned.
+            throw new StorageWriteException('the PSR-6 pool refused the challenge store (save() === false)');
+        }
     }
 
     public function find(string $nonce): ?ChallengeRecord
@@ -175,7 +193,16 @@ final class Psr6Storage implements StorageInterface, NonAtomicStorageInterface
         if (!$consumed) {
             $data['state'] = 'consumed';
             $item->set($data);
-            $this->pool->save($item);
+            if (!$this->pool->save($item)) {
+                // Fail closed: a pending→consumed flip whose save failed
+                // leaves the record pending in the pool while this call
+                // would report itself the consume winner (consumedNow) —
+                // a sequential replay window. Throw instead; the Verifier
+                // maps the failure onto its existing typed indeterminate
+                // outcome, and the record stays pending for a clean
+                // retry once the pool recovers.
+                throw new StorageWriteException('the PSR-6 pool refused the pending→consumed transition (save() === false)');
+            }
         }
         $result = self::parseResult($data['consumed_result'] ?? null);
 

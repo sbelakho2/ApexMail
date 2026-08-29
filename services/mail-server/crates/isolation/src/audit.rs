@@ -38,6 +38,14 @@ pub struct AuditService {
     config: SecurityConfig,
     signing_key: Zeroizing<String>,
     buffer: RwLock<Vec<AuditEvent>>,
+    /// Registry of per-org flush locks (F12). Two concurrent flushes for the
+    /// same org both read the SAME "latest hash" before either inserts, so
+    /// the chain forks into two heads. Each org's flush is serialized
+    /// in-process; multi-org batches acquire the org locks in SORTED order
+    /// so overlapping batches can never deadlock.
+    flush_locks: tokio::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
+    >,
 }
 
 impl AuditService {
@@ -48,6 +56,7 @@ impl AuditService {
             config,
             signing_key,
             buffer: RwLock::new(Vec::new()),
+            flush_locks: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -136,59 +145,11 @@ impl AuditService {
 
         let rows: Vec<AuditRow> = q.fetch_all(&self.db).await?;
 
-        let mut previous_hash = String::new();
-        for (i, row) in rows.iter().enumerate() {
-            let stored_previous_hash = row
-                .metadata
-                .get("previous_hash")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let stored_hash = row
-                .metadata
-                .get("hash")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let stored_sig = row
-                .metadata
-                .get("signature")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-
-            if i > 0 && stored_previous_hash != previous_hash {
-                return Ok(HashChainResult {
-                    valid: false,
-                    broken_at: Some(i),
-                    entries_checked: rows.len(),
-                });
-            }
-
-            let computed =
-                compute_event_hash(&row.id, &row.event_type, &row.details, stored_previous_hash);
-            if computed != stored_hash {
-                return Ok(HashChainResult {
-                    valid: false,
-                    broken_at: Some(i),
-                    entries_checked: rows.len(),
-                });
-            }
-
-            let expected_sig = sign_data(&self.signing_key, stored_hash)?;
-            if expected_sig != stored_sig {
-                return Ok(HashChainResult {
-                    valid: false,
-                    broken_at: Some(i),
-                    entries_checked: rows.len(),
-                });
-            }
-
-            previous_hash = stored_hash.to_string();
-        }
-
-        Ok(HashChainResult {
-            valid: true,
-            broken_at: None,
-            entries_checked: rows.len(),
-        })
+        // F12:verify in CHAIN order. The SQL created_at ordering does not
+        // necessarily reflect chain order (interleaved flushes, windowed
+        // queries), so the traversal follows previous_hash links and only
+        // falls back to created_at for the start points.
+        verify_chain_rows(&rows, &self.signing_key)
     }
 
     /// Query audit events with pagination and filtering.
@@ -386,6 +347,47 @@ impl AuditService {
             return Ok(());
         }
 
+        // F12:serialize per-org flushes. The "read latest hash → compute →
+        // insert" sequence below is the chain's critical section; without
+        // the lock two concurrent flushes forked the chain.
+        let mut org_ids: Vec<String> = events
+            .iter()
+            .map(|e| e.organization_id.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect();
+        org_ids.sort(); // sorted acquisition ⇒ no deadlock between batches
+
+        let locks: Vec<std::sync::Arc<tokio::sync::Mutex<()>>> = {
+            let mut registry = self.flush_locks.lock().await;
+            org_ids
+                .iter()
+                .map(|org| {
+                    registry
+                        .entry(org.clone())
+                        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+                        .clone()
+                })
+                .collect()
+        };
+        let mut guards = Vec::with_capacity(locks.len());
+        for lock in &locks {
+            guards.push(lock.lock().await);
+        }
+
+        let result = self.flush_events_locked(events).await;
+
+        drop(guards);
+        result
+    }
+
+    /// Critical section of [`Self::flush_events`] — caller holds the
+    /// per-org locks.
+    async fn flush_events_locked(&self, events: Vec<AuditEvent>) -> anyhow::Result<()> {
+        if events.is_empty() {
+            return Ok(());
+        }
+
         let mut previous_by_org: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
         let mut enriched_metadata: Vec<serde_json::Value> = Vec::with_capacity(events.len());
@@ -560,6 +562,123 @@ impl AuditRow {
 }
 
 // ── Helpers ────────────────────────────────────────────────
+
+/// (previous_hash, hash, signature) stored in a row's chain metadata.
+/// Missing fields read as "".
+fn chain_meta(row: &AuditRow) -> (&str, &str, &str) {
+    let get = |key: &str| row.metadata.get(key).and_then(|v| v.as_str()).unwrap_or("");
+    (get("previous_hash"), get("hash"), get("signature"))
+}
+
+/// Verify an organization's audit hash chain by TRAVERSING the
+/// previous_hash links rather than trusting row order (F12).
+///
+/// - Rows WITHOUT chain metadata (`hash` empty) are legacy rows that
+///   predate hashing:they are counted but carry nothing to verify, and
+///   created_at order is only used to order the chain's start points
+///   (multiple independent starts arise from legacy gaps and from windowed
+///   queries whose parent row lies outside the fetched range).
+/// - Two chained rows claiming the same previous_hash are a FORK → invalid.
+/// - Each chained row's hash and HMAC signature are recomputed and checked.
+/// - A chained row unreachable by traversal (dangling previous_hash into a
+///   visited region) marks the chain invalid.
+///
+/// `broken_at` indexes the created_at-ordered input slice, matching the
+/// previous implementation's semantics.
+fn verify_chain_rows(rows: &[AuditRow], signing_key: &str) -> anyhow::Result<HashChainResult> {
+    let invalid = |at: usize| {
+        Ok(HashChainResult {
+            valid: false,
+            broken_at: Some(at),
+            entries_checked: rows.len(),
+        })
+    };
+
+    let chained: Vec<usize> = rows
+        .iter()
+        .enumerate()
+        .filter(|(_, row)| !chain_meta(row).1.is_empty())
+        .map(|(i, _)| i)
+        .collect();
+    if chained.is_empty() {
+        return Ok(HashChainResult {
+            valid: true,
+            broken_at: None,
+            entries_checked: rows.len(),
+        });
+    }
+
+    // Index chained rows by claimed parent. More than one claimant per
+    // parent is a fork (two heads grown from one link).
+    let mut by_prev: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
+    for &i in &chained {
+        let (prev, _, _) = chain_meta(&rows[i]);
+        by_prev.entry(prev).or_default().push(i);
+    }
+    for claimants in by_prev.values() {
+        if claimants.len() > 1 {
+            let first = *claimants.iter().min().expect("non-empty claimants");
+            return invalid(first);
+        }
+    }
+
+    // Chain starts:genesis (empty previous_hash) or a gap start whose
+    // parent lies outside this row set (legacy gap / query window).
+    let hashes: std::collections::HashSet<&str> =
+        chained.iter().map(|&i| chain_meta(&rows[i]).1).collect();
+    let mut starts: Vec<usize> = chained
+        .iter()
+        .copied()
+        .filter(|&i| {
+            let (prev, _, _) = chain_meta(&rows[i]);
+            prev.is_empty() || !hashes.contains(prev)
+        })
+        .collect();
+    starts.sort_unstable(); // created_at order among starts
+
+    let mut visited: std::collections::HashSet<usize> = std::collections::HashSet::new();
+    for start in starts {
+        let mut current = start;
+        loop {
+            if !visited.insert(current) {
+                return invalid(current); // cycle or reachable from two starts
+            }
+            let (prev, stored_hash, stored_sig) = chain_meta(&rows[current]);
+            let computed = compute_event_hash(
+                &rows[current].id,
+                &rows[current].event_type,
+                &rows[current].details,
+                prev,
+            );
+            if computed != stored_hash {
+                return invalid(current);
+            }
+            if sign_data(signing_key, stored_hash)? != stored_sig {
+                return invalid(current);
+            }
+            match by_prev.get(stored_hash) {
+                Some(next) if !next.is_empty() => current = next[0],
+                _ => break, // tail of this segment
+            }
+        }
+    }
+
+    // Every chained row must have been visited exactly once.
+    if visited.len() != chained.len() {
+        let dangling = chained
+            .iter()
+            .copied()
+            .find(|i| !visited.contains(i))
+            .expect("visited ⊂ chained when lengths differ");
+        return invalid(dangling);
+    }
+
+    Ok(HashChainResult {
+        valid: true,
+        broken_at: None,
+        entries_checked: rows.len(),
+    })
+}
 
 fn compute_event_hash(
     id: &str,
@@ -811,6 +930,132 @@ mod tests {
             "test-key-for-audit-at-least-32-chars!!",
             "AuditService must not use the master KEK directly as its HMAC key"
         );
+    }
+
+    // ── F12:chain verification follows previous_hash links ──────────────
+
+    const CHAIN_TEST_KEY: &str = "unit-test-hmac-key";
+
+    fn chain_row(id: &str, created_at: chrono::DateTime<Utc>, prev: &str) -> AuditRow {
+        let details = serde_json::json!({ "seq": id });
+        let hash = compute_event_hash(id, "AUTH_LOGIN", &details, prev);
+        let signature = sign_data(CHAIN_TEST_KEY, &hash).unwrap();
+        AuditRow {
+            id: id.into(),
+            organization_id: "org1".into(),
+            workspace_id: None,
+            event_type: "AUTH_LOGIN".into(),
+            severity: "info".into(),
+            actor_id: "user1".into(),
+            actor_type: "user".into(),
+            actor_ip: None,
+            actor_user_agent: None,
+            resource: None,
+            resource_id: None,
+            action: "login".into(),
+            details,
+            metadata: serde_json::json!({
+                "previous_hash": prev,
+                "hash": hash,
+                "signature": signature,
+            }),
+            created_at,
+        }
+    }
+
+    fn legacy_row(id: &str, created_at: chrono::DateTime<Utc>) -> AuditRow {
+        AuditRow {
+            id: id.into(),
+            organization_id: "org1".into(),
+            workspace_id: None,
+            event_type: "AUTH_LOGIN".into(),
+            severity: "info".into(),
+            actor_id: "user1".into(),
+            actor_type: "user".into(),
+            actor_ip: None,
+            actor_user_agent: None,
+            resource: None,
+            resource_id: None,
+            action: "login".into(),
+            details: serde_json::json!({}),
+            metadata: serde_json::json!({}), // no chain metadata
+            created_at,
+        }
+    }
+
+    #[test]
+    fn test_verify_chain_rows_walks_links_not_row_order() {
+        let t0 = Utc::now();
+        let r1 = chain_row("e1", t0, "");
+        let h1 = chain_meta(&r1).1.to_string();
+        let r2 = chain_row("e2", t0 + Duration::seconds(1), &h1);
+        let h2 = chain_meta(&r2).1.to_string();
+        let r3 = chain_row("e3", t0 + Duration::seconds(2), &h2);
+
+        // Rows delivered in NON-chain order plus a legacy row interleaved:
+        // traversal must follow previous_hash links (not slice order) and
+        // tolerate the legacy row.
+        let rows = vec![r3, legacy_row("old", t0 - Duration::seconds(5)), r1, r2];
+        let result = verify_chain_rows(&rows, CHAIN_TEST_KEY).unwrap();
+        assert!(result.valid, "chain is intact regardless of row order");
+        assert_eq!(result.entries_checked, 4);
+        assert_eq!(result.broken_at, None);
+    }
+
+    #[test]
+    fn test_verify_chain_rows_detects_tampering() {
+        let t0 = Utc::now();
+        let r1 = chain_row("e1", t0, "");
+        let h1 = chain_meta(&r1).1.to_string();
+        let mut r2 = chain_row("e2", t0 + Duration::seconds(1), &h1);
+        // Tamper with the row contents WITHOUT updating the stored hash.
+        r2.details = serde_json::json!({ "seq": "tampered" });
+
+        let result = verify_chain_rows(&[r1, r2], CHAIN_TEST_KEY).unwrap();
+        assert!(!result.valid, "tampered row must invalidate the chain");
+        assert_eq!(result.broken_at, Some(1));
+    }
+
+    #[test]
+    fn test_verify_chain_rows_detects_fork() {
+        // Two rows claiming the same parent — what concurrent unserialized
+        // flushes used to produce.
+        let t0 = Utc::now();
+        let r1 = chain_row("e1", t0, "");
+        let h1 = chain_meta(&r1).1.to_string();
+        let r2 = chain_row("e2", t0 + Duration::seconds(1), &h1);
+        let r2b = chain_row("e2-prime", t0 + Duration::seconds(2), &h1);
+
+        let result = verify_chain_rows(&[r1, r2, r2b], CHAIN_TEST_KEY).unwrap();
+        assert!(!result.valid, "two claimants of one parent are a fork");
+    }
+
+    #[test]
+    fn test_verify_chain_rows_detects_wrong_signature() {
+        let t0 = Utc::now();
+        let r1 = chain_row("e1", t0, "");
+        // Same chain, signed with a DIFFERENT key:hashes link up but the
+        // HMAC does not verify.
+        let h1 = chain_meta(&r1).1.to_string();
+        let r2 = chain_row("e2", t0 + Duration::seconds(1), &h1);
+
+        let result = verify_chain_rows(&[r1, r2], "a-different-signing-key").unwrap();
+        assert!(
+            !result.valid,
+            "rows signed with a foreign key must not verify"
+        );
+    }
+
+    #[test]
+    fn test_verify_chain_rows_legacy_only_is_valid() {
+        let t0 = Utc::now();
+        let rows = vec![
+            legacy_row("a", t0),
+            legacy_row("b", t0 + Duration::seconds(1)),
+        ];
+        let result = verify_chain_rows(&rows, CHAIN_TEST_KEY).unwrap();
+        assert!(result.valid);
+        assert_eq!(result.entries_checked, 2);
     }
 
     fn test_runtime() -> &'static tokio::runtime::Runtime {

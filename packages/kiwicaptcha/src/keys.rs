@@ -35,10 +35,27 @@
 use hkdf::Hkdf;
 use sha2::Sha256;
 
+use std::sync::atomic::{AtomicU64, Ordering};
+
 /// The public (non-secret) deployment salt for the HKDF-based extraction
 /// step — domain separation shared with the PHP core; the secrecy comes from
 /// the master secret, never from this string.
 pub const HKDF_DEPLOY_SALT: &[u8] = b"kiwicaptcha/deploy-salt/v1";
+
+/// Process-wide count of `DerivedKeys::from_master` invocations. A cheap
+/// (one relaxed atomic) observability seam proving the per-kid derivation
+/// cache works: production verifiers route every signature / IP-binding
+/// check through a cached [`DerivedKeys`], so after the first derivation
+/// per key id this counter must not grow while verifying. Diagnostic only;
+/// not part of the stable API surface.
+static FROM_MASTER_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// The number of [`DerivedKeys::from_master`] calls this process has made
+/// (the derivation-cache observability seam — see [`FROM_MASTER_CALLS`]).
+#[doc(hidden)]
+pub fn from_master_call_count() -> u64 {
+    FROM_MASTER_CALLS.load(Ordering::Relaxed)
+}
 
 /// Info label for the challenge-signing purpose key.
 pub const INFO_CHALLENGE_SIGN: &[u8] = b"kiwi/v2/challenge-sign";
@@ -71,6 +88,7 @@ impl DerivedKeys {
     ///   secret cannot forge each other's challenges, binding tags, or
     ///   result tokens.
     pub fn from_master(master: &str, tenant: Option<&str>) -> DerivedKeys {
+        FROM_MASTER_CALLS.fetch_add(1, Ordering::Relaxed);
         let prk = Hkdf::<Sha256>::new(Some(HKDF_DEPLOY_SALT), master.as_bytes());
         match tenant {
             None => DerivedKeys {

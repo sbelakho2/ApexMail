@@ -8,6 +8,11 @@ use ApexMail\Client;
 
 /**
  * Manage sending domains (SPF / DKIM / DMARC).
+ *
+ * The server's CreateDomainRequest accepts exactly {name} and the domain
+ * response carries the verification state
+ * {id, name, status, ses_verified, spf_verified, dkim_verified,
+ *  dmarc_verified, return_path_verified, created_at}.
  */
 class Domains
 {
@@ -16,17 +21,17 @@ class Domains
     /**
      * Add a new sending domain.
      *
-     * @param string $domain   e.g. "mail.example.com"
-     * @param array  $options  { region, click_tracking, open_tracking }
+     * @param string $domain   e.g. "mail.example.com" (sent as {name})
+     * @param array  $options  Unused legacy options (region, click_tracking,
+     *                         open_tracking) — accepted for backwards
+     *                         compatibility but not sent: the API has no
+     *                         such fields.
      */
     public function create(string $domain, array $options = []): array
     {
-        return $this->client->request('POST', '/v1/domains', array_filter([
-            'domain'         => $domain,
-            'region'         => $options['region']          ?? null,
-            'clickTracking'  => $options['click_tracking']  ?? $options['clickTracking']  ?? null,
-            'openTracking'   => $options['open_tracking']   ?? $options['openTracking']   ?? null,
-        ], static fn ($v) => $v !== null));
+        return $this->client->request('POST', '/v1/domains', [
+            'name' => $domain,
+        ]);
     }
 
     /** List all domains on the account. */
@@ -55,10 +60,13 @@ class Domains
 
     /**
      * Check the deliverability health of a domain.
-     * Returns SPF / DKIM / DMARC / blacklist status.
+     *
+     * The API has no GET /:id/health endpoint — GET /:id itself returns the
+     * health information (spf_verified, dkim_verified, dmarc_verified,
+     * return_path_verified, status), so this is a thin alias of get().
      */
     public function health(string $id): array
     {
-        return $this->client->request('GET', '/v1/domains/' . urlencode($id) . '/health');
+        return $this->get($id);
     }
 }

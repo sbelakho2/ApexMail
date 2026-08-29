@@ -17,9 +17,13 @@ Bel Consulting OÜ (Handelsname ApexMail) („wir", „uns") verpflichtet sich, 
 
 ## 2. Von uns erfasste Daten
 
-- **Kontodaten:** Name, E-Mail, Unternehmen, Rechnungsadresse.
-- **Nutzungsdaten:** API-Aufrufe, E-Mail-Versandvolumen, Zustellereignisse.
-- **Technische Daten:** IP-Adressen, Browsertyp, Geräteinformationen.
+- **Webseitenbesucher (Marketing-Website):** IP-Adresse, Browsertyp und User-Agent, Geräteinformationen, besuchte Seiten, Referrer-URL und Zeitstempel — automatisch über Server-Zugriffsprotokolle erhoben. Die Marketing-Website setzt keine Analyse-Skripte ein und bettet keine Tracking-Pixel oder Werbe-Cookies ein.
+- **Interessenten:** Name, E-Mail-Adresse, Unternehmensname, Telefonnummer (falls angegeben) und Kommunikationsverlauf, bereitgestellt über Kontaktformulare oder E-Mail.
+- **Kontodaten:** Name, E-Mail, Unternehmen, Rechnungsadresse, USt-IdNr., Zahlungsdaten-Tokens (Kartendaten werden von Stripe verarbeitet und erreichen niemals unsere Server), API-Schlüssel-Metadaten, Anmeldezeitstempel, IP-Adressen und Audit-Log-Einträge.
+- **Nutzungsdaten:** API-Aufrufe, E-Mail-Versandvolumen, Zustellereignisse sowie Engagement-Ereignisse (Öffnungen und Klicks) für Ihre gesendeten Nachrichten.
+- **Empfängerdaten (als Auftragsverarbeiter für unsere Kunden):** E-Mail-Adressen und Namen der Empfänger, E-Mail-Inhalte (Betreff, Text, Header, Anhänge) sowie Zustell- und Engagement-Metadaten. Wenn der versendende Kunde das Tracking aktiviert, werden bei Öffnungs- und Klick-Ereignissen zusätzlich IP-Adresse und User-Agent des Empfängers erfasst.
+- **Technische Daten:** IP-Adressen (für Authentifizierung, Rate-Limiting sowie Betrugs- und Missbrauchsprävention), Browsertyp, Geräteinformationen.
+- **KI-Verarbeitung:** Wenn Sie optionale KI-gestützte Funktionen nutzen, werden die von Ihnen übermittelten Betreffzeilen und Nachrichteninhalte verarbeitet, um die angeforderte Analyse zu erstellen (z. B. Betreffzeilen-Einblicke).
 
 ## 3. Rechtsgrundlage
 
@@ -48,8 +52,8 @@ Wir bewahren personenbezogene Daten nur so lange auf, wie es für die Zwecke, f�
 |---|---|
 | Kontodaten | Vertragsdauer + 30 Tage |
 | Abrechnungsunterlagen | 7 Jahre (estnisches Rechnungslegungsrecht) |
-| E-Mail-Inhalte | 30 Tage (konfigurierbar bis 90 Tage für Enterprise) |
-| Ereignisprotokolle | 90 Tage (730 Tage für Enterprise) |
+| E-Mail-Inhalte (Text, Betreff, Header, Anhänge) | Standardmäßig 7 Tage; planabhängiges Maximum (von 1 Tag im Free-Plan bis 365 Tage bei Enterprise) |
+| Ereignisprotokolle (Zustell-, Öffnungs- und Klick-Ereignisse) | Standardmäßig 30 Tage; planabhängiges Maximum (bis 365 Tage bei Enterprise) |
 | Support-Tickets | 2 Jahre nach Lösung |
 
 Vollständige Details finden Sie in unserer [Datenaufbewahrungsrichtlinie](/compliance/#data-retention).

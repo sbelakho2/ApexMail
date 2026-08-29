@@ -684,10 +684,33 @@ impl AtoEngine {
         removed
     }
 
+    /// Evict expired entries from the `locked_until` map (audit F7).
+    ///
+    /// The map previously had NO eviction path: a lockout expiry recorded
+    /// for a user who never attempts to authenticate again stayed in the
+    /// table forever, so the map grew unboundedly over the process
+    /// lifetime. Entries whose `locked_until` instant has passed are
+    /// semantically equivalent to "not locked", so dropping them is safe.
+    /// Returns the number of entries removed.
+    pub fn evict_expired_locked_until(&self) -> usize {
+        let now = Utc::now();
+        let before = self.locked_until.len();
+        self.locked_until.retain(|_, until| *until > now);
+        let removed = before - self.locked_until.len();
+        if removed > 0 {
+            tracing::debug!(
+                removed = removed,
+                remaining = self.locked_until.len(),
+                "Evicted expired locked_until entries"
+            );
+        }
+        removed
+    }
+
     /// Spawn a background Tokio task that periodically evicts stale in-memory
-    /// state from all three unbounded DashMaps.
-    /// The returned [`tokio::task::JoinHandle`] can be awaited or aborted by
-    /// the caller. `interval_secs` controls how often the cleanup runs;
+    /// state from all four unbounded DashMaps.
+    /// The returned [`tokio::task::JoinHandle`] can be awaited or aborted by the
+    /// caller. `interval_secs` controls how often the cleanup runs;
     /// 60 seconds is a reasonable default. The method requires `Arc<Self>`
     /// because the background task must hold an independent reference to the
     /// engine after this method returns.
@@ -695,6 +718,7 @@ impl AtoEngine {
     /// * `ip_call_counts` — entries older than 2× interval (2 × rate-limit windows)
     /// * `lockout_events` — entries whose newest event is older than 1 hour
     /// * `tls_histories` — entries not seen in 24 hours
+    /// * `locked_until` — entries whose lockout expiry has passed (audit F7)
     pub fn run_cleanup_loop(self: Arc<Self>, interval_secs: u64) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let interval = tokio::time::Duration::from_secs(interval_secs);
@@ -706,11 +730,13 @@ impl AtoEngine {
                 let rate_removed = self.evict_stale_rate_limits(interval_secs * 2);
                 let lock_removed = self.evict_stale_lockout_events(3_600);
                 let tls_removed = self.evict_stale_tls_histories(86_400);
-                if rate_removed + lock_removed + tls_removed > 0 {
+                let locked_removed = self.evict_expired_locked_until();
+                if rate_removed + lock_removed + tls_removed + locked_removed > 0 {
                     tracing::info!(
                         rate_removed,
                         lock_removed,
                         tls_removed,
+                        locked_removed,
                         "ATO engine periodic cleanup complete"
                     );
                 }
@@ -915,6 +941,31 @@ mod tests {
         assert!(verdict.new_device, "First login should be new device");
         // New device alone shouldn't block
         assert_ne!(verdict.action, AtoAction::Block);
+    }
+
+    // ── Audit F7:locked_until map eviction ────────────────────────────
+
+    #[test]
+    fn test_evict_expired_locked_until() {
+        let engine = AtoEngine::new();
+
+        // One expired and one still-active lockout expiry.
+        engine.locked_until.insert(
+            "gone-user".into(),
+            Utc::now() - chrono::Duration::seconds(60),
+        );
+        engine.locked_until.insert(
+            "locked-user".into(),
+            Utc::now() + chrono::Duration::seconds(600),
+        );
+
+        let removed = engine.evict_expired_locked_until();
+        assert_eq!(removed, 1, "only the expired entry is evicted");
+        assert!(!engine.locked_until.contains_key(&"gone-user".to_string()));
+        assert!(engine.locked_until.contains_key(&"locked-user".to_string()));
+
+        // A second pass is a no-op.
+        assert_eq!(engine.evict_expired_locked_until(), 0);
     }
 
     #[test]

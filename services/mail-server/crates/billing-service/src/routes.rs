@@ -1630,6 +1630,15 @@ async fn get_mrr_report(
     Ok(Json(serde_json::json!({ "report": report })).into_response())
 }
 
+/// Monthly churn report. `churned_mrr` prices each canceled subscription
+/// from its own price snapshot — the subscription's `stripe_price_id`
+/// resolved against `plans.stripe_price_id_monthly/yearly` (falling back to
+/// the tenant's current plan only while it is still non-free) — because
+/// `tenants.plan` is set to `'free'` on cancellation (audit F10): pricing
+/// churn from `t.plan` made `churned_mrr` always ≈ 0. Subscriptions with no
+/// resolvable price (snapshot missing AND tenant already downgraded to
+/// free) are EXCLUDED from `churned_mrr` and reported separately as
+/// `churned_mrr_unpriced` so the metric's coverage is explicit.
 async fn get_churn_report(
     State(state): State<Arc<AppState>>,
     Extension(scope): Extension<TenantAuthScope>,
@@ -1648,13 +1657,37 @@ async fn get_churn_report(
                     COUNT(*) as churned_count,
                     SUM(
                         CASE
-                            WHEN s.billing_interval = 'yearly' THEN ROUND(p.price_yearly / 12.0)::bigint
-                            ELSE p.price_monthly
+                            WHEN sp.id IS NOT NULL AND s.billing_interval = 'yearly'
+                                THEN ROUND(sp.price_yearly / 12.0)::bigint
+                            WHEN sp.id IS NOT NULL
+                                THEN sp.price_monthly
+                            WHEN tp.id IS NOT NULL AND s.billing_interval = 'yearly'
+                                THEN ROUND(tp.price_yearly / 12.0)::bigint
+                            WHEN tp.id IS NOT NULL
+                                THEN tp.price_monthly
+                            ELSE NULL
                         END
-                    ) as churned_mrr
+                    ) as churned_mrr,
+                    COUNT(*) FILTER (WHERE sp.id IS NULL AND tp.id IS NULL) as churned_mrr_unpriced
                 FROM stripe_subscriptions s
                 JOIN tenants t ON t.id = s.tenant_id
-                JOIN plans p ON p.name = t.plan
+                -- Fix F10 — price the CHURNED SUBSCRIPTION, not the tenant's
+                -- current plan: subscription cancellation downgrades
+                -- tenants.plan to 'free', so the previous
+                -- `plans p ON p.name = t.plan` priced all churn at the free
+                -- plan (churned_mrr was structurally ~0). Preferred source:
+                -- the subscription's own Stripe price snapshot
+                -- (stripe_price_id, written when the subscription was
+                -- stored and never downgraded). Fallback: the tenant's plan
+                -- only while it is still non-free; otherwise the row is
+                -- excluded from churned_mrr and counted as unpriced.
+                LEFT JOIN plans sp ON s.stripe_price_id IS NOT NULL AND (
+                    (s.billing_interval = 'yearly'
+                        AND sp.stripe_price_id_yearly = s.stripe_price_id)
+                    OR (COALESCE(s.billing_interval, 'monthly') <> 'yearly'
+                        AND sp.stripe_price_id_monthly = s.stripe_price_id)
+                )
+                LEFT JOIN plans tp ON tp.name = t.plan AND t.plan <> 'free'
                 WHERE s.status = 'canceled'
                 GROUP BY DATE_TRUNC('month', COALESCE(s.canceled_at, s.updated_at))
             ),
@@ -1671,6 +1704,7 @@ async fn get_churn_report(
                 c.month,
                 c.churned_count,
                 c.churned_mrr,
+                c.churned_mrr_unpriced,
                 COALESCE(s.starting_count, 0) as starting_count
             FROM churned c
             LEFT JOIN starting s ON s.month = c.month

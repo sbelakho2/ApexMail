@@ -106,6 +106,12 @@ pub struct DdosProtector {
     /// Cost-based rate limiter
     cost_limiter: Arc<CostBasedLimiter>,
 
+    /// Per-IP adaptive rate limiter (Layer 2b, audit F2c). Constructed when
+    /// `enable_per_ip_adaptive` is set (the default); previously the flag and
+    /// the [`AdaptiveRateLimiter`] type existed but were never wired into the
+    /// decide path, so the configuration was inert.
+    adaptive_limiter: Option<Arc<AdaptiveRateLimiter>>,
+
     /// IP blocklist with expiration
     blocklist: Arc<DashMap<IpAddr, BlockEntry>>,
 
@@ -170,6 +176,13 @@ pub struct RequestContext {
     pub tenant_id: Option<String>,
     /// API key ID (if authenticated)
     pub api_key_id: Option<String>,
+    /// DDoS challenge id presented for redemption (audit F3c). Populated by
+    /// the caller from the `X-DDoS-Challenge-Id` request header (or the body
+    /// of a `POST /__ddos/verify`); see `middleware::evaluate_request`.
+    pub challenge_id: Option<String>,
+    /// Nonce presented as the challenge solution (audit F3c), from the
+    /// `X-DDoS-Challenge-Solution` header.
+    pub challenge_solution: Option<u64>,
 }
 
 impl DdosProtector {
@@ -187,15 +200,44 @@ impl DdosProtector {
             config.max_sessions,
         ));
 
+        // Audit F2c: wire the per-IP adaptive rate limiter when
+        // `enable_per_ip_adaptive` is enabled (previously inert config —
+        // the limiter was never constructed nor consulted). Thresholds are
+        // converted from the per-IP RPM knobs to requests/second, the unit
+        // the limiter works in.
+        let adaptive_min_rps = (config.per_ip_min_rpm / 60).max(1);
+        let adaptive_max_rps = (config.per_ip_max_rpm / 60).max(adaptive_min_rps);
+        let adaptive_limiter = config.enable_per_ip_adaptive.then(|| {
+            Arc::new(AdaptiveRateLimiter::new(adaptive::AdaptiveConfig {
+                baseline_window: if config.per_ip_baseline_window_secs == 0 {
+                    Duration::from_secs(300)
+                } else {
+                    Duration::from_secs(config.per_ip_baseline_window_secs)
+                },
+                z_threshold: config.per_ip_z_threshold,
+                min_threshold: adaptive_min_rps,
+                max_threshold: adaptive_max_rps,
+                ..adaptive::AdaptiveConfig::default()
+            }))
+        });
+
         let protector = Self {
             config,
             reputation_db: Arc::new(DashMap::new()),
             session_tracker,
             cost_limiter,
+            adaptive_limiter,
             blocklist: Arc::new(DashMap::new()),
             attack_state: Arc::new(RwLock::new(AttackState::default())),
             #[cfg(feature = "ml")]
-            anomaly_detector: None,
+            // Audit F2a: construct the anomaly detector so the ML
+            // anomaly/challenge block in `evaluate` actually runs. It was
+            // previously hard-coded to `None`, making the whole Layer-3 ML
+            // path dead code (an untrained forest returns a neutral 0.5
+            // score and trains online from observed traffic).
+            anomaly_detector: Some(Arc::new(ml::IsolationForest::new(
+                ml::IsolationForestConfig::default(),
+            ))),
             #[cfg(feature = "challenges")]
             // Fix I: initialize the ChallengeManager (random per-process
             // secret) so challenges are issued with fresh random data and
@@ -237,6 +279,25 @@ impl DdosProtector {
             metric.with_label_values(&["evaluated", "all"]).inc();
         }
 
+        // Canonical client key (audit F2d): IPv6 addresses are truncated to
+        // their /64 (and IPv4-mapped IPv6 mapped back to IPv4) for every
+        // protection table — cost buckets, sessions, reputation and the
+        // blocklist. Without this, an attacker rotating the interface ID of
+        // a single /64 minted a fresh budget, session and reputation for
+        // every request. The full address continues to be used in logs
+        // (`evaluate_with_event` receives the original context).
+        let canonical_ip = canonical_client_key(&ctx.ip);
+        let canonical_ctx_storage;
+        let ctx = if canonical_ip == ctx.ip {
+            ctx
+        } else {
+            canonical_ctx_storage = RequestContext {
+                ip: canonical_ip,
+                ..ctx.clone()
+            };
+            &canonical_ctx_storage
+        };
+
         // Layer 0:Check blocklist
         if self.is_blocked(&ctx.ip) {
             if let Some(metric) = metrics::REQUESTS_TOTAL.as_ref() {
@@ -245,11 +306,21 @@ impl DdosProtector {
             return ProtectionDecision::Block;
         }
 
-        // Layer 1:Check fingerprint (if available)
-        if let Some(ref fp) = ctx.tls_fingerprint {
-            if self.is_suspicious_fingerprint(fp) {
-                self.decrease_reputation(&ctx.ip, 10);
+        // Layer 1:Fingerprint-based reputation penalty.
+        //
+        // Audit F2b: the full penalty requires `ctx.tls_fingerprint`, which
+        // HTTP callers never set — Layer 1 could therefore never lower a
+        // reputation. When the fingerprint is absent a smaller fixed penalty
+        // is applied instead, so unattributed clients still trend downward
+        // (operators that forward JA4 fingerprints from their proxy avoid
+        // the penalty entirely; the periodic cleanup decays scores back
+        // toward neutral).
+        match ctx.tls_fingerprint.as_deref() {
+            Some(fp) if self.is_suspicious_fingerprint(fp) => {
+                self.decrease_reputation(&ctx.ip, FINGERPRINT_PENALTY);
             }
+            Some(_) => {}
+            None => self.decrease_reputation(&ctx.ip, MISSING_FINGERPRINT_PENALTY),
         }
 
         // Re-read reputation after potential fingerprint penalty so the
@@ -283,6 +354,30 @@ impl DdosProtector {
         let session = self.session_tracker.track(ctx);
         #[cfg(not(feature = "ml"))]
         let _ = &session;
+
+        // Layer 2b:Per-IP adaptive rate limiting (audit F2c). The adaptive
+        // limiter learns a request-rate baseline and tightens the allowed
+        // rate under attack; a client whose (damped) request rate exceeds
+        // the current adaptive threshold is limited. Previously
+        // `enable_per_ip_adaptive` never influenced any decision.
+        if let Some(ref adaptive) = self.adaptive_limiter {
+            let rate_rps = session_rate_per_sec(&session);
+            adaptive.update(adaptive::TrafficObservation {
+                timestamp: std::time::Instant::now(),
+                requests_per_second: rate_rps,
+                error_rate: session.error_rate,
+                latency_p99_ms: 0.0,
+                cpu_usage: 0.0,
+            });
+            if rate_rps > adaptive.current_threshold() as f64 {
+                if let Some(metric) = metrics::REQUESTS_TOTAL.as_ref() {
+                    metric.with_label_values(&["limited", "adaptive"]).inc();
+                }
+                return ProtectionDecision::RateLimit {
+                    retry_after: Duration::from_secs(1),
+                };
+            }
+        }
 
         // ML anomaly detection (uses anomaly_score, not a predict method)
         #[cfg(feature = "ml")]
@@ -348,43 +443,26 @@ impl DdosProtector {
                 // configured baseline difficulty.
                 #[cfg(feature = "challenges")]
                 if let Some(ref cm) = self.challenge_manager {
-                    // Fix I: issue through the ChallengeManager so the
-                    // challenge data is random per issuance (the previous
-                    // constant prefix `"challenge"` made solved nonces
-                    // replayable forever) and so verification goes through
-                    // the manager's replay cache.
-                    if let challenges::ChallengeType::ProofOfWork(pow) = cm.issue_pow_challenge() {
-                        // Adaptive PoW:scale difficulty based on anomaly severity.
-                        // Base difficulty from config (e.g. 16 bits). Under heavy
-                        // attack (anomaly_score near 1.0), add up to 8 extra bits.
-                        let attack_multiplier = ((anomaly_score - self.config.anomaly_threshold)
-                            / (1.0 - self.config.anomaly_threshold))
-                            .clamp(0.0, 1.0);
-                        let extra_bits = (attack_multiplier * 8.0) as u8;
-                        let adaptive_difficulty = self
-                            .config
-                            .pow_difficulty
-                            .saturating_add(extra_bits)
-                            .min(32); // Cap at 32 bits
-                        let expected_time = 1000_u64
-                            .saturating_mul(
-                                1u64.checked_shl(extra_bits.min(10) as u32).unwrap_or(1024),
-                            )
-                            .min(u32::MAX as u64)
-                            as u32;
-                        return ProtectionDecision::Challenge(crate::decision::Challenge::Pow(
-                            crate::decision::PowChallenge {
-                                id: pow.challenge_id,
-                                data: pow.prefix,
-                                difficulty: adaptive_difficulty,
-                                expires_at: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_secs() + 300)
-                                    .unwrap_or(0),
-                                expected_time_ms: expected_time,
-                            },
-                        ));
-                    }
+                    // Adaptive PoW:Scale difficulty based on anomaly severity.
+                    // Base difficulty from config (e.g. 16 bits). Under heavy
+                    // attack (anomaly_score near 1.0), add up to 8 extra bits.
+                    let attack_multiplier = ((anomaly_score - self.config.anomaly_threshold)
+                        / (1.0 - self.config.anomaly_threshold))
+                        .clamp(0.0, 1.0);
+                    let extra_bits = (attack_multiplier * 8.0) as u8;
+                    let adaptive_difficulty = self
+                        .config
+                        .pow_difficulty
+                        .saturating_add(extra_bits)
+                        .min(32); // Cap at 32 bits
+                                  // Audit F3: issue through the server-side registry. The
+                                  // challenge parameters (data, difficulty, expiry) are
+                                  // stored server-side, clamped (difficulty ≥ 8) and
+                                  // signed; verification consults the stored values and
+                                  // NEVER client claims.
+                    return ProtectionDecision::Challenge(crate::decision::Challenge::Pow(
+                        cm.issue_server_pow(adaptive_difficulty),
+                    ));
                 }
             }
         }
@@ -413,24 +491,14 @@ impl DdosProtector {
                             .with_label_values(&["challenged", "reputation"])
                             .inc();
                     }
-                    // Fix I: issue through the ChallengeManager (random
-                    // per-issuance data). The previous per-IP constant
-                    // prefix `rep_challenge:<ip>` allowed one solved nonce
-                    // to be replayed for every future request from that IP.
-                    if let challenges::ChallengeType::ProofOfWork(pow) = cm.issue_pow_challenge() {
-                        return ProtectionDecision::Challenge(crate::decision::Challenge::Pow(
-                            crate::decision::PowChallenge {
-                                id: pow.challenge_id,
-                                data: pow.prefix,
-                                difficulty: self.config.pow_difficulty,
-                                expires_at: std::time::SystemTime::now()
-                                    .duration_since(std::time::UNIX_EPOCH)
-                                    .map(|d| d.as_secs() + 300)
-                                    .unwrap_or(0),
-                                expected_time_ms: 1000,
-                            },
-                        ));
-                    }
+                    // Audit F3: issue through the server-side registry
+                    // (random per-issuance data, server-clamped difficulty
+                    // and expiry, HMAC-signed parameters). The client
+                    // receives the params to SOLVE the challenge, but
+                    // verification only ever uses the stored values.
+                    return ProtectionDecision::Challenge(crate::decision::Challenge::Pow(
+                        cm.issue_server_pow(self.config.pow_difficulty),
+                    ));
                 }
             }
         }
@@ -635,26 +703,58 @@ impl DdosProtector {
         self.attack_state.read().clone()
     }
 
-    /// Verify a proof-of-work challenge response with replay protection.
+    /// Verify a proof-of-work solution against the SERVER-SIDE issuance
+    /// registry (audit F3) with replay protection.
     ///
-    /// Fix I: routes through the [`challenges::ChallengeManager`] so a
-    /// solved nonce is rejected on replay (UsedResponseCache) and the
-    /// verification is audited.
+    /// Only the challenge id is taken from the client; the data, difficulty
+    /// and expiry used for verification are the values the server stored
+    /// when it ISSUED the challenge — client-supplied difficulty/expiry
+    /// claims are never trusted. On success the challenge is marked solved
+    /// in the registry (short allow-TTL) and the client IP's reputation is
+    /// credited so the re-evaluated request is not immediately re-challenged.
     #[cfg(feature = "challenges")]
     pub fn verify_pow(
         &self,
-        challenge: &crate::decision::PowChallenge,
+        ip: &IpAddr,
+        challenge_id: &str,
         nonce: u64,
-        client_fingerprint: Option<&str>,
     ) -> challenges::ChallengeVerifyResult {
-        match &self.challenge_manager {
-            Some(cm) => cm.verify_decision_pow(challenge, nonce, client_fingerprint),
+        let result = match &self.challenge_manager {
+            Some(cm) => cm.verify_pow_solution(challenge_id, nonce, Some(&ip.to_string())),
             None => challenges::ChallengeVerifyResult {
                 valid: false,
                 replayed: false,
                 expired: true,
             },
+        };
+        if result.valid {
+            self.record_challenge_passed(&canonical_client_key(ip));
         }
+        result
+    }
+
+    /// Whether a solved challenge is still inside its redemption allow-TTL.
+    #[cfg(feature = "challenges")]
+    pub fn pow_allow_active(&self, challenge_id: &str) -> bool {
+        match &self.challenge_manager {
+            Some(cm) => cm.pow_solved_allow_active(challenge_id),
+            None => false,
+        }
+    }
+
+    /// Credit a client for passing a challenge (audit F3c redemption path):
+    /// bumps `challenges_passed` and restores reputation so the follow-up
+    /// request evaluation can pass.
+    #[cfg(feature = "challenges")]
+    fn record_challenge_passed(&self, ip: &IpAddr) {
+        if !self.reputation_db.contains_key(ip) {
+            self.enforce_reputation_capacity();
+        }
+        let mut entry = self.reputation_db.entry(*ip).or_default();
+        entry.challenges_passed = entry.challenges_passed.saturating_add(1);
+        entry.last_seen = std::time::Instant::now();
+        entry.score = entry.score.saturating_add(CHALLENGE_PASS_CREDIT).min(100);
+        debug!(%ip, new_score = entry.score, "Challenge passed; reputation credited");
     }
 
     /// Background cleanup task.
@@ -758,7 +858,7 @@ fn generate_challenge_secret() -> [u8; 32] {
             .unwrap_or_default(),
     );
     let digest = hasher.finalize();
-    let mut secret = [u8; 32];
+    let mut secret = [0u8; 32];
     secret.copy_from_slice(&digest);
     secret
 }
@@ -775,6 +875,51 @@ fn cost_bucket_key(tenant_id: Option<&str>, ip: Option<&IpAddr>) -> String {
         (None, Some(ip)) => format!("anon:{ip}"),
         (None, None) => String::new(),
     }
+}
+
+/// Reputation penalty for a client presenting a SUSPICIOUS TLS
+/// fingerprint (audit F2b).
+const FINGERPRINT_PENALTY: u8 = 10;
+
+/// Smaller fixed reputation penalty applied when NO TLS fingerprint is
+/// available (audit F2b) — Layer 1 must still be able to lower reputation
+/// for unattributed clients instead of being permanently inert.
+const MISSING_FINGERPRINT_PENALTY: u8 = 1;
+
+/// Reputation credit granted when a client solves a server-issued
+/// challenge (audit F3c redemption path), so a redeemed client is not
+/// immediately re-challenged.
+#[cfg(feature = "challenges")]
+const CHALLENGE_PASS_CREDIT: u8 = 25;
+
+/// Canonicalize a client address for protection-table keying (audit F2d):
+///
+/// - IPv4-mapped IPv6 (`::ffff:a.b.c.d`) maps back to the IPv4 form, and
+/// - IPv6 addresses are truncated to their /64 (host bits zeroed).
+///
+/// Cost buckets, sessions, reputation and the blocklist all key on the
+/// canonical form, so rotating the interface ID inside one /64 cannot mint
+/// fresh budgets/sessions/reputations. Logs keep the full address.
+pub(crate) fn canonical_client_key(ip: &IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V4(_) => *ip,
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return IpAddr::V4(v4);
+            }
+            let mut octets = v6.octets();
+            octets[8..].fill(0);
+            IpAddr::V6(std::net::Ipv6Addr::from(octets))
+        }
+    }
+}
+
+/// Damped request rate (requests/second) for a session, used by the
+/// adaptive limiter (audit F2c). Young sessions extrapolate wildly
+/// (1 request in 40 ms projects to 1500 RPS), so the estimate never uses
+/// a window shorter than 60 s — the per-IP floor in RPM terms.
+fn session_rate_per_sec(session: &session::SessionInfo) -> f64 {
+    session.request_count as f64 / session.age_secs.max(60) as f64
 }
 
 /// DDoS protection errors
@@ -814,6 +959,8 @@ mod tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         let decision = protector.evaluate(&ctx).await;
@@ -842,6 +989,8 @@ mod tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         let decision = protector.evaluate(&ctx).await;
@@ -865,6 +1014,8 @@ mod tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         let (_decision, event) = protector.evaluate_with_event(&ctx, None).await;
@@ -892,6 +1043,8 @@ mod tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         for _ in 0..12 {
@@ -964,6 +1117,8 @@ mod tests {
                 body_size: 0,
                 tenant_id: None,
                 api_key_id: None,
+                challenge_id: None,
+                challenge_solution: None,
             };
             let _ = protector.evaluate(&ctx).await;
             assert!(
@@ -1006,6 +1161,8 @@ mod tests {
                 body_size: 0,
                 tenant_id: None,
                 api_key_id: None,
+                challenge_id: None,
+                challenge_solution: None,
             };
             let _ = protector.evaluate(&ctx).await;
         }
@@ -1086,6 +1243,8 @@ mod tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         // Drain the budget of 198.51.100.10.
@@ -1123,26 +1282,70 @@ mod tests {
             .await
             .expect("test should succeed");
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0)
-            + 300;
-        let challenge = crate::decision::PowChallenge {
-            id: "test-pow".to_string(),
-            data: "random-prefix".to_string(),
-            difficulty: 0,
-            expires_at: now,
-            expected_time_ms: 1,
-        };
+        // Audit F3: verification goes through the server-side issuance
+        // registry — a client-fabricated challenge (any id/data/difficulty
+        // the client likes) must be rejected outright, and a replayed
+        // solution to a REAL server-issued challenge must be rejected via
+        // the replay cache.
+        let ip: IpAddr = "203.0.113.4".parse().expect("hardcoded test IP");
 
-        let first = protector.verify_pow(&challenge, 7, Some("203.0.113.4"));
+        // Fabricated challenge id → rejected (never issued by this server).
+        let forged = protector.verify_pow(&ip, "totally-forged-id", 7);
+        assert!(!forged.valid, "forged challenge id must be rejected");
+
+        // Real issuance: force the reputation-challenge path (90 threshold).
+        let config = ProtectorConfig {
+            challenge_threshold: 90,
+            ..ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+        let ctx = RequestContext {
+            ip,
+            path: "/".to_string(),
+            method: "GET".to_string(),
+            tls_fingerprint: None,
+            h2_fingerprint: None,
+            user_agent: None,
+            body_size: 0,
+            tenant_id: None,
+            api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
+        };
+        let challenge = match protector.evaluate(&ctx).await {
+            ProtectionDecision::Challenge(crate::decision::Challenge::Pow(c)) => c,
+            other => panic!("expected PoW challenge, got {other:?}"),
+        };
+        let nonce = solve_pow(&challenge.data, challenge.difficulty);
+
+        let first = protector.verify_pow(&ip, &challenge.id, nonce);
         assert!(first.valid, "first submission must pass");
-        let replay = protector.verify_pow(&challenge, 7, Some("203.0.113.4"));
+        let replay = protector.verify_pow(&ip, &challenge.id, nonce);
         assert!(
             !replay.valid && replay.replayed,
             "replayed nonce must be rejected via the replay cache"
         );
+    }
+
+    /// Brute-force a nonce satisfying sha256("<data>:<nonce>") having
+    /// `difficulty` leading zero bits (test helper).
+    #[cfg(feature = "challenges")]
+    fn solve_pow(data: &str, difficulty: u8) -> u64 {
+        use sha2::{Digest, Sha256};
+        for nonce in 0..u64::MAX {
+            let input = format!("{data}:{nonce}");
+            let hash = Sha256::digest(input.as_bytes());
+            let required_bytes = (difficulty / 8) as usize;
+            let remaining_bits = difficulty % 8;
+            if hash[..required_bytes].iter().all(|b| *b == 0)
+                && (remaining_bits == 0 || hash[required_bytes] << remaining_bits == 0)
+            {
+                return nonce;
+            }
+        }
+        unreachable!("a satisfying nonce always exists");
     }
 
     #[cfg(feature = "challenges")]
@@ -1169,6 +1372,8 @@ mod tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         let c1 = match protector.evaluate(&ctx).await {
@@ -1184,6 +1389,249 @@ mod tests {
         assert!(
             !c1.data.starts_with("rep_challenge:"),
             "per-IP constant prefixes are replayable and must not be used"
+        );
+        // Audit F3: issued challenges are signed and difficulty-clamped.
+        assert!(!c1.signature.is_empty(), "issued challenge must be signed");
+        assert!(c1.difficulty >= 8, "difficulty must be clamped to >= 8");
+    }
+
+    // ── Audit F2:Layer-1 penalty, adaptive wiring, /64 canonical keys ──
+
+    #[test]
+    fn test_canonical_client_key_slash64_and_v4_mapped() {
+        let v4: IpAddr = "198.51.100.7".parse().expect("valid IPv4");
+        assert_eq!(canonical_client_key(&v4), v4, "IPv4 is unchanged");
+
+        // v4-mapped IPv6 collapses to the IPv4 form.
+        let mapped: IpAddr = "::ffff:198.51.100.7".parse().expect("valid mapped v6");
+        assert_eq!(canonical_client_key(&mapped), v4);
+
+        // /64 truncation: host bits are zeroed, prefix kept.
+        let a: IpAddr = "2001:db8:1:2:3:4:5:6".parse().expect("valid IPv6");
+        let b: IpAddr = "2001:db8:1:2:ffff:ffff:ffff:ffff"
+            .parse()
+            .expect("valid IPv6");
+        let canonical_a = canonical_client_key(&a);
+        assert_eq!(
+            canonical_a,
+            "2001:db8:1:2::".parse::<IpAddr>().expect("valid IPv6")
+        );
+        assert_eq!(
+            canonical_client_key(&b),
+            canonical_a,
+            "all addresses inside one /64 share the canonical key"
+        );
+
+        // Distinct /64s keep distinct keys.
+        let c: IpAddr = "2001:db8:1:3::1".parse().expect("valid IPv6");
+        assert_ne!(canonical_client_key(&c), canonical_a);
+    }
+
+    #[tokio::test]
+    async fn test_ipv6_slash64_rotation_shares_budget_and_reputation() {
+        // Rotating the interface ID inside a /64 previously minted a fresh
+        // cost bucket, session and reputation entry per request.
+        let config = ProtectorConfig {
+            default_cost_budget: 30, // /v1/health costs 10 → exhausted after 3
+            system_cost_capacity: 10_000_000,
+            ..ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+
+        let ctx = |ip: &str| RequestContext {
+            ip: ip.parse().expect("valid IPv6"),
+            path: "/v1/health".to_string(),
+            method: "GET".to_string(),
+            tls_fingerprint: None,
+            h2_fingerprint: None,
+            user_agent: None,
+            body_size: 0,
+            tenant_id: None,
+            api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
+        };
+
+        // Drain the /64's shared budget from ::1 and ::2.
+        for _ in 0..3 {
+            let _ = protector.evaluate(&ctx("2001:db8:aa:bb::1")).await;
+        }
+        assert!(
+            matches!(
+                protector.evaluate(&ctx("2001:db8:aa:bb::2")).await,
+                ProtectionDecision::RateLimit { .. }
+            ),
+            "a rotated interface ID in the same /64 must NOT get a fresh budget"
+        );
+
+        // Reputation is also keyed per /64 (single shared entry).
+        assert_eq!(protector.reputation_entry_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_missing_fingerprint_still_lowers_reputation() {
+        // Audit F2b: with no TLS fingerprint (what HTTP callers send), the
+        // Layer-1 penalty previously never fired; a small fixed penalty must
+        // still apply so reputation can fall.
+        let config = ProtectorConfig {
+            block_threshold: 0, // never block in this test
+            challenge_threshold: 5,
+            ..ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+
+        let ip: IpAddr = "203.0.113.60".parse().expect("hardcoded test IP");
+        let ctx = RequestContext {
+            ip,
+            path: "/".to_string(),
+            method: "GET".to_string(),
+            tls_fingerprint: None,
+            h2_fingerprint: None,
+            user_agent: None,
+            body_size: 0,
+            tenant_id: None,
+            api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
+        };
+        let _ = protector.evaluate(&ctx).await;
+        let _ = protector.evaluate(&ctx).await;
+        let _ = protector.evaluate(&ctx).await;
+        let score = protector
+            .reputation_db
+            .get(&ip)
+            .map(|e| e.score)
+            .expect("reputation entry exists");
+        assert!(
+            score < 50,
+            "missing-fingerprint penalty must lower reputation (score {score})"
+        );
+
+        // A suspicious (unparseable/short) fingerprint takes the full hit.
+        let suspicious: IpAddr = "203.0.113.61".parse().expect("hardcoded test IP");
+        let ctx = RequestContext {
+            ip: suspicious,
+            path: "/".to_string(),
+            method: "GET".to_string(),
+            tls_fingerprint: Some("short".to_string()),
+            h2_fingerprint: None,
+            user_agent: None,
+            body_size: 0,
+            tenant_id: None,
+            api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
+        };
+        let _ = protector.evaluate(&ctx).await;
+        let suspicious_score = protector
+            .reputation_db
+            .get(&suspicious)
+            .map(|e| e.score)
+            .expect("reputation entry exists");
+        assert_eq!(suspicious_score, 40, "suspicious fingerprint penalty is 10");
+    }
+
+    #[tokio::test]
+    async fn test_enable_per_ip_adaptive_is_enforced() {
+        // Audit F2c: the adaptive limiter is wired into the decide path.
+        // With per_ip_min_rpm = 60 (1 rps floor) a burst of >60 requests
+        // within the first minute from one IP must be rate limited.
+        let config = ProtectorConfig {
+            default_cost_budget: 10_000_000,
+            system_cost_capacity: 100_000_000,
+            block_threshold: 0, // isolate the adaptive layer
+            enable_per_ip_adaptive: true,
+            per_ip_min_rpm: 60,
+            per_ip_max_rpm: 6_000,
+            ..ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+
+        let ctx = RequestContext {
+            ip: "203.0.113.70".parse().expect("hardcoded test IP"),
+            path: "/v1/health".to_string(),
+            method: "GET".to_string(),
+            tls_fingerprint: None,
+            h2_fingerprint: None,
+            user_agent: None,
+            body_size: 0,
+            tenant_id: None,
+            api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
+        };
+
+        let mut limited = false;
+        for _ in 0..70 {
+            if matches!(
+                protector.evaluate(&ctx).await,
+                ProtectionDecision::RateLimit { .. }
+            ) {
+                limited = true;
+                break;
+            }
+        }
+        assert!(
+            limited,
+            "a >60 RPM burst must hit the adaptive per-IP limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_disabled_per_ip_adaptive_never_limits() {
+        // Flag off → the adaptive layer must not interfere.
+        let config = ProtectorConfig {
+            default_cost_budget: 10_000_000,
+            system_cost_capacity: 100_000_000,
+            block_threshold: 0,
+            enable_per_ip_adaptive: false,
+            per_ip_min_rpm: 1,
+            per_ip_max_rpm: 1,
+            ..ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+        assert!(protector.adaptive_limiter.is_none());
+
+        let ctx = RequestContext {
+            ip: "203.0.113.71".parse().expect("hardcoded test IP"),
+            path: "/v1/health".to_string(),
+            method: "GET".to_string(),
+            tls_fingerprint: None,
+            h2_fingerprint: None,
+            user_agent: None,
+            body_size: 0,
+            tenant_id: None,
+            api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
+        };
+        for _ in 0..10 {
+            assert!(matches!(
+                protector.evaluate(&ctx).await,
+                ProtectionDecision::Allow
+            ));
+        }
+    }
+
+    #[cfg(feature = "ml")]
+    #[tokio::test]
+    async fn test_anomaly_detector_is_constructed() {
+        // Audit F2a: the detector was previously always None, making the
+        // whole ML anomaly block dead code.
+        let protector = DdosProtector::new(ProtectorConfig::default())
+            .await
+            .expect("test should succeed");
+        assert!(
+            protector.anomaly_detector.is_some(),
+            "anomaly detector must be constructed in new()"
         );
     }
 }

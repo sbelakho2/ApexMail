@@ -92,6 +92,18 @@ final class MalformedRecordException extends \RuntimeException
         ));
     }
 
+    /**
+     * The optional decoy (honeypot) field name violated its alphabet
+     * `[A-Za-z0-9_-]{1,64}` — e.g. the canonical `|` separator, an
+     * identifier-shaped `.`, Unicode/whitespace, an empty string or an
+     * over-long name (the Rust validate_record mirror; none can alter the
+     * canonical segment structure).
+     */
+    public static function invalidDecoyField(): self
+    {
+        return new self('record field "decoy_field" must be 1-64 characters of [A-Za-z0-9_-]');
+    }
+
     public static function unexpectedNull(string $field): self
     {
         return new self(sprintf('record field "%s" must not be null', $field));

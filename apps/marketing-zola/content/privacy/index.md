@@ -17,9 +17,13 @@ Bel Consulting OÜ (trading as ApexMail) ("we", "us") is committed to protecting
 
 ## 2. Data We Collect
 
-- **Account data:** name, email, company, billing address.
-- **Usage data:** API calls, email sending volumes, delivery events.
-- **Technical data:** IP addresses, browser type, device information.
+- **Website visitors (marketing site):** IP address, browser type and user agent, device information, pages visited, referring URL, and timestamps — collected automatically from server access logs. The marketing site runs no analytics scripts and embeds no tracking pixels or advertising cookies.
+- **Prospects:** name, email address, company name, phone number (if provided), and communication history, provided via contact forms or email.
+- **Account data:** name, email, company, billing address, VAT number, payment method tokens (card details are processed by Stripe and never reach our servers), API key metadata, login timestamps, IP addresses, and audit log entries.
+- **Usage data:** API calls, email sending volumes, delivery events, and engagement events (opens and clicks) for messages you send.
+- **Recipient data (as processor for our customers):** recipient email addresses and names, email content (subject, body, headers, attachments), and delivery and engagement metadata. When tracking is enabled by the sending customer, open and click events also record the recipient's IP address and user agent.
+- **Technical data:** IP addresses (used for authentication, rate limiting, and fraud and abuse prevention), browser type, device information.
+- **AI processing:** when you use optional AI-assisted features, the subject lines and message content you submit are processed to generate the requested analysis (for example, subject-line insights).
 
 ## 3. Legal Basis
 
@@ -48,8 +52,8 @@ We retain personal data only as long as necessary for the purposes for which it 
 |---------------|-----------------|
 | Account data | Duration of contract + 30 days |
 | Billing records | 7 years (Estonian accounting law) |
-| Email content | 30 days (configurable up to 90 days for Enterprise) |
-| Event logs | 90 days (730 days for Enterprise) |
+| Email content (body, subject, headers, attachments) | 7 days by default; plan-dependent maximum (from 1 day on the Free plan up to 365 days on Enterprise) |
+| Event logs (delivery, open, and click events) | 30 days by default; plan-dependent maximum (up to 365 days on Enterprise) |
 | Support tickets | 2 years after resolution |
 
 See our [Data Retention Policy](/compliance/#data-retention) for full details.

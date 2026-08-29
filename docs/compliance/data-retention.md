@@ -29,18 +29,18 @@ Hetzner infrastructure (EU).
 
 ### 3.1 Customer-Generated Data
 
-| Data Category | Default Retention | Enterprise Retention | Notes |
+| Data Category | Default Retention | Plan-Dependent Retention | Notes |
 |---------------|-------------------|---------------------|-------|
-| **Email content** (body, subject, headers) | 30 days after send | Configurable (up to 90 days) | Stored in PostgreSQL. Purged automatically. |
+| **Email content** (body, subject, headers) | 7 days after send | 1 day (Free) to 365 days (Enterprise), plan-dependent | Stored in PostgreSQL. Purged automatically. Retention registry categories RET-001/002/005: default 7 days, customer-selectable up to 90 days, Enterprise limit 365 days. |
 | **Recipient lists** | Duration of contract | Duration of contract | Deleted within 30 days of account closure. |
 | **Email templates** | Duration of contract | Duration of contract | Part of account data. |
-| **Attachments / hosted images** | 30 days after send | Configurable (up to 90 days) | Stored in object storage. |
+| **Attachments / hosted images** | 7 days after send | Same plan-dependent limits as email content (RET-006) | Stored in object storage. |
 
 ### 3.2 Event and Analytics Data
 
-| Data Category | Default Retention | Enterprise Retention | Notes |
+| Data Category | Default Retention | Plan-Dependent Retention | Notes |
 |---------------|-------------------|---------------------|-------|
-| **Event logs** (sends, deliveries, bounces, opens, clicks) | 90 days | 730 days | Contains recipient identifiers (hashed after aggregation). |
+| **Event logs** (sends, deliveries, bounces, opens, clicks) | 30 days | Up to 365 days, plan-dependent (RET-007/009/010) | Contains recipient identifiers (hashed after aggregation). |
 | **Analytics aggregates** (campaign stats, trends) | 2 years | 2 years | Anonymised/aggregated. No PII. |
 | **Webhook delivery logs** | 30 days | 90 days | Contains endpoint URLs and response codes. |
 | **API request logs** | 30 days | 90 days | Contains API keys (masked) and request metadata. |

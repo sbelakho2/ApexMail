@@ -40,7 +40,7 @@ import javax.crypto.spec.SecretKeySpec;
  *   ApexMailClient client = new ApexMailClient("am_your_api_key");
  *   Map&lt;String, Object&gt; result = client.emails().send(Map.of(
  *       "from",    "Sender &lt;hello@example.com&gt;",
- *       "to",      "user@example.com",
+ *       "to",      java.util.List.of("user@example.com"),
  *       "subject", "Hello from ApexMail",
  *       "html",    "&lt;p&gt;Hello!&lt;/p&gt;"
  *   ));
@@ -241,7 +241,8 @@ public final class ApexMailClient implements AutoCloseable {
     <T> T request(String method, String path, Object body, Class<T> responseType,
                           String idempotencyKey) {
         String jsonBody = serializeBody(body);
-        TransportResponse transport = execute(method, path, jsonBody, idempotencyKey);
+        TransportResponse transport = execute(method, path, jsonBody,
+            autoIdempotencyKey(method, jsonBody, idempotencyKey));
 
         if (responseType == Void.class || transport.body() == null || transport.body().isBlank()) {
             return null;
@@ -262,7 +263,8 @@ public final class ApexMailClient implements AutoCloseable {
     <T> T request(String method, String path, Object body, TypeReference<T> responseType,
                           String idempotencyKey) {
         String jsonBody = serializeBody(body);
-        TransportResponse transport = execute(method, path, jsonBody, idempotencyKey);
+        TransportResponse transport = execute(method, path, jsonBody,
+            autoIdempotencyKey(method, jsonBody, idempotencyKey));
 
         if (transport.body() == null || transport.body().isBlank()) {
             return null;
@@ -274,6 +276,24 @@ public final class ApexMailClient implements AutoCloseable {
                 "Failed to parse response body: " + e.getMessage(),
                 "PARSE_ERROR", transport.status(), null, e);
         }
+    }
+
+    /**
+     * Duplicate-side-effect protection for mutating POSTs (SDK-B, matching
+     * the PHP SDK): a POST that times out AFTER the server processed it
+     * retries blind — creating a second webhook/template/API key. Every
+     * non-idempotent request with a body gets a UUID generated BEFORE the
+     * retry loop, so all attempts of the same logical operation present
+     * the same key and the server can deduplicate.
+     */
+    private static String autoIdempotencyKey(String method, String jsonBody, String idempotencyKey) {
+        if (idempotencyKey != null && !idempotencyKey.isBlank()) {
+            return idempotencyKey;
+        }
+        if ("POST".equalsIgnoreCase(method) && jsonBody != null && !jsonBody.isEmpty()) {
+            return java.util.UUID.randomUUID().toString();
+        }
+        return null;
     }
 
     /**
@@ -297,12 +317,21 @@ public final class ApexMailClient implements AutoCloseable {
 
     /**
      * Run the HTTP request with retries (transport errors, 429, 5xx).
-     * The whole loop is bounded by a deadline derived from the configured
-     * timeout (SDK-E: previously the loop could run unbounded).
+     *
+     * <p>The retry budget bounds the REQUESTS, not the sleeps (F9): an
+     * honored Retry-After — capped at {@link #DEFAULT_MAX_RETRY_AFTER}
+     * (120s) by {@link #retryDelay} — is allowed to elapse in full even
+     * when it exceeds the configured per-request timeout. The previous
+     * loop-level deadline threw RETRY_TIMEOUT before sleeping, so any
+     * Retry-After near 120s could never execute. Individual requests are
+     * still bounded by the configured timeout (see buildRequest), and a
+     * terminal 429 surfaces as the typed RateLimitException, never a
+     * generic network error.
      */
     private TransportResponse execute(String method, String path, String jsonBody, String idempotencyKey) {
         int attempt = 0;
-        // Overall budget for all attempts of this call, including retry sleeps.
+        // Overall budget for the REQUEST ATTEMPTS of this call (the sleeps
+        // between them are excluded on purpose — see the javadoc above).
         long deadlineNanos = System.nanoTime()
             + this.timeout.multipliedBy(DEFAULT_MAX_RETRIES + 1L).toNanos();
 
@@ -325,12 +354,10 @@ public final class ApexMailClient implements AutoCloseable {
 
                 if ((status == 429 || status >= 500) && attempt < DEFAULT_MAX_RETRIES) {
                     Duration delay = retryDelay(response, attempt);
-                    if (System.nanoTime() + delay.toNanos() > deadlineNanos) {
-                        throw new ApexMailException(
-                            "Retry budget exhausted before retry #" + (attempt + 1) + " of " + method + " " + path,
-                            "RETRY_TIMEOUT", 0, null);
-                    }
-                    waitForRetry(delay);
+                    // The delay is already capped at 120s; let it run —
+                    // checking it against the request budget here would
+                    // defeat honoring the server's Retry-After.
+                    waitForRetry(jittered(delay));
                     attempt++;
                     continue;
                 }
@@ -470,6 +497,37 @@ public final class ApexMailClient implements AutoCloseable {
         String secret,
         Duration tolerance
     ) {
+        return verifyWebhookSignature(payload, signatureHeader, secret, tolerance, null);
+    }
+
+    public static boolean verifyWebhookSignature(String payload, String signatureHeader, String secret) {
+        return verifyWebhookSignature(payload, signatureHeader, secret, Duration.ofMinutes(5), null);
+    }
+
+    /**
+     * Validates a webhook signature in the platform's exact wire format
+     * (worker-processors/src/webhook/processor.rs):
+     *
+     * <pre>
+     *   X-ApexMail-Signature: sha256=&lt;hex hmac-sha256&gt;
+     *   X-ApexMail-Timestamp: &lt;milliseconds since epoch&gt;
+     *   signed message: "{timestamp_millis}.{payload}"
+     * </pre>
+     *
+     * Pass the {@code X-ApexMail-Timestamp} header in {@code timestampHeader}
+     * — the platform sends milliseconds (auto-detected and compared against
+     * {@code System.currentTimeMillis()}), and the signed string always uses
+     * the timestamp digits verbatim. The legacy combined header form
+     * {@code "t=<seconds>,v1=<hex>"} remains supported when no separate
+     * timestamp header is given.
+     */
+    public static boolean verifyWebhookSignature(
+        String payload,
+        String signatureHeader,
+        String secret,
+        Duration tolerance,
+        String timestampHeader
+    ) {
         if (payload == null || signatureHeader == null || signatureHeader.isBlank() || secret == null || secret.isBlank()) {
             return false;
         }
@@ -477,23 +535,43 @@ public final class ApexMailClient implements AutoCloseable {
         if (parts.signature() == null || parts.signature().isBlank()) {
             return false;
         }
-        // SDK-E: a missing or malformed `t=` component must be rejected.
-        // Substituting "now" for a missing timestamp made the tolerance
-        // window vacuous (any signature signed with the current second
-        // verified).
-        if (parts.timestamp() == null) {
+        // SDK-E: a missing timestamp (neither the platform
+        // X-ApexMail-Timestamp header nor a legacy t= field) must be
+        // rejected — substituting "now" made the tolerance window vacuous.
+        String timestampText = timestampHeader != null && !timestampHeader.isBlank()
+            ? timestampHeader.trim()
+            : parts.timestampText();
+        if (timestampText == null || timestampText.isBlank()) {
             return false;
         }
-        long timestamp = parts.timestamp();
+        long timestamp;
+        try {
+            timestamp = Long.parseLong(timestampText);
+        } catch (NumberFormatException error) {
+            return false;
+        }
         long toleranceSeconds = tolerance != null ? tolerance.getSeconds() : 300L;
-        if (Math.abs((System.currentTimeMillis() / 1000L) - timestamp) > toleranceSeconds) {
+        // Auto-detect seconds vs milliseconds: the platform sends ms.
+        long now;
+        long toleranceLimit;
+        if (timestamp > MS_DETECTION_CUTOFF) {
+            now = System.currentTimeMillis();
+            toleranceLimit = toleranceSeconds * 1000L;
+        } else {
+            now = System.currentTimeMillis() / 1000L;
+            toleranceLimit = toleranceSeconds;
+        }
+        if (Math.abs(now - timestamp) > toleranceLimit) {
             return false;
         }
 
         try {
             Mac mac = Mac.getInstance("HmacSHA256");
             mac.init(new SecretKeySpec(secret.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            byte[] expected = toHex(mac.doFinal((timestamp + "." + payload).getBytes(StandardCharsets.UTF_8))).getBytes(StandardCharsets.UTF_8);
+            // Sign with the timestamp digits EXACTLY as delivered (ms on
+            // the platform path) — never a normalized form.
+            byte[] expected = toHex(mac.doFinal((timestampText + "." + payload).getBytes(StandardCharsets.UTF_8)))
+                .getBytes(StandardCharsets.UTF_8);
             byte[] supplied = parts.signature().getBytes(StandardCharsets.UTF_8);
             return MessageDigest.isEqual(expected, supplied);
         } catch (Exception error) {
@@ -501,9 +579,8 @@ public final class ApexMailClient implements AutoCloseable {
         }
     }
 
-    public static boolean verifyWebhookSignature(String payload, String signatureHeader, String secret) {
-        return verifyWebhookSignature(payload, signatureHeader, secret, Duration.ofMinutes(5));
-    }
+    /** Timestamps above this cannot be epoch seconds (2001-09-09); below it they cannot be epoch ms. */
+    private static final long MS_DETECTION_CUTOFF = 1_000_000_000_000L;
 
     private static String toHex(byte[] bytes) {
         StringBuilder builder = new StringBuilder(bytes.length * 2);
@@ -536,9 +613,9 @@ public final class ApexMailClient implements AutoCloseable {
         }
     }
 
-    private record SignatureParts(Long timestamp, String signature) {
+    private record SignatureParts(String timestampText, String signature) {
         static SignatureParts parse(String header) {
-            Long timestamp = null;
+            String timestampText = null;
             String signature = null;
             for (String part : header.split(",")) {
                 String trimmed = part.trim();
@@ -547,20 +624,19 @@ public final class ApexMailClient implements AutoCloseable {
                     String key = trimmed.substring(0, sep);
                     String value = trimmed.substring(sep + 1);
                     if ("t".equals(key)) {
-                        try {
-                            timestamp = Long.parseLong(value);
-                        } catch (NumberFormatException ignored) {
+                        if (value.isBlank() || !value.chars().allMatch(Character::isDigit)) {
                             return new SignatureParts(null, null);
                         }
+                        timestampText = value;
                     } else if ("v1".equals(key)) {
                         signature = value;
                     }
                 }
             }
             if (signature == null) {
-                signature = header.startsWith("sha256=") ? header.substring("sha256=".length()) : header.trim();
+                signature = header.startsWith("sha256=") ? header.substring("sha256=".length()).trim() : header.trim();
             }
-            return new SignatureParts(timestamp, signature);
+            return new SignatureParts(timestampText, signature);
         }
     }
 
@@ -599,8 +675,11 @@ public final class ApexMailClient implements AutoCloseable {
             }
         }
 
-        // Compute quadratic backoff: baseDelay * attempt²
-        long backoffMillis = DEFAULT_INITIAL_BACKOFF.toMillis() * (long) (attempt * attempt);
+        // Compute quadratic backoff: baseDelay * max(1, attempt)² — the
+        // first retry must use the base delay, not 0 (F8: a 0-based
+        // exponent produced a 0s delay, an immediate hammer at a server
+        // that had just said "slow down").
+        long backoffMillis = DEFAULT_INITIAL_BACKOFF.toMillis() * (long) (Math.max(1, attempt) * Math.max(1, attempt));
 
         // Use max(retryAfter, quadraticBackoff), then cap at 120s
         if (retryAfterSeconds > 0) {
@@ -618,11 +697,13 @@ public final class ApexMailClient implements AutoCloseable {
     /**
      * Quadratic backoff used when no Retry-After header is available
      * (e.g. on network-level IO errors).
-     * Formula: {@code baseDelay * attempt²}, capped at {@link #DEFAULT_MAX_BACKOFF}.
+     * Formula: {@code baseDelay * max(1, attempt)²}, capped at
+     * {@link #DEFAULT_MAX_BACKOFF} — the first retry always waits at least
+     * the base delay (F8).
      */
     private static Duration calculateBackoff(int attempt) {
-        if (attempt < 0) {
-            attempt = 0;
+        if (attempt < 1) {
+            attempt = 1;
         }
         if (attempt > 30) {
             attempt = 30;
@@ -646,7 +727,18 @@ public final class ApexMailClient implements AutoCloseable {
             .header("User-Agent", "apexmail-java/1.0.0");
 
         if (idempotencyKey != null && !idempotencyKey.isBlank()) {
-            builder.header("X-Idempotency-Key", idempotencyKey);
+            // Header injection: strip control characters (CR/LF/NUL) from
+            // caller-supplied keys before they reach the transport.
+            String safeKey = idempotencyKey.codePoints()
+                .filter(cp -> cp >= 0x20 && cp != 0x7F)
+                .collect(StringBuilder::new, StringBuilder::appendCodePoint, StringBuilder::append)
+                .toString();
+            if (safeKey.length() > 128) {
+                safeKey = safeKey.substring(0, 128);
+            }
+            if (!safeKey.isBlank()) {
+                builder.header("X-Idempotency-Key", safeKey);
+            }
         }
 
         HttpRequest.BodyPublisher publisher =
@@ -663,15 +755,33 @@ public final class ApexMailClient implements AutoCloseable {
         }
     }
 
-    private void waitForRetry(Duration delay) throws InterruptedException {
+    private static void waitForRetry(Duration delay) throws InterruptedException {
         if (delay == null || delay.isNegative() || delay.isZero()) {
             return;
         }
         Thread.sleep(delay.toMillis());
     }
 
-    private void sleepBackoff(int attempt) throws InterruptedException {
-        waitForRetry(calculateBackoff(attempt));
+    private static void sleepBackoff(int attempt) throws InterruptedException {
+        waitForRetry(jittered(calculateBackoff(attempt)));
+    }
+
+    /**
+     * Applies up to ±20% jitter so clients retrying in lockstep spread out
+     * (thundering herd). The delay is never shortened by more than 20%, so
+     * an honored Retry-After window is preserved.
+     */
+    private static Duration jittered(Duration delay) {
+        if (delay.isZero() || delay.isNegative()) {
+            return delay;
+        }
+        long jitterNanos = delay.dividedBy(5).toNanos();
+        if (jitterNanos <= 0) {
+            jitterNanos = 1;
+        }
+        long delta = (long) ((Math.random() * 2 - 1) * jitterNanos);
+        long result = delay.toNanos() + delta;
+        return result < 0 ? Duration.ZERO : Duration.ofNanos(result);
     }
 
     @Override

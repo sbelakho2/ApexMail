@@ -283,6 +283,11 @@ pub fn ingest_security_event(event: SecurityEvent) -> Option<CompositeAlert> {
 /// Prometheus: total number of events dropped by the correlator (rate-limited or evicted).
 static CORRELATOR_DROPPED_EVENTS: AtomicU64 = AtomicU64::new(0);
 
+/// Bounded retries for the rate-limit epoch transition in
+/// [`SecurityCorrelator::check_rate_limit`] before falling back to counting
+/// in the observed epoch.
+const EPOCH_TRANSITION_RETRIES: usize = 8;
+
 /// Returns the total number of events the correlator has dropped due to rate
 /// limiting or IP-eviction since process start. Exposed as a Prometheus gauge.
 pub fn correlator_dropped_event_count() -> u64 {
@@ -407,25 +412,39 @@ impl SecurityCorrelator {
     }
 
     /// Atomic rate limiting check. Returns true if under rate cap.
+    ///
+    /// Every admitted event is COUNTED. On an epoch transition the CAS loser
+    /// retries into whichever epoch won, instead of the old behaviour of
+    /// returning true uncounted (which admitted up to one uncounted event per
+    /// racing thread each second boundary). After a bounded retry budget
+    /// (sustained contention / clock flapping) the event is counted in the
+    /// epoch it observes — still never admitted uncounted.
     #[inline]
     fn check_rate_limit(&self) -> bool {
         let now = Utc::now().timestamp() as u64;
-        let current_epoch = self.rate_epoch.load(Ordering::Relaxed);
 
-        if current_epoch != now {
-            // Try to advance epoch (only one writer wins)
+        for _ in 0..EPOCH_TRANSITION_RETRIES {
+            let current_epoch = self.rate_epoch.load(Ordering::Acquire);
+            if current_epoch == now {
+                let count = self.rate_count.fetch_add(1, Ordering::Relaxed);
+                return count < self.rate_cap_per_sec;
+            }
             if self
                 .rate_epoch
-                .compare_exchange(current_epoch, now, Ordering::AcqRel, Ordering::Relaxed)
+                .compare_exchange(current_epoch, now, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
+                // Winner of the transition opens the new epoch with this
+                // event already counted.
                 self.rate_count.store(1, Ordering::Relaxed);
+                return true;
             }
-            true
-        } else {
-            let count = self.rate_count.fetch_add(1, Ordering::Relaxed);
-            count < self.rate_cap_per_sec
+            // Lost the race — the epoch moved under us; retry so this event
+            // is counted in the new epoch.
         }
+
+        let count = self.rate_count.fetch_add(1, Ordering::Relaxed);
+        count < self.rate_cap_per_sec
     }
 
     /// Ingest a security event. Returns a CompositeAlert if the event causes
@@ -505,9 +524,23 @@ impl SecurityCorrelator {
         // Keep the eviction index current for this IP. The index is lazy:
         // entries whose counts later drift (trim/purge/eviction) are
         // revalidated against the live map when eviction runs.
-        self.eviction_index
-            .lock()
-            .push(Reverse((final_len, ip.clone())));
+        //
+        // One push per ingest would grow the heap O(total events) — eviction
+        // only ever pops at IP capacity. Rebuilding from the live map once
+        // stale duplicates exceed 2×max_tracked_ips keeps index memory
+        // O(tracked IPs). (Safe under the lock order: no caller holds a map
+        // shard lock while acquiring the index lock.)
+        {
+            let mut index = self.eviction_index.lock();
+            index.push(Reverse((final_len, ip.clone())));
+            if index.len() > self.max_tracked_ips.saturating_mul(2) {
+                *index = self
+                    .ip_events
+                    .iter()
+                    .map(|entry| Reverse((entry.value().len(), entry.key().clone())))
+                    .collect();
+            }
+        }
 
         // Check correlation:how many distinct systems have flagged this IP?
         // (Owned copies: the entry guard above is already released; a short
@@ -976,6 +1009,38 @@ mod tests {
         );
         assert!(correlator.ip_events.contains_key("10.0.0.5"));
         assert!(!correlator.ip_events.contains_key("10.0.0.4"));
+    }
+
+    #[test]
+    fn eviction_index_stays_bounded_below_ip_capacity() {
+        // 10k events across 3 IPs, far below the 100-IP capacity: the lazy
+        // eviction index must stay O(tracked IPs) (bounded at 2× capacity),
+        // not O(total events) — one push per ingest used to grow it by one
+        // entry per event with pops only at capacity.
+        let max_tracked_ips = 100;
+        let correlator = SecurityCorrelator::with_limits(50, max_tracked_ips, 1_000_000);
+        let ips = ["10.0.0.1", "10.0.0.2", "10.0.0.3"];
+        for i in 0..10_000 {
+            correlator.ingest(event(
+                SecuritySystem::Waf,
+                SecurityAction::Monitor,
+                "src_ip",
+                ips[i % ips.len()],
+                3.0,
+            ));
+        }
+        assert_eq!(correlator.tracked_ip_count(), 3);
+        let heap_len = correlator.eviction_index.lock().len();
+        assert!(
+            heap_len <= 2 * max_tracked_ips,
+            "eviction index must stay bounded at 2×max_tracked_ips, got {heap_len}"
+        );
+        // The rebuild keeps one entry per tracked IP — the heap still covers
+        // every evictable IP.
+        assert!(
+            heap_len >= 3,
+            "heap must cover all tracked IPs, got {heap_len}"
+        );
     }
 
     #[test]

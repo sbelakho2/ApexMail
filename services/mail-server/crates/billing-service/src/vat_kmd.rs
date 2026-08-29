@@ -465,7 +465,11 @@ pub async fn generate_kmd_return(
                 taxable_amount_cents: *taxable,
                 vat_amount_cents: *vat,
                 reason: reason.map(|s| s.to_string()),
-                invoice_count: 1,
+                // Fix F7 — initialize consistently with the merge branch:
+                // start at 0 and add the group's OWN invoice count. The
+                // previous hardcoded `1` overstated single-invoice groups
+                // (and multi-row groups) whenever the count itself wasn't 1.
+                invoice_count: *invoice_count,
             });
         }
     }

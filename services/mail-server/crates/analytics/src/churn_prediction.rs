@@ -2,8 +2,9 @@
 
 use anyhow::Context as _;
 use chrono::{Duration, Utc};
+use serde::{Deserialize, Serialize};
 
-use crate::email_hash::hash_email;
+use crate::email_hash::hash_for_analytics;
 use crate::types::*;
 
 /// Signal weights.
@@ -15,6 +16,29 @@ const DECAY_WEIGHT: f64 = 20.0;
 /// Sigmoid midpoint and steepness.
 const SIGMOID_MIDPOINT: f64 = 50.0;
 const SIGMOID_STEEPNESS: f64 = 15.0;
+
+/// F10:the Redis-cached form of a churn prediction.
+///
+/// Redis is an external store, so the cache carries ONLY the salted
+/// identifier plus the prediction payload — never the raw email (which the
+/// caller already has and gets back on the returned [`ChurnPrediction`]).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CachedChurnPrediction {
+    email_hash: String,
+    tenant_id: String,
+    probability: f64,
+    risk_tier: RiskTier,
+    signals: Vec<ChurnSignal>,
+    engagement_velocity: f64,
+    predicted_at: chrono::DateTime<Utc>,
+}
+
+/// F10:salted, tenant-scoped cache key — the crate's configured-key hash
+/// (`ANALYTICS_STO_HMAC_KEY`, see [`crate::email_hash`]) instead of the old
+/// unsalted SHA-256 (rainbow-tableable), with no raw email in the key.
+fn churn_cache_key(tenant_id: &str, email: &str) -> String {
+    format!("churn:{}:{}", tenant_id, hash_for_analytics(email))
+}
 
 pub struct ChurnPredictionEngine {
     pool: sqlx::PgPool,
@@ -30,12 +54,22 @@ impl ChurnPredictionEngine {
     /// `tenant_id` is required to scope all queries to the correct tenant,
     /// preventing cross-tenant data leakage.
     pub async fn predict(&self, tenant_id: &str, email: &str) -> anyhow::Result<ChurnPrediction> {
-        // Include tenant_id in cache key to prevent cross-tenant cache poisoning
-        let cache_key = format!("churn:{}:{}", tenant_id, hash_email(email, ""));
+        // F10:salted hash + tenant scope prevent both cache poisoning and
+        // rainbow-table recovery of the raw email from the key.
+        let cache_key = churn_cache_key(tenant_id, email);
 
-        // Check cache (6h TTL)
+        // Check cache (6h TTL). The cached form carries no raw email (F10);
+        // the caller-supplied address is re-attached on return.
         if let Ok(cached) = self.get_cached(&cache_key).await {
-            return Ok(cached);
+            return Ok(ChurnPrediction {
+                email: email.to_string(),
+                tenant_id: cached.tenant_id,
+                probability: cached.probability,
+                risk_tier: cached.risk_tier,
+                signals: cached.signals,
+                engagement_velocity: cached.engagement_velocity,
+                predicted_at: cached.predicted_at,
+            });
         }
 
         let signals = self.compute_signals(tenant_id, email).await?;
@@ -198,17 +232,28 @@ impl ChurnPredictionEngine {
         Ok((current as f64 - previous as f64) / previous as f64)
     }
 
-    async fn get_cached(&self, key: &str) -> anyhow::Result<ChurnPrediction> {
+    /// F10:fetches the hashed-identifier cache form (no raw email).
+    async fn get_cached(&self, key: &str) -> anyhow::Result<CachedChurnPrediction> {
         let mut conn = self.redis.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
         let val: String = redis::cmd("GET").arg(key).query_async(&mut *conn).await?;
         Ok(serde_json::from_str(&val)?)
     }
 
+    /// F10:stores the hashed-identifier cache form (no raw email).
     async fn set_cached(&self, key: &str, val: &ChurnPrediction, ttl: u64) -> anyhow::Result<()> {
         let mut conn = self.redis.get().await.map_err(|e| anyhow::anyhow!("{e}"))?;
+        let cached = CachedChurnPrediction {
+            email_hash: hash_for_analytics(&val.email),
+            tenant_id: val.tenant_id.clone(),
+            probability: val.probability,
+            risk_tier: val.risk_tier,
+            signals: val.signals.clone(),
+            engagement_velocity: val.engagement_velocity,
+            predicted_at: val.predicted_at,
+        };
         redis::cmd("SET")
             .arg(key)
-            .arg(serde_json::to_string(val)?)
+            .arg(serde_json::to_string(&cached)?)
             .arg("EX")
             .arg(ttl)
             .query_async::<()>(&mut *conn)
@@ -352,5 +397,54 @@ mod tests {
         assert!(matches!(RiskTier::from_score(0.35), RiskTier::Medium));
         assert!(matches!(RiskTier::from_score(0.55), RiskTier::High));
         assert!(matches!(RiskTier::from_score(0.85), RiskTier::Critical));
+    }
+
+    // ── F10:cache key + hashed-only cache payload ───────────────────────
+
+    #[test]
+    fn test_cache_key_contains_no_raw_email_and_is_tenant_scoped() {
+        let key = churn_cache_key("tenant_a", "carol@example.com");
+        assert!(!key.contains("carol"), "raw email leaked into key: {key}");
+        assert!(key.starts_with("churn:tenant_a:"));
+        // Deterministic for the same inputs, different across tenants.
+        assert_eq!(key, churn_cache_key("tenant_a", "carol@example.com"));
+        assert_ne!(key, churn_cache_key("tenant_b", "carol@example.com"));
+    }
+
+    #[test]
+    fn test_cache_key_is_salted_not_bare_sha256() {
+        // The old key hashed with a bare (unsalted) SHA-256; the configured
+        // HMAC key must produce a different digest than the bare hash.
+        let bare = crate::email_hash::hash_email("carol@example.com", "");
+        let key = churn_cache_key("tenant_a", "carol@example.com");
+        assert!(!key.contains(&bare), "cache key must not use the bare hash");
+    }
+
+    #[test]
+    fn test_cached_payload_roundtrips_without_raw_email() {
+        let cached = CachedChurnPrediction {
+            email_hash: hash_for_analytics("carol@example.com"),
+            tenant_id: "tenant_a".into(),
+            probability: 0.42,
+            risk_tier: RiskTier::Medium,
+            signals: vec![ChurnSignal {
+                name: "bounce".into(),
+                value: 0.5,
+                weight: 25.0,
+            }],
+            engagement_velocity: -0.25,
+            predicted_at: Utc::now(),
+        };
+        let json = serde_json::to_string(&cached).unwrap();
+        assert!(
+            !json.contains("carol@example.com"),
+            "raw email must not be cached: {json}"
+        );
+        assert!(!json.contains("\"email\":"), "no raw-email field: {json}");
+
+        let back: CachedChurnPrediction = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.probability, 0.42);
+        assert_eq!(back.signals.len(), 1);
+        assert!(matches!(back.risk_tier, RiskTier::Medium));
     }
 }

@@ -427,7 +427,10 @@ impl FailoverService {
         let duration_ms = (completed_at - started_at).num_milliseconds().max(0);
         // B.3: data_loss is only reported as false WITH lag evidence; a
         // forced failback records the missing evidence in metadata instead
-        // of silently claiming zero loss.
+        // of silently claiming zero loss. The flag matches
+        // `initiate_failover`'s semantics (true when lag was NOT verified)
+        // — it was previously inverted, so a verified-good failback was
+        // recorded as lossy and a forced, unverified one as loss-free.
         let event = FailoverEvent {
             id: Uuid::new_v4(),
             from_node: current,
@@ -438,7 +441,7 @@ impl FailoverService {
             started_at,
             completed_at: Some(completed_at),
             duration_ms: Some(duration_ms),
-            data_loss: lag_verified.is_some(),
+            data_loss: lag_verified.is_none(),
             metadata: Some(serde_json::json!({
                 "forced": force && lag_verified.is_none(),
                 "lag_verified_ms": lag_verified,
@@ -1581,8 +1584,14 @@ mod tests {
                 .expect("forced failback");
             assert_eq!(svc.get_state().await, FailoverState::Normal);
             assert_eq!(*svc.primary_node.read().await, "node-primary");
-            // Forced failback has no evidence: data_loss must NOT be claimed false.
-            assert!(!event.data_loss);
+            // Forced failback has no lag evidence: data_loss must be TRUE.
+            // (Updated for the F6 inversion fix — this assertion previously
+            // pinned the inverted `lag_verified.is_some()` value, which
+            // contradicted its own "must NOT be claimed false" comment.)
+            assert!(
+                event.data_loss,
+                "forced failback without verified lag must be recorded as data loss"
+            );
             assert_eq!(event.metadata.unwrap()["forced"], serde_json::json!(true));
             // Claims swapped and the original's fence cleared; lock released.
             assert!(redis_get(redis.port, "ha:primary:node-primary")

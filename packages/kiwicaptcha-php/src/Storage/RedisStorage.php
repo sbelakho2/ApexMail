@@ -40,9 +40,12 @@ use KiwiCaptcha\ResumeDerivationClaimInterface;
  * acknowledged-writes-can-never-vanish must back the one-shot security
  * state with a consensus-capable store instead.
  *
- * - phpredis (\Redis): eval() with the script.
- * - Predis: eval() (the same script; the server must support Lua, i.e.
- *   any Redis >= 2.6).
+ * - phpredis (\Redis): evalSha() with the script's sha1 (SCRIPT LOAD
+ *   once per script, sha cached per storage instance); a NOSCRIPT
+ *   reply falls back to one plain eval() that ships the body.
+ * - Predis: evalsha() the same way (the server must support Lua, i.e.
+ *   any Redis >= 2.6); a NOSCRIPT ServerException re-runs SCRIPT LOAD
+ *   once and retries evalsha().
  *
  * Records are stored as JSON in the canonical `ChallengeRecord` wire
  * keys schema, which is language-neutral: a Rust service using the same
@@ -626,50 +629,7 @@ LUA;
      */
     public function consume(string $nonce): ?ConsumedRecord
     {
-        $key = $this->prefix.$nonce;
-        $raw = $this->evalScript(self::CONSUME_SCRIPT, [$key, ''], 1);
-        if ($raw === false || $raw === null || !\is_array($raw)) {
-            return null;
-        }
-
-        // Lua tables are 1-indexed; normalize before destructuring.
-        $parts = array_values($raw);
-        if (\count($parts) < 4) {
-            return null;
-        }
-        [$json, $consumedNow, $consumedBefore, $resultBinding] = $parts;
-
-        // Durability barrier: the verified WAIT runs only when the
-        // pending→consumed transition actually happened (consumedNow) —
-        // the write the barrier exists to replicate. An already-consumed
-        // replay or a missing record performed no write, so no WAIT is
-        // issued: an idempotent retry must not turn a replica outage
-        // into a storage failure. The WAIT acknowledgement count proves
-        // that at least the configured number of replicas received the
-        // write; it does not constrain which replicas a future failover
-        // manager promotes. Replay-safe promotion additionally requires
-        // the threshold to cover every eligible failover target or
-        // promotion gating.
-        if ($this->waitReplicas > 0 && (bool) $consumedNow) {
-            $this->waitAndVerify('the pending→consumed transition');
-        }
-
-        $record = $this->decode((string) $json);
-        if ($record === null) {
-            return null;
-        }
-        $result = null;
-        if ((string) $resultBinding !== 'null' && (string) $resultBinding !== '') {
-            $obj = json_decode((string) $resultBinding, true);
-            if (\is_array($obj)) {
-                $result = new ConsumedResult(
-                    (int) ($obj['valid'] ?? 0) === 1,
-                    \is_string($obj['binding'] ?? null) ? $obj['binding'] : null,
-                );
-            }
-        }
-
-        return new ConsumedRecord($record, (bool) $consumedNow, (bool) $consumedBefore, $result, $this->decodeIdentity((string) $json));
+        return $this->doConsume($nonce, '');
     }
 
     /**
@@ -683,7 +643,6 @@ LUA;
      */
     public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?ConsumedRecord
     {
-        $key = $this->prefix.$nonce;
         // The identity is validated against the narrow shared alphabet,
         // see {@see OperationIdentity::validate()} (1..128 bytes of
         // [A-Za-z0-9_-]), before it can reach the Lua splice. A malformed
@@ -696,6 +655,21 @@ LUA;
         if ($validated !== null) {
             $identityArg = json_encode($validated, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
         }
+
+        return $this->doConsume($nonce, $identityArg);
+    }
+
+    /**
+     * The shared consume implementation of both public entry points
+     * (the plain consume passes '' as the identity argument, which the
+     * Lua leaves untouched). The returned envelope is parsed ONCE by
+     * {@see self::decodeEnvelope()}: the ChallengeRecord, the committed
+     * result and the recorded operation identity are all derived from
+     * a single json_decode of the same bytes.
+     */
+    private function doConsume(string $nonce, string $identityArg): ?ConsumedRecord
+    {
+        $key = $this->prefix.$nonce;
         $raw = $this->evalScript(self::CONSUME_SCRIPT, [$key, $identityArg], 1);
         if ($raw === false || $raw === null || !\is_array($raw)) {
             return null;
@@ -723,8 +697,8 @@ LUA;
             $this->waitAndVerify('the pending→consumed transition');
         }
 
-        $record = $this->decode((string) $json);
-        if ($record === null) {
+        $envelope = $this->decodeEnvelope((string) $json);
+        if ($envelope === null) {
             return null;
         }
         $result = null;
@@ -738,7 +712,7 @@ LUA;
             }
         }
 
-        return new ConsumedRecord($record, (bool) $consumedNow, (bool) $consumedBefore, $result, $this->decodeIdentity((string) $json));
+        return new ConsumedRecord($envelope['record'], (bool) $consumedNow, (bool) $consumedBefore, $result, $envelope['identity']);
     }
 
     public function consumedState(string $nonce): ?ConsumedRecord
@@ -763,8 +737,8 @@ LUA;
      */
     private function decodeConsumedEnvelope(string $raw): ?ConsumedRecord
     {
-        $record = $this->decode($raw);
-        if ($record === null) {
+        $envelope = $this->decodeEnvelope($raw);
+        if ($envelope === null) {
             return null;
         }
         $result = null;
@@ -773,7 +747,7 @@ LUA;
             $result = $this->decodeResult($resultJson);
         }
 
-        return new ConsumedRecord($record, false, true, $result, $this->decodeIdentity($raw));
+        return new ConsumedRecord($envelope['record'], false, true, $result, $envelope['identity']);
     }
 
     /**
@@ -878,8 +852,8 @@ LUA;
         // along — no second lookup). No WAIT: no mutation occurred, the
         // record was already durably consumed.
         $json = (string) ($parts[1] ?? '');
-        $record = $this->decode($json);
-        if ($record === null) {
+        $envelope = $this->decodeEnvelope($json);
+        if ($envelope === null) {
             throw new \RuntimeException('delete-if-pending: undecodable consumed envelope');
         }
         $result = null;
@@ -888,7 +862,7 @@ LUA;
             $result = $this->decodeResult($resultJson);
         }
 
-        return new \KiwiCaptcha\DeleteIfPendingResult('consumed', new ConsumedRecord($record, false, true, $result, $this->decodeIdentity($json)));
+        return new \KiwiCaptcha\DeleteIfPendingResult('consumed', new ConsumedRecord($envelope['record'], false, true, $result, $envelope['identity']));
     }
 
     /**
@@ -1113,16 +1087,110 @@ LUA;
     }
 
     /**
+     * Cached sha1 of every static Lua script (SCRIPT LOAD once per
+     * script, cached for the storage instance's lifetime — the mirror
+     * of RedisRiskStateStore's sha cache). The scripts are immutable
+     * class constants, so a cached sha can never go stale within a
+     * process; a server-side SCRIPT FLUSH or restart is absorbed by
+     * the NOSCRIPT fallback below, which reloads and retries.
+     *
+     * @var array<string, string>
+     */
+    private array $scriptShas = [];
+
+    /**
+     * Diagnostic counter of stored-envelope json_decode calls — the
+     * single-parse contract of {@see self::decodeEnvelope()}. Internal
+     * test seam; never read by production code paths.
+     */
+    private int $envelopeDecodes = 0;
+
+    /**
+     * Run one of the class's Lua scripts through EVALSHA with the
+     * cached sha instead of shipping the ~2KB source on every call
+     * (the mirror of RedisRiskStateStore::runScript). The sha is
+     * established once per script per process with SCRIPT LOAD; a
+     * NOSCRIPT reply (the script cache was flushed or the server
+     * restarted) falls back to reloading — and, on phpredis, to one
+     * plain EVAL — so the observable transition semantics and the
+     * error propagation of the previous EVAL-only path are unchanged.
+     *
      * @param list<mixed> $args    key(s) then script arguments
      * @param int         $numKeys number of leading keys in $args
      */
     private function evalScript(string $script, array $args, int $numKeys): mixed
     {
         if ($this->client instanceof \Redis) {
+            $sha = $this->shaOf($script);
+            try {
+                $result = $this->client->evalSha($sha, $args, $numKeys);
+                if ($result !== false) {
+                    return $result;
+                }
+                // phpredis builds exist that report a missing script as
+                // a plain false instead of raising the server's
+                // NOSCRIPT error, and false is also phpredis's mapping
+                // of a Lua nil reply. Every script of this class
+                // replies nil only on a no-mutation path (a missing,
+                // refused or terminal record), so treating false as a
+                // suspected NOSCRIPT and re-running through plain EVAL
+                // is safe: the re-run is idempotent and returns the
+                // same answer, while a genuine NOSCRIPT is repaired.
+            } catch (\RedisException $e) {
+                if (!self::isNoScriptError($e)) {
+                    throw $e;
+                }
+            }
+
             return $this->client->eval($script, $args, $numKeys);
         }
 
-        return $this->client->eval($script, $numKeys, ...$args);
+        $sha = $this->shaOf($script);
+        try {
+            return $this->client->evalsha($sha, $numKeys, ...$args);
+        } catch (\Predis\Response\ServerException $e) {
+            if (!str_contains($e->getMessage(), 'NOSCRIPT')) {
+                throw $e;
+            }
+            // The server lost its script cache (SCRIPT FLUSH or a
+            // restart): load the body again, refresh the cache, and
+            // retry EVALSHA once. A failure of the retry propagates
+            // raw, exactly like a failed EVAL did.
+            $sha = $this->scriptShas[$script] = $this->loadScript($script);
+
+            return $this->client->evalsha($sha, $numKeys, ...$args);
+        }
+    }
+
+    /**
+     * Whether a phpredis exception carries the server's NOSCRIPT error
+     * (the missing-script reply that triggers the reload fallback).
+     */
+    private static function isNoScriptError(\RedisException $e): bool
+    {
+        return stripos($e->getMessage(), 'NOSCRIPT') !== false;
+    }
+
+    /** Cached sha of a script, SCRIPT LOADing it exactly once. */
+    private function shaOf(string $script): string
+    {
+        return $this->scriptShas[$script] ??= $this->loadScript($script);
+    }
+
+    /**
+     * SCRIPT LOAD the body and return the server's sha. Any client
+     * failure propagates raw, like every other command of this class.
+     */
+    private function loadScript(string $script): string
+    {
+        $sha = $this->client instanceof \Redis
+            ? $this->client->script('load', $script)
+            : $this->client->script('LOAD', $script);
+        if (!\is_string($sha) || $sha === '') {
+            throw new \RuntimeException('SCRIPT LOAD returned no sha for the storage script');
+        }
+
+        return $sha;
     }
 
     /**
@@ -1174,6 +1242,9 @@ LUA;
      * the strict serde-mirror parse; the canonical record schema never
      * sees them.
      *
+     * Thin wrapper over the single-parse {@see self::decodeEnvelope()}
+     * for callers that need only the record.
+     *
      * @return ChallengeRecord|null null when the value is absent, not valid
      *                              JSON, not an object, or does not map to a
      *                              record (a corrupt key must not blow up the
@@ -1181,6 +1252,24 @@ LUA;
      */
     private function decode(string $raw): ?ChallengeRecord
     {
+        return $this->decodeEnvelope($raw)['record'] ?? null;
+    }
+
+    /**
+     * Decode the record AND the recorded logical-operation identity from
+     * ONE json_decode of the same stored envelope bytes. The identity is
+     * lifted BEFORE the runtime fields are stripped (decode() alone
+     * unsets `operation_identity`, which the strict record parse must
+     * never see), so the identical source is never parsed twice — the
+     * consume and retained-state paths used to pay a second full
+     * json_decode per call just for the identity.
+     *
+     * @return array{record: ChallengeRecord, identity: string|null}|null
+     *         null under the same contract as {@see self::decode()}
+     */
+    private function decodeEnvelope(string $raw): ?array
+    {
+        $this->envelopeDecodes++;
         try {
             $data = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
         } catch (\JsonException) {
@@ -1189,32 +1278,30 @@ LUA;
         if (!\is_array($data)) {
             return null;
         }
+        $identity = \is_string($data['operation_identity'] ?? null)
+            ? $data['operation_identity']
+            : null;
         unset($data['state'], $data['consumed_result'], $data['operation_identity'], $data['resume_owner'], $data['resume_until']);
 
         try {
-            return ChallengeRecord::fromArray($data);
+            $record = ChallengeRecord::fromArray($data);
         } catch (\Throwable) {
             return null;
         }
+
+        return ['record' => $record, 'identity' => $identity];
     }
 
     /**
-     * The logical-operation identity recorded on a stored value, or null
-     * when the record carries none (a plain consume, an identity-less
-     * record, or a non-string marker from an older/foreign writer).
+     * @internal Test seam: how many times the stored envelope bytes were
+     * json_decode'd through {@see self::decodeEnvelope()} on this
+     * storage instance. The single-parse contract of the consume and
+     * retained-state paths asserts on it; production code never reads
+     * it.
      */
-    private function decodeIdentity(string $raw): ?string
+    public function envelopeDecodeCount(): int
     {
-        try {
-            $data = json_decode($raw, true, flags: JSON_THROW_ON_ERROR);
-        } catch (\JsonException) {
-            return null;
-        }
-        if (!\is_array($data) || !\is_string($data['operation_identity'] ?? null)) {
-            return null;
-        }
-
-        return $data['operation_identity'];
+        return $this->envelopeDecodes;
     }
 
     private function decodeResult(string $raw): ?ConsumedResult

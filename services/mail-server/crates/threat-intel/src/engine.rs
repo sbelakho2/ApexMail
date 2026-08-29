@@ -121,11 +121,21 @@ impl ThreatIntelEngine {
         *self.last_refresh_ok.read()
     }
 
-    /// Atomically replace blocklist contents with a freshly loaded feed
-    /// dataset. Refuses (returns `false`, current data untouched) when BOTH
-    /// inputs are empty — a broken feed must not wipe the last-known-good
-    /// blocklist. On success the data is swapped, indexes are optimized,
-    /// and the refresh is recorded as successful.
+    /// Merge a freshly loaded feed dataset into the blocklists, PER SOURCE
+    /// (audit F6).
+    ///
+    /// Semantics:
+    /// - Only the sources PRESENT in the payload have their entries replaced
+    ///   (their old entries are removed first, then the fresh ones added).
+    ///   Entries from every other source are kept (last-known per source).
+    /// - Refuses (returns `false`, nothing touched) when BOTH inputs are
+    ///   empty — a broken feed must not wipe the last-known-good blocklist.
+    /// - If [`ThreatIntelConfig::drop_absent_sources_on_refresh`] is set,
+    ///   entries of CONFIGURED feeds that are absent from the payload are
+    ///   dropped as well (explicit operator opt-in; default is to keep
+    ///   last-known-good per source).
+    /// - On success indexes are optimized and the refresh is recorded as
+    ///   successful.
     pub fn apply_feed_refresh(
         &self,
         ip_entries: Vec<(String, IpBlockEntry)>,
@@ -136,24 +146,64 @@ impl ThreatIntelEngine {
             return false;
         }
 
-        let new_ips =
-            UnifiedIpBlocklist::new(self.config.max_ip_entries, self.config.max_ip_entries / 2);
-        for (cidr, entry) in ip_entries {
-            if cidr.contains('/') {
-                let _ = new_ips.add_cidr(&cidr, entry);
-            } else {
-                new_ips.add_ip_str(&cidr, entry);
+        // Sources whose entries this refresh replaces.
+        let mut refreshed_sources: Vec<String> = Vec::new();
+        let mut push_source = |source: &str| {
+            if !refreshed_sources
+                .iter()
+                .any(|s| s.eq_ignore_ascii_case(source))
+            {
+                refreshed_sources.push(source.to_string());
+            }
+        };
+        for (_, entry) in &ip_entries {
+            push_source(&entry.source);
+        }
+        for (_, entry) in &domain_entries {
+            push_source(&entry.source);
+        }
+
+        {
+            let ips = self.ip_blocklist.write();
+            let domains = self.domain_blocklist.write();
+
+            // Replace only the refreshed sources' entries; keep the rest.
+            for source in &refreshed_sources {
+                ips.remove_source(source);
+                domains.remove_source(source);
+            }
+
+            // Optional opt-in: drop entries of configured feeds that failed
+            // to contribute to this refresh (absent from the payload).
+            if self.config.drop_absent_sources_on_refresh {
+                for feed in &self.config.feeds {
+                    if !feed.enabled {
+                        continue;
+                    }
+                    if !refreshed_sources
+                        .iter()
+                        .any(|s| s.eq_ignore_ascii_case(&feed.name))
+                    {
+                        ips.remove_source(&feed.name);
+                        domains.remove_source(&feed.name);
+                    }
+                }
+            }
+
+            for (cidr, entry) in ip_entries {
+                if cidr.contains('/') {
+                    let _ = ips.add_cidr(&cidr, entry);
+                } else {
+                    ips.add_ip_str(&cidr, entry);
+                }
+            }
+            ips.optimize();
+
+            for (domain, entry) in domain_entries {
+                domains.add(&domain, entry);
             }
         }
-        new_ips.optimize();
 
-        let new_domains = DomainBlocklist::new(self.config.max_domain_entries);
-        for (domain, entry) in domain_entries {
-            new_domains.add(&domain, entry);
-        }
-
-        *self.ip_blocklist.write() = new_ips;
-        *self.domain_blocklist.write() = new_domains;
         self.record_refresh_success();
         true
     }
@@ -367,6 +417,11 @@ impl ThreatIntelEngine {
     /// well double-applied trust — a confidence-10 hit from a trust-7
     /// feed scored 5.7 instead of 8.2 and fell below the block threshold,
     /// so confirmed-malicious verdicts were silently dampened to Flags.
+    ///
+    /// UNCONFIGURED sources (audit F6) are always monitor-only: a feed the
+    /// operator never vouched for can contribute to scoring but can never
+    /// produce an Enforce (Block) outcome — to make a source enforceable it
+    /// must be added to `config.feeds` with `Enforce` and sufficient trust.
     fn feed_adjusted_score(&self, source_name: &str, raw_confidence: f64) -> (f64, bool) {
         let raw = raw_confidence.clamp(0.0, 10.0);
         let Some(feed) = self
@@ -375,7 +430,7 @@ impl ThreatIntelEngine {
             .iter()
             .find(|f| f.name.eq_ignore_ascii_case(source_name))
         else {
-            return (raw, false);
+            return (raw, true);
         };
 
         let trust = feed.trust_score.clamp(0.0, 10.0);
@@ -385,20 +440,28 @@ impl ThreatIntelEngine {
         (raw, monitor_only)
     }
 
-    /// Get the configured trust score for a named feed (full trust if unknown).
+    /// Get the configured trust score for a named feed.
+    ///
+    /// UNCONFIGURED sources (audit F6) receive a LOW default trust
+    /// ([`UNCONFIGURED_FEED_TRUST`]) instead of full trust: an operator who
+    /// never configured a feed should not be silently granting it the
+    /// ability to hard-block traffic. Raise the trust explicitly in config
+    /// to weight a feed more strongly.
     fn feed_trust_score(&self, source_name: &str) -> f64 {
         self.config
             .feeds
             .iter()
             .find(|f| f.name.eq_ignore_ascii_case(source_name))
             .map(|f| f.trust_score.clamp(0.0, 10.0))
-            // Unknown (unconfigured) feeds receive full trust so that trust-
-            // weighting only reduces scores when explicitly configured.
-            // Operators must actively set a low trust_score to down-weight a
-            // feed; omitting a feed should never silently suppress blocking.
-            .unwrap_or(10.0)
+            .unwrap_or(UNCONFIGURED_FEED_TRUST)
     }
 }
+
+/// Default trust granted to sources that are NOT configured in
+/// [`ThreatIntelConfig::feeds`] (audit F6). Low on purpose: unconfigured
+/// feeds can never produce Enforce (Block) verdicts — see
+/// [`ThreatIntelEngine::feed_adjusted_score`].
+const UNCONFIGURED_FEED_TRUST: f64 = 3.0;
 
 #[cfg(feature = "events")]
 impl ThreatIntelEngine {
@@ -499,6 +562,23 @@ mod tests {
     use crate::ip_blocklist::{IpBlockEntry, ThreatCategory};
     use chrono::Utc;
 
+    /// Engine whose config registers "test-feed" as a trusted Enforce feed.
+    /// Audit F6 made UNCONFIGURED sources low-trust/monitor-only, so tests
+    /// that assert Block verdicts from the test feed must configure it.
+    fn configured_engine() -> ThreatIntelEngine {
+        let mut config = ThreatIntelConfig::default();
+        config.feeds.push(crate::config::FeedSource {
+            name: "test-feed".into(),
+            url: "https://example.invalid/feed.txt".into(),
+            format: crate::config::FeedFormat::PlainText,
+            refresh_interval_secs: 3600,
+            enabled: true,
+            trust_score: 9.5,
+            enforcement_mode: FeedEnforcementMode::Enforce,
+        });
+        ThreatIntelEngine::with_config(config)
+    }
+
     fn ip_entry(cidr: &str) -> IpBlockEntry {
         IpBlockEntry {
             cidr: cidr.into(),
@@ -530,7 +610,7 @@ mod tests {
 
     #[test]
     fn test_blocked_ip() {
-        let engine = ThreatIntelEngine::new();
+        let engine = configured_engine();
         engine
             .ip_blocklist()
             .add_ip_str("1.2.3.4", ip_entry("1.2.3.4"));
@@ -540,7 +620,7 @@ mod tests {
 
     #[test]
     fn test_blocked_cidr() {
-        let engine = ThreatIntelEngine::new();
+        let engine = configured_engine();
         engine
             .ip_blocklist()
             .add_cidr("10.0.0.0/8", ip_entry("10.0.0.0/8"))
@@ -551,7 +631,7 @@ mod tests {
 
     #[test]
     fn test_blocked_domain() {
-        let engine = ThreatIntelEngine::new();
+        let engine = configured_engine();
         engine
             .domain_blocklist()
             .add("evil.com", domain_entry("evil.com"));
@@ -561,7 +641,7 @@ mod tests {
 
     #[test]
     fn test_subdomain_blocked() {
-        let engine = ThreatIntelEngine::new();
+        let engine = configured_engine();
         engine
             .domain_blocklist()
             .add("evil.com", domain_entry("evil.com"));
@@ -571,7 +651,7 @@ mod tests {
 
     #[test]
     fn test_combined_check_worst_wins() {
-        let engine = ThreatIntelEngine::new();
+        let engine = configured_engine();
         engine
             .domain_blocklist()
             .add("evil.com", domain_entry("evil.com"));
@@ -685,7 +765,7 @@ mod tests {
 
     #[test]
     fn test_ipv6_lookup_no_longer_fails_open() {
-        let engine = ThreatIntelEngine::new();
+        let engine = configured_engine();
         // A listed IPv6 IOC must produce a Block verdict — previously the
         // engine consulted an IPv4-only blocklist and every IPv6 lookup
         // came back clean.
@@ -746,7 +826,7 @@ mod tests {
 
     #[test]
     fn test_empty_refresh_keeps_last_known_good() {
-        let engine = ThreatIntelEngine::new();
+        let engine = configured_engine();
         engine
             .ip_blocklist()
             .add_ip_str("198.51.100.23", ip_entry("198.51.100.23"));
@@ -764,25 +844,178 @@ mod tests {
         );
         assert!(engine.refresh_failure_count() >= 1, "failure is counted");
         assert!(engine.last_successful_refresh().is_none());
+    }
 
-        // A real (non-empty) refresh applies and records success.
-        let entries = vec![(
-            "198.51.100.99".to_string(),
+    // ── Audit F6:unconfigured sources & per-source refresh merging ──
+
+    #[test]
+    fn test_unconfigured_source_gets_low_default_trust() {
+        // A hit from a source that is NOT in config.feeds previously got
+        // FULL trust (unwrap_or(10.0)); it must now be down-weighted.
+        let engine = ThreatIntelEngine::new(); // default feeds, no "mystery-feed"
+        assert_eq!(engine.feed_trust_score("mystery-feed"), 3.0);
+        assert_eq!(engine.feed_trust_score("TEST-FEED-CASE"), 3.0);
+        // Configured feeds keep their configured trust.
+        assert_eq!(engine.feed_trust_score("Spamhaus DROP"), 9.5);
+    }
+
+    #[test]
+    fn test_unconfigured_source_can_never_block() {
+        // Even a confidence-10 hit from an unconfigured source must not
+        // produce an Enforce (Block) verdict — it is monitor-only and
+        // down-weighted. Previously it blocked with full trust.
+        let engine = ThreatIntelEngine::new();
+        engine.ip_blocklist().add_ip_str(
+            "203.0.113.111",
             IpBlockEntry {
-                cidr: "198.51.100.99".into(),
-                source: "fresh-feed".into(),
+                cidr: "203.0.113.111".into(),
+                source: "mystery-feed".into(),
+                category: ThreatCategory::Malware,
+                confidence: 10.0,
+                added_at: Utc::now(),
+                expires_at: Utc::now() + chrono::Duration::hours(1),
+            },
+        );
+        let verdict = engine.check_ip("203.0.113.111");
+        assert_ne!(
+            verdict.action,
+            ThreatAction::Block,
+            "unconfigured source must never produce a Block verdict"
+        );
+        let score = verdict
+            .ip_reputation
+            .as_ref()
+            .map(|r| r.score)
+            .unwrap_or(0.0);
+        assert!(
+            score < engine.config.block_threshold,
+            "weighted score must stay below the block threshold, got {score}"
+        );
+        // The same hit from a configured trusted feed DOES block.
+        let engine = configured_engine();
+        engine
+            .ip_blocklist()
+            .add_ip_str("203.0.113.112", ip_entry("203.0.113.112"));
+        assert_eq!(engine.check_ip("203.0.113.112").action, ThreatAction::Block);
+    }
+
+    #[test]
+    fn test_feed_refresh_merges_per_source() {
+        // Refreshing source B must replace ONLY B's entries; A's entries and
+        // unrelated sources' entries survive (previously refresh REPLACED the
+        // whole blocklist, wiping every other feed's data).
+        let engine = configured_engine();
+        engine
+            .ip_blocklist()
+            .add_ip_str("198.51.100.10", ip_entry("198.51.100.10")); // source A ("test-feed")
+
+        let refresh_b = vec![(
+            "198.51.100.20".to_string(),
+            IpBlockEntry {
+                cidr: "198.51.100.20".into(),
+                source: "feed-b".into(),
                 category: ThreatCategory::Spam,
                 confidence: 9.0,
                 added_at: Utc::now(),
                 expires_at: Utc::now() + chrono::Duration::hours(24),
             },
         )];
-        let applied = engine.apply_feed_refresh(entries, Vec::new());
-        assert!(applied);
-        assert_eq!(engine.refresh_failure_count(), 0);
-        assert!(engine.last_successful_refresh().is_some());
-        assert_eq!(engine.check_ip("198.51.100.99").action, ThreatAction::Block);
-        // Old data was replaced.
-        assert_eq!(engine.check_ip("198.51.100.23").action, ThreatAction::Allow);
+        assert!(engine.apply_feed_refresh(refresh_b, Vec::new()));
+
+        // A's entry survived; B's entry was added.
+        assert_eq!(engine.check_ip("198.51.100.10").action, ThreatAction::Block);
+        assert_eq!(engine.check_ip("198.51.100.20").action, ThreatAction::Flag);
+
+        // Refreshing A replaces only A: the old A address disappears, the
+        // new A address appears, and B's entry is untouched.
+        let refresh_a = vec![(
+            "198.51.100.11".to_string(),
+            ip_entry("198.51.100.11"), // source "test-feed" = A
+        )];
+        assert!(engine.apply_feed_refresh(refresh_a, Vec::new()));
+        assert_eq!(
+            engine.check_ip("198.51.100.10").action,
+            ThreatAction::Allow,
+            "refreshed source's OLD entry must be replaced"
+        );
+        assert_eq!(engine.check_ip("198.51.100.11").action, ThreatAction::Block);
+        assert_eq!(
+            engine.check_ip("198.51.100.20").action,
+            ThreatAction::Flag,
+            "other sources' entries must survive a per-source refresh"
+        );
+    }
+
+    #[test]
+    fn test_drop_absent_sources_on_refresh_is_opt_in() {
+        fn feed_cfg(drop: bool) -> ThreatIntelConfig {
+            let mut config = ThreatIntelConfig {
+                drop_absent_sources_on_refresh: drop,
+                ..ThreatIntelConfig::default()
+            };
+            config.feeds.push(crate::config::FeedSource {
+                name: "feed-a".into(),
+                url: "https://example.invalid/a.txt".into(),
+                format: crate::config::FeedFormat::PlainText,
+                refresh_interval_secs: 3600,
+                enabled: true,
+                trust_score: 9.5,
+                enforcement_mode: FeedEnforcementMode::Enforce,
+            });
+            config.feeds.push(crate::config::FeedSource {
+                name: "feed-b".into(),
+                url: "https://example.invalid/b.txt".into(),
+                format: crate::config::FeedFormat::PlainText,
+                refresh_interval_secs: 3600,
+                enabled: true,
+                trust_score: 9.5,
+                enforcement_mode: FeedEnforcementMode::Enforce,
+            });
+            config
+        }
+
+        let entry = |source: &str| IpBlockEntry {
+            cidr: format!("198.51.100.{source}"),
+            source: source.to_string(),
+            category: ThreatCategory::Spam,
+            confidence: 9.0,
+            added_at: Utc::now(),
+            expires_at: Utc::now() + chrono::Duration::hours(24),
+        };
+
+        // Default (drop = false): a refresh carrying only feed-a's entries
+        // KEEPS feed-b's last-known entries.
+        let engine = ThreatIntelEngine::with_config(feed_cfg(false));
+        engine
+            .ip_blocklist()
+            .add_ip_str("198.51.100.30", entry("feed-a"));
+        engine
+            .ip_blocklist()
+            .add_ip_str("198.51.100.40", entry("feed-b"));
+        let only_a = vec![("198.51.100.31".to_string(), entry("feed-a"))];
+        assert!(engine.apply_feed_refresh(only_a, Vec::new()));
+        assert_eq!(engine.check_ip("198.51.100.31").action, ThreatAction::Block);
+        assert_eq!(
+            engine.check_ip("198.51.100.40").action,
+            ThreatAction::Block,
+            "default: absent source keeps last-known-good entries"
+        );
+
+        // Opt-in (drop = true): feed-b (configured but absent) is dropped.
+        let engine = ThreatIntelEngine::with_config(feed_cfg(true));
+        engine
+            .ip_blocklist()
+            .add_ip_str("198.51.100.30", entry("feed-a"));
+        engine
+            .ip_blocklist()
+            .add_ip_str("198.51.100.40", entry("feed-b"));
+        let only_a = vec![("198.51.100.31".to_string(), entry("feed-a"))];
+        assert!(engine.apply_feed_refresh(only_a, Vec::new()));
+        assert_eq!(engine.check_ip("198.51.100.31").action, ThreatAction::Block);
+        assert_eq!(
+            engine.check_ip("198.51.100.40").action,
+            ThreatAction::Allow,
+            "opt-in: absent configured source entries are dropped"
+        );
     }
 }

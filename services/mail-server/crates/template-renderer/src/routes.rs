@@ -261,6 +261,7 @@ mod tests {
                 max_memory_bytes: 64 * 1024 * 1024,
                 max_source_length: 512 * 1024,
                 max_output_length: 2 * 1024 * 1024,
+                trusted_html_props: Vec::new(),
             },
             cache: CacheConfig {
                 max_entries: 100,
@@ -342,6 +343,7 @@ mod tests {
                 max_memory_bytes: 64 * 1024 * 1024,
                 max_source_length: 512 * 1024,
                 max_output_length: 2 * 1024 * 1024,
+                trusted_html_props: Vec::new(),
             },
             cache: CacheConfig {
                 max_entries: 100,

@@ -515,7 +515,7 @@ async fn get_autopilot(
     Query(params): Query<AutopilotQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     let section = params.section.as_deref().unwrap_or("overview");
     let allowed = [
@@ -622,7 +622,7 @@ async fn post_autopilot(
     Json(body): Json<AutopilotAction>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     let allowed = [
         "start",

@@ -12,12 +12,14 @@
 //! the postmaster scheduler updates summaries every 6 hours, so a one-minute
 //! cache is well within freshness budget.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use moka::future::Cache;
 use rand::Rng;
 use sqlx::PgPool;
+use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
 /// Map a recipient domain to its provider bucket.
@@ -54,11 +56,24 @@ struct CachedThrottle {
     source: &'static str,
 }
 
+/// F8:bound on the number of in-flight best-effort audit inserts. Each
+/// `decide()` used to spawn an UNBOUNDED tokio task (and thus an unbounded
+/// queue of pending INSERTs) — a burst of decisions under DB pressure
+/// spawned without limit. The semaphore permit travels into the spawned
+/// task, so at most this many audit inserts are outstanding; a decide()
+/// that cannot acquire a permit drops its audit row and counts it.
+const AUDIT_INSERT_CONCURRENCY: usize = 64;
+
 #[derive(Clone)]
 pub struct ProviderThrottle {
     db: PgPool,
     /// Key: (sender_domain, recipient_provider, tenant_id).
     cache: Cache<(String, String, String), Arc<CachedThrottle>>,
+    /// F8:bounds in-flight audit-insert tasks (permits are held by the
+    /// spawned tasks for their lifetime).
+    audit_permits: Arc<Semaphore>,
+    /// F8:audit rows dropped because the bounded insert queue was full.
+    audit_dropped: Arc<AtomicU64>,
 }
 
 impl ProviderThrottle {
@@ -69,7 +84,15 @@ impl ProviderThrottle {
                 .time_to_live(Duration::from_secs(60))
                 .max_capacity(10_000)
                 .build(),
+            audit_permits: Arc::new(Semaphore::new(AUDIT_INSERT_CONCURRENCY)),
+            audit_dropped: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// F8:audit rows dropped because the bounded audit-insert queue was
+    /// full (all [`AUDIT_INSERT_CONCURRENCY`] permits in flight).
+    pub fn audit_dropped(&self) -> u64 {
+        self.audit_dropped.load(Ordering::Relaxed)
     }
 
     /// Decide whether an outbound message to `recipient_domain` from
@@ -133,7 +156,12 @@ impl ProviderThrottle {
             }
         };
 
-        // Best-effort audit row.  Errors here never fail the send path.
+        // Best-effort audit row. Errors here never fail the send path.
+        // F8:the insert task is bounded — a semaphore permit is acquired
+        // non-blockingly and travels into the task; when all
+        // AUDIT_INSERT_CONCURRENCY permits are in flight the row is DROPPED
+        // and counted (audit is observability, never a send-path blocker,
+        // and may no longer spawn without bound under decision bursts).
         let recip_domain = recipient_domain.to_string();
         let sender = sender_domain.to_string();
         let tenant_owned = tenant_id.map(|s| s.to_string());
@@ -147,25 +175,41 @@ impl ProviderThrottle {
         let band = entry.band.clone();
         let pct = throttle_pct as i32;
         let pool = self.db.clone();
-        tokio::spawn(async move {
-            let _ = sqlx::query(
-                "INSERT INTO outbound_throttle_decisions
-                   (tenant_id, sender_domain, recipient_domain, provider,
-                    throttle_pct, decision, source, score, band)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
-            )
-            .bind(&tenant_owned)
-            .bind(&sender)
-            .bind(&recip_domain)
-            .bind(&provider_str)
-            .bind(pct)
-            .bind(decision_str)
-            .bind(source)
-            .bind(score)
-            .bind(&band)
-            .execute(&pool)
-            .await;
-        });
+        match Arc::clone(&self.audit_permits).try_acquire_owned() {
+            Ok(permit) => {
+                tokio::spawn(async move {
+                    // Hold the permit for the insert's lifetime — this is
+                    // what bounds the in-flight audit queue.
+                    let _permit = permit;
+                    let _ = sqlx::query(
+                        "INSERT INTO outbound_throttle_decisions
+                           (tenant_id, sender_domain, recipient_domain, provider,
+                            throttle_pct, decision, source, score, band)
+                         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+                    )
+                    .bind(&tenant_owned)
+                    .bind(&sender)
+                    .bind(&recip_domain)
+                    .bind(&provider_str)
+                    .bind(pct)
+                    .bind(decision_str)
+                    .bind(source)
+                    .bind(score)
+                    .bind(&band)
+                    .execute(&pool)
+                    .await;
+                });
+            }
+            Err(_) => {
+                let dropped = self.audit_dropped.fetch_add(1, Ordering::Relaxed) + 1;
+                metrics::counter!("outbound_throttle_audit_dropped").increment(1);
+                debug!(
+                    dropped_total = dropped,
+                    bound = AUDIT_INSERT_CONCURRENCY,
+                    "audit insert queue full — throttle decision dropped (best-effort)"
+                );
+            }
+        }
 
         decision
     }

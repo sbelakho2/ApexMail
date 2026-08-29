@@ -1620,6 +1620,11 @@ mod tests {
                 system_from_address: "noreply@apexmail.ee".into(),
                 outbox_flush_batch: 25,
                 outbox_flush_max_attempts: 5,
+                clickhouse_erasure_enabled: false,
+                clickhouse_url: String::new(),
+                clickhouse_database: "apexmail".into(),
+                clickhouse_user: "default".into(),
+                clickhouse_password: String::new(),
             },
             secrets: crate::config::SecretsConfig {
                 encryption_key: String::new(),
@@ -2229,6 +2234,11 @@ mod tests {
             system_from_address: "noreply@apexmail.ee".into(),
             outbox_flush_batch: 25,
             outbox_flush_max_attempts: 5,
+            clickhouse_erasure_enabled: false,
+            clickhouse_url: String::new(),
+            clickhouse_database: "apexmail".into(),
+            clickhouse_user: "default".into(),
+            clickhouse_password: String::new(),
         }
     }
 

@@ -45,7 +45,7 @@ Wir verarbeiten Daten gemäß unserer [Datenschutzerklärung](/de/privacy/) und 
 
 ## 7. Zahlungsbedingungen
 
-Gebühren werden monatlich oder jährlich gemäß dem gewählten Tarif abgerechnet. Alle veröffentlichten Preise sind in USD angegeben. Anwendbare Steuern werden nach den geltenden Regeln und dem Rechnungsland behandelt.
+Gebühren werden monatlich oder jährlich gemäß dem gewählten Tarif abgerechnet. Alle veröffentlichten Preise sind in EUR angegeben. Anwendbare Steuern werden nach den geltenden Regeln und dem Rechnungsland behandelt.
 
 ### 7.1 Automatische Verlängerung
 

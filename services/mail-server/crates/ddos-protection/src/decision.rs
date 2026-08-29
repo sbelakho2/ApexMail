@@ -92,6 +92,12 @@ pub struct PowChallenge {
     pub expires_at: u64,
     /// Expected solve time in milliseconds
     pub expected_time_ms: u32,
+    /// HMAC-SHA256 signature over `(id, data, difficulty, expires_at)`
+    /// computed with the server's per-process secret (audit F3). Included so
+    /// the client (and any intermediate) can detect tampered parameters;
+    /// server-side VERIFICATION always uses the stored issuance-registry
+    /// parameters, never these client-visible claims.
+    pub signature: String,
 }
 
 /// Cookie challenge - verify cookie support

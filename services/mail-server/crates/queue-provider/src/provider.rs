@@ -176,6 +176,18 @@ impl PostgresQueueProvider {
     /// `priority + LEAST(age_in_hours, 100)`. This prevents low‑priority
     /// jobs from starving while maintaining priority ordering for recent jobs.
     ///
+    /// F15:index shape — the inner WHERE leads with exactly the predicates
+    /// of the partial dequeue index (`idx_queue_jobs_dequeue ON queue_jobs
+    /// (queue, scheduled_at) WHERE status = 'pending'`, see
+    /// [`crate::schema::QUEUE_SCHEMA`]): `queue = $1 AND status = 'pending'
+    /// AND scheduled_at <= $3`. The planner can therefore pre-filter with
+    /// the partial index (equality on the leading column + range on the
+    /// second) BEFORE the computed effective-priority sort; the ORDER BY
+    /// expression itself is inherently un-indexable, but it only sorts the
+    /// already index-filtered candidate set. The extra `attempts <
+    /// max_attempts` filter is applied after the index scan and must not
+    /// be reordered ahead of the index predicates.
+    ///
     /// O‑5.1: If signing is enabled, each payload's HMAC is verified before
     /// returning. Tampered payloads are logged and skipped.
     pub async fn dequeue(&self, queue: &str, batch_size: i32) -> Result<Vec<Job>, QueueError> {
@@ -392,8 +404,11 @@ impl PostgresQueueProvider {
             // Move to dead letter queue
             self.dead_letter(job_id, lease_token, error).await?;
         } else {
-            // #228:Exponential backoff with cap at 1 hour to prevent excessive delays
-            let backoff_secs = retry_backoff_secs(job.attempts);
+            // #228:Exponential backoff with cap at 1 hour to prevent
+            // excessive delays. F6:±20% jitter, deterministic per job, so a
+            // cohort of jobs failing the same attempt does not retry in one
+            // synchronized wave.
+            let backoff_secs = jittered_backoff_secs(job_id, job.attempts);
             let retry_at = now + chrono::Duration::seconds(backoff_secs);
 
             let result = sqlx::query(
@@ -477,6 +492,20 @@ impl PostgresQueueProvider {
     /// it invisible forever. Such jobs are routed straight to dead_letter.
     /// A sweep also dead-letters any pre-existing pending zombies so
     /// nothing sits invisible in the queue.
+    ///
+    /// # Callers (F10 — deliberately unwired)
+    ///
+    /// NO production code calls this method. This crate's only consumer is
+    /// `smoke-tests`, which exercises `queue_provider::types` only; the
+    /// production email path (`worker-processors`) polls `email_queue`
+    /// directly with its own lease reclaim, not `queue_jobs`. Wiring this
+    /// sweep therefore requires first adopting `PostgresQueueProvider` in a
+    /// production poller — until then a periodic caller would sweep a table
+    /// nothing reads, which is noise, not recovery. If/when a production
+    /// owner appears (e.g. a `queue_jobs`-based processor in
+    /// worker-processors), call this on a ~30-60s interval from that
+    /// processor's poll loop, mirroring `reap_expired_processing` in
+    /// outbound-queue's main loop.
     pub async fn recover_stale(&self) -> Result<i64, QueueError> {
         let now = Utc::now();
 
@@ -629,6 +658,24 @@ struct PreparedPayload {
 fn retry_backoff_secs(attempts: i32) -> i64 {
     let exponent = attempts.clamp(0, 7) as u32;
     ((1_i64 << exponent) * 30).min(MAX_RETRY_BACKOFF_SECS)
+}
+
+/// F6:retry backoff with ±20% jitter, DETERMINISTIC per (job, attempt).
+///
+/// `rand` is not a dependency of this crate, so the spread is derived from
+/// a stable hash of the job id + attempt count: identical inputs always
+/// produce identical output (reproducible in tests and logs), while
+/// distinct failing jobs spread their retries across the ±20% band instead
+/// of landing on the same second.
+fn jittered_backoff_secs(job_id: Uuid, attempts: i32) -> i64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    job_id.hash(&mut hasher);
+    attempts.hash(&mut hasher);
+    // 0..=40 → multiplier 0.80..=1.20
+    let spread = (hasher.finish() % 41) as f64 / 100.0;
+    let base = retry_backoff_secs(attempts) as f64;
+    ((base * (0.8 + spread)).round() as i64).clamp(1, MAX_RETRY_BACKOFF_SECS)
 }
 
 /// K: a completion-path call may only act while the job is leased for
@@ -829,6 +876,85 @@ mod tests {
         assert_eq!(retry_backoff_secs(3), 240);
         assert_eq!(retry_backoff_secs(30), MAX_RETRY_BACKOFF_SECS);
         assert_eq!(retry_backoff_secs(i32::MAX), MAX_RETRY_BACKOFF_SECS);
+    }
+
+    #[test]
+    fn test_jittered_backoff_within_20_percent_and_deterministic() {
+        // F6:every jittered sample stays within ±20% of the pure backoff,
+        // never exceeds the cap, never collapses to zero, and is
+        // deterministic per (job, attempt).
+        for attempts in 1..6 {
+            let base = retry_backoff_secs(attempts);
+            let low = ((base as f64) * 0.8).floor() as i64;
+            let high = ((base as f64) * 1.2).ceil() as i64;
+            let mut saw_below = false;
+            let mut saw_above = false;
+            for _ in 0..50 {
+                let id = Uuid::new_v4();
+                let jittered = jittered_backoff_secs(id, attempts);
+                assert!(
+                    jittered >= low && jittered <= high.min(MAX_RETRY_BACKOFF_SECS),
+                    "jittered {jittered}s outside [{low},{high}] for base {base}s"
+                );
+                saw_below |= jittered < base;
+                saw_above |= jittered > base;
+            }
+            assert!(
+                saw_below && saw_above,
+                "jitter must spread on both sides of the base at attempt {attempts}"
+            );
+            // Deterministic per (job, attempt).
+            let id = Uuid::new_v4();
+            assert_eq!(
+                jittered_backoff_secs(id, attempts),
+                jittered_backoff_secs(id, attempts)
+            );
+        }
+        // Attempt 30: base already at the cap → jitter stays within
+        // [0.8*cap, cap] (downward jitter remains, upward is clamped).
+        let capped_low = ((MAX_RETRY_BACKOFF_SECS as f64) * 0.8).floor() as i64;
+        for _ in 0..20 {
+            let jittered = jittered_backoff_secs(Uuid::new_v4(), 30);
+            assert!(
+                jittered >= capped_low && jittered <= MAX_RETRY_BACKOFF_SECS,
+                "capped jitter {jittered}s outside [{capped_low},{MAX_RETRY_BACKOFF_SECS}]"
+            );
+        }
+    }
+
+    #[test]
+    fn dequeue_inner_where_matches_partial_dequeue_index() {
+        // F15:the inner WHERE must carry the exact predicates of the
+        // partial dequeue index (schema.rs): equality on `queue`, the
+        // partial predicate `status = 'pending'`, and the range on
+        // `scheduled_at` — so the index pre-filters before the computed
+        // effective-priority sort. Pinned by test because reordering or
+        // dropping these predicates silently degrades to a full scan.
+        let index = crate::schema::QUEUE_SCHEMA;
+        assert!(
+            index.contains("idx_queue_jobs_dequeue"),
+            "the partial dequeue index must exist in the schema"
+        );
+        assert!(index.contains("WHERE status = 'pending'"));
+
+        let source = include_str!("provider.rs");
+        let inner = source
+            .split("WHERE id IN (")
+            .nth(1)
+            .and_then(|rest| rest.split("ORDER BY").next())
+            .expect("dequeue inner WHERE must exist");
+        assert!(
+            inner.contains("queue = $1"),
+            "inner WHERE must equality-match the index's leading column"
+        );
+        assert!(
+            inner.contains("status = 'pending'"),
+            "inner WHERE must imply the partial index predicate"
+        );
+        assert!(
+            inner.contains("scheduled_at <= $3"),
+            "inner WHERE must range-match the index's second column"
+        );
     }
 
     #[tokio::test]

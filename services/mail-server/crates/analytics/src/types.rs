@@ -161,6 +161,12 @@ pub struct BulkOptimizationResult {
     pub windows: Vec<OptimalSendWindow>,
     pub confidence: f64,
     pub profile_age_days: u32,
+    /// F5:UTC offset (minutes) that was applied when extracting the hour
+    /// buckets — `windows[*].hour` are LOCAL hours under this offset.
+    /// `serde(default)` keeps entries cached before the field existed
+    /// readable (they were computed at offset 0).
+    #[serde(default)]
+    pub utc_offset_minutes: i32,
 }
 
 // ── churn types ────────────────────────────────────────────────────────────────

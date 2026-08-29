@@ -133,6 +133,15 @@ impl PlacementEngine {
             )));
         }
 
+        // F4:the From address must be on one of the tenant's VERIFIED sending
+        // domains. The internal MTA relay accepts arbitrary From headers, so
+        // without this check the platform would relay (and providers would
+        // evaluate) mail for domains the tenant does not control — spoofing
+        // via the placement-test API. Reject-as-default:no silent
+        // substitution of a default sender.
+        self.ensure_from_domain_verified(tenant_id, &request.from_email)
+            .await?;
+
         // 3. Insert the test.
         let id = Uuid::new_v4();
         let now = Utc::now();
@@ -774,6 +783,45 @@ impl PlacementEngine {
         }
     }
 
+    /// F4:require the From address's domain to be a VERIFIED sending domain
+    /// of the tenant (mirrors the api-server `domains` verification check:
+    /// `WHERE tenant_id = $1 AND verified = true`). Fails with a
+    /// `sqlx::Error::Protocol` carrying operator guidance; the create-test
+    /// route maps that to a 400.
+    async fn ensure_from_domain_verified(
+        &self,
+        tenant_id: Uuid,
+        from_email: &str,
+    ) -> Result<(), sqlx::Error> {
+        let Some(domain) = from_email_domain(from_email) else {
+            return Err(sqlx::Error::Protocol(format!(
+                "invalid from_email '{from_email}': expected a fully qualified address like sender@yourdomain.com"
+            )));
+        };
+
+        // domains.tenant_id is the shared VARCHAR(26) tenant key — bind as
+        // text (same as the api-server readers of this table).
+        let verified: (bool,) = sqlx::query_as(
+            "SELECT EXISTS( \
+              SELECT 1 FROM domains \
+              WHERE tenant_id = $1 AND LOWER(name) = $2 AND verified = true \
+             )",
+        )
+        .bind(tenant_id.to_string())
+        .bind(&domain)
+        .fetch_one(&self.db)
+        .await?;
+
+        if !verified.0 {
+            return Err(sqlx::Error::Protocol(format!(
+                "from_email domain '{domain}' is not a verified sending domain of this tenant; \
+                 add and verify the domain first (Settings → Domains), or use a sender address \
+                 on an already-verified domain"
+            )));
+        }
+        Ok(())
+    }
+
     /// Insert a single placement result row.
     #[allow(clippy::too_many_arguments)] // clippy: justified - maps directly to 8 DB columns; a parameter struct would add indirection without reducing complexity
     async fn insert_placement_result(
@@ -844,6 +892,15 @@ struct TrendRow {
 }
 
 // ── ProviderName helper ────────────────────────────────────────────
+
+/// F4:lower-cased domain part of a From address (`Sender@Example.COM` →
+/// `example.com`), or `None` when the address has no domain.
+fn from_email_domain(from_email: &str) -> Option<String> {
+    from_email
+        .rsplit_once('@')
+        .map(|(_, domain)| domain.trim().to_ascii_lowercase())
+        .filter(|domain| !domain.is_empty())
+}
 
 impl ProviderName {
     /// Construct a [`ProviderName`] from a string (case-insensitive).
@@ -999,6 +1056,27 @@ fn build_encryptor(config: &PlacementConfig) -> Option<Arc<FieldEncryptor>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── F4:From-domain extraction ───────────────────────────────────
+
+    #[test]
+    fn from_email_domain_extracts_and_lowercases() {
+        assert_eq!(
+            from_email_domain("Sender@Example.COM"),
+            Some("example.com".into())
+        );
+        assert_eq!(
+            from_email_domain("ops@mail.apexmail.ee"),
+            Some("mail.apexmail.ee".into())
+        );
+    }
+
+    #[test]
+    fn from_email_domain_rejects_domainless_addresses() {
+        assert_eq!(from_email_domain("no-domain"), None);
+        assert_eq!(from_email_domain("local@"), None);
+        assert_eq!(from_email_domain(""), None);
+    }
 
     #[test]
     fn parse_auth_results_gmail_style_pass() {

@@ -360,6 +360,65 @@ final class RedisAdmissionSemaphoreTest extends TestCase
         self::assertSame(3, $client->counters[$this->waitersKey('waiters-bound')] ?? 0, 'after the bound, each overflow attempt increments then removes its own entry (steady state = the cap)');
     }
 
+    public function testOverCapAcquireFastFailsWithoutHoldingASlot(): void
+    {
+        // Round-97: the saturation-pressure fast-fail is real. Once the
+        // waiters gauge exceeds the cap, the acquire script returns its
+        // distinguishable sentinel (-1) and acquire() maps it to the
+        // CapacityExceeded path: null, NO lease slot held, no counter
+        // residue — the subsequent below-cap acquire (after the lease is
+        // released) still succeeds, proving the fast-fail never wedged
+        // the gate or leaked a phantom lease.
+        $client = $this->requirePredis();
+        $semaphore = new RedisAdmissionSemaphore($client, 1, 'fast-fail', self::LEASE_MS, 2);
+
+        $lease = $semaphore->acquire();
+        self::assertIsString($lease);
+        self::assertFalse($semaphore->lastAcquireFastFailed(), 'a granted acquire never fast-fails');
+
+        // Two refusals fill the gauge exactly to the cap (2): ordinary
+        // refusals, the boundary does not trip.
+        self::assertNull($semaphore->acquire());
+        self::assertFalse($semaphore->lastAcquireFastFailed(), 'the boundary (waiters == cap) is an ordinary refusal');
+        self::assertNull($semaphore->acquire());
+        self::assertFalse($semaphore->lastAcquireFastFailed(), 'waiters == cap exactly: still no trip');
+        self::assertSame(2, $client->counters[$this->waitersKey('fast-fail')] ?? 0);
+
+        // The third refusal exceeds the cap: the capacity signal fires.
+        self::assertNull($semaphore->acquire(), 'the over-cap acquire returns the capacity signal (null lease)');
+        self::assertTrue($semaphore->lastAcquireFastFailed(), 'the over-cap refusal is distinguishable: the fast-fail flag is set');
+        self::assertSame(1, $this->leases($client, 'fast-fail'), 'the fast-fail acquires NO lease slot');
+        self::assertSame(2, $client->counters[$this->waitersKey('fast-fail')] ?? 0, 'the fast-fail contender leaves no counter residue (steady state = the cap)');
+
+        // Releasing the lease recovers the gate: the next acquire is a
+        // normal grant (nothing wedged), and the granted caller serves
+        // one waiter as always.
+        $semaphore->release($lease);
+        $next = $semaphore->acquire();
+        self::assertIsString($next, 'the subsequent below-cap acquire succeeds — the fast-fail held no slot');
+        self::assertFalse($semaphore->lastAcquireFastFailed(), 'a fresh acquire resets the flag');
+        $semaphore->release($next);
+    }
+
+    public function testFastFailCounterResidueIsNeverNegativeAndGaugeStaysAtTheCap(): void
+    {
+        // A saturation storm: the gauge stays pinned at the cap no matter
+        // how many over-cap contenders arrive, and every one of them is
+        // the fast-fail (capacity) signal, never an ordinary refusal.
+        $client = $this->requirePredis();
+        $semaphore = new RedisAdmissionSemaphore($client, 1, 'storm', self::LEASE_MS, 1);
+
+        self::assertIsString($semaphore->acquire());
+        self::assertNull($semaphore->acquire());
+        self::assertFalse($semaphore->lastAcquireFastFailed(), 'waiters 0 -> 1: the boundary equals the cap, no trip');
+
+        for ($i = 0; $i < 25; $i++) {
+            self::assertNull($semaphore->acquire());
+            self::assertTrue($semaphore->lastAcquireFastFailed(), 'every over-cap contender trips the fast-fail');
+            self::assertSame(1, $client->counters[$this->waitersKey('storm')] ?? 0, 'the gauge stays at the cap through the whole storm');
+        }
+    }
+
     public function testGrantedLeaseServesOneWaiter(): void
     {
         $client = $this->requirePredis();

@@ -1,5 +1,7 @@
 {
-  "annotations": {"list": []},
+  "annotations": {
+    "list": []
+  },
   "editable": false,
   "fiscalYearStartMonth": 0,
   "graphTooltip": 0,
@@ -7,29 +9,79 @@
   "links": [],
   "panels": [
     {
-      "datasource": {"type": "prometheus", "uid": "Prometheus"},
-      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
       "id": 1,
-      "targets": [{"expr": "up{job=\"apexmail-worker\"}", "legendFormat": "{{ instance }}", "refId": "A"}],
+      "targets": [
+        {
+          "expr": "up{job=\"apexmail-worker\"}",
+          "legendFormat": "{{ instance }}",
+          "refId": "A"
+        }
+      ],
       "title": "Worker Availability",
       "type": "timeseries"
     },
     {
-      "datasource": {"type": "prometheus", "uid": "Prometheus"},
-      "fieldConfig": {"defaults": {"color": {"mode": "palette-classic"}}, "overrides": []},
-      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 0},
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
       "id": 2,
-      "targets": [{"expr": "sum(worker_queue_depth{job=\"apexmail-worker\"})", "legendFormat": "queue depth", "refId": "A"}],
-      "title": "Queue Depth",
+      "targets": [
+        {
+          "expr": "apexmail_worker_info{job=\"apexmail-worker\"}",
+          "legendFormat": "worker process",
+          "refId": "A"
+        }
+      ],
+      "title": "Worker Process Liveness (apexmail_worker_info)",
       "type": "timeseries"
     }
   ],
   "refresh": "30s",
   "schemaVersion": 39,
-  "tags": ["apexmail", "worker"],
-  "templating": {"list": []},
-  "time": {"from": "now-6h", "to": "now"},
+  "tags": [
+    "apexmail",
+    "worker"
+  ],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
   "timezone": "browser",
   "title": "Worker Overview",
   "uid": "apexmail-worker-overview",

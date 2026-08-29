@@ -52,8 +52,15 @@ impl Sandbox {
         // 4. Render HTML by resolving placeholders in original source.
         //    Missing merge fields resolve to the configured fallback
         //    (empty string by default) and are reported as warnings.
+        //    F8:`*_html` values substitute raw ONLY when their exact prop
+        //    path is in the renderer's trusted_html_props allowlist.
         let fallback = options.missing_field_fallback.clone().unwrap_or_default();
-        let outcome = transpiler::resolve_placeholders_reported(source, &options.props, &fallback);
+        let outcome = transpiler::resolve_placeholders_reported_with_trust(
+            source,
+            &options.props,
+            &fallback,
+            &self.config.trusted_html_props,
+        );
         let mut warnings = outcome.warnings;
         let html = outcome.html;
 
@@ -282,6 +289,7 @@ mod tests {
             max_memory_bytes: 64 * 1024 * 1024,
             max_source_length: 512 * 1024,
             max_output_length: 2 * 1024 * 1024,
+            trusted_html_props: Vec::new(),
         })
     }
 
@@ -308,6 +316,7 @@ mod tests {
             max_memory_bytes: 64 * 1024 * 1024,
             max_source_length: 50,
             max_output_length: 2 * 1024 * 1024,
+            trusted_html_props: Vec::new(),
         });
         let source = "x".repeat(100);
         let opts = RenderOptions {
@@ -328,6 +337,7 @@ mod tests {
             max_memory_bytes: 64 * 1024 * 1024,
             max_source_length: 512 * 1024,
             max_output_length: 10, // very small
+            trusted_html_props: Vec::new(),
         });
         let source = "<p>This is a long template output</p>";
         let opts = RenderOptions {
@@ -403,6 +413,40 @@ mod tests {
         assert_eq!(result.html, "<div>Content</div>");
     }
 
+    /// F8:through the full sandbox path, `*_html` props are escaped unless
+    /// their exact path is in the renderer's trusted_html_props allowlist.
+    #[test]
+    fn test_sandbox_escapes_untrusted_html_props_and_allows_listed() {
+        let source = "<div>{{ body_html }}</div><p>{{ article.cta_html }}</p>";
+        let opts = RenderOptions {
+            props: serde_json::json!({
+                "body_html": "<script>alert(1)</script>",
+                "article": { "cta_html": "<b>Act now</b>" }
+            }),
+            generate_plaintext: false,
+            minify: false,
+            subject: None,
+            missing_field_fallback: None,
+        };
+
+        // Default (empty allowlist):everything escaped.
+        let result = test_sandbox().execute(source, &opts).unwrap();
+        assert!(!result.html.contains("<script"), "{}", result.html);
+        assert!(!result.html.contains("<b>"), "{}", result.html);
+
+        // Allowlisted exact path substitutes raw; the other stays escaped.
+        let sandbox = Sandbox::new(SandboxConfig {
+            timeout_ms: 5000,
+            max_memory_bytes: 64 * 1024 * 1024,
+            max_source_length: 512 * 1024,
+            max_output_length: 2 * 1024 * 1024,
+            trusted_html_props: vec!["article.cta_html".to_string()],
+        });
+        let result = sandbox.execute(source, &opts).unwrap();
+        assert!(!result.html.contains("<script"), "{}", result.html);
+        assert!(result.html.contains("<b>Act now</b>"), "{}", result.html);
+    }
+
     #[test]
     fn test_sandbox_reports_missing_merge_fields() {
         let sandbox = test_sandbox();
@@ -459,6 +503,7 @@ mod tests {
             max_memory_bytes: 100,
             max_source_length: 512 * 1024,
             max_output_length: 2 * 1024 * 1024,
+            trusted_html_props: Vec::new(),
         });
         let source = "<p>padding padding padding padding padding padding padding</p>";
         let opts = RenderOptions {
@@ -475,6 +520,7 @@ mod tests {
             max_memory_bytes: 512,
             max_source_length: 512 * 1024,
             max_output_length: 2 * 1024 * 1024,
+            trusted_html_props: Vec::new(),
         });
         assert!(sandbox.execute("<p>ok</p>", &opts).is_ok());
     }

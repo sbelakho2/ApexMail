@@ -28,7 +28,8 @@ func TestEmailsCancelUsesCancelEndpoint(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":"msg_123","status":"cancelled","createdAt":"2026-04-27T12:00:00Z"}`))
+		// Real MessageResponse shape: snake_case created_at.
+		_, _ = w.Write([]byte(`{"id":"msg_123","status":"cancelled","created_at":"2026-04-27T12:00:00Z"}`))
 	}))
 	defer server.Close()
 

@@ -58,35 +58,91 @@ use KiwiCaptcha\ChallengeRuntimeState;
  * exactly 32 lowercase hex characters (rejected with
  * InvalidArgumentException at the storage boundary otherwise) and the
  * claim lease TTL is >= 1 second.
+ *
+ * Expiry semantics (Redis TTL parity): a record whose expires_at has
+ * passed on the storage clock is ABSENT — find() returns null, consume
+ * and the consume-with-identity transition report missing, the retained
+ * consumed state is null, the runtime state is Missing, the fused
+ * cleanup answers missing, cancel is idempotently null and the result
+ * commit refuses — exactly what the Redis backend's key TTLs give. The
+ * expiry boundary matches the verifier's own (`now >= expires_at`), and
+ * a verifier fail-closed on a record the storage still holds is an
+ * availability property, never a security one.
+ *
+ * Bounded retention: store() first prunes expired entries, and when the
+ * map is at the hard cap ({@see self::DEFAULT_MAX_ENTRIES}, or the
+ * constructor's $maxEntries) it evicts the oldest-EXPIRING entries
+ * first, so a long-lived CLI process sharing one storage instance can
+ * never accumulate unbounded state.
  */
 final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface, \KiwiCaptcha\ChallengeRuntimeStateReadableInterface, ResumeDerivationClaimInterface
 {
+    /**
+     * The default hard cap on retained entries: store() prunes expired
+     * records first and then, only when the map is at the cap, evicts
+     * the oldest-EXPIRING entries, so a long-lived CLI process sharing
+     * one storage instance stays memory-bounded (matching what the
+     * Redis backend gets for free from key TTLs).
+     */
+    public const DEFAULT_MAX_ENTRIES = 10_000;
+
     /** @var array<string, array{record: ChallengeRecord, consumed: bool, cancelled: bool, result: ConsumedResult|null, operationIdentity: string|null, claim: string|null, claimUntil: int|null}> */
     private array $records = [];
 
     /**
-     * @param \Closure|null $now the clock override (epoch seconds) used
-     *                           for the resume-claim lease; defaults to
-     *                           `time()`. Test seam, same style as
-     *                           {@see Verifier}'s `$now`.
+     * @param \Closure|null $now        the clock override (epoch seconds)
+     *                                  used for the resume-claim lease AND
+     *                                  the expiry semantics; defaults to
+     *                                  `time()`. Test seam, same style as
+     *                                  {@see Verifier}'s `$now`.
+     * @param int           $maxEntries the hard cap on retained entries
+     *                                  (>= 1). store() prunes expired
+     *                                  records first and evicts the
+     *                                  oldest-expiring entries only when
+     *                                  the cap would be exceeded.
+     *
+     * @throws \InvalidArgumentException when $maxEntries is below 1
      */
-    public function __construct(private readonly ?\Closure $now = null)
-    {
+    public function __construct(
+        private readonly ?\Closure $now = null,
+        private readonly int $maxEntries = self::DEFAULT_MAX_ENTRIES,
+    ) {
+        if ($this->maxEntries < 1) {
+            throw new \InvalidArgumentException('maxEntries must be at least 1');
+        }
     }
 
     public function store(ChallengeRecord $record): void
     {
+        // Bounded retention: expired entries never accumulate (they are
+        // absent to every read anyway, see {@see self::entry()}), and a
+        // long-lived process never exceeds the hard cap — the evictions
+        // drop the entries that expire soonest first, mirroring what
+        // Redis key TTLs do for the other backend.
+        $this->pruneExpired();
+        $needed = (isset($this->records[$record->nonce]) ? 0 : 1) + \count($this->records) - $this->maxEntries;
+        if ($needed > 0) {
+            $byExpiry = [];
+            foreach ($this->records as $nonce => $entry) {
+                $byExpiry[$nonce] = $entry['record']->expiresAt;
+            }
+            asort($byExpiry);
+            $evictables = array_keys($byExpiry);
+            for ($i = 0; $i < $needed; $i++) {
+                unset($this->records[$evictables[$i]]);
+            }
+        }
         $this->records[$record->nonce] = ['record' => $record, 'consumed' => false, 'cancelled' => false, 'result' => null, 'operationIdentity' => null, 'claim' => null, 'claimUntil' => null];
     }
 
     public function find(string $nonce): ?ChallengeRecord
     {
-        return $this->records[$nonce]['record'] ?? null;
+        return $this->entry($nonce)['record'] ?? null;
     }
 
     public function consume(string $nonce): ?ConsumedRecord
     {
-        $entry = $this->records[$nonce] ?? null;
+        $entry = $this->entry($nonce);
         if ($entry === null) {
             return null;
         }
@@ -113,7 +169,7 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
         // malformed identity is rejected with InvalidArgumentException,
         // never silently dropped.
         $validated = OperationIdentity::validate($operationIdentity);
-        $entry = $this->records[$nonce] ?? null;
+        $entry = $this->entry($nonce);
         if ($entry === null) {
             return null;
         }
@@ -133,7 +189,7 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
 
     public function consumedState(string $nonce): ?ConsumedRecord
     {
-        $entry = $this->records[$nonce] ?? null;
+        $entry = $this->entry($nonce);
         if ($entry === null || !$entry['consumed']) {
             return null;
         }
@@ -143,7 +199,7 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
 
     public function commitResult(string $nonce, bool $valid, ?string $binding): bool
     {
-        $entry = $this->records[$nonce] ?? null;
+        $entry = $this->entry($nonce);
         if ($entry === null || !$entry['consumed'] || $entry['result'] !== null) {
             return false;
         }
@@ -180,11 +236,11 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
         if ($ttlSecs < 1) {
             throw new \InvalidArgumentException('the resume claim TTL must be at least 1 second');
         }
-        $entry = $this->records[$nonce] ?? null;
+        $entry = $this->entry($nonce);
         if ($entry === null || !$entry['consumed'] || ($entry['cancelled'] ?? false) || $entry['result'] !== null) {
             return null;
         }
-        $now = $this->now !== null ? (int) ($this->now)() : time();
+        $now = $this->nowInSeconds();
         if (($entry['claim'] ?? null) !== null && ($entry['claimUntil'] ?? null) !== null && ($entry['claimUntil'] ?? 0) > $now) {
             return null;
         }
@@ -210,7 +266,7 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
     public function releaseResumeDerivation(string $nonce, string $owner): bool
     {
         $this->assertValidResumeOwner($owner);
-        $entry = $this->records[$nonce] ?? null;
+        $entry = $this->entry($nonce);
         if ($entry === null || ($entry['claim'] ?? null) !== $owner) {
             return false;
         }
@@ -238,11 +294,11 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
     public function commitResultResume(string $nonce, bool $valid, ?string $binding, string $owner): bool
     {
         $this->assertValidResumeOwner($owner);
-        $entry = $this->records[$nonce] ?? null;
+        $entry = $this->entry($nonce);
         if ($entry === null || !$entry['consumed'] || ($entry['cancelled'] ?? false) || $entry['result'] !== null) {
             return false;
         }
-        $now = $this->now !== null ? (int) ($this->now)() : time();
+        $now = $this->nowInSeconds();
         if (($entry['claim'] ?? null) !== $owner || ($entry['claimUntil'] ?? null) === null || ($entry['claimUntil'] ?? 0) <= $now) {
             return false;
         }
@@ -268,6 +324,59 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
     }
 
     /**
+     * The storage clock: the constructor's $now closure (epoch seconds)
+     * or the wall clock. Shared by the expiry semantics, the resume
+     * claim lease and the pruning pass.
+     */
+    private function nowInSeconds(): int
+    {
+        return $this->now !== null ? (int) ($this->now)() : time();
+    }
+
+    /**
+     * The live entry, or null when the nonce is absent OR its record has
+     * expired — Redis TTL semantics: an expired key is indistinguishable
+     * from a missing one on every read and transition (find returns
+     * null, consume reports missing, the runtime state is Missing, the
+     * cleanup is missing, cancel is idempotently null). The expiry
+     * boundary matches the verifier's own (`now >= expires_at`), so a
+     * record this backend reports present is exactly one the verifier
+     * would not immediately fail as Expired. The lazy unset also evicts
+     * the expired entry from the map on first observation.
+     *
+     * @return array{record: ChallengeRecord, consumed: bool, cancelled: bool, result: ConsumedResult|null, operationIdentity: string|null, claim: string|null, claimUntil: int|null}|null
+     */
+    private function entry(string $nonce): ?array
+    {
+        $entry = $this->records[$nonce] ?? null;
+        if ($entry === null) {
+            return null;
+        }
+        if ($this->nowInSeconds() >= $entry['record']->expiresAt) {
+            unset($this->records[$nonce]);
+
+            return null;
+        }
+
+        return $entry;
+    }
+
+    /**
+     * Drop every expired entry from the map (the bounded-retention half
+     * of {@see self::store()}): an entry no read can observe never
+     * accumulates in a long-lived process.
+     */
+    private function pruneExpired(): void
+    {
+        $now = $this->nowInSeconds();
+        foreach ($this->records as $nonce => $entry) {
+            if ($now >= $entry['record']->expiresAt) {
+                unset($this->records[$nonce]);
+            }
+        }
+    }
+
+    /**
      * The fused cleanup transition. The state is a plain in-process
      * array no other process can observe, so the read-decide-delete
      * sequence is de-facto atomic here. A missing record reports
@@ -283,7 +392,7 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
      */
     public function deleteIfPending(string $nonce): \KiwiCaptcha\DeleteIfPendingResult
     {
-        $entry = $this->records[$nonce] ?? null;
+        $entry = $this->entry($nonce);
         if ($entry === null) {
             return new \KiwiCaptcha\DeleteIfPendingResult('missing');
         }
@@ -313,7 +422,7 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
      */
     public function runtimeState(string $nonce): ChallengeRuntimeState
     {
-        $entry = $this->records[$nonce] ?? null;
+        $entry = $this->entry($nonce);
         if ($entry === null) {
             return new ChallengeRuntimeState(ChallengeRuntimeStateKind::Missing);
         }
@@ -329,7 +438,7 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
 
     public function cancel(string $nonce): ?\KiwiCaptcha\CancellationResult
     {
-        $entry = $this->records[$nonce] ?? null;
+        $entry = $this->entry($nonce);
         if ($entry === null) {
             return null;
         }

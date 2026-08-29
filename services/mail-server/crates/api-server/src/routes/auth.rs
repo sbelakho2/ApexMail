@@ -20,8 +20,8 @@ use uuid::Uuid;
 use crate::error::ApiError;
 use crate::middleware::auth::{
     invalidate_api_key_cache, invalidate_tenant_user_status_cache, issued_before_or_at_revocation,
-    lookup_session_revoked_after, session_revocation_key, validate_session_csrf, AuthUser,
-    JwtClaims,
+    lookup_session_revoked_after, require_scopes, session_revocation_key, validate_session_csrf,
+    AuthUser, JwtClaims,
 };
 use crate::middleware::rate_limiter::{extract_public_client_ip, INCR_EXPIRE_LUA};
 use crate::routes::csrf::validate_form_csrf;
@@ -37,6 +37,10 @@ const LOGIN_LOCKOUT_MAX_SECS: u64 = 24 * 60 * 60;
 const LOGIN_LOCKOUT_ESCALATION_WINDOW_SECS: u64 = 24 * 60 * 60;
 const DEFAULT_API_KEY_EXPIRY_DAYS: i64 = 90;
 const MAX_API_KEY_EXPIRY_DAYS: i64 = 365;
+/// Per-tenant API key ceiling, counted before insert (F2). Mirrors
+/// `webhooks::MAX_WEBHOOKS_PER_TENANT`. Shared with the console form twin
+/// (`routes::web::form_api_key_create`) so both surfaces enforce the same cap.
+pub(crate) const MAX_API_KEYS_PER_TENANT: i64 = 25;
 /// Login IP rate limiting: max login attempts per IP address per window.
 const LOGIN_IP_RATE_LIMIT: i64 = 20;
 const LOGIN_IP_RATE_LIMIT_WINDOW_SECS: u64 = 15 * 60;
@@ -72,6 +76,44 @@ const KIWI_MAX_VERIFY_ATTEMPTS: i64 = 20;
 /// semaphore bounds ALL of them. Initialized from config on first use.
 static ARGON2_VERIFY_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
+/// Upper bound on how long a verification may WAIT for an Argon2 permit
+/// before it is rejected with a retryable denial. Without a bound, an
+/// attacker occupying every permit (`kiwi_argon2_max_concurrent`, default 2)
+/// with wrong-counter submissions parks every legitimate verification in an
+/// unbounded `acquire_owned` queue. A single derivation finishes well under
+/// a second even at the 64 MiB / `t` ceiling, so a caller still queued after
+/// this bound is looking at attacker-dominated saturation, not jitter.
+/// Follows the `Bulkhead::acquire` bounded-wait pattern (resilience.rs);
+/// no argon-runtime config knob exists, so the bound is fixed here.
+const KIWI_ARGON2_PERMIT_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Acquire the aggregate Argon2 verification permit with a BOUNDED wait.
+/// On timeout (or semaphore closure — never triggered today) the caller gets
+/// the same retryable 503-style denial `routes::kiwicaptcha.rs` uses for
+/// capacity exhaustion, never an indefinite queue.
+async fn acquire_argon2_permit_bounded(
+    semaphore: &Arc<Semaphore>,
+    max_wait: std::time::Duration,
+) -> Result<tokio::sync::OwnedSemaphorePermit, ApiError> {
+    match tokio::time::timeout(max_wait, semaphore.clone().acquire_owned()).await {
+        Ok(permit) => permit.map_err(|_| {
+            tracing::error!("KiwiCaptcha Argon2 verify semaphore closed");
+            ApiError::ServiceUnavailable(
+                "captcha verification capacity exceeded; please retry shortly".into(),
+            )
+        }),
+        Err(_) => {
+            tracing::warn!(
+                max_wait_ms = max_wait.as_millis() as u64,
+                "KiwiCaptcha: Argon2 verify permit wait timed out — verifier saturated"
+            );
+            Err(ApiError::ServiceUnavailable(
+                "captcha verification capacity exceeded; please retry shortly".into(),
+            ))
+        }
+    }
+}
+
 /// Atomic single-use consumption of a KiwiCaptcha challenge record.
 ///
 /// The record is deleted only if it still equals the exact JSON the caller
@@ -85,6 +127,80 @@ const KIWI_CONSUME_LUA: &str = r#"
     end
     return 0
 "#;
+
+/// Outcome of the per-nonce KiwiCaptcha verify-attempt cap check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KiwiAttemptCap {
+    /// Under the cap — verification may proceed.
+    Allowed,
+    /// Over the cap — verification must be denied. This is ALSO the outcome
+    /// when the INCR Lua script itself fails: the check fails CLOSED, never
+    /// silently passing (a `0` on a script error would remove the
+    /// `KIWI_MAX_VERIFY_ATTEMPTS` cap and let one nonce drive unbounded
+    /// Argon2id derivations). Mirrors the issuance limiter's script-error
+    /// semantics in `routes::kiwicaptcha.rs` (error → treated as exceeded).
+    Exceeded,
+    /// Redis is unavailable — verification must be denied with a retryable
+    /// 503, mirroring `ChallengeRateLimit::RedisUnavailable` in
+    /// `routes::kiwicaptcha.rs`.
+    RedisUnavailable,
+}
+
+/// Per-nonce verify-attempt cap check, extracted so it can be unit-tested
+/// directly. Never silently allows on a Redis error: pool failure →
+/// [`KiwiAttemptCap::RedisUnavailable`], script failure →
+/// [`KiwiAttemptCap::Exceeded`] (the same fail-closed mapping the challenge
+/// issuance limiter in `routes::kiwicaptcha.rs` applies).
+async fn check_kiwi_verify_attempt_cap(
+    redis_pool: &deadpool_redis::Pool,
+    attempt_key: &str,
+    ttl_secs: u64,
+) -> KiwiAttemptCap {
+    let mut conn = match redis_pool.get().await {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                "KiwiCaptcha verify-attempt store unavailable — failing verification closed"
+            );
+            return KiwiAttemptCap::RedisUnavailable;
+        }
+    };
+
+    let attempts: i64 = deadpool_redis::redis::Script::new(
+        r#"
+            local key = KEYS[1]
+            local max = tonumber(ARGV[1])
+            local ttl = tonumber(ARGV[2])
+            local count = redis.call('INCR', key)
+            if count == 1 then
+                redis.call('EXPIRE', key, ttl)
+            end
+            if count > max then
+                return 1
+            end
+            return 0
+        "#,
+    )
+    .key(attempt_key)
+    .arg(KIWI_MAX_VERIFY_ATTEMPTS)
+    .arg(ttl_secs)
+    .invoke_async::<i64>(&mut *conn)
+    .await
+    .unwrap_or_else(|error| {
+        tracing::error!(
+            error = %error,
+            "KiwiCaptcha verify-attempt script failed — failing verification closed"
+        );
+        1
+    });
+
+    if attempts > 0 {
+        KiwiAttemptCap::Exceeded
+    } else {
+        KiwiAttemptCap::Allowed
+    }
+}
 
 /// Verify a KiwiCaptcha proof-of-work solution against the stored challenge.
 ///
@@ -174,35 +290,28 @@ pub async fn verify_kiwi_token(
     // memory-hard (Argon2id) verification and defeats counter-guessing loops —
     // the challenge record itself is only consumed on success, so without this
     // cap a single issued nonce could trigger unbounded expensive verifications.
+    // The check FAILS CLOSED (mirroring the issuance limiter in
+    // routes::kiwicaptcha.rs): over the cap → denial; store unavailable →
+    // retryable 503; never a silent pass.
     let attempt_key = format!("{KIWI_CHALLENGE_PREFIX}attempts:{}", solution.nonce);
+    match check_kiwi_verify_attempt_cap(
+        redis_pool,
+        &attempt_key,
+        config.kiwi_challenge_ttl_secs.max(1),
+    )
+    .await
     {
-        let mut conn = redis_pool.get().await?;
-        let attempts: i64 = deadpool_redis::redis::Script::new(
-            r#"
-                local key = KEYS[1]
-                local max = tonumber(ARGV[1])
-                local ttl = tonumber(ARGV[2])
-                local count = redis.call('INCR', key)
-                if count == 1 then
-                    redis.call('EXPIRE', key, ttl)
-                end
-                if count > max then
-                    return 1
-                end
-                return 0
-            "#,
-        )
-        .key(&attempt_key)
-        .arg(KIWI_MAX_VERIFY_ATTEMPTS)
-        .arg(config.kiwi_challenge_ttl_secs.max(1))
-        .invoke_async::<i64>(&mut *conn)
-        .await
-        .unwrap_or(0);
-        if attempts > 0 {
-            tracing::warn!(attempts, "KiwiCaptcha: verify attempt cap exceeded");
+        KiwiAttemptCap::Allowed => {}
+        KiwiAttemptCap::Exceeded => {
+            tracing::warn!("KiwiCaptcha: verify attempt cap exceeded");
             return Err(ApiError::Validation(vec![
                 "CAPTCHA verification failed — please refresh and try again".into(),
             ]));
+        }
+        KiwiAttemptCap::RedisUnavailable => {
+            return Err(ApiError::ServiceUnavailable(
+                "captcha challenge store unavailable; please retry shortly".into(),
+            ));
         }
     }
 
@@ -223,14 +332,25 @@ pub async fn verify_kiwi_token(
 
     // Telemetry scoring: detect headless/automated clients. The telemetry
     // payload itself is deliberately not logged (privacy).
-    if kiwicaptcha::score_telemetry(&solution.telemetry, solution.duration_ms) {
+    //
+    // Telemetry is client-controlled and forgeable — supplementary evidence,
+    // never the security boundary (the kiwicaptcha model: default-off,
+    // verify.rs `enforce_telemetry` docs). It is scored EXACTLY ONCE here:
+    // when enforcement is OFF, a bot-scored payload is observability-only
+    // (warn log below, no rejection); when enforcement is ON, this call is
+    // short-circuited and the crate-side check inside verify_solution
+    // performs the single scoring and the rejection. The previous shape —
+    // an unconditional hard reject here — ran before the configured
+    // `kiwi_enforce_telemetry` flag was consulted (rejecting even with
+    // KIWI_ENFORCE_TELEMETRY=false) and double-scored the payload when the
+    // flag was on.
+    if !config.kiwi_enforce_telemetry
+        && kiwicaptcha::score_telemetry(&solution.telemetry, solution.duration_ms)
+    {
         tracing::warn!(
             duration_ms = solution.duration_ms,
-            "KiwiCaptcha bot detected via telemetry"
+            "KiwiCaptcha bot signal in telemetry (not enforced: KIWI_ENFORCE_TELEMETRY is off)"
         );
-        return Err(ApiError::Validation(vec![
-            "CAPTCHA verification failed — please try again".into(),
-        ]));
     }
 
     let now_ns = std::time::SystemTime::now()
@@ -240,17 +360,14 @@ pub async fn verify_kiwi_token(
 
     // kiwicaptcha's VerifyContext carries a `&mut dyn FnMut` clock (not
     // Send): acquire the Argon2 permit FIRST, then build ctx and scope it
-    // to the sync verify call so the handler future stays Send.
+    // to the sync verify call so the handler future stays Send. The wait is
+    // BOUNDED (KIWI_ARGON2_PERMIT_WAIT_TIMEOUT): a saturated semaphore
+    // yields a retryable denial instead of an unbounded queue.
     let _argon2_permit = if record.algorithm == kiwicaptcha::PoWAlgorithm::Argon2id {
         let semaphore = ARGON2_VERIFY_SEMAPHORE
             .get_or_init(|| Arc::new(Semaphore::new(config.kiwi_argon2_max_concurrent as usize)))
             .clone();
-        Some(
-            semaphore
-                .acquire_owned()
-                .await
-                .map_err(|_| ApiError::Internal("CAPTCHA verification capacity exceeded".into()))?,
-        )
+        Some(acquire_argon2_permit_bounded(&semaphore, KIWI_ARGON2_PERMIT_WAIT_TIMEOUT).await?)
     } else {
         None
     };
@@ -352,6 +469,42 @@ pub async fn verify_kiwi_token(
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some("23505"))
+}
+
+/// F8: enterprise SSO enforcement. A tenant whose `ent_sso_configurations`
+/// row has `enforce_sso = true` must not be able to authenticate with a
+/// local password — every login has to go through the SSO flow. Returns
+/// `Ok(false)` when the table does not exist (deployments without the
+/// enterprise schema) so enforcement degrades safely; any other database
+/// error is propagated.
+async fn tenant_sso_enforced(db: &sqlx::PgPool, tenant_id: &str) -> Result<bool, ApiError> {
+    let enforced: Option<bool> = match sqlx::query_scalar::<_, bool>(
+        "SELECT enforce_sso FROM ent_sso_configurations WHERE tenant_id = $1 LIMIT 1",
+    )
+    .bind(tenant_id)
+    .fetch_optional(db)
+    .await
+    {
+        Ok(row) => row,
+        Err(error)
+            if matches!(
+                &error,
+                sqlx::Error::Database(db_error)
+                    if db_error.code().as_deref() == Some("42P01")
+            ) =>
+        {
+            // ent_sso_configurations absent: no enterprise SSO configuration
+            // can exist, so nothing is enforced.
+            tracing::warn!(tenant_id = %tenant_id, "ent_sso_configurations table absent; SSO enforcement skipped");
+            None
+        }
+        Err(error) => {
+            tracing::error!(error = %error, tenant_id = %tenant_id, "SSO enforcement lookup failed");
+            return Err(ApiError::Internal("database error".into()));
+        }
+    };
+
+    Ok(enforced.unwrap_or(false))
 }
 
 fn verify_password_or_log(password: &str, hash: &str, subject: &str) -> Result<bool, ApiError> {
@@ -857,21 +1010,6 @@ async fn store_mfa_challenge(
     Ok(token)
 }
 
-async fn load_mfa_challenge(
-    redis_pool: &deadpool_redis::Pool,
-    token: &str,
-) -> Result<MfaChallengeState, ApiError> {
-    let mut conn = redis_pool.get().await?;
-    let key = mfa_challenge_key(token);
-    let payload: Option<String> =
-        deadpool_redis::redis::AsyncCommands::get(&mut *conn, &key).await?;
-    let payload =
-        payload.ok_or_else(|| ApiError::Unauthorized("invalid or expired MFA challenge".into()))?;
-
-    serde_json::from_str(&payload)
-        .map_err(|error| ApiError::Internal(format!("failed to decode MFA challenge: {error}")))
-}
-
 async fn delete_mfa_challenge(
     redis_pool: &deadpool_redis::Pool,
     token: &str,
@@ -880,6 +1018,207 @@ async fn delete_mfa_challenge(
     let mut conn = redis_pool.get().await?;
     let _: i64 = deadpool_redis::redis::AsyncCommands::del(&mut *conn, &key).await?;
     Ok(())
+}
+
+// ─── F3: TOTP hardening (lockout, replay guard, single-use challenges) ──
+
+/// RFC 6238 time step used by `apexmail_lib::mfa` (30 s). Duplicated here
+/// because the lib keeps it private; the replay guard must key on the same
+/// windows the verifier accepts.
+const TOTP_STEP_SECS: u64 = 30;
+
+/// Replay-guard TTL: a code is accepted while the current step is within ±1
+/// of the code's own step, so a single code can stay acceptable for up to
+/// 3 steps (90 s). 120 s covers the whole span plus clock-skew slack.
+const TOTP_REPLAY_TTL_SECS: u64 = 120;
+
+/// Capacity bound for the in-process replay fallback so a Redis outage can
+/// never grow memory unboundedly (F3).
+const TOTP_REPLAY_FALLBACK_CAP: usize = 8192;
+
+const MFA_TOTP_REPLAY_PREFIX: &str = "apexmail:auth:mfa_totp_replay:";
+
+/// Process-wide TOTP verifier with per-secret failed-attempt lockout
+/// (`apexmail_lib::mfa::TOTPVerifier`, audit O-19.2). Shared so every TOTP
+/// check site contributes to — and is bounded by — the same lockout state.
+static TOTP_VERIFIER: std::sync::LazyLock<apexmail_lib::mfa::TOTPVerifier> =
+    std::sync::LazyLock::new(apexmail_lib::mfa::TOTPVerifier::new);
+
+/// Bounded in-process replay-map fallback used only while Redis is
+/// unavailable (key → expiry instant).
+static TOTP_REPLAY_FALLBACK: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+/// Atomic single-use claim of a TOTP code's ±1 acceptance windows (F3).
+/// KEYS = the three replay keys for the current step ±1,
+/// ARGV[1] = TTL seconds.
+/// Returns 1 when this caller is the first to use the window, 0 on replay.
+const TOTP_REPLAY_CLAIM_LUA: &str = r#"
+    for i = 1, #KEYS do
+        if redis.call('EXISTS', KEYS[i]) == 1 then
+            return 0
+        end
+    end
+    for i = 1, #KEYS do
+        redis.call('SET', KEYS[i], '1', 'EX', ARGV[1])
+    end
+    return 1
+"#;
+
+/// Atomic single-use consumption of an MFA challenge (F3): fetch the stored
+/// state and delete it in the same round trip. The challenge is burned on
+/// the first verification ATTEMPT regardless of outcome, so a challenge
+/// token can never be replayed after a failed code (or a successful one).
+const MFA_CHALLENGE_CONSUME_LUA: &str = r#"
+    local stored = redis.call('GET', KEYS[1])
+    if stored ~= false then
+        redis.call('DEL', KEYS[1])
+    end
+    return stored
+"#;
+
+/// Replay-guard key for one TOTP step window of one secret. The secret is
+/// hashed (never stored raw) so TOTP key material does not land in Redis
+/// keyspace.
+fn mfa_totp_replay_key(secret_fingerprint: &str, step: u64) -> String {
+    format!("{MFA_TOTP_REPLAY_PREFIX}{secret_fingerprint}:{step}")
+}
+
+/// Stable fingerprint of a TOTP secret for replay keys.
+fn mfa_totp_secret_fingerprint(secret: &str) -> String {
+    hex::encode(Sha256::digest(secret.as_bytes()))
+}
+
+fn current_totp_step() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        / TOTP_STEP_SECS
+}
+
+/// Atomically claim the ±1 windows around the current step in Redis.
+/// `Some(true)` = first use, `Some(false)` = replay, `None` = Redis
+/// unavailable (caller falls back to the in-process map).
+async fn claim_totp_window_redis(
+    redis_pool: &deadpool_redis::Pool,
+    secret_fingerprint: &str,
+) -> Option<bool> {
+    let mut conn = match redis_pool.get().await {
+        Ok(conn) => conn,
+        Err(error) => {
+            tracing::warn!(error = %error, "TOTP replay guard Redis unavailable");
+            return None;
+        }
+    };
+
+    let step = current_totp_step();
+    let keys = [
+        mfa_totp_replay_key(secret_fingerprint, step.saturating_sub(1)),
+        mfa_totp_replay_key(secret_fingerprint, step),
+        mfa_totp_replay_key(secret_fingerprint, step + 1),
+    ];
+
+    let claimed: i64 = deadpool_redis::redis::Script::new(TOTP_REPLAY_CLAIM_LUA)
+        .key(&keys[0])
+        .key(&keys[1])
+        .key(&keys[2])
+        .arg(TOTP_REPLAY_TTL_SECS)
+        .invoke_async(&mut conn)
+        .await
+        .map_err(|error| {
+            tracing::warn!(error = %error, "TOTP replay guard Redis command failed");
+            error
+        })
+        .ok()?;
+
+    Some(claimed == 1)
+}
+
+/// Bounded in-process fallback for the replay claim while Redis is down.
+/// Expired entries are pruned on insert; the map is cleared if it is still
+/// at capacity, so memory stays bounded no matter how many secrets are seen.
+fn claim_totp_window_inprocess(secret_fingerprint: &str) -> bool {
+    let mut map = TOTP_REPLAY_FALLBACK.lock();
+    let now = std::time::Instant::now();
+    let step = current_totp_step();
+    let keys = [
+        mfa_totp_replay_key(secret_fingerprint, step.saturating_sub(1)),
+        mfa_totp_replay_key(secret_fingerprint, step),
+        mfa_totp_replay_key(secret_fingerprint, step + 1),
+    ];
+
+    if keys
+        .iter()
+        .any(|key| map.get(key).is_some_and(|expires| *expires > now))
+    {
+        return false;
+    }
+
+    if map.len() >= TOTP_REPLAY_FALLBACK_CAP {
+        map.retain(|_, expires| *expires > now);
+        if map.len() >= TOTP_REPLAY_FALLBACK_CAP {
+            map.clear();
+        }
+    }
+
+    let expires = now + std::time::Duration::from_secs(TOTP_REPLAY_TTL_SECS);
+    for key in keys {
+        map.insert(key, expires);
+    }
+    true
+}
+
+/// Verify a TOTP code with the full F3 hardening applied:
+/// 1. **Lockout** — the shared `TOTPVerifier` locks a secret after repeated
+///    failures (per process).
+/// 2. **Replay guard** — a valid code is single-use across its whole ±1
+///    acceptance window (atomic Redis claim, in-process fallback), so an
+///    intercepted code cannot be replayed inside the drift window.
+///
+/// Returns `true` only for a valid, previously-unused code. Shared with the
+/// console form twins (`routes::web`) so browser MFA gets the identical
+/// hardening.
+pub(crate) async fn verify_totp_code_guarded(
+    redis_pool: &deadpool_redis::Pool,
+    secret: &str,
+    code: &str,
+) -> bool {
+    if !TOTP_VERIFIER.verify(secret, code) {
+        return false;
+    }
+
+    let fingerprint = mfa_totp_secret_fingerprint(secret);
+    match claim_totp_window_redis(redis_pool, &fingerprint).await {
+        Some(true) => true,
+        Some(false) => {
+            tracing::warn!("replayed TOTP code rejected");
+            TOTP_VERIFIER.record_failure(secret);
+            false
+        }
+        None => claim_totp_window_inprocess(&fingerprint),
+    }
+}
+
+/// Load an MFA challenge and atomically consume it (single-use, F3). The
+/// token is deleted whether the upcoming verification succeeds or fails.
+async fn consume_mfa_challenge(
+    redis_pool: &deadpool_redis::Pool,
+    token: &str,
+) -> Result<MfaChallengeState, ApiError> {
+    let mut conn = redis_pool.get().await?;
+    let stored: Option<String> = deadpool_redis::redis::Script::new(MFA_CHALLENGE_CONSUME_LUA)
+        .key(mfa_challenge_key(token))
+        .invoke_async(&mut conn)
+        .await
+        .map_err(|error| ApiError::Internal(format!("failed to consume MFA challenge: {error}")))?;
+
+    let payload =
+        stored.ok_or_else(|| ApiError::Unauthorized("invalid or expired MFA challenge".into()))?;
+
+    serde_json::from_str(&payload)
+        .map_err(|error| ApiError::Internal(format!("failed to decode MFA challenge: {error}")))
 }
 
 async fn delete_email_mfa_code(
@@ -915,7 +1254,10 @@ async fn enqueue_verification_email(
     email: &str,
     token: &str,
 ) -> Result<(), ApiError> {
-    let verification_link = build_action_link(base_url, "/verify-email", email, token);
+    // F5: the link targets the path-param JSON route. The bare
+    // `/verify-email` root path only understands `?token=` (browser page
+    // routed in app.rs), so a path-style link there would 404.
+    let verification_link = build_action_link(base_url, "/v1/auth/verify-email", email, token);
     let safe_email = html_escape(email);
     let safe_link = html_escape(&verification_link);
     let html_body = format!(
@@ -955,6 +1297,9 @@ pub fn router() -> Router<AppState> {
         .route("/mfa/status", get(mfa_status))
         .route("/register", post(register))
         .route("/signup", post(register))
+        // Canonical path-param form (F5/CWE-598); the query-string twin
+        // below is deprecated but kept for in-flight links and old clients.
+        .route("/verify-email/:token", get(verify_email_by_path))
         .route("/verify-email", get(verify_email))
         .route("/reset-password", post(reset_password))
         .route("/api-keys", post(create_api_key).get(list_api_keys))
@@ -975,6 +1320,9 @@ pub fn control_plane_alias_router() -> Router<AppState> {
         .route("/mfa/status", get(mfa_status))
         .route("/register", post(register))
         .route("/signup", post(register))
+        // Canonical path-param form (F5/CWE-598); the query-string twin
+        // below is deprecated but kept for in-flight links and old clients.
+        .route("/verify-email/:token", get(verify_email_by_path))
         .route("/verify-email", get(verify_email))
         .route("/reset-password", post(reset_password))
         .route("/logout", post(logout))
@@ -1509,6 +1857,20 @@ async fn login(
         return Err(ApiError::Forbidden("account is not active".into()));
     }
 
+    // F8: SSO-enforced tenants reject password login outright — before any
+    // credential verification, so no password hash work is even performed
+    // and no password side channel exists for these tenants.
+    if tenant_sso_enforced(&state.db, &user.tenant_id).await? {
+        tracing::info!(
+            tenant_id = %user.tenant_id,
+            "password login rejected: tenant enforces SSO"
+        );
+        return Err(ApiError::Forbidden(
+            "SSO_REQUIRED: this organization requires single sign-on; password login is disabled"
+                .into(),
+        ));
+    }
+
     let valid = verify_password_or_log(&body.password, &user.password_hash, &user.email)?;
 
     if !valid {
@@ -1667,8 +2029,9 @@ async fn login(
                     ));
                 }
             } else if let Some(mfa_code) = body.mfa_code.as_deref() {
-                // Try TOTP first, then fall back to recovery code
-                let totp_valid = apexmail_lib::mfa::verify_totp_code(secret, mfa_code);
+                // Try TOTP first (with lockout + replay guards, F3), then
+                // fall back to recovery code
+                let totp_valid = verify_totp_code_guarded(&state.redis, secret, mfa_code).await;
                 let recovery_valid = if !totp_valid {
                     verify_and_consume_recovery_code(
                         &state.db,
@@ -1828,23 +2191,30 @@ async fn complete_mfa_challenge(
         ]));
     }
 
-    let challenge = load_mfa_challenge(&state.redis, &body.challenge_token).await?;
+    // Single-use (F3): consume the challenge on this attempt regardless of
+    // the outcome — a challenge token can never be retried after a failed
+    // (or successful) verification.
+    let challenge = consume_mfa_challenge(&state.redis, &body.challenge_token).await?;
     let login_identifier = normalized_login_identifier(&challenge.email);
 
-    match challenge.kind {
+    // Verify the TOTP code exactly once (F3): the replay guard makes codes
+    // single-use, so a second verification of the same code below would
+    // always fail. The result is carried into the second half instead.
+    let totp_verified = match challenge.kind {
         MfaChallengeKind::Setup => {
             // Setup always requires a valid TOTP code
             if !has_mfa_code
-                || !apexmail_lib::mfa::verify_totp_code(&challenge.secret, &body.mfa_code)
+                || !verify_totp_code_guarded(&state.redis, &challenge.secret, &body.mfa_code).await
             {
                 record_login_failure(&state.redis, &login_identifier, client_ip.as_deref()).await?;
                 return Err(ApiError::Unauthorized("invalid MFA code".into()));
             }
+            true
         }
         MfaChallengeKind::Verify => {
             // Verify accepts either TOTP code or recovery code
             let totp_valid = has_mfa_code
-                && apexmail_lib::mfa::verify_totp_code(&challenge.secret, &body.mfa_code);
+                && verify_totp_code_guarded(&state.redis, &challenge.secret, &body.mfa_code).await;
 
             if !totp_valid {
                 // Try recovery code before failing
@@ -1859,8 +2229,9 @@ async fn complete_mfa_challenge(
                 }
                 // Recovery code verification happens below after loading user
             }
+            totp_valid
         }
-    }
+    };
 
     clear_login_failures(&state.redis, &login_identifier).await?;
 
@@ -1939,8 +2310,6 @@ async fn complete_mfa_challenge(
             user.mfa_enabled = true;
             user.mfa_secret = Some(challenge.secret.clone());
 
-            delete_mfa_challenge(&state.redis, &body.challenge_token).await?;
-
             // AR-005: Rotate session after MFA setup (privilege escalation)
             let ttl = state.config.jwt_expiry.as_secs();
             let revoked_after =
@@ -1965,8 +2334,10 @@ async fn complete_mfa_challenge(
                 ));
             }
 
-            // If TOTP failed earlier, try recovery code
-            let totp_valid = apexmail_lib::mfa::verify_totp_code(&challenge.secret, &body.mfa_code);
+            // If TOTP failed earlier, try recovery code. `totp_verified`
+            // carries the one-shot verification result from above — the code
+            // must NOT be verified again (replay guard makes it single-use).
+            let totp_valid = totp_verified;
             if !totp_valid {
                 let rc = body
                     .recovery_code
@@ -2002,8 +2373,6 @@ async fn complete_mfa_challenge(
                 )
                 .await?;
             }
-
-            delete_mfa_challenge(&state.redis, &body.challenge_token).await?;
 
             // AR-005: Rotate session after MFA verification (privilege escalation)
             let ttl = state.config.jwt_expiry.as_secs();
@@ -2110,10 +2479,11 @@ async fn confirm_mfa_setup(
         return Err(ApiError::Validation(vec!["mfa_code is required".into()]));
     }
 
-    let challenge = load_mfa_challenge(&state.redis, &body.challenge_token).await?;
+    // Single-use (F3): consume the challenge on this attempt regardless of
+    // the outcome, and check the TOTP code with lockout + replay guards.
+    let challenge = consume_mfa_challenge(&state.redis, &body.challenge_token).await?;
 
-    // Validate the TOTP code
-    if !apexmail_lib::mfa::verify_totp_code(&challenge.secret, &body.mfa_code) {
+    if !verify_totp_code_guarded(&state.redis, &challenge.secret, &body.mfa_code).await {
         return Err(ApiError::Unauthorized("invalid MFA code".into()));
     }
 
@@ -2128,7 +2498,6 @@ async fn confirm_mfa_setup(
     .ok_or_else(|| ApiError::NotFound("user not found".into()))?;
 
     if user.mfa_enabled {
-        delete_mfa_challenge(&state.redis, &body.challenge_token).await?;
         return Err(ApiError::Validation(vec!["MFA is already enabled".into()]));
     }
 
@@ -2173,8 +2542,6 @@ async fn confirm_mfa_setup(
         None, // user_agent
     )
     .await?;
-
-    delete_mfa_challenge(&state.redis, &body.challenge_token).await?;
 
     // AR-005: Rotate session after MFA setup (privilege escalation)
     let ttl = state.config.jwt_expiry.as_secs();
@@ -2527,7 +2894,24 @@ async fn verify_email(
     State(state): State<AppState>,
     Query(params): Query<VerifyEmailQuery>,
 ) -> Result<Json<VerifyEmailResponse>, ApiError> {
+    // Deprecated query-string form (CWE-598): a token in the query string
+    // leaks into server/access logs, proxies, Referer headers, and browser
+    // history. Retained only so in-flight links and API clients built
+    // against the old shape keep working — new links use
+    // GET /v1/auth/verify-email/{token} (F5).
+    tracing::warn!(
+        "deprecated query-string email verification used; use /v1/auth/verify-email/{{token}}"
+    );
     Ok(Json(verify_email_token(&state, &params.token).await?))
+}
+
+/// Path-parameter form of email verification (F5/CWE-598): the token
+/// travels in the path, never in the query string.
+async fn verify_email_by_path(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+) -> Result<Json<VerifyEmailResponse>, ApiError> {
+    Ok(Json(verify_email_token(&state, &token).await?))
 }
 
 pub(crate) async fn verify_email_token(
@@ -2606,6 +2990,11 @@ async fn create_api_key(
     auth: AuthUser,
     Json(body): Json<CreateApiKeyRequest>,
 ) -> Result<(StatusCode, Json<CreateApiKeyResponse>), ApiError> {
+    // Scope gate (F2): minting keys is a write-capability on credential
+    // material, not an implicit side effect of being logged in. Admin/owner
+    // sessions hold the "*" wildcard, so they pass transparently.
+    require_scopes(&auth, &["api-keys:write"])?;
+
     if body.name.is_empty() {
         return Err(ApiError::Validation(vec!["name is required".into()]));
     }
@@ -2630,6 +3019,21 @@ async fn create_api_key(
                 "scope '{scope}' exceeds your own permissions"
             )));
         }
+    }
+
+    // Per-tenant key ceiling, counted before insert (F2). Mirrors the
+    // webhooks cap; without it a churn loop (mint → never revoke) grows
+    // api_keys unboundedly.
+    let existing_keys: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1")
+            .bind(&auth.tenant_id)
+            .fetch_one(&state.db)
+            .await?;
+
+    if existing_keys.0 >= MAX_API_KEYS_PER_TENANT {
+        return Err(ApiError::Forbidden(format!(
+            "API key limit reached: maximum {MAX_API_KEYS_PER_TENANT} keys per tenant"
+        )));
     }
 
     let raw_key = apexmail_lib::id::generate_api_key(false);
@@ -2683,6 +3087,10 @@ async fn list_api_keys(
     auth: AuthUser,
     Query(params): Query<ListApiKeysQuery>,
 ) -> Result<Json<Vec<ApiKeyInfo>>, ApiError> {
+    // Scope gate (F2): key prefixes/scope sets are credential metadata and
+    // must not be enumerable by every member of the tenant.
+    require_scopes(&auth, &["api-keys:read"])?;
+
     let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
     let rows = sqlx::query_as::<_, ApiKeyInfoRow>(
         "SELECT id::text AS id, name, key_prefix, scopes, last_used_at, created_at, expires_at
@@ -2740,6 +3148,9 @@ async fn revoke_api_key(
     auth: AuthUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
+    // Scope gate (F2): destroying credentials is a write operation.
+    require_scopes(&auth, &["api-keys:write"])?;
+
     let deleted_key_hash: Option<String> = sqlx::query_scalar(
         "DELETE FROM api_keys WHERE id::text = $1 AND tenant_id = $2 RETURNING key_hash",
     )
@@ -3755,6 +4166,228 @@ mod tests {
             .unwrap_or(0);
     }
 
+    /// Issue a fresh KiwiCaptcha challenge, store it in Redis exactly like
+    /// the challenge route does, solve it, and encode a solution token with
+    /// the given telemetry payload. Shared by the kiwi verify regression
+    /// tests (needs a live Redis — callers gate on TEST_REDIS_URL).
+    async fn mint_kiwi_solution_token(
+        pool: &deadpool_redis::Pool,
+        config: &crate::config::Config,
+        telemetry: serde_json::Value,
+    ) -> String {
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let kc_config = kiwicaptcha::ChallengeConfig {
+            secret_key: config.kiwi_secret_key.clone(),
+            algorithm: config.kiwi_algorithm,
+            m_kib: config.kiwi_argon_m_kib,
+            t: config.kiwi_argon_t,
+            p: config.kiwi_argon_p,
+            target_bits: config.kiwi_difficulty_bits,
+            argon2_target_bits: config.kiwi_argon2_difficulty_bits,
+            ttl_secs: config.kiwi_challenge_ttl_secs,
+            min_duration_ms: config.kiwi_min_duration_ms,
+            auto_tune: config.kiwi_auto_tune,
+            auto_tune_min_bits: config.kiwi_auto_tune_min_bits,
+            auto_tune_max_bits: config.kiwi_auto_tune_max_bits,
+            binding_mode: kiwicaptcha::BindingMode::Bound,
+            policy_version: 1,
+            region: None,
+            issuer: None,
+            kid: 1,
+        };
+        let issued = kiwicaptcha::issue_challenge(
+            &kc_config,
+            "login",
+            "1.2.3.4",
+            now_unix,
+            now_unix * 1_000_000,
+            0,
+            None,
+        )
+        .expect("challenge issuance succeeds");
+
+        let record_json = serde_json::to_string(&issued.record).expect("record serializes");
+        let key = format!("{KIWI_CHALLENGE_PREFIX}{}", issued.record.nonce);
+        let mut conn = pool.get().await.expect("redis connection available");
+        let _: () = deadpool_redis::redis::AsyncCommands::set_ex(
+            &mut *conn,
+            &key,
+            record_json,
+            config.kiwi_challenge_ttl_secs,
+        )
+        .await
+        .expect("challenge stored");
+        drop(conn);
+
+        let counter = kiwicaptcha::solve_for_test(&issued.record).expect("solver finds a counter");
+        kiwicaptcha::SolutionToken {
+            nonce: issued.challenge.nonce.clone(),
+            counter,
+            duration_ms: 5000,
+            telemetry,
+        }
+        .encode()
+    }
+
+    /// Live-Redis test pool gate shared by the kiwi verify tests: returns
+    /// None (skip) unless TEST_REDIS_URL names a reachable Redis (F6: the
+    /// ambient 6379 is never probed implicitly).
+    async fn live_redis_pool_or_skip() -> Option<deadpool_redis::Pool> {
+        let Ok(redis_url) = std::env::var("TEST_REDIS_URL") else {
+            eprintln!("skipping: TEST_REDIS_URL not set");
+            return None;
+        };
+        let pool = RedisConfig::from_url(&redis_url)
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .ok()?;
+        let mut conn = pool.get().await.ok()?;
+        let ping: Result<String, _> = deadpool_redis::redis::cmd("PING")
+            .query_async(&mut *conn)
+            .await;
+        if ping.is_err() {
+            eprintln!("skipping: TEST_REDIS_URL unreachable");
+            return None;
+        }
+        drop(conn);
+        Some(pool)
+    }
+
+    /// F1 regression: when Redis is unreachable the per-nonce verify-attempt
+    /// cap must report store-unavailability — never silently allow (the old
+    /// `.unwrap_or(0)` treated script/pool failures as "under the cap",
+    /// removing the 20-attempt bound on Argon2id re-derivations).
+    #[tokio::test]
+    async fn kiwi_verify_attempt_cap_fails_closed_when_redis_is_down() {
+        // Port 1 is guaranteed-closed on loopback; the pool is created lazily
+        // so construction succeeds and the failure surfaces on acquire.
+        let cfg = RedisConfig::from_url("redis://127.0.0.1:1/");
+        let pool = cfg
+            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
+            .expect("pool construction is lazy");
+
+        assert_eq!(
+            check_kiwi_verify_attempt_cap(&pool, "apexmail:kiwi:attempts:test-down", 60).await,
+            KiwiAttemptCap::RedisUnavailable,
+            "a dead Redis must never silently allow Kiwi verify attempts"
+        );
+    }
+
+    /// F1 regression against live Redis: under the cap allows, past
+    /// KIWI_MAX_VERIFY_ATTEMPTS exceeds (skipped when no Redis is available).
+    #[tokio::test]
+    async fn kiwi_verify_attempt_cap_allows_then_exceeds_on_live_redis() {
+        let Some(pool) = live_redis_pool_or_skip().await else {
+            return;
+        };
+        let key = format!("apexmail:kiwi:attempts:test-{}", uuid::Uuid::new_v4());
+        if let Ok(mut conn) = pool.get().await {
+            let _: Result<i64, _> = deadpool_redis::redis::cmd("DEL")
+                .arg(&key)
+                .query_async(&mut *conn)
+                .await;
+        }
+
+        for _ in 0..KIWI_MAX_VERIFY_ATTEMPTS {
+            assert_eq!(
+                check_kiwi_verify_attempt_cap(&pool, &key, 60).await,
+                KiwiAttemptCap::Allowed
+            );
+        }
+        assert_eq!(
+            check_kiwi_verify_attempt_cap(&pool, &key, 60).await,
+            KiwiAttemptCap::Exceeded,
+            "attempt {} must exceed the cap of {KIWI_MAX_VERIFY_ATTEMPTS}",
+            KIWI_MAX_VERIFY_ATTEMPTS + 1
+        );
+
+        if let Ok(mut conn) = pool.get().await {
+            let _: Result<i64, _> = deadpool_redis::redis::cmd("DEL")
+                .arg(&key)
+                .query_async(&mut *conn)
+                .await;
+        }
+    }
+
+    /// F2 regression: the Argon2 permit wait is BOUNDED — a saturated
+    /// semaphore must produce a prompt retryable denial (503-style), not an
+    /// unbounded queue that an attacker pinning both permits could induce.
+    #[tokio::test]
+    async fn argon2_permit_wait_is_bounded_under_saturation() {
+        let semaphore = Arc::new(Semaphore::new(1));
+
+        // Free permit: acquired immediately.
+        let held = acquire_argon2_permit_bounded(&semaphore, std::time::Duration::from_millis(50))
+            .await
+            .expect("a free permit must be acquired");
+
+        // Saturation: the only permit is held, so the bounded acquire must
+        // time out promptly with the retryable overloaded denial.
+        let started = std::time::Instant::now();
+        let err = acquire_argon2_permit_bounded(&semaphore, std::time::Duration::from_millis(50))
+            .await
+            .expect_err("a saturated semaphore must time out, not queue forever");
+        assert!(
+            matches!(err, ApiError::ServiceUnavailable(_)),
+            "permit-wait timeout must surface as a retryable 503-style denial, got {err:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "the bounded wait must return promptly, took {:?}",
+            started.elapsed()
+        );
+
+        drop(held);
+        assert!(
+            acquire_argon2_permit_bounded(&semaphore, std::time::Duration::from_millis(50))
+                .await
+                .is_ok(),
+            "a released permit must be acquirable again"
+        );
+    }
+
+    /// F3 regression: telemetry findings reject ONLY when
+    /// `kiwi_enforce_telemetry` is on. With the flag off a bot-scored
+    /// payload (webdriver=true) must not reject — the crate's documented
+    /// telemetry-default-off model (skipped when no Redis is available).
+    #[tokio::test]
+    async fn kiwi_telemetry_rejects_only_when_enforced() {
+        let Some(pool) = live_redis_pool_or_skip().await else {
+            return;
+        };
+        let mut config = crate::config::tests::valid_production_config();
+        config.kiwi_enabled = true;
+        config.kiwi_secret_key = "test-kiwi-secret-key-for-telemetry-test".into();
+        config.kiwi_difficulty_bits = 8; // fast to solve in tests
+        config.kiwi_min_duration_ms = Some(0); // disable the min-duration gate
+        config.kiwi_challenge_ttl_secs = 120;
+
+        // Flag OFF: bot-scored telemetry (wd=true is an instant bot signal
+        // in score_telemetry) must NOT reject — log-only.
+        config.kiwi_enforce_telemetry = false;
+        let token =
+            mint_kiwi_solution_token(&pool, &config, serde_json::json!({ "wd": true })).await;
+        verify_kiwi_token(&config, &pool, Some(&token), "1.2.3.4", Some("login"))
+            .await
+            .expect("telemetry findings must not reject when KIWI_ENFORCE_TELEMETRY is off");
+
+        // Flag ON: the same bot-scored payload on a fresh challenge must
+        // reject (scored once, crate-side).
+        config.kiwi_enforce_telemetry = true;
+        let token =
+            mint_kiwi_solution_token(&pool, &config, serde_json::json!({ "wd": true })).await;
+        let err = verify_kiwi_token(&config, &pool, Some(&token), "1.2.3.4", Some("login"))
+            .await
+            .expect_err("enforced telemetry must reject a bot-scored payload");
+        assert!(
+            matches!(err, ApiError::Validation(_)),
+            "enforced telemetry rejection must be a validation error, got {err:?}"
+        );
+    }
+
     #[test]
     fn test_login_lockout_duration_all_escalation_levels() {
         // Verify the full escalation series: 15min → 30min → 1hr → 2hr → 4hr → 8hr → 16hr → 24hr (cap)
@@ -4032,11 +4665,11 @@ mod tests {
         );
     }
 
-    /// Tests that MFA challenge store/load functions use `?` for Redis
+    /// Tests that MFA challenge store/consume functions use `?` for Redis
     /// errors, meaning Redis failures are propagated as ApiError.
     #[test]
     fn test_mfa_challenge_functions_use_propagating_error_pattern() {
-        // Both `store_mfa_challenge` and `load_mfa_challenge` use `?` for
+        // Both `store_mfa_challenge` and `consume_mfa_challenge` use `?` for
         // Redis operations. This means Redis connection failures propagate
         // as ApiError (503 Service Unavailable).
         fn assert_propagates_error<T>() {}
@@ -4050,6 +4683,45 @@ mod tests {
         assert_eq!(
             MFA_CHALLENGE_PREFIX, "apexmail:auth:mfa_challenge:",
             "MFA challenge prefix must match the build_challenge_key function"
+        );
+    }
+
+    // ── F3: TOTP hardening helpers ──────────────────────────────
+
+    #[test]
+    fn test_mfa_totp_replay_key_is_secret_safe_and_window_scoped() {
+        let fingerprint = mfa_totp_secret_fingerprint("JBSWY3DPEHPK3PXP");
+        // Only the SHA-256 fingerprint may appear in the key — raw TOTP key
+        // material must never land in Redis keyspace.
+        assert_eq!(fingerprint.len(), 64);
+        assert!(!fingerprint.to_uppercase().contains("JBSWY3DPEHPK3PXP"));
+        assert_eq!(
+            mfa_totp_replay_key(&fingerprint, 42),
+            format!("apexmail:auth:mfa_totp_replay:{fingerprint}:42")
+        );
+        // Different secrets (and different windows) must not collide.
+        assert_ne!(
+            mfa_totp_replay_key(&fingerprint, 42),
+            mfa_totp_replay_key(&mfa_totp_secret_fingerprint("other-secret"), 42)
+        );
+        assert_ne!(
+            mfa_totp_replay_key(&fingerprint, 42),
+            mfa_totp_replay_key(&fingerprint, 43)
+        );
+    }
+
+    #[test]
+    fn test_claim_totp_window_inprocess_single_use_per_window() {
+        // Unique secret per run so the shared process-wide fallback map is
+        // not polluted by other tests claiming the same window.
+        let fingerprint = mfa_totp_secret_fingerprint(&format!("window-{}", Uuid::new_v4()));
+        assert!(
+            claim_totp_window_inprocess(&fingerprint),
+            "first use of a window must be claimable"
+        );
+        assert!(
+            !claim_totp_window_inprocess(&fingerprint),
+            "the same window must not be claimable twice (replay)"
         );
     }
 

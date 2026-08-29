@@ -49,6 +49,12 @@ CREATE TABLE IF NOT EXISTS tenants (
     -- the moment CI_TEST_DB=ephemeral started applying this bootstrap.
     settings    JSONB,
     metadata    JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    -- legal_hold/retention_days match the canonical chain (migration 121):
+    -- held tenants are excluded from every retention purge; retention_days
+    -- is a per-tenant override (NULL = plan-tier default from the RET
+    -- registry).
+    legal_hold  BOOLEAN     NOT NULL DEFAULT FALSE,
+    retention_days INT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -134,62 +140,80 @@ CREATE INDEX IF NOT EXISTS idx_messages_status        ON messages(tenant_id, sta
 CREATE INDEX IF NOT EXISTS idx_messages_created       ON messages(created_at DESC);
 
 -- ── Events ──────────────────────────────────────────────────────
+-- Canonical shape (migrations 075 + 090): VARCHAR(64) string ids, NOT UUIDs.
 CREATE TABLE IF NOT EXISTS events (
-    id              UUID PRIMARY KEY,
-    tenant_id       VARCHAR(26)        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    message_id      UUID        REFERENCES messages(id) ON DELETE SET NULL,
-    event_type      TEXT        NOT NULL,
-    recipient       TEXT,
-    metadata        JSONB,
+    id              VARCHAR(64) PRIMARY KEY,
+    tenant_id       VARCHAR(26) NOT NULL,
+    message_id      VARCHAR(64),
+    domain_id       TEXT,
+    campaign_id     TEXT,
+    event_type      VARCHAR(50) NOT NULL,
+    recipient       VARCHAR(255),
+    link_id         VARCHAR(64),
+    link_url        TEXT,
+    user_agent      TEXT,
+    ip_address      VARCHAR(45),
+    bounce_type     VARCHAR(20),
+    bounce_subtype  VARCHAR(50),
+    diagnostic_code TEXT,
+    complaint_type  VARCHAR(50),
+    metadata        JSONB DEFAULT '{}',
+    raw_data        JSONB,
     timestamp       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_events_tenant     ON events(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_events_message    ON events(message_id);
-CREATE INDEX IF NOT EXISTS idx_events_type       ON events(tenant_id, event_type);
-CREATE INDEX IF NOT EXISTS idx_events_timestamp  ON events(timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_events_event_type ON events(event_type);
+CREATE INDEX IF NOT EXISTS idx_events_timestamp  ON events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_events_recipient  ON events(recipient);
 
 -- ── Templates ───────────────────────────────────────────────────
+-- Canonical shape (migration 075): VARCHAR(26) string ids.
 CREATE TABLE IF NOT EXISTS templates (
-    id              UUID PRIMARY KEY,
-    tenant_id       VARCHAR(26)        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    name            TEXT        NOT NULL,
-    subject         TEXT        NOT NULL,
-    html_body       TEXT        NOT NULL,
-    text_body       TEXT,
-    version         INT         NOT NULL DEFAULT 1,
-    status          TEXT        NOT NULL DEFAULT 'draft',
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(tenant_id, name)
+    id          VARCHAR(26) PRIMARY KEY,
+    tenant_id   VARCHAR(26) NOT NULL,
+    name        VARCHAR(255) NOT NULL,
+    slug        VARCHAR(100),
+    subject     VARCHAR(255) NOT NULL,
+    html_body   TEXT NOT NULL,
+    text_body   TEXT,
+    version     INTEGER NOT NULL DEFAULT 1,
+    status      VARCHAR(20) NOT NULL DEFAULT 'active',
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_templates_tenant ON templates(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_templates_tenant_name ON templates(tenant_id, name);
 
 -- ── Suppressions ────────────────────────────────────────────────
+-- Canonical shape (migration 088/115): VARCHAR(26) string ids.
 CREATE TABLE IF NOT EXISTS suppressions (
-    id              UUID PRIMARY KEY,
-    tenant_id       VARCHAR(26)        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    email           TEXT        NOT NULL,
-    reason          TEXT        NOT NULL,
-    source          TEXT        NOT NULL DEFAULT 'system',
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(tenant_id, email)
+    id          VARCHAR(26) PRIMARY KEY,
+    tenant_id   VARCHAR(26) NOT NULL,
+    email       VARCHAR(255) NOT NULL,
+    reason      VARCHAR(50) NOT NULL,
+    subtype     VARCHAR(100),
+    source      VARCHAR(100),
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at  TIMESTAMPTZ,
+    UNIQUE (tenant_id, email)
 );
 CREATE INDEX IF NOT EXISTS idx_suppressions_tenant ON suppressions(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_suppressions_email  ON suppressions(tenant_id, email);
 
 -- ── Webhooks ────────────────────────────────────────────────────
+-- Canonical shape (migration 075): VARCHAR(26) string ids.
 CREATE TABLE IF NOT EXISTS webhooks (
-    id               TEXT PRIMARY KEY,
-    tenant_id        VARCHAR(26)        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    url              TEXT        NOT NULL,
-    events           JSONB       NOT NULL DEFAULT '[]'::jsonb,
-    secret           TEXT        NOT NULL,
-    previous_secret  TEXT,
-    status           TEXT        NOT NULL DEFAULT 'active',
+    id               VARCHAR(26) PRIMARY KEY,
+    tenant_id        VARCHAR(26) NOT NULL,
+    url              VARCHAR(2048) NOT NULL,
+    events           JSONB       NOT NULL DEFAULT '["*"]'::jsonb,
+    secret           VARCHAR(255) NOT NULL,
+    previous_secret  VARCHAR(255),
+    status           VARCHAR(20) NOT NULL DEFAULT 'active',
     enabled          BOOLEAN     NOT NULL DEFAULT TRUE,
     created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (tenant_id, url)
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_webhooks_tenant ON webhooks(tenant_id);
 
@@ -231,19 +255,56 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_system_alerts_source_fingerprint
     WHERE source <> 'system' AND fingerprint IS NOT NULL;
 
 -- ── Audit Logs ──────────────────────────────────────────────────
+-- Canonical tamper-evident shape (migrations 038 + 055): the compliance
+-- crate's hash-chain writer (audit_logger::persist_entry) and the api-server
+-- / billing audit writers INSERT these exact columns. The former UUID shape
+-- (a separate actor column + resource_type + metadata-only JSONB) made every
+-- tamper-evident INSERT fail on SCHEMA-provisioned databases — audit item F6.
 CREATE TABLE IF NOT EXISTS audit_logs (
-    id              UUID PRIMARY KEY,
-    tenant_id       VARCHAR(26)        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    actor_id        UUID,
+    id              TEXT        PRIMARY KEY,
+    tenant_id       TEXT,
+    user_id         TEXT,
+    session_id      TEXT,
     action          TEXT        NOT NULL,
-    resource_type   TEXT        NOT NULL,
+    resource        TEXT        NOT NULL,
     resource_id     TEXT,
-    metadata        JSONB,
+    details         JSONB       NOT NULL DEFAULT '{}'::jsonb,
     ip_address      TEXT,
+    user_agent      TEXT,
+    outcome         TEXT        NOT NULL,
+    error_message   TEXT,
+    timestamp       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    hash            TEXT        NOT NULL,
+    previous_hash   TEXT,
+    signature       TEXT        NOT NULL,
+    -- Mirror of "timestamp" for the writers that read created_at (055).
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_audit_logs_tenant ON audit_logs(tenant_id);
-CREATE INDEX IF NOT EXISTS idx_audit_logs_time   ON audit_logs(created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_time   ON audit_logs(timestamp DESC);
+
+-- Archive target for the retention trim (038: same shape, no PK — one row
+-- may be archived across re-runs).
+CREATE TABLE IF NOT EXISTS audit_logs_archive (
+    id              TEXT,
+    tenant_id       TEXT,
+    user_id         TEXT,
+    session_id      TEXT,
+    action          TEXT        NOT NULL,
+    resource        TEXT        NOT NULL,
+    resource_id     TEXT,
+    details         JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    ip_address      TEXT,
+    user_agent      TEXT,
+    outcome         TEXT        NOT NULL,
+    error_message   TEXT,
+    timestamp       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    hash            TEXT        NOT NULL,
+    previous_hash   TEXT,
+    signature       TEXT        NOT NULL,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_audit_logs_archive_time ON audit_logs_archive(timestamp DESC);
 
 -- ── Contacts ────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS contacts (
@@ -278,14 +339,20 @@ CREATE INDEX IF NOT EXISTS idx_campaigns_tenant ON campaigns(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_campaigns_status ON campaigns(tenant_id, status);
 
 -- ── Support Tickets ─────────────────────────────────────────────
+-- Canonical shape (migration 075): VARCHAR(26) string ids.
 CREATE TABLE IF NOT EXISTS support_tickets (
-    id              UUID PRIMARY KEY,
-    tenant_id       VARCHAR(26)        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    subject         TEXT        NOT NULL,
-    description     TEXT        NOT NULL,
-    priority        TEXT        NOT NULL DEFAULT 'medium',
-    status          TEXT        NOT NULL DEFAULT 'open',
-    assigned_to     UUID,
+    id              VARCHAR(26) PRIMARY KEY,
+    tenant_id       VARCHAR(26),
+    subject         VARCHAR(500) NOT NULL,
+    description     TEXT NOT NULL DEFAULT '',
+    tenant_name     VARCHAR(255),
+    tenant_email    VARCHAR(255),
+    status          VARCHAR(30) NOT NULL DEFAULT 'open',
+    priority        VARCHAR(20) NOT NULL DEFAULT 'normal',
+    category        VARCHAR(50),
+    assigned_to     VARCHAR(26),
+    assignee        VARCHAR(255),
+    resolved_at     TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -386,48 +453,54 @@ CREATE TABLE IF NOT EXISTS messages (
 
 pub const CREATE_EVENTS: &str = r#"
 CREATE TABLE IF NOT EXISTS events (
-    id UUID PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    message_id UUID REFERENCES messages(id) ON DELETE SET NULL,
-    event_type TEXT NOT NULL, recipient TEXT, metadata JSONB,
+    id VARCHAR(64) PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL,
+    message_id VARCHAR(64), domain_id TEXT, campaign_id TEXT,
+    event_type VARCHAR(50) NOT NULL, recipient VARCHAR(255), metadata JSONB DEFAULT '{}',
     timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 "#;
 
 pub const CREATE_TEMPLATES: &str = r#"
 CREATE TABLE IF NOT EXISTS templates (
-    id UUID PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    name TEXT NOT NULL, subject TEXT NOT NULL, html_body TEXT NOT NULL, text_body TEXT,
-    version INT NOT NULL DEFAULT 1, status TEXT NOT NULL DEFAULT 'draft',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(tenant_id, name)
+    id VARCHAR(26) PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL,
+    name VARCHAR(255) NOT NULL, subject VARCHAR(255) NOT NULL,
+    html_body TEXT NOT NULL, text_body TEXT,
+    version INTEGER NOT NULL DEFAULT 1, status VARCHAR(20) NOT NULL DEFAULT 'active',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 "#;
 
 pub const CREATE_SUPPRESSIONS: &str = r#"
 CREATE TABLE IF NOT EXISTS suppressions (
-    id UUID PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    email TEXT NOT NULL, reason TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'system',
-    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE(tenant_id, email)
+    id VARCHAR(26) PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL,
+    email VARCHAR(255) NOT NULL, reason VARCHAR(50) NOT NULL, subtype VARCHAR(100),
+    source VARCHAR(100),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ,
+    UNIQUE (tenant_id, email)
 );
 "#;
 
 pub const CREATE_WEBHOOKS: &str = r#"
 CREATE TABLE IF NOT EXISTS webhooks (
-    id UUID PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    url TEXT NOT NULL, events JSONB NOT NULL DEFAULT '[]'::jsonb,
-    secret TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'active',
+    id VARCHAR(26) PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL,
+    url VARCHAR(2048) NOT NULL, events JSONB NOT NULL DEFAULT '["*"]'::jsonb,
+    secret VARCHAR(255) NOT NULL, previous_secret VARCHAR(255),
+    status VARCHAR(20) NOT NULL DEFAULT 'active', enabled BOOLEAN NOT NULL DEFAULT TRUE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 "#;
 
 pub const CREATE_AUDIT_LOGS: &str = r#"
 CREATE TABLE IF NOT EXISTS audit_logs (
-    id UUID PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    actor_id UUID, action TEXT NOT NULL, resource_type TEXT NOT NULL, resource_id TEXT,
-    metadata JSONB, ip_address TEXT,
+    id TEXT PRIMARY KEY, tenant_id TEXT, user_id TEXT, session_id TEXT,
+    action TEXT NOT NULL, resource TEXT NOT NULL, resource_id TEXT,
+    details JSONB NOT NULL DEFAULT '{}'::jsonb, ip_address TEXT, user_agent TEXT,
+    outcome TEXT NOT NULL, error_message TEXT,
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    hash TEXT NOT NULL, previous_hash TEXT, signature TEXT NOT NULL,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE TABLE IF NOT EXISTS audit_logs_archive (LIKE audit_logs INCLUDING ALL);
 "#;
 
 pub const CREATE_CONTACTS: &str = r#"
@@ -453,10 +526,11 @@ CREATE TABLE IF NOT EXISTS campaigns (
 
 pub const CREATE_SUPPORT_TICKETS: &str = r#"
 CREATE TABLE IF NOT EXISTS support_tickets (
-    id UUID PRIMARY KEY, tenant_id VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    subject TEXT NOT NULL, description TEXT NOT NULL,
-    priority TEXT NOT NULL DEFAULT 'medium', status TEXT NOT NULL DEFAULT 'open',
-    assigned_to UUID,
+    id VARCHAR(26) PRIMARY KEY, tenant_id VARCHAR(26),
+    subject VARCHAR(500) NOT NULL, description TEXT NOT NULL DEFAULT '',
+    tenant_name VARCHAR(255), tenant_email VARCHAR(255),
+    status VARCHAR(30) NOT NULL DEFAULT 'open', priority VARCHAR(20) NOT NULL DEFAULT 'normal',
+    category VARCHAR(50), assigned_to VARCHAR(26), assignee VARCHAR(255), resolved_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 "#;
@@ -558,5 +632,88 @@ mod tests {
             tenants_block.contains("metadata    JSONB"),
             "SCHEMA tenants must carry the canonical metadata JSONB column"
         );
+        // Migration 121: retention controls live on the canonical tenants
+        // table; a SCHEMA without them made every hold-aware retention query
+        // fail on runtime-provisioned databases.
+        assert!(
+            tenants_block.contains("legal_hold"),
+            "SCHEMA tenants must carry legal_hold (migration 121)"
+        );
+        assert!(
+            tenants_block.contains("retention_days"),
+            "SCHEMA tenants must carry retention_days (migration 121)"
+        );
+    }
+
+    /// F6 drift contract: the SCHEMA audit_logs must be the canonical
+    /// tamper-evident (038 + 055) shape. The former UUID shape
+    /// (actor_id/resource_type/metadata/created_at-only) made the compliance
+    /// crate's hash-chain INSERT fail on every SCHEMA-provisioned database.
+    #[test]
+    fn schema_audit_logs_matches_canonical_hash_chain_shape() {
+        assert!(
+            SCHEMA.contains("hash            TEXT        NOT NULL"),
+            "audit_logs.hash NOT NULL is required by the tamper-evident writer"
+        );
+        for col in ["previous_hash", "signature", "timestamp", "outcome"] {
+            assert!(
+                SCHEMA.contains(&format!("audit_logs ({col}")) || SCHEMA.contains(col),
+                "audit_logs must carry the canonical {col} column"
+            );
+        }
+        assert!(
+            !SCHEMA.contains("actor_id"),
+            "actor_id is the legacy UUID shape — canonical (038) is user_id TEXT"
+        );
+        assert!(
+            !SCHEMA.contains("resource_type   TEXT"),
+            "resource_type is the legacy UUID shape — canonical (038) is resource TEXT"
+        );
+        assert!(
+            SCHEMA.contains("CREATE TABLE IF NOT EXISTS audit_logs_archive"),
+            "the retention trim archives into audit_logs_archive (038) — the SCHEMA must create it"
+        );
+        // tenant linkage is what lets retention exclude legal-held tenants.
+        assert!(
+            SCHEMA.contains("tenant_id       TEXT"),
+            "audit_logs.tenant_id must be nullable TEXT (038) — global chain rows have NULL"
+        );
+    }
+
+    /// F8 drift contract: string id types. Canonical tenant ids are
+    /// VARCHAR(26) (064) and events ids VARCHAR(64) (075) — binding Uuid
+    /// against them fails at runtime with a type mismatch.
+    #[test]
+    fn schema_id_types_match_canonical_string_shapes() {
+        assert!(
+            !SCHEMA.contains("tenant_id           UUID"),
+            "no table may declare tenant_id UUID — canonical type is VARCHAR(26)"
+        );
+        let events_block = SCHEMA
+            .split("-- ── Events")
+            .nth(1)
+            .unwrap()
+            .split("-- ── Templates")
+            .next()
+            .unwrap();
+        assert!(
+            events_block.contains("id              VARCHAR(64) PRIMARY KEY"),
+            "events.id must be VARCHAR(64) (migration 075), not UUID"
+        );
+        assert!(
+            events_block.contains("message_id      VARCHAR(64)"),
+            "events.message_id must be VARCHAR(64) (migration 075), not UUID"
+        );
+        for table in ["templates", "suppressions", "webhooks", "support_tickets"] {
+            let block = SCHEMA
+                .split(&format!("CREATE TABLE IF NOT EXISTS {table} ("))
+                .nth(1)
+                .unwrap_or_else(|| panic!("{table} missing from SCHEMA"));
+            let block = block.split(");").next().unwrap();
+            assert!(
+                block.contains("VARCHAR(26) PRIMARY KEY"),
+                "{table}.id must be VARCHAR(26) (migration 075/088 canonical shape), not UUID"
+            );
+        }
     }
 }

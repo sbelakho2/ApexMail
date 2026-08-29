@@ -12,6 +12,7 @@ use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainIssuedResult;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainReservationResult;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainVerifiedResult;
+use BelConsulting\KiwiCaptchaBundle\Risk\ClientIpResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\MalformedPostSolveDispositionException;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDisposition;
 use BelConsulting\KiwiCaptchaBundle\Risk\PostSolveFinalizeOutcome;
@@ -543,6 +544,164 @@ final class ValidatorTest extends TestCase
 
         self::assertCount(0, $violations, 'a valid solve passes without a client IP');
         self::assertSame([], $store->observations, 'no client IP means no per-IP evidence, never an empty-string pseudonym');
+    }
+
+// ── replay-branch risk feedback (round-97) ────────────────────────────────
+
+    public function testStoredValidSameIdentityReplayEmitsReplayRiskFeedbackAndViolates(): void
+    {
+        // The classic replay of a solved token — a stored-valid,
+        // same-identity retained-state outcome with no explicit
+        // operation id — used to return the replayed_token violation
+        // with ZERO risk-model signal. The replay branch now feeds the
+        // ReplayAttempt event (AlreadyConsumed through the shared
+        // RiskFeedback taxonomy), guarded by a resolved client IP and
+        // fired BEFORE the violation is built.
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $risk = $this->riskStack(1, 'allow', 'allow', false);
+        $run = function (array $server) use ($risk, $token): ConstraintViolationListInterface {
+            $stack = new RequestStack();
+            $stack->push(Request::create('/', 'POST', [], [], [], $server));
+            $validator = new KiwiCaptchaValidator($this->verifier, $stack, self::SECRET, false, $risk['gateway']);
+            $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+            $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+            $dto = new class {
+                public ?string $captcha = null;
+            };
+            $dto->captcha = $token;
+            $meta = $engine->getMetadataFor($dto::class);
+            $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+            return $engine->validate($dto);
+        };
+
+        self::assertCount(0, $run(['REMOTE_ADDR' => '198.51.100.7']), 'the first submission validates');
+
+        $violations = $run(['REMOTE_ADDR' => '198.51.100.7']);
+        self::assertCount(1, $violations, 'the replayed token still violates');
+        self::assertSame(KiwiCaptcha::REPLAYED_TOKEN_ERROR, $violations[0]->getCode(), 'the replay refusal keeps its code');
+
+        $events = array_map(static fn (RiskObservation $o): RiskEventKind => $o->event, $risk['store']->observations);
+        self::assertSame([RiskEventKind::SolveSuccess, RiskEventKind::ReplayAttempt], $events, 'the stored-valid replay must feed the ReplayAttempt feedback');
+        $obs = $risk['store']->observations[1];
+        self::assertSame($this->expectedSourcePseudonym('198.51.100.7', $obs), $obs->sourceId, 'the replay feedback carries the canonical client IP pseudonym');
+        self::assertNull($obs->sessionId, 'the replay feedback session is null like every validator feedback');
+        self::assertSame(1, $obs->scope, 'the replay feedback carries the configured scope id');
+    }
+
+    public function testStoredValidSameIdentityReplayWithoutClientIpViolatesWithoutFeedback(): void
+    {
+        // The guard mirrors the other feedback paths: no client IP means
+        // no per-IP evidence, never an empty-string pseudonym — the
+        // violation itself is unaffected.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, bindingMode: BindingMode::None), $storage);
+        $verifier = new Verifier($storage);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $risk = $this->riskStack(1, 'allow', 'allow', false);
+        $run = function () use ($verifier, $token, $risk): ConstraintViolationListInterface {
+            $stack = new RequestStack();
+            $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => null]));
+            $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, false, $risk['gateway']);
+            $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+            $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+            $dto = new class {
+                public ?string $captcha = null;
+            };
+            $dto->captcha = $token;
+            $meta = $engine->getMetadataFor($dto::class);
+            $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+            return $engine->validate($dto);
+        };
+
+        self::assertCount(0, $run(), 'the first submission validates without a client IP');
+        self::assertSame([], $risk['store']->observations, 'no IP: no SolveSuccess feedback either');
+
+        $violations = $run();
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::REPLAYED_TOKEN_ERROR, $violations[0]->getCode());
+        self::assertSame([], $risk['store']->observations, 'no client IP means no replay feedback, never an empty-string pseudonym');
+    }
+
+// ── ambiguous-forwarding risk feedback (round-97) ─────────────────────────
+
+    public function testAmbiguousForwardingFeedsMalformedEvidenceOnTheSocketPeerAndViolates(): void
+    {
+        // A trusted peer sending BOTH forwarding headers is partially
+        // attacker-triggerable (a client behind an appending proxy can
+        // present both). The refusal now feeds MalformedToken evidence
+        // (the closest existing kind — RiskFeedback has no dedicated
+        // ambiguous-identity bucket), attributed to the DIRECT SOCKET
+        // PEER only: the canonical client IP is exactly what could not
+        // be resolved, so a header-derived guess is never the identity.
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $risk = $this->riskStack(1, 'allow', 'allow', false);
+        $validate = function (array $server) use ($token, $risk): ConstraintViolationListInterface {
+            $stack = new RequestStack();
+            $stack->push(Request::create('/', 'POST', [], [], [], $server));
+            $resolver = new ClientIpResolver(ClientIpResolver::MODE_SYMFONY_TRUSTED_PROXIES, ['203.0.113.10'], true);
+            $validator = new KiwiCaptchaValidator($this->verifier, $stack, self::SECRET, false, $risk['gateway'], clientIpResolver: $resolver);
+            $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+            $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+            $dto = new class {
+                public ?string $captcha = null;
+            };
+            $dto->captcha = $token;
+            $meta = $engine->getMetadataFor($dto::class);
+            $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+            return $engine->validate($dto);
+        };
+
+        $violations = $validate([
+            'REMOTE_ADDR' => '203.0.113.10',
+            'HTTP_X_FORWARDED_FOR' => '198.51.100.7',
+            'HTTP_FORWARDED' => 'for=192.0.2.9',
+        ]);
+        self::assertCount(1, $violations, 'the ambiguous-forwarding request fails closed');
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
+
+        $events = array_map(static fn (RiskObservation $o): RiskEventKind => $o->event, $risk['store']->observations);
+        self::assertSame([RiskEventKind::MalformedToken], $events, 'the ambiguous-identity refusal feeds the malformed-traffic event');
+        $obs = $risk['store']->observations[0];
+        self::assertSame($this->expectedSourcePseudonym('203.0.113.10', $obs), $obs->sourceId, 'the evidence is attributed to the direct socket peer (the trusted proxy), never a header-derived guess');
+
+        // The ambiguous-identity refusal fires BEFORE the token is even
+        // decoded: a garbage token behind the same ambiguous proxy pair
+        // yields the identical single MalformedToken evidence (the
+        // branch returns before the failure path could double-feed).
+        $risk2 = $this->riskStack(1, 'allow', 'allow', false);
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], [
+            'REMOTE_ADDR' => '203.0.113.10',
+            'HTTP_X_FORWARDED_FOR' => '198.51.100.7',
+            'HTTP_FORWARDED' => 'for=192.0.2.9',
+        ]));
+        $resolver = new ClientIpResolver(ClientIpResolver::MODE_SYMFONY_TRUSTED_PROXIES, ['203.0.113.10'], true);
+        $validator = new KiwiCaptchaValidator($this->verifier, $stack, self::SECRET, false, $risk2['gateway'], clientIpResolver: $resolver);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = 'not-a-token';
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
+        $events = array_map(static fn (RiskObservation $o): RiskEventKind => $o->event, $risk2['store']->observations);
+        self::assertSame([RiskEventKind::MalformedToken], $events, 'exactly one malformed event — the branch returns before the failure path feeds again');
     }
 
     public function testValidSolveDecrementsTheOutstandingCounter(): void

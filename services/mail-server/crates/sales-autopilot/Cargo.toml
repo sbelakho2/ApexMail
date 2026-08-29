@@ -29,6 +29,11 @@ tower-http.workspace       = true
 tower.workspace            = true
 tracing-subscriber.workspace = true
 observability-service = { path = "../observability-service" }
+# Real quota gate for campaign/reply sends (audit F1): the dispatcher calls
+# billing_service::usage::record_with_quota_check / rollback_usage_record —
+# the same functions api-server's REST send path uses — instead of a local
+# mirror whose counter key drifted from the billing-cycle-anchored original.
+billing-service = { path = "../billing-service" }
 metrics.workspace             = true
 anyhow.workspace           = true
 deadpool-redis.workspace   = true

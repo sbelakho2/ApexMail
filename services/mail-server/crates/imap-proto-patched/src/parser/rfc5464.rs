@@ -116,8 +116,12 @@ fn entry_name(i: &[u8]) -> IResult<&[u8], &[u8]> {
     Ok(astring_res)
 }
 
-fn slice_to_str(i: &[u8]) -> &str {
-    str::from_utf8(i).unwrap()
+/// F11: convert parsed bytes to &str, ERRORING on invalid UTF-8 instead of
+/// panicking. Combined with `map_res!` this follows the crate's own
+/// `quoted_utf8`/`string_utf8` convention: a non-UTF-8 literal (hostile or
+/// merely mis-encoded) fails the parse instead of unwrapping a `None`.
+fn slice_to_str(i: &[u8]) -> Result<&str, std::str::Utf8Error> {
+    str::from_utf8(i)
 }
 
 named!(nil_value<Option<String>>, do_parse!(
@@ -126,13 +130,13 @@ named!(nil_value<Option<String>>, do_parse!(
 ));
 
 named!(string_value<Option<String>>, do_parse!(
-    value: map!(alt!(quoted | literal), slice_to_str) >>
+    value: map_res!(alt!(quoted | literal), slice_to_str) >>
         (Some(value.to_string()))
 ));
 
 named!(keyval_list<Vec<Metadata>>, do_parse!(
     list: parenthesized_nonempty_list!(do_parse!(
-        key: map!(entry_name, slice_to_str) >>
+        key: map_res!(entry_name, slice_to_str) >>
             tag!(" ") >>
             value: alt!(nil_value | string_value) >>
             (Metadata{entry: key.to_string(), value})
@@ -141,15 +145,15 @@ named!(keyval_list<Vec<Metadata>>, do_parse!(
 ));
 
 named!(entry_list<Vec<&str>>, do_parse!(
-    list: separated_list!(tag!(" "), map!(entry_name, slice_to_str)) >>
+    list: separated_list!(tag!(" "), map_res!(entry_name, slice_to_str)) >>
         (list)
 ));
 
-named!(metadata_common<&[u8]>, do_parse!(
+named!(metadata_common<&str>, do_parse!(
     tag_no_case!("METADATA ") >>
-        mbox: quoted >>
-        tag!(" ") >>
-        (mbox)
+    mbox: map_res!(quoted, str::from_utf8) >>
+    tag!(" ") >>
+    (mbox)
 ));
 
 // [RFC5464 - 4.4.1 METADATA Response with values]
@@ -157,16 +161,16 @@ named!(metadata_solicited<Response>, do_parse!(
     mbox: metadata_common >>
     tail: keyval_list >>
         (Response::MailboxData(MailboxDatum::MetadataSolicited {
-            mailbox:slice_to_str(mbox), values:tail
+            mailbox: mbox, values: tail
         }))
 ));
 
 // [RFC5464 - 4.4.2 Unsolicited METADATA Response without values]
 named!(metadata_unsolicited<Response>, do_parse!(
     mbox: metadata_common >>
-        tail: entry_list >>
+    tail: entry_list >>
         (Response::MailboxData(MailboxDatum::MetadataUnsolicited {
-            mailbox:slice_to_str(mbox), values:tail
+            mailbox: mbox, values: tail
         }))
 ));
 
@@ -289,5 +293,23 @@ mod tests {
             }
             _ => panic!("Correct METADATA response is not parsed properly."),
         }
+    }
+
+    // ── F11: non-UTF-8 literals must not panic ────────────────────────────
+
+    #[test]
+    fn test_non_utf8_literal_value_is_a_parse_error_not_a_panic() {
+        // A literal carrying invalid UTF-8 used to hit str::from_utf8().unwrap()
+        // and panic the whole process; it must fail the parse instead (the
+        // crate's own map_res + from_utf8 convention for utf8 strings).
+        assert!(metadata_solicited(b"METADATA \"\" (/private/comment {2}\r\n\xff\xfe)\r\n").is_err());
+    }
+
+    #[test]
+    fn test_non_utf8_mailbox_name_is_a_parse_error_not_a_panic() {
+        // Same guarantee for the (quoted) mailbox name position.
+        assert!(
+            metadata_unsolicited(b"METADATA \"\xff\xfe\" /private/comment/a\r\n").is_err()
+        );
     }
 }

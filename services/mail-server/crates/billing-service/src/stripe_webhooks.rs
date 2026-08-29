@@ -1228,26 +1228,49 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
     .execute(&state.db)
     .await;
 
-    match result {
-        Ok(execution) if execution.rows_affected() > 0 => { /* existing row marked paid */ }
+    // Fix F4 — dunning recovery is only legitimate when this event actually
+    // settled THE tenant's subscription-linked invoice. Track whether the
+    // local invoice row was really affected by this handler.
+    let invoice_persisted = match result {
+        Ok(execution) if execution.rows_affected() > 0 => {
+            // existing row marked paid
+            true
+        }
         Ok(_) => {
             // Fix A — no local row matched, meaning the invoice was created
             // on Stripe's side (e.g. subscription billing or Meter usage)
             // without a local draft. Insert the paid invoice so revenue is
-            // recorded. ON CONFLICT makes replays idempotent.
-            insert_paid_invoice_from_stripe(state, &invoice, &tenant_id).await?;
+            // recorded. ON CONFLICT makes replays idempotent. Rows == 0
+            // means the tenant guard rejected the upsert (the local row is
+            // bound to a DIFFERENT tenant) — not this tenant's invoice.
+            let inserted = insert_paid_invoice_from_stripe(state, &invoice, &tenant_id).await?;
+            if inserted == 0 {
+                warn!(
+                    invoice_id = %invoice.id,
+                    tenant_id = %tenant_id,
+                    "invoice.paid upsert matched 0 rows (invoice bound to another tenant) — dunning state left untouched"
+                );
+            }
+            inserted > 0
         }
         Err(error) => return Err(format!("Failed to mark invoice as paid: {error}")),
-    }
+    };
 
     // If a previously-dunning invoice was settled, clear the tenant's dunning
     // state (healthy again), release queued messages and drop the cached
     // status — mirrors the auto-pay recovery path in maintenance.rs.
-    crate::maintenance::mark_payment_recovered(state, &tenant_id).await?;
+    // Fix F4 — only when the invoice upsert actually affected rows above; a
+    // 0-row/guard-rejected event must never blanket-reset dunning or
+    // reactivate the tenant. The recovery is scoped to this invoice's
+    // failure history inside mark_payment_recovered.
+    if invoice_persisted {
+        crate::maintenance::mark_payment_recovered(state, &tenant_id, Some(&invoice.id)).await?;
+    }
 
     info!(
         invoice_id = %invoice.id,
         tenant_id = %tenant_id,
+        dunning_recovery = invoice_persisted,
         "stripe invoice marked as paid"
     );
     Ok(())
@@ -1258,11 +1281,15 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
 /// VAT and total come from the Stripe payload; sequential numbering uses the
 /// existing `invoice_number_seq` unless Stripe assigned a number.
 /// Idempotent via ON CONFLICT (stripe_invoice_id) (unique index, migration 101).
+/// Returns the number of rows affected: 0 when the tenant guard in the ON
+/// CONFLICT clause rejected the update (the local row is bound to a
+/// different tenant) — callers use that to decide whether payment recovery
+/// is legitimate (Fix F4).
 async fn insert_paid_invoice_from_stripe(
     state: &AppState,
     invoice: &InvoiceEvent,
     tenant_id: &str,
-) -> Result<(), String> {
+) -> Result<u64, String> {
     let (subtotal, vat_total, total) = derive_invoice_totals(
         invoice.subtotal,
         invoice.tax,
@@ -1297,7 +1324,7 @@ async fn insert_paid_invoice_from_stripe(
             .unwrap_or(None)
             .flatten();
 
-    sqlx::query(
+    let result = sqlx::query(
         r#"
         INSERT INTO invoices (
             id, tenant_id, stripe_invoice_id, invoice_number, status,
@@ -1342,6 +1369,8 @@ async fn insert_paid_invoice_from_stripe(
     .await
     .map_err(|error| format!("Failed to insert paid Stripe invoice {}: {error}", invoice.id))?;
 
+    let rows_affected = result.rows_affected();
+
     info!(
         invoice_id = %invoice.id,
         tenant_id = %tenant_id,
@@ -1349,10 +1378,11 @@ async fn insert_paid_invoice_from_stripe(
         vat_total,
         total,
         currency = %currency,
+        rows_affected,
         "inserted missing local invoice from Stripe invoice.paid event"
     );
 
-    Ok(())
+    Ok(rows_affected)
 }
 
 async fn handle_payment_failed(state: &AppState, invoice: InvoiceEvent) -> Result<(), String> {

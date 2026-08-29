@@ -104,9 +104,17 @@ primary = true
 
 
 # ── Internationalization ──────────────────────────────────────
-# i18n .po files are in ./i18n/{lang}.po
-# The trans() macro in templates uses these translations.
-# Each language section below configures the language metadata.
+# i18n .po files exist in ./i18n/{lang}.po, but NOTHING reads them:
+# no template calls Zola's trans() function. All visible UI strings
+# come from data/i18n.json via the macros::t() macro in
+# templates/macros.html (with inline English fallbacks in the
+# templates), and per-locale page content lives in
+# content/**/*.{de,fr,es}.md. The .po files are therefore NOT a
+# translation source of truth — do not edit them expecting changes
+# on the site, and do not let them drift; either wire trans() in a
+# template or keep i18n.json as the single catalog.
+# Each language section below only configures language metadata
+# (title/description used for those locale trees).
 
 [languages.fr]
 title = "ApexMail - API d'email professionnelle pour développeurs"

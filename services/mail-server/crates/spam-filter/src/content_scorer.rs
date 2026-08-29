@@ -1334,22 +1334,96 @@ pub fn normalize_leet_speak(text: &str) -> String {
     result
 }
 
+/// Decode HTML entities (numeric decimal/hex plus the common named ones)
+/// so "vi&#103;ra"-style obfuscation is matched against its plain form.
+///
+/// Bounded:the pass is skipped entirely when the text contains no `&`, an
+/// entity candidate must terminate within a 12-byte window (real entities
+/// are at most ~10 bytes), and the output can only shrink relative to the
+/// input — never expand.
+pub fn decode_html_entities(text: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
+
+    if !text.contains('&') {
+        return Cow::Borrowed(text);
+    }
+
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0usize;
+    while i < text.len() {
+        if !text[i..].starts_with('&') {
+            // Copy the run up to the next '&' wholesale.
+            let next_amp = text[i..].find('&').map_or(text.len(), |rel| i + rel);
+            out.push_str(&text[i..next_amp]);
+            i = next_amp;
+            continue;
+        }
+
+        // Entity candidates must end with ';' close by; anything else is
+        // literal text.
+        let window_end = text.floor_char_boundary((i + 12).min(text.len()));
+        let Some(semi_rel) = text[i..window_end].find(';') else {
+            out.push('&');
+            i += 1;
+            continue;
+        };
+        let entity = &text[i + 1..i + semi_rel];
+        let decoded = if let Some(hex) = entity
+            .strip_prefix("#x")
+            .or_else(|| entity.strip_prefix("#X"))
+        {
+            u32::from_str_radix(hex, 16).ok().and_then(char::from_u32)
+        } else if let Some(dec) = entity.strip_prefix('#') {
+            dec.parse::<u32>().ok().and_then(char::from_u32)
+        } else {
+            match entity {
+                "amp" => Some('&'),
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                "nbsp" => Some('\u{00A0}'),
+                _ => None,
+            }
+        };
+
+        match decoded {
+            Some(c) => {
+                out.push(c);
+                i += semi_rel + 1;
+            }
+            None => {
+                out.push('&');
+                i += 1;
+            }
+        }
+    }
+    Cow::Owned(out)
+}
+
 /// Analyze message content (body text) for spam indicators
 pub fn score_content(body: &str) -> ContentScore {
     let mut findings = Vec::new();
 
-    // 1. Aho-Corasick phrase matching (raw + leet-speak–normalized)
+    // ONE lowercased copy shared by every check that needs case-insensitive
+    // matching — previously the HTML-tag checks alone each allocated their
+    // own `to_lowercase()` copy of the full body.
+    let lower_body = body.to_lowercase();
+
+    // 1. Aho-Corasick phrase matching (raw + obfuscation-normalized)
     if let Some(phrases) = spam_phrase_set() {
         let mut matched = vec![false; phrases.ids.len()];
 
-        // Pass 1:match against the raw (lowercased) body
+        // Pass 1:match against the raw body (the automaton is already
+        // ASCII-case-insensitive — no lowercase copy needed here).
         for mat in phrases.automaton.find_iter(body) {
             let idx = mat.pattern().as_usize();
             matched[idx] = true;
         }
 
-        // Pass 2:match against leet-speak–normalized text
-        let normalized = normalize_leet_speak(body);
+        // Pass 2:match against HTML-entity-decoded + leet-speak–normalized
+        // text ("vi&#97;gr&#97;" and "v1@gr@" both resolve to "viagra").
+        let normalized = normalize_leet_speak(&decode_html_entities(body));
         if normalized != body {
             for mat in phrases.automaton.find_iter(&normalized) {
                 let idx = mat.pattern().as_usize();
@@ -1379,11 +1453,18 @@ pub fn score_content(body: &str) -> ContentScore {
         }
     }
 
-    // 2. ALL-CAPS ratio
-    let alpha_chars: Vec<char> = body.chars().filter(|c| c.is_alphabetic()).collect();
-    if alpha_chars.len() > 20 {
-        let upper_count = alpha_chars.iter().filter(|c| c.is_uppercase()).count();
-        let ratio = upper_count as f64 / alpha_chars.len() as f64;
+    // 2. ALL-CAPS ratio — single pass over the chars, no intermediate
+    // Vec<char> copy of every alphabetic character.
+    let mut alpha_count = 0usize;
+    let mut upper_count = 0usize;
+    for c in body.chars().filter(|c| c.is_alphabetic()) {
+        alpha_count += 1;
+        if c.is_uppercase() {
+            upper_count += 1;
+        }
+    }
+    if alpha_count > 20 {
+        let ratio = upper_count as f64 / alpha_count as f64;
         if ratio > 0.7 {
             findings.push(ContentFinding {
                 id: "CAPS_HEAVY",
@@ -1400,7 +1481,7 @@ pub fn score_content(body: &str) -> ContentScore {
     }
 
     // 3. Excessive exclamation marks
-    let exclamation_count = body.chars().filter(|c| *c == '!').count();
+    let exclamation_count = body.matches('!').count();
     if exclamation_count > 5 {
         let penalty = (exclamation_count as f64 * 0.2).min(3.0);
         findings.push(ContentFinding {
@@ -1411,15 +1492,7 @@ pub fn score_content(body: &str) -> ContentScore {
     }
 
     // 4. Zero-width / invisible character obfuscation
-    let invisible_count = body
-        .chars()
-        .filter(|c| {
-            matches!(
-                *c,
-                '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}' | '\u{00AD}'
-            )
-        })
-        .count();
+    let invisible_count = body.chars().filter(|c| is_invisible_char(*c)).count();
     if invisible_count > 0 {
         findings.push(ContentFinding {
             id: "INVISIBLE_CHARS",
@@ -1431,8 +1504,9 @@ pub fn score_content(body: &str) -> ContentScore {
         });
     }
 
-    // 5. HTML heavy (img tags, excessive links)
-    let img_count = body.to_lowercase().matches("<img").count();
+    // 5. HTML heavy (img tags, excessive links) — reuses the single
+    // lowercased copy from above.
+    let img_count = lower_body.matches("<img").count();
     if img_count > 3 {
         findings.push(ContentFinding {
             id: "EXCESSIVE_IMAGES",
@@ -1440,8 +1514,7 @@ pub fn score_content(body: &str) -> ContentScore {
             penalty: 1.5,
         });
     }
-    let link_count =
-        body.to_lowercase().matches("<a ").count() + body.to_lowercase().matches("<a\t").count();
+    let link_count = lower_body.matches("<a ").count() + lower_body.matches("<a\t").count();
     if link_count > 10 {
         findings.push(ContentFinding {
             id: "EXCESSIVE_LINKS",
@@ -1540,5 +1613,81 @@ mod tests {
         assert!(result.findings.iter().any(|f| f.id == "PHISH_VERIFY"));
         assert!(result.findings.iter().any(|f| f.id == "PHISH_LOGIN"));
         assert!(result.score > 4.0);
+    }
+
+    // ── F10:HTML entity decoding in the normalization pass ─────────────
+
+    #[test]
+    fn test_decode_html_entities_numeric_and_named() {
+        // Decimal numeric entities.
+        assert_eq!(decode_html_entities("vi&#97;gr&#97;"), "viagra");
+        // Hex numeric entities (both cases of the x prefix).
+        assert_eq!(decode_html_entities("&#x76;iagra"), "viagra");
+        assert_eq!(decode_html_entities("&#X76;iagra"), "viagra");
+        // Common named entities.
+        assert_eq!(decode_html_entities("a &amp; b &lt;c&gt;"), "a & b <c>");
+        assert_eq!(
+            decode_html_entities("&quot;q&quot; &apos;a&apos;"),
+            "\"q\" 'a'"
+        );
+        // No '&' at all — borrowed, zero-copy.
+        let plain = "no entities here";
+        assert!(matches!(
+            decode_html_entities(plain),
+            std::borrow::Cow::Borrowed(_)
+        ));
+        // Unterminated / unknown candidates stay literal.
+        assert_eq!(
+            decode_html_entities("AT&T &unknown; &# ;"),
+            "AT&T &unknown; &# ;"
+        );
+    }
+
+    #[test]
+    fn test_entity_obfuscated_spam_phrase_detected() {
+        // Fail-first:"vi&#97;gr&#97;" (viagra) previously slipped past both
+        // the raw and the leet-normalization passes.
+        let result = score_content("cheap vi&#97;gr&#97; online pharmacy deal");
+        assert!(
+            result.findings.iter().any(|f| f.id == "PHARMA_VIAGRA"),
+            "entity-obfuscated 'viagra' must match: {:?}",
+            result.findings
+        );
+        assert!(
+            result
+                .findings
+                .iter()
+                .any(|f| f.id == "PHARMA_ONLINE" || f.id == "PHARMA_GENERIC"),
+            "phrases around the entities must still match: {:?}",
+            result.findings
+        );
+    }
+
+    #[test]
+    fn test_entity_decode_does_not_overreach() {
+        // Ordinary ampersand prose must not be mangled into matches.
+        let result = score_content("Q3 plans &amp; budgets — see attached report");
+        assert!(
+            result.score < 1.0,
+            "clean prose with a named entity must stay clean, got {} ({:?})",
+            result.score,
+            result.findings
+        );
+    }
+
+    #[test]
+    fn test_html_tag_counts_still_fire() {
+        // Regression for the shared-lowercase-copy refactor:the tag counts
+        // must still detect heavy HTML.
+        let mut body = String::new();
+        for i in 0..15 {
+            body.push_str(&format!("<IMG src=\"x{i}.png\"> "));
+        }
+        for i in 0..12 {
+            body.push_str(&format!("<a href=\"l{i}\">link</a> "));
+        }
+        let result = score_content(&body);
+        assert!(result.findings.iter().any(|f| f.id == "EXCESSIVE_IMAGES"));
+        assert!(result.findings.iter().any(|f| f.id == "EXCESSIVE_LINKS"));
     }
 }

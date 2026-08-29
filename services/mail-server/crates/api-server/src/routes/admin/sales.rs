@@ -184,7 +184,7 @@ async fn list_leads(
     Query(params): Query<LeadsQuery>,
 ) -> Result<Json<LeadsResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     if !table_exists(&state.db, "sales_leads").await {
         return Ok(Json(empty_leads_response()));
@@ -353,7 +353,7 @@ async fn update_leads(
     Json(body): Json<LeadUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     let ids: Vec<String> = if let Some(ref single) = body.id {
         vec![single.clone()]
@@ -504,7 +504,7 @@ async fn enrich_leads(
     Json(body): Json<EnrichRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     if body.lead_ids.is_empty() || body.lead_ids.len() > 50 {
         return Err(ApiError::Validation(vec!["1-50 lead IDs allowed".into()]));
@@ -651,7 +651,7 @@ async fn list_campaigns(
     auth: AuthUser,
 ) -> Result<Json<Vec<Campaign>>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     if !table_exists(&state.db, "drip_campaigns").await {
         return Ok(Json(vec![]));
@@ -733,7 +733,7 @@ async fn update_campaign(
     Json(body): Json<CampaignUpdate>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     if !table_exists(&state.db, "drip_campaigns").await {
         return Err(ApiError::NotFound("campaign not found".into()));
@@ -804,7 +804,7 @@ async fn run_discovery(
     Json(body): Json<DiscoveryRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     if body.sources.is_empty() {
         return Err(ApiError::Validation(vec![
@@ -992,7 +992,7 @@ async fn start_outreach(
     Json(body): Json<OutreachRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     if body.lead_ids.is_empty() || body.lead_ids.len() > 100 {
         return Err(ApiError::Validation(vec!["1-100 lead IDs allowed".into()]));
@@ -1143,7 +1143,7 @@ async fn get_settings(
     auth: AuthUser,
 ) -> Result<Json<SalesSettings>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     let row: Option<(serde_json::Value, serde_json::Value, serde_json::Value)> = sqlx::query_as(
         "SELECT scoring_weights, schedule, notifications FROM sales_settings LIMIT 1",
@@ -1175,7 +1175,7 @@ async fn save_settings(
     Json(body): Json<SalesSettings>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     // API-114/115: Use OnceLock to avoid running DDL on every request.
     static SALES_SETTINGS_ENSURE: OnceLock<()> = OnceLock::new();

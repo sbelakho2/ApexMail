@@ -88,11 +88,6 @@ class TemplatesResource:
         data = self._client._request("GET", f"/v1/templates/{template_id}")
         return Template(**_extract_item(data, "template"))
 
-    def get_by_slug(self, slug: str) -> Template:
-        _validate_id(slug, "template slug")
-        data = self._client._request("GET", f"/v1/templates/slug/{slug}")
-        return Template(**_extract_item(data, "template"))
-
     def update(
         self,
         template_id: str,
@@ -190,11 +185,6 @@ class AsyncTemplatesResource:
     async def get(self, template_id: str) -> Template:
         _validate_id(template_id, "template")
         data = await self._client._request("GET", f"/v1/templates/{template_id}")
-        return Template(**_extract_item(data, "template"))
-
-    async def get_by_slug(self, slug: str) -> Template:
-        _validate_id(slug, "template slug")
-        data = await self._client._request("GET", f"/v1/templates/slug/{slug}")
         return Template(**_extract_item(data, "template"))
 
     async def update(

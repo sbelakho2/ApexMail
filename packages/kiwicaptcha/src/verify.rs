@@ -282,6 +282,21 @@ pub enum VerifyOutcome {
         /// [`VerifyOutcome::Valid`] as authorization can therefore
         /// distinguish a new proof from a retained-state replay.
         from_stored_result: bool,
+        /// The server-measured solve duration in milliseconds: the span
+        /// between the record's signed issuance clock (`issued_at_ns`,
+        /// epoch microseconds) and this verification's receipt instant —
+        /// unforgeable behavioral evidence the risk layer can consume as a
+        /// graded signal. The client-reported token `duration_ms` is
+        /// forgeable and is NEVER consulted; only server-written
+        /// timestamps feed this value. Mirrors the PHP
+        /// `VerifyOutcome::solveDurationMs()`: `None` when no duration
+        /// was measurable — a record without an issuance clock
+        /// (`issued_at_ns == 0`), or a receipt preceding issuance within
+        /// the verifier's clock-skew tolerance, where the elapsed time
+        /// cannot be measured reliably (the same skew semantics as the
+        /// minimum-duration floor) — and always `None` on non-valid
+        /// outcomes. Purely additive.
+        solve_duration_ms: Option<u64>,
     },
     /// The solution is invalid; the reason explains why.
     Invalid(VerifyError),
@@ -304,6 +319,25 @@ impl VerifyOutcome {
             VerifyOutcome::Valid {
                 request_binding, ..
             } => request_binding.as_deref(),
+            VerifyOutcome::Invalid(_) => None,
+        }
+    }
+
+    /// The server-measured solve duration in milliseconds when the
+    /// outcome is valid AND a duration was measurable, else `None`.
+    ///
+    /// The value is the gap between the record's `issued_at_ns` and the
+    /// verification receipt instant — unforgeable behavioral evidence
+    /// (the client-reported token duration never feeds it). `None` on
+    /// every non-valid outcome, for a record whose issuance clock is
+    /// unknown, and for a receipt that precedes issuance within the
+    /// verifier's clock-skew tolerance — exactly the semantics of the
+    /// minimum-duration floor.
+    pub fn solve_duration_ms(&self) -> Option<u64> {
+        match self {
+            VerifyOutcome::Valid {
+                solve_duration_ms, ..
+            } => *solve_duration_ms,
             VerifyOutcome::Invalid(_) => None,
         }
     }
@@ -538,6 +572,17 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
             return Err(VerifyError::MalformedRecord);
         }
     }
+    // The decoy (honeypot) field name is an authenticated v2 canonical
+    // field: when present it must match the exact shape the issuer mints
+    // and the widget driver renders — 1..=64 bytes of `[A-Za-z0-9_-]` (no
+    // `.`, `:` or `|`, so the canonical segment structure can never be
+    // altered by a stored value). A non-conforming name is a corrupt or
+    // foreign record.
+    if let Some(decoy) = record.decoy_field.as_deref() {
+        if !crate::challenge::valid_decoy_field_name(decoy) {
+            return Err(VerifyError::MalformedRecord);
+        }
+    }
     // The server-side hostname metadata is validated on read — a label of at
     // most 4096 bytes with no whitespace/control characters, or None. It is
     // NOT part of the signed security payload, so this is interoperability
@@ -638,15 +683,20 @@ pub(crate) fn check_argon2_ceilings(record: &ChallengeRecord) -> Result<(), Veri
 ///    authentication, before any `Params::new`/allocation.
 /// 5. Check the TTL (defends against stale challenges).
 /// 6. Check the scope (prevents cross-scope replay) →
-///    [`VerifyError::WrongScope`].
-/// 7. Check the region (when `expected_region` is set) →
-///    [`VerifyError::WrongRegion`].
-/// 8. Check the IP binding: for v2 records, recompute the nonce-bound
+///    [`VerifyError::WrongScope`], then the application transaction
+///    binding, then the IP binding — the PHP `cheapPhaseCheck` precedence
+///    (shape → TTL → scope+request binding → IP binding → deployment
+///    expectations → floor), so a record failing several invariants
+///    reports the same error code in both languages.
+/// 7. Check the IP binding: for v2 records, recompute the nonce-bound
 ///    `binding_tag` from `client_ip` + record nonce + secret and compare in
 ///    constant time; for v1 records, compare the legacy `hash_ip`. An empty
 ///    `binding_tag` skips the check. A `None` `client_ip` with a non-empty
 ///    tag fails closed with [`VerifyError::MissingClientIp`] — only records
 ///    issued with `BindingMode::None` (empty tag) verify without an IP.
+/// 8. Check the region (when `expected_region` is set) →
+///    [`VerifyError::WrongRegion`], the security-policy epoch and the
+///    issuer (the deployment expectations, after the IP binding).
 /// 9. Check the minimum duration with the server clock, honoring the
 ///    clock-skew tolerance. The client-reported
 ///    duration is forgeable and is never trusted for this check. Records
@@ -675,6 +725,34 @@ pub(crate) fn real_now_unix() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+/// The server-measured solve duration of a verified record, in
+/// milliseconds: the span between the record's high-resolution
+/// issuance timestamp (`issued_at_ns`, epoch microseconds written by
+/// the issuing host) and this verification's receipt instant — the
+/// SAME single receipt the server-measured minimum-duration floor
+/// reads, never a second clock read. Carried on every valid outcome
+/// as unforgeable behavioral evidence for the risk layer — the
+/// client-reported token duration is forgeable and never consulted.
+/// The PHP `measurableSolveDurationMs()` mirror.
+///
+/// The skew-tolerance semantics mirror the minimum-duration floor
+/// exactly: a receipt that precedes issuance is unmeasurable (within
+/// the tolerance the two hosts' clocks are unsynced, so the elapsed
+/// time cannot be measured reliably — `None`; beyond the tolerance
+/// the record is rejected as `TooFast` and never reaches a valid
+/// outcome). A record whose issuance clock is unknown
+/// (`issued_at_ns == 0`) is equally unmeasurable. Sub-millisecond
+/// spans floor toward zero.
+pub(crate) fn measurable_solve_duration_ms(
+    record: &ChallengeRecord,
+    receipt_ns: u64,
+) -> Option<u64> {
+    if record.issued_at_ns == 0 || receipt_ns < record.issued_at_ns {
+        return None;
+    }
+    Some((receipt_ns - record.issued_at_ns) / 1_000)
 }
 
 pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
@@ -797,7 +875,35 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         return VerifyOutcome::Invalid(e);
     }
 
-    // 2c. Region validation: a deployment that expects a region
+    // 2c. IP binding: the challenge was issued to a client IP; a different
+    //     submission IP means the token was relayed. Enforced here (not just
+    //     at the route layer) so the secure behavior cannot be forgotten.
+    //     The stored record is authoritative: an empty binding tag means
+    //     binding is disabled (BindingMode::None) and the check is skipped; a
+    //     non-empty tag means the challenge is bound, so a missing client IP
+    //     fails closed (MissingClientIp) instead of silently skipping the
+    //     check. Checked BEFORE the region/policy/issuer expectations, the
+    //     PHP cheapPhaseCheck precedence (shape → TTL → scope+request
+    //     binding → IP binding → deployment expectations → floor), so a
+    //     record failing several invariants reports the same error code in
+    //     both languages.
+    if !ctx.record.binding_tag.is_empty() {
+        let Some(client_ip) = ctx.client_ip else {
+            return VerifyOutcome::Invalid(VerifyError::MissingClientIp);
+        };
+        let expected = match ctx.record.protocol_version {
+            1 => hash_ip(client_ip, secret),
+            _ => match binding_tag(&ctx.record.nonce, client_ip, secret) {
+                Ok(tag) => tag,
+                Err(_) => return VerifyOutcome::Invalid(VerifyError::IpMismatch),
+            },
+        };
+        if !ct_eq(ctx.record.binding_tag.as_bytes(), expected.as_bytes()) {
+            return VerifyOutcome::Invalid(VerifyError::IpMismatch);
+        }
+    }
+
+    // 2d. Region validation: a deployment that expects a region
     //     rejects challenges issued for a different region — or for no region
     //     at all (fail closed).
     if let Some(expected) = ctx.expected_region {
@@ -820,30 +926,6 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     if let Some(expected) = ctx.expected_issuer {
         if ctx.record.issuer.as_deref() != Some(expected) {
             return VerifyOutcome::Invalid(VerifyError::WrongIssuer);
-        }
-    }
-
-    // 2c. IP binding: the challenge was issued to a client IP; a different
-    //     submission IP means the token was relayed. Enforced here (not just
-    //     at the route layer) so the secure behavior cannot be forgotten.
-    //     The stored record is authoritative: an empty binding tag means
-    //     binding is disabled (BindingMode::None) and the check is skipped; a
-    //     non-empty tag means the challenge is bound, so a missing client IP
-    //     fails closed (MissingClientIp) instead of silently skipping the
-    //     check.
-    if !ctx.record.binding_tag.is_empty() {
-        let Some(client_ip) = ctx.client_ip else {
-            return VerifyOutcome::Invalid(VerifyError::MissingClientIp);
-        };
-        let expected = match ctx.record.protocol_version {
-            1 => hash_ip(client_ip, secret),
-            _ => match binding_tag(&ctx.record.nonce, client_ip, secret) {
-                Ok(tag) => tag,
-                Err(_) => return VerifyOutcome::Invalid(VerifyError::IpMismatch),
-            },
-        };
-        if !ct_eq(ctx.record.binding_tag.as_bytes(), expected.as_bytes()) {
-            return VerifyOutcome::Invalid(VerifyError::IpMismatch);
         }
     }
 
@@ -932,11 +1014,15 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
 
     if leading_zero_bits(&hash) >= ctx.record.target_bits {
         // The outcome carries the consumed canonical nonce (jti) so callers
-        // can correlate the result without re-decoding the solution.
+        // can correlate the result without re-decoding the solution. The
+        // server-measured solve duration is computed from the SAME receipt
+        // instant the minimum-duration floor read above (`ctx.now_ns`),
+        // never a second clock read.
         VerifyOutcome::Valid {
             nonce: ctx.record.nonce.clone(),
             request_binding: ctx.record.request_binding.clone(),
             from_stored_result: false,
+            solve_duration_ms: measurable_solve_duration_ms(ctx.record, ctx.now_ns),
         }
     } else {
         VerifyOutcome::Invalid(VerifyError::InsufficientWork)
@@ -1333,6 +1419,57 @@ mod tests {
         let challenge = format!("{}.{}", B64.encode(canonical.as_bytes()), sig);
         record.challenge = challenge.clone();
         record.prefix = format!("{challenge}|{}|", record.salt);
+    }
+
+    #[test]
+    fn generic_path_follows_the_php_ip_before_deployment_precedence() {
+        // The generic verifier's first-error order mirrors the PHP
+        // cheapPhaseCheck: shape → TTL → scope + request binding → IP
+        // binding → region/policy/issuer → floor. A record failing BOTH
+        // the IP binding and a deployment expectation reports the IP
+        // error, exactly like the PHP core (cross-language error-code
+        // parity for multi-failure records).
+        for (label, client_ip, expected) in [
+            (
+                "missing ip beats wrong region",
+                None,
+                VerifyError::MissingClientIp,
+            ),
+            (
+                "ip mismatch beats wrong region",
+                Some("9.9.9.9"),
+                VerifyError::IpMismatch,
+            ),
+        ] {
+            let mut record = make_record(8);
+            let counter = solve_for_test(&record).expect("8-bit sha solves");
+            let mut ctx = VerifyContext {
+                record: &mut record,
+                secret_key: "test-key-16-bytes!",
+                secrets_by_kid: None,
+                revoked_kids: None,
+                counter,
+                duration_ms: 5000,
+                now_unix: Some(&mut || NOW_UNIX + 1),
+                now_ns: NOW_NS + 5_000_000,
+                min_duration_ms: 0,
+                expected_scope: None,
+                expected_request_binding: RequestBindingExpectation::Unenforced,
+                expected_region: Some("eu"), // the record is region-unbound → WrongRegion would fire later
+                expected_issuer: Some("prod"),
+                expected_policy_version: Some(2),
+                client_ip,
+                telemetry: None,
+                enforce_telemetry: false,
+                max_attempts: 0,
+                accept_legacy_v1: false,
+            };
+            assert_eq!(
+                verify_solution(&mut ctx),
+                VerifyOutcome::Invalid(expected),
+                "{label}: the IP binding precedes the deployment expectations"
+            );
+        }
     }
 
     #[test]
@@ -4475,10 +4612,179 @@ mod tests {
                 nonce: expected_nonce,
                 request_binding: None,
                 from_stored_result: false,
+                // The verify() helper's receipt is NOW_NS + 5 s: the
+                // server-measured span to that same receipt instant.
+                solve_duration_ms: Some(5000),
             }
         );
         let invalid = VerifyOutcome::Invalid(VerifyError::Expired);
         assert_eq!(invalid.nonce(), None);
+    }
+
+    #[test]
+    fn valid_outcome_carries_the_server_measured_solve_duration() {
+        // The server-measured span between the record's issued_at_ns and
+        // the verification receipt instant — the client-reported
+        // duration_ms (5000 in the verify() helper) is forgeable and must
+        // never leak into the outcome.
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).expect("8-bit sha solves");
+        let outcome = verify(&mut record, counter, 5000);
+        match outcome {
+            VerifyOutcome::Valid {
+                solve_duration_ms, ..
+            } => assert_eq!(
+                solve_duration_ms,
+                Some(5000),
+                "the outcome carries the server-measured span (NOW_NS + 5 s), never the client-reported 5000 ms claim"
+            ),
+            other => panic!("expected a valid outcome, got {other:?}"),
+        }
+        // Sub-millisecond precision floors toward zero (the PHP
+        // intdiv semantics): 1234.567 ms -> 1234.
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
+            revoked_kids: None,
+            counter,
+            duration_ms: 5000,
+            now_unix: Some(&mut || NOW_UNIX + 1),
+            now_ns: NOW_NS + 1_234_567,
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        match verify_solution(&mut ctx) {
+            VerifyOutcome::Valid {
+                solve_duration_ms, ..
+            } => assert_eq!(solve_duration_ms, Some(1234)),
+            other => panic!("expected a valid outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn receipt_preceding_issuance_within_the_skew_tolerance_is_unmeasurable() {
+        // A receipt 2 s BEFORE issuance: within the 5 s skew tolerance the
+        // two hosts' clocks are unsynced, so the elapsed time cannot be
+        // measured reliably — the floor check is skipped (the proof still
+        // verifies) and the exposed duration is null, exactly the PHP
+        // semantics.
+        let mut record = make_record(8);
+        let counter = solve_for_test(&record).expect("8-bit sha solves");
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
+            revoked_kids: None,
+            counter,
+            duration_ms: 5000,
+            now_unix: Some(&mut || NOW_UNIX + 1),
+            now_ns: NOW_NS.saturating_sub(2_000_000),
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        match verify_solution(&mut ctx) {
+            VerifyOutcome::Valid {
+                solve_duration_ms, ..
+            } => assert_eq!(
+                solve_duration_ms, None,
+                "a receipt preceding issuance within the skew tolerance is unmeasurable"
+            ),
+            other => panic!("the skew window keeps the verification valid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn one_receipt_instant_feeds_both_the_floor_and_the_duration() {
+        // The single-receipt-instant property: the exposed duration is
+        // computed from the SAME now_ns the minimum-duration floor reads
+        // (never a second clock read). A solve at exactly the floor
+        // boundary passes the floor and exposes that exact boundary as
+        // its duration — a second, later read would report a larger span.
+        let mut record = make_record(8);
+        record.min_duration_ms = 5000;
+        resign_v2(&mut record, "test-key-16-bytes!");
+        let counter = solve_for_test(&record).expect("8-bit sha solves");
+        let mut ctx = VerifyContext {
+            record: &mut record,
+            secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
+            revoked_kids: None,
+            counter,
+            duration_ms: 5000,
+            now_unix: Some(&mut || NOW_UNIX + 1),
+            now_ns: NOW_NS + 5_000_000, // exactly 5000 ms of elapsed time
+            min_duration_ms: 0,
+            expected_scope: None,
+            expected_request_binding: RequestBindingExpectation::Unenforced,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        match verify_solution(&mut ctx) {
+            VerifyOutcome::Valid {
+                solve_duration_ms, ..
+            } => assert_eq!(
+                solve_duration_ms,
+                Some(5000),
+                "the same receipt instant that passes the floor is the measured duration"
+            ),
+            other => panic!("the floor boundary must verify, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unmeasurable_duration_helpers_and_non_valid_outcomes_are_null() {
+        // The measurableSolveDurationMs mirror: a record without an
+        // issuance clock (issued_at_ns == 0) is unmeasurable, and a
+        // receipt preceding issuance is unmeasurable; the PHP intdiv
+        // semantics floor sub-millisecond spans.
+        let mut record = make_record(8);
+        record.issued_at_ns = 0;
+        assert_eq!(measurable_solve_duration_ms(&record, NOW_NS), None);
+        record.issued_at_ns = NOW_NS;
+        assert_eq!(
+            measurable_solve_duration_ms(&record, NOW_NS + 1_234_567),
+            Some(1234),
+            "sub-millisecond precision floors toward zero (PHP intdiv)"
+        );
+        assert_eq!(
+            measurable_solve_duration_ms(&record, NOW_NS - 1),
+            None,
+            "a receipt preceding issuance is unmeasurable"
+        );
+        // Non-valid outcomes never carry a duration (purely additive).
+        assert_eq!(
+            VerifyOutcome::Invalid(VerifyError::Expired).solve_duration_ms(),
+            None
+        );
+        assert_eq!(
+            VerifyOutcome::Invalid(VerifyError::TooFast).solve_duration_ms(),
+            None
+        );
     }
 
     #[test]
@@ -4612,6 +4918,7 @@ mod tests {
             issuer: None,
             kid: 1,
             hostname: None,
+            decoy_field: None,
         }
     }
 

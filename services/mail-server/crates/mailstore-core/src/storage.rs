@@ -37,7 +37,31 @@ pub struct QuotaExceeded;
 const ACCOUNT_COLUMNS: &str = "id, email, domain, password_hash, display_name, quota_bytes, used_bytes, is_active, created_at, updated_at";
 const MAILBOX_COLUMNS: &str = "id, account_id, name, parent_id, mailbox_type, total_messages, unread_messages, uidnext, created_at, updated_at";
 const MESSAGE_COLUMNS: &str = "id, account_id, mailbox_id, uid, message_id, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, subject, date, text_body, html_body, raw_message, raw_size, is_read, is_starred, is_deleted, is_spam, labels, dedup_exempt, headers, attachments, created_at, updated_at";
+/// F2: metadata-only column list — everything the listing/metadata read path
+/// needs (ids, flags, sizes, envelope-ish fields, headers JSONB) EXCLUDING
+/// the AES-GCM-encrypted body columns (`text_body`, `html_body`,
+/// `raw_message`). Selecting (and decrypting) bodies for up to 100k rows per
+/// IMAP command was pure waste: metadata consumers discard them, and FETCH
+/// bodies go through the point reads (`get_message_by_uid` /
+/// `get_message_by_uids`) which still select the full column list with the
+/// body columns and keep the AAD semantics intact.
+const MESSAGE_META_COLUMNS: &str = "id, account_id, mailbox_id, uid, message_id, from_address, from_name, to_addresses, cc_addresses, bcc_addresses, subject, date, raw_size, is_read, is_starred, is_deleted, is_spam, labels, dedup_exempt, headers, attachments, created_at, updated_at";
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+
+/// Which optional filters the SQL produced by
+/// [`MessageStorage::message_list_tail`] expects to be bound, in order.
+/// Generated and consumed together so the bind sequence can never drift from
+/// the SQL text. Pure data, which keeps the (F1) deleted-inclusive SQL shape
+/// unit-testable without a database.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct MessageListBinds {
+    mailbox_id: bool,
+    uid_min: bool,
+    uid_max: bool,
+    is_read: bool,
+    is_starred: bool,
+    is_deleted: bool,
+}
 
 /// Message storage
 ///
@@ -846,91 +870,149 @@ impl MessageStorage {
 
     /// List messages.
     ///
-    /// By default (when `query.is_deleted` is `None`) soft-deleted messages are
-    /// excluded, matching the mailbox view reported by `EXISTS`/
-    /// `total_messages` (which count `is_deleted = false` rows). Passing
-    /// `Some(true)` returns only soft-deleted rows; `Some(false)` is identical
-    /// to the default.
+    /// F1 (RFC 3501 §6.4.3/§7.4.1): when `query.is_deleted` is `None` the
+    /// listing INCLUDES soft-deleted (`\Deleted`) messages — they are part of
+    /// the mailbox view until an EXPUNGE actually removes them, so
+    /// `STORE +FLAGS (\Deleted)` must not make messages vanish, sequence
+    /// numbers must not shift silently, and `SEARCH DELETED` must find them.
+    /// Passing `Some(true)` returns only soft-deleted rows; `Some(false)`
+    /// returns only live rows.
+    ///
+    /// This is the FULL read path: it selects and decrypts the body columns.
+    /// Callers that only need metadata (the IMAP listing path) should use
+    /// [`Self::list_message_metadata`] instead.
     pub async fn list_messages(&self, query: &MessageQuery) -> Result<Vec<StoredMessage>> {
-        // SAFETY: MESSAGE_COLUMNS is a compile-time constant string, not user input.
-        // The dynamic WHERE clauses below use format!() only for parameter placeholder
-        // indices ($1, $2, ...), never for actual user values. All user-supplied values
-        // are passed via sqlx::query().bind(), which uses parameterized queries.
-        let mut sql = format!(
-            "SELECT {} FROM mail_messages WHERE account_id = $1",
-            MESSAGE_COLUMNS
+        // SAFETY: MESSAGE_COLUMNS is a compile-time constant string, not user
+        // input. The dynamic tail below uses format!() only for parameter
+        // placeholder indices ($1, $2, ...), never for actual user values. All
+        // user-supplied values are passed via sqlx::query().bind(), which uses
+        // parameterized queries.
+        let (tail, binds) = Self::message_list_tail(query);
+        let sql = format!(
+            "SELECT {} FROM mail_messages WHERE account_id = $1{}",
+            MESSAGE_COLUMNS, tail
         );
+        let q = Self::bind_message_list_filters(
+            sqlx::query(&sql).bind(query.account_id),
+            query,
+            &binds,
+        );
+        let rows = q.fetch_all(&self.pool).await?;
+        rows.iter().map(|r| self.row_to_message(r)).collect()
+    }
 
-        let mut param_idx = 2;
+    /// F2: list messages WITHOUT the encrypted body columns. Identical
+    /// filtering, ordering and paging to [`Self::list_messages`] (same
+    /// [`Self::message_list_tail`] SQL), but the SELECT omits `text_body`,
+    /// `html_body` and `raw_message`, so up to 100k-row IMAP listings no
+    /// longer fetch and AES-decrypt every body just to throw it away. The
+    /// returned [`StoredMessage`]s carry `None` bodies; content is only ever
+    /// obtained through the point reads (`get_message_by_uid` et al.).
+    pub async fn list_message_metadata(&self, query: &MessageQuery) -> Result<Vec<StoredMessage>> {
+        // SAFETY: MESSAGE_META_COLUMNS is a compile-time constant string, not
+        // user input; see list_messages for the parameterization note.
+        let (tail, binds) = Self::message_list_tail(query);
+        let sql = format!(
+            "SELECT {} FROM mail_messages WHERE account_id = $1{}",
+            MESSAGE_META_COLUMNS, tail
+        );
+        let q = Self::bind_message_list_filters(
+            sqlx::query(&sql).bind(query.account_id),
+            query,
+            &binds,
+        );
+        let rows = q.fetch_all(&self.pool).await?;
+        rows.iter().map(Self::row_to_message_meta).collect()
+    }
+
+    /// Shared WHERE/ORDER/LIMIT tail for the full and metadata-only listing
+    /// paths. F1: `is_deleted = None` emits NO predicate (soft-deleted
+    /// messages are part of the mailbox view until EXPUNGE); `Some(_)` filters
+    /// on the flag. UID bounds are pushed into SQL (not post-filtered) so
+    /// LIMIT-based paging over the UID space stays exact.
+    fn message_list_tail(query: &MessageQuery) -> (String, MessageListBinds) {
+        let mut sql = String::new();
+        let mut binds = MessageListBinds::default();
+        let mut param_idx = 2usize;
 
         if query.mailbox_id.is_some() {
             sql.push_str(&format!(" AND mailbox_id = ${}", param_idx));
             param_idx += 1;
+            binds.mailbox_id = true;
         }
-
-        // UID bounds are pushed into SQL (not post-filtered) so LIMIT-based
-        // paging over the UID space is exact even in mailboxes larger than
-        // one page.
         if query.uid_min.is_some() {
             sql.push_str(&format!(" AND uid >= ${}", param_idx));
             param_idx += 1;
+            binds.uid_min = true;
         }
         if query.uid_max.is_some() {
             sql.push_str(&format!(" AND uid <= ${}", param_idx));
             param_idx += 1;
+            binds.uid_max = true;
         }
-
         if query.is_read.is_some() {
             sql.push_str(&format!(" AND is_read = ${}", param_idx));
             param_idx += 1;
+            binds.is_read = true;
         }
-
         if query.is_starred.is_some() {
             sql.push_str(&format!(" AND is_starred = ${}", param_idx));
             param_idx += 1;
+            binds.is_starred = true;
         }
-
-        // Soft-deleted (\Deleted) messages are excluded from the mailbox view
-        // by default — they are only removed from view by EXPUNGE, which has
-        // its own dedicated query. Callers that explicitly pass
-        // `is_deleted = Some(true)` get only deleted rows.
-        match query.is_deleted {
-            Some(_) => {
-                sql.push_str(&format!(" AND is_deleted = ${}", param_idx));
-                param_idx += 1;
-            }
-            None => sql.push_str(" AND is_deleted = false"),
+        // F1: the default (None) includes soft-deleted rows — they leave the
+        // view only via EXPUNGE, which has its own dedicated queries. An
+        // explicit Some(_) filters on the flag for callers that want one side.
+        if query.is_deleted.is_some() {
+            sql.push_str(&format!(" AND is_deleted = ${}", param_idx));
+            param_idx += 1;
+            binds.is_deleted = true;
         }
 
         sql.push_str(" ORDER BY uid DESC NULLS LAST, date DESC");
         sql.push_str(&format!(" LIMIT ${} OFFSET ${}", param_idx, param_idx + 1));
+        (sql, binds)
+    }
 
-        let mut q = sqlx::query(&sql).bind(query.account_id);
-
-        if let Some(ref mailbox_id) = query.mailbox_id {
-            q = q.bind(mailbox_id);
+    /// Apply the optional filter binds declared by
+    /// [`Self::message_list_tail`] in SQL order.
+    fn bind_message_list_filters<'q>(
+        q: sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments>,
+        query: &'q MessageQuery,
+        binds: &MessageListBinds,
+    ) -> sqlx::query::Query<'q, sqlx::Postgres, sqlx::postgres::PgArguments> {
+        let mut q = q;
+        if binds.mailbox_id {
+            if let Some(ref mailbox_id) = query.mailbox_id {
+                q = q.bind(mailbox_id);
+            }
         }
-        if let Some(uid_min) = query.uid_min {
-            q = q.bind(uid_min.min(i64::MAX as u64) as i64);
+        if binds.uid_min {
+            if let Some(uid_min) = query.uid_min {
+                q = q.bind(uid_min.min(i64::MAX as u64) as i64);
+            }
         }
-        if let Some(uid_max) = query.uid_max {
-            q = q.bind(uid_max.min(i64::MAX as u64) as i64);
+        if binds.uid_max {
+            if let Some(uid_max) = query.uid_max {
+                q = q.bind(uid_max.min(i64::MAX as u64) as i64);
+            }
         }
-        if let Some(is_read) = query.is_read {
-            q = q.bind(is_read);
+        if binds.is_read {
+            if let Some(is_read) = query.is_read {
+                q = q.bind(is_read);
+            }
         }
-        if let Some(is_starred) = query.is_starred {
-            q = q.bind(is_starred);
+        if binds.is_starred {
+            if let Some(is_starred) = query.is_starred {
+                q = q.bind(is_starred);
+            }
         }
-        if let Some(is_deleted) = query.is_deleted {
-            q = q.bind(is_deleted);
+        if binds.is_deleted {
+            if let Some(is_deleted) = query.is_deleted {
+                q = q.bind(is_deleted);
+            }
         }
-
-        q = q.bind(query.limit).bind(query.offset);
-
-        let rows = q.fetch_all(&self.pool).await?;
-
-        rows.iter().map(|r| self.row_to_message(r)).collect()
+        q.bind(query.limit).bind(query.offset)
     }
 
     // O-4.1:Minimum search term length to prevent expensive short queries
@@ -975,7 +1057,10 @@ impl MessageStorage {
         .fetch_one(&self.pool)
         .await?;
 
-        // SAFETY: MESSAGE_COLUMNS is a compile-time constant string, not user input.
+        // SAFETY: MESSAGE_META_COLUMNS is a compile-time constant string, not
+        // user input. F1/F2: no `is_deleted = false` predicate — SEARCH
+        // operates over the mailbox view, which includes \Deleted messages —
+        // and the rows are read metadata-only (no body decrypt).
         let rows = sqlx::query(&format!(
             r#"
             SELECT {} FROM mail_messages
@@ -985,7 +1070,7 @@ impl MessageStorage {
             ORDER BY uid DESC NULLS LAST, date DESC
             LIMIT $4 OFFSET $5
         "#,
-            MESSAGE_COLUMNS
+            MESSAGE_META_COLUMNS
         ))
         .bind(account_id)
         .bind(mailbox_id)
@@ -997,7 +1082,7 @@ impl MessageStorage {
 
         let messages = rows
             .iter()
-            .map(|r| self.row_to_message(r))
+            .map(Self::row_to_message_meta)
             .collect::<Result<Vec<_>>>()?;
         Ok((messages, total))
     }
@@ -1040,7 +1125,7 @@ impl MessageStorage {
         let total: i64 = sqlx::query_scalar(&format!(
             r#"
             SELECT COUNT(*) FROM mail_messages
-            WHERE account_id = $1 AND mailbox_id = $2 AND is_deleted = false
+            WHERE account_id = $1 AND mailbox_id = $2
               AND {predicate}
         "#
         ))
@@ -1051,16 +1136,20 @@ impl MessageStorage {
         .fetch_one(&self.pool)
         .await?;
 
-        // SAFETY: MESSAGE_COLUMNS is a compile-time constant string, not user input.
+        // SAFETY: MESSAGE_META_COLUMNS is a compile-time constant string, not
+        // user input. F1/F2: no `is_deleted = false` predicate (the SEARCH
+        // view includes \Deleted messages) and metadata-only columns (headers
+        // are never encrypted, so the predicate still works on encrypted
+        // stores — and no body is decrypted for the result rows).
         let rows = sqlx::query(&format!(
             r#"
             SELECT {} FROM mail_messages
-            WHERE account_id = $1 AND mailbox_id = $2 AND is_deleted = false
+            WHERE account_id = $1 AND mailbox_id = $2
               AND {predicate}
             ORDER BY uid DESC NULLS LAST, date DESC
             LIMIT $5 OFFSET $6
         "#,
-            MESSAGE_COLUMNS
+            MESSAGE_META_COLUMNS
         ))
         .bind(account_id)
         .bind(mailbox_id)
@@ -1073,7 +1162,7 @@ impl MessageStorage {
 
         let messages = rows
             .iter()
-            .map(|r| self.row_to_message(r))
+            .map(Self::row_to_message_meta)
             .collect::<Result<Vec<_>>>()?;
         Ok((messages, total))
     }
@@ -1647,6 +1736,42 @@ impl MessageStorage {
 
     // ========== Helper Methods ==========
 
+    /// F2: build a [`StoredMessage`] from a metadata-only row (see
+    /// [`MESSAGE_META_COLUMNS`]). No body columns were selected, so none are
+    /// read or decrypted; the body fields are `None` by construction and
+    /// content must come from the point reads. Unlike
+    /// [`Self::row_to_message`] this needs no `&self` (no decryption key).
+    fn row_to_message_meta(row: &sqlx::postgres::PgRow) -> Result<StoredMessage> {
+        Ok(StoredMessage {
+            text_body: None,
+            html_body: None,
+            raw_message: None,
+            id: row.get("id"),
+            account_id: row.get("account_id"),
+            mailbox_id: row.get("mailbox_id"),
+            uid: row.get("uid"),
+            message_id: row.get("message_id"),
+            from_address: row.get("from_address"),
+            from_name: row.get("from_name"),
+            to_addresses: serde_json::from_value(row.get("to_addresses"))?,
+            cc_addresses: serde_json::from_value(row.get("cc_addresses"))?,
+            bcc_addresses: serde_json::from_value(row.get("bcc_addresses"))?,
+            subject: row.get("subject"),
+            date: row.get("date"),
+            raw_size: row.get("raw_size"),
+            is_read: row.get("is_read"),
+            is_starred: row.get("is_starred"),
+            is_deleted: row.get("is_deleted"),
+            is_spam: row.get("is_spam"),
+            labels: row.get("labels"),
+            dedup_exempt: row.get("dedup_exempt"),
+            headers: row.get("headers"),
+            attachments: serde_json::from_value(row.get("attachments"))?,
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        })
+    }
+
     fn row_to_message(&self, row: &sqlx::postgres::PgRow) -> Result<StoredMessage> {
         let account_id: Uuid = row.get("account_id");
         let id: Uuid = row.get("id");
@@ -1902,6 +2027,84 @@ mod tests {
             .unwrap();
         assert!(msgs.is_empty());
         assert_eq!(total, 0);
+    }
+
+    // ── F1: deleted-inclusive listing SQL shape ───────────────────────────
+
+    #[test]
+    fn message_list_tail_default_includes_soft_deleted() {
+        let query = MessageQuery {
+            account_id: Uuid::new_v4(),
+            mailbox_id: Some(Uuid::new_v4()),
+            limit: 100,
+            ..Default::default()
+        };
+        let (sql, binds) = MessageStorage::message_list_tail(&query);
+        assert!(
+            !sql.to_lowercase().contains("is_deleted"),
+            "the default (is_deleted = None) listing must NOT filter soft-deleted rows \
+             (RFC 3501 §6.4.3/§7.4.1: they leave the view only via EXPUNGE), got: {}",
+            sql
+        );
+        assert!(!binds.is_deleted);
+        // mailbox_id consumes $2, so LIMIT/OFFSET land on $3/$4 — what
+        // matters is that NO is_deleted predicate appears anywhere.
+        assert!(sql.contains(" AND mailbox_id = $2"));
+        assert!(sql.contains(" ORDER BY uid DESC NULLS LAST, date DESC"));
+        assert!(sql.contains("LIMIT $3 OFFSET $4"));
+    }
+
+    #[test]
+    fn message_list_tail_explicit_is_deleted_filters() {
+        for value in [true, false] {
+            let query = MessageQuery {
+                account_id: Uuid::new_v4(),
+                mailbox_id: Some(Uuid::new_v4()),
+                is_deleted: Some(value),
+                limit: 10,
+                ..Default::default()
+            };
+            let (sql, binds) = MessageStorage::message_list_tail(&query);
+            // mailbox_id = $2, is_deleted = $3.
+            assert!(sql.contains(" AND is_deleted = $3"), "got: {}", sql);
+            assert!(binds.is_deleted);
+        }
+    }
+
+    // ── F2: metadata-only reads skip the encrypted body columns ───────────
+
+    #[test]
+    fn metadata_columns_exclude_encrypted_bodies() {
+        for body_col in ["text_body", "html_body", "raw_message"] {
+            assert!(
+                !MESSAGE_META_COLUMNS.split(", ").any(|c| c == body_col),
+                "the metadata-only column list must not select {}",
+                body_col
+            );
+            assert!(
+                MESSAGE_COLUMNS.split(", ").any(|c| c == body_col),
+                "the full column list must keep {} for point body reads",
+                body_col
+            );
+        }
+        for meta_col in [
+            "uid",
+            "raw_size",
+            "is_read",
+            "is_starred",
+            "is_deleted",
+            "is_spam",
+            "labels",
+            "subject",
+            "date",
+            "headers",
+        ] {
+            assert!(
+                MESSAGE_META_COLUMNS.split(", ").any(|c| c == meta_col),
+                "metadata-only column list must keep {}",
+                meta_col
+            );
+        }
     }
 
     // ── DB-gated dedup semantics (skipped without TEST_DATABASE_URL) ──────

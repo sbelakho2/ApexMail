@@ -40,6 +40,17 @@ pub struct ThreatIntelConfig {
     /// the configured maximums, trigger an immediate TTL purge instead of
     /// waiting for the next scheduled purge cycle (default:0.9 = 90%).
     pub purge_pressure_threshold: f64,
+
+    /// Drop entries of configured feeds that are ABSENT from a refresh
+    /// payload (default: `false` = keep last-known per source).
+    ///
+    /// Feed refreshes MERGE per source (only the sources present in the
+    /// payload are replaced; every other source keeps its last-known-good
+    /// entries). With this flag set, a configured feed that fails or returns
+    /// nothing also has its stale entries dropped — use only when operators
+    /// prefer an empty blocklist over a stale one for broken feeds.
+    #[serde(default)]
+    pub drop_absent_sources_on_refresh: bool,
 }
 
 /// Feed enforcement mode.
@@ -105,6 +116,7 @@ impl Default for ThreatIntelConfig {
             enable_ttl_expiration: true,
             min_feed_trust_score: 6.0,
             purge_pressure_threshold: 0.9,
+            drop_absent_sources_on_refresh: false,
             feeds: vec![
                 FeedSource {
                     name: "Spamhaus DROP".into(),

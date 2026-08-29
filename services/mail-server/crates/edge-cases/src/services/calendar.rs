@@ -255,7 +255,7 @@ pub fn generate_ics(event: &CalendarEvent) -> String {
     lines.push("CALSCALE:GREGORIAN".to_string());
 
     lines.push("BEGIN:VEVENT".to_string());
-    lines.push(format!("UID:{}", event.uid));
+    lines.push(format!("UID:{}", escape_ics(&event.uid)));
     lines.push(format!("SUMMARY:{}", escape_ics(&event.summary)));
 
     if let Some(ref desc) = event.description {
@@ -285,43 +285,51 @@ pub fn generate_ics(event: &CalendarEvent) -> String {
         format_datetime(&event.last_modified)
     ));
 
-    // Organizer
+    // Organizer — every interpolated value is ICS-escaped (F5): CN values
+    // and mailto addresses previously went in raw, so a name containing
+    // CR/LF/`:`/`;`/`,` could inject arbitrary properties into the ICS.
     if let Some(ref name) = event.organizer.name {
         lines.push(format!(
             "ORGANIZER;CN={}:mailto:{}",
-            name, event.organizer.email
+            escape_ics(name),
+            escape_ics(&event.organizer.email)
         ));
     } else {
-        lines.push(format!("ORGANIZER:mailto:{}", event.organizer.email));
+        lines.push(format!(
+            "ORGANIZER:mailto:{}",
+            escape_ics(&event.organizer.email)
+        ));
     }
 
-    // Attendees
+    // Attendees — same escaping for CN, ROLE, PARTSTAT and the address.
     for att in &event.attendees {
         let mut params = Vec::new();
         if let Some(ref name) = att.name {
-            params.push(format!("CN={name}"));
+            params.push(format!("CN={}", escape_ics(name)));
         }
-        params.push(format!("ROLE={}", att.role));
-        params.push(format!("PARTSTAT={}", att.part_stat));
+        params.push(format!("ROLE={}", escape_ics(&att.role)));
+        params.push(format!("PARTSTAT={}", escape_ics(&att.part_stat)));
         params.push(format!("RSVP={}", if att.rsvp { "TRUE" } else { "FALSE" }));
         lines.push(format!(
             "ATTENDEE;{}:mailto:{}",
             params.join(";"),
-            att.email
+            escape_ics(&att.email)
         ));
     }
 
-    // URL (validate scheme)
+    // URL (validate scheme) — the URL body is still escaped so a newline in
+    // the path cannot terminate the property line.
     if let Some(ref url) = event.url {
         if url.starts_with("http://") || url.starts_with("https://") {
-            lines.push(format!("URL:{url}"));
+            lines.push(format!("URL:{}", escape_ics(url)));
         }
     }
 
-    // Categories
+    // Categories — escape each category; the list separator ',' stays real.
     if let Some(ref cats) = event.categories {
         if !cats.is_empty() {
-            lines.push(format!("CATEGORIES:{}", cats.join(",")));
+            let escaped: Vec<String> = cats.iter().map(|c| escape_ics(c)).collect();
+            lines.push(format!("CATEGORIES:{}", escaped.join(",")));
         }
     }
 
@@ -342,7 +350,9 @@ pub fn generate_ics(event: &CalendarEvent) -> String {
 }
 
 fn generate_rrule(rule: &RecurrenceRule) -> String {
-    let mut parts = vec![format!("FREQ={}", rule.freq.to_uppercase())];
+    // String components (freq, until, BYDAY labels) come from user input and
+    // are escaped (F5) so they cannot break out of the RRULE property.
+    let mut parts = vec![format!("FREQ={}", escape_ics(&rule.freq.to_uppercase()))];
     if let Some(interval) = rule.interval {
         parts.push(format!("INTERVAL={interval}"));
     }
@@ -350,10 +360,11 @@ fn generate_rrule(rule: &RecurrenceRule) -> String {
         parts.push(format!("COUNT={count}"));
     }
     if let Some(ref until) = rule.until {
-        parts.push(format!("UNTIL={until}"));
+        parts.push(format!("UNTIL={}", escape_ics(until)));
     }
     if let Some(ref days) = rule.by_day {
-        parts.push(format!("BYDAY={}", days.join(",")));
+        let escaped: Vec<String> = days.iter().map(|d| escape_ics(d)).collect();
+        parts.push(format!("BYDAY={}", escaped.join(",")));
     }
     if let Some(ref months) = rule.by_month {
         parts.push(format!(
@@ -419,11 +430,23 @@ fn split_at_char_boundary(s: &str, max_chars: usize) -> (&str, &str) {
     (&s[..split_idx], &s[split_idx..])
 }
 
+/// Escape a TEXT value per RFC 5545 §3.3.11 (`\` `;` `,` and newlines).
+///
+/// F5: `\r` (bare or as part of CRLF) is ALSO neutralized — a raw CR or LF
+/// in an interpolated value would terminate the property line and allow
+/// CRLF injection of arbitrary ICS properties (e.g. `URL:evil`).
 fn escape_ics(text: &str) -> String {
-    text.replace('\\', "\\\\")
-        .replace(';', "\\;")
-        .replace(',', "\\,")
-        .replace('\n', "\\n")
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            ';' => out.push_str("\\;"),
+            ',' => out.push_str("\\,"),
+            '\n' | '\r' => out.push_str("\\n"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn unescape_ics(text: &str) -> String {
@@ -860,6 +883,111 @@ mod tests {
     fn test_escape_ics() {
         assert_eq!(escape_ics("hello; world,test"), "hello\\; world\\,test");
         assert_eq!(escape_ics("line\nbreak"), "line\\nbreak");
+        // F5: CR and CRLF must not survive into the output — a raw CR/LF
+        // terminates an ICS property line and enables property injection.
+        assert_eq!(escape_ics("cr\ronly"), "cr\\nonly");
+        assert_eq!(escape_ics("crlf\r\ninject"), "crlf\\n\\ninject");
+        assert_eq!(escape_ics("back\\slash"), "back\\\\slash");
+    }
+
+    // ── F5:CRLF/property injection into ORGANIZER/ATTENDEE ──────────
+
+    #[test]
+    fn test_organizer_attendee_injection_is_escaped() {
+        let event = CalendarEvent {
+            uid: "uid\r\nX-Evil:1".into(),
+            summary: "Meeting".into(),
+            description: None,
+            location: None,
+            start: Utc::now(),
+            end: Utc::now(),
+            all_day: false,
+            timezone: None,
+            organizer: Organizer {
+                email: "org@example.com".into(),
+                name: Some("Evil\r\nURL:evil.example/collect".into()),
+            },
+            attendees: vec![Attendee {
+                email: "att@example.com\r\nX-Pwned: yes".into(),
+                name: Some("Guest;ROLE=CHAIRNobody".into()),
+                role: "REQ-PARTICIPANT\r\nX-Bad:1".into(),
+                part_stat: "NEEDS-ACTION".into(),
+                rsvp: true,
+            }],
+            method: CalendarMethod::Request,
+            status: CalendarStatus::Confirmed,
+            sequence: 0,
+            created: Utc::now(),
+            last_modified: Utc::now(),
+            url: None,
+            categories: Some(vec!["team\r\nX-Inject:1".into()]),
+            priority: None,
+            recurrence: None,
+        };
+
+        let ics = generate_ics(&event);
+
+        // No raw CR/LF may appear anywhere in the output — every line must be
+        // a single property ending in CRLF, so injected content cannot start
+        // a new property. The escaped text stays on the ORGANIZER/ATTENDEE
+        // line; the check is that no LINE begins with an injected property.
+        let lines: Vec<&str> = ics.split("\r\n").collect();
+        for line in &lines {
+            let stripped = line.strip_prefix(' ').unwrap_or(line);
+            assert!(
+                !stripped.starts_with("URL:evil")
+                    && !stripped.starts_with("X-Pwned")
+                    && !stripped.starts_with("X-Bad")
+                    && !stripped.starts_with("X-Evil")
+                    && !stripped.starts_with("X-Inject"),
+                "injected property leaked onto its own line: {line:?}"
+            );
+        }
+        // The attacker's URL never becomes a real URL property.
+        assert!(!ics.split("\r\n").any(|l| l.starts_with("URL:")));
+        // The malicious values survive as (escaped) text inside the CN param.
+        assert!(ics.contains("URL\\nevil.example/collect") || ics.contains("URL:evil"));
+        assert!(ics.contains("ORGANIZER"));
+        assert!(ics.contains("ATTENDEE"));
+        // UID injection neutralized too.
+        assert!(!ics.split("\r\n").any(|l| l.starts_with("X-Evil:")));
+    }
+
+    #[test]
+    fn test_url_and_categories_injection_is_escaped() {
+        let event = CalendarEvent {
+            uid: "uid-ok".into(),
+            summary: "Sync".into(),
+            description: None,
+            location: None,
+            start: Utc::now(),
+            end: Utc::now(),
+            all_day: false,
+            timezone: None,
+            organizer: Organizer {
+                email: "org@example.com".into(),
+                name: None,
+            },
+            attendees: vec![],
+            method: CalendarMethod::Publish,
+            status: CalendarStatus::Confirmed,
+            sequence: 0,
+            created: Utc::now(),
+            last_modified: Utc::now(),
+            url: Some("http://example.com/\r\nDESCRIPTION:pwned".into()),
+            categories: Some(vec!["a;b".into(), "c,d".into()]),
+            priority: None,
+            recurrence: None,
+        };
+
+        let ics = generate_ics(&event);
+        assert!(
+            !ics.split("\r\n")
+                .any(|l| l.starts_with("DESCRIPTION:pwned")),
+            "URL must not be able to inject a DESCRIPTION property"
+        );
+        // ';' and ',' in category values are escaped as \; and \,.
+        assert!(ics.contains("a\\;b") && ics.contains("c\\,d"));
     }
 
     #[test]

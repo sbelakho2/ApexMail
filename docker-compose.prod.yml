@@ -10,10 +10,13 @@
 # - Replicas for stateless services
 #
 # ── About the mutable `:latest` image pins ──────────────────────────────────
-# Every service below pins `ghcr.io/.../<service>:latest`. This is DELIBERATE
-# (see deploy/DEPLOYMENT.md "Tag strategy": CI publishes :<short-sha> AND
-# :latest per merge to main; compose resolves :latest so deploys need no
-# render step). The mutability is mitigated end-to-end by the CI pipeline:
+# Every service below pins `ghcr.io/.../<service>:latest`. This is DELIBERATE.
+# NOTE (F12): nothing is pushed to GHCR anymore — the GitHub publish/workflow
+# files are gone. CI (ci/pipeline.sh → ci/stages/images.sh) and the manual
+# path (deploy/scripts/deploy.sh) build every image LOCALLY on the deploy
+# host and tag it with the canonical ghcr.io/... NAMES so compose resolves
+# them without a render step; the tags exist only on that host. The
+# mutability is mitigated end-to-end by the CI pipeline:
 #   * ci/stages/images.sh builds each image, tags it :<sha> AND :latest,
 #     runs the trivy gate on the :<sha> pin, and records an image-digests.txt
 #     manifest (sha256 of every image ID, itself signed via
@@ -22,7 +25,8 @@
 #     digest no longer matches that manifest (rebuilt/retagged/removed
 #     out-of-band between the images and deploy stages).
 #   * ci/stages/verify.sh rolls back to the previous :<sha> pins when
-#     post-deploy probes fail.
+#     post-deploy probes fail (see deploy/rollback-plan.md — rollback is
+#     local retagging, NOT a registry pull).
 # TODO(audit): render immutable digest pins (`image: ghcr.io/...@sha256:...`)
 # from the images-stage manifest into this file at deploy time so the
 # running stack is provably byte-identical to what CI gated — until then,
@@ -42,9 +46,9 @@ services:
   # MARKETING SITE (Zola static site, served by nginx-alpine on 8080)
   # ===========================================================================
   marketing:
-    # Canonical image name + tag published by .github/workflows/deploy.yml.
-    # The namespace (ghcr.io/sbelakho2/apexmail) must match the CI publisher's
-    # `github.repository`-derived registry path. See deploy/DEPLOYMENT.md.
+    # Canonical image name — built LOCALLY by CI (ci/stages/images.sh via
+    # deploy/scripts/deploy.sh) or a manual deploy.sh run and tagged with
+    # this name; nothing is pulled from or pushed to GHCR.
     image: ghcr.io/sbelakho2/apexmail/marketing:latest
     restart: unless-stopped
     read_only: true
@@ -113,6 +117,9 @@ services:
     volumes:
       - ./deploy/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
       - ./deploy/nginx/proxy-headers.conf:/etc/nginx/proxy-headers.conf:ro
+      # F15 — self-contained branded 404/50x pages served by the marketing
+      # vhost's error_page directives (no upstream dependency).
+      - ./deploy/nginx/error-pages:/var/www/apexmail-error-pages:ro
       - ${TLS_CERT_DIR:-./deploy/nginx/ssl}:/etc/nginx/ssl:ro
       # certbot_webroot is mounted read-only: nginx only needs to READ the
       # `reload-requested` sentinel the certbot renewal loop drops there
@@ -525,12 +532,99 @@ services:
         max_attempts: 5
 
   # ===========================================================================
+  # COMPLIANCE SERVICE (audit log, DSR/GDPR automation, secrets rotation)
+  # ===========================================================================
+  # Internal-only: no host ports (3011 stays on apexmail_backend). Same
+  # secret-bridging chain as sales-autopilot: load-secret-env.sh bridges the
+  # compliance-specific Docker secrets, then entrypoint-wrapper.sh assembles
+  # DATABASE_URL / REDIS_URL from the DB_*/REDIS_* parts and bridges
+  # CLICKHOUSE_PASSWORD for the (optional) GDPR erasure pass. In production
+  # (NODE_ENV=production) the binary REFUSES an ephemeral AUDIT_SIGNING_KEY —
+  # the key comes from the audit_signing_key Docker secret.
+  compliance:
+    image: ghcr.io/sbelakho2/apexmail/compliance:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+      NODE_ENV: production
+      COMPLIANCE_PORT: "3011"
+      # ── Database / Redis (URLs assembled by the entrypoint wrapper) ───────
+      DATABASE_URL: ""
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      # ── Auth / signing — blank the env so the secret files are used ───────
+      COMPLIANCE_AUTH_TOKEN: ""
+      COMPLIANCE_AUTH_TOKEN_FILE: /run/secrets/compliance_auth_token
+      AUDIT_SIGNING_KEY: ""
+      AUDIT_SIGNING_KEY_FILE: /run/secrets/audit_signing_key
+      SECRETS_ENCRYPTION_KEY: ""
+      SECRETS_ENCRYPTION_KEY_FILE: /run/secrets/compliance_secrets_encryption_key
+      SECRETS_KDF_SALT: ""
+      SECRETS_KDF_SALT_FILE: /run/secrets/compliance_secrets_kdf_salt
+      CONSENT_SIGNING_KEY: ""
+      CONSENT_SIGNING_KEY_FILE: /run/secrets/compliance_consent_signing_key
+      # ── Optional integration knobs ────────────────────────────────────────
+      CORS_ORIGIN: ${COMPLIANCE_CORS_ORIGIN:-}
+      GDPR_EXPORT_BASE_URL: ${GDPR_EXPORT_BASE_URL:-}
+      GDPR_VERIFY_BASE_URL: ${GDPR_VERIFY_BASE_URL:-}
+      AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-}
+      # ClickHouse GDPR erasure is OFF unless explicitly enabled here.
+      GDPR_CLICKHOUSE_ERASURE_ENABLED: ${GDPR_CLICKHOUSE_ERASURE_ENABLED:-false}
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE:-apexmail}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
+      CLICKHOUSE_PASSWORD: ""
+      CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
+    secrets:
+      - postgres_password
+      - redis_password
+      - clickhouse_password
+      - compliance_auth_token
+      - audit_signing_key
+      - compliance_secrets_encryption_key
+      - compliance_secrets_kdf_salt
+      - compliance_consent_signing_key
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/3011' 2>/dev/null || nc -z 127.0.0.1 3011"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      - apexmail_backend
+      - apexmail_data_internal
+    logging: *default-logging
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+
+  # ===========================================================================
   # MIGRATOR (one-shot database migration job — runs BEFORE `up`)
   # ===========================================================================
   # The deploy-time migration gate: applies the sqlx migration chain embedded
   # in the image (services/mail-server/migrations) and exits. Never started by
-  # `up` (profile `migrate` + restart: no) — deploy-hetzner.yml and deploy.sh
-  # run it explicitly before `docker compose up -d`:
+  # `up` (profile `migrate` + restart: no) — the pipeline's migrate stage and
+  # deploy/scripts/deploy.sh run it explicitly before `docker compose up -d`:
   #   docker compose ... --profile migrate run --rm migrator
   # DATABASE_URL is assembled from DB_* + the postgres_password secret by the
   # same entrypoint wrapper as every sibling service.
@@ -1073,6 +1167,11 @@ services:
     volumes:
       - ./deploy/hardening/scripts/postgres-backup-encrypt.sh:/usr/local/bin/postgres-backup-encrypt.sh:ro
       - postgres_backups:/backups
+      # F1 — SSH key for the BACKUP_TARGET rsync (read-only, host path is
+      # env-overridable). Optional known_hosts alongside it when present;
+      # both are only read when BACKUP_TARGET is set.
+      - ${BACKUP_SSH_KEY_FILE:-/var/run/apexmail-backup-ssh/id_ed25519}:/root/.ssh/id_ed25519:ro
+      - ${BACKUP_SSH_KNOWN_HOSTS_FILE:-/var/run/apexmail-backup-ssh/known_hosts}:/root/.ssh/known_hosts:ro
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_DB: ${POSTGRES_DB:-apexmail}
@@ -1089,11 +1188,28 @@ services:
       # Encryption key from a Docker secret (preferred over the env var).
       BACKUP_ENCRYPTION_KEY_FILE: /run/secrets/backup_encryption_key
       # Optional offsite mirror, e.g. "backup-user@offsite::apexmail" or
-      # "backup-user@offsite:/srv/apexmail-backups" (rsync over ssh; the
-      # container needs the matching key mounted to /root/.ssh when set).
+      # "backup-user@offsite:/srv/apexmail-backups" (rsync over ssh).
+      #
+      # ── OFFSITE EGRESS (F1) — operator runbook ──────────────────────────
+      # rsync-over-ssh needs BOTH an egress path and an SSH key:
+      #   1. Egress: this container is attached to `apexmail_backup_egress`
+      #      (a dedicated NON-internal bridge used ONLY by the two backup
+      #      containers — apexmail_data_internal stays internal: true for
+      #      everything else).
+      #   2. Key: provision the private key on the HOST at
+      #      ${BACKUP_SSH_KEY_FILE:-/var/run/apexmail-backup-ssh/id_ed25519}
+      #      (read-only bind below; chmod 600 — ssh refuses group/world-
+      #      readable keys) AND the offsite target's authorized_keys with the
+      #      matching public key. sshd host-key pinning: pre-seed
+      #      /var/run/apexmail-backup-ssh/known_hosts on the host and mount
+      #      it (see the volumes entry) — the scheduler is non-interactive
+      #      and cannot answer a first-connection host-key prompt.
+      # Without both, BACKUP_TARGET rsync fails (logged, non-fatal) and the
+      # encrypted backups stay on the host volume only.
       BACKUP_TARGET: ${BACKUP_TARGET:-}
     networks:
       - apexmail_data_internal
+      - apexmail_backup_egress
     secrets:
       - postgres_password
       - backup_encryption_key
@@ -1140,6 +1256,9 @@ services:
       - ./deploy/hardening/scripts/clickhouse-backup-encrypt.sh:/usr/local/bin/clickhouse-backup-encrypt.sh:ro
       - ./scripts/clickhouse-backup.sh:/usr/local/bin/clickhouse-backup.sh:ro
       - clickhouse_backups:/backups
+      # F1 — SSH key for the BACKUP_TARGET rsync (same mounts as postgres-backup).
+      - ${BACKUP_SSH_KEY_FILE:-/var/run/apexmail-backup-ssh/id_ed25519}:/root/.ssh/id_ed25519:ro
+      - ${BACKUP_SSH_KNOWN_HOSTS_FILE:-/var/run/apexmail-backup-ssh/known_hosts}:/root/.ssh/known_hosts:ro
     environment:
       CLICKHOUSE_HOST: clickhouse
       CLICKHOUSE_PORT: "8123"
@@ -1152,11 +1271,14 @@ services:
       BACKUP_KEEP_COUNT: ${CLICKHOUSE_BACKUP_KEEP_COUNT:-14}
       # Same secret as postgres-backup (one key, verified restores).
       BACKUP_ENCRYPTION_KEY_FILE: /run/secrets/backup_encryption_key
-      # Optional offsite mirror (rsync over ssh; mount the key to /root/.ssh
-      # when set — same caveat as postgres-backup on the no-egress network).
+      # Optional offsite mirror (rsync over ssh) — SAME egress contract as
+      # postgres-backup above: apexmail_backup_egress network + the SSH key
+      # bind mounts (operator provisions key + offsite target; see the
+      # OFFSITE EGRESS runbook comment on postgres-backup).
       BACKUP_TARGET: ${BACKUP_TARGET:-}
     networks:
       - apexmail_data_internal
+      - apexmail_backup_egress
     secrets:
       - clickhouse_password
       - backup_encryption_key
@@ -1206,14 +1328,24 @@ volumes:
 
 # Audit J — apexmail_data_internal is a plain bridge in the base (dev) file;
 # in production it has no egress path (no gateway/NAT), so the data plane
-# (postgres, redis, clickhouse, mailstore, postgres-backup) can only be
+# (postgres, redis, clickhouse, mailstore) can only be
 # reached by containers explicitly attached to it. Services that need
 # outbound connectivity (api-server/worker → SES, mta → mail, billing →
 # Stripe, certbot → ACME) keep their frontend/backend memberships.
+#
+# F1 — apexmail_backup_egress is a dedicated NON-internal bridge used ONLY by
+# the two backup containers (postgres-backup, clickhouse-backup). Their data
+# path to postgres/clickhouse stays on apexmail_data_internal (internal), but
+# their offsite mirror (BACKUP_TARGET, rsync over ssh) needs a gateway to
+# leave the host — with only the internal network attached, backups could
+# never leave. Keeping this as a separate, minimal-membership network means
+# the data plane itself still has no egress.
 networks:
   apexmail_data_internal:
     driver: bridge
     internal: true
+  apexmail_backup_egress:
+    driver: bridge
 
 secrets:
   postgres_password:
@@ -1272,3 +1404,21 @@ secrets:
   # Audit E — backup encryption key for postgres-backup-encrypt.sh.
   backup_encryption_key:
     file: ${PROD_BACKUP_ENCRYPTION_KEY_FILE:?PROD_BACKUP_ENCRYPTION_KEY_FILE is required in production}
+  # ── Compliance service (F13) ────────────────────────────────────────────────
+  # HMAC-SHA256 key signing the audit-log hash chain. No prior file
+  # convention existed (billing + compliance share the key) — this IS the
+  # convention now; >= 32 chars.
+  audit_signing_key:
+    file: ${PROD_AUDIT_SIGNING_KEY_FILE:?PROD_AUDIT_SIGNING_KEY_FILE is required in production}
+  # Bearer token every compliance route requires.
+  compliance_auth_token:
+    file: ${PROD_COMPLIANCE_AUTH_TOKEN_FILE:?PROD_COMPLIANCE_AUTH_TOKEN_FILE is required in production}
+  # AES key encrypting stored compliance secrets (secret auto-rotation).
+  compliance_secrets_encryption_key:
+    file: ${PROD_COMPLIANCE_SECRETS_ENCRYPTION_KEY_FILE:?PROD_COMPLIANCE_SECRETS_ENCRYPTION_KEY_FILE is required in production}
+  # KDF salt for the secrets store.
+  compliance_secrets_kdf_salt:
+    file: ${PROD_COMPLIANCE_SECRETS_KDF_SALT_FILE:?PROD_COMPLIANCE_SECRETS_KDF_SALT_FILE is required in production}
+  # HMAC key signing consent records/tokens.
+  compliance_consent_signing_key:
+    file: ${PROD_COMPLIANCE_CONSENT_SIGNING_KEY_FILE:?PROD_COMPLIANCE_CONSENT_SIGNING_KEY_FILE is required in production}

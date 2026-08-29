@@ -17,6 +17,7 @@ class EmailStatus(str, Enum):
     """Email delivery status."""
 
     QUEUED = "queued"
+    SCHEDULED = "scheduled"
     SENDING = "sending"
     SENT = "sent"
     DELIVERED = "delivered"
@@ -24,6 +25,7 @@ class EmailStatus(str, Enum):
     COMPLAINED = "complained"
     FAILED = "failed"
     REJECTED = "rejected"
+    CANCELLED = "cancelled"
 
 
 class DomainStatus(str, Enum):
@@ -36,23 +38,26 @@ class DomainStatus(str, Enum):
 
 
 class WebhookEvent(str, Enum):
-    """Webhook event types."""
+    """Webhook event types.
 
-    MESSAGE_ACCEPTED = "message.accepted"
-    MESSAGE_QUEUED = "message.queued"
-    MESSAGE_SENDING = "message.sending"
+    Mirrors KNOWN_WEBHOOK_EVENTS in api-server/src/routes/webhooks.rs —
+    the server rejects any other name with 422.
+    """
+
+    EMAIL_DELIVERED = "email.delivered"
+    EMAIL_BOUNCED = "email.bounced"
+    EMAIL_COMPLAINED = "email.complained"
     MESSAGE_SENT = "message.sent"
     MESSAGE_DELIVERED = "message.delivered"
     MESSAGE_BOUNCED = "message.bounced"
-    MESSAGE_DEFERRED = "message.deferred"
-    MESSAGE_DROPPED = "message.dropped"
+    MESSAGE_COMPLAINED = "message.complained"
     MESSAGE_OPENED = "message.opened"
     MESSAGE_CLICKED = "message.clicked"
-    MESSAGE_UNSUBSCRIBED = "message.unsubscribed"
-    MESSAGE_COMPLAINED = "message.complained"
-    MESSAGE_FAILED = "message.failed"
-    DOMAIN_VERIFIED = "domain.verified"
-    DOMAIN_FAILED = "domain.failed"
+    RECIPIENT_UNSUBSCRIBED = "recipient.unsubscribed"
+    PLACEMENT_TEST_COMPLETED = "placement_test.completed"
+    BOUNCE = "bounce"
+    COMPLAINT = "complaint"
+    INBOUND = "inbound"
     ALL = "*"
 
 
@@ -147,32 +152,48 @@ class SendEmailResponse(BaseModel):
 
 
 class Email(BaseModel):
-    """Email details."""
+    """Email details (the flat MessageDetail payload of GET /v1/messages/:id).
+
+    The API sends bare address strings for from/to (no display-name
+    objects) and snake_case timestamps.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
     id: str
-    from_: EmailAddress = Field(alias="from")
-    to: list[EmailAddress]
-    cc: Optional[list[EmailAddress]] = None
-    bcc: Optional[list[EmailAddress]] = None
+    from_: str = Field(alias="from")
+    to: list[str]
+    cc: Optional[list[str]] = None
+    bcc: Optional[list[str]] = None
     subject: str
     status: EmailStatus
+    scheduled_at: Optional[datetime] = Field(default=None, alias="scheduledAt")
     created_at: datetime = Field(alias="createdAt")
     sent_at: Optional[datetime] = Field(default=None, alias="sentAt")
     delivered_at: Optional[datetime] = Field(default=None, alias="deliveredAt")
     opened_at: Optional[datetime] = Field(default=None, alias="openedAt")
     clicked_at: Optional[datetime] = Field(default=None, alias="clickedAt")
-    tags: Optional[list[Tag]] = None
+    tags: Optional[list[str]] = None
     metadata: Optional[dict[str, Any]] = None
 
 
 class EmailListResponse(BaseModel):
-    """Response from listing emails."""
+    """Response from listing emails.
+
+    The API returns the envelope {"data": [MessageDetail...], "meta": ...};
+    the client unwraps data, so this model accepts a bare list.
+    """
 
     emails: list[Email]
     cursor: Optional[str] = None
-    has_more: bool = Field(alias="hasMore")
+    has_more: bool = Field(default=False, alias="hasMore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_bare_list(cls, data: Any) -> Any:
+        if isinstance(data, list):
+            return {"emails": data}
+        return data
 
 
 class DNSRecord(BaseModel):
@@ -187,13 +208,24 @@ class DNSRecord(BaseModel):
 
 
 class Domain(BaseModel):
-    """Domain details."""
+    """Domain details.
+
+    Matches the server's DomainResponse: {id, name, status, ses_verified,
+    spf_verified, dkim_verified, dmarc_verified, return_path_verified,
+    created_at}. `domain` is kept as an optional alias for older payloads.
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
     id: str
-    domain: str
+    name: Optional[str] = None
+    domain: Optional[str] = None
     status: DomainStatus
+    ses_verified: Optional[bool] = Field(default=None, alias="sesVerified")
+    spf_verified: Optional[bool] = Field(default=None, alias="spfVerified")
+    dkim_verified: Optional[bool] = Field(default=None, alias="dkimVerified")
+    dmarc_verified: Optional[bool] = Field(default=None, alias="dmarcVerified")
+    return_path_verified: Optional[bool] = Field(default=None, alias="returnPathVerified")
     verification_token: Optional[str] = Field(default=None, alias="verificationToken")
     dns_records: Optional[dict[str, DNSRecord]] = Field(default=None, alias="dnsRecords")
     verified_at: Optional[datetime] = Field(default=None, alias="verifiedAt")
@@ -201,20 +233,35 @@ class Domain(BaseModel):
 
 
 class DomainListResponse(BaseModel):
-    """Response from listing domains."""
+    """Response from listing domains (accepts the API's bare array)."""
 
     domains: list[Domain]
 
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_bare_list(cls, data: Any) -> Any:
+        if isinstance(data, list):
+            return {"domains": data}
+        return data
+
 
 class Webhook(BaseModel):
-    """Webhook details."""
+    """Webhook details.
+
+    Matches the server's WebhookResponse: {id, url, events, secret? (only
+    at creation/rotation), status, created_at, updated_at}. The API has no
+    name/enabled fields — status is "active" | "paused" | "disabled".
+    """
 
     model_config = ConfigDict(populate_by_name=True)
 
     id: str
-    name: str = Field(min_length=1)
     url: str = Field(min_length=1)
     events: list[str]
+    status: str = "active"
+    secret: Optional[str] = None
+    created_at: datetime = Field(alias="createdAt")
+    updated_at: Optional[datetime] = Field(default=None, alias="updatedAt")
 
     @field_validator("url")
     @classmethod
@@ -222,15 +269,19 @@ class Webhook(BaseModel):
         if not v.startswith(("http://", "https://")):
             raise ValueError("url must start with http:// or https://")
         return v
-    enabled: bool
-    secret: Optional[str] = None
-    created_at: datetime = Field(alias="createdAt")
 
 
 class WebhookListResponse(BaseModel):
-    """Response from listing webhooks."""
+    """Response from listing webhooks (accepts the API's bare array)."""
 
     webhooks: list[Webhook]
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_bare_list(cls, data: Any) -> Any:
+        if isinstance(data, list):
+            return {"webhooks": data}
+        return data
 
 
 class Template(BaseModel):
@@ -258,11 +309,18 @@ class TemplateRenderResponse(BaseModel):
 
 
 class TemplateListResponse(BaseModel):
-    """Response from listing templates."""
+    """Response from listing templates (accepts the API's bare array)."""
 
     templates: list[Template]
     cursor: Optional[str] = None
     has_more: bool = Field(default=False, alias="hasMore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_bare_list(cls, data: Any) -> Any:
+        if isinstance(data, list):
+            return {"templates": data}
+        return data
 
 
 class Suppression(BaseModel):
@@ -286,11 +344,18 @@ class SuppressionCheckResponse(BaseModel):
 
 
 class SuppressionListResponse(BaseModel):
-    """Response from listing suppressions."""
+    """Response from listing suppressions (accepts the API's bare array)."""
 
     suppressions: list[Suppression]
     cursor: Optional[str] = None
     has_more: bool = Field(default=False, alias="hasMore")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_bare_list(cls, data: Any) -> Any:
+        if isinstance(data, list):
+            return {"suppressions": data}
+        return data
 
 
 class BulkSuppressionResponse(BaseModel):

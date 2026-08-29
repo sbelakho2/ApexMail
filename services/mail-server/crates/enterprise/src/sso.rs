@@ -120,6 +120,35 @@ pub struct SSOService {
     config: Config,
 }
 
+/// F7 (audit): reusable per-tenant `enforce_sso` lookup for api-server's
+/// auth gate — `SELECT enforce_sso FROM ent_sso_configurations WHERE
+/// tenant_id = $1 LIMIT 1`.
+///
+/// Contract:
+/// * `Ok(true)`  — a configuration row sets `enforce_sso = true`; password
+///   logins for this tenant must be rejected.
+/// * `Ok(false)` — no row, or `enforce_sso = false`: password logins allowed.
+/// * `Ok(false)` — the table itself is absent (`42P01`, migrations not yet
+///   applied): the gate degrades open rather than locking every tenant out.
+/// * `Err`       — any other database failure (surfaced so the caller can
+///   fail closed on infrastructure errors).
+pub async fn tenant_enforces_sso(db: &PgPool, tenant_id: &str) -> Result<bool, String> {
+    match sqlx::query_scalar::<_, bool>(
+        "SELECT enforce_sso FROM ent_sso_configurations WHERE tenant_id = $1 LIMIT 1",
+    )
+    .bind(tenant_id)
+    .fetch_optional(db)
+    .await
+    {
+        Ok(Some(enforced)) => Ok(enforced),
+        Ok(None) => Ok(false),
+        Err(sqlx::Error::Database(db_error)) if db_error.code().as_deref() == Some("42P01") => {
+            Ok(false)
+        }
+        Err(error) => Err(format!("Check enforce_sso for tenant {tenant_id}: {error}")),
+    }
+}
+
 impl SSOService {
     pub fn new(db: PgPool, config: Config) -> Self {
         Self {
@@ -127,6 +156,12 @@ impl SSOService {
             redis: None,
             config,
         }
+    }
+
+    /// F7: per-tenant SSO enforcement via this service's pool — see
+    /// [`tenant_enforces_sso`] for the exact semantics.
+    pub async fn tenant_enforces_sso(&self, tenant_id: &str) -> Result<bool, String> {
+        tenant_enforces_sso(&self.db, tenant_id).await
     }
 
     pub fn with_redis(db: PgPool, redis: RedisPool, config: Config) -> Self {

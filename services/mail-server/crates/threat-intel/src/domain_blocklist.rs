@@ -98,6 +98,20 @@ impl DomainBlocklist {
         self.exact.len()
     }
 
+    /// Remove all entries that originate from `source` (per-source refresh
+    /// merging, audit F6). Returns the number removed.
+    pub fn remove_source(&self, source: &str) -> usize {
+        let mut removed = 0;
+        self.exact.retain(|_, entry| {
+            let keep = !entry.source.eq_ignore_ascii_case(source);
+            if !keep {
+                removed += 1;
+            }
+            keep
+        });
+        removed
+    }
+
     /// Remove expired entries
     pub fn purge_expired(&self) -> usize {
         let now = Utc::now();

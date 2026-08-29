@@ -117,6 +117,22 @@ pub struct GdprConfig {
     /// `failed` and no longer retried (retention purges it with the
     /// request window). Env: `COMPLIANCE_DSR_FLUSH_MAX_ATTEMPTS` (default 5).
     pub outbox_flush_max_attempts: i64,
+    /// ClickHouse erasure step (audit F1): the analytics `events` table is a
+    /// real PII store (recipient addresses) and must be purged on Art. 17
+    /// requests. Disabled by default so deployments without ClickHouse get an
+    /// honest `skipped_not_configured` line on the deletion certificate
+    /// instead of a silent gap.
+    /// Env: `GDPR_CLICKHOUSE_ERASURE_ENABLED` (default "false").
+    pub clickhouse_erasure_enabled: bool,
+    /// Env: `CLICKHOUSE_URL` (default "http://clickhouse:8123" — the
+    /// workspace-wide convention, same as the analytics/tracking crates).
+    pub clickhouse_url: String,
+    /// Env: `CLICKHOUSE_DATABASE` (default "apexmail").
+    pub clickhouse_database: String,
+    /// Env: `CLICKHOUSE_USER` (default "default").
+    pub clickhouse_user: String,
+    /// Env: `CLICKHOUSE_PASSWORD` (default "").
+    pub clickhouse_password: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -283,6 +299,14 @@ impl ComplianceConfig {
                 system_from_address: env_or("COMPLIANCE_SYSTEM_FROM", "noreply@apexmail.ee"),
                 outbox_flush_batch: env_i64("COMPLIANCE_DSR_FLUSH_BATCH", 25),
                 outbox_flush_max_attempts: env_i64("COMPLIANCE_DSR_FLUSH_MAX_ATTEMPTS", 5),
+                // F1: ClickHouse erasure step — same env names as the
+                // analytics/tracking crates' ClickHouse clients.
+                clickhouse_erasure_enabled: env_or("GDPR_CLICKHOUSE_ERASURE_ENABLED", "false")
+                    == "true",
+                clickhouse_url: env_or("CLICKHOUSE_URL", "http://clickhouse:8123"),
+                clickhouse_database: env_or("CLICKHOUSE_DATABASE", "apexmail"),
+                clickhouse_user: env_or("CLICKHOUSE_USER", "default"),
+                clickhouse_password: env_or("CLICKHOUSE_PASSWORD", ""),
             },
 
             secrets: SecretsConfig {
@@ -399,6 +423,10 @@ mod tests {
         assert_eq!(cfg.gdpr.system_from_address, "noreply@apexmail.ee");
         assert_eq!(cfg.gdpr.outbox_flush_batch, 25);
         assert_eq!(cfg.gdpr.outbox_flush_max_attempts, 5);
+        // F1: ClickHouse erasure step defaults (off unless explicitly enabled).
+        assert!(!cfg.gdpr.clickhouse_erasure_enabled);
+        assert_eq!(cfg.gdpr.clickhouse_url, "http://clickhouse:8123");
+        assert_eq!(cfg.gdpr.clickhouse_database, "apexmail");
         // SEC-15: DSAR rate limit defaults
         assert_eq!(cfg.dsar_rate_limit.per_user, 1);
         assert_eq!(cfg.dsar_rate_limit.per_tenant, 100);

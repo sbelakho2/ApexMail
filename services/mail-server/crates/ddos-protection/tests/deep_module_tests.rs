@@ -46,6 +46,8 @@ mod bug_fix_verification {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         // First request
@@ -89,6 +91,8 @@ mod bug_fix_verification {
                 body_size: 0,
                 tenant_id: None,
                 api_key_id: None,
+                challenge_id: None,
+                challenge_solution: None,
             };
             tracker.track(&ctx);
         }
@@ -178,6 +182,8 @@ mod session_tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         // Track 10 requests
@@ -209,6 +215,8 @@ mod session_tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         // Track 3 requests
@@ -244,6 +252,8 @@ mod session_tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         tracker.track(&ctx);
@@ -270,6 +280,8 @@ mod session_tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         tracker.track(&ctx);
@@ -299,6 +311,8 @@ mod session_tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: Some("key-1".to_string()),
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         let ctx2 = RequestContext {
@@ -311,6 +325,8 @@ mod session_tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: Some("key-2".to_string()),
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         tracker.track(&ctx1);
@@ -424,6 +440,7 @@ mod decision_tests {
                 .as_secs()
                 + 300,
             expected_time_ms: 100,
+            signature: String::new(),
         };
 
         // Find a valid nonce by brute force (difficulty 4 = 16 combinations)
@@ -453,6 +470,7 @@ mod decision_tests {
                 .as_secs()
                 + 300,
             expected_time_ms: 1000,
+            signature: String::new(),
         };
 
         // Random nonces should almost certainly fail
@@ -469,6 +487,7 @@ mod decision_tests {
             difficulty: 0, // Trivial
             expires_at: 0, // Already expired
             expected_time_ms: 0,
+            signature: String::new(),
         };
 
         // Even nonce 0 should work for difficulty 0, but expiration should cause failure
@@ -746,6 +765,8 @@ mod integration_tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         let decision = protector.evaluate(&ctx).await;
@@ -770,6 +791,8 @@ mod integration_tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         let decision = protector.evaluate(&ctx).await;
@@ -806,6 +829,8 @@ mod integration_tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         // First request creates reputation and decreases it

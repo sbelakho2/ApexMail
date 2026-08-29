@@ -41,57 +41,70 @@ impl EngagementTrustService {
     /// Maximum number of recipients to fetch per page when computing campaign trust.
     const CAMPAIGN_TRUST_PAGE_SIZE: i64 = 1000;
 
+    /// F6:computes campaign trust with ONE batched GROUP BY query per page
+    /// instead of a per-subscriber round-trip (the old N+1 issued one
+    /// `GROUP BY event_type` query per recipient — thousands of sequential
+    /// queries for a large campaign).
+    ///
+    /// The paged inner SELECT reproduces the previous cursor pagination
+    /// exactly (DISTINCT campaign recipients, ordered ascending); the LEFT
+    /// JOIN + FILTER aggregation produces the SAME trust inputs the
+    /// per-subscriber path produced (tenant-wide counts over the last 90
+    /// days, with zero rows for recipients whose engagement predates the
+    /// window — they still count toward `subscriber_count` and score with
+    /// zero engagement, as before).
     pub async fn campaign_trust(
         &self,
         tenant_id: &str,
         campaign_id: &str,
     ) -> anyhow::Result<CampaignTrustMetrics> {
+        let since_90d = Utc::now() - chrono::Duration::days(90);
+
         let mut scores: Vec<f64> = Vec::new();
         let mut grades: std::collections::HashMap<String, i64> = std::collections::HashMap::new();
         let mut total_subscribers: i64 = 0;
         let mut cursor: Option<String> = None;
 
-        // Process recipients in pages using cursor-based pagination to avoid OOM
-        // for campaigns with millions of subscribers.
         loop {
-            let rows = if let Some(ref c) = cursor {
-                sqlx::query_as::<_, (String,)>(
-                    "SELECT DISTINCT recipient FROM events \
-                     WHERE tenant_id = $1 AND campaign_id = $2 AND recipient > $3 \
-                     ORDER BY recipient ASC LIMIT $4",
-                )
-                .bind(tenant_id)
-                .bind(campaign_id)
-                .bind(c)
-                .bind(Self::CAMPAIGN_TRUST_PAGE_SIZE)
-                .fetch_all(&self.pool)
-                .await?
-            } else {
-                sqlx::query_as::<_, (String,)>(
-                    "SELECT DISTINCT recipient FROM events \
-                     WHERE tenant_id = $1 AND campaign_id = $2 \
-                     ORDER BY recipient ASC LIMIT $3",
-                )
-                .bind(tenant_id)
-                .bind(campaign_id)
-                .bind(Self::CAMPAIGN_TRUST_PAGE_SIZE)
-                .fetch_all(&self.pool)
-                .await?
-            };
+            let cursor_bound = cursor.clone().unwrap_or_default();
+            let rows = sqlx::query_as::<_, SubscriberCountsRow>(
+                "SELECT r.recipient AS email, \
+                 COUNT(*) FILTER (WHERE e.event_type = 'sent') AS sent, \
+                 COUNT(*) FILTER (WHERE e.event_type = 'delivered') AS delivered, \
+                 COUNT(*) FILTER (WHERE e.event_type = 'opened') AS opened, \
+                 COUNT(*) FILTER (WHERE e.event_type = 'clicked') AS clicked, \
+                 COUNT(*) FILTER (WHERE e.event_type = 'complained') AS complained, \
+                 COUNT(*) FILTER (WHERE e.event_type = 'unsubscribed') AS unsubscribed, \
+                 COUNT(*) FILTER (WHERE e.event_type = 'replied') AS replied, \
+                 COUNT(*) FILTER (WHERE e.event_type = 'bounced') AS bounced \
+                 FROM (SELECT DISTINCT recipient FROM events \
+                       WHERE tenant_id = $1 AND campaign_id = $2 AND recipient > $3 \
+                       ORDER BY recipient ASC LIMIT $4) r \
+                 LEFT JOIN events e \
+                   ON e.tenant_id = $1 AND e.recipient = r.recipient AND e.timestamp >= $5 \
+                 GROUP BY r.recipient \
+                 ORDER BY r.recipient ASC",
+            )
+            .bind(tenant_id)
+            .bind(campaign_id)
+            .bind(&cursor_bound)
+            .bind(Self::CAMPAIGN_TRUST_PAGE_SIZE)
+            .bind(since_90d)
+            .fetch_all(&self.pool)
+            .await?;
 
             if rows.is_empty() {
                 break;
             }
 
-            for (email,) in &rows {
-                if let Ok(trust) = self.calculate_trust(tenant_id, email).await {
-                    scores.push(trust.score);
-                    *grades.entry(trust.grade.clone()).or_insert(0) += 1;
-                }
+            for row in &rows {
+                let trust = compute_trust_score(&engagement_from_counts(row));
+                scores.push(trust.score);
+                *grades.entry(trust.grade.clone()).or_insert(0) += 1;
             }
 
             total_subscribers += rows.len() as i64;
-            cursor = rows.last().map(|(e,)| e.clone());
+            cursor = rows.last().map(|r| r.email.clone());
         }
 
         let avg_score = if scores.is_empty() {
@@ -133,43 +146,82 @@ impl EngagementTrustService {
 
         let map: std::collections::HashMap<String, i64> = counts.into_iter().collect();
 
-        let sent = *map.get("sent").unwrap_or(&0);
-        let delivered = *map.get("delivered").unwrap_or(&0);
-        let opened = *map.get("opened").unwrap_or(&0);
-        let clicked = *map.get("clicked").unwrap_or(&0);
-        let complained = *map.get("complained").unwrap_or(&0);
-        let unsubscribed = *map.get("unsubscribed").unwrap_or(&0);
-        let replied = *map.get("replied").unwrap_or(&0);
-        let bounced = *map.get("bounced").unwrap_or(&0);
-
-        let safe_rate = |num: i64, den: i64| -> f64 {
-            if den > 0 {
-                num as f64 / den as f64
-            } else {
-                0.0
-            }
-        };
-
-        Ok(SubscriberEngagement {
+        // Same construction as the batched campaign path (F6) — both feed
+        // identical inputs into compute_trust_score.
+        Ok(engagement_from_counts(&SubscriberCountsRow {
             email: email.to_string(),
-            open_rate: safe_rate(opened, delivered),
-            click_rate: safe_rate(clicked, delivered),
-            spam_rate: safe_rate(complained, delivered),
-            unsubscribe_rate: safe_rate(unsubscribed, delivered),
-            reply_rate: safe_rate(replied, sent),
-            bounce_rate: safe_rate(bounced, sent),
-            total_sent: sent,
-            total_delivered: delivered,
-            total_opened: opened,
-            total_clicked: clicked,
-            preference_compliance: 1.0, // Default:fully compliant
-            send_frequency_compliance: 1.0,
-            recency_score: 1.0,
-            nps_score: None,
-            survey_score: None,
-            feedback_count: 0,
-            last_engagement: None,
-        })
+            sent: *map.get("sent").unwrap_or(&0),
+            delivered: *map.get("delivered").unwrap_or(&0),
+            opened: *map.get("opened").unwrap_or(&0),
+            clicked: *map.get("clicked").unwrap_or(&0),
+            complained: *map.get("complained").unwrap_or(&0),
+            unsubscribed: *map.get("unsubscribed").unwrap_or(&0),
+            replied: *map.get("replied").unwrap_or(&0),
+            bounced: *map.get("bounced").unwrap_or(&0),
+        }))
+    }
+}
+
+/// Row shape of the batched campaign-trust query (F6).
+#[derive(Debug, sqlx::FromRow)]
+struct SubscriberCountsRow {
+    email: String,
+    sent: i64,
+    delivered: i64,
+    opened: i64,
+    clicked: i64,
+    complained: i64,
+    unsubscribed: i64,
+    replied: i64,
+    bounced: i64,
+}
+
+/// Build a [`SubscriberEngagement`] from per-event-type counts — the single
+/// shared definition of the trust inputs (rates + the same default
+/// compliance/recency scores the per-subscriber path used).
+fn engagement_from_counts(row: &SubscriberCountsRow) -> SubscriberEngagement {
+    let SubscriberCountsRow {
+        email,
+        sent,
+        delivered,
+        opened,
+        clicked,
+        complained,
+        unsubscribed,
+        replied,
+        bounced,
+    } = row;
+    let (sent, delivered, opened, clicked) = (*sent, *delivered, *opened, *clicked);
+    let (complained, unsubscribed, replied, bounced) =
+        (*complained, *unsubscribed, *replied, *bounced);
+
+    let safe_rate = |num: i64, den: i64| -> f64 {
+        if den > 0 {
+            num as f64 / den as f64
+        } else {
+            0.0
+        }
+    };
+
+    SubscriberEngagement {
+        email: email.to_string(),
+        open_rate: safe_rate(opened, delivered),
+        click_rate: safe_rate(clicked, delivered),
+        spam_rate: safe_rate(complained, delivered),
+        unsubscribe_rate: safe_rate(unsubscribed, delivered),
+        reply_rate: safe_rate(replied, sent),
+        bounce_rate: safe_rate(bounced, sent),
+        total_sent: sent,
+        total_delivered: delivered,
+        total_opened: opened,
+        total_clicked: clicked,
+        preference_compliance: 1.0, // Default:fully compliant
+        send_frequency_compliance: 1.0,
+        recency_score: 1.0,
+        nps_score: None,
+        survey_score: None,
+        feedback_count: 0,
+        last_engagement: None,
     }
 }
 

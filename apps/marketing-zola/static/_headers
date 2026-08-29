@@ -27,3 +27,13 @@
 
 /images/*
   Cache-Control: public, max-age=86400, stale-while-revalidate=604800
+
+# Error pages (404.html / 50x.html): Netlify and Cloudflare Pages serve
+# these automatically for matching error statuses — they must never be
+# cached, matching the `internal` no-store locations in
+# apps/marketing-zola/nginx.conf.
+/404.html
+  Cache-Control: no-store
+
+/50x.html
+  Cache-Control: no-store

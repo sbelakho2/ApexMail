@@ -425,10 +425,9 @@ See [chained-challenges.md](chained-challenges.md).
 
 `argon2_saturation_pressure_cap` (default 64; the deprecated `argon2_max_waiters` name still works) bounds the Redis semaphore's saturation-pressure counter (`{..}:sem:waiters`, hash-tagged with the lease set).
 When a cap is saturated, each refused contender is counted with the lease lifetime's TTL.
-Once the counter exceeds the cap, `acquire()` returns null immediately (CapacityExceeded → the captcha violation / 429).
+Once the counter exceeds the cap (the boundary value equal to the cap does not trip), the acquire script returns its distinguishable capacity sentinel (`-1`) after removing the contender's own entry, and `acquire()` maps it to the explicit fast-fail: null immediately (CapacityExceeded → the captcha violation / 429), no lease slot held, no counter residue — `RedisAdmissionSemaphore::lastAcquireFastFailed()` exposes the distinction so telemetry can tell a saturation storm from ordinary cap contention.
 Nothing queues, blocks or waits: admission is immediate and non-blocking, and the counter is a gauge of saturation pressure, never a queue.
-A counter entry is removed when a lease is granted or the acquire returns null (best-effort, same Lua).
-During an Argon2id saturation storm the counter can never grow unboundedly.
+During an Argon2id saturation storm the gauge stays pinned at the cap: each over-cap contender's entry is removed in the same script, so the counter can never grow unboundedly.
 
 ## Per-scope Argon2 concentration cap
 

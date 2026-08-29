@@ -16,18 +16,29 @@ class Templates
     /**
      * Create a new template.
      *
+     * The server's CreateTemplateRequest accepts exactly
+     * {name, subject, html_body, text_body?} (deny_unknown_fields). Legacy
+     * `html` / `text` input keys are accepted and mapped to html_body /
+     * text_body; slug / engine / schema inputs are accepted but NOT sent
+     * (the API has no such fields).
+     *
      * @param array $params {
      *   @type string $name       Human-readable name
      *   @type string $subject    Subject line (supports {{variables}})
-     *   @type string $html       HTML body
-     *   @type string $text       Plain-text body (generated automatically when omitted)
-        *   @type string $engine     Template engine name
-     *   @type array  $schema     JSON Schema describing available template variables
+     *   @type string $html_body  HTML body (alias: html)
+     *   @type string $text_body  Plain-text body (alias: text)
      * }
      */
     public function create(array $params): array
     {
-        return $this->client->request('POST', '/v1/templates', $params);
+        $body = array_filter([
+            'name'       => $params['name'] ?? null,
+            'subject'    => $params['subject'] ?? null,
+            'html_body'  => $params['html_body'] ?? $params['html'] ?? null,
+            'text_body'  => $params['text_body'] ?? $params['text'] ?? null,
+        ], static fn ($v) => $v !== null && $v !== '');
+
+        return $this->client->request('POST', '/v1/templates', $body);
     }
 
     /**
@@ -52,20 +63,22 @@ class Templates
         return $this->client->request('GET', '/v1/templates/' . urlencode($id));
     }
 
-    /** Get a template by its unique slug. */
-    public function getBySlug(string $slug): array
-    {
-        return $this->client->request('GET', '/v1/templates/slug/' . urlencode($slug));
-    }
-
     /**
      * Update a template (creates a new version automatically).
      *
-     * @param array $params { name, subject, html, text, engine, schema }
+     * The server's UpdateTemplateRequest accepts {name?, subject?,
+     * html_body?, text_body?}; legacy html/text keys are mapped.
      */
     public function update(string $id, array $params): array
     {
-        return $this->client->request('PUT', '/v1/templates/' . urlencode($id), $params);
+        $body = array_filter([
+            'name'       => $params['name'] ?? null,
+            'subject'    => $params['subject'] ?? null,
+            'html_body'  => $params['html_body'] ?? $params['html'] ?? null,
+            'text_body'  => $params['text_body'] ?? $params['text'] ?? null,
+        ], static fn ($v) => $v !== null && $v !== '');
+
+        return $this->client->request('PUT', '/v1/templates/' . urlencode($id), $body);
     }
 
     /** Delete a template and all its versions. */
@@ -101,5 +114,4 @@ class Templates
     {
         return $this->client->request('POST', '/v1/templates/' . urlencode($id) . '/render', ['variables' => $data]);
     }
-
 }

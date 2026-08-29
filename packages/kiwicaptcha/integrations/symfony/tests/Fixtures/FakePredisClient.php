@@ -679,7 +679,11 @@ final class FakePredisClient extends \Predis\Client
             if ($n > $maxWaiters) {
                 $this->fakeDecr([$waitersKey]);
 
-                return 0;
+                // The distinguishable saturation-pressure sentinel: the
+                // over-cap contender's own entry is removed in the same
+                // script and acquire() maps -1 to its fast-fail
+                // CapacityExceeded path.
+                return -1;
             }
 
             return 0;

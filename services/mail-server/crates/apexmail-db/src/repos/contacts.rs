@@ -13,7 +13,7 @@ impl ContactsRepo {
     /// Create a new contact.
     pub async fn create(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         email: &str,
         name: Option<&str>,
         tags: Option<serde_json::Value>,
@@ -37,7 +37,7 @@ impl ContactsRepo {
     /// Find a contact by ID.
     pub async fn find_by_id(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         id: Uuid,
     ) -> Result<Option<Contact>, sqlx::Error> {
         sqlx::query_as::<_, Contact>(
@@ -53,7 +53,7 @@ impl ContactsRepo {
     /// Find a contact by email.
     pub async fn find_by_email(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         email: &str,
     ) -> Result<Option<Contact>, sqlx::Error> {
         sqlx::query_as::<_, Contact>(
@@ -69,7 +69,7 @@ impl ContactsRepo {
     /// List contacts for a tenant.
     pub async fn list(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Contact>, sqlx::Error> {
@@ -98,7 +98,7 @@ impl ContactsRepo {
     /// results (the extra row serves as the "has_more" indicator).
     pub async fn list_keyset(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         limit: i64,
         cursor_created_at: Option<DateTime<Utc>>,
         cursor_id: Option<Uuid>,
@@ -138,7 +138,7 @@ impl ContactsRepo {
     /// Update a contact.
     pub async fn update(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         id: Uuid,
         name: Option<&str>,
         tags: Option<serde_json::Value>,
@@ -160,7 +160,7 @@ impl ContactsRepo {
     }
 
     /// Delete a contact.
-    pub async fn delete(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> Result<bool, sqlx::Error> {
+    pub async fn delete(pool: &PgPool, tenant_id: &str, id: Uuid) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM contacts WHERE id = $1 AND tenant_id = $2")
             .bind(id)
             .bind(tenant_id)
@@ -172,7 +172,7 @@ impl ContactsRepo {
     /// Bulk-create contacts (skip conflicts on email within tenant).
     pub async fn bulk_create(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         entries: &[(&str, Option<&str>)], // (email, name)
     ) -> Result<Vec<Contact>, sqlx::Error> {
         // #214:Return early on empty input to avoid invalid SQL
@@ -223,7 +223,7 @@ mod tests {
     fn test_contact_mock() {
         let c = Contact {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            tenant_id: crate::types::short_id('t'),
             email: "alice@example.com".into(),
             name: Some("Alice".into()),
             tags: Some(serde_json::json!(["vip", "enterprise"])),
@@ -240,7 +240,7 @@ mod tests {
     fn test_contact_minimal() {
         let c = Contact {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            tenant_id: crate::types::short_id('t'),
             email: "bob@example.com".into(),
             name: None,
             tags: None,

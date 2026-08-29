@@ -258,7 +258,16 @@ pub async fn record_usage(
     audit_result?;
 
     // Execute the atomic Lua script: SET NX dedup + INCRBY counter.
-    let recorded: i64 = redis::cmd("EVAL")
+    // Fix F8 — on a post-commit Redis failure the DB row is already durable
+    // but the transport-level error leaves the counter/dedup state unknown
+    // (the Lua itself is atomic, so it either ran completely or not at all).
+    // Perform the SAME compensation `record_with_quota_check` performs on
+    // its failure path: decrement the counter by the attempted quantity and
+    // drop the dedup key, returning Redis to its pre-call state so a retry
+    // re-records cleanly. The committed `metering_events` row stays — it is
+    // the source of truth for /usage aggregates and the DB fallback path of
+    // `check_quota`.
+    let recorded: i64 = match redis::cmd("EVAL")
         .arg(RECORD_USAGE_LUA)
         .arg(2) // number of keys
         .arg(&dedup_key)
@@ -268,18 +277,29 @@ pub async fn record_usage(
         .arg(40i64 * 86_400i64) // counter TTL (40 days)
         .query_async(&mut conn)
         .await
-        .map_err(UsageError::RedisCmd)?;
+    {
+        Ok(recorded) => recorded,
+        Err(error) => {
+            if let Err(rollback_error) =
+                rollback_quota_reservation(pool, redis, tenant_id, event_type, quantity, id, now)
+                    .await
+            {
+                tracing::error!(
+                    error = %rollback_error,
+                    tenant_id,
+                    event_id = %id,
+                    "failed to compensate Redis counter after metering EVAL failure"
+                );
+            }
+            return Err(UsageError::RedisCmd(error));
+        }
+    };
 
     if recorded == 0 {
         // Dedup key already existed — this is a duplicate event that somehow
         // made it past the DB ON CONFLICT. This is not expected but harmless.
         return Ok(false);
     }
-
-    // 3. If the Lua script fails after setting the dedup key, we attempt to
-    //    rollback the counter to keep Redis consistent with the DB.
-    //    (The Lua script is atomic within Redis, so this only applies to
-    //    transport-level failures.)
 
     Ok(true)
 }
@@ -375,12 +395,22 @@ pub async fn check_quota(
         }
         Err(e) => {
             tracing::warn!(error = %e, tenant_id, "Redis unavailable for quota check — falling back to DB aggregate");
-            let period_start = Utc::now()
-                .date_naive()
-                .with_day(1)
-                .unwrap_or(Utc::now().date_naive());
-            let period_start = period_start.and_hms_opt(0, 0, 0).unwrap_or_default();
-            let period_start = DateTime::<Utc>::from_naive_utc_and_offset(period_start, Utc);
+            // Fix F3 — the fallback must aggregate over the SAME period the
+            // enforced counter covers: the tenant's anchored billing cycle
+            // when a subscription defines one, NOT the UTC calendar month
+            // (otherwise an anchored tenant got a fresh quota window in the
+            // fallback for the days between the calendar month start and
+            // the cycle start).
+            let period_start = match cycle_anchor {
+                Some(anchor) => most_recent_anchored_cycle(now, anchor).2,
+                None => now
+                    .date_naive()
+                    .with_day(1)
+                    .unwrap_or(now.date_naive())
+                    .and_hms_opt(0, 0, 0)
+                    .unwrap_or_default()
+                    .and_utc(),
+            };
 
             let row: Option<(Option<i64>,)> = sqlx::query_as(
                 r#"
@@ -956,10 +986,28 @@ fn usage_counter_key_anchored(
     let Some(anchor) = cycle_anchor else {
         return usage_counter_key(tenant_id, event_type, at);
     };
-    // Walk back month-by-month from `at` to the most recent anchored cycle
-    // start (same day-of-month; clamped to the month's length so a 31st
-    // anchor still fires in shorter months — mirroring Stripe's own cycle
-    // proration semantics closely enough for a period LABEL).
+    let (year, month, _cycle_start) = most_recent_anchored_cycle(at, anchor);
+    format!(
+        "meter:rt:{}:{}:c{}-{:02}",
+        tenant_id,
+        event_type_to_str(event_type),
+        year,
+        month
+    )
+}
+
+/// The most recent anchored billing-cycle start at or before `at`, as
+/// `(cycle_year, cycle_month, cycle_start_utc)`. Walks back month-by-month
+/// from `at` to the most recent anchored cycle start (same day-of-month;
+/// clamped to the month's length so a 31st anchor still fires in shorter
+/// months — mirroring Stripe's own cycle proration semantics closely enough
+/// for a period LABEL). Shared by the counter-key builder, the Redis-outage
+/// fallback window (Fix F3) and the exported key helper (Fix F6) so every
+/// path agrees on the period in force.
+fn most_recent_anchored_cycle(
+    at: DateTime<Utc>,
+    anchor: chrono::NaiveDate,
+) -> (i32, u32, DateTime<Utc>) {
     let mut year = at.year();
     let mut month = at.month();
     loop {
@@ -969,13 +1017,7 @@ fn usage_counter_key_anchored(
             .map(|naive| DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc));
         if let Some(start) = candidate_start {
             if start <= at {
-                return format!(
-                    "meter:rt:{}:{}:c{}-{:02}",
-                    tenant_id,
-                    event_type_to_str(event_type),
-                    year,
-                    month
-                );
+                return (year, month, start);
             }
         }
         if month == 1 {
@@ -1026,6 +1068,56 @@ async fn tenant_cycle_anchor(
     .await
     .ok()
     .flatten()
+}
+
+/// The exact Redis real-time counter key currently ENFORCED for a tenant —
+/// the one and only key the quota gate ([`record_with_quota_check`]), the
+/// rollback path ([`rollback_usage_record`]) and the pending-event drain all
+/// increment.
+///
+/// * Tenant with an active/trialing/past-due Stripe subscription (cycle
+///   anchor known): the billing-cycle-anchored key
+///   `meter:rt:{tenant}:{event_type}:c{year}-{month:02}`, where `(year,
+///   month)` labels the month the CURRENT cycle started in.
+/// * Otherwise: the legacy UTC calendar-month key
+///   `meter:rt:{tenant}:{event_type}:{year}-{month:02}`.
+///
+/// Exported (audit F6) so external readers — api-server's
+/// `/usage/realtime` — read the counter the quota gate actually enforces
+/// instead of re-deriving (and drifting from) the key shape. Pass the same
+/// instant you consider "now" for the read.
+pub async fn enforced_counter_key(
+    pool: &PgPool,
+    tenant_id: &str,
+    event_type: MeterEventType,
+    at: DateTime<Utc>,
+) -> String {
+    let cycle_anchor = tenant_cycle_anchor(pool, tenant_id, at).await;
+    usage_counter_key_anchored(tenant_id, event_type, at, cycle_anchor)
+}
+
+/// String-typed variant of [`enforced_counter_key`] for callers inside this
+/// crate that hold the RAW wire event type (the pending-metering drain in
+/// maintenance.rs recovers events whose `event_type` arrives as an
+/// untyped string). Identical anchoring math; the event-type string is
+/// embedded verbatim so unknown/custom types keep their counter identity.
+pub(crate) async fn enforced_counter_key_for_event_type(
+    pool: &PgPool,
+    tenant_id: &str,
+    event_type: &str,
+    at: DateTime<Utc>,
+) -> String {
+    match tenant_cycle_anchor(pool, tenant_id, at).await {
+        Some(anchor) => {
+            let (year, month, _cycle_start) = most_recent_anchored_cycle(at, anchor);
+            format!("meter:rt:{tenant_id}:{event_type}:c{year}-{month:02}")
+        }
+        None => format!(
+            "meter:rt:{tenant_id}:{event_type}:{}-{:02}",
+            at.year(),
+            at.month()
+        ),
+    }
 }
 
 async fn rollback_quota_reservation(
@@ -1345,6 +1437,30 @@ mod tests {
             usage_counter_key("tenant_123", MeterEventType::EmailsSent, at),
             "meter:rt:tenant_123:emails_sent:2026-04"
         );
+    }
+
+    /// Fix F3 — the Redis-outage fallback window must be the same period the
+    /// enforced counter labels: the anchored cycle START, not the calendar
+    /// month, and it must agree with the `c{Y}-{M}` label of the key.
+    #[test]
+    fn most_recent_anchored_cycle_start_matches_key_label() {
+        let anchor = chrono::NaiveDate::from_ymd_opt(2026, 1, 15).unwrap();
+        let at = chrono::DateTime::parse_from_rfc3339("2026-04-14T23:59:59Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let (year, month, start) = most_recent_anchored_cycle(at, anchor);
+        assert_eq!((year, month), (2026, 3));
+        assert_eq!(start.to_rfc3339(), "2026-03-15T00:00:00+00:00");
+
+        // Cycle-day boundary: exactly at the cycle start is the new cycle.
+        let (year, month, start) = most_recent_anchored_cycle(
+            chrono::DateTime::parse_from_rfc3339("2026-04-15T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc),
+            anchor,
+        );
+        assert_eq!((year, month), (2026, 4));
+        assert_eq!(start.to_rfc3339(), "2026-04-15T00:00:00+00:00");
     }
 
     #[test]

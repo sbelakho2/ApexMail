@@ -14,7 +14,7 @@ impl MessagesRepo {
     #[allow(clippy::too_many_arguments)]
     pub async fn create(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         from_email: &str,
         to_emails: serde_json::Value,
         cc_emails: Option<serde_json::Value>,
@@ -52,7 +52,7 @@ impl MessagesRepo {
     /// Find a message by ID (scoped to tenant).
     pub async fn find_by_id(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         id: Uuid,
     ) -> Result<Option<Message>, sqlx::Error> {
         sqlx::query_as::<_, Message>(
@@ -69,7 +69,7 @@ impl MessagesRepo {
     /// List messages for a tenant with optional status filter and pagination.
     pub async fn list(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         limit: i64,
         offset: i64,
         status: Option<&str>,
@@ -111,7 +111,7 @@ impl MessagesRepo {
     /// the extra row as a "has_more" indicator.
     pub async fn list_keyset(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         limit: i64,
         cursor_created_at: Option<DateTime<Utc>>,
         cursor_id: Option<Uuid>,
@@ -182,7 +182,7 @@ impl MessagesRepo {
     /// Update message status.
     pub async fn update_status(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         id: Uuid,
         status: &str,
     ) -> Result<bool, sqlx::Error> {
@@ -197,7 +197,7 @@ impl MessagesRepo {
     }
 
     /// Cancel a queued or scheduled message.
-    pub async fn cancel(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> Result<bool, sqlx::Error> {
+    pub async fn cancel(pool: &PgPool, tenant_id: &str, id: Uuid) -> Result<bool, sqlx::Error> {
         let result = sqlx::query(
             "UPDATE messages SET status = 'cancelled' \
              WHERE id = $1 AND tenant_id = $2 AND status IN ('queued', 'scheduled')",
@@ -213,7 +213,7 @@ impl MessagesRepo {
     #[allow(clippy::type_complexity)]
     pub async fn batch_create(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         messages: &[(
             String,
             serde_json::Value,
@@ -262,7 +262,7 @@ mod tests {
     fn test_message_mock_queued() {
         let m = Message {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            tenant_id: crate::types::short_id('t'),
             from_email: "noreply@example.com".into(),
             to_emails: serde_json::json!(["user@test.com"]),
             cc_emails: None,
@@ -284,7 +284,7 @@ mod tests {
     fn test_message_with_tags() {
         let m = Message {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            tenant_id: crate::types::short_id('t'),
             from_email: "noreply@example.com".into(),
             to_emails: serde_json::json!(["a@b.com"]),
             cc_emails: None,

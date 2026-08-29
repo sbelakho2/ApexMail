@@ -353,4 +353,102 @@ final class Psr6StorageTest extends TestCase
         self::assertNull($storage->find($nonce));
         self::assertNull($storage->consume($nonce));
     }
+
+    public function testStoreThrowsWhenThePoolSaveFails(): void
+    {
+        // Fail closed: PSR-6 permits save() === false without raising. A
+        // store that returned normally would hand the client a challenge
+        // whose record never landed — a guaranteed verify-time
+        // RecordNotFound. The issuance must fail instead.
+        $pool = new \KiwiCaptcha\Tests\Fixtures\FailingSavePool();
+        $storage = new Psr6Storage($pool);
+
+        try {
+            $storage->store($this->makeRecord());
+            self::fail('store() must throw when the pool save fails');
+        } catch (\KiwiCaptcha\Storage\StorageWriteException $e) {
+            self::assertStringContainsString('save() === false', $e->getMessage());
+        }
+        self::assertSame(1, $pool->saveCalls);
+        self::assertNull($storage->find('nonce-1'), 'nothing was handed out that a verifier could later accept');
+    }
+
+    public function testConsumeThrowsWhenTheTransitionSaveFails(): void
+    {
+        // Fail closed: a pending→consumed flip whose save failed leaves
+        // the record pending while consume() would report itself the
+        // winner (consumedNow) — a sequential replay window. The throw
+        // keeps the record pending for a clean retry instead: the same
+        // storage over a pool that recovered consumes normally.
+        $pool = new \KiwiCaptcha\Tests\Fixtures\FailingSavePool(failFromAttempt: 2, failUntilAttempt: 2);
+        $storage = new Psr6Storage($pool);
+        $storage->store($this->makeRecord());
+
+        try {
+            $storage->consume('nonce-1');
+            self::fail('consume() must throw when the transition save fails');
+        } catch (\KiwiCaptcha\Storage\StorageWriteException $e) {
+            self::assertStringContainsString('save() === false', $e->getMessage());
+        }
+        self::assertSame(2, $pool->saveCalls);
+        self::assertNotNull($storage->find('nonce-1'), 'the record is still there — the failed flip never persisted');
+
+        // The pool recovered: the retry wins the transition normally,
+        // proving the record was left pending rather than consumed.
+        $retry = $storage->consume('nonce-1');
+        self::assertNotNull($retry);
+        self::assertTrue($retry->consumedNow, 'the retry over the recovered pool wins the transition normally');
+        self::assertFalse($retry->consumedBefore);
+    }
+
+    public function testCommitResultKeepsReturningTheSaveResult(): void
+    {
+        // commitResult() already surfaced save() as its boolean return;
+        // the fail-closed change must not alter that contract.
+        $pool = new \KiwiCaptcha\Tests\Fixtures\FailingSavePool();
+        $storage = new Psr6Storage($pool);
+
+        self::assertFalse($storage->commitResult('nonce-1', true, null), 'a failed commit save returns false, it does not throw');
+    }
+
+    public function testVerifierMapsAFailedConsumeSaveToTheTypedIndeterminateOutcome(): void
+    {
+        // End to end: the issuance save succeeds, the consume save
+        // fails, and the Verifier's existing consume catch maps the
+        // StorageWriteException onto the typed indeterminate outcome —
+        // never a Valid, never an escaping exception.
+        $pool = new \KiwiCaptcha\Tests\Fixtures\FailingSavePool(failFromAttempt: 2);
+        $storage = new Psr6Storage($pool);
+        $verifier = @new \KiwiCaptcha\Verifier($storage); // @: the non-atomic one-time diagnostic may already have fired in this process
+        $issuer = new Issuer(
+            new \KiwiCaptcha\Config(
+                secretKey: Vectors::SECRET,
+                algorithm: PoWAlgorithm::Sha256,
+                mKib: 0,
+                t: 1,
+                p: 1,
+                targetBits: 8,
+                argon2TargetBits: 8,
+                ttlSecs: 120,
+                minDurationMs: 0,
+            ),
+            $storage,
+        );
+        $challenge = $issuer->issue('login', '198.51.100.7');
+
+        $saltBytes = base64_decode($challenge->salt, true);
+        $counter = 0;
+        do {
+            $hash = hash('sha256', $challenge->prefix.$counter.$saltBytes, true);
+            $counter++;
+        } while (\KiwiCaptcha\Verifier::leadingZeroBits($hash) < $challenge->targetBits);
+        --$counter;
+        $token = \KiwiCaptcha\SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode();
+
+        $outcome = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7');
+
+        self::assertFalse($outcome->isOk(), 'a failed consume save must never verify valid');
+        self::assertSame(\KiwiCaptcha\VerifyError::ConsumeIndeterminate, $outcome->error, 'the consume throw maps onto the typed indeterminate outcome');
+        self::assertNotNull($storage->find($challenge->nonce), 'the record stays pending in the pool for a clean retry');
+    }
 }

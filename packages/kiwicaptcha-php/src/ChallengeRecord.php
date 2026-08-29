@@ -78,6 +78,20 @@ namespace KiwiCaptcha;
  * unset); it is never signed into the challenge and never sent to the
  * client.
  *
+ * `decoyField` is the server-issued decoy (honeypot) form-field name
+ * armed for this challenge (see {@see Issuer::DECOY_FIELD_POOL}). Null =
+ * no decoy armed (the default, and the shape every pre-decoy record
+ * carries). The name is an authenticated v2 canonical field — the FINAL
+ * segment `|<decoy_field>`, appended after the `kid` (see
+ * {@see Issuer::canonicalPayload()}) — so a stored/tampered record cannot
+ * change or drop it without breaking the signature. Wire-compatible both
+ * directions: the JSON key is absent when null (`skip_serializing_if`),
+ * so pre-decoy writers and readers keep their exact byte format, and a
+ * decoy-armed record simply carries one extra string key. Absent in
+ * legacy stored records; a present value must match the decoy alphabet
+ * `[A-Za-z0-9_-]{1,64}` ({@see Config::isValidDecoyFieldName()}),
+ * enforced on read and by the verifier's malformed-record path.
+ *
  * `fromArray()` is the strict serde-mirror parser: it accepts exactly
  * what the Rust `serde_json::from_str::<ChallengeRecord>` accepts.
  * Whitelisted keys only, exact lowercase algorithm values, strict
@@ -96,14 +110,16 @@ final class ChallengeRecord
      * `binding_tag` (serde alias attribute). `issuer`
      * is the deployment identity, always present, null when
      * unset. `kid` is the signing key id, always present,
-     * default 1.
+     * default 1. `decoy_field` is the optional honeypot name —
+     * unlike the always-present Option keys it is OMITTED from
+     * `toArray()` when null (the Rust `skip_serializing_if` mirror).
      */
     public const WIRE_KEYS = [
         'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
         'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
         'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
         'attempts_used', 'region', 'policy_version', 'request_binding',
-        'issuer', 'kid', 'hostname',
+        'issuer', 'kid', 'hostname', 'decoy_field',
     ];
 
     /**
@@ -143,6 +159,11 @@ final class ChallengeRecord
         // Server-side issuance metadata: the Host the challenge
         // was issued for (Siteverify `hostname`); never signed, never sent.
         public readonly ?string $hostname = null,
+        // The server-issued decoy (honeypot) form-field name armed for
+        // this challenge (see Issuer::DECOY_FIELD_POOL); null = no decoy
+        // (the legacy shape). Signed as the FINAL v2 canonical segment,
+        // appended after the kid; the JSON key is OMITTED when null.
+        public readonly ?string $decoyField = null,
     ) {
     }
 
@@ -185,7 +206,7 @@ final class ChallengeRecord
     /** @return array<string, mixed> */
     public function toArray(): array
     {
-        return [
+        $data = [
             'nonce' => $this->nonce,
             'scope' => $this->scope,
             // Protocol v2 primary key only. The legacy `ip_hash` key must
@@ -235,6 +256,17 @@ final class ChallengeRecord
             // (null when unset) for byte parity with the Rust serde schema.
             'hostname' => $this->hostname,
         ];
+        // The decoy (honeypot) field name is the ONE Option key that is
+        // omitted when null — the exact mirror of the Rust
+        // `#[serde(skip_serializing_if = "Option::is_none")]`: a null
+        // must never serialize as a JSON `null` key, so unarmed records
+        // keep the exact pre-decoy byte format (old records/tokens keep
+        // verifying; old readers never see the key).
+        if ($this->decoyField !== null) {
+            $data['decoy_field'] = $this->decoyField;
+        }
+
+        return $data;
     }
 
     /**
@@ -257,14 +289,17 @@ final class ChallengeRecord
      *   rejected.
      * - Strings must be JSON strings of at most 4096 bytes.
      * - `algorithm` must be exactly `sha256` or `argon2id` (no aliases).
-     * - Null is only legal for `region`, `request_binding` and `issuer`
-     *   (Option fields).
+     * - Null is only legal for `region`, `request_binding`, `issuer` and
+     *   `decoy_field` (Option fields).
      * - The deployment-bound identifiers `region`, `request_binding` and
      *   `issuer` must match the narrow identifier alphabet
      *   `[A-Za-z0-9._:-]+` with their length caps (64 / 128 /
      *   128 bytes). Unicode, whitespace, invisible characters, empty
-     *   strings and canonical separators are rejected. `scope` is
-     *   deliberately not validated here: serde treats it as an opaque
+     *   strings and canonical separators are rejected. The optional
+     *   `decoy_field` honeypot name must match its own alphabet
+     *   `[A-Za-z0-9_-]{1,64}` (no `.`, `:` or `|`, so the canonical
+     *   segment structure can never be altered by a stored value). `scope`
+     *   is deliberately not validated here: serde treats it as an opaque
      *   string, and the differential fuzz corpus pins both parsers to the
      *   same acceptance split. The verifier's validateRecord enforces the
      *   scope alphabet at verification time.
@@ -365,6 +400,20 @@ final class ChallengeRecord
             }
         }
 
+        // Option field: the decoy (honeypot) field name. Absent (the
+        // legacy shape) and an explicit JSON null both decode to null —
+        // the serde Option semantics; a present string must match the
+        // exact shape the issuer mints and the widget driver renders,
+        // 1..=64 bytes of [A-Za-z0-9_-] (no `.`, `:` or `|`, so the
+        // canonical segment structure can never be altered by a stored
+        // value). A non-conforming name is a corrupt or foreign record.
+        if (isset($data['decoy_field']) && $data['decoy_field'] !== null) {
+            self::requireString($data['decoy_field'], 'decoy_field');
+            if (!Config::isValidDecoyFieldName($data['decoy_field'])) {
+                throw MalformedRecordException::invalidDecoyField();
+            }
+        }
+
         return new self(
             nonce: $data['nonce'],
             scope: $data['scope'],
@@ -391,6 +440,9 @@ final class ChallengeRecord
             // and passed through so a serialize -> Redis -> deserialize
             // cycle preserves it.
             hostname: isset($data['hostname']) ? self::validateHostname($data['hostname']) : null,
+            // The armed decoy (honeypot) name, or null for the legacy
+            // shape (absent key / JSON null).
+            decoyField: $data['decoy_field'] ?? null,
         );
     }
 

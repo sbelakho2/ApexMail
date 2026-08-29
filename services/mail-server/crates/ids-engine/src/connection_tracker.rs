@@ -177,12 +177,48 @@ impl ConnectionTracker {
             });
         }
 
-        // Check overall capacity
+        // Check overall capacity.
+        //
+        // Audit F9: `max_connections` previously only produced an ALERT —
+        // the table itself kept growing unboundedly between cleanup passes
+        // (and the cleanup loop was never spawned by the engine). Keep the
+        // alert AND evict the oldest entries down to the cap so memory is
+        // bounded at all times.
         if self.connections.len() > self.max_connections {
             anomalies.push(ConnectionAnomaly::ConnectionFlood { ip: src_ip });
+            self.evict_oldest_to_cap();
         }
 
         anomalies
+    }
+
+    /// Evict the least-recently-active connections until the table is back
+    /// at (or below) `max_connections` (audit F9). The just-inserted entry
+    /// is the freshest, so a scanning source never evicts its own current
+    /// connection.
+    fn evict_oldest_to_cap(&self) {
+        if self.max_connections == 0 {
+            self.connections.clear();
+            return;
+        }
+        let excess = self.connections.len().saturating_sub(self.max_connections);
+        if excess == 0 {
+            return;
+        }
+        let mut candidates: Vec<((IpAddr, u16), Instant)> = self
+            .connections
+            .iter()
+            .map(|entry| (*entry.key(), entry.value().last_seen))
+            .collect();
+        candidates.sort_by_key(|(_, last_seen)| *last_seen);
+        for (key, _) in candidates.into_iter().take(excess) {
+            self.connections.remove(&key);
+        }
+        tracing::debug!(
+            remaining = self.connections.len(),
+            max = self.max_connections,
+            "Connection tracker capped: evicted oldest entries"
+        );
     }
 
     /// Record connection established (SYN-ACK-ACK).
@@ -374,5 +410,34 @@ mod tests {
             "flagged port_scan entry must be removable via cleanup_all"
         );
         assert_eq!(tracker.stats().tracked_ips_half_open, 0);
+    }
+
+    // ── Audit F9:the connection table is hard-capped at max_connections ──
+
+    #[test]
+    fn test_connection_table_capped_at_max_connections() {
+        // max_connections = 5; a flood of distinct (ip, port) keys previously
+        // only produced an alert while the table grew without bound.
+        let tracker = ConnectionTracker::new(5, 100_000, 60, 100_000);
+
+        let mut saw_flood_alert = false;
+        for i in 0..25u32 {
+            let ip: IpAddr = format!("10.20.0.{}", i & 0xFF).parse().expect("valid IP");
+            let anomalies = tracker.record_syn(ip, 1000 + (i as u16));
+            if anomalies
+                .iter()
+                .any(|a| matches!(a, ConnectionAnomaly::ConnectionFlood { .. }))
+            {
+                saw_flood_alert = true;
+            }
+            // Hard invariant: the table never exceeds the cap.
+            assert!(
+                tracker.active_connections() <= 5,
+                "connection table exceeded cap at iteration {i}: {}",
+                tracker.active_connections()
+            );
+        }
+        assert!(saw_flood_alert, "the ConnectionFlood alert must still fire");
+        assert!(tracker.active_connections() <= 5);
     }
 }

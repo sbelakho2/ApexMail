@@ -1,6 +1,7 @@
 //! Compaction worker – hot→cold migration, batch deletes, checksums.
 
 use chrono::{Duration, Utc};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tracing::{debug, info};
@@ -86,6 +87,11 @@ impl CompactionWorker {
         for tenant_id in &tenants {
             debug!(tenant_id = %tenant_id, "compacting tenant events");
 
+            // F13:ids already manifested in a previous (possibly crashed) run.
+            // A crash between the JSONL write and the DELETE used to duplicate
+            // cold rows on rerun — manifested ids are never re-written.
+            let mut manifested = load_manifested_ids(&self.storage_path, tenant_id);
+
             loop {
                 let rows = tokio::time::timeout(
                     std::time::Duration::from_secs(30),
@@ -113,12 +119,35 @@ impl CompactionWorker {
                     break;
                 }
 
-                let count = rows.len() as i64;
-                let (bytes, batch_data) = self.write_jsonl_batch(&rows).await?;
-                hasher.update(&batch_data);
-                total_bytes += bytes;
+                // F13:split the batch — ids already manifested (a previous run
+                // wrote the cold copy but died before the DELETE) skip the
+                // JSONL write; they still get deleted below to finish the
+                // interrupted migration.
+                let pending: Vec<&EventRow> = rows
+                    .iter()
+                    .filter(|r| !manifested.contains(&r.id))
+                    .collect();
+                let count = pending.len() as i64;
 
-                // Delete migrated rows
+                if !pending.is_empty() {
+                    // Manifest BEFORE the DELETE:once the (ids + file) pair is
+                    // on disk, a crash at any later point is recoverable — the
+                    // rerun sees the ids manifested and only deletes them.
+                    // Residual window: a crash between the JSONL write and the
+                    // manifest write can duplicate one batch in cold storage;
+                    // the ids then manifest on the rerun, so it happens at
+                    // most once per crash.
+                    let (bytes, batch_data, file) = self.write_jsonl_batch(&pending).await?;
+                    hasher.update(&batch_data);
+                    total_bytes += bytes;
+
+                    let dir = jsonl_dir(&self.storage_path, pending[0]);
+                    write_batch_manifest(&dir, &file, pending.iter().map(|r| r.id)).await?;
+                    manifested.extend(pending.iter().map(|r| r.id));
+                }
+
+                // Delete migrated rows (both fresh writes and ids whose cold
+                // copy already existed from an interrupted run).
                 let ids: Vec<uuid::Uuid> = rows.iter().map(|r| r.id).collect();
                 sqlx::query("DELETE FROM events WHERE id = ANY($1)")
                     .bind(&ids)
@@ -126,10 +155,10 @@ impl CompactionWorker {
                     .await?;
 
                 total_migrated += count;
-                total_deleted += count;
-                debug!(tenant_id = %tenant_id, "Compacted batch of {count} rows");
+                total_deleted += rows.len() as i64;
+                debug!(tenant_id = %tenant_id, "Compacted batch of {} rows", rows.len());
 
-                if count < batch_size {
+                if (rows.len() as i64) < batch_size {
                     break;
                 }
             }
@@ -154,22 +183,34 @@ impl CompactionWorker {
 
     /// Serialize batch of events to JSONL and write to storage path.
     /// #182:Use tokio::task::spawn_blocking to avoid blocking the Tokio runtime.
-    async fn write_jsonl_batch(&self, rows: &[EventRow]) -> anyhow::Result<(u64, Vec<u8>)> {
+    ///
+    /// GDPR:the cold copy stores the MASKED client IP (IPv4 → /24, IPv6 →
+    /// /48 — see [`crate::ip_mask`]); the 730-day cold tier must not retain
+    /// a full address.
+    ///
+    /// Returns `(bytes_written, batch_bytes_for_checksum, filename)`.
+    async fn write_jsonl_batch(
+        &self,
+        rows: &[&EventRow],
+    ) -> anyhow::Result<(u64, Vec<u8>, String)> {
         let mut buf = Vec::with_capacity(rows.len().saturating_mul(256));
         for row in rows {
-            let line = serde_json::to_vec(row)?;
+            let mut masked = (*row).clone();
+            masked.ip_address = crate::ip_mask::mask_ip_opt(row.ip_address.as_deref());
+            let line = serde_json::to_vec(&masked)?;
             buf.extend_from_slice(&line);
             buf.push(b'\n');
         }
 
+        let mut filename = String::new();
         if let Some(first) = rows.first() {
-            let date = first.timestamp.format("%Y/%m");
-            let dir = format!("{}/{}/{}", self.storage_path, first.tenant_id, date);
-            let filename = format!("{}/events_{}.jsonl", dir, Utc::now().timestamp_millis());
+            let dir = jsonl_dir(&self.storage_path, first);
+            filename = format!("events_{}.jsonl", Utc::now().timestamp_millis());
+            let path = format!("{dir}/{filename}");
             let buf_clone = buf.clone();
             tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
                 std::fs::create_dir_all(&dir)?;
-                std::fs::write(&filename, &buf_clone)?;
+                std::fs::write(&path, &buf_clone)?;
                 Ok(())
             })
             .await??;
@@ -177,7 +218,7 @@ impl CompactionWorker {
         }
 
         let len = buf.len() as u64;
-        Ok((len, buf))
+        Ok((len, buf, filename))
     }
 
     /// Remove cold storage files older than cold_retention_days.
@@ -279,6 +320,96 @@ pub fn compute_checksum(data: &[u8]) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+// ── Batch manifests (F13:idempotent compaction) ──────────────────────────────
+
+/// Per-batch manifest recording WHICH event ids were written to WHICH cold
+/// file. Written after the JSONL write but BEFORE the Postgres DELETE, so a
+/// crash between file-write and delete never duplicates cold rows on rerun:
+/// the rerun loads the manifested ids, skips re-writing them, and only
+/// completes the DELETE.
+#[derive(Debug, Serialize, Deserialize)]
+struct BatchManifest {
+    /// Cold JSONL file name (inside the manifest's own directory).
+    file: String,
+    /// Event ids contained in that file.
+    ids: Vec<uuid::Uuid>,
+}
+
+/// Directory a batch's JSONL (+ manifest) lives in:
+/// `{storage}/{tenant}/{YYYY/MM}` (by the first row's timestamp).
+fn jsonl_dir(storage_path: &str, first_row: &EventRow) -> String {
+    let date = first_row.timestamp.format("%Y/%m");
+    format!("{}/{}/{}", storage_path, first_row.tenant_id, date)
+}
+
+/// Write the manifest for a just-written batch (spawn_blocking; same dir as
+/// the JSONL so retention cleanup removes them together).
+async fn write_batch_manifest(
+    dir: &str,
+    file: &str,
+    ids: impl Iterator<Item = uuid::Uuid>,
+) -> anyhow::Result<()> {
+    let manifest = BatchManifest {
+        file: file.to_string(),
+        ids: ids.collect(),
+    };
+    let path = format!("{}/{}.manifest.json", dir, file.trim_end_matches(".jsonl"));
+    let data = serde_json::to_vec(&manifest)?;
+    let dir = dir.to_string();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(&path, &data)?;
+        Ok(())
+    })
+    .await??;
+    Ok(())
+}
+
+/// Parse a manifest file's bytes (testable / used by [`load_manifested_ids`]).
+fn parse_manifest(data: &[u8]) -> Option<BatchManifest> {
+    serde_json::from_slice(data).ok()
+}
+
+/// Load all event ids already manifested for a tenant (scans every
+/// `*.manifest.json` under the tenant's storage tree). Missing directories
+/// or unreadable/corrupt manifests are skipped — a corrupt manifest costs a
+/// possible cold duplicate for those ids, never data loss.
+fn load_manifested_ids(
+    storage_path: &str,
+    tenant_id: &str,
+) -> std::collections::HashSet<uuid::Uuid> {
+    let mut ids = std::collections::HashSet::new();
+    let tenant_dir = std::path::Path::new(storage_path).join(tenant_id);
+    let year_entries = match std::fs::read_dir(&tenant_dir) {
+        Ok(entries) => entries,
+        Err(_) => return ids,
+    };
+    for year in year_entries.flatten() {
+        let months = match std::fs::read_dir(year.path()) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        for month in months.flatten() {
+            let files = match std::fs::read_dir(month.path()) {
+                Ok(f) => f,
+                Err(_) => continue,
+            };
+            for file in files.flatten() {
+                let name = file.file_name().to_string_lossy().to_string();
+                if !name.ends_with(".manifest.json") {
+                    continue;
+                }
+                if let Ok(data) = std::fs::read(file.path()) {
+                    if let Some(manifest) = parse_manifest(&data) {
+                        ids.extend(manifest.ids);
+                    }
+                }
+            }
+        }
+    }
+    ids
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,5 +454,97 @@ mod tests {
             checksum,
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
+    }
+
+    // ── F13:idempotent compaction manifests ───────────────────────────
+
+    fn example_row(id: uuid::Uuid, ip: Option<&str>) -> EventRow {
+        EventRow {
+            id,
+            tenant_id: "tenant_a".into(),
+            message_id: "msg_1".into(),
+            event_type: "opened".into(),
+            recipient: "user@example.com".into(),
+            timestamp: Utc::now(),
+            metadata: None,
+            ip_address: ip.map(String::from),
+            user_agent: None,
+            link_id: None,
+            bounce_type: None,
+            bounce_subtype: None,
+            provider: None,
+            region: None,
+            campaign_id: None,
+        }
+    }
+
+    #[test]
+    fn manifest_roundtrips_through_json() {
+        let ids: Vec<uuid::Uuid> = vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
+        let manifest = BatchManifest {
+            file: "events_123.jsonl".into(),
+            ids: ids.clone(),
+        };
+        let bytes = serde_json::to_vec(&manifest).unwrap();
+        let parsed = parse_manifest(&bytes).expect("manifest must parse");
+        assert_eq!(parsed.file, "events_123.jsonl");
+        assert_eq!(parsed.ids, ids);
+    }
+
+    #[test]
+    fn corrupt_manifest_is_skipped_not_fatal() {
+        assert!(parse_manifest(b"not json").is_none());
+        assert!(parse_manifest(b"{\"file\":123}").is_none());
+    }
+
+    /// A crash between JSONL write and DELETE must not duplicate cold rows on
+    /// rerun:the rerun loads the manifested ids and skips re-writing them.
+    #[test]
+    fn load_manifested_ids_finds_written_manifests() {
+        let root =
+            std::env::temp_dir().join(format!("apexmail_compact_test_{}", std::process::id()));
+        let dir = root.join("tenant_a/2026/08");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let ids: Vec<uuid::Uuid> = vec![uuid::Uuid::new_v4(), uuid::Uuid::new_v4()];
+        let manifest = BatchManifest {
+            file: "events_1.jsonl".into(),
+            ids: ids.clone(),
+        };
+        std::fs::write(
+            dir.join("events_1.manifest.json"),
+            serde_json::to_vec(&manifest).unwrap(),
+        )
+        .unwrap();
+        // Non-manifest files must be ignored.
+        std::fs::write(dir.join("events_1.jsonl"), b"{}\n").unwrap();
+
+        let loaded = load_manifested_ids(root.to_str().unwrap(), "tenant_a");
+        assert_eq!(loaded.len(), 2);
+        for id in &ids {
+            assert!(loaded.contains(id));
+        }
+
+        // A different tenant / missing tree yields an empty set.
+        assert!(load_manifested_ids(root.to_str().unwrap(), "tenant_b").is_empty());
+        assert!(load_manifested_ids(root.join("nope").to_str().unwrap(), "tenant_a").is_empty());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// GDPR:the cold JSONL line carries the MASKED IP, never the full one.
+    #[test]
+    fn cold_jsonl_line_masks_client_ip() {
+        let row = example_row(uuid::Uuid::new_v4(), Some("203.0.113.178"));
+        let mut masked = row.clone();
+        masked.ip_address = crate::ip_mask::mask_ip_opt(row.ip_address.as_deref());
+        let line = serde_json::to_string(&masked).unwrap();
+        assert!(line.contains("203.0.113.0"), "{line}");
+        assert!(!line.contains("203.0.113.178"), "{line}");
+
+        let none_row = example_row(uuid::Uuid::new_v4(), None);
+        assert!(serde_json::to_string(&none_row)
+            .unwrap()
+            .contains("\"ip_address\":null"));
     }
 }

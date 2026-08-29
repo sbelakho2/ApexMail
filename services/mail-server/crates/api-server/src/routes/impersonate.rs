@@ -63,7 +63,7 @@ async fn start_impersonation(
     // impersonation session. Impersonation is a control-plane capability
     // and additionally requires the system tenant.
     require_scopes(&auth, &["*"])?;
-    require_system_tenant(&auth)?;
+    require_system_tenant(&state, &auth).await?;
 
     if body.token.is_empty() {
         return Err(ApiError::BadRequest("missing impersonation token".into()));
@@ -171,7 +171,7 @@ async fn end_impersonation(
 ) -> Result<Response, ApiError> {
     // CRITICAL: Only platform admins can end impersonation sessions.
     require_scopes(&auth, &["*"])?;
-    require_system_tenant(&auth)?;
+    require_system_tenant(&state, &auth).await?;
 
     // Try to read the impersonation cookie for audit logging
     let imp_token = extract_cookie(&headers, "impersonation_session");

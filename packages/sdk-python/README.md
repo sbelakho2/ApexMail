@@ -71,10 +71,14 @@ response = client.emails.send(
     text="Hello!",  # Optional plain text
     cc=["cc@example.com"],  # Optional
     bcc=["bcc@example.com"],  # Optional
-    reply_to="support@example.com",  # Optional
-    tags=[{"name": "type", "value": "welcome"}],  # Optional
-    scheduled_at="2024-01-15T09:00:00Z",  # Optional
+    tags=["welcome", "type=campaign"],  # Optional (plain strings on the wire)
+    scheduled_at="2026-01-15T09:00:00Z",  # Optional
 )
+
+# Note: the API accepts bare address strings only (no {email, name}
+# objects) and has no reply_to/attachments/headers/priority fields —
+# those inputs are accepted by the SDK for compatibility but are not
+# transmitted.
 
 # Batch send
 responses = client.emails.batch([
@@ -107,9 +111,14 @@ domains = client.domains.list()
 ```python
 # Create a webhook
 webhook = client.webhooks.create(
-    name="My Webhook",
     url="https://example.com/webhook",
-    events=["message.delivered", "message.bounced"]
+    events=["message.delivered", "email.bounced", "*"],
+    # Valid event names (KNOWN_WEBHOOK_EVENTS on the server):
+    #   email.delivered / email.bounced / email.complained
+    #   message.sent / message.delivered / message.bounced /
+    #   message.complained / message.opened / message.clicked
+    #   recipient.unsubscribed / placement_test.completed
+    #   bounce / complaint / inbound / * (wildcard)
 )
 
 # List webhooks

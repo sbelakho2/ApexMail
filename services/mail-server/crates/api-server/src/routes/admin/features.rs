@@ -138,7 +138,7 @@ async fn list_features(
     Query(params): Query<FeatureListQuery>,
 ) -> Result<Json<FeaturesResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
@@ -164,7 +164,7 @@ async fn create_feature(
     Json(body): Json<CreateFeatureRequest>,
 ) -> Result<(StatusCode, Json<FeatureFlag>), ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     if body.name.is_empty() || body.name.len() > 100 {
         return Err(ApiError::Validation(vec![
@@ -219,7 +219,7 @@ async fn update_feature(
     Json(body): Json<FeatureUpdatePayload>,
 ) -> Result<StatusCode, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
     for update in normalize_feature_updates(body)? {
         let id = update.id;
         let mut changes = serde_json::Map::new();

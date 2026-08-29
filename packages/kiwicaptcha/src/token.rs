@@ -51,6 +51,26 @@ pub struct IssuedChallenge {
     /// (bound to the challenge so the solver cannot reuse a counter from a
     /// different challenge).
     pub prefix: String,
+    /// The server-issued decoy (honeypot) form-field name armed for this
+    /// challenge, when the deployment enables the decoy surface: a random
+    /// name from the crate's server-side pool (CSPRNG-picked per issuance,
+    /// matching `[A-Za-z0-9_-]{1,64}`). The widget driver renders a hidden
+    /// text input with exactly this name next to the token input and never
+    /// auto-fills it — a submission that carries a value in it is bot
+    /// evidence (the risk engine's `DecoyFieldSubmitted` event /
+    /// `honeypot_hit` signal). The name is authenticated: it is signed
+    /// into the v2 canonical payload as the final `|<decoy_field>` segment
+    /// (see [`crate::challenge::canonical_signing_input_v2`]), so a
+    /// client cannot strip or swap it without breaking the signature the
+    /// verifier re-checks (the final `|<decoy_field>` segment of the v2
+    /// canonical signing input, see the `challenge` module docs).
+    ///
+    /// Wire-compatible both ways: the key is absent from the JSON when no
+    /// decoy is armed (`skip_serializing_if = "Option::is_none"`), which
+    /// is the old behavior, and old payloads (no key) deserialize with
+    /// `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decoy_field: Option<String>,
 }
 
 /// The client-submitted solution, decoded from the `kiwi__token` hidden input.

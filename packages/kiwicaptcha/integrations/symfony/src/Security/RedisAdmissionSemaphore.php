@@ -68,12 +68,17 @@ final class RedisAdmissionSemaphore implements VerificationAdmissionGate
      * at 0) in the same script. When a cap is saturated the contender is
      * refused right away and the counter is incremented with the lease
      * lifetime's TTL. Once the counter exceeds the saturation-pressure
-     * cap, the acquire returns null immediately (CapacityExceeded
-     * surfaces as the 429/violation) and the entry is removed in the same
-     * script, so the gauge can never grow unboundedly under a saturation
-     * storm. The counter stays global, one shared gauge regardless of
-     * which cap refused. Returns 1 when the lease was granted, 0 when
-     * refused.
+     * cap (strictly AFTER the post-INCR value; the boundary value equal
+     * to the cap does NOT trip), the script returns the distinguishable
+     * capacity sentinel -1 after removing the contender's own entry, so
+     * the gauge can never grow unboundedly under a saturation storm and
+     * acquire() can map the over-cap refusal to its explicit fast-fail
+     * CapacityExceeded path (observable through
+     * {@see self::lastAcquireFastFailed()}; the lease contract is
+     * unchanged — null, no slot held, no counter residue). The counter
+     * stays global, one shared gauge regardless of which cap refused.
+     * Returns 1 when the lease was granted, 0 when refused by a cap, -1
+     * when refused by the saturation-pressure bound.
      */
     private const ACQUIRE_SCRIPT = <<<'LUA'
 local time = redis.call('TIME')
@@ -105,7 +110,7 @@ local waiters = redis.call('INCR', KEYS[2])
 redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[2])*2)
 if waiters > tonumber(ARGV[4]) then
     redis.call('DECR', KEYS[2])
-    return 0
+    return -1
 end
 return 0
 LUA;
@@ -155,6 +160,18 @@ LUA;
     private readonly string $waitersKey;
 
     /**
+     * @var bool whether the LAST acquire() was refused by the
+     *           saturation-pressure fast-fail (the script's -1 sentinel:
+     *           the waiters gauge was already at the cap when this
+     *           contender was refused). Observability for callers and
+     *           telemetry — the lease contract is identical either way
+     *           (null, no slot held, no counter residue); the flag
+     *           distinguishes "ordinary cap-full, retry soon" from
+     *           "saturation storm, back off harder".
+     */
+    private bool $lastAcquireFastFailed = false;
+
+    /**
      * @param \Redis|\Predis\Client $client                 Redis client (phpredis or
      *                                                      Predis; the same clients
      *                                                      RedisStorage accepts, and
@@ -168,12 +185,20 @@ LUA;
      *                                                      counter
      *                                                      (argon2_saturation_pressure_cap,
      *                                                      >= 1): when a cap is
-     *                                                      saturated and the counter
-     *                                                      exceeds it, acquire()
-     *                                                      refuses immediately. The
-     *                                                      counter is a gauge, never
-     *                                                      a queue: admission is
-     *                                                      immediate and non-blocking.
+     *                                                      saturated and the
+     *                                                      counter exceeds it,
+     *                                                      acquire() refuses
+     *                                                      immediately through
+     *                                                      the explicit
+     *                                                      fast-fail path (the
+     *                                                      script's -1
+     *                                                      sentinel; see
+     *                                                      {@see self::lastAcquireFastFailed()}).
+     *                                                      The counter is a
+     *                                                      gauge, never a
+     *                                                      queue: admission is
+     *                                                      immediate and
+     *                                                      non-blocking.
      * @param int                   $maxPerScope            per-scope concentration cap
      *                                                      (argon2_max_per_tenant,
      *                                                      >= 1): each scope string
@@ -209,11 +234,33 @@ LUA;
     }
 
     /**
+     * Whether the most recent acquire() was refused by the
+     * saturation-pressure bound (the waiters gauge already at
+     * argon2_saturation_pressure_cap when the contender arrived) rather
+     * than by an ordinary cap refusal. Both refusals return null — this
+     * flag is the distinguishable capacity signal the acquire script's -1
+     * sentinel feeds, so callers and telemetry can tell a saturation
+     * storm (shed load, back off) from ordinary cap contention (retry
+     * soon). Reset by every acquire().
+     */
+    public function lastAcquireFastFailed(): bool
+    {
+        return $this->lastAcquireFastFailed;
+    }
+
+    /**
      * Acquire an Argon2id admission slot. Immediate and non-blocking: on
      * saturation (the global or per-scope cap is full) the method returns
      * null right away and the "waiters" counter records the
-     * saturation-pressure spike. A rejected request is never queued,
-     * polled or later admitted (the counter is a gauge, not a queue).
+     * saturation-pressure spike. When that counter is already AT the
+     * saturation-pressure cap, the contender trips the fast-fail: the
+     * script returns its distinguishable sentinel (-1) after removing the
+     * contender's own counter entry, and acquire() maps it to the
+     * explicit CapacityExceeded path — null, no slot held, no counter
+     * residue — surfacing the distinction through
+     * {@see self::lastAcquireFastFailed()}. A rejected request is never
+     * queued, polled or later admitted (the counter is a gauge, not a
+     * queue).
      *
      * @param string|null $scope the scope string (the challenge's scope) for
      *                           the per-scope concentration cap: the scope's
@@ -238,7 +285,7 @@ LUA;
         $scopeKey = '';
         $hasScope = false;
         if ($scope !== null && $scope !== '') {
-        // Per-scope set: {kiwicaptcha:argon2:leases:<ns>}:<sha256(scope)>
+        // Per-scope set: {kiwicaptcha:argon2:leases:<ns>}:<sha256(scope)}
         // — hash-tagged with the same family as the saturation counter
         // (Cluster safe). The scope is hashed, never sanitized: a
         // lossy sanitization would collapse distinct legitimate scopes
@@ -251,13 +298,34 @@ LUA;
             $token .= '.'.$scopeSuffix;
             $hasScope = true;
         }
-        $result = $this->eval(
+        $result = (int) $this->eval(
             self::ACQUIRE_SCRIPT,
             [$this->key, $this->waitersKey, $scopeKey !== '' ? $scopeKey : $this->key],
             [(string) $this->maxConcurrent, (string) $this->leaseMs, $token, (string) $this->saturationPressureCap, (string) $this->maxPerScope, $hasScope ? '1' : '0'],
         );
 
-        return $result === 1 ? $token : null;
+        if ($result === 1) {
+            $this->lastAcquireFastFailed = false;
+
+            return $token;
+        }
+        if ($result === -1) {
+            // Saturation-pressure fast-fail: the waiters gauge was already
+            // at the cap when this contender arrived, so the script
+            // removed the contender's own entry (the gauge stays at the
+            // cap, never growing) and returned the distinguishable
+            // sentinel. The CapacityExceeded path: refuse immediately,
+            // hold no lease slot, leave no counter residue — the caller
+            // surfaces CapacityExceeded (the captcha violation / 429) and
+            // telemetry can distinguish the storm from ordinary
+            // contention through lastAcquireFastFailed().
+            $this->lastAcquireFastFailed = true;
+
+            return null;
+        }
+        $this->lastAcquireFastFailed = false;
+
+        return null;
     }
 
     public function release(string $lease): void

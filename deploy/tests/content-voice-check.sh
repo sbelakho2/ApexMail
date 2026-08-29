@@ -50,16 +50,26 @@ add_flag() {
 main() {
     echo "=== ApexMail Content Voice & Tone Audit ==="
 
+    # bash-3 compatible (macOS /bin/bash) collection, then loops in the main
+    # shell: (1) pipelines would run the loop body in a subshell, so
+    #     add_flag's updates to FLAGS/TOTAL_FLAGS were lost and the report was
+    #     always empty; (2) under `set -o pipefail` a matchless grep (exit 1)
+    #     killed the whole script mid-run.
+    local htmls=()
+    while IFS= read -r -d '' html; do
+        htmls+=("$html")
+    done < <(find "${BUILD_DIR}" -name '*.html' -print0 2>/dev/null)
+
     for term in "${VAGUE_TERMS[@]}"; do
-        find "${BUILD_DIR}" -name '*.html' 2>/dev/null | while read -r html; do
+        for html in "${htmls[@]}"; do
             local rel
             rel="$(echo "$html" | sed "s|${BUILD_DIR}||")"
-            grep -nPi "$term" "$html" 2>/dev/null | while IFS=: read -r ln content; do
+            while IFS=: read -r ln content; do
                 local ctx
                 ctx="$(echo "$content" | sed 's/<[^>]*>//g' | xargs | cut -c1-120)"
                 echo "  $rel:$ln — \"$ctx\""
                 add_flag "$rel" "$ln" "$term" "$ctx"
-            done
+            done < <(grep -nPi "$term" "$html" 2>/dev/null || true)
         done
     done
 

@@ -13,7 +13,7 @@ impl UsersRepo {
     /// Create a new user.
     pub async fn create(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         email: &str,
         name: Option<&str>,
         password_hash: &str,
@@ -80,7 +80,7 @@ impl UsersRepo {
     /// #220:Added limit/offset parameters to prevent unbounded queries
     pub async fn list_by_tenant(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<User>, sqlx::Error> {
@@ -103,7 +103,7 @@ impl UsersRepo {
     /// so cursors select rows AFTER the cursor position.
     pub async fn list_keyset(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         limit: i64,
         cursor_created_at: Option<DateTime<Utc>>,
         cursor_id: Option<Uuid>,
@@ -150,7 +150,7 @@ mod tests {
     fn test_user_mock() {
         let u = User {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            tenant_id: crate::types::short_id('t'),
             email: "admin@example.com".into(),
             name: Some("Admin".into()),
             password_hash: "$argon2id$v=19$...".into(),
@@ -167,7 +167,7 @@ mod tests {
     fn test_user_without_name() {
         let u = User {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            tenant_id: crate::types::short_id('t'),
             email: "bot@example.com".into(),
             name: None,
             password_hash: "hash".into(),

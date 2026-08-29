@@ -9,6 +9,11 @@
 #
 # All credentials are read from environment variables. Copy .env.example to
 # .env and customise before running.
+#
+# F11 hardening: every datastore port is bound to 127.0.0.1 ONLY (load-test
+# credentials are throwaway but real; 0.0.0.0 exposed them to the network),
+# and the Redis healthcheck authenticates via REDISCLI_AUTH instead of a
+# `-a $PASSWORD` command line (visible in `ps` inside the container).
 # =============================================================================
 
 version: '3.9'
@@ -23,7 +28,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-apexmail}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
@@ -46,12 +51,19 @@ services:
     image: redis:7-alpine
     container_name: apexmail-lt-redis
     command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --requirepass "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"
+    # The password is interpolated into the command by compose; exporting it
+    # as container env lets the healthcheck authenticate via REDISCLI_AUTH
+    # (redis-cli reads it automatically) instead of a `-a` CLI flag.
+    environment:
+      REDIS_PASSWORD: "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      # $$ = literal for compose: the shell inside the container expands
+      # $REDIS_PASSWORD from the environment block above.
+      test: ["CMD-SHELL", "export REDISCLI_AUTH=\"$$REDIS_PASSWORD\"; redis-cli --no-auth-warning ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -68,8 +80,8 @@ services:
     image: axllent/mailpit:v1.21
     container_name: apexmail-lt-mailpit
     ports:
-      - "${MAILPIT_SMTP_PORT:-1025}:1025"     # SMTP server
-      - "${MAILPIT_WEB_PORT:-8025}:8025"       # Web UI
+      - "127.0.0.1:${MAILPIT_SMTP_PORT:-1025}:1025"   # SMTP server
+      - "127.0.0.1:${MAILPIT_WEB_PORT:-8025}:8025"    # Web UI
     environment:
       MP_MAX_MESSAGES: 500000
       MP_SMTP_AUTH_ACCEPT_ANY: "true"

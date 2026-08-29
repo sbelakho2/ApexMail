@@ -78,8 +78,16 @@ final class StrictParserTest extends TestCase
         self::assertNull($record->requestBinding);
         self::assertNull($record->issuer);
         self::assertSame(1, $record->kid, 'kid defaults to 1 on the wire');
-        self::assertSame(23, \count(ChallengeRecord::WIRE_KEYS));
-        self::assertSame(ChallengeRecord::WIRE_KEYS, \array_keys($record->toArray()));
+        self::assertSame(24, \count(ChallengeRecord::WIRE_KEYS));
+        // An unarmed record omits the optional decoy_field key entirely
+        // (the skip_serializing_if mirror), so toArray() emits exactly the
+        // 23 always-present keys.
+        self::assertSame(
+            \array_values(\array_diff(ChallengeRecord::WIRE_KEYS, ['decoy_field'])),
+            \array_keys($record->toArray()),
+        );
+        self::assertNull($record->decoyField);
+        self::assertArrayNotHasKey('decoy_field', $record->toArray());
         self::assertSame(1, $record->toArray()['kid'], 'the kid key is ALWAYS present');
     }
 
@@ -226,6 +234,16 @@ final class StrictParserTest extends TestCase
         yield 'issuer empty string rejected (alphabet)' => [self::mutate('issuer', ''), 'must be 1-128 characters of [A-Za-z0-9._:-]'];
 
         yield 'issuer with invisible char rejected (alphabet)' => [self::mutate('issuer', "prod\x1f"), 'must be 1-128 characters of [A-Za-z0-9._:-]'];
+
+        yield 'decoy_field with pipe rejected (alphabet)' => [self::mutate('decoy_field', 'company|website'), 'must be 1-64 characters of [A-Za-z0-9_-]'];
+
+        yield 'decoy_field with dot rejected (alphabet)' => [self::mutate('decoy_field', 'company.website'), 'must be 1-64 characters of [A-Za-z0-9_-]'];
+
+        yield 'decoy_field empty string rejected (alphabet)' => [self::mutate('decoy_field', ''), 'must be 1-64 characters of [A-Za-z0-9_-]'];
+
+        yield 'decoy_field over-long rejected (alphabet)' => [self::mutate('decoy_field', str_repeat('x', 65)), 'must be 1-64 characters of [A-Za-z0-9_-]'];
+
+        yield 'non-string decoy_field rejected' => [self::mutate('decoy_field', 123), 'must be a string'];
     }
 
     public function testLegacyIpHashAliasIsAcceptedInPlaceOfBindingTag(): void
@@ -326,14 +344,17 @@ final class StrictParserTest extends TestCase
         self::assertSame('QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY', $record->salt);
     }
 
-    public function testWireKeySetIsPinnedTo23(): void
+    public function testWireKeySetIsPinnedTo24(): void
     {
+        // decoy_field is the one Option key OMITTED from toArray() when
+        // null (the Rust skip_serializing_if mirror); every other key is
+        // always present.
         self::assertSame([
             'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
             'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
             'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
             'attempts_used', 'region', 'policy_version', 'request_binding',
-            'issuer', 'kid', 'hostname',
+            'issuer', 'kid', 'hostname', 'decoy_field',
         ], ChallengeRecord::WIRE_KEYS);
     }
 

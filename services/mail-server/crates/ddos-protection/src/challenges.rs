@@ -12,6 +12,107 @@ use subtle::ConstantTimeEq;
 const MAX_USED_RESPONSES: usize = 100_000;
 const USED_RESPONSE_TTL_SECS: u64 = 3600;
 
+// ── Server-side PoW issuance (audit F3) ─────────────────────────────────────
+
+/// Minimum PoW difficulty the server will ever issue or accept (audit F3).
+/// Client-claimed difficulty values are never trusted; any issued challenge
+/// is clamped to at least this many leading zero bits.
+pub const MIN_POW_DIFFICULTY: u8 = 8;
+
+/// Maximum PoW difficulty the server will issue.
+pub const MAX_POW_DIFFICULTY: u8 = 32;
+
+/// Lifetime of an issued PoW challenge (seconds).
+const POW_CHALLENGE_TTL_SECS: u64 = 300;
+
+/// How long a SOLVED challenge keeps redeeming its holder after a successful
+/// verification (the short allow-TTL of audit F3c).
+const SOLVED_ALLOW_TTL_SECS: u64 = 600;
+
+/// Upper bound on outstanding (issued-but-not-yet-expired) challenges kept
+/// in the in-process registry; oldest entries are evicted beyond it.
+const MAX_OUTSTANDING_CHALLENGES: usize = 100_000;
+
+/// Server-side record of an issued PoW challenge. Verification consults
+/// THESE values — the client's copy of the parameters is untrusted input.
+#[derive(Debug, Clone)]
+struct IssuedPowRecord {
+    /// Challenge data (prefix) the client must hash.
+    data: String,
+    /// Difficulty (leading zero bits) required.
+    difficulty: u8,
+    /// Expiry (unix seconds).
+    expires_at: u64,
+    /// When the challenge was solved, if it was (`Some` ⇒ redemption
+    /// allow-window is `solved_at + SOLVED_ALLOW_TTL_SECS`).
+    solved_at: Option<u64>,
+}
+
+/// Bounded in-process TTL map of issued challenges (audit F3a).
+///
+/// This is the fallback registry used when no shared store is configured.
+/// A Redis-backed implementation can replace it behind the same interface;
+/// single-process correctness does not depend on it (challenge ids are
+/// 128-bit random values, so cross-process collision is not a concern, and
+/// each process only verifies the challenges it issued).
+#[derive(Default)]
+struct IssuanceRegistry {
+    entries: std::collections::HashMap<String, IssuedPowRecord>,
+    order: VecDeque<String>,
+}
+
+impl IssuanceRegistry {
+    fn prune(&mut self, now: u64) {
+        let horizon = SOLVED_ALLOW_TTL_SECS.max(POW_CHALLENGE_TTL_SECS);
+        while let Some(oldest_id) = self.order.front().cloned() {
+            let expired = self.entries.get(&oldest_id).is_none_or(|record| {
+                let relevant_expiry = record
+                    .solved_at
+                    .map(|s| s + SOLVED_ALLOW_TTL_SECS)
+                    .unwrap_or(record.expires_at);
+                now > relevant_expiry.saturating_add(horizon)
+            });
+            if !expired {
+                break;
+            }
+            if self.order.pop_front().is_some() {
+                self.entries.remove(&oldest_id);
+            }
+        }
+    }
+
+    fn insert(&mut self, id: String, record: IssuedPowRecord, now: u64) {
+        self.prune(now);
+        self.entries.insert(id.clone(), record);
+        self.order.push_back(id);
+        while self.entries.len() > MAX_OUTSTANDING_CHALLENGES {
+            if let Some(oldest) = self.order.pop_front() {
+                self.entries.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn get(&self, id: &str) -> Option<&IssuedPowRecord> {
+        self.entries.get(id)
+    }
+
+    fn mark_solved(&mut self, id: &str, now: u64) {
+        if let Some(record) = self.entries.get_mut(id) {
+            record.solved_at = Some(now);
+        }
+    }
+
+    fn solved_allow_active(&self, id: &str, now: u64) -> bool {
+        self.entries.get(id).is_some_and(|record| {
+            record
+                .solved_at
+                .is_some_and(|solved| now <= solved.saturating_add(SOLVED_ALLOW_TTL_SECS))
+        })
+    }
+}
+
 #[derive(Debug, Default)]
 struct UsedResponseCache {
     entries: HashMap<String, u64>,
@@ -422,6 +523,8 @@ pub struct ChallengeManager {
     captcha_provider: Option<CaptchaProvider>,
     /// Used challenge responses to prevent replay
     used_responses: parking_lot::RwLock<UsedResponseCache>,
+    /// Server-side registry of issued PoW challenges (audit F3)
+    issued: parking_lot::RwLock<IssuanceRegistry>,
     /// Bounded in-memory audit log
     audit_log: parking_lot::RwLock<VecDeque<ChallengeAuditRecord>>,
     /// Max records retained in audit log
@@ -438,6 +541,7 @@ impl ChallengeManager {
             captcha_site_key: None,
             captcha_provider: None,
             used_responses: parking_lot::RwLock::new(UsedResponseCache::default()),
+            issued: parking_lot::RwLock::new(IssuanceRegistry::default()),
             audit_log: parking_lot::RwLock::new(VecDeque::new()),
             max_audit_records: 10_000,
         }
@@ -579,28 +683,159 @@ impl ChallengeManager {
         }
     }
 
-    /// Verify a `decision::PowChallenge` response (the challenge type the
-    /// middleware hands to clients) with replay protection and audit
-    /// logging.
+    /// Issue a server-registered, HMAC-signed PoW challenge (audit F3).
     ///
-    /// Fix I: `DdosProtector::evaluate` previously issued challenges with a
-    /// constant prefix and no replay cache — a single solved nonce could be
-    /// replayed forever. This routes verification through the same
-    /// UsedResponseCache as the managed challenges.
-    pub fn verify_decision_pow(
+    /// The parameters (random data, clamped difficulty ≥
+    /// [`MIN_POW_DIFFICULTY`], server-chosen expiry) are stored in the
+    /// issuance registry and signed; the returned [`decision::PowChallenge`]
+    /// carries them (plus the signature) for serialization to the client.
+    /// Verification later uses ONLY the stored parameters.
+    pub fn issue_server_pow(&self, difficulty: u8) -> crate::decision::PowChallenge {
+        self.issue_server_pow_with_ttl(difficulty, POW_CHALLENGE_TTL_SECS)
+    }
+
+    /// `issue_server_pow` with an explicit TTL (test seam).
+    pub fn issue_server_pow_with_ttl(
         &self,
-        challenge: &crate::decision::PowChallenge,
+        difficulty: u8,
+        ttl_secs: u64,
+    ) -> crate::decision::PowChallenge {
+        let now = current_timestamp();
+        let difficulty = difficulty.clamp(MIN_POW_DIFFICULTY, MAX_POW_DIFFICULTY);
+        let id = generate_challenge_id();
+        let prefix = generate_random_hex(16);
+        let expires_at = now.saturating_add(ttl_secs);
+        let signature = self.sign_pow_params(&id, &prefix, difficulty, expires_at);
+
+        self.issued.write().insert(
+            id.clone(),
+            IssuedPowRecord {
+                data: prefix.clone(),
+                difficulty,
+                expires_at,
+                solved_at: None,
+            },
+            now,
+        );
+
+        self.record_audit(ChallengeAuditRecord {
+            challenge_id: id.clone(),
+            challenge_type: "pow".into(),
+            outcome: "issued".into(),
+            client_fingerprint: None,
+            timestamp: now,
+        });
+
+        crate::decision::PowChallenge {
+            id,
+            data: prefix,
+            difficulty,
+            expires_at,
+            expected_time_ms: expected_solve_time_ms(difficulty),
+            signature,
+        }
+    }
+
+    /// HMAC-SHA256 over the challenge parameters, binding
+    /// `(id, data, difficulty, expires_at)` to this server's secret.
+    fn sign_pow_params(&self, id: &str, data: &str, difficulty: u8, expires_at: u64) -> String {
+        let payload = format!("pow:{id}:{data}:{difficulty}:{expires_at}");
+        hmac_sign(&self.secret, payload.as_bytes())
+    }
+
+    /// Issue a challenge whose expiry is STRICTLY in the past (test seam for
+    /// the registry expiry path — `issue_server_pow_with_ttl(_, 0)` cannot
+    /// guarantee the second boundary has ticked over before verification).
+    #[cfg(test)]
+    fn issue_expired_server_pow(&self) -> crate::decision::PowChallenge {
+        let now = current_timestamp();
+        let difficulty = MIN_POW_DIFFICULTY;
+        let id = generate_challenge_id();
+        let prefix = generate_random_hex(16);
+        let expires_at = now.saturating_sub(1);
+        let signature = self.sign_pow_params(&id, &prefix, difficulty, expires_at);
+        self.issued.write().insert(
+            id.clone(),
+            IssuedPowRecord {
+                data: prefix.clone(),
+                difficulty,
+                expires_at,
+                solved_at: None,
+            },
+            now,
+        );
+        crate::decision::PowChallenge {
+            id,
+            data: prefix,
+            difficulty,
+            expires_at,
+            expected_time_ms: 0,
+            signature,
+        }
+    }
+
+    /// Verify the HMAC signature of a presented challenge (integrity check
+    /// on the serialized parameters; a tampered difficulty/expiry fails).
+    pub fn verify_pow_signature(&self, challenge: &crate::decision::PowChallenge) -> bool {
+        let expected = self.sign_pow_params(
+            &challenge.id,
+            &challenge.data,
+            challenge.difficulty,
+            challenge.expires_at,
+        );
+        challenge
+            .signature
+            .as_bytes()
+            .ct_eq(expected.as_bytes())
+            .unwrap_u8()
+            == 1
+    }
+
+    /// Verify a PoW solution against the SERVER-SIDE issuance registry
+    /// (audit F3a) with replay protection and audit logging.
+    ///
+    /// Only `challenge_id` is taken from the client. The data, difficulty
+    /// and expiry used for verification are the values stored when the
+    /// challenge was ISSUED — a client that "relaxes" the difficulty or
+    /// extends the expiry in its own copy of the challenge gains nothing.
+    /// A valid solution marks the challenge solved in the registry for a
+    /// short redemption allow-TTL.
+    pub fn verify_pow_solution(
+        &self,
+        challenge_id: &str,
         nonce: u64,
         client_fingerprint: Option<&str>,
     ) -> ChallengeVerifyResult {
         let nonce_str = nonce.to_string();
-        let response_key = format!("pow:{}:{}", challenge.id, hash_result(&nonce_str));
         let now = current_timestamp();
+
+        // Unknown id: never issued by this server (or already evicted).
+        let record = {
+            let mut registry = self.issued.write();
+            registry.prune(now);
+            registry.get(challenge_id).cloned()
+        };
+        let Some(record) = record else {
+            self.record_audit(ChallengeAuditRecord {
+                challenge_id: challenge_id.to_string(),
+                challenge_type: "pow".into(),
+                outcome: "unknown".into(),
+                client_fingerprint: client_fingerprint.map(ToString::to_string),
+                timestamp: now,
+            });
+            return ChallengeVerifyResult {
+                valid: false,
+                replayed: false,
+                expired: true,
+            };
+        };
+
+        let response_key = format!("pow:{challenge_id}:{}", hash_result(&nonce_str));
         {
             let mut used = self.used_responses.write();
             if used.contains(&response_key, now) {
                 self.record_audit(ChallengeAuditRecord {
-                    challenge_id: challenge.id.clone(),
+                    challenge_id: challenge_id.to_string(),
                     challenge_type: "pow".into(),
                     outcome: "replay".into(),
                     client_fingerprint: client_fingerprint.map(ToString::to_string),
@@ -614,16 +849,17 @@ impl ChallengeManager {
             }
         }
 
-        let expired = now > challenge.expires_at;
+        let expired = now > record.expires_at;
         // Hash format matches `decision::PowChallenge::verify`:
-        // sha256("<data>:<nonce>") with `difficulty` leading zero bits.
+        // sha256("<data>:<nonce>") with `difficulty` leading zero bits —
+        // using the STORED data and difficulty.
         let valid =
-            !expired && decision_pow_hash_valid(&challenge.data, challenge.difficulty, &nonce_str);
+            !expired && decision_pow_hash_valid(&record.data, record.difficulty, &nonce_str);
 
         let replayed = valid && !self.used_responses.write().insert(response_key, now);
         if replayed {
             self.record_audit(ChallengeAuditRecord {
-                challenge_id: challenge.id.clone(),
+                challenge_id: challenge_id.to_string(),
                 challenge_type: "pow".into(),
                 outcome: "replay".into(),
                 client_fingerprint: client_fingerprint.map(ToString::to_string),
@@ -636,8 +872,12 @@ impl ChallengeManager {
             };
         }
 
+        if valid {
+            self.issued.write().mark_solved(challenge_id, now);
+        }
+
         self.record_audit(ChallengeAuditRecord {
-            challenge_id: challenge.id.clone(),
+            challenge_id: challenge_id.to_string(),
             challenge_type: "pow".into(),
             outcome: if expired {
                 "expired".into()
@@ -655,6 +895,14 @@ impl ChallengeManager {
             replayed: false,
             expired,
         }
+    }
+
+    /// Whether a solved challenge is still inside its redemption allow-TTL
+    /// (audit F3c) — used to let a redeemed client through while its
+    /// reputation recovers.
+    pub fn pow_solved_allow_active(&self, challenge_id: &str) -> bool {
+        let now = current_timestamp();
+        self.issued.read().solved_allow_active(challenge_id, now)
     }
 
     /// Verify JS challenge with replay protection and audit logging.
@@ -775,6 +1023,15 @@ fn current_timestamp() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+/// Rough expected solve time (ms) for a difficulty, assuming ~1M sha256/s
+/// on client hardware (advisory only — shown to the client).
+fn expected_solve_time_ms(difficulty: u8) -> u32 {
+    let hashes = 1u64
+        .checked_shl(difficulty.min(31) as u32)
+        .unwrap_or(u32::MAX as u64);
+    ((hashes / 1_000_000).saturating_mul(1000)).min(u32::MAX as u64) as u32
 }
 
 /// Leading-zero-bits check for `decision::PowChallenge` solutions:
@@ -927,55 +1184,138 @@ mod tests {
         assert!(!cache.contains("response", 10 + USED_RESPONSE_TTL_SECS + 1));
     }
 
-    // ── Fix I:decision::PowChallenge replay protection ──────────────
+    // ── Audit F3:server-side issuance registry / signed parameters ──
 
-    fn easy_decision_pow() -> crate::decision::PowChallenge {
-        crate::decision::PowChallenge {
-            id: "challenge-fixed".to_string(),
-            data: "random-prefix-0123456789abcdef".to_string(),
-            difficulty: 0, // trivially solvable for test speed
-            expires_at: current_timestamp() + 300,
-            expected_time_ms: 1,
+    /// Brute-force a nonce with `difficulty` leading zero bits over
+    /// `sha256("<data>:<nonce>")` (mirror of the verification math).
+    fn solve_decision_pow(data: &str, difficulty: u8) -> u64 {
+        for nonce in 0..10_000_000u64 {
+            if decision_pow_hash_valid(data, difficulty, &nonce.to_string()) {
+                return nonce;
+            }
         }
+        panic!("no nonce found (difficulty too high for test)");
     }
 
     #[test]
-    fn decision_pow_solved_nonce_rejected_on_replay() {
+    fn server_issued_pow_solved_challenge_passes() {
         let manager = ChallengeManager::new([3u8; 32]);
-        let challenge = easy_decision_pow();
+        let challenge = manager.issue_server_pow(MIN_POW_DIFFICULTY);
 
-        let first = manager.verify_decision_pow(&challenge, 42, Some("10.0.0.1"));
-        assert!(first.valid, "first submission must pass");
+        // Server-side clamps and signing.
+        assert!(challenge.difficulty >= MIN_POW_DIFFICULTY);
+        assert!(!challenge.signature.is_empty());
+        assert!(manager.verify_pow_signature(&challenge));
+
+        let nonce = solve_decision_pow(&challenge.data, challenge.difficulty);
+        let first = manager.verify_pow_solution(&challenge.id, nonce, Some("10.0.0.1"));
+        assert!(
+            first.valid,
+            "a correctly solved server-issued challenge must pass"
+        );
         assert!(!first.replayed);
 
-        let second = manager.verify_decision_pow(&challenge, 42, Some("10.0.0.1"));
-        assert!(
-            !second.valid && second.replayed,
-            "replayed nonce must be rejected"
-        );
+        // Solving activates the redemption allow-TTL.
+        assert!(manager.pow_solved_allow_active(&challenge.id));
 
-        // A different nonce for the same challenge is still fine.
-        let third = manager.verify_decision_pow(&challenge, 43, Some("10.0.0.1"));
-        assert!(third.valid);
+        // Replay of the same solution is rejected.
+        let replay = manager.verify_pow_solution(&challenge.id, nonce, Some("10.0.0.1"));
+        assert!(!replay.valid && replay.replayed, "replay must be rejected");
     }
 
     #[test]
-    fn decision_pow_wrong_nonce_fails() {
+    fn server_issued_pow_wrong_nonce_fails() {
         let manager = ChallengeManager::new([4u8; 32]);
-        let mut challenge = easy_decision_pow();
-        challenge.difficulty = 20; // infeasible to hit by luck
-        let result = manager.verify_decision_pow(&challenge, 1, None);
+        let challenge = manager.issue_server_pow_with_ttl(16, 300);
+        // 16 zero bits is infeasible to satisfy by guessing one nonce.
+        let result = manager.verify_pow_solution(&challenge.id, 1, None);
         assert!(!result.valid);
         assert!(!result.replayed);
+        assert!(!manager.pow_solved_allow_active(&challenge.id));
     }
 
     #[test]
-    fn decision_pow_expired_challenge_rejected() {
+    fn expired_server_challenge_rejected_via_stored_expiry() {
         let manager = ChallengeManager::new([5u8; 32]);
-        let mut challenge = easy_decision_pow();
-        challenge.expires_at = current_timestamp().saturating_sub(1);
-        let result = manager.verify_decision_pow(&challenge, 42, None);
+        // The record's expiry is strictly in the past; the STORED expiry
+        // decides, and a correctly solved nonce still fails.
+        let challenge = manager.issue_expired_server_pow();
+        let nonce = solve_decision_pow(&challenge.data, challenge.difficulty);
+        let result = manager.verify_pow_solution(&challenge.id, nonce, None);
         assert!(!result.valid);
-        assert!(result.expired);
+        assert!(result.expired, "expiry must come from the server record");
+        assert!(!manager.pow_solved_allow_active(&challenge.id));
+    }
+
+    #[test]
+    fn unknown_challenge_id_rejected() {
+        let manager = ChallengeManager::new([6u8; 32]);
+        let result = manager.verify_pow_solution("never-issued", 42, None);
+        assert!(!result.valid && !result.replayed);
+    }
+
+    #[test]
+    fn forged_client_side_difficulty_is_ignored() {
+        // The attack: receive a difficulty-16 challenge, "relax" it to 0 in
+        // the client copy, solve trivially, submit. Verification must use
+        // the STORED difficulty (16), so the easy solution fails.
+        let manager = ChallengeManager::new([7u8; 32]);
+        let mut challenge = manager.issue_server_pow_with_ttl(16, 300);
+
+        // Sanity: the tampered copy no longer matches the signature.
+        challenge.difficulty = 0;
+        assert!(
+            !manager.verify_pow_signature(&challenge),
+            "tampered parameters must fail signature verification"
+        );
+
+        // Solve against the FORGED difficulty (0 bits ⇒ almost any nonce).
+        let forged_nonce = solve_decision_pow(&challenge.data, 0);
+        assert!(decision_pow_hash_valid(
+            &challenge.data,
+            0,
+            &forged_nonce.to_string()
+        ));
+
+        let result = manager.verify_pow_solution(&challenge.id, forged_nonce, None);
+        assert!(
+            !result.valid,
+            "a solution for a client-claimed easier difficulty must NOT verify"
+        );
+        assert!(!manager.pow_solved_allow_active(&challenge.id));
+    }
+
+    #[test]
+    fn issued_difficulty_is_clamped_server_side() {
+        let manager = ChallengeManager::new([8u8; 32]);
+        let too_easy = manager.issue_server_pow_with_ttl(0, 300);
+        assert_eq!(too_easy.difficulty, MIN_POW_DIFFICULTY);
+        let too_hard = manager.issue_server_pow_with_ttl(64, 300);
+        assert_eq!(too_hard.difficulty, MAX_POW_DIFFICULTY);
+        // Signature covers the clamped values.
+        assert!(manager.verify_pow_signature(&too_easy));
+        assert!(manager.verify_pow_signature(&too_hard));
+    }
+
+    #[test]
+    fn issuance_registry_bounds_outstanding_challenges() {
+        let mut registry = IssuanceRegistry::default();
+        for i in 0..=MAX_OUTSTANDING_CHALLENGES {
+            registry.insert(
+                format!("challenge-{i}"),
+                IssuedPowRecord {
+                    data: format!("data-{i}"),
+                    difficulty: MIN_POW_DIFFICULTY,
+                    expires_at: current_timestamp() + 300,
+                    solved_at: None,
+                },
+                current_timestamp(),
+            );
+        }
+        assert!(registry.get("challenge-0").is_none());
+        assert!(registry
+            .get(&format!("challenge-{MAX_OUTSTANDING_CHALLENGES}"))
+            .is_some());
+        assert!(registry.entries.len() <= MAX_OUTSTANDING_CHALLENGES);
     }
 }

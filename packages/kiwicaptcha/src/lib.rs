@@ -50,12 +50,13 @@ pub mod verify;
 pub mod widget;
 
 pub use challenge::{
-    binding_tag, hash_ip, issue_challenge, now_epoch_micros, payload_from_record, sign_payload,
-    verify_signature, verify_signature_v2, BindingMode, ChallengeCache, ChallengeConfig,
-    ChallengePayload, ChallengeRecord, Issued, PoWAlgorithm, MAX_ARGON_MEMORY_KIB, MAX_ARGON_TIME,
-    MAX_CLOCK_SKEW_SECS, MAX_DIFFICULTY, MAX_PARALLELISM, MIN_ARGON_MEMORY_KIB, MIN_ARGON_TIME,
-    MIN_DIFFICULTY, MIN_PARALLELISM, SOLVER_MAX_ARGON2_M_KIB, SOLVER_MAX_ARGON2_TARGET_BITS,
-    SOLVER_MAX_HASHES, SOLVER_MAX_TARGET_BITS,
+    binding_tag, hash_ip, issue_challenge, issue_challenge_with_decoy, now_epoch_micros,
+    payload_from_record, sign_payload, verify_signature, verify_signature_v2, BindingMode,
+    ChallengeCache, ChallengeConfig, ChallengePayload, ChallengeRecord, Issued, PoWAlgorithm,
+    DECOY_FIELD_POOL, MAX_ARGON_MEMORY_KIB, MAX_ARGON_TIME, MAX_CLOCK_SKEW_SECS, MAX_DIFFICULTY,
+    MAX_PARALLELISM, MIN_ARGON_MEMORY_KIB, MIN_ARGON_TIME, MIN_DIFFICULTY, MIN_PARALLELISM,
+    SOLVER_MAX_ARGON2_M_KIB, SOLVER_MAX_ARGON2_TARGET_BITS, SOLVER_MAX_HASHES,
+    SOLVER_MAX_TARGET_BITS,
 };
 pub use keys::{DerivedKeys, HKDF_DEPLOY_SALT};
 pub use logo::{kiwi_lockup_svg, kiwi_logo_svg, kiwi_mark_svg, kiwi_shield_svg};

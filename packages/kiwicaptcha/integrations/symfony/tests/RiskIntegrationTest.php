@@ -41,6 +41,7 @@ use KiwiCaptcha\Risk\Storage\RedisRiskStateStore;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Verifier;
 use KiwiCaptcha\VerifyError;
+use KiwiCaptcha\VerifyOutcome;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Config\Definition\Processor;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest;
@@ -219,6 +220,87 @@ final class RiskIntegrationTest extends TestCase
             RiskEventKind::ExpiredChallenge,
             RiskEventKind::ReplayAttempt,
         ], $events, 'infrastructure failures (CapacityExceeded) must not be recorded as client abuse');
+    }
+
+    public function testSolveOutcomeCarriesTheMeasuredDurationWithoutChangingTheEvent(): void
+    {
+        // Round-97 solve-duration consumption: the server-measured
+        // duration rides on the feedback call. The risk-v1/v2 surface is
+        // categorical (fixed RiskEventKind contract; the v2 signals are
+        // engine-derived), so the duration is consumed as bounded
+        // observability only — it must never change the event mapping,
+        // and it must never conjure attribution where none exists.
+        $stack = $this->stack(new FakeRiskStateStore());
+        $gateway = $stack['gateway'];
+
+        $gateway->solveOutcome('login', '198.51.100.7', null, null, null, 470);
+        $gateway->solveOutcome('login', '198.51.100.7', null, VerifyError::InsufficientWork, null, 120);
+        $gateway->solveOutcome('login', '198.51.100.7', null, VerifyError::RecordNotFound, null, null);
+
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $stack['store']->observations);
+        self::assertSame([
+            RiskEventKind::SolveSuccess,
+            RiskEventKind::InvalidProof,
+            RiskEventKind::ReplayAttempt,
+        ], $events, 'the duration never changes the event classification');
+
+        // No client IP: no attribution, duration or not (the same
+        // no-empty-pseudonym rule as every feedback path).
+        $before = \count($stack['store']->observations);
+        $gateway->solveOutcome('login', null, null, null, null, 470);
+        $gateway->solveOutcome('login', '', null, null, null, 470);
+        self::assertCount($before, $stack['store']->observations, 'a missing source address skips the feedback entirely, duration included');
+    }
+
+    public function testSolveDurationExtractionBridgesTheCoreAdditiveSurface(): void
+    {
+        // The core (round-97, concurrent) adds a nullable solve-duration
+        // field to VerifyOutcome computed from the unforgeable issuedAtNs.
+        // The gateway's bridge is feature-checked (method first, then
+        // public property; a microsecond variant converts), so the
+        // consumption activates the moment the core lands — stub
+        // outcomes prove each shape, and the current (pre-field) core
+        // outcome must extract null, never error.
+        $ms = new class {
+            public function solveDurationMs(): ?int
+            {
+                return 470;
+            }
+        };
+        self::assertSame(470, RiskGateway::solveDurationMsOf($ms));
+
+        $micros = new class {
+            public function solveDurationMicros(): ?int
+            {
+                return 1_234_567;
+            }
+        };
+        self::assertSame(1234, RiskGateway::solveDurationMsOf($micros), 'a microsecond variant converts to milliseconds');
+
+        $unmeasured = new class {
+            public function solveDurationMs(): ?int
+            {
+                return null;
+            }
+        };
+        self::assertNull(RiskGateway::solveDurationMsOf($unmeasured), 'a null duration (unmeasurable outcome) stays null');
+
+        $property = new class {
+            public ?int $solveDurationMs = 900;
+        };
+        self::assertSame(900, RiskGateway::solveDurationMsOf($property), 'a public property surface is bridged too');
+
+        $invalid = new class {
+            public function solveDurationMs(): ?int
+            {
+                return -5;
+            }
+        };
+        self::assertNull(RiskGateway::solveDurationMsOf($invalid), 'a negative duration is not measurable evidence');
+
+        // The installed core predates the field: null-safe extraction,
+        // never a method-missing error.
+        self::assertNull(RiskGateway::solveDurationMsOf(VerifyOutcome::valid('nonce')), 'an outcome without the solve-duration surface extracts null');
     }
 
     public function testRiskFeedbackMapsEveryCoreError(): void

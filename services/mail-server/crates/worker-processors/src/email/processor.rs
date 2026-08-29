@@ -11,6 +11,7 @@ use apexmail_lib::dkim::{
 };
 use chrono::{DateTime, Utc};
 use moka::sync::Cache;
+use rand::Rng;
 use sqlx::PgPool;
 use std::sync::Mutex;
 use tokio::sync::Notify;
@@ -337,6 +338,17 @@ fn fenced_out(rows_affected: u64) -> bool {
     rows_affected == 0
 }
 
+/// F6:apply ±20% jitter to a retry delay (in seconds). `rand` is already a
+/// crate dependency. A non-positive input passes through untouched; a
+/// positive input never collapses to zero (min 1s).
+fn jittered_secs(base_secs: i64) -> i64 {
+    if base_secs <= 0 {
+        return base_secs;
+    }
+    let spread: f64 = rand::rng().random_range(-0.2..=0.2);
+    ((base_secs as f64) * (1.0 + spread)).round().max(1.0) as i64
+}
+
 /// Audit-5: handle_success's row write — identical semantics to the
 /// pre-fence inline SQL, plus the lease-token fence.
 const HANDLE_SUCCESS_UPDATE_SQL: &str = r#"
@@ -417,6 +429,24 @@ const REQUEUE_JOB_UPDATE_SQL: &str = r#"
                 metadata = jsonb_set(COALESCE(metadata, '{}'), '{requeue_reason}', $2::jsonb)
             WHERE id = $3::uuid
               AND (metadata->>'lease_token') IS NOT DISTINCT FROM $4::text
+"#;
+
+/// F5:release a multi-recipient row back to `pending` after a processed
+/// chunk when recipients are still owed. `expand_rows_within_cap` admits at
+/// most `limit` recipients per claim, so a 1000-recipient row used to drain
+/// only `limit` recipients per 300s visibility lease (~8.3h end-to-end).
+/// Releasing the remainder immediately (status='pending', lease cleared,
+/// still fenced on this claim's lease token so a stale worker cannot
+/// release a row the next owner holds) lets the very next poll continue.
+/// Rows whose pending set emptied are already terminal ('sent') and do not
+/// match; requeued/deferred rows are already 'pending'.
+const RELEASE_REMAINDER_SQL: &str = r#"
+            UPDATE email_queue
+            SET status = 'pending', locked_until = NULL, updated_at = NOW()
+            WHERE id = $1::uuid
+              AND status = 'processing'
+              AND (metadata->>'lease_token') IS NOT DISTINCT FROM $2::text
+              AND COALESCE(metadata->'pending_recipients', '[]'::jsonb) <> '[]'::jsonb
 "#;
 
 /// Audit-5: handle_permanent_job_failure's dead-letter write — previously
@@ -905,8 +935,33 @@ impl EmailProcessor {
                     }
                 }
                 Ok(jobs) => {
-                    // SCALE-H-04: Observe backlog depth for load shedding
-                    self.backpressure.observe_backlog(jobs.len() as u64);
+                    // SCALE-H-04/F9: Observe the REAL queue depth for the
+                    // load-shedding decision. The batch is capped at
+                    // `available_slots` (≤ concurrency, e.g. 10), so feeding
+                    // `jobs.len()` kept the observed backlog permanently far
+                    // below `max_backlog` (10_000) — shedding was
+                    // unreachable. Threshold semantics are unchanged; only
+                    // the observed value is now the true pending depth.
+                    match self.pending_queue_depth().await {
+                        Ok(depth) => self.backpressure.observe_backlog(depth),
+                        Err(e) => {
+                            warn!(
+                                error = %e,
+                                "Failed to read queue depth for backpressure; keeping last sample"
+                            );
+                        }
+                    }
+
+                    // F5:claim identity of every distinct row in this batch,
+                    // used after the chunk to release multi-recipient rows
+                    // whose pending set is not yet empty.
+                    let claimed_rows: Vec<(String, Option<String>)> = {
+                        let mut seen = std::collections::HashSet::new();
+                        jobs.iter()
+                            .filter(|job| seen.insert(job.id.clone()))
+                            .map(|job| (job.id.clone(), lease_token_of(job).map(str::to_string)))
+                            .collect()
+                    };
 
                     // Batch suppression check
                     let suppressions = self.batch_suppression_check(&jobs).await;
@@ -962,6 +1017,14 @@ impl EmailProcessor {
                         }
                     }
 
+                    // F5:multi-recipient rows admitted only `available_slots`
+                    // recipients this lease; release rows that still owe
+                    // recipients back to 'pending' so the next poll continues
+                    // immediately instead of waiting out the 300s lease
+                    // (~8.3h for a 1000-recipient row otherwise).
+                    self.release_rows_with_remaining_recipients(&claimed_rows)
+                        .await;
+
                     // Short delay before next batch
                     sleep(Duration::from_millis(100)).await;
                 }
@@ -995,8 +1058,58 @@ impl EmailProcessor {
         // `limit` is the available slot count, and the expansion is capped to
         // it so one 10k-recipient row cannot fan out into 10k concurrent
         // sends. Recipients beyond the cap remain in the row's pending set
-        // and are delivered after the visibility lease expires.
+        // and are delivered after the visibility lease expires (or — F5 —
+        // immediately, via `release_rows_with_remaining_recipients`).
         Ok(expand_rows_within_cap(rows, limit))
+    }
+
+    /// F9:actual depth of the deliverable queue — the value the SCALE-H-04
+    /// load-shedding decision must be fed (the fetched batch is capped at
+    /// the concurrency budget and is NOT the backlog).
+    async fn pending_queue_depth(&self) -> ProcessorResult<u64> {
+        let depth: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*) FROM email_queue
+            WHERE status = 'pending'
+              AND (scheduled_at IS NULL OR scheduled_at <= NOW())
+            "#,
+        )
+        .fetch_one(&self.db)
+        .await?;
+        Ok(depth.max(0) as u64)
+    }
+
+    /// F5:after a processed chunk, release rows that still owe recipients
+    /// back to 'pending' (lease cleared) so the next poll continues without
+    /// waiting for the visibility lease to expire. Fenced on this claim's
+    /// lease token (Audit-5) — a stale worker cannot release a row the
+    /// next owner has re-claimed. Rows that finished (empty pending set →
+    /// already 'sent') or were requeued/deferred by the failure handlers
+    /// simply do not match the predicate.
+    async fn release_rows_with_remaining_recipients(&self, claimed: &[(String, Option<String>)]) {
+        for (job_id, lease_token) in claimed {
+            match sqlx::query(RELEASE_REMAINDER_SQL)
+                .bind(job_id)
+                .bind(lease_token.as_deref())
+                .execute(&self.db)
+                .await
+            {
+                Ok(updated) if updated.rows_affected() > 0 => {
+                    debug!(
+                        job_id = %job_id,
+                        "Released multi-recipient row with remaining recipients back to pending"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(
+                        job_id = %job_id,
+                        error = %e,
+                        "Failed to release row with remaining recipients; the lease expiry will recover it"
+                    );
+                }
+            }
+        }
     }
 
     /// Batch suppression check for efficiency.
@@ -1793,10 +1906,13 @@ impl EmailProcessor {
 
         let next_attempt = job.attempt + 1;
         let backoff_multiplier = 2_i64.saturating_pow(job.attempt.min(30) as u32);
-        let retry_at = Utc::now()
-            + chrono::Duration::seconds(
-                (self.config.base.retry_delay.as_secs() as i64).saturating_mul(backoff_multiplier),
-            );
+        // F6:±20% jitter on the exponential backoff — a cohort of messages
+        // failing the same transient error at the same attempt otherwise
+        // retries in one synchronized wave (thundering herd against the
+        // same recovering endpoint).
+        let base_retry_secs =
+            (self.config.base.retry_delay.as_secs() as i64).saturating_mul(backoff_multiplier);
+        let retry_at = Utc::now() + chrono::Duration::seconds(jittered_secs(base_retry_secs));
 
         // Requeue only the recipients still owed a delivery (partial-failure
         // duplicate fix). `metadata.pending_recipients` is seeded here if it
@@ -2688,6 +2804,35 @@ mod tests {
             delay,
             60_i64.saturating_mul(1_073_741_824),
             "attempt 30: delay capped at 2^30 * base"
+        );
+    }
+
+    #[test]
+    fn test_jittered_backoff_stays_within_20_percent() {
+        // F6:handle_soft_bounce applies jittered_secs to the exponential
+        // backoff — every sample must stay within ±20% of the base, a
+        // positive base never collapses to zero, and non-positive inputs
+        // pass through.
+        let base: i64 = 1920; // 60s * 2^5
+        let mut saw_below = false;
+        let mut saw_above = false;
+        for _ in 0..100 {
+            let jittered = jittered_secs(base);
+            assert!(
+                (1536..=2304).contains(&jittered),
+                "jittered {jittered}s outside ±20% of {base}s"
+            );
+            saw_below |= jittered < base;
+            saw_above |= jittered > base;
+        }
+        assert!(
+            saw_below && saw_above,
+            "jitter must actually spread on both sides of the base"
+        );
+        assert!(jittered_secs(0) == 0 && jittered_secs(-5) == -5);
+        assert!(
+            jittered_secs(1) >= 1,
+            "a positive base never jitters to zero"
         );
     }
 

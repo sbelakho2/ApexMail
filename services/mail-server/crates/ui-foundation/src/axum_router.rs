@@ -829,17 +829,52 @@ pub fn render_route_with_form_fields(
     data: Option<&RouteData>,
     fields: Option<&FormFieldData>,
 ) -> Option<String> {
+    render_route_with_form_fields_and_csrf(
+        surface,
+        path,
+        query,
+        csrf_secret,
+        flash,
+        data,
+        fields,
+        None,
+    )
+    .map(|(html, _csrf_token)| html)
+}
+
+/// [`render_route_with_form_fields`] under the double-submit CSRF contract
+/// (form tokens are bound to the matching `csrf_token` cookie): the caller
+/// may hand in a pre-minted token (e.g. reused from the request's still
+/// valid cookie so multi-tab pages don't rotate under each other) and
+/// receives back the token that was ACTUALLY embedded, so it can set the
+/// matching cookie on the response when it minted one.
+#[allow(clippy::too_many_arguments)]
+pub fn render_route_with_form_fields_and_csrf(
+    surface: &str,
+    path: &str,
+    query: Option<&str>,
+    csrf_secret: Option<&str>,
+    flash: &[crate::flash::FlashMessage],
+    data: Option<&RouteData>,
+    fields: Option<&FormFieldData>,
+    csrf_token: Option<&str>,
+) -> Option<(String, String)> {
     // Normalise trailing slash at the top level so ALL surfaces handle /login/ etc.
     let path = if path.len() > 1 && path.ends_with('/') {
         &path[..path.len() - 1]
     } else {
         path
     };
-    let csrf_token = csrf_secret.map_or_else(String::new, crate::csrf::generate_csrf_token);
+    // The caller's pre-minted token wins (double-submit binding to the
+    // request's cookie); otherwise mint one, exactly as before.
+    let csrf_token = csrf_token
+        .filter(|token| !token.is_empty() && csrf_secret.is_some())
+        .map(str::to_string)
+        .unwrap_or_else(|| csrf_secret.map_or_else(String::new, crate::csrf::generate_csrf_token));
     let html =
         match surface {
             "web" => {
-                let inner = render_inner(surface, path, query, csrf_secret, data)?;
+                let inner = render_inner(surface, path, query, csrf_secret, data, &csrf_token)?;
 
                 match path {
                     "/login" | "/signup" | "/forgot-password" | "/reset-password"
@@ -850,7 +885,7 @@ pub fn render_route_with_form_fields(
                 }
             }
             "control-plane" => {
-                let inner = render_inner(surface, path, query, csrf_secret, data)?;
+                let inner = render_inner(surface, path, query, csrf_secret, data, &csrf_token)?;
                 let page = match path {
                     "/login" => inner,
                     _ => {
@@ -869,16 +904,16 @@ pub fn render_route_with_form_fields(
             "marketing" | "marketing-zola" => marketing_static_document(surface, path)
                 .map(normalize_marketing_static_document)
                 .or_else(|| {
-                    let inner = render_inner(surface, path, query, csrf_secret, data)?;
+                    let inner = render_inner(surface, path, query, csrf_secret, data, &csrf_token)?;
                     Some(leptos_views::marketing_page(&inner))
                 })?,
             _ => return None,
         };
     let html = render_flash_banners(html, flash);
     let html = inject_form_field_state(html, fields);
-    let html = inject_csrf_and_sign_confirms(html, csrf_secret);
+    let html = inject_csrf_and_sign_confirms(html, csrf_secret, &csrf_token);
     let html = inject_opt_in_auto_refresh(html, surface, path, query);
-    Some(html)
+    Some((html, csrf_token))
 }
 
 /// Live-metrics opt-in auto-refresh: when a [`LIVE_METRICS_PATHS`] route is
@@ -1335,15 +1370,21 @@ fn extract_attribute(tag: &str, attribute: &str) -> Option<String> {
 /// append an HMAC signature to every `/confirm` link. Pages render without
 /// secrets; this pass (running only when a server secret is available) makes
 /// every submission verifiable — no client-side code participates.
-fn inject_csrf_and_sign_confirms(html: String, csrf_secret: Option<&str>) -> String {
+fn inject_csrf_and_sign_confirms(
+    html: String,
+    csrf_secret: Option<&str>,
+    csrf_token: &str,
+) -> String {
     let Some(secret) = csrf_secret else {
         return html;
     };
 
-    // 1. Hidden CSRF inputs for /web POST forms that lack one.
+    // 1. Hidden CSRF inputs for /web POST forms that lack one. The token is
+    //    the caller's (bound to the double-submit `csrf_token` cookie), not a
+    //    per-pass mint — see `render_route_with_form_fields_and_csrf`.
     let csrf_input = format!(
         "<input type=\"hidden\" name=\"_csrf\" value=\"{}\" />",
-        crate::csrf::generate_csrf_token(secret),
+        crate::shell::html_escape(csrf_token),
     );
     let mut output = String::with_capacity(html.len() + 512);
     let mut rest = html.as_str();
@@ -1480,9 +1521,10 @@ fn render_inner(
     query: Option<&str>,
     csrf_secret: Option<&str>,
     data: Option<&RouteData>,
+    csrf_token: &str,
 ) -> Option<String> {
     match surface {
-        "web" => render_web(path, query, csrf_secret, data),
+        "web" => render_web(path, query, csrf_secret, data, csrf_token),
         "control-plane" => {
             // The CP login shares the web MFA challenge step (multi-step
             // SSR login): `?mfa=1&email=…` renders the same challenge form.
@@ -1490,18 +1532,15 @@ fn render_inner(
                 let params = parse_query_params(query);
                 if params.mfa_challenge {
                     if let Some(email) = params.email.as_deref() {
-                        let token = csrf_secret.map_or_else(String::new, |secret| {
-                            crate::csrf::generate_csrf_token(secret)
-                        });
                         return Some(leptos_views::web_login_mfa_challenge_page(
-                            &token,
+                            csrf_token,
                             email,
                             params.return_to.as_deref().unwrap_or("/dashboard"),
                         ));
                     }
                 }
             }
-            render_control_plane(path, csrf_secret, data)
+            render_control_plane(path, csrf_secret, data, csrf_token)
         }
         "marketing" | "marketing-zola" => render_marketing(surface, path),
         _ => None,
@@ -1533,11 +1572,12 @@ fn render_web(
     query: Option<&str>,
     csrf_secret: Option<&str>,
     data: Option<&RouteData>,
+    csrf_token: &str,
 ) -> Option<String> {
     let params = parse_query_params(query);
-
-    // Generate CSRF token for auth routes if a secret is available
-    let csrf_token = |secret: &str| crate::csrf::generate_csrf_token(secret);
+    // The CSRF token arrives pre-minted (double-submit binding to the
+    // caller's csrf_token cookie); it is empty only when no secret is
+    // configured, in which case the auth forms embed an empty token.
 
     // Normalise trailing slash so /login/ matches /login etc.
     let normalised_path = if path.len() > 1 && path.ends_with('/') {
@@ -1549,7 +1589,7 @@ fn render_web(
     Some(match normalised_path {
         "/" => leptos_views::web_home_page(),
         "/login" => {
-            let token = csrf_secret.map_or_else(String::new, csrf_token);
+            let token = csrf_token.to_string();
             // Multi-step SSR MFA: `?mfa=1&email=…` renders the challenge
             // form (the password step redirected here after success).
             if params.mfa_challenge {
@@ -1564,15 +1604,15 @@ fn render_web(
             leptos_views::web_login_page(&token)
         }
         "/signup" => {
-            let token = csrf_secret.map_or_else(String::new, csrf_token);
+            let token = csrf_token.to_string();
             leptos_views::web_signup_page_with_plan(&token, params.signup_plan.as_deref())
         }
         "/forgot-password" => {
-            let token = csrf_secret.map_or_else(String::new, csrf_token);
+            let token = csrf_token.to_string();
             leptos_views::web_forgot_password_page(&token)
         }
         "/reset-password" => {
-            let token = csrf_secret.map_or_else(String::new, csrf_token);
+            let token = csrf_token.to_string();
             leptos_views::web_reset_password_page_with_state(
                 params.token.as_deref(),
                 params.email.as_deref(),
@@ -1722,8 +1762,11 @@ fn render_control_plane(
     path: &str,
     csrf_secret: Option<&str>,
     data: Option<&RouteData>,
+    csrf_token: &str,
 ) -> Option<String> {
-    let csrf_token = |secret: &str| crate::csrf::generate_csrf_token(secret);
+    // The token is threaded from the caller (double-submit CSRF); the
+    // secret remains for any per-page signing need.
+    let _ = csrf_secret;
 
     Some(match path {
         "/cp" => data_backed_inner("/dashboard", data)
@@ -1744,10 +1787,7 @@ fn render_control_plane(
             data_backed_inner("/sales", data).unwrap_or_else(leptos_views::control_plane_sales_page)
         }
         "/" => data_backed_inner("/", data).unwrap_or_else(leptos_views::control_plane_home_page),
-        "/login" => {
-            let token = csrf_secret.map_or_else(String::new, csrf_token);
-            leptos_views::control_plane_login_page(&token)
-        }
+        "/login" => leptos_views::control_plane_login_page(csrf_token),
         "/dashboard" => data_backed_inner("/dashboard", data)
             .unwrap_or_else(leptos_views::control_plane_dashboard_page),
         "/tenants" => data_backed_inner("/tenants", data)

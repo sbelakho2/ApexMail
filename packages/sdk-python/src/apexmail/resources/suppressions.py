@@ -65,7 +65,9 @@ class SuppressionsResource:
         reason: str,
         source: Optional[str] = None,
     ) -> Suppression:
-        payload = {"email": email, "reason": reason, "source": source}
+        payload: dict[str, Any] = {"email": email, "reason": reason}
+        if source is not None:
+            payload["source"] = source
         data = self._client._request("POST", "/v1/suppressions", json=payload)
         return Suppression(**_extract_item(data, "suppression"))
 
@@ -124,7 +126,9 @@ class AsyncSuppressionsResource:
         reason: str,
         source: Optional[str] = None,
     ) -> Suppression:
-        payload = {"email": email, "reason": reason, "source": source}
+        payload: dict[str, Any] = {"email": email, "reason": reason}
+        if source is not None:
+            payload["source"] = source
         data = await self._client._request("POST", "/v1/suppressions", json=payload)
         return Suppression(**_extract_item(data, "suppression"))
 

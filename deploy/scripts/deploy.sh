@@ -2,11 +2,15 @@
 #
 # deploy.sh — ApexMail manual deployment script (emergency/hotfix path only).
 #
-# ⚠️  CANONICAL deployment is CI/CD: deploy.yml builds + pushes images to GHCR,
-#     deploy-hetzner.yml pulls + `docker compose up -d` on the host.
-#     See deploy/DEPLOYMENT.md — the single source of truth.
-#     This script builds images LOCALLY and tags them with GHCR-style names;
-#     they are NEVER pushed to GHCR. Use it only for manual hotfixes.
+# ⚠️  CANONICAL deployment is the self-hosted pipeline (ci/pipeline.sh on the
+#     deploy host): it builds every image LOCALLY (nothing is pushed to or
+#     pulled from GHCR — the registry-publishing GitHub workflows are gone),
+#     gates them (trivy/digest manifest), runs the migrator and brings the
+#     stack up. See deploy/DEPLOYMENT.md and ci/README.md.
+#     This script is the SAME local-build path used for manual hotfixes: it
+#     builds images locally and tags them with the canonical
+#     ghcr.io/sbelakho2/apexmail/<service> names so compose resolves them;
+#     the tags exist ONLY on the host.
 #
 # Usage (from developer machine via Makefile):
 #   make deploy              — full deploy: sync all code + rebuild all images
@@ -75,7 +79,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # All services that can be built from the mail-server Dockerfile
-ALL_SERVICES=(api-server mta imap-server mailstore worker enterprise observability status-server billing-service sales-autopilot migrator)
+ALL_SERVICES=(api-server mta imap-server mailstore worker enterprise observability status-server billing-service sales-autopilot compliance migrator)
 # Dockerfile targets that differ from the canonical image/service name.
 # status-server is built from the `auth-server` stage (the binary inside the
 # image is auth-server); the IMAGE name follows the compose service key.
@@ -105,11 +109,14 @@ step "Step 0: Verify environment"
 [[ -d "$DEPLOY_DIR" ]] || { error "$DEPLOY_DIR does not exist."; exit 1; }
 [[ -f "$ENV_FILE" ]]   || { error ".env not found at $ENV_FILE"; exit 1; }
 
-# ── Concurrency lock (audit fix) ─────────────────────────────────────────────
-# flock pattern from ci/pipeline.sh (ci_lock_acquire in ci/lib.sh): two
-# overlapping manual deploys race the build, the migrator and `compose up`,
-# and can interleave image tags. Refuse to run concurrently.
-LOCK_FILE="${DEPLOY_DIR}/.deploy.lock"
+# ── Concurrency lock (audit fix + F5) ────────────────────────────────────────
+# THE SAME LOCK the CI pipeline takes (ci/pipeline.sh): two overlapping
+# deploys — one manual, one pipeline — race the build, the migrator and
+# `compose up`, and can interleave image tags. Canonical path:
+# /opt/apexmail/.deploy.lock (APEXMAIL_DEPLOY_LOCK overrides both sides);
+# ci/pipeline.sh acquires exactly this file before running its stages.
+LOCK_FILE="${APEXMAIL_DEPLOY_LOCK:-${DEPLOY_DIR}/.deploy.lock}"
+mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
 if command -v flock >/dev/null 2>&1; then
     exec 9>"$LOCK_FILE"
     if ! flock -n 9; then
@@ -355,6 +362,7 @@ fi
 verify_stack() {
     local services="api-server mta imap-server mailstore worker enterprise tracking
                     observability marketing status-server billing-service sales-autopilot
+                    compliance
                     postgres-backup clickhouse-backup nginx certbot postgres redis clickhouse
                     prometheus grafana loki alertmanager tempo otel-collector
                     node-exporter blackbox-exporter postgres-exporter redis-exporter
@@ -450,9 +458,23 @@ for img in $ALL_IMAGES; do
     docker rmi "${img%:latest}:pre-deploy" 2>/dev/null || true
 done
 if [[ -n "$SERVICES_TO_BUILD" ]]; then
+    # F6 — NEVER rmi the :<sha> rollback pins the CI verify stage depends on.
+    # ci/stages/verify.sh rolls a failed rollout back to the tags recorded in
+    # ci/.last-deployed-sha (written by ci/stages/deploy.sh after a green
+    # deploy). Read the SAME file/format here and exclude that tag (plus
+    # `latest`) from the prune list.
+    LAST_DEPLOYED_SHA=""
+    if [[ -f "${DEPLOY_DIR}/ci/.last-deployed-sha" ]]; then
+        LAST_DEPLOYED_SHA="$(tr -d '[:space:]' < "${DEPLOY_DIR}/ci/.last-deployed-sha")"
+    fi
+    if [[ -n "$LAST_DEPLOYED_SHA" ]]; then
+        log "Preserving rollback pin :${LAST_DEPLOYED_SHA} (ci/.last-deployed-sha) from tag cleanup."
+    fi
     for svc in "${BUILD_LIST[@]}"; do
         docker images "${GHCR_NS}/${svc}" --format '{{.Tag}}' 2>/dev/null | \
-            grep -v "^latest$" | while read -r old_tag; do
+            grep -v "^latest$" | \
+            { [[ -n "$LAST_DEPLOYED_SHA" ]] && grep -v "^${LAST_DEPLOYED_SHA}$" || cat; } | \
+            while read -r old_tag; do
                 warn "Removing old image: ${GHCR_NS}/${svc}:${old_tag}"
                 docker rmi "${GHCR_NS}/${svc}:${old_tag}" 2>/dev/null || true
             done

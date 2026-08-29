@@ -246,7 +246,7 @@ async fn audit_search(
     Query(params): Query<AuditSearchQuery>,
 ) -> Result<Json<AuditSearchResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     let plan = build_search_plan(&params, Utc::now())?;
 
@@ -354,7 +354,7 @@ async fn audit_export(
     Json(body): Json<AuditExportRequest>,
 ) -> Result<impl IntoResponse, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     let (window_start, window_end) =
         resolve_search_window(body.from.as_deref(), body.to.as_deref(), Utc::now())?;

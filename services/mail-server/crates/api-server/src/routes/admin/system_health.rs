@@ -97,7 +97,7 @@ async fn system_health(
     auth: AuthUser,
 ) -> Result<Json<SystemHealthResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     let system_sender = match crate::routes::domains::system_sender_status(&state).await {
         Ok(sender) => SystemSenderHealth {

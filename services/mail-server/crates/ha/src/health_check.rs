@@ -36,6 +36,41 @@ async fn check_component(
     }
 }
 
+/// Classify replication lag from `pg_is_in_recovery()` and the standby's
+/// replay lag. Pure helper so the primary/standby gating is unit-testable.
+///
+/// On a PRIMARY the replay timestamp is meaningless (it tracks local
+/// commits), so the component is reported healthy regardless of the lag
+/// number — previously the check flapped unhealthy on busy primaries.
+fn classify_replication_lag(
+    in_recovery: bool,
+    lag_ms: Option<f64>,
+    threshold: f64,
+    warning: f64,
+) -> (HealthStatus, Option<String>) {
+    if !in_recovery {
+        return (
+            HealthStatus::Healthy,
+            Some("Primary — replay-lag check not applicable".into()),
+        );
+    }
+    match lag_ms {
+        Some(lag) if lag > threshold => (
+            HealthStatus::Unhealthy,
+            Some(format!("Replication lag: {lag:.0}ms")),
+        ),
+        Some(lag) if lag > warning => (
+            HealthStatus::Degraded,
+            Some(format!("Replication lag: {lag:.0}ms")),
+        ),
+        Some(lag) => (HealthStatus::Healthy, Some(format!("Lag: {lag:.0}ms"))),
+        None => (
+            HealthStatus::Healthy,
+            Some("Standby — no transactions replayed yet".into()),
+        ),
+    }
+}
+
 /// HealthCheckService monitors the cluster's overall health.
 pub struct HealthCheckService {
     pool: PgPool,
@@ -133,28 +168,25 @@ impl HealthCheckService {
         let threshold = self.config.replication.lag_threshold_ms as f64;
         let warning = self.config.replication.warning_lag_ms as f64;
         check_component("replication", async move {
-// pg_last_wal_receive_lsn / pg_last_wal_replay_lsn
-            let row: Option<(Option<f64>,)> = sqlx::query_as(
-                "SELECT EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())) * 1000 AS lag_ms"
+            // pg_last_xact_replay_timestamp() only means something on a
+            // standby. On a primary it returns the last local commit time,
+            // so "lag" grows with write traffic and the check flapped
+            // unhealthy on perfectly healthy primaries. Gate on
+            // pg_is_in_recovery() and skip (mark healthy) on primaries.
+            let row: Option<(bool, Option<f64>)> = sqlx::query_as(
+                "SELECT pg_is_in_recovery() AS in_recovery, \
+                 (EXTRACT(EPOCH FROM (now() - pg_last_xact_replay_timestamp())) * 1000)::float8 AS lag_ms",
             )
             .fetch_optional(&pool)
             .await
             .map_err(|e| format!("Replication lag query: {e}"))?;
 
             match row {
-                Some((Some(lag_ms),)) if lag_ms > threshold => {
-                    Ok((HealthStatus::Unhealthy, Some(format!("Replication lag: {lag_ms:.0}ms"))))
+                Some((in_recovery, lag_ms)) => {
+                    Ok(classify_replication_lag(in_recovery, lag_ms, threshold, warning))
                 }
-                Some((Some(lag_ms),)) if lag_ms > warning => {
-                    Ok((HealthStatus::Degraded, Some(format!("Replication lag: {lag_ms:.0}ms"))))
-                }
-                Some((Some(lag_ms),)) => {
-                    Ok((HealthStatus::Healthy, Some(format!("Lag: {lag_ms:.0}ms"))))
-                }
-                _ => {
-// No replication configured is fine on standalone
-                    Ok((HealthStatus::Healthy, Some("Standalone / no replication timestamp".into())))
-                }
+                // No row at all:standalone / no replication configured.
+                None => Ok((HealthStatus::Healthy, Some("Standalone / no replication timestamp".into()))),
             }
         }).await
     }
@@ -382,5 +414,33 @@ mod tests {
         let json = serde_json::to_value(&ch).unwrap();
         assert_eq!(json["node_id"], "node-1");
         assert_eq!(json["overall"], "healthy");
+    }
+
+    // ── F7:replay-lag check is gated on pg_is_in_recovery() ────────────
+
+    #[test]
+    fn test_replication_lag_healthy_on_primary_regardless_of_lag() {
+        // On a primary, pg_last_xact_replay_timestamp() is the last local
+        // commit — a large value there must NOT flag the node unhealthy.
+        let (status, msg) = classify_replication_lag(false, Some(999_999.0), 30_000.0, 10_000.0);
+        assert_eq!(status, HealthStatus::Healthy);
+        assert!(msg.unwrap().contains("Primary"));
+    }
+
+    #[test]
+    fn test_replication_lag_thresholds_on_standby() {
+        // Standby, lag within limits.
+        let (status, _) = classify_replication_lag(true, Some(500.0), 30_000.0, 10_000.0);
+        assert_eq!(status, HealthStatus::Healthy);
+        // Standby, warning band.
+        let (status, _) = classify_replication_lag(true, Some(20_000.0), 30_000.0, 10_000.0);
+        assert_eq!(status, HealthStatus::Degraded);
+        // Standby, beyond the hard threshold.
+        let (status, _) = classify_replication_lag(true, Some(60_000.0), 30_000.0, 10_000.0);
+        assert_eq!(status, HealthStatus::Unhealthy);
+        // Standby that has not replayed anything yet (NULL lag).
+        let (status, msg) = classify_replication_lag(true, None, 30_000.0, 10_000.0);
+        assert_eq!(status, HealthStatus::Healthy);
+        assert!(msg.unwrap().contains("Standby"));
     }
 }

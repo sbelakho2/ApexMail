@@ -15,7 +15,9 @@ Three backends, in priority order:
   This is a bound, not a gate.
   A shared pool is the only no-Redis mode whose windows survive across requests, so it is the only no-Redis fallback that keeps the per-client and global limits temporal under conventional PHP-FPM.
   The pool must be genuinely cross-worker: a known in-memory adapter (Symfony Cache `ArrayAdapter` or a subclass) is refused in production, since its items live per process.
+  The refusal resolves the pool class through parameter-indirected service ids (`rate_limit_cache: '%kiwi.rate_pool%'`), full alias chains, parent-declared pools (a `framework.cache.pools` entry with `parent: cache.adapter.array`) and `%param%` classes; a pool id still unresolvable to a class at compile time fails closed in production with a compile error asking for a concrete pool service id.
   Use a Redis-backed pool (`RedisAdapter`) or another shared backend.
+  The pool items are keyed by the deployment namespace (`kr_global_<ns>` and `kr_<ns>_<hmac>`; the empty namespace keeps the legacy `kr_global` / `kr_<hmac>` shapes), so two deployments sharing one pool keep independent per-client and global budgets.
 - Object memory (long-lived runtime only). The fallback when no pool is configured.
   The windows live in the limiter object, so they are exact for one persistent worker process (RoadRunner, Swoole, amphp, or a single CLI process).
   Under conventional PHP-FPM each request rebuilds the bundle services, so the object windows are per-request and provide no temporal limiting across requests.

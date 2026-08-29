@@ -45,7 +45,7 @@ We process data in accordance with our [Privacy Policy](/privacy/) and [Data Pro
 
 ## 7. Payment Terms
 
-Fees are billed monthly or annually as selected. Published prices are in USD. Applicable taxes are determined under the rules that apply to the invoice and billing location.
+Fees are billed monthly or annually as selected. Published prices are in EUR (euro). Applicable taxes are determined under the rules that apply to the invoice and billing location.
 
 ### 7.1 Automatic Renewal
 

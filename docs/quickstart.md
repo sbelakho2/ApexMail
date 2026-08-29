@@ -20,10 +20,15 @@ Use `am_test_` keys for sandbox and smoke tests. Use `am_live_` keys only after 
 
 ## Step 2: Install an SDK (Optional)
 
-### Python
+The ApexMail SDKs are **not yet published to public package registries** — `pip install apexmail` will fail until the first stable release. Until then, build from the monorepo source, pin to a specific commit, and verify the source you vendor:
+
 ```bash
-pip install apexmail
+git clone https://github.com/Bel-Consulting-OU/ApexMail.git
+cd ApexMail
+pip install ./packages/sdk-python   # the Go, PHP, Ruby, and Java SDKs live alongside it in packages/
 ```
+
+See the [SDK status page](https://apexmail.ee/docs/sdks/) for per-language build instructions and the current release state.
 
 ## Step 3: Send Your First Email
 

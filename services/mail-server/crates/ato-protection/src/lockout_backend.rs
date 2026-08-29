@@ -105,6 +105,18 @@ impl LockoutBackend for InMemoryLockoutBackend {
 /// Use this to check at runtime if Redis lockout operations will actually work.
 pub const REDIS_LOCKOUT_AVAILABLE: bool = cfg!(feature = "redis-lockout");
 
+/// Timeout applied when OPENING a Redis connection (audit F8). Without it a
+/// hung Redis accept queue blocked the synchronous `evaluate()` hot path
+/// indefinitely.
+#[cfg(feature = "redis-lockout")]
+const REDIS_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Per-socket read/write timeout applied to every command on a cached
+/// connection (audit F8): bounds each query so `evaluate()` cannot stall on
+/// a dead-but-open connection.
+#[cfg(feature = "redis-lockout")]
+const REDIS_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Redis-backed lockout backend for multi-node deployments.
 /// Stores lockout events as sorted-set members keyed by
 /// `ato:lockout:{user_id}` with score = Unix timestamp.
@@ -118,7 +130,15 @@ pub const REDIS_LOCKOUT_AVAILABLE: bool = cfg!(feature = "redis-lockout");
 /// ```
 /// ## Known limitations
 /// - **Blocking I/O**:Redis calls currently use synchronous I/O on the calling
-/// thread. For high-throughput deployments, wrap in `tokio::task::spawn_blocking`.
+///   thread, so every operation is bounded by explicit connect and socket
+///   timeouts (see [`REDIS_CONNECT_TIMEOUT`] / [`REDIS_IO_TIMEOUT`], audit F8).
+///   On timeout or I/O error the operation short-circuits to the same result
+///   as the in-memory fallback (`recent_lockouts` → 0, writes → no-op), which
+///   keeps `evaluate()` latency bounded instead of blocking the hot path on a
+///   hung Redis. NOTE: because the [`LockoutBackend`] trait is synchronous,
+///   the blocking call still occupies the calling thread for up to the
+///   timeout; fully async behavior requires an async trait method or wrapping
+///   each call in `tokio::task::spawn_blocking` at the call site.
 /// Error returned when a Redis lockout backend cannot be constructed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LockoutBackendError {
@@ -221,6 +241,12 @@ impl RedisLockoutBackend {
     /// Run `f` with a persistent connection, reconnecting once on failure.
     /// The connection is cached between calls — previously every lockout
     /// operation opened a brand-new TCP connection to Redis.
+    ///
+    /// Audit F8: connects with an explicit timeout and stamps per-socket
+    /// read/write timeouts on the connection, so a hung Redis can no longer
+    /// block the synchronous hot path. Any timeout/I-O error short-circuits
+    /// to `None`, which the callers translate to the in-memory-fallback
+    /// result (`recent_lockouts` → 0, writes → no-op).
     #[cfg(feature = "redis-lockout")]
     fn with_conn<T>(
         &self,
@@ -233,14 +259,28 @@ impl RedisLockoutBackend {
             Err(poisoned) => poisoned.into_inner(),
         };
         if guard.is_none() {
-            match client.get_connection() {
-                Ok(c) => *guard = Some(c),
+            // Bounded connect (audit F8).
+            match client.get_connection_with_timeout(REDIS_CONNECT_TIMEOUT) {
+                Ok(mut c) => {
+                    // Bound each subsequent query on this socket as well.
+                    if c.set_read_timeout(Some(REDIS_IO_TIMEOUT)).is_err()
+                        || c.set_write_timeout(Some(REDIS_IO_TIMEOUT)).is_err()
+                    {
+                        tracing::error!(
+                            redis_url = %self.url,
+                            op = op,
+                            "RedisLockoutBackend: could not set socket timeouts — reconnecting without cache"
+                        );
+                    }
+                    *guard = Some(c);
+                }
                 Err(e) => {
                     tracing::error!(
                         redis_url = %self.url,
                         op = op,
                         error = %e,
-                        "RedisLockoutBackend: connect failed"
+                        "RedisLockoutBackend: connect failed (timeout: {:?})",
+                        REDIS_CONNECT_TIMEOUT
                     );
                     return None;
                 }
@@ -252,14 +292,15 @@ impl RedisLockoutBackend {
         match f(conn) {
             Ok(v) => Some(v),
             Err(e) => {
-                // Drop the (probably broken) connection so the next call
-                // reconnects.
+                // Drop the (probably broken or timed-out) connection so the
+                // next call reconnects; the caller falls back to the
+                // in-memory result, keeping evaluate() bounded.
                 *guard = None;
                 tracing::error!(
                     redis_url = %self.url,
                     op = op,
                     error = %e,
-                    "RedisLockoutBackend: command failed — connection recycled"
+                    "RedisLockoutBackend: command failed or timed out — connection recycled, falling back to in-memory behavior"
                 );
                 None
             }

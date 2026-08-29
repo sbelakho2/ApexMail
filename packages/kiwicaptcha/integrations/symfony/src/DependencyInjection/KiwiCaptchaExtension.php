@@ -431,15 +431,20 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // cross-worker: Symfony's in-memory ArrayAdapter keeps its
             // items per process, so under PHP-FPM the guard above would
             // pass while the rate-limit state is request-local. When the
-            // pool's class is resolvable at extension time and is (a
-            // subclass of) ArrayAdapter, refuse in production — but only
-            // when the pool is the effective limiter backend: with a
+            // pool's class resolves at extension time (through parameter
+            // placeholders in the service id, full alias chains and
+            // %param%-class definitions — see definitionClass()) and is
+            // (a subclass of) ArrayAdapter, refuse in production — but
+            // only when the pool is the effective limiter backend: with a
             // Redis client wired the atomic distributed limiter wins and
             // the pool is never selected, and with both temporal limits
             // disabled the limiter is not wired at all, so an
-            // in-memory pool is harmless in both cases. External or
-            // unresolvable pool services pass (their class cannot be
-            // inspected here).
+            // in-memory pool is harmless in both cases. A pool id that
+            // STILL cannot be resolved to a class after all that fails
+            // closed exactly like the storage path's unresolvable-class
+            // refusal: an uninspectable pool cannot be proven shared, so
+            // production refuses the combination and asks for a concrete
+            // pool service id.
             if (($config['rate_limit_cache'] ?? null) !== null
                 && $redisRef === null
                 && ($config['rate_limit'] > 0 || $config['rate_limit_global'] > 0)
@@ -450,6 +455,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         'kiwi_captcha.rate_limit_cache ("%s", class %s) is an in-memory adapter (Symfony\Cache\Adapter\ArrayAdapter or a subclass): its items live per process, so it cannot be a shared cross-worker rate-limit pool under PHP-FPM. Use a genuinely shared pool (e.g. a Redis-backed Symfony Cache pool such as RedisAdapter) or leave rate_limit_cache unset and accept the object-memory semantics (long-lived-runtime-only).',
                         $config['rate_limit_cache'],
                         $poolClass,
+                    ));
+                }
+                if ($poolClass === null) {
+                    throw new \LogicException(sprintf(
+                        'kiwi_captcha.rate_limit_cache ("%s") cannot be resolved to a service class at container compile time — the production pool guard fails closed (an uninspectable pool cannot be proven cross-worker, exactly like the storage path\'s unresolvable-class refusal). Reference a concrete pool service id whose class is visible to the extension: the id may carry %%parameter%% placeholders and alias hops, but they must resolve to a real definition whose class (literal or %%param%%) is resolvable here. An external pool service the extension cannot see must be aliased or defined before this bundle loads.',
+                        $config['rate_limit_cache'],
                     ));
                 }
             }
@@ -1906,26 +1917,104 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     }
 
     /**
-     * The class of a service id (following aliases), or null when
-     * invisible. A definition may inherit its class from a parent
-     * (ChildDefinition — exactly what framework.cache.pools generates
-     * for `parent: cache.adapter.array`), and the extension loads
-     * before ResolveChildDefinitionsPass flattens those chains, so the
-     * parent chain is walked here. The first non-null class in the
-     * child->parent chain wins; a chain that ends without a class, an
-     * unknown parent or a cycle yields null (the service cannot be
+     * Resolve the %%parameter%% placeholders inside a service id (e.g.
+     * `rate_limit_cache: '%kiwi.rate_pool%'`), or null when the id carries
+     * parameters this container cannot resolve at extension time (a
+     * non-existent parameter, an unresolved env var, a non-string value).
+     * A plain id without placeholders is returned unchanged.
+     */
+    private function resolveParameterizedServiceId(string $id, ContainerBuilder $container): ?string
+    {
+        if (!str_contains($id, '%')) {
+            return $id;
+        }
+        try {
+            $resolved = $container->getParameterBag()->resolveValue($id);
+        } catch (\Throwable) {
+            // ParameterNotFoundException (a missing/env-processed
+            // parameter) or any bag refusal: the id is unresolvable here.
+            return null;
+        }
+
+        return \is_string($resolved) && $resolved !== '' ? $resolved : null;
+    }
+
+    /**
+     * Resolve the %%parameter%% placeholders inside a definition's class
+     * (e.g. `class: '%app.cache.class%'`) to the literal class name, or
+     * null when the class is not a resolvable string (a missing parameter
+     * is NOT silently ignored — the caller's unresolvable path applies,
+     * mirroring requireAtomicStorageWhenNeeded()'s %param% class handling
+     * but for any placeholder position, not only whole-string params).
+     */
+    private function resolveParameterizedClass(?string $class, ContainerBuilder $container): ?string
+    {
+        if ($class === null) {
+            return null;
+        }
+        if (!str_contains($class, '%')) {
+            return $class;
+        }
+        try {
+            $resolved = $container->getParameterBag()->resolveValue($class);
+        } catch (\Throwable) {
+            return null;
+        }
+
+        return \is_string($resolved) && $resolved !== '' ? $resolved : null;
+    }
+
+    /**
+     * The class of a service id, or null when unresolvable. The id is as
+     * strict as the storage path's class resolution:
+     *  - %%parameter%% placeholders in the service id itself are resolved
+     *    through the parameter bag first (a parameter-indirected id such
+     *    as `%kiwi.rate_pool%` must not survive unresolved and be treated
+     *    as an opaque external id);
+     *  - alias chains are followed to the END (bounded, cycle-guarded) —
+     *    a two-hop alias must resolve to its final target, not exit the
+     *    walk after one hop;
+     *  - a definition may inherit its class from a parent
+     *    (ChildDefinition — exactly what framework.cache.pools generates
+     *    for `parent: cache.adapter.array`), and the extension loads
+     *    before ResolveChildDefinitionsPass flattens those chains, so the
+     *    parent chain is walked here;
+     *  - a %%param%% class on any definition in the chain is resolved
+     *    through the parameter bag (a parameterized class that cannot be
+     *    resolved yields null, never a silent pass).
+     * The first non-null class in the child->parent chain wins; a chain
+     * that ends without a class, an unknown parent, a cycle or an
+     * unresolvable parameter yields null (the service cannot be
      * inspected and the caller's unresolvable-services path applies).
      */
     private function definitionClass(string $id, ContainerBuilder $container): ?string
     {
-        if ($container->hasAlias($id)) {
-            $id = (string) $container->getAlias($id);
+        $id = $this->resolveParameterizedServiceId($id, $container);
+        if ($id === null) {
+            return null;
+        }
+        // Follow alias chains to the end: each hop's target may itself be
+        // an alias or a parameter-indirected id. Bounded by a generous
+        // hop count and cycle-guarded, so a hostile/self-referential
+        // chain terminates with null instead of looping.
+        $seenAliases = [];
+        while ($container->hasAlias($id)) {
+            if (isset($seenAliases[$id]) || \count($seenAliases) >= 32) {
+                return null;
+            }
+            $seenAliases[$id] = true;
+            $target = (string) $container->getAlias($id);
+            $resolved = $this->resolveParameterizedServiceId($target, $container);
+            if ($resolved === null) {
+                return null;
+            }
+            $id = $resolved;
         }
         $seen = [];
         while ($container->hasDefinition($id) && !isset($seen[$id])) {
             $seen[$id] = true;
             $definition = $container->getDefinition($id);
-            $class = $definition->getClass();
+            $class = $this->resolveParameterizedClass($definition->getClass(), $container);
             if ($class !== null) {
                 return $class;
             }

@@ -25,7 +25,10 @@ const MAX_BULK_EMAILS: usize = 1_000;
 /// message on its very first attempt. "Immediate" is expressed by the
 /// priority bump (100), not by a 1-attempt budget; the now-path now gets
 /// the queue's standard retry headroom (the same 5 `queue_email` uses).
-const QUEUE_MAX_ATTEMPTS: u32 = 5;
+///
+/// `i32` to match `QueuedEmail::max_attempts` (this u32 constant made the
+/// retired crate's source fail to compile against the i32 field).
+const QUEUE_MAX_ATTEMPTS: i32 = 5;
 
 /// Outbound gRPC service
 pub struct OutboundServiceImpl {

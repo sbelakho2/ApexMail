@@ -26,12 +26,18 @@ use Psr\Cache\CacheItemPoolInterface;
  *  2. PSR-6 pool (shared, best-effort): when a shared pool is configured but
  *     no Redis client exists, the per-client window is kept in the pool. The
  *     deployment-global window lives in ONE dedicated cache item
- *     (`kr_global`, shared by every client identity, distinct from the
- *     per-client `kr_`+60-hex keys). A PSR-6 pool cannot express an atomic
- *     read-modify-write, so the shared global window is cross-worker
- *     best-effort: concurrent requests racing the read-modify-write may
- *     briefly exceed the cap (N workers can admit up to ~N x cap in a
- *     race). It is a soft bound, never an exact distributed gate.
+ *     (`kr_global`, or `kr_global_<namespace>` when a deployment namespace
+ *     is configured — shared by every client identity of that deployment,
+ *     distinct from the per-client `kr_`+hex keys). Both PSR-6 key families
+ *     fold the constructor namespace in (the empty namespace keeps the
+ *     legacy `kr_`/`kr_global` key shapes unchanged), so two deployments
+ *     sharing one pool never contend on one literal item: their windows are
+ *     as independent as their Redis keys always were. A PSR-6 pool cannot
+ *     express an atomic read-modify-write, so the shared global window is
+ *     cross-worker best-effort: concurrent requests racing the
+ *     read-modify-write may briefly exceed the cap (N workers can admit up
+ *     to ~N x cap in a race). It is a soft bound, never an exact
+ *     distributed gate.
  *  3. Object memory (long-lived runtime only): the fallback when no pool
  *     is configured. The windows live in this object's fields, so they are
  *     exact for one persistent worker process (RoadRunner, Swoole, amphp
@@ -67,9 +73,10 @@ use Psr\Cache\CacheItemPoolInterface;
  * Degradation ladder for the deployment-global cap: exact distributed
  * (Redis) -> shared best-effort (PSR-6) -> object-memory exact for one
  * persistent worker. The global cap is enforced on ALL backends: without
- * Redis the limiter keeps a real global window (the shared `kr_global`
- * item when a pool is configured, the process-local list otherwise)
- * instead of disabling the cap. `allow_nonredis_rate_limit_fallback`
+ * Redis the limiter keeps a real global window (the shared
+ * `kr_global`/`kr_global_<namespace>` item when a pool is configured, the
+ * process-local list otherwise) instead of disabling the cap.
+ * `allow_nonredis_rate_limit_fallback`
  * therefore means "long-lived-runtime-only object window / shared
  * best-effort window", never "no temporal limit at all".
  *
@@ -123,24 +130,81 @@ final class IssuanceRateLimiter
     private const CACHE_KEY_PREFIX = 'kr_';
 
     /**
-     * PSR-6 cache key for the deployment-global window: a fixed item shared
-     * by every client identity (the global cap is deployment-wide, not
-     * per-client). It must stay distinct from the per-client keys
-     * ('kr_' + 60 hex chars): this literal contains non-hex characters, so
-     * it can never collide with a client-HMAC key, and it must never be
-     * rotated (the global budget is rotation-independent by design).
+     * PSR-6 cache key for the deployment-global window (the legacy,
+     * namespace-empty shape): a fixed item shared by every client
+     * identity (the global cap is deployment-wide, not per-client). It
+     * must stay distinct from the per-client keys ('kr_' + 60 hex
+     * chars): this literal contains non-hex characters, so it can never
+     * collide with a client-HMAC key, and it must never be rotated (the
+     * global budget is rotation-independent by design). A NAMED
+     * deployment uses {@see self::globalCacheKey()} instead, so two
+     * deployments sharing one pool keep independent global budgets.
      */
     private const GLOBAL_CACHE_KEY = 'kr_global';
 
     /**
-     * PSR-6 cache key for a client identity: 'kr_' + the first 60 hex chars
-     * of the identity (which is already a keyed 256-bit HMAC — truncating to
-     * 240 bits is more than sufficient). Total: 63 characters, within the
-     * 64-character floor that PSR-6 requires implementations to support.
+     * The namespace budget inside a PSR-6 key: the spec only guarantees
+     * implementations support keys up to 64 chars, and the namespaced
+     * shapes below are built to stay within that floor.
      */
-    private static function cacheKey(string $identity): string
+    private const NS_KEY_BUDGET = 20;
+
+    /**
+     * The namespace segment of a PSR-6 key: the (already sanitized)
+     * namespace truncated to the key budget, with any character outside
+     * PSR-6's guaranteed-supported set (A-Z a-z 0-9 _ . — note the
+     * namespace sanitizer permits '-', which Redis keys allow but strict
+     * pools may reject) folded to '_'. Two deployments whose sanitized
+     * prefixes agree after this mapping share a key segment — distinct
+     * deployments on one shared pool must differ within it.
+     */
+    private static function namespaceKeySegment(string $namespace): string
     {
-        return self::CACHE_KEY_PREFIX.substr($identity, 0, 60);
+        return (string) preg_replace('/[^A-Za-z0-9_.]/', '_', substr($namespace, 0, self::NS_KEY_BUDGET));
+    }
+
+    /**
+     * PSR-6 cache key for a client identity. The empty namespace keeps
+     * the legacy shape ('kr_' + the first 60 hex chars of the identity =
+     * 63 chars). A NAMED namespace folds the deployment discriminator
+     * into the key ('kr_' + the bounded PSR-6-safe namespace segment +
+     * '_' + hex), so two deployments sharing one PSR-6 pool never
+     * contend on one literal item: their per-client windows are as
+     * independent as their Redis keys always were. The '_' separator
+     * cannot appear in the hex segment, so no two namespaces (and no
+     * namespaced key vs a legacy 'kr_global'/'kr_'-hex key) can ever
+     * collide.
+     */
+    private static function cacheKey(string $identity, string $namespace): string
+    {
+        if ($namespace === '') {
+            return self::CACHE_KEY_PREFIX.substr($identity, 0, 60);
+        }
+        $ns = self::namespaceKeySegment($namespace);
+
+        // 64 - 'kr_' - ns - '_' hex chars, floored at a still-safe 160
+        // bits of the keyed HMAC (the identity is 256-bit; truncation
+        // only narrows the pseudonym, never merges identities).
+        $hex = substr($identity, 0, max(20, 64 - 4 - \strlen($ns)));
+
+        return self::CACHE_KEY_PREFIX.$ns.'_'.$hex;
+    }
+
+    /**
+     * PSR-6 cache key for the deployment-global window: the legacy
+     * literal when no namespace is configured, else 'kr_global_' + the
+     * (bounded, PSR-6-safe) namespace segment — one dedicated item PER
+     * DEPLOYMENT, never rotated, shared by every client identity of that
+     * deployment. The non-hex 'global' segment can never collide with a
+     * per-client key.
+     */
+    private function globalCacheKey(): string
+    {
+        if ($this->namespace === '') {
+            return self::GLOBAL_CACHE_KEY;
+        }
+
+        return self::GLOBAL_CACHE_KEY.'_'.self::namespaceKeySegment($this->namespace);
     }
 
     /**
@@ -477,7 +541,7 @@ LUA;
         $now = $this->now();
 
         if ($this->pool !== null) {
-            $globalItem = $this->pool->getItem(self::GLOBAL_CACHE_KEY);
+            $globalItem = $this->pool->getItem($this->globalCacheKey());
             $globalState = $globalItem->isHit() ? $globalItem->get() : null;
             $globalHits = $this->prune(\is_array($globalState) ? $this->timestamps($globalState) : [], $now);
 
@@ -572,7 +636,7 @@ LUA;
     {
         $now = $this->now();
 
-        $item = $this->pool->getItem(self::cacheKey($key));
+        $item = $this->pool->getItem(self::cacheKey($key, $this->namespace));
         $state = $item->isHit() ? $item->get() : null;
         $hits = $this->prune(\is_array($state) ? $this->timestamps($state) : [], $now);
 
@@ -581,7 +645,7 @@ LUA;
         }
 
         if ($this->globalMax > 0) {
-            $globalItem = $this->pool->getItem(self::GLOBAL_CACHE_KEY);
+            $globalItem = $this->pool->getItem($this->globalCacheKey());
             $globalState = $globalItem->isHit() ? $globalItem->get() : null;
             $globalHits = $this->prune(\is_array($globalState) ? $this->timestamps($globalState) : [], $now);
 
@@ -622,7 +686,7 @@ LUA;
      * PSR-6): same read-then-decide flow as
      * {@see self::checkLocalTwoEpoch()} with the windows in the pool. A
      * denied request saves NO item (neither the previous- nor the
-     * current-epoch client item, nor the `kr_global` item); an admitted
+     * current-epoch client item, nor the global item); an admitted
      * request saves the current-epoch client item and the global item.
      * Inter-worker races on the non-atomic read-modify-write are the
      * documented best-effort weakness of any generic PSR-6 pool.
@@ -631,8 +695,8 @@ LUA;
     {
         $now = $this->now();
 
-        $itemPrev = $this->pool->getItem(self::cacheKey($identityPrev));
-        $itemCur = $this->pool->getItem(self::cacheKey($identityCur));
+        $itemPrev = $this->pool->getItem(self::cacheKey($identityPrev, $this->namespace));
+        $itemCur = $this->pool->getItem(self::cacheKey($identityCur, $this->namespace));
         $prevState = $itemPrev->isHit() ? $itemPrev->get() : null;
         $curState = $itemCur->isHit() ? $itemCur->get() : null;
         $prevHits = $this->prune(\is_array($prevState) ? $this->timestamps($prevState) : [], $now);
@@ -643,7 +707,7 @@ LUA;
         }
 
         if ($this->globalMax > 0) {
-            $globalItem = $this->pool->getItem(self::GLOBAL_CACHE_KEY);
+            $globalItem = $this->pool->getItem($this->globalCacheKey());
             $globalState = $globalItem->isHit() ? $globalItem->get() : null;
             $globalHits = $this->prune(\is_array($globalState) ? $this->timestamps($globalState) : [], $now);
 

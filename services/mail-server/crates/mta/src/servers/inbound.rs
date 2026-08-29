@@ -968,6 +968,13 @@ impl InboundServer {
         } else if verb == "AUTH" && !ctx.tls_active {
             // AUTH before TLS — reject for security
             "538 5.7.11 Encryption required for requested authentication\r\n".into()
+        } else if verb == "AUTH" && ctx.authenticated {
+            // RFC 4954 §4: a session must not re-AUTH once authenticated
+            // (same guard the submission server applies).
+            "503 5.5.1 Already authenticated\r\n".into()
+        } else if verb == "AUTH" && ctx.mail_from.is_some() {
+            // RFC 4954 §4: AUTH is not permitted during a mail transaction.
+            "503 5.5.1 AUTH not permitted during a mail transaction\r\n".into()
         } else if verb == "AUTH" {
             // F-12: the mechanism matches case-insensitively on the first
             // ARG token; the remainder is the optional inline initial
@@ -1364,6 +1371,11 @@ impl InboundServer {
         let aad = apexmail_lib::dkim::dkim_private_key_aad(&tenant_id, &domain_id.to_string());
 
         let (headers_bytes, body_bytes) = super::submission::split_headers_body(raw);
+        // Parse-only decode for chain detection: ARC field names and tags
+        // are ASCII, so a lossy decode cannot hide an existing chain. The
+        // SIGNING input below stays raw octets — hashing a lossy block
+        // rewrites 8-bit header bytes as U+FFFD, and no external verifier
+        // could reconstruct the seal (same discipline as the body hash).
         let headers = String::from_utf8_lossy(headers_bytes);
 
         // First-hop only (see doc comment): an existing chain would need
@@ -1392,7 +1404,7 @@ impl InboundServer {
         // panicking seal task) is downgraded to "no seal": ARC must never
         // reject or delay mail.
         let seal_task = tokio::task::spawn_blocking({
-            let headers = headers.into_owned();
+            let headers = headers_bytes.to_vec();
             let body = body_bytes.to_vec();
             let domain = domain.to_string();
             move || -> anyhow::Result<String> {
@@ -2820,6 +2832,37 @@ mod tests {
         // No brute-force state is engaged: the AUTH LOGIN/PLAIN state
         // machines must not arm.
         assert!(!ctx.auth_plain_pending && ctx.auth_login_user.is_none());
+    }
+
+    #[tokio::test]
+    async fn auth_command_after_authentication_rejected_with_503() {
+        // RFC 4954 §4: a session must not re-AUTH once authenticated (the
+        // same guard the submission server applies).
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        ctx.authenticated = true;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(b"\0a@example.com\0pw");
+        let resp = handle_cmd(&server, &format!("AUTH PLAIN {b64}"), &mut ctx).await;
+        assert_eq!(resp, "503 5.5.1 Already authenticated\r\n");
+        assert!(
+            !ctx.auth_plain_pending && ctx.auth_login_user.is_none(),
+            "no AUTH state machine may arm on an already-authenticated session"
+        );
+    }
+
+    #[tokio::test]
+    async fn auth_command_during_mail_transaction_rejected_with_503() {
+        // RFC 4954 §4: AUTH is not permitted during a mail transaction.
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        ctx.mail_from = Some("<>".to_string());
+        let resp = handle_cmd(&server, "AUTH LOGIN\r\n", &mut ctx).await;
+        assert_eq!(
+            resp,
+            "503 5.5.1 AUTH not permitted during a mail transaction\r\n"
+        );
+        assert!(
+            ctx.auth_login_user.is_none(),
+            "the LOGIN state machine must not arm mid-transaction"
+        );
     }
 
     /// Read one CRLF-terminated SMTP reply line from a raw TCP stream

@@ -63,17 +63,25 @@ impl CachedDnsResolver {
         let cache_key = format!("mx:{domain}");
 
         if let Some(CachedResult::Records(recs)) = self.cache.get(&cache_key) {
-            return Ok(recs
-                .iter()
-                .filter_map(|r| {
-                    let parts: Vec<&str> = r.splitn(2, ' ').collect();
-                    if parts.len() == 2 {
-                        Some(MxRecord::new(parts[0].parse().unwrap_or(10), parts[1]))
-                    } else {
-                        None
+            // Replay structurally: the cached form is "<u16 priority> <exchange>"
+            // (see mx_cache_action). The priority token MUST validate as u16 and
+            // the remainder — spaces included — is the exchange; a malformed
+            // entry is dropped with a log instead of silently defaulting its
+            // priority to 10, which used to reorder failover.
+            let mut records = Vec::with_capacity(recs.len());
+            for entry in recs {
+                let Some((priority, exchange)) = entry.split_once(' ') else {
+                    debug!(cached = %entry, "Dropping malformed cached MX entry: no priority token");
+                    continue;
+                };
+                match priority.parse::<u16>() {
+                    Ok(p) => records.push(MxRecord::new(p, exchange)),
+                    Err(_) => {
+                        debug!(cached = %entry, "Dropping malformed cached MX entry: invalid priority");
                     }
-                })
-                .collect());
+                }
+            }
+            return Ok(records);
         }
 
         if let Some(CachedResult::NxDomain) = self.cache.get(&cache_key) {
@@ -103,6 +111,11 @@ impl CachedDnsResolver {
     }
 
     /// Lookup SPF record with caching.
+    ///
+    /// A domain with multiple SPF records surfaces as
+    /// [`DnsError::MultipleSpfRecords`] (RFC 7208 §4.5 permerror) and is
+    /// cached as neither positive nor negative — the caller re-queries until
+    /// the misconfiguration is fixed.
     pub async fn spf(&self, domain: &str) -> Result<Option<SpfRecord>, DnsError> {
         let cache_key = format!("spf:{domain}");
 
@@ -385,9 +398,33 @@ mod tests {
         }
     }
 
-    // ── E-2: invalidate_domain reaches DKIM selector keys ─────────────────
+    // ── cached-MX replay: structural, never defaults a priority ───────────
 
-    #[test]
+    #[tokio::test]
+    async fn mx_cache_replay_validates_priority_and_drops_malformed_entries() {
+        let resolver = CachedDnsResolver::default_resolver().expect("resolver construction");
+        resolver.cache.insert(
+            "mx:replay.example",
+            vec![
+                "20 backup.example.com".into(),
+                // Exchange keeps the remainder including spaces.
+                "5 primary example com".into(),
+                "malformed-no-priority-token".into(),
+                "not-a-priority mx.example.com".into(),
+            ],
+        );
+
+        let records = resolver.mx("replay.example").await.expect("cache replay");
+        assert_eq!(
+            records.len(),
+            2,
+            "malformed entries must be dropped, not defaulted: {records:?}"
+        );
+        assert_eq!(records[0], MxRecord::new(20, "backup.example.com"));
+        assert_eq!(records[1], MxRecord::new(5, "primary example com"));
+    }
+
+    // ── E-2: invalidate_domain reaches DKIM selector keys ─────────────────    #[test]
     fn invalidate_domain_invalidates_dkim_selector_keys() {
         let resolver = CachedDnsResolver::default_resolver().expect("resolver construction");
         resolver.cache.insert(

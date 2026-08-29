@@ -25,11 +25,12 @@ import java.util.concurrent.Executor;
 import java.util.concurrent.Flow;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EmailsSendRequestTest {
     @Test
-    void typedSendRequestSerializesReplyToAndScheduledAt() {
+    void typedSendRequestSerializesOnlyApiFields() {
         CapturingHttpClient httpClient = new CapturingHttpClient(successResponse());
 
         try (ApexMailClient client = new ApexMailClient(
@@ -52,15 +53,18 @@ class EmailsSendRequestTest {
                 "idem_typed"
             ));
 
-            assertEquals("2026-05-01T09:00:00Z", response.message().scheduledAt());
-            assertTrue(httpClient.lastRequestBody().contains("\"replyTo\":\"support@example.com\""));
-            assertTrue(httpClient.lastRequestBody().contains("\"scheduledAt\":\"2026-05-01T09:00:00Z\""));
+            // F1: only API-accepted fields reach the wire — replyTo is NOT
+            // sent and scheduled_at is snake_case.
+            assertFalse(httpClient.lastRequestBody().contains("replyTo"));
+            assertTrue(httpClient.lastRequestBody().contains("\"scheduled_at\":\"2026-05-01T09:00:00Z\""));
+            assertTrue(httpClient.lastRequestBody().contains("\"from\":\"hello@example.com\""));
+            assertTrue(httpClient.lastRequestBody().contains("\"to\":[\"user@example.com\"]"));
             assertEquals("idem_typed", httpClient.lastRequest().headers().firstValue("X-Idempotency-Key").orElseThrow());
         }
     }
 
     @Test
-    void mapSendPreservesReplyToAndScheduledAt() {
+    void mapSendSerializesOnlyApiFields() {
         CapturingHttpClient httpClient = new CapturingHttpClient(successResponse());
 
         Map<String, Object> params = new HashMap<>();
@@ -80,8 +84,10 @@ class EmailsSendRequestTest {
         )) {
             client.emails().send(params);
 
-            assertTrue(httpClient.lastRequestBody().contains("\"replyTo\":\"support@example.com\""));
-            assertTrue(httpClient.lastRequestBody().contains("\"scheduledAt\":\"2026-05-01T09:00:00Z\""));
+            assertFalse(httpClient.lastRequestBody().contains("replyTo"));
+            assertFalse(httpClient.lastRequestBody().contains("scheduledAt"));
+            assertTrue(httpClient.lastRequestBody().contains("\"scheduled_at\":\"2026-05-01T09:00:00Z\""));
+            assertTrue(httpClient.lastRequestBody().contains("\"from\":\"hello@example.com\""));
             assertEquals("idem_map", httpClient.lastRequest().headers().firstValue("X-Idempotency-Key").orElseThrow());
         }
     }

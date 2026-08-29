@@ -26,7 +26,7 @@ async fn status(
     auth: AuthUser,
 ) -> Result<Json<SystemSenderStatus>, ApiError> {
     require_scopes(&auth, &["*"])?;
-    require_system_tenant(&auth)?;
+    require_system_tenant(&state, &auth).await?;
     Ok(Json(system_sender_status(&state).await?))
 }
 
@@ -35,7 +35,7 @@ async fn bootstrap(
     auth: AuthUser,
 ) -> Result<Json<SystemSenderStatus>, ApiError> {
     require_scopes(&auth, &["*"])?;
-    require_system_tenant(&auth)?;
+    require_system_tenant(&state, &auth).await?;
     Ok(Json(bootstrap_system_sender(&state).await?))
 }
 
@@ -44,7 +44,7 @@ async fn verify(
     auth: AuthUser,
 ) -> Result<Json<SystemSenderStatus>, ApiError> {
     require_scopes(&auth, &["*"])?;
-    require_system_tenant(&auth)?;
+    require_system_tenant(&state, &auth).await?;
     let current_status = system_sender_status(&state).await?;
     let _verification =
         verify_domain_for_tenant(&state, SYSTEM_TENANT_ID, &current_status.id).await?;

@@ -13,7 +13,7 @@ impl WebhooksRepo {
     /// Create a new webhook.
     pub async fn create(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         url: &str,
         events: serde_json::Value,
         secret: &str,
@@ -23,7 +23,7 @@ impl WebhooksRepo {
              VALUES ($1, $2, $3, $4, $5, 'active', NOW(), NOW()) \
              RETURNING id, tenant_id, url, events, secret, status, created_at, updated_at"
         )
-        .bind(Uuid::new_v4())
+        .bind(crate::types::short_id('w'))
         .bind(tenant_id)
         .bind(url)
         .bind(events)
@@ -35,8 +35,8 @@ impl WebhooksRepo {
     /// Find a webhook by ID.
     pub async fn find_by_id(
         pool: &PgPool,
-        tenant_id: Uuid,
-        id: Uuid,
+        tenant_id: &str,
+        id: &str,
     ) -> Result<Option<Webhook>, sqlx::Error> {
         sqlx::query_as::<_, Webhook>(
             "SELECT id, tenant_id, url, events, secret, status, created_at, updated_at \
@@ -52,7 +52,7 @@ impl WebhooksRepo {
     /// #225:Added limit/offset parameters
     pub async fn list(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Webhook>, sqlx::Error> {
@@ -73,7 +73,7 @@ impl WebhooksRepo {
     /// Uses `(created_at, id)` tuple comparison for stable, efficient pagination.
     pub async fn list_keyset(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         limit: i64,
         cursor_created_at: Option<DateTime<Utc>>,
         cursor_id: Option<Uuid>,
@@ -112,8 +112,8 @@ impl WebhooksRepo {
     /// Update a webhook.
     pub async fn update(
         pool: &PgPool,
-        tenant_id: Uuid,
-        id: Uuid,
+        tenant_id: &str,
+        id: &str,
         url: &str,
         events: serde_json::Value,
         status: &str,
@@ -132,7 +132,7 @@ impl WebhooksRepo {
     }
 
     /// Delete a webhook.
-    pub async fn delete(pool: &PgPool, tenant_id: Uuid, id: Uuid) -> Result<bool, sqlx::Error> {
+    pub async fn delete(pool: &PgPool, tenant_id: &str, id: Uuid) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM webhooks WHERE id = $1 AND tenant_id = $2")
             .bind(id)
             .bind(tenant_id)
@@ -144,7 +144,7 @@ impl WebhooksRepo {
     /// List all webhooks subscribed to a specific event type.
     pub async fn list_by_event_type(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         event_type: &str,
     ) -> Result<Vec<Webhook>, sqlx::Error> {
         sqlx::query_as::<_, Webhook>(
@@ -168,8 +168,8 @@ mod tests {
     #[test]
     fn test_webhook_mock() {
         let w = Webhook {
-            id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            id: crate::types::short_id('w'),
+            tenant_id: crate::types::short_id('w'),
             url: "https://example.com/hooks".into(),
             events: serde_json::json!(["delivered", "bounced"]),
             secret: "whsec_abc123".into(),

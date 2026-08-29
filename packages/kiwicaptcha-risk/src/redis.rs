@@ -20,9 +20,22 @@
 //! timeout (that is the async API); the equivalent sync settings are
 //! `Client::get_connection_with_timeout` (connection, 5 ms) and
 //! `Connection::set_read_timeout`/`set_write_timeout` (command, 10 ms).
+//!
+//! Broken connections are evicted, never reused (the same policy the
+//! sister crate's `redis_verify` pool applies — see its no-retry rule):
+//! any invocation/command error evicts the slot (the connection is
+//! dropped, so the next acquire on that slot reconnects), because a
+//! timed-out or failed reply may still be in flight on the socket and
+//! reusing the connection could desync the Redis reply stream — the next
+//! assessment would silently parse shifted values into the risk
+//! [`SignalVector`]. A pooled slot whose socket is no longer open (a
+//! Redis restart, an idle TCP reset) is detected on acquire via the
+//! cheap `is_open` check and replaced the same way, so a backend restart
+//! heals per slot on the next use instead of leaving every slot broken
+//! until process restart.
 
 use std::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use crate::event::RiskObservation;
@@ -32,6 +45,7 @@ use crate::store::{
     SessionContextTagStore, SessionTlsTagStore,
 };
 use ::redis as redis_crate;
+use ::redis::ConnectionLike as _;
 
 /// The canonical risk-v1 state script, embedded verbatim from this
 /// package's resources directory (kept in sync with the shared protocol
@@ -82,11 +96,16 @@ pub struct RedisRiskStateStore {
     principal_ttl_secs: u64,
     outcome_ttl_secs: u64,
     saturations: [u32; 11],
-    script: redis_crate::Script,
-    assess_v2_script: redis_crate::Script,
-    outcome_register_script: redis_crate::Script,
-    outcome_confirm_script: redis_crate::Script,
-    outcome_correct_script: redis_crate::Script,
+    /// Shared, immutable script handles: the Lua sources are ~18-25 KB, so
+    /// the per-assessment hot path borrows them through the `Arc` instead
+    /// of cloning the full source `String` (and recomputing nothing — the
+    /// SHA-1 cache digest inside `redis::Script` is computed once, at
+    /// construction).
+    script: Arc<redis_crate::Script>,
+    assess_v2_script: Arc<redis_crate::Script>,
+    outcome_register_script: Arc<redis_crate::Script>,
+    outcome_confirm_script: Arc<redis_crate::Script>,
+    outcome_correct_script: Arc<redis_crate::Script>,
     pool: ConnectionPool,
     connection_timeout_ms: u64,
     command_timeout_ms: u64,
@@ -118,13 +137,20 @@ impl ConnectionPool {
     }
 
     /// Picks the next slot round-robin and lazily opens (and timeouts-
-    /// configures) its connection.
+    /// configures) its connection. A slot whose pooled connection is no
+    /// longer open (a Redis restart, an idle TCP reset — the cheap
+    /// `is_open` socket check, no round trip) is evicted here and replaced
+    /// by a fresh connection, so a backend restart heals per slot on the
+    /// next use instead of leaving the pool broken until process restart.
     fn acquire(
         &self,
         client: &redis_crate::Client,
     ) -> Result<MutexGuard<'_, Option<redis_crate::Connection>>, RiskStoreError> {
         let idx = self.next.fetch_add(1, Ordering::Relaxed) % self.slots.len();
         let mut guard = self.slots[idx].lock().unwrap_or_else(|p| p.into_inner());
+        if guard.as_ref().is_some_and(|conn| !conn.is_open()) {
+            *guard = None;
+        }
         if guard.is_none() {
             let conn = client
                 .get_connection_with_timeout(Duration::from_millis(self.connection_timeout_ms))
@@ -136,6 +162,50 @@ impl ConnectionPool {
             *guard = Some(conn);
         }
         Ok(guard)
+    }
+
+    /// The number of slots currently holding a live (not evicted)
+    /// connection. Diagnostic observability for operations and tests; not
+    /// part of the stable API surface.
+    #[doc(hidden)]
+    pub fn live_connections(&self) -> usize {
+        self.slots
+            .iter()
+            .filter(|slot| slot.lock().unwrap_or_else(|p| p.into_inner()).is_some())
+            .count()
+    }
+
+    /// Runs one unit of Redis work on the next slot's connection. Any
+    /// command-level failure EVICTS the slot (the connection is dropped out
+    /// of it) before the error is mapped and propagated, so the next
+    /// acquire on that slot reconnects: a timed-out or failed reply may
+    /// still be in flight on the socket, and reusing the connection could
+    /// desync the Redis reply stream — the next assessment would silently
+    /// parse shifted values into the risk signal vector (the same
+    /// no-retry/poison rule the sister crate's `redis_verify` pool
+    /// documents; there it is r2d2's `has_broken`, here it is eviction on
+    /// error because this pool owns its slots directly).
+    fn with_connection<T>(
+        &self,
+        client: &redis_crate::Client,
+        f: impl FnOnce(&mut redis_crate::Connection) -> redis_crate::RedisResult<T>,
+    ) -> Result<T, RiskStoreError> {
+        let mut guard = self.acquire(client)?;
+        let result = match guard.as_mut() {
+            Some(conn) => f(conn),
+            None => {
+                return Err(RiskStoreError::BackendUnavailable(
+                    "connection vanished".to_string(),
+                ))
+            }
+        };
+        match result {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                *guard = None;
+                Err(map_redis_error(e))
+            }
+        }
     }
 }
 
@@ -166,11 +236,11 @@ impl RedisRiskStateStore {
             principal_ttl_secs: 86_400,
             outcome_ttl_secs: DEFAULT_OUTCOME_TTL_SECS,
             saturations: DEFAULT_SATURATIONS,
-            script: redis_crate::Script::new(SCRIPT),
-            assess_v2_script: redis_crate::Script::new(ASSESS_V2_LUA),
-            outcome_register_script: redis_crate::Script::new(OUTCOME_REGISTER_LUA),
-            outcome_confirm_script: redis_crate::Script::new(OUTCOME_CONFIRM_LUA),
-            outcome_correct_script: redis_crate::Script::new(OUTCOME_CORRECT_LUA),
+            script: Arc::new(redis_crate::Script::new(SCRIPT)),
+            assess_v2_script: Arc::new(redis_crate::Script::new(ASSESS_V2_LUA)),
+            outcome_register_script: Arc::new(redis_crate::Script::new(OUTCOME_REGISTER_LUA)),
+            outcome_confirm_script: Arc::new(redis_crate::Script::new(OUTCOME_CONFIRM_LUA)),
+            outcome_correct_script: Arc::new(redis_crate::Script::new(OUTCOME_CORRECT_LUA)),
             pool: ConnectionPool::new(
                 DEFAULT_POOL_SIZE,
                 Self::CONNECTION_TIMEOUT_MS,
@@ -259,6 +329,15 @@ impl RedisRiskStateStore {
         self.pool.slots.len()
     }
 
+    /// The number of pool slots currently holding a live (not evicted)
+    /// connection. Diagnostic observability for operations and tests (a
+    /// slot evicted after a failed invocation is reconnected lazily on its
+    /// next acquire); not part of the stable API surface.
+    #[doc(hidden)]
+    pub fn live_pool_connections(&self) -> usize {
+        self.pool.live_connections()
+    }
+
     /// The full key set for one observation, in the Lua keys order.
     ///
     /// Source keys use the observation's epoch-scoped pseudonyms:
@@ -342,8 +421,11 @@ impl RedisRiskStateStore {
         args.push(self.session_ttl_secs.to_string());
         args.push(self.principal_ttl_secs.to_string());
 
-        let script = self.script.clone();
-        let mut invocation = script.prepare_invoke();
+        // The script handle is borrowed through the Arc (no per-assessment
+        // source clone); the invocation is configured with this call's keys
+        // and argv, then run on the next pool slot. A failed invocation
+        // evicts the slot (see ConnectionPool::with_connection).
+        let mut invocation = self.script.prepare_invoke();
         for key in &keys {
             invocation.key(key.as_str());
         }
@@ -351,11 +433,9 @@ impl RedisRiskStateStore {
             invocation.arg(arg.as_str());
         }
 
-        let mut conn_guard = self.pool.acquire(&self.client)?;
-        let conn = conn_guard
-            .as_mut()
-            .ok_or_else(|| RiskStoreError::BackendUnavailable("connection vanished".to_string()))?;
-        let reply: Vec<i64> = invocation.invoke(conn).map_err(map_redis_error)?;
+        let reply: Vec<i64> = self
+            .pool
+            .with_connection(&self.client, |conn| invocation.invoke(conn))?;
 
         if reply.len() < 16 {
             return Err(RiskStoreError::ScriptError(format!(
@@ -522,8 +602,7 @@ impl RedisRiskStateStore {
             }
         }
 
-        let script = self.assess_v2_script.clone();
-        let mut invocation = script.prepare_invoke();
+        let mut invocation = self.assess_v2_script.prepare_invoke();
         for key in &keys {
             invocation.key(key.as_str());
         }
@@ -531,11 +610,9 @@ impl RedisRiskStateStore {
             invocation.arg(arg.as_str());
         }
 
-        let mut conn_guard = self.pool.acquire(&self.client)?;
-        let conn = conn_guard
-            .as_mut()
-            .ok_or_else(|| RiskStoreError::BackendUnavailable("connection vanished".to_string()))?;
-        let reply: Vec<redis_crate::Value> = invocation.invoke(conn).map_err(map_redis_error)?;
+        let reply: Vec<redis_crate::Value> = self
+            .pool
+            .with_connection(&self.client, |conn| invocation.invoke(conn))?;
 
         if reply.len() < 19 {
             return Err(RiskStoreError::ScriptError(format!(
@@ -706,34 +783,28 @@ impl RiskStateStore for RedisRiskStateStore {
         // {"o":"P","scope","hour","score","w":1}. Returns 1 when created,
         // 0 when the decision_id is already registered.
         let key = self.outcome_ledger_key(decision_id);
-        let mut conn_guard = self.pool.acquire(&self.client)?;
-        let conn = conn_guard
-            .as_mut()
-            .ok_or_else(|| RiskStoreError::BackendUnavailable("connection vanished".to_string()))?;
-        let script = self.outcome_register_script.clone();
-        let mut invoke = script.prepare_invoke();
-        invoke.key(key.as_str());
-        invoke.arg(scope.to_string());
-        invoke.arg(decision_hour.to_string());
-        invoke.arg(score.to_string());
-        invoke.arg(self.outcome_ttl_secs.to_string());
-        let created: i64 = invoke.invoke(conn).map_err(map_redis_error)?;
+        let mut invocation = self.outcome_register_script.prepare_invoke();
+        invocation.key(key.as_str());
+        invocation.arg(scope.to_string());
+        invocation.arg(decision_hour.to_string());
+        invocation.arg(score.to_string());
+        invocation.arg(self.outcome_ttl_secs.to_string());
+        let created: i64 = self
+            .pool
+            .with_connection(&self.client, |conn| invocation.invoke(conn))?;
         Ok(created != 0)
     }
 
     fn confirm_outcome(&self, decision_id: &str, legitimate: bool) -> Result<u8, RiskStoreError> {
         // outcome_confirm.lua: pending -> L/A exactly once.
         let key = self.outcome_ledger_key(decision_id);
-        let mut conn_guard = self.pool.acquire(&self.client)?;
-        let conn = conn_guard
-            .as_mut()
-            .ok_or_else(|| RiskStoreError::BackendUnavailable("connection vanished".to_string()))?;
-        let script = self.outcome_confirm_script.clone();
-        let mut invoke = script.prepare_invoke();
-        invoke.key(key.as_str());
-        invoke.arg(if legitimate { "L" } else { "A" });
-        invoke.arg(self.outcome_ttl_secs.to_string());
-        let status: i64 = invoke.invoke(conn).map_err(map_redis_error)?;
+        let mut invocation = self.outcome_confirm_script.prepare_invoke();
+        invocation.key(key.as_str());
+        invocation.arg(if legitimate { "L" } else { "A" });
+        invocation.arg(self.outcome_ttl_secs.to_string());
+        let status: i64 = self
+            .pool
+            .with_connection(&self.client, |conn| invocation.invoke(conn))?;
         Ok(status as u8)
     }
 
@@ -741,16 +812,13 @@ impl RiskStateStore for RedisRiskStateStore {
         // outcome_correct.lua: flip L <-> A (no-op when the ledger already
         // carries the target outcome).
         let key = self.outcome_ledger_key(decision_id);
-        let mut conn_guard = self.pool.acquire(&self.client)?;
-        let conn = conn_guard
-            .as_mut()
-            .ok_or_else(|| RiskStoreError::BackendUnavailable("connection vanished".to_string()))?;
-        let script = self.outcome_correct_script.clone();
-        let mut invoke = script.prepare_invoke();
-        invoke.key(key.as_str());
-        invoke.arg(if legitimate { "L" } else { "A" });
-        invoke.arg(self.outcome_ttl_secs.to_string());
-        let applied: i64 = invoke.invoke(conn).map_err(map_redis_error)?;
+        let mut invocation = self.outcome_correct_script.prepare_invoke();
+        invocation.key(key.as_str());
+        invocation.arg(if legitimate { "L" } else { "A" });
+        invocation.arg(self.outcome_ttl_secs.to_string());
+        let applied: i64 = self
+            .pool
+            .with_connection(&self.client, |conn| invocation.invoke(conn))?;
         Ok(applied != 0)
     }
 
@@ -783,19 +851,7 @@ impl SessionContextTagStore for RedisRiskStateStore {
             self.namespace,
             hex::encode(session_id)
         );
-        let mut conn_guard = self.pool.acquire(&self.client)?;
-        let conn = conn_guard
-            .as_mut()
-            .ok_or_else(|| RiskStoreError::BackendUnavailable("connection vanished".to_string()))?;
-        use ::redis::Commands;
-        let created: bool = conn.set_nx(key.clone(), tag).map_err(map_redis_error)?;
-        if created {
-            let ttl: i64 = self.session_ttl_secs.try_into().unwrap_or(i64::MAX);
-            conn.expire::<_, ()>(key, ttl).map_err(map_redis_error)?;
-            return Ok(Some(tag.to_string()));
-        }
-        let stored: Option<String> = conn.get(key).map_err(map_redis_error)?;
-        Ok(stored)
+        self.session_first_tag_record(&key, tag)
     }
 }
 
@@ -821,19 +877,36 @@ impl SessionTlsTagStore for RedisRiskStateStore {
             self.namespace,
             hex::encode(session_id)
         );
-        let mut conn_guard = self.pool.acquire(&self.client)?;
-        let conn = conn_guard
-            .as_mut()
-            .ok_or_else(|| RiskStoreError::BackendUnavailable("connection vanished".to_string()))?;
+        self.session_first_tag_record(&key, tag)
+    }
+}
+
+impl RedisRiskStateStore {
+    /// The shared body of the two first-seen session tag records (context /
+    /// TLS): SET NX with the session TTL (first write wins), then EXPIRE on
+    /// the fresh record or GET the existing one. Runs as ONE unit of pool
+    /// work, so any command failure evicts the slot exactly like a failed
+    /// script invocation (a desynced reply stream must never serve the next
+    /// assessment).
+    fn session_first_tag_record(
+        &self,
+        key: &str,
+        tag: &str,
+    ) -> Result<Option<String>, RiskStoreError> {
         use ::redis::Commands;
-        let created: bool = conn.set_nx(key.clone(), tag).map_err(map_redis_error)?;
-        if created {
-            let ttl: i64 = self.session_ttl_secs.try_into().unwrap_or(i64::MAX);
-            conn.expire::<_, ()>(key, ttl).map_err(map_redis_error)?;
-            return Ok(Some(tag.to_string()));
-        }
-        let stored: Option<String> = conn.get(key).map_err(map_redis_error)?;
-        Ok(stored)
+        let ttl: i64 = self.session_ttl_secs.try_into().unwrap_or(i64::MAX);
+        let created_key = key.to_string();
+        let existing_key = key.to_string();
+        let tag = tag.to_string();
+        self.pool.with_connection(&self.client, |conn| {
+            let created: bool = conn.set_nx(created_key.clone(), tag.as_str())?;
+            if created {
+                conn.expire::<_, ()>(created_key, ttl)?;
+                return Ok(Some(tag.clone()));
+            }
+            let stored: Option<String> = conn.get(existing_key)?;
+            Ok(stored)
+        })
     }
 }
 
@@ -964,6 +1037,66 @@ mod tests {
 
         let no_tag = vec!["risk:global".to_string()];
         assert!(RedisRiskStateStore::assert_same_slot(&no_tag).is_err());
+    }
+
+    // ── Hermetic pool-eviction tests (no Redis URL needed) ──
+
+    /// A failed invocation evicts its pool slot: the connection is dropped
+    /// (never returned to the slot), and the next acquire on that slot
+    /// opens a FRESH TCP connection. A miniature endpoint accepts a
+    /// connection, swallows the first command bytes and then closes the
+    /// socket without replying — the in-flight invocation fails with an
+    /// I/O error, exactly the "reply timed out / backend died mid-command"
+    /// shape that would desync the reply stream if the connection were
+    /// reused. Hermetic: no Redis URL needed.
+    #[test]
+    fn failed_invocation_evicts_the_pool_slot() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accepted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let server_accepted = std::sync::Arc::clone(&accepted);
+        std::thread::spawn(move || {
+            use std::io::Read;
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                server_accepted.fetch_add(1, Ordering::SeqCst);
+                // Swallow whatever command the client sends, then close
+                // with no reply (dropping the stream sends the FIN).
+                let mut buf = [0u8; 512];
+                let _ = stream.read(&mut buf);
+            }
+        });
+
+        let url = format!("redis://127.0.0.1:{port}/");
+        let client = redis_crate::Client::open(url).expect("fake endpoint URL parses");
+        // pool_size 1: a single slot, so round-robin cannot mask the
+        // eviction with a different slot. Relaxed timeouts for CI jitter.
+        let store =
+            RedisRiskStateStore::with_pool_size(client, "evict", 1).with_io_timeouts(2_000, 2_000);
+        let obs = observation(&event_id(1), 0, T0, 0);
+
+        assert!(
+            store.observe(&obs).is_err(),
+            "the abruptly closed reply must fail the invocation"
+        );
+        assert_eq!(
+            store.live_pool_connections(),
+            0,
+            "the slot whose invocation failed must be evicted (None), never reused"
+        );
+        assert_eq!(accepted.load(Ordering::SeqCst), 1);
+
+        // The evicted slot reconnects on its next acquire: a SECOND TCP
+        // connection is accepted by the endpoint. Without eviction the
+        // stale (closed-socket) connection would sit in the slot and the
+        // next invocation would fail on it without any new connection.
+        assert!(store.observe(&obs).is_err());
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            2,
+            "the next acquire on the evicted slot must have reconnected"
+        );
+        assert_eq!(store.live_pool_connections(), 0);
     }
 
     // ── Redis-backed tests (skipped unless the Redis test URL is set) ──

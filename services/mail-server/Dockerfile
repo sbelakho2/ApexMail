@@ -286,6 +286,25 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--", "sales-autopilot"]
 
 # =============================================================================
+# Compliance Service (GDPR/DSR pipeline, retention crons, hash-chain audit)
+# =============================================================================
+# Binds 0.0.0.0:3011 (crates/compliance/src/bin/server.rs, COMPLIANCE_PORT
+# overrides). GET /health is liveness; GET /health/ready is readiness (pings
+# Postgres). Internal-only: nginx never proxies it; the control plane calls
+# compliance:3011 server-side with the COMPLIANCE_AUTH_TOKEN bearer.
+FROM runtime-base AS compliance
+
+COPY --from=builder /app/target/release/compliance-server /usr/local/bin/
+
+USER apexmail
+EXPOSE 3011
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3011"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "compliance-server"]
+
+# =============================================================================
 # Migrator (one-shot database migration job — runs BEFORE `compose up`)
 # =============================================================================
 # Applies services/mail-server/migrations via sqlx::migrate!. Run as

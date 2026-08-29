@@ -45,7 +45,7 @@ Tratamos los datos de acuerdo con nuestra [Política de privacidad](/es/privacy/
 
 ## 7. Condiciones de pago
 
-Las tarifas se facturan mensual o anualmente según su elección. Los precios publicados están en USD. Los impuestos aplicables se determinan conforme a las reglas aplicables a la factura y al país de facturación.
+Las tarifas se facturan mensual o anualmente según su elección. Los precios publicados están en EUR. Los impuestos aplicables se determinan conforme a las reglas aplicables a la factura y al país de facturación.
 
 ### 7.1 Renovación automática
 

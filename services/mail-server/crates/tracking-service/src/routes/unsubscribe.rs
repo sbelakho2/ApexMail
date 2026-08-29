@@ -86,10 +86,20 @@ pub async fn handle_unsub_post(
         .await
         .unwrap_or_else(|| new_id("msg"));
 
-    // Dedup per (tenant, recipient) within 24 h: mail clients and MUA
+    // Dedup per (tenant, recipient) within 24 h:mail clients and MUA
     // auto-retries can fire the one-click POST repeatedly; only the first is
     // recorded (suppression + event + webhook).
-    if !try_mark_unsub_dedup(&state, &data.tenant_id, &data.recipient).await {
+    //
+    // F1:the key is only CHECKED here and SET after a successful record.
+    // Setting it before the recording meant a record_unsubscribe failure
+    // (5xx) was followed by the MUA's RFC 8058 auto-retry hitting the dedup
+    // key and receiving 200-without-recording — a silently lost
+    // unsubscribe. The record-then-mark window allows a concurrent
+    // duplicate through; that is acceptable because the compliance-critical
+    // suppression writes are idempotent upserts (ON CONFLICT (tenant,email)
+    // / (tenant,email,category) DO UPDATE — see
+    // `EventProcessor::add_to_suppression_list`).
+    if is_unsub_duplicate(&state, &data.tenant_id, &data.recipient).await {
         info!("One-click unsubscribe duplicate within 24h window — skipping");
         return axum::http::Response::builder()
             .status(200)
@@ -118,6 +128,12 @@ pub async fn handle_unsub_post(
             .body(axum::body::Body::from(r#"{"error":"Internal error"}"#))
             .unwrap_or_default();
     }
+
+    // Recorded successfully — NOW claim the dedup slot so retries within the
+    // 24 h window short-circuit above. Best-effort:a Redis failure here only
+    // means a duplicate may be re-recorded (idempotent upserts), never a
+    // lost one.
+    mark_unsub_dedup(&state, &data.tenant_id, &data.recipient).await;
 
     // Fire-and-forget webhook queue (F-215)
     queue_unsub_webhook_async(&state, &data.tenant_id, &data.recipient, "one-click");
@@ -164,7 +180,10 @@ pub async fn handle_unsub_get(
         let ip = extract_client_ip(&headers, addr.ip(), &state);
 
         // Dedup per (tenant, recipient) within 24 h (double-clicks, retries).
-        if !try_mark_unsub_dedup(&state, &data.tenant_id, &data.recipient).await {
+        // F1:check-only here; the key is SET after a successful record (see
+        // the POST handler) so a failed record is never swallowed by the
+        // dedup window on the user's retry.
+        if is_unsub_duplicate(&state, &data.tenant_id, &data.recipient).await {
             info!("Unsubscribe confirm duplicate within 24h window — skipping");
             return Html(render_success_page(&data.recipient)).into_response();
         }
@@ -190,6 +209,9 @@ pub async fn handle_unsub_get(
             return Html(render_error_page("Something went wrong. Please try again."))
                 .into_response();
         }
+
+        // Recorded successfully — claim the dedup slot (best-effort, F1).
+        mark_unsub_dedup(&state, &data.tenant_id, &data.recipient).await;
 
         queue_unsub_webhook_async(&state, &data.tenant_id, &data.recipient, "link-click");
 
@@ -399,6 +421,43 @@ pub async fn handle_prefs_post(
         .collect();
 
     if !cats.is_empty() {
+        // F9:category names must be the tenant's own active email_categories,
+        // and the accepted quantity is capped — otherwise a token holder
+        // could write arbitrary junk rows into subscription_preferences in
+        // unbounded volume.
+        let valid_rows = sqlx::query_as::<_, (String,)>(
+            "SELECT name FROM email_categories WHERE tenant_id=$1 AND active=true",
+        )
+        .bind(&data.tenant_id)
+        .fetch_all(&state.db)
+        .await;
+        let valid: std::collections::HashSet<String> = match valid_rows {
+            Ok(rows) => rows.into_iter().map(|(name,)| name).collect(),
+            Err(e) => {
+                tracing::error!(error = %e, tenant_id = %data.tenant_id, "Failed to load email categories for validation");
+                return axum::http::Response::builder()
+                    .status(500)
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        r#"{"error":"Failed to save preferences. Please try again."}"#,
+                    ))
+                    .unwrap_or_default();
+            }
+        };
+
+        if let Err(msg) = validate_category_preferences(&cats, &valid, MAX_CATEGORY_PREFERENCES) {
+            warn!(tenant_id = %data.tenant_id, reason = %msg, "Rejected category preference update");
+            return axum::http::Response::builder()
+                .status(400)
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(format!(
+                    r#"{{"error":{}}}"#,
+                    serde_json::to_string(&msg)
+                        .unwrap_or_else(|_| "\"invalid category preferences\"".into())
+                )))
+                .unwrap_or_default();
+        }
+
         // #203:Use batch INSERT via sqlx::QueryBuilder instead of N individual INSERTs
         let mut tx = match state.db.begin().await {
             Ok(tx) => tx,
@@ -460,17 +519,46 @@ pub async fn handle_prefs_post(
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
-/// Mark an unsubscribe as seen for (tenant, recipient) using Redis
-/// `SET NX EX 86400`. Returns `true` when this is the FIRST unsubscribe in
-/// the 24 h window (the caller should record the event / webhook), `false`
-/// when it is a duplicate. Fails open on Redis errors — losing dedup is
-/// preferable to losing an unsubscribe (compliance-critical).
-async fn try_mark_unsub_dedup(state: &AppState, tenant_id: &str, recipient: &str) -> bool {
-    let recipient_lc = recipient.to_lowercase();
-    let key = format!("unsub:dedup:{tenant_id}:{recipient_lc}");
+/// Dedup key for (tenant, recipient), lower-cased so mixed-case recipients
+/// from token payloads collapse to one key.
+fn unsub_dedup_key(tenant_id: &str, recipient: &str) -> String {
+    format!("unsub:dedup:{}:{}", tenant_id, recipient.to_lowercase())
+}
+
+/// Check (GET) whether an unsubscribe for (tenant, recipient) was already
+/// recorded within the 24 h window. Fails OPEN on Redis errors — losing
+/// dedup is preferable to losing an unsubscribe (compliance-critical); the
+/// duplicate record is absorbed by the idempotent suppression upsert.
+async fn is_unsub_duplicate(state: &AppState, tenant_id: &str, recipient: &str) -> bool {
+    let key = unsub_dedup_key(tenant_id, recipient);
+    match state.redis.get().await {
+        Ok(mut conn) => match redis::cmd("GET")
+            .arg(&key)
+            .query_async::<Option<String>>(&mut *conn)
+            .await
+        {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(e) => {
+                warn!(error = %e, "Unsubscribe dedup check failed — recording anyway");
+                false
+            }
+        },
+        Err(e) => {
+            warn!(error = %e, "Unsubscribe dedup Redis pool error — recording anyway");
+            false
+        }
+    }
+}
+
+/// Claim the 24 h dedup slot (SET NX EX) AFTER the unsubscribe has been
+/// successfully recorded (F1). Best-effort:on Redis failure the worst case
+/// is a duplicate record (idempotent upserts), never a lost unsubscribe.
+async fn mark_unsub_dedup(state: &AppState, tenant_id: &str, recipient: &str) {
+    let key = unsub_dedup_key(tenant_id, recipient);
     match state.redis.get().await {
         Ok(mut conn) => {
-            match redis::cmd("SET")
+            if let Err(e) = redis::cmd("SET")
                 .arg(&key)
                 .arg("1")
                 .arg("EX")
@@ -479,19 +567,11 @@ async fn try_mark_unsub_dedup(state: &AppState, tenant_id: &str, recipient: &str
                 .query_async::<Option<String>>(&mut *conn)
                 .await
             {
-                // Key newly set → first unsubscribe in the window.
-                Ok(Some(_)) => true,
-                // Key existed → duplicate within 24 h.
-                Ok(None) => false,
-                Err(e) => {
-                    warn!(error = %e, "Unsubscribe dedup check failed — recording anyway");
-                    true
-                }
+                warn!(error = %e, "Unsubscribe dedup mark failed — duplicates may re-record");
             }
         }
         Err(e) => {
-            warn!(error = %e, "Unsubscribe dedup Redis pool error — recording anyway");
-            true
+            warn!(error = %e, "Unsubscribe dedup Redis pool error — duplicates may re-record");
         }
     }
 }
@@ -589,4 +669,101 @@ async fn queue_unsub_webhook(
 
 fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4().simple())
+}
+
+/// F9:maximum number of category preferences accepted per POST. The tenant's
+/// own category list is naturally bounded; anything beyond this is rejected.
+const MAX_CATEGORY_PREFERENCES: usize = 50;
+
+/// F9:validate submitted category preferences against the tenant's active
+/// categories and the accepted-count cap. Returns a human-readable error
+/// naming what was rejected, or `Ok(())`.
+fn validate_category_preferences(
+    cats: &[(String, bool)],
+    valid: &std::collections::HashSet<String>,
+    cap: usize,
+) -> Result<(), String> {
+    if cats.len() > cap {
+        return Err(format!(
+            "too many category preferences submitted ({ }); maximum is {cap}",
+            cats.len()
+        ));
+    }
+    let unknown: Vec<&str> = cats
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .filter(|name| !valid.contains(*name))
+        .collect();
+    if !unknown.is_empty() {
+        return Err(format!(
+            "unknown categories rejected: {} (only this tenant's active categories can be set)",
+            unknown.join(", ")
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── F1:dedup key ──────────────────────────────────────────────────
+
+    #[test]
+    fn unsub_dedup_key_is_deterministic_and_case_insensitive() {
+        let a = unsub_dedup_key("tenant_1", "User@Example.com");
+        assert_eq!(a, "unsub:dedup:tenant_1:user@example.com");
+        // Mixed-case token recipients collapse to the same key.
+        assert_eq!(a, unsub_dedup_key("tenant_1", "user@example.com"));
+        assert_eq!(a, unsub_dedup_key("tenant_1", "USER@EXAMPLE.COM"));
+        // Tenant and recipient both scope the key.
+        assert_ne!(a, unsub_dedup_key("tenant_2", "User@Example.com"));
+        assert_ne!(a, unsub_dedup_key("tenant_1", "other@example.com"));
+    }
+
+    // ── F9:category preference validation ─────────────────────────────
+
+    fn valid_set() -> std::collections::HashSet<String> {
+        ["marketing", "product-updates", "weekly-digest"]
+            .into_iter()
+            .map(String::from)
+            .collect()
+    }
+
+    #[test]
+    fn category_prefs_accept_known_categories_within_cap() {
+        let cats = vec![
+            ("marketing".to_string(), true),
+            ("weekly-digest".to_string(), false),
+        ];
+        assert!(validate_category_preferences(&cats, &valid_set(), 50).is_ok());
+    }
+
+    #[test]
+    fn category_prefs_reject_unknown_names() {
+        let cats = vec![
+            ("marketing".to_string(), true),
+            ("arbitrary-junk".to_string(), true),
+        ];
+        let err = validate_category_preferences(&cats, &valid_set(), 50).unwrap_err();
+        assert!(err.contains("arbitrary-junk"), "{err}");
+        assert!(err.contains("unknown categories"), "{err}");
+    }
+
+    #[test]
+    fn category_prefs_reject_over_cap_quantity() {
+        let cats: Vec<(String, bool)> = (0..51)
+            .map(|i| ("marketing".to_string(), i % 2 == 0))
+            .collect();
+        let err = validate_category_preferences(&cats, &valid_set(), 50).unwrap_err();
+        assert!(err.contains("maximum is 50"), "{err}");
+        // Exactly at the cap passes.
+        let at_cap: Vec<(String, bool)> = cats[..50].to_vec();
+        assert!(validate_category_preferences(&at_cap, &valid_set(), 50).is_ok());
+    }
+
+    #[test]
+    fn category_prefs_empty_submission_is_ok() {
+        assert!(validate_category_preferences(&[], &valid_set(), 50).is_ok());
+    }
 }

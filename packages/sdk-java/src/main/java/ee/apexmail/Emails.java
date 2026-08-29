@@ -50,10 +50,19 @@ public final class Emails {
             this(from, to, subject, html, text, templateId, cc, bcc, replyTo, null, null, null, null, scheduledAt, idempotencyKey);
         }
 
+        /**
+         * Serializes the exact server SendMessageRequest wire shape
+         * (messages.rs, deny_unknown_fields): from/to/cc/bcc as BARE
+         * address strings (map inputs {email, name} contribute only the
+         * address — the API has no display-name field), tags as a string
+         * list, scheduled_at snake_case. Inputs the API rejects (replyTo,
+         * templateId, attachments, priority) are validated as inputs but
+         * never transmitted.
+         */
         Map<String, Object> toMap() {
             Map<String, Object> body = new HashMap<>();
-            body.put("from", from);
-            body.put("to", to);
+            body.put("from", Emails.extractEmail(from));
+            body.put("to", Emails.coerceAddressList(to));
             body.put("subject", subject);
             if (html != null) {
                 body.put("html", html);
@@ -61,42 +70,91 @@ public final class Emails {
             if (text != null) {
                 body.put("text", text);
             }
-            if (templateId != null) {
-                body.put("templateId", templateId);
+            Object ccList = Emails.coerceAddressList(cc);
+            if (ccList != null) {
+                body.put("cc", ccList);
             }
-            if (cc != null) {
-                body.put("cc", cc);
-            }
-            if (bcc != null) {
-                body.put("bcc", bcc);
-            }
-            if (replyTo != null) {
-                body.put("replyTo", replyTo);
-            }
-            if (attachments != null) {
-                body.put("attachments", attachments);
+            Object bccList = Emails.coerceAddressList(bcc);
+            if (bccList != null) {
+                body.put("bcc", bccList);
             }
             if (tags != null) {
-                body.put("tags", tags);
-            }
-            if (priority != null) {
-                body.put("priority", priority);
+                body.put("tags", Emails.coerceTagList(tags));
             }
             if (metadata != null) {
                 body.put("metadata", metadata);
             }
             if (scheduledAt != null) {
-                body.put("scheduledAt", scheduledAt);
+                body.put("scheduled_at", scheduledAt);
             }
             return body;
         }
     }
 
+    /** Extracts the bare address string from "addr" or {email, name} inputs. */
+    static String extractEmail(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Map<?, ?> map) {
+            Object email = map.get("email");
+            if (email == null) {
+                email = map.get("address");
+            }
+            return email == null ? null : String.valueOf(email);
+        }
+        return String.valueOf(value);
+    }
+
+    /** Coerces "addr" | ["addr", ...] | [{email, name}] to a List of bare
+     *  address strings (the API's SendMessageRequest takes Vec<String>). */
+    static List<String> coerceAddressList(Object value) {
+        if (value == null) {
+            return null;
+        }
+        List<?> raw = value instanceof Iterable<?> iterable
+            ? new java.util.ArrayList<>(java.util.stream.StreamSupport.stream(iterable.spliterator(), false).toList())
+            : List.of(value);
+        List<String> out = new java.util.ArrayList<>();
+        for (Object item : raw) {
+            String email = extractEmail(item);
+            if (email != null && !email.isBlank()) {
+                out.add(email);
+            }
+        }
+        return out;
+    }
+
+    /** Flattens tags to a List<String> ("name" or "name=value" for map
+     *  inputs) — the API requires Vec<String>. */
+    static List<String> coerceTagList(Object tags) {
+        List<String> out = new java.util.ArrayList<>();
+        Iterable<?> raw = tags instanceof Iterable<?> iterable ? iterable : List.of(tags);
+        for (Object tag : raw) {
+            if (tag instanceof Map<?, ?> map && map.get("name") != null) {
+                Object name = map.get("name");
+                Object value = map.get("value");
+                out.add(value == null ? String.valueOf(name) : name + "=" + value);
+            } else if (tag != null) {
+                out.add(String.valueOf(tag));
+            }
+        }
+        return out;
+    }
+
     /**
      * Send a single email.
      *
-     * <p>Required keys: {@code from}, {@code to}, {@code subject} plus at least one of
-     * {@code html}, {@code text}, or {@code templateId}.
+     * <p>Required keys: {@code from}, {@code to}, {@code subject} plus at
+     * least one of {@code html} or {@code text} (the API's
+     * SendMessageRequest has no templateId field).
+     *
+     * <p>The serialized body matches the server's SendMessageRequest
+     * exactly: from/to/cc/bcc go out as BARE address strings ({email, name}
+     * map inputs contribute only the address — the API has no display-name
+     * field), tags as a string list, scheduled_at snake_case. Inputs the
+     * API rejects (replyTo, templateId, attachments, priority) are
+     * validated as inputs but never transmitted.
      *
      * <p>When no {@code idempotencyKey} is supplied, a random UUID v4 is generated
      * per logical send and replayed across transport retries of that send, so
@@ -141,10 +199,20 @@ public final class Emails {
         ));
     }
 
-    /** Cancel a scheduled email. */
-    public GetResponse cancel(String id) {
-        return client.request("POST", "/v1/messages/" + encode(id) + "/cancel", Map.of(), GetResponse.class);
+    /**
+     * Cancel a scheduled email. Returns the flat MessageResponse
+     * ({id, status, created_at}).
+     */
+    public CancelResponse cancel(String id) {
+        return client.request("POST", "/v1/messages/" + encode(id) + "/cancel", Map.of(), CancelResponse.class);
     }
+
+    /** Flat cancellation result ({id, status, created_at}). */
+    public record CancelResponse(
+        String id,
+        String status,
+        @com.fasterxml.jackson.annotation.JsonProperty("created_at") String createdAt
+    ) {}
 
     private static void validateSendParams(Map<String, Object> params) {
         if (!params.containsKey("from")) {
@@ -156,8 +224,13 @@ public final class Emails {
         if (!params.containsKey("subject")) {
             throw new IllegalArgumentException("subject is required");
         }
-        if (!params.containsKey("html") && !params.containsKey("text") && !params.containsKey("templateId")) {
-            throw new IllegalArgumentException("html, text, or templateId is required");
+        if (!params.containsKey("html") && !params.containsKey("text")) {
+            // The API's SendMessageRequest has no templateId field.
+            if (params.containsKey("templateId")) {
+                throw new IllegalArgumentException(
+                    "html or text body is required (templateId is not supported by the send API)");
+            }
+            throw new IllegalArgumentException("html or text is required");
         }
 
         validateRecipients(params.get("from"), "from");
@@ -174,11 +247,55 @@ public final class Emails {
     }
 
     /**
+     * Normalize one batch message map to the exact SendMessageRequest wire
+     * shape (same coercion as a single send).
+     */
+    private static Map<String, Object> normalizeBatchMessage(Map<String, Object> message) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("from", extractEmail(message.get("from")));
+        body.put("to", coerceAddressList(message.get("to")));
+        Object subject = message.get("subject");
+        if (subject != null) {
+            body.put("subject", subject);
+        }
+        if (message.get("html") != null) {
+            body.put("html", message.get("html"));
+        }
+        if (message.get("text") != null) {
+            body.put("text", message.get("text"));
+        }
+        Object ccList = coerceAddressList(message.get("cc"));
+        if (ccList != null) {
+            body.put("cc", ccList);
+        }
+        Object bccList = coerceAddressList(message.get("bcc"));
+        if (bccList != null) {
+            body.put("bcc", bccList);
+        }
+        if (message.get("tags") != null) {
+            body.put("tags", coerceTagList(message.get("tags")));
+        }
+        if (message.get("metadata") != null) {
+            body.put("metadata", message.get("metadata"));
+        }
+        Object scheduledAt = message.get("scheduled_at");
+        if (scheduledAt == null) {
+            scheduledAt = message.get("scheduledAt");
+        }
+        if (scheduledAt != null) {
+            body.put("scheduled_at", scheduledAt);
+        }
+        return body;
+    }
+
+    /**
      * Send up to 1,000 emails in one API call.
      *
      * <p>An idempotency key is generated automatically and replayed across
      * transport retries of the batch call (SDK-B); supply {@code idempotencyKey}
-     * via the overload to control it.
+     * via the overload to control it. Each message map is serialized with
+     * the same coercion as {@link #send} (bare-string recipients, snake_case
+     * scheduled_at, no API-unknown keys).
      *
      * @param messages  List of parameter maps (same shape as {@link #send})
      */
@@ -197,6 +314,7 @@ public final class Emails {
         if (messages == null || messages.isEmpty()) {
             throw new IllegalArgumentException("messages must not be empty");
         }
+        List<Map<String, Object>> normalized = new java.util.ArrayList<>(messages.size());
         for (int i = 0; i < messages.size(); i++) {
             Map<String, Object> message = messages.get(i);
             if (message == null) {
@@ -213,32 +331,46 @@ public final class Emails {
             if (!message.containsKey("subject")) {
                 throw new IllegalArgumentException("message at index " + i + " missing subject");
             }
-            if (!message.containsKey("html") && !message.containsKey("text") && !message.containsKey("templateId")) {
-                throw new IllegalArgumentException("message at index " + i + " missing html, text, or templateId");
+            if (!message.containsKey("html") && !message.containsKey("text")) {
+                if (message.containsKey("templateId")) {
+                    throw new IllegalArgumentException("message at index " + i
+                        + " missing html or text (templateId is not supported by the send API)");
+                }
+                throw new IllegalArgumentException("message at index " + i + " missing html or text");
             }
+            normalized.add(normalizeBatchMessage(message));
         }
         String key = (idempotencyKey == null || idempotencyKey.isBlank())
             ? java.util.UUID.randomUUID().toString()
             : idempotencyKey;
-        return client.request("POST", "/v1/messages/batch", Map.of("messages", messages), BatchResponse.class, key);
-    }
-
-    /** Get a sent email by its ID. */
-    public GetResponse get(String id) {
-        return client.request("GET", "/v1/messages/" + encode(id), null, GetResponse.class);
+        return client.request("POST", "/v1/messages/batch", Map.of("messages", normalized), BatchResponse.class, key);
     }
 
     /**
-     * List emails with optional filters.
-     *
-     * @param options  Optional filters: {@code status}, {@code limit}, {@code offset}, {@code tag}
+     * Get a sent email by its ID — the flat MessageDetail payload
+     * ({id, from, to, subject, status, tags, metadata, scheduled_at,
+     * sent_at, created_at}); the API has no {"email": ...} wrapper.
      */
-    public ListResponse list(Map<String, Object> options) {
-        String query = buildQuery(options);
-        return client.request("GET", "/v1/messages" + query, null, ListResponse.class);
+    public EmailDetail get(String id) {
+        return client.request("GET", "/v1/messages/" + encode(id), null, EmailDetail.class);
     }
 
-    public ListResponse list() {
+    /**
+     * List emails with optional filters. The server's ListMessagesQuery
+     * accepts {limit, offset, cursor, status, sort_by} only — after
+     * envelope unwrap the payload is the bare MessageDetail array.
+     *
+     * @param options  Optional filters: {@code status}, {@code limit},
+     *                 {@code offset}, {@code cursor}, {@code sort_by}
+     * @return the bare list of message details
+     */
+    public List<EmailDetail> list(Map<String, Object> options) {
+        String query = buildQuery(options);
+        return client.request("GET", "/v1/messages" + query, null,
+            new com.fasterxml.jackson.core.type.TypeReference<List<EmailDetail>>() {});
+    }
+
+    public List<EmailDetail> list() {
         return list(Map.of());
     }
 
@@ -290,18 +422,11 @@ public final class Emails {
             }
             return;
         }
-        validateEmail(extractEmail(value), field);
-    }
-
-    private static String extractEmail(Object value) {
-        if (value instanceof Map<?, ?> map) {
-            Object email = map.get("email");
-            if (email == null || String.valueOf(email).isBlank()) {
-                throw new IllegalArgumentException("Recipient object must include a non-empty 'email' field");
-            }
-            return String.valueOf(email);
+        String email = extractEmail(value);
+        if (email == null) {
+            throw new IllegalArgumentException("Recipient object must include a non-empty 'email' field");
         }
-        return value == null ? null : String.valueOf(value);
+        validateEmail(email, field);
     }
 
     private static void validateEmail(String email, String field) {
@@ -357,18 +482,41 @@ public final class Emails {
         public record Summary(Integer total, Integer success, Integer failed) {}
     }
 
+    /**
+     * The flat MessageDetail payload of GET /v1/messages/:id: bare-string
+     * from, string-array to, snake_case timestamps.
+     */
     public record EmailDetail(
         String id,
-        String status,
-        String fromEmail,
+        @com.fasterxml.jackson.annotation.JsonProperty("from") String from,
+        java.util.List<String> to,
         String subject,
+        String status,
         java.util.List<String> tags,
-        String createdAt,
-        String sentAt,
-        String deliveredAt,
-        String openedAt,
-        String clickedAt
+        Map<String, Object> metadata,
+        @com.fasterxml.jackson.annotation.JsonProperty("scheduled_at") String scheduledAt,
+        @com.fasterxml.jackson.annotation.JsonProperty("created_at") String createdAt,
+        @com.fasterxml.jackson.annotation.JsonProperty("sent_at") String sentAt
     ) {}
+
+    /**
+     * Historical wrapper record.
+     *
+     * @deprecated the API returns the flat MessageDetail object (no
+     * {"message": ...} wrapper); {@link #get(String)} returns
+     * {@link EmailDetail} directly.
+     */
+    @Deprecated
+    public record GetResponse(EmailDetail message) {}
+
+    /**
+     * Historical list response record.
+     *
+     * @deprecated the API returns the envelope {"data": [MessageDetail...],
+     * "meta": ...}; {@link #list(Map)} returns the bare list.
+     */
+    @Deprecated
+    public record ListResponse(java.util.List<EmailDetail> messages, Map<String, Object> pagination) {}
 
     /**
      * SMTP delivery envelope with authentication results.
@@ -384,7 +532,4 @@ public final class Emails {
         String timestamp
     ) {}
 
-    public record GetResponse(EmailDetail message) {}
-
-    public record ListResponse(java.util.List<EmailDetail> messages, Map<String, Object> pagination) {}
 }

@@ -174,7 +174,7 @@ async fn list_tenants(
     Query(params): Query<ListTenantsQuery>,
 ) -> Result<Json<Vec<TenantRow>>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
@@ -199,7 +199,7 @@ async fn update_tenant(
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     // Per-handler system-tenant double-check (the router-level gate is
     // defense in depth; every admin handler re-asserts it like audit.rs).
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
     validate_generic_tenant_update(&body)?;
     let id = body.id;
 
@@ -280,7 +280,7 @@ async fn delete_tenant(
     Json(body): Json<DeleteTenantRequest>,
 ) -> Result<StatusCode, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
     validate_delete_confirmation(&body.id, &body.confirmation)?;
     let deleted = delete_tenant_records(&state.db, &body.id).await?;
 

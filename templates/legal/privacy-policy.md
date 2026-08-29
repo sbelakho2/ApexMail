@@ -26,7 +26,7 @@ We process personal data about the following categories of individuals.
 | Source | Automated collection via web server logs and analytics |
 | Purpose | Website operation, security monitoring, performance analytics |
 | Legal basis | Legitimate interest (GDPR Art. 6(1)(f)) — website security and improvement |
-| Processor or recipient | Hetzner (hosting), Plausible Analytics (privacy-focused, self-hosted) |
+| Processor or recipient | Hetzner (hosting) |
 | Location | EU data centers (Hetzner Germany, Finland) — web server logs, analytics |
 | Retention | 30 days for raw logs; aggregated analytics retained indefinitely |
 | Rights | Access, erasure, objection |
@@ -39,7 +39,7 @@ We process personal data about the following categories of individuals.
 | Source | Directly from the individual via web forms, email, or sales contact |
 | Purpose | Responding to inquiries, providing product information, sales communication |
 | Legal basis | Legitimate interest (GDPR Art. 6(1)(f)) — business development; Consent (Art. 6(1)(a)) for marketing |
-| Processor or recipient | HubSpot CRM (EU-hosted), internal sales team |
+| Processor or recipient | Internal sales team (in-house tooling) |
 | Location | EU data centers (Hetzner Germany, Finland) — CRM hosted in EU |
 | Retention | 24 months after last contact, or until consent is withdrawn |
 | Rights | Access, rectification, erasure, objection, data portability |
@@ -107,7 +107,7 @@ Payment card details are processed by Stripe and never touch our servers. We rec
 
 ### 3.3 Analytics
 
-We collect aggregated, anonymized platform usage metrics for operational purposes. Per-account analytics (delivery rates, engagement metrics) are available to account holders. Self-hosted Plausible Analytics (no third-party cookies) is used on our marketing website.
+We collect aggregated, anonymized platform usage metrics for operational purposes. Per-account analytics (delivery rates, engagement metrics) are available to account holders. Our marketing website ships no analytics scripts or third-party trackers (CSP `script-src 'none'`); only the server-side access logs described in §2.1 are used.
 
 ### 3.4 Support
 

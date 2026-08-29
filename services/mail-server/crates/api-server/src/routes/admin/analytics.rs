@@ -297,12 +297,12 @@ fn clickhouse_window(range: &str) -> chrono::Duration {
 /// series and an explanatory note — the Postgres endpoints above remain the
 /// source of truth.
 async fn get_clickhouse_engagement(
-    State(_state): State<AppState>,
+    state: State<AppState>,
     auth: AuthUser,
     Query(params): Query<ClickHouseEngagementQuery>,
 ) -> Result<Json<ClickHouseEngagementResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     if params.tenant_id.trim().is_empty() {
         return Err(ApiError::Validation(vec!["tenant_id is required".into()]));
@@ -379,7 +379,7 @@ async fn get_analytics(
     Query(params): Query<AnalyticsQuery>,
 ) -> Result<Json<AnalyticsResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     let range = parse_analytics_range(&params.range);
     let columns = detect_event_columns(&state).await;

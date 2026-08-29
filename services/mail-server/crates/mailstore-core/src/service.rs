@@ -49,9 +49,10 @@ pub struct MailstoreServiceImpl {
     /// Keyed per account (M): the previous single global limiter let one hot
     /// account exhaust the entire budget and starve every other tenant.
     /// Limiters are tracked in a bounded map; when the cap is reached the
-    /// map is reset (memory stays bounded, attackers lose their budget too,
-    /// legitimate accounts rebuild burst within a second).
-    rate_limiters: std::sync::Mutex<HashMap<String, Arc<PerAccountLimiter>>>,
+    /// OLDEST HALF of the entries is evicted by last-seen (F13) — the old
+    /// `map.clear()` reset every legitimate account's budget the moment a
+    /// key spray (e.g. pre-auth garbage account ids) filled the map.
+    rate_limiters: std::sync::Mutex<HashMap<String, TrackedLimiter>>,
     /// L14(a): per-account mailbox-list cache. `resolve_account_mailbox`
     /// used to run `get_account` + `list_mailboxes` (ALL of the account's
     /// mailboxes) on EVERY RPC just to map a name to an id. Entries expire
@@ -75,8 +76,64 @@ const MAILBOX_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3)
 
 type PerAccountLimiter = GovRateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
+/// One tracked per-key limiter with its last-seen time so the bounded map can
+/// evict the OLDEST HALF instead of flushing everything (F13): the previous
+/// `map.clear()` at the cap let a pre-auth key spray reset every legitimate
+/// account's burst budget in one shot.
+struct TrackedLimiter {
+    limiter: Arc<PerAccountLimiter>,
+    last_seen: std::time::Instant,
+}
+
 /// Maximum simultaneously tracked rate-limit keys (bounded memory).
 const MAX_TRACKED_RATE_KEYS: usize = 10_000;
+
+// ── F3: monotonic UIDVALIDITY minting ────────────────────────────────────────
+//
+// The old derivation (`created_at` seconds) had 1-second granularity and was
+// not bumped on a same-second DELETE+CREATE of the same mailbox name: the
+// recreated mailbox served the SAME UIDVALIDITY, so clients kept their stale
+// UID caches and silently missed the recreation (RFC 3501 §6.3.1: UIDs must
+// never be reused across mailbox recreations). Minting now mixes the mailbox
+// row's creation timestamp (nanosecond wall clock) with a process-global
+// monotonic counter:
+//
+//   * a per-mailbox-ROW memo keeps the value stable for the process lifetime
+//     of that row (a mailbox must not change UIDVALIDITY mid-session);
+//   * every mint is `max(previous mint + 1, ns timestamp)` — strictly greater
+//     than anything served before, so ties on the timestamp (or a same-second
+//     recreation) still yield fresh, increasing values;
+//   * a recreated mailbox is a NEW row id, and RENAME creates a new row for
+//     the new name, so both always mint a fresh value.
+//
+// RESTART CAVEAT (honest limitation): the memo and counter are process-local.
+// After a restart, values are re-derived from `created_at`; a wall-clock
+// rewind across the restart could mint a value lower than one served before
+// it. Persisting a high-water mark needs a schema change (out of scope here).
+
+/// Last UIDVALIDITY value minted by this process (monotonic floor).
+static UIDVALIDITY_LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Per-mailbox-row memo: mailbox id → the UIDVALIDITY this process serves for
+/// it. Keyed by row id (not name) so a recreation of the same name mints anew.
+static UIDVALIDITY_MEMO: LazyLock<std::sync::Mutex<HashMap<Uuid, u64>>> =
+    LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+/// Mint the UIDVALIDITY for a mailbox row (see the module comment above).
+fn mint_uidvalidity(mailbox_row_id: Uuid, created_at: chrono::DateTime<chrono::Utc>) -> u64 {
+    let mut memo = UIDVALIDITY_MEMO.lock().unwrap();
+    if let Some(&validity) = memo.get(&mailbox_row_id) {
+        return validity;
+    }
+    let ns = created_at
+        .timestamp_nanos_opt()
+        .and_then(|ns| u64::try_from(ns).ok())
+        .unwrap_or(0);
+    let prev = UIDVALIDITY_LAST.load(std::sync::atomic::Ordering::Relaxed);
+    let candidate = ns.max(prev.saturating_add(1)).max(1);
+    UIDVALIDITY_LAST.store(candidate, std::sync::atomic::Ordering::Relaxed);
+    memo.insert(mailbox_row_id, candidate);
+    candidate
+}
 
 /// A dummy Argon2 password hash used to equalize timing on the
 /// "account not found" and "stored hash unparseable" paths of
@@ -414,14 +471,33 @@ impl MailstoreServiceImpl {
         let limiter = {
             let mut map = self.rate_limiters.lock().unwrap();
             if map.len() >= MAX_TRACKED_RATE_KEYS && !map.contains_key(key) {
-                // Bound memory: drop all tracked limiters (see struct docs).
-                map.clear();
+                // F13: partial eviction — drop the oldest HALF by last-seen
+                // instead of clearing the map. A pre-auth key spray now only
+                // costs the quietest half of the keys their burst budget;
+                // active accounts keep their limiters (and the attacker's own
+                // keys are the newest, so they are never the ones evicted).
+                let mut by_age: Vec<String> = map.keys().cloned().collect();
+                by_age.sort_by_key(|k| {
+                    map.get(k)
+                        .map(|entry| entry.last_seen)
+                        .unwrap_or_else(std::time::Instant::now)
+                });
+                let evict = by_age.len() / 2;
+                for key in by_age.into_iter().take(evict) {
+                    map.remove(&key);
+                }
             }
-            Arc::clone(map.entry(key.to_string()).or_insert_with(|| {
-                Arc::new(GovRateLimiter::direct(GovQuota::per_second(nonzero!(
-                    1000u32
-                ))))
-            }))
+            let now = std::time::Instant::now();
+            let entry = map
+                .entry(key.to_string())
+                .or_insert_with(|| TrackedLimiter {
+                    limiter: Arc::new(GovRateLimiter::direct(GovQuota::per_second(nonzero!(
+                        1000u32
+                    )))),
+                    last_seen: now,
+                });
+            entry.last_seen = now;
+            Arc::clone(&entry.limiter)
         };
         if limiter.check().is_err() {
             return Err(Status::resource_exhausted(
@@ -500,9 +576,7 @@ impl MailstoreServiceImpl {
                 crate::models::MailboxType::Archive => attrs.push("\\Archive".to_string()),
                 crate::models::MailboxType::Custom => {}
             }
-            let created = mailbox.created_at.timestamp();
-            let validity = if created < 0 { 1 } else { created as u64 };
-            (attrs, validity)
+            (attrs, mint_uidvalidity(mailbox.id, mailbox.created_at))
         };
 
         Mailbox {
@@ -755,9 +829,17 @@ impl MailstoreService for MailstoreServiceImpl {
         // UID bounds are pushed into SQL so the storage LIMIT applies AFTER
         // the bound — the previous post-filter truncated pages lossily for
         // mailboxes larger than the limit (breaking exact UID paging).
+        //
+        // F1: `is_deleted` stays `None`, so the listing INCLUDES soft-deleted
+        // (\Deleted) messages — the IMAP mailbox view must keep them visible
+        // (and `SEARCH DELETED` findable) until EXPUNGE removes them. The only
+        // consumer of this RPC today is the IMAP server's view construction.
+        //
+        // F2: metadata-only read — no body columns are selected or decrypted;
+        // bodies are served by `get_message` point reads.
         let messages = self
             .storage
-            .list_messages(&MessageQuery {
+            .list_message_metadata(&MessageQuery {
                 account_id,
                 mailbox_id: Some(mailbox.id),
                 uid_min: (req.uid_min > 0).then_some(req.uid_min),
@@ -1545,6 +1627,37 @@ mod tests {
     use crate::models::MailboxType;
     use crate::storage::MessageStorage;
     use sqlx::PgPool;
+
+    // ── F3: UIDVALIDITY minting is monotonic and stable per row ──────────
+
+    #[test]
+    fn uidvalidity_is_stable_per_row_and_strictly_monotonic_across_rows() {
+        // Fresh row ids so parallel tests sharing the process-global memo and
+        // counter cannot collide (same convention as the auth-throttle test).
+        let row1 = Uuid::new_v4();
+        let row2 = Uuid::new_v4();
+        let row3 = Uuid::new_v4();
+        let t0 = chrono::Utc::now();
+
+        let v1 = mint_uidvalidity(row1, t0);
+        // Same row, later call: STABLE (a mailbox must not change validity
+        // mid-session), even if asked with a different timestamp.
+        assert_eq!(
+            v1,
+            mint_uidvalidity(row1, t0 + chrono::Duration::seconds(60))
+        );
+        assert!(v1 >= 1);
+
+        // A recreated mailbox (new row) created in the SAME instant must
+        // still mint a strictly greater value — the old second-granularity
+        // derivation collided here.
+        let v2 = mint_uidvalidity(row2, t0);
+        assert!(v2 > v1, "recreation must yield a strictly greater value");
+
+        // Later creations are greater too (counter floor beats clock ties).
+        let v3 = mint_uidvalidity(row3, t0);
+        assert!(v3 > v2);
+    }
 
     #[test]
     fn parse_message_metadata_extracts_envelope_fields() {

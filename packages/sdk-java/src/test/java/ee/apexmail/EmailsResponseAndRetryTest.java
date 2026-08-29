@@ -244,7 +244,11 @@ class EmailsResponseAndRetryTest {
         assertEquals(Duration.ofSeconds(3), retryDelayWithHeader("3", 2)); // max(2s backoff, 3s) = 3s
         assertEquals(Duration.ofSeconds(120), retryDelayWithHeader("300", 0)); // capped
         assertEquals(Duration.ofSeconds(2), retryDelayWithHeader(null, 2)); // quadratic backoff 500ms*4
-        assertEquals(Duration.ZERO, retryDelayWithHeader("garbage", 0)); // unparseable → backoff 0
+        // F8: the first retry uses attempt 1, so the backoff floor is 500ms —
+        // a 0-based exponent produced a 0s delay (an immediate hammer at a
+        // server that had just said "slow down").
+        assertEquals(Duration.ofMillis(500), retryDelayWithHeader(null, 0));
+        assertEquals(Duration.ofMillis(500), retryDelayWithHeader("garbage", 0)); // unparseable → backoff floor
     }
 
     private static Duration retryDelayWithHeader(String retryAfter, int attempt) {

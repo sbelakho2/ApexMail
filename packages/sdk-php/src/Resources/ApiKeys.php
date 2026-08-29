@@ -16,14 +16,27 @@ class ApiKeys
     /**
      * Create a new API key.
      *
-     * @param array $params { name, expiresAt, expires_at }
+     * The server's CreateApiKeyRequest accepts exactly
+     * {name, scopes: string[], expires_in_days?} (deny_unknown_fields).
+     * `scopes` is required by the API and defaults to [] (a key with no
+     * scopes); the legacy expiresAt input is accepted but not sent — use
+     * expires_in_days (1..365).
+     *
+     * @param array $params { name, scopes?, expires_in_days?, expires_at? (unused) }
      */
     public function create(array $params): array
     {
+        $scopes = $params['scopes'] ?? [];
         $body = array_filter([
-            'name'      => $params['name'] ?? null,
-            'expiresAt' => $params['expires_at'] ?? $params['expiresAt'] ?? null,
+            'name'             => $params['name'] ?? null,
+            'scopes'           => array_values(array_map('strval', (array) $scopes)),
+            'expires_in_days'  => $params['expires_in_days'] ?? $params['expiresInDays'] ?? null,
         ], static fn ($value) => $value !== null && $value !== '');
+
+        // scopes must always be present (even empty) for the server DTO.
+        if (!isset($body['scopes'])) {
+            $body['scopes'] = [];
+        }
 
         return $this->client->request('POST', '/v1/auth/api-keys', $body);
     }

@@ -1,5 +1,32 @@
-//! Compliance server binary — HTTP on port 3011 with 5 background cron jobs
-//! and graceful shutdown.
+//! Compliance server binary — a long-running service: HTTP API on port 3011
+//! (liveness `GET /health`, readiness `GET /health/ready`), 7 background
+//! cron jobs and graceful shutdown (SIGTERM/SIGINT → in-flight requests
+//! drain, DB pool closes).
+//!
+//! ## Service contract (docker-compose)
+//!
+//! * Service name: `compliance`; container port `3011` (env `COMPLIANCE_PORT`
+//!   overrides; CLI `--port` wins over both).
+//! * Required env: `DATABASE_URL` (Postgres), `REDIS_URL`,
+//!   `COMPLIANCE_AUTH_TOKEN` (bearer token every route requires; in
+//!   production `NODE_ENV=production` an ephemeral token is generated with a
+//!   warning when unset), `AUDIT_SIGNING_KEY` (or `AUDIT_SIGNING_KEY_FILE`
+//!   when `NODE_ENV=production` — the service refuses to start on an
+//!   ephemeral key), `SECRETS_ENCRYPTION_KEY`, `CONSENT_SIGNING_KEY`.
+//! * Optional env: `CORS_ORIGIN`, `GDPR_EXPORT_BASE_URL`,
+//!   `GDPR_VERIFY_BASE_URL`, `AUDIT_RETENTION_DAYS`, DSAR rate-limit vars,
+//!   and the ClickHouse erasure vars (`GDPR_CLICKHOUSE_ERASURE_ENABLED`,
+//!   `CLICKHOUSE_URL`, `CLICKHOUSE_DATABASE`, `CLICKHOUSE_USER`,
+//!   `CLICKHOUSE_PASSWORD`) — off unless enabled.
+//!
+//! Cron jobs (all idempotent, retried on the next tick on failure):
+//! 1. DSR queue processing + stuck-entry recovery — every 30s
+//! 2. Secret auto-rotation — every 60min
+//! 3. GDPR request/token expiry — every 5min
+//! 4. Audit archival — daily
+//! 5. Data retention enforcement (consents/exports) — daily
+//! 6. Retention sweep (registry-driven canonical-store purges + report) — daily
+//! 7. DSR verification-outbox flush — every 60s
 
 use clap::Parser;
 use deadpool_redis::{Config as RedisConfig, Runtime};
@@ -89,6 +116,18 @@ async fn main() -> anyhow::Result<()> {
     // Shared behind an Arc so the breach notifier participates in the same
     // audit hash-chain state as the rest of the service.
     let audit_logger = Arc::new(AuditLogger::new(db.clone(), config.audit.clone()));
+    // F12/F3: load the per-chain hash heads (live table + archive) BEFORE
+    // any append. Without this the first append after a restart built on
+    // previous_hash = NULL and silently forked the chain — and a fully
+    // archived chain forked on EVERY restart.
+    if let Err(e) = audit_logger.initialize().await {
+        // Not fatal: an empty/missing table legitimately yields no heads.
+        // Anything else is logged loudly — appends still work, but the
+        // operator should investigate before the chain drifts.
+        error!("Audit logger initialization failed (chain heads not preloaded): {e}");
+    } else {
+        info!("Audit hash-chain heads loaded");
+    }
     let secret_manager =
         SecretManager::new(db.clone(), config.secrets.clone()).map_err(|e| anyhow::anyhow!(e))?;
     let gdpr = GdprAutomation::new(db.clone(), redis.clone(), config.gdpr.clone());

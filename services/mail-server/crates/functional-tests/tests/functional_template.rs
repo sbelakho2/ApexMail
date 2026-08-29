@@ -13,6 +13,7 @@ fn test_sandbox() -> Sandbox {
         max_memory_bytes: 64 * 1024 * 1024,
         max_source_length: 512 * 1024,
         max_output_length: 2 * 1024 * 1024,
+        trusted_html_props: Vec::new(),
     })
 }
 
@@ -119,6 +120,7 @@ fn sandbox_rejects_source_too_large() {
         max_memory_bytes: 64 * 1024 * 1024,
         max_source_length: 50,
         max_output_length: 2 * 1024 * 1024,
+        trusted_html_props: Vec::new(),
     });
     let source = "x".repeat(100);
     let opts = RenderOptions {

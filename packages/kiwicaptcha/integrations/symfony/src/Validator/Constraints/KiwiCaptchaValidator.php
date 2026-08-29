@@ -367,6 +367,22 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                     ? $this->clientIpResolver->resolve($request)
                     : $request->getClientIp();
             } catch (AmbiguousForwardingException $e) {
+                // Risk evidence for the ambiguous-identity refusal (the
+                // failure is partially attacker-triggerable: a client
+                // behind an appending proxy can present both forwarding
+                // headers). RiskFeedback's taxonomy has no dedicated
+                // ambiguous-identity kind, so the closest existing kind
+                // — MalformedToken (VerifyError::MalformedToken), the
+                // wire/shape corruption bucket — carries the signal.
+                // Attribution: only the direct socket peer (REMOTE_ADDR,
+                // never a header-derived guess) is attributable here;
+                // the canonical client IP is exactly what could NOT be
+                // resolved. No peer means no feedback (like every
+                // no-client-IP path, never an empty-string pseudonym).
+                $peer = (string) $request->server->get('REMOTE_ADDR', '');
+                if ($peer !== '') {
+                    $this->risk?->solveOutcome($constraint->scope, $peer, null, VerifyError::MalformedToken);
+                }
                 $this->logger?->info('KiwiCaptcha: verification refused — ambiguous forwarding headers', [
                     'scope' => $constraint->scope,
                 ]);
@@ -522,6 +538,28 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // re-run on the core's replay path, which is exactly why this
         // gate must hold for everything except the proven identity.
         if ($outcome->isOk() && $this->isStoredResult($outcome) && $operationId === null) {
+            // Native replay risk feedback (round-97): the classic replay
+            // of a solved token — a stored-valid, same-identity
+            // retained-state retry without an explicit operation id —
+            // previously returned here with ZERO risk-model signal, so a
+            // static identity replaying a consumed token polluted no
+            // counters. The feedback is the same ReplayAttempt outcome
+            // the core's AlreadyConsumed path feeds (RiskFeedback), with
+            // the measured solve duration when the outcome carries one
+            // (null-safe: cores predating the solve-duration field feed
+            // no duration). Guarded exactly like the failure-path call:
+            // only when a client IP resolves, and BEFORE the violation is
+            // built so the evidence always precedes the refusal.
+            if ($clientIp !== null) {
+                $this->risk?->solveOutcome(
+                    $constraint->scope,
+                    $clientIp,
+                    null,
+                    VerifyError::AlreadyConsumed,
+                    null,
+                    RiskGateway::solveDurationMsOf($outcome),
+                );
+            }
             $this->logger?->info('KiwiCaptcha: replayed token refused — no explicit operation identity', [
                 'reason' => VerifyError::AlreadyConsumed->value,
                 'scope' => $constraint->scope,
@@ -555,9 +593,29 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // evidence carries the canonical client IP only when one
             // exists: a request without a client IP produces no per-IP
             // signal, never an empty-string pseudonym, and the session
-            // argument is null (the validator has no session here).
+            // argument is null (the validator has no session here). The
+            // measured solve duration rides along when the outcome
+            // carries one (observability until the engine gains a graded
+            // channel, see RiskGateway::solveOutcome()). Two refusal
+            // paths deliberately sit OUTSIDE this block, each a precise
+            // carve-out:
+            //   - the empty-value branch above (null/'' token): no token
+            //     means no solve attempt, so there is no attempt to
+            //     attribute — no feedback, just the violation;
+            //   - the ambiguous-forwarding refusal above: it feeds its
+            //     MalformedToken evidence separately, attributed to the
+            //     direct socket peer (REMOTE_ADDR) only — the canonical
+            //     client IP is exactly what could not be resolved, and a
+            //     header-derived guess is never used as the identity.
             if ($clientIp !== null) {
-                $this->risk?->solveOutcome($constraint->scope, $clientIp, null, $outcome->error);
+                $this->risk?->solveOutcome(
+                    $constraint->scope,
+                    $clientIp,
+                    null,
+                    $outcome->error,
+                    null,
+                    RiskGateway::solveDurationMsOf($outcome),
+                );
             }
             $code = $this->publicCode($outcome->error);
             if ($outcome->error !== null && $code !== KiwiCaptcha::INVALID_OR_EXPIRED_ERROR) {
@@ -1326,9 +1384,19 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // canonical client IP only when one exists: a request
             // without a client IP produces no per-IP signal, never an
             // empty-string pseudonym, and the session argument is null
-            // like the provider surface.
+            // like the provider surface. The measured solve duration
+            // rides along (null-safe through the core's additive
+            // solve-duration surface, see
+            // RiskGateway::solveDurationMsOf()).
             if ($this->risk !== null && $clientIp !== null) {
-                $this->risk->solveOutcome($constraint->scope, $clientIp, null, $outcome->error);
+                $this->risk->solveOutcome(
+                    $constraint->scope,
+                    $clientIp,
+                    null,
+                    $outcome->error,
+                    null,
+                    RiskGateway::solveDurationMsOf($outcome),
+                );
             }
 
             return new PostSolveDisposition(PostSolveDispositionKind::Pass, $originalDecisionId);

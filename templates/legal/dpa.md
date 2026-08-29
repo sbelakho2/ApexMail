@@ -1,11 +1,11 @@
 # Data Processing Agreement (DPA)
 
-**Last Updated:** {{LAST_UPDATED}}
+**Last Updated:** 2026-08-29
 
 This Data Processing Agreement ("DPA") forms part of the Terms of Service between:
 
 - **Data Controller**: The Customer (as defined in the Terms).
-- **Data Processor**: **{{LEGAL_NAME}}** (trading as **{{TRADING_NAME}}**), registry code **{{REGISTRY_CODE}}**, VAT **{{VAT_NUMBER}}**, registered address **{{ADDRESS}}**, Republic of Estonia ("ApexMail").
+- **Data Processor**: **Bel Consulting OÜ** (trading as **ApexMail**), registry code **16588745**, VAT **EE102951727**, registered address **Sakala 7-2, 10141 Tallinn, Estonia**, Republic of Estonia ("ApexMail").
 
 This DPA applies where ApexMail processes Personal Data on behalf of the Customer in the course of providing the Service, to the extent that GDPR (Regulation (EU) 2016/679) applies.
 
@@ -90,7 +90,7 @@ ApexMail shall:
 
 ### 5.3 New Subprocessors
 
-ApexMail shall notify Customer of new Subprocessors at least 14 days before engagement. Customer may object to a new Subprocessor within 14 days on reasonable data protection grounds. If the objection cannot be resolved, Customer may terminate the affected Service without penalty.
+ApexMail shall notify Customer of new Subprocessors at least **30 days** before engagement, by updating the Subprocessor Register and by email notification to account administrators (customers may additionally subscribe at subprocessor-notifications@apexmail.ee). Customer may object to a new Subprocessor within 30 days on reasonable data protection grounds. If the Controller objects on reasonable data protection grounds and no alternative can be reached, the Controller may terminate the affected services without penalty.
 
 ### 5.4 Subprocessor List
 
@@ -198,7 +198,7 @@ Each party's liability under this DPA is subject to the liability provisions of 
 ## 15. Contact
 
 Data Protection inquiries:
-**{{PRIVACY_EMAIL}}**
+**privacy@apexmail.ee**
 
 General inquiries:
-**{{SUPPORT_EMAIL}}**
+**support@apexmail.ee**

@@ -46,7 +46,8 @@ namespace KiwiCaptcha;
  *
  * Check order: structural validation of the stored record (scope shape,
  * nonce/salt sizes, TTL ceiling, prefix binding, per-algorithm
- * difficulty range 1..20). The kid gate and secret selection follow: a
+ * difficulty range 1..20, and the armed decoy field's `[A-Za-z0-9_-]{1,64}`
+ * alphabet). The kid gate and secret selection follow: a
  * revoked kid fails immediately, a kid beyond the newest configured kid
  * fails the rollback/forward guard. Then comes the HMAC signature
  * re-check. Next come the absolute Argon2id process ceilings after
@@ -107,6 +108,21 @@ namespace KiwiCaptcha;
  * cheap-phase failure keeps its own verdict. In every interleaving a
  * cancelled record is never redeemable and can never produce a
  * successful outcome.
+ *
+ * Server-measured solve duration: every valid outcome — the fresh
+ * consumed/valid path, the identity-proven replay of a stored success,
+ * and the resumed-operation recoveries — carries
+ * {@see VerifyOutcome::solveDurationMs()}, the span between the
+ * record's issued_at_ns and the verification receipt clock. It is
+ * computed only from server-written timestamps (the client-reported
+ * token duration is forgeable and never consulted), so the risk layer
+ * can consume it as unforgeable graded behavioral evidence. The field
+ * is nullable and additive: null on every non-valid outcome, for a
+ * record whose issuance clock is unknown, and for a receipt preceding
+ * issuance within the clock-skew tolerance — exactly the skew
+ * semantics of the minimum-duration floor, where the elapsed time
+ * cannot be measured reliably (see
+ * {@see self::measurableSolveDurationMs()}).
  */
 final class Verifier
 {
@@ -204,6 +220,14 @@ final class Verifier
      *            deployment property, not a per-verification event)
      */
     private static bool $nonAtomicStorageWarned = false;
+
+    /**
+     * @var int|null the newest configured kid of the secretsByKid set,
+     *               resolved once (max of the immutable kid keys) — the
+     *               rollback/forward guard compared it against
+     *               max(array_keys(...)) on every secret lookup before
+     */
+    private ?int $newestKid = null;
 
     public function __construct(
         private readonly StorageInterface $storage,
@@ -430,6 +454,13 @@ final class Verifier
             return VerifyOutcome::malformedToken($e->getMessage());
         }
 
+        // The server receipt clock, resolved ONCE: the minimum-duration
+        // floor of the cheap phase and the exposed server-measured solve
+        // duration ({@see self::measurableSolveDurationMs()}) read the
+        // same receipt instant, never two separately timed microtime
+        // reads of one verification.
+        $receiptNs = $nowNs ?? (int) (microtime(true) * 1_000_000);
+
         // The record source is a single snapshot for storages with the
         // {@see ChallengeRuntimeStateReadableInterface} capability
         // (round-95 audit fix): runtimeState() decodes the full
@@ -525,7 +556,7 @@ final class Verifier
         // to preserve). The same helper revalidates the retained
         // consumed record on the consumed-operation resume path
         // {@see self::resumeConsumedOperation()}.
-        $failure = $this->cheapPhaseCheck($peek, $secretKey, $expectedScope, $clientIp, true, $nowNs, $expectation);
+        $failure = $this->cheapPhaseCheck($peek, $secretKey, $expectedScope, $clientIp, true, $receiptNs, $expectation);
         if ($failure !== null) {
             // The cleanup runs through the fused atomic transition when
             // the storage offers it ({@see AtomicDeleteIfPendingInterface}):
@@ -569,7 +600,22 @@ final class Verifier
                 // Consumed + exempt with every hard invariant intact:
                 // fall through to the consume branch.
             } else {
-                $retained = $this->retainedConsumedState($token->nonce);
+                // The retained-state tri-state. When the runtime-state
+                // snapshot already resolved the terminal state (the
+                // round-95 pattern), it is served from the snapshot:
+                // never a second GET through retainedConsumedState()
+                // -> consumedState(). This is the MissingClientIp
+                // retry path on an atomic storage (whose fused cleanup
+                // is deliberately skipped so the caller can retry with
+                // the IP), and every non-fused-cleanup storage. A
+                // snapshot that resolved Pending or Cancelled maps to
+                // 'pending' exactly like a consumedState() miss does
+                // (the retained-state read only distinguishes consumed
+                // evidence); a Consumed kind maps to 'consumed'.
+                // Storages without the snapshot keep the legacy read.
+                $retained = $runtime !== null
+                    ? ($runtime->kind === ChallengeRuntimeStateKind::Consumed ? 'consumed' : 'pending')
+                    : $this->retainedConsumedState($token->nonce);
                 if ($retained === 'unreadable') {
                     // The consumed marker cannot be established: the record
                     // may be retained consumed evidence, so it is never
@@ -628,7 +674,22 @@ final class Verifier
                 // Consumed: fall through to the consumed branch (the
                 // gate is exempt — client-side solve evidence).
             } else {
-                $retained = $this->retainedConsumedState($token->nonce);
+                // The retained-state tri-state. When the runtime-state
+                // snapshot already resolved the terminal state (the
+                // round-95 pattern), it is served from the snapshot:
+                // never a second GET through retainedConsumedState()
+                // -> consumedState(). This is the MissingClientIp
+                // retry path on an atomic storage (whose fused cleanup
+                // is deliberately skipped so the caller can retry with
+                // the IP), and every non-fused-cleanup storage. A
+                // snapshot that resolved Pending or Cancelled maps to
+                // 'pending' exactly like a consumedState() miss does
+                // (the retained-state read only distinguishes consumed
+                // evidence); a Consumed kind maps to 'consumed'.
+                // Storages without the snapshot keep the legacy read.
+                $retained = $runtime !== null
+                    ? ($runtime->kind === ChallengeRuntimeStateKind::Consumed ? 'consumed' : 'pending')
+                    : $this->retainedConsumedState($token->nonce);
                 if ($retained === 'unreadable') {
                     return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
                 }
@@ -681,7 +742,7 @@ final class Verifier
                 // that produced the peek: resolve it directly, never a
                 // second read.
                 if ($runtime->consumed !== null) {
-                    return $this->resolveConsumedRecord($runtime->consumed, $operationIdentity);
+                    return $this->resolveConsumedRecord($runtime->consumed, $operationIdentity, $receiptNs);
                 }
                 // Safety net kept only for an exotic storage that
                 // reported Consumed without the envelope: re-read via
@@ -695,7 +756,7 @@ final class Verifier
                         return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
                     }
                     if ($retained !== null) {
-                        return $this->resolveConsumedRecord($retained, $operationIdentity);
+                        return $this->resolveConsumedRecord($retained, $operationIdentity, $receiptNs);
                     }
                 }
             }
@@ -762,7 +823,7 @@ final class Verifier
                 // {@see self::resolveConsumedRecord()}, used by both this
                 // consume path and the pre-admission terminal-state
                 // check, so the two can never diverge.
-                return $this->resolveConsumedRecord($consumed, $operationIdentity);
+                return $this->resolveConsumedRecord($consumed, $operationIdentity, $receiptNs);
             }
             $record = $consumed->record;
 
@@ -862,7 +923,11 @@ final class Verifier
             // replays it without re-deriving.
             $this->bestEffortCommit($record->nonce, true, $record->requestBinding);
 
-            return VerifyOutcome::valid($record->nonce, $record->requestBinding);
+            return VerifyOutcome::valid(
+                $record->nonce,
+                $record->requestBinding,
+                solveDurationMs: $this->measurableSolveDurationMs($record, $receiptNs),
+            );
         } finally {
             if ($lease !== null) {
                 try {
@@ -891,6 +956,13 @@ final class Verifier
      * (crash between consume and commit) is ambiguous and reported as
      * ConsumeIndeterminate.
      *
+     * The identity-proven replay of a stored success carries the
+     * server-measured solve duration
+     * ({@see self::measurableSolveDurationMs()}) computed from the
+     * replayed record's issuance clock and this verification's receipt
+     * — unforgeable behavioral evidence for the risk layer, never the
+     * client-reported duration.
+     *
      * The failed-barrier replay guard runs before a stored success is
      * accepted: the consume and commit mutations that produced it may
      * have landed on the primary with their WAIT failing. Accepting the
@@ -900,7 +972,7 @@ final class Verifier
      * StorageUnavailable, never a generic exception escaping the
      * verifier.
      */
-    private function resolveConsumedRecord(ConsumedRecord $consumed, ?string $operationIdentity): VerifyOutcome
+    private function resolveConsumedRecord(ConsumedRecord $consumed, ?string $operationIdentity, ?int $receiptNs): VerifyOutcome
     {
         if ($consumed->consumedResult === null) {
             return VerifyOutcome::invalid(VerifyError::ConsumeIndeterminate);
@@ -929,7 +1001,12 @@ final class Verifier
                 return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
             }
 
-            return VerifyOutcome::valid($consumed->record->nonce, $consumed->consumedResult->binding, true);
+            return VerifyOutcome::valid(
+                $consumed->record->nonce,
+                $consumed->consumedResult->binding,
+                true,
+                $this->measurableSolveDurationMs($consumed->record, $receiptNs),
+            );
         }
 
         return VerifyOutcome::invalid(VerifyError::AlreadyConsumed);
@@ -1066,6 +1143,11 @@ final class Verifier
             return VerifyOutcome::malformedToken($e->getMessage());
         }
 
+        // The server receipt clock for the resume's exposed solve
+        // duration ({@see self::measurableSolveDurationMs()}) — the
+        // same receipt instant feeds every valid-returning path below.
+        $receiptNs = (int) (microtime(true) * 1_000_000);
+
         // The retained consumed state must be readable (the bundle enforces
         // the ConsumedStateReadableInterface contract at configuration time;
         // a non-capable storage degrades to a typed, retryable result).
@@ -1139,7 +1221,12 @@ final class Verifier
             }
 
             return $consumed->consumedResult->valid
-                ? VerifyOutcome::valid($consumed->record->nonce, $consumed->consumedResult->binding, true)
+                ? VerifyOutcome::valid(
+                    $consumed->record->nonce,
+                    $consumed->consumedResult->binding,
+                    true,
+                    $this->measurableSolveDurationMs($consumed->record, $receiptNs),
+                )
                 : VerifyOutcome::invalid(VerifyError::InsufficientWork);
         }
         $record = $consumed->record;
@@ -1228,7 +1315,7 @@ final class Verifier
                     return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
                 }
                 if ($loserState?->consumedResult !== null) {
-                    return $this->acceptStoredResumeResult($loserState, 'the resumed claim-refused re-read acceptance');
+                    return $this->acceptStoredResumeResult($loserState, 'the resumed claim-refused re-read acceptance', $receiptNs);
                 }
 
                 return VerifyOutcome::invalid(VerifyError::ConsumeIndeterminate);
@@ -1330,7 +1417,7 @@ final class Verifier
                     $after = null;
                 }
                 if ($after?->consumedResult !== null) {
-                    return $this->acceptStoredResumeResult($after, 'the resumed post-commit read acceptance');
+                    return $this->acceptStoredResumeResult($after, 'the resumed post-commit read acceptance', $receiptNs);
                 }
 
                 // A genuinely missing result. With a held claim the
@@ -1353,7 +1440,7 @@ final class Verifier
             $claimOwner = null;
 
             return $valid
-                ? VerifyOutcome::valid($record->nonce, $binding)
+                ? VerifyOutcome::valid($record->nonce, $binding, solveDurationMs: $this->measurableSolveDurationMs($record, $receiptNs))
                 : VerifyOutcome::invalid(VerifyError::InsufficientWork);
         } finally {
             if ($claimOwner !== null) {
@@ -1395,7 +1482,7 @@ final class Verifier
      * the verifier). A stored invalid outcome is deterministic and
      * replays to any caller.
      */
-    private function acceptStoredResumeResult(ConsumedRecord $after, string $fenceReason): VerifyOutcome
+    private function acceptStoredResumeResult(ConsumedRecord $after, string $fenceReason, ?int $receiptNs): VerifyOutcome
     {
         try {
             if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
@@ -1406,7 +1493,12 @@ final class Verifier
         }
 
         return $after->consumedResult->valid
-            ? VerifyOutcome::valid($after->record->nonce, $after->consumedResult->binding, true)
+            ? VerifyOutcome::valid(
+                $after->record->nonce,
+                $after->consumedResult->binding,
+                true,
+                $this->measurableSolveDurationMs($after->record, $receiptNs),
+            )
             : VerifyOutcome::invalid(VerifyError::InsufficientWork);
     }
 
@@ -1426,6 +1518,14 @@ final class Verifier
      * The scope check enforces the narrow identifier alphabet
      * `[A-Za-z0-9._:-]+`, 1..128 bytes; the alphabet itself makes the
      * legacy '|' separator rejection unnecessary.
+     *
+     * The decoy (honeypot) field name is an authenticated v2 canonical
+     * field: when present it must match the exact shape the issuer mints
+     * and the widget driver renders — 1..=64 bytes of `[A-Za-z0-9_-]` (no
+     * `.`, `:` or `|`, so the canonical segment structure can never be
+     * altered by a stored value). A non-conforming name is a corrupt or
+     * foreign record: MalformedRecord (the Rust validate_record decoy
+     * check).
      *
      * Argon2id memory/time/parallelism are not bounded here: the
      * absolute process ceilings apply to the signed parameters after
@@ -1448,6 +1548,15 @@ final class Verifier
             || $scopeLen > 128
             || \preg_match('/^[A-Za-z0-9._:-]+$/D', $record->scope) !== 1
         ) {
+            return false;
+        }
+        // The decoy (honeypot) field name is an authenticated v2 canonical
+        // field: when present it must match the exact shape the issuer
+        // mints and the widget driver renders — 1..=64 bytes of
+        // [A-Za-z0-9_-] (no `.`, `:` or `|`, so the canonical segment
+        // structure can never be altered by a stored value). A
+        // non-conforming name is a corrupt or foreign record.
+        if ($record->decoyField !== null && !Config::isValidDecoyFieldName($record->decoyField)) {
             return false;
         }
         $nonceBytes = base64_decode($record->nonce, true);
@@ -1892,6 +2001,34 @@ final class Verifier
     }
 
     /**
+     * The server-measured solve duration of a verified record, in
+     * milliseconds: the span between the record's high-resolution
+     * issuance timestamp (issued_at_ns, wall-clock epoch microseconds
+     * written by the issuing host) and this verification's receipt
+     * clock. Exposed on the valid outcomes of the consumed/valid and
+     * replay-of-valid paths as unforgeable behavioral evidence for the
+     * risk layer — the client-reported token duration is forgeable and
+     * is never consulted.
+     *
+     * The skew-tolerance semantics mirror {@see self::checkMinDuration()}
+     * exactly: a receipt that precedes issuance is unmeasurable
+     * (within the tolerance the two hosts' clocks are unsynced, so the
+     * elapsed time cannot be measured reliably — null; beyond the
+     * tolerance the record is rejected as TooFast and never reaches a
+     * valid outcome). A record whose issuance clock is unknown
+     * (issued_at_ns <= 0) is equally unmeasurable. Sub-millisecond
+     * spans floor toward zero.
+     */
+    private function measurableSolveDurationMs(ChallengeRecord $record, ?int $receiptNs): ?int
+    {
+        if ($record->issuedAtNs <= 0 || $receiptNs === null || $receiptNs < $record->issuedAtNs) {
+            return null;
+        }
+
+        return intdiv($receiptNs - $record->issuedAtNs, 1_000);
+    }
+
+    /**
      * Absolute process ceilings for Argon2id parameters: the
      * signed record's memory/time/parallelism must sit within the
      * process ceilings before any allocation or computation. Runs after
@@ -2068,7 +2205,13 @@ final class Verifier
      * in the challenge string. The v2 canonical payload covers every
      * immutable parameter (kid included), so a valid signature proves the
      * whole record is authentic; used in the cheap phase and re-applied to
-     * the consumed instance (the proof-phase re-check).
+     * the consumed instance (the proof-phase re-check). When the record
+     * carries an armed decoy (honeypot) field, the name is covered too —
+     * it is the FINAL `|<decoy_field>` segment appended after the kid
+     * (see {@see Issuer::canonicalPayload()}), so stripping, renaming or
+     * splicing it breaks the signature. An unarmed record renders the
+     * legacy 18-field canonical bytes, byte-identical to the
+     * pre-extension format.
      */
     private function verifyRecordSignature(ChallengeRecord $record, string $secretKey): bool
     {
@@ -2098,6 +2241,7 @@ final class Verifier
                 $record->requestBinding,
                 $record->issuer,
                 $record->kid ?? 1,
+                $record->decoyField,
             ), $secretKey);
 
         return hash_equals($expected, self::signatureFromChallenge($record->challenge));
@@ -2111,14 +2255,19 @@ final class Verifier
      * non-empty set the secret is looked up by the record's kid. Null is
      * returned, yielding UnknownKid, when the kid is unknown or exceeds
      * the newest configured kid: the rollback/forward guard that keeps a
-     * future-keyed challenge from verifying on an older node.
+     * future-keyed challenge from verifying on an older node. The newest
+     * kid is resolved once per process (the set is immutable), not
+     * re-derived with max(array_keys(...)) on every lookup.
      */
     private function secretForKey(ChallengeRecord $record, string $legacySecret): ?string
     {
         if ($this->secretsByKid === []) {
             return $legacySecret;
         }
-        if ($record->kid > max(array_keys($this->secretsByKid))) {
+        if ($this->newestKid === null) {
+            $this->newestKid = max(array_keys($this->secretsByKid));
+        }
+        if ($record->kid > $this->newestKid) {
             return null;
         }
         if (!\array_key_exists($record->kid, $this->secretsByKid)) {

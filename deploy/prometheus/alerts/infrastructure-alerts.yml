@@ -1,319 +1,176 @@
 # ApexMail Infrastructure Alerting Rules
 # ==========================================
-# This file defines Prometheus alerting rules for infrastructure-level concerns:
-# CPU/memory saturation, disk full, OOM kills, and node-level issues.
+# Infrastructure-level alerts for the SINGLE-HOST Docker Compose deployment.
 #
 # Loaded by: prometheus.yml -> rule_files
+#
+# F8 (audit) — this file used to be a Kubernetes alert set (kube_*,
+# container_*/cAdvisor, kubelet, HPA): NONE of those exporters run on the
+# compose host, so every rule was permanently inert. It now uses ONLY
+# metrics that are actually scraped on this host (see deploy/prometheus.yml):
+#   * node_*      — node-exporter (job="node"): host CPU/memory/disk/inodes
+#   * up          — every scrape job (exporters + app metrics endpoints)
+#   * probe_*     — blackbox-exporter jobs (job=~"blackbox.*")
+#   * pg_*        — postgres-exporter (job="postgres")
+#   * redis_*     — redis-exporter (job="redis")
+# Availability (`up == 0`) and queue/backlog alerts for the application
+# services live in deploy/alerting-rules.yml (ApiServerDown, MtaDown,
+# EmailQueueBacklog, TrackingWalBacklog, ...) and are not duplicated here.
 
 groups:
   - name: apexmail-infrastructure
     rules:
-      # ── CPU Saturation ─────────────────────────────────────────────────────
+      # ── Host CPU (node-exporter) ────────────────────────────────────────────
 
-      - alert: HighCpuUsage
-        expr: sum(rate(container_cpu_usage_seconds_total{pod=~".*apexmail.*"}[5m])) by (pod) / sum(kube_pod_container_resource_limits{pod=~".*apexmail.*", resource="cpu"}) by (pod) > 0.85
+      - alert: HostCpuHigh
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{job="node",mode="idle"}[5m])) * 100) > 85
         for: 10m
         labels:
           severity: warning
           team: infrastructure
         annotations:
-          summary: "CPU usage above 85% for pod {{ $labels.pod }}"
-          description: "Pod {{ $labels.pod }} CPU usage is {{ $value | humanizePercentage }} for over 10 minutes."
+          summary: "Host CPU usage above 85%"
+          description: "Node {{ $labels.instance }} CPU utilization is {{ $value | humanizePercentage }} for over 10 minutes."
           runbook_url: "https://apexmail.ee/docs/runbooks/high-cpu-usage"
 
-      - alert: CriticalCpuUsage
-        expr: sum(rate(container_cpu_usage_seconds_total{pod=~".*apexmail.*"}[5m])) by (pod) / sum(kube_pod_container_resource_limits{pod=~".*apexmail.*", resource="cpu"}) by (pod) > 0.95
+      - alert: HostCpuCritical
+        expr: 100 - (avg by (instance) (rate(node_cpu_seconds_total{job="node",mode="idle"}[5m])) * 100) > 95
         for: 5m
         labels:
           severity: critical
           team: infrastructure
         annotations:
-          summary: "CRITICAL: CPU usage above 95% for pod {{ $labels.pod }}"
-          description: "Pod {{ $labels.pod }} CPU usage is {{ $value | humanizePercentage }} for over 5 minutes. Immediate investigation required."
+          summary: "CRITICAL: Host CPU usage above 95%"
+          description: "Node {{ $labels.instance }} CPU utilization is {{ $value | humanizePercentage }} for over 5 minutes. The whole compose stack shares this host."
           runbook_url: "https://apexmail.ee/docs/runbooks/high-cpu-usage"
 
-      # ── Memory Saturation ──────────────────────────────────────────────────
+      # ── Host Memory (node-exporter) ─────────────────────────────────────────
 
-      - alert: HighMemoryUsage
-        expr: sum(container_memory_working_set_bytes{pod=~".*apexmail.*"}) by (pod) / sum(kube_pod_container_resource_limits{pod=~".*apexmail.*", resource="memory"}) by (pod) > 0.85
+      - alert: HostMemoryHigh
+        expr: (node_memory_MemTotal_bytes{job="node"} - node_memory_MemAvailable_bytes{job="node"}) / node_memory_MemTotal_bytes{job="node"} > 0.85
         for: 10m
         labels:
           severity: warning
           team: infrastructure
         annotations:
-          summary: "Memory usage above 85% for pod {{ $labels.pod }}"
-          description: "Pod {{ $labels.pod }} memory usage is {{ $value | humanizePercentage }} for over 10 minutes."
+          summary: "Host memory usage above 85%"
+          description: "Node {{ $labels.instance }} memory utilization is {{ $value | humanizePercentage }} — containers risk OOM kills (per-service compose memory limits)."
           runbook_url: "https://apexmail.ee/docs/runbooks/high-memory-usage"
 
-      - alert: CriticalMemoryUsage
-        expr: sum(container_memory_working_set_bytes{pod=~".*apexmail.*"}) by (pod) / sum(kube_pod_container_resource_limits{pod=~".*apexmail.*", resource="memory"}) by (pod) > 0.95
+      - alert: HostMemoryCritical
+        expr: (node_memory_MemTotal_bytes{job="node"} - node_memory_MemAvailable_bytes{job="node"}) / node_memory_MemTotal_bytes{job="node"} > 0.95
         for: 3m
         labels:
           severity: critical
           team: infrastructure
         annotations:
-          summary: "CRITICAL: Memory usage above 95% for pod {{ $labels.pod }}"
-          description: "Pod {{ $labels.pod }} memory usage is {{ $value | humanizePercentage }} for over 3 minutes. Risk of OOM kill."
+          summary: "CRITICAL: Host memory usage above 95%"
+          description: "Node {{ $labels.instance }} memory utilization is {{ $value | humanizePercentage }}. The kernel OOM killer is imminent; check docker stats for the top consumer."
           runbook_url: "https://apexmail.ee/docs/runbooks/high-memory-usage"
 
-      # ── OOM Kill Detection ─────────────────────────────────────────────────
+      # ── Host Disk (node-exporter) ───────────────────────────────────────────
+      # Compose volumes (postgres_data, clickhouse_data, backups) all live on
+      # the host root filesystem — these are the real disk-pressure signals.
+      # (fstype filters mirror deploy/alerting-rules.yml LowDiskSpace.)
 
-      - alert: OOMKillDetected
-        expr: increase(kube_pod_container_status_restarts_total{pod=~".*apexmail.*"}[5m]) > 0 and on(pod) (container_memory_working_set_bytes / container_spec_memory_limit_bytes > 0.9)
-        for: 1m
-        labels:
-          severity: critical
-          team: infrastructure
-        annotations:
-          summary: "OOM kill detected for pod {{ $labels.pod }}"
-          description: "Pod {{ $labels.pod }} was restarted and had >90% memory utilization before restart. Likely OOM killed."
-          runbook_url: "https://apexmail.ee/docs/runbooks/oom-kill"
-
-      - alert: ContainerRestartLoop
-        expr: increase(kube_pod_container_status_restarts_total{pod=~".*apexmail.*"}[30m]) > 5
-        for: 5m
-        labels:
-          severity: critical
-          team: infrastructure
-        annotations:
-          summary: "Pod {{ $labels.pod }} restarting frequently"
-          description: "Pod {{ $labels.pod }} has restarted {{ $value }} times in the last 30 minutes."
-          runbook_url: "https://apexmail.ee/docs/runbooks/container-restart-loop"
-
-      # ── Disk Space ─────────────────────────────────────────────────────────
-
-      - alert: DiskSpaceWarning
-        expr: container_fs_usage_bytes{pod=~".*apexmail.*"} / container_fs_limit_bytes{pod=~".*apexmail.*"} > 0.80
+      - alert: HostDiskSpaceWarning
+        expr: (1 - (node_filesystem_avail_bytes{job="node",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{job="node",fstype!~"tmpfs|overlay"})) * 100 > 80
         for: 10m
         labels:
           severity: warning
           team: infrastructure
         annotations:
-          summary: "Disk usage above 80% for pod {{ $labels.pod }}"
-          description: "Pod {{ $labels.pod }} disk usage is {{ $value | humanizePercentage }}."
+          summary: "Host disk usage above 80% on {{ $labels.instance }} {{ $labels.mountpoint }}"
+          description: "Disk is {{ $value | humanizePercentage }} full. Cleanup: docker system prune, old images, rotated logs; check the postgres_backups/clickhouse_backups volumes."
           runbook_url: "https://apexmail.ee/docs/runbooks/disk-space"
 
-      - alert: DiskSpaceCritical
-        expr: container_fs_usage_bytes{pod=~".*apexmail.*"} / container_fs_limit_bytes{pod=~".*apexmail.*"} > 0.95
+      - alert: HostDiskSpaceCritical
+        expr: (1 - (node_filesystem_avail_bytes{job="node",fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{job="node",fstype!~"tmpfs|overlay"})) * 100 > 90
         for: 5m
         labels:
           severity: critical
           team: infrastructure
         annotations:
-          summary: "CRITICAL: Disk usage above 95% for pod {{ $labels.pod }}"
-          description: "Pod {{ $labels.pod }} disk usage is {{ $value | humanizePercentage }}. Immediate action required."
+          summary: "CRITICAL: Host disk usage above 90%"
+          description: "Disk {{ $labels.mountpoint }} is {{ $value | humanizePercentage }} full — Postgres/ClickHouse writes fail when it fills. IMMEDIATE ACTION REQUIRED."
           runbook_url: "https://apexmail.ee/docs/runbooks/disk-space"
 
-      # ── Network ────────────────────────────────────────────────────────────
-
-      - alert: HighNetworkErrorRate
-        expr: sum(rate(container_network_receive_errors_total{pod=~".*apexmail.*"}[5m])) by (pod) > 0
-        for: 10m
-        labels:
-          severity: warning
-          team: infrastructure
-        annotations:
-          summary: "Network errors detected on pod {{ $labels.pod }}"
-          description: "Pod {{ $labels.pod }} has network receive errors."
-          runbook_url: "https://apexmail.ee/docs/runbooks/network-errors"
-
-      - alert: PodNetworkUnavailable
-        expr: sum(rate(container_network_receive_bytes_total{pod=~".*apexmail.*"}[5m])) by (pod) == 0 and sum(rate(container_network_transmit_bytes_total{pod=~".*apexmail.*"}[5m])) by (pod) == 0
-        for: 5m
-        labels:
-          severity: critical
-          team: infrastructure
-        annotations:
-          summary: "Pod {{ $labels.pod }} has no network traffic"
-          description: "Pod {{ $labels.pod }} has zero network receive and transmit bytes for over 5 minutes."
-          runbook_url: "https://apexmail.ee/docs/runbooks/pod-network-unavailable"
-
-      # ── Pod Status ─────────────────────────────────────────────────────────
-
-      - alert: PodCrashLoopBackOff
-        expr: kube_pod_container_status_waiting_reason{pod=~".*apexmail.*", reason="CrashLoopBackOff"} > 0
-        for: 2m
-        labels:
-          severity: critical
-          team: infrastructure
-        annotations:
-          summary: "Pod {{ $labels.pod }} in CrashLoopBackOff"
-          description: "Pod {{ $labels.pod }} is in CrashLoopBackOff state."
-          runbook_url: "https://apexmail.ee/docs/runbooks/pod-crash-loop"
-
-      - alert: PodNotReady
-        expr: kube_pod_status_ready{pod=~".*apexmail.*", condition="false"} > 0
-        for: 5m
-        labels:
-          severity: critical
-          team: infrastructure
-        annotations:
-          summary: "Pod {{ $labels.pod }} is not ready"
-          description: "Pod {{ $labels.pod }} has been not ready for over 5 minutes."
-          runbook_url: "https://apexmail.ee/docs/runbooks/pod-not-ready"
-
-      - alert: PodPending
-        expr: kube_pod_status_phase{pod=~".*apexmail.*", phase="Pending"} > 0
-        for: 10m
-        labels:
-          severity: warning
-          team: infrastructure
-        annotations:
-          summary: "Pod {{ $labels.pod }} stuck in Pending state"
-          description: "Pod {{ $labels.pod }} has been in Pending state for over 10 minutes. Check resource availability and scheduling."
-          runbook_url: "https://apexmail.ee/docs/runbooks/pod-pending"
-
-      # ── Node-Level ─────────────────────────────────────────────────────────
-
-      - alert: NodeDiskPressure
-        expr: kube_node_status_condition{condition="DiskPressure", status="true"} == 1
-        for: 5m
-        labels:
-          severity: critical
-          team: infrastructure
-        annotations:
-          summary: "Node {{ $labels.node }} has disk pressure"
-          description: "Node {{ $labels.node }} is experiencing disk pressure."
-          runbook_url: "https://apexmail.ee/docs/runbooks/node-disk-pressure"
-
-      - alert: NodeMemoryPressure
-        expr: kube_node_status_condition{condition="MemoryPressure", status="true"} == 1
-        for: 5m
-        labels:
-          severity: critical
-          team: infrastructure
-        annotations:
-          summary: "Node {{ $labels.node }} has memory pressure"
-          description: "Node {{ $labels.node }} is experiencing memory pressure."
-          runbook_url: "https://apexmail.ee/docs/runbooks/node-memory-pressure"
-
-      # ── HPA & Scale ────────────────────────────────────────────────────────
-
-      - alert: HpaMaxedOut
-        expr: kube_horizontalpodautoscaler_spec_max_replicas{horizontalpodautoscaler=~".*apexmail.*"} == kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler=~".*apexmail.*"}
+      - alert: HostDiskPredictedFull
+        expr: predict_linear(node_filesystem_avail_bytes{job="node",fstype!~"tmpfs|overlay"}[6h], 86400) < 0
         for: 30m
         labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "Host disk {{ $labels.mountpoint }} predicted to fill within 24 hours"
+          description: "At the current consumption rate the filesystem fills within 24h. Check WAL accumulation, backup volume growth and log rotation."
+          runbook_url: "https://apexmail.ee/docs/runbooks/disk-space"
+
+      # ── Metrics-pipeline health (every job's up) ────────────────────────────
+
+      - alert: ExporterDown
+        expr: up{job=~"postgres|redis|clickhouse|node|synthetic-transactions"} == 0
+        for: 5m
+        labels:
           severity: warning
           team: infrastructure
         annotations:
-          summary: "HPA for {{ $labels.pod }} is at max replicas"
-          description: "HPA {{ $labels.pod }} has been running at max replicas ({{ $value }}) for over 30 minutes. Consider increasing max replicas or investigating resource constraints."
-          runbook_url: "https://apexmail.ee/docs/runbooks/hpa-maxed-out"
+          summary: "Metrics exporter {{ $labels.job }} is down"
+          description: "The {{ $labels.job }} scrape target {{ $labels.instance }} has been unreachable for 5 minutes — its dashboard panels and dependent alerts are blind."
+          runbook_url: "https://apexmail.ee/docs/runbooks/exporter-down"
 
-      - alert: HpaScaleToZero
-        expr: kube_horizontalpodautoscaler_status_current_replicas{horizontalpodautoscaler=~".*apexmail.*"} == 0
+      - alert: BlackboxProbeJobFailing
+        expr: probe_success{job=~"blackbox.*"} == 0
         for: 5m
         labels:
           severity: critical
           team: infrastructure
         annotations:
-          summary: "HPA for {{ $labels.pod }} scaled to zero"
-          description: "HPA {{ $labels.pod }} has scaled to 0 replicas. Service may be unavailable."
-          runbook_url: "https://apexmail.ee/docs/runbooks/hpa-scale-zero"
+          summary: "Blackbox probe {{ $labels.job }} failing for {{ $labels.instance }}"
+          description: "The {{ $labels.job }} probe against {{ $labels.instance }} has failed for 5 minutes (external reachability, TLS, SMTP or DNS is broken at the edge)."
+          runbook_url: "https://apexmail.ee/docs/runbooks/blackbox-probe-failure"
 
-      # ── SMTP / MTA Infrastructure ──────────────────────────────────────────
+      # ── Datastore saturation (exporters) ────────────────────────────────────
 
-      - alert: SmtpQueueBacklog
-        expr: apexmail_smtp_queue_depth > 10000
+      - alert: PostgresConnectionSaturation
+        expr: pg_stat_activity_count{job="postgres"} / pg_settings_max_connections{job="postgres"} > 0.90
+        for: 5m
+        labels:
+          severity: critical
+          team: infrastructure
+        annotations:
+          summary: "Postgres connection usage above 90% of max_connections"
+          description: "Postgres is at {{ $value | humanizePercentage }} of max_connections — new application connections will start failing."
+          runbook_url: "https://apexmail.ee/docs/runbooks/postgres-connections"
+
+      - alert: PostgresRollbackSpike
+        expr: sum(rate(pg_stat_database_xact_rollback{job="postgres"}[10m])) / clamp_min(sum(rate(pg_stat_database_xact_commit{job="postgres"}[10m])), 1e-9) > 0.10
         for: 10m
         labels:
           severity: warning
           team: infrastructure
         annotations:
-          summary: "SMTP queue depth exceeds 10,000"
-          description: "SMTP queue depth is {{ $value }}. Messages are accumulating faster than they can be delivered."
-          runbook_url: "https://apexmail.ee/docs/runbooks/smtp-queue-backlog"
-
-      - alert: SmtpQueueCritical
-        expr: apexmail_smtp_queue_depth > 50000
-        for: 5m
-        labels:
-          severity: critical
-          team: infrastructure
-        annotations:
-          summary: "SMTP queue depth exceeds 50,000"
-          description: "SMTP queue depth is {{ $value }}. Critical backlog — messages may exceed delivery time SLAs."
-          runbook_url: "https://apexmail.ee/docs/runbooks/smtp-queue-backlog"
-
-      # ── Redis Infrastructure ───────────────────────────────────────────────
-
-      - alert: RedisMemoryHigh
-        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.80
-        for: 5m
-        labels:
-          severity: warning
-          team: infrastructure
-        annotations:
-          summary: "Redis memory usage above 80%"
-          description: "Redis memory usage is {{ $value | humanizePercentage }}. Risk of eviction or OOM."
-          runbook_url: "https://apexmail.ee/docs/runbooks/redis-memory"
+          summary: "Postgres rollback ratio above 10%"
+          description: "Rolled-back transactions are {{ $value | humanizePercentage }} of committed ones over 10 minutes — failing queries or deadlocks."
+          runbook_url: "https://apexmail.ee/docs/runbooks/postgres-rollback-spike"
 
       - alert: RedisMemoryCritical
-        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.95
+        expr: redis_memory_used_bytes{job="redis"} / redis_memory_max_bytes{job="redis"} > 0.95
         for: 2m
         labels:
           severity: critical
           team: infrastructure
         annotations:
           summary: "Redis memory usage above 95%"
-          description: "Redis memory usage is {{ $value | humanizePercentage }}. Immediate action required."
+          description: "Redis is at {{ $value | humanizePercentage }} of maxmemory — writes are about to hit the eviction policy (or fail under noeviction). Immediate action required."
           runbook_url: "https://apexmail.ee/docs/runbooks/redis-memory"
 
-      # ── Database Infrastructure ────────────────────────────────────────────
-
-      - alert: PostgresReplicationLag
-        expr: pg_replication_lag_seconds > 60
-        for: 5m
-        labels:
-          severity: warning
-          team: infrastructure
-        annotations:
-          summary: "PostgreSQL replication lag exceeds 60 seconds"
-          description: "Replication lag is {{ $value }}s. Read replicas may serve stale data."
-          runbook_url: "https://apexmail.ee/docs/runbooks/postgres-replication-lag"
-
-      - alert: PostgresReplicationLagCritical
-        expr: pg_replication_lag_seconds > 300
-        for: 5m
-        labels:
-          severity: critical
-          team: infrastructure
-        annotations:
-          summary: "CRITICAL: PostgreSQL replication lag exceeds 5 minutes"
-          description: "Replication lag is {{ $value }}s. Potential data loss risk on primary failure."
-          runbook_url: "https://apexmail.ee/docs/runbooks/postgres-replication-lag"
-
-      - alert: PostgresConnectionsHigh
-        expr: pg_stat_database_numbackends > 100
-        for: 5m
-        labels:
-          severity: warning
-          team: infrastructure
-        annotations:
-          summary: "PostgreSQL connection count high"
-          description: "PostgreSQL has {{ $value }} active connections. Review connection pool configuration."
-          runbook_url: "https://apexmail.ee/docs/runbooks/postgres-connections"
-
-      # ── Synthetic Monitoring ───────────────────────────────────────────────
-
-      - alert: SyntheticApiProbeFailure
-        expr: apexmail_synthetic_probe_success{probe_type="api"} == 0
-        for: 2m
-        labels:
-          severity: critical
-          team: infrastructure
-        annotations:
-          summary: "Synthetic API probe failed for {{ $labels.target }}"
-          description: "Synthetic API probe to {{ $labels.target }} has failed for over 2 minutes. Endpoint may be degraded or unreachable."
-          runbook_url: "https://apexmail.ee/docs/runbooks/synthetic-probe-failure"
-
-      - alert: SyntheticSmtpProbeFailure
-        expr: apexmail_synthetic_probe_success{probe_type="smtp"} == 0
-        for: 2m
-        labels:
-          severity: critical
-          team: infrastructure
-        annotations:
-          summary: "Synthetic SMTP probe failed for {{ $labels.target }}"
-          description: "Synthetic SMTP probe to {{ $labels.target }} has failed for over 2 minutes."
-          runbook_url: "https://apexmail.ee/docs/runbooks/synthetic-probe-failure"
+      # NOTE (F8 deletions): the previous file also contained kube_/container_
+      # CPU-memory-restart-network rules, HPA rules, apexmail_smtp_queue_depth
+      # and apexmail_synthetic_probe_success rules — all referencing metrics
+      # with no exporter on this host. Real coverage for the removed concerns:
+      #   * container restarts/OOM → compose healthchecks + verify stage probes
+      #   * email queue depth     → EmailQueueBacklog (alerting-rules.yml,
+      #                              apexmail_email_queue_depth, job=apexmail-worker)
+      #   * synthetic probes      → SyntheticTransactionFailure /
+      #     SyntheticSmtpFailure (alerting-rules.yml, apexmail_synthetic_*)

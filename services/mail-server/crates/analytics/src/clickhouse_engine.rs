@@ -44,6 +44,9 @@ pub struct ClickHouseEvent {
     pub recipient_domain: String,
     pub link_id: String,
     pub user_agent: String,
+    /// GDPR:stored MASKED at ingest (IPv4 → /24, IPv6 → /48 — see
+    /// [`crate::ip_mask`]). The column stays `String`; it carries the
+    /// truncated network form, never the full client IP.
     pub ip_address: String,
     pub country: String,
     pub device_type: String,
@@ -179,6 +182,9 @@ impl ClickHouseEngine {
                     recipient_domain LowCardinality(String),
                     link_id String,
                     user_agent String,
+                    -- GDPR:ip_address stores the MASKED network form
+                    -- (IPv4 /24, IPv6 /48 — see analytics::ip_mask),
+                    -- never the full client IP.
                     ip_address String,
                     country LowCardinality(String),
                     device_type LowCardinality(String),
@@ -281,6 +287,10 @@ impl ClickHouseEngine {
     ///
     /// The insert is bounded by [`ClickHouseConfig::insert_timeout_seconds`] (T-309)
     /// to prevent unbounded waits when ClickHouse is slow or unresponsive.
+    ///
+    /// GDPR:client IPs are masked at this ingest boundary (IPv4 → /24,
+    /// IPv6 → /48) so the OLAP store never persists a full address — the
+    /// 730-day TTL makes raw IPs disproportionate personal data.
     pub async fn insert_events(&self, events: &[ClickHouseEvent]) -> anyhow::Result<()> {
         if events.is_empty() {
             return Ok(());
@@ -291,7 +301,9 @@ impl ClickHouseEngine {
         timeout(timeout_dur, async {
             let mut insert = self.client.insert("events")?;
             for event in events {
-                insert.write(event).await?;
+                let mut row = event.clone();
+                row.ip_address = crate::ip_mask::mask_ip(&row.ip_address);
+                insert.write(&row).await?;
             }
             insert.end().await
         })
@@ -524,11 +536,16 @@ impl ClickHouseEngine {
             .map(|r| (r.event_type, r.unique_messages))
             .collect();
 
+        let ordered_counts: Vec<u64> = stages
+            .iter()
+            .map(|s| counts.get(*s).copied().unwrap_or(0))
+            .collect();
+        let percentages = compute_funnel_percentages(&ordered_counts);
+
         let mut results = Vec::new();
         let mut previous_count: Option<u64> = None;
-        let first_count = counts.get(stages[0]).copied().unwrap_or(0).max(1);
 
-        for stage in stages {
+        for (stage, percentage) in stages.iter().zip(percentages) {
             let count = counts.get(*stage).copied().unwrap_or(0);
 
             let dropoff = previous_count
@@ -540,8 +557,6 @@ impl ClickHouseEngine {
                     }
                 })
                 .unwrap_or(0.0);
-
-            let percentage = count as f64 / first_count as f64 * 100.0;
 
             results.push(FunnelStage {
                 stage: stage.to_string(),
@@ -805,6 +820,31 @@ pub struct StorageStats {
     pub active_parts: u64,
 }
 
+/// Compute per-stage funnel percentages against a sane denominator (F7).
+///
+/// The old code divided every stage by `max(stage0, 1)`, so a funnel whose
+/// first stage had zero events reported absurd values (e.g. 5000% for a
+/// stage with 50 events). Rules now:
+///
+/// - The denominator is the FIRST stage (in the requested order) with a
+///   nonzero count — the earliest stage the data actually observes.
+/// - When every stage is zero, every percentage is `0.0`.
+/// - Stages at/after the chosen denominator never exceed `100.0`
+///   (non-monotonic funnels are clamped rather than reported as >100%).
+/// - Stages before the denominator are zero by construction, so they report
+///   `0.0`.
+fn compute_funnel_percentages(ordered_counts: &[u64]) -> Vec<f64> {
+    let base = match ordered_counts.iter().find(|c| **c > 0) {
+        Some(base) => *base,
+        // Empty funnel — no observable base stage.
+        None => return vec![0.0; ordered_counts.len()],
+    };
+    ordered_counts
+        .iter()
+        .map(|c| (*c as f64 / base as f64 * 100.0).min(100.0))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -836,6 +876,42 @@ mod tests {
 
     // Integration tests require a running ClickHouse instance
     // Run with:docker run -d -p 8123:8123 clickhouse/clickhouse-server
+
+    /// F7:normal funnel — stage 0 is the base, each stage is its share.
+    #[test]
+    fn funnel_percentages_classic_funnel() {
+        let p = compute_funnel_percentages(&[100, 50, 25]);
+        assert_eq!(p, vec![100.0, 50.0, 25.0]);
+    }
+
+    /// F7:the old `max(1)` denominator turned a zero stage 0 into absurd
+    /// percentages (10 / 1 = 1000%); the first nonzero stage is now the base.
+    #[test]
+    fn funnel_percentages_zero_first_stage_uses_first_nonzero_base() {
+        let p = compute_funnel_percentages(&[0, 10, 5]);
+        assert_eq!(p, vec![0.0, 100.0, 50.0]);
+    }
+
+    /// F7:all-zero funnel returns zeros, never a divide-by-one blowup.
+    #[test]
+    fn funnel_percentages_all_zero_returns_zeros() {
+        assert_eq!(compute_funnel_percentages(&[0, 0, 0]), vec![0.0, 0.0, 0.0]);
+        assert!(compute_funnel_percentages(&[]).is_empty());
+    }
+
+    /// F7:non-monotonic stages downstream of the base clamp at 100%.
+    #[test]
+    fn funnel_percentages_never_exceed_100_downstream() {
+        let p = compute_funnel_percentages(&[10, 20, 5]);
+        assert_eq!(p, vec![100.0, 100.0, 50.0]);
+    }
+
+    /// F7:zero stages mixed after the base still report 0%.
+    #[test]
+    fn funnel_percentages_zero_hole_after_base() {
+        let p = compute_funnel_percentages(&[100, 0, 30]);
+        assert_eq!(p, vec![100.0, 0.0, 30.0]);
+    }
 
     #[tokio::test]
     #[ignore = "requires running ClickHouse"]

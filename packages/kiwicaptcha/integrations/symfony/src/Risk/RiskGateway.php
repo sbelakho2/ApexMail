@@ -460,9 +460,34 @@ final class RiskGateway
      * mirrors {@see recordFeedback()}'s unusable-IP skip, but one level
      * up, so callers may pass a nullable IP without a TypeError under
      * strict_types.
+     *
+     * Solve duration (graded evidence, partially consumed): the optional
+     * $solveDurationMs carries the server-measured solve duration of the
+     * verified outcome (computed from the unforgeable issuedAtNs receipt
+     * time — never the client-reported durationMs). The risk-v1/v2
+     * feedback surface is CATEGORICAL: RiskEventKind is a fixed
+     * cross-language contract (values 1..21 byte-identical with the Rust
+     * mirror and the canonical risk.lua), the risk-v2 context carries
+     * only categorical fields (honeypot bool, context/TLS tags) and its
+     * numeric 0..1000 signals are derived INSIDE the engine, never
+     * caller-supplied. A graded fast-solve bucket (e.g. below a
+     * configurable multiple of the min-duration floor) therefore cannot
+     * be expressed without a protocol change — a new additive risk-v2
+     * context/signal/weight triple mirrored in PHP, Rust and Lua. Until
+     * such a channel exists the measured duration is consumed as
+     * bounded observability only (a debug log line, scope + duration,
+     * no IP, no identity) so operators can alert on implausibly fast
+     * solves today, and the plumbing is live: the moment the engine
+     * grows a graded input, this parameter is the single wiring point.
      */
-    public function solveOutcome(string $scope, ?string $ip, ?string $session, ?VerifyError $error, ?string $decisionId = null): void
+    public function solveOutcome(string $scope, ?string $ip, ?string $session, ?VerifyError $error, ?string $decisionId = null, ?int $solveDurationMs = null): void
     {
+        if ($solveDurationMs !== null && $solveDurationMs >= 0) {
+            $this->logger?->debug('kiwicaptcha.risk: measured solve duration (graded evidence channel pending, observability only)', [
+                'scope' => $scope,
+                'solve_duration_ms' => $solveDurationMs,
+            ]);
+        }
         if ($ip === null || $ip === '') {
             return;
         }
@@ -471,6 +496,41 @@ final class RiskGateway
             return;
         }
         $this->recordFeedback($event, $scope, $ip, $session, null, $decisionId);
+    }
+
+    /**
+     * Null-safe extraction of the core VerifyOutcome's additive
+     * solve-duration surface (round-97 core addition, computed from the
+     * unforgeable issuedAtNs): returns the measured duration in
+     * milliseconds when the installed core exposes it (method or public
+     * property, ms first, a microsecond variant converted), null when the
+     * core predates the field or the value is not a measurable non-negative
+     * integer. The bridge is feature-checked so the consumption activates
+     * the moment the core lands, without requiring a hard dependency bump.
+     */
+    public static function solveDurationMsOf(object $outcome): ?int
+    {
+        foreach (['solveDurationMs', 'solveDurationMicros', 'solveDurationUs'] as $accessor) {
+            if (!method_exists($outcome, $accessor)) {
+                continue;
+            }
+            $value = $outcome->$accessor();
+            if ($value === null) {
+                return null;
+            }
+            if (!\is_int($value) || $value < 0) {
+                return null;
+            }
+
+            return str_ends_with($accessor, 'Micros') || str_ends_with($accessor, 'Us')
+                ? intdiv($value, 1000)
+                : $value;
+        }
+        if (isset($outcome->solveDurationMs) && \is_int($outcome->solveDurationMs) && $outcome->solveDurationMs >= 0) {
+            return $outcome->solveDurationMs;
+        }
+
+        return null;
     }
 
     /**

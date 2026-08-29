@@ -202,21 +202,18 @@ async fn verify_workspace_org_claim(
     }
 }
 
-/// The rate-limit key owned by a workspace (used by status/reset handlers).
-fn workspace_rate_limit_key(workspace_id: &str) -> String {
-    format!("workspace:{workspace_id}:api")
-}
-
-/// Restrict rate-limit resets to keys under the path workspace's prefix.
-/// Raw caller-supplied keys (e.g. `workspace:other-ws:api`) are rejected.
+/// Restrict rate-limit resets to the path workspace's OWN enforcement key.
+/// Raw caller-supplied keys (e.g. another workspace's key, or the old
+/// phantom `workspace:{ws}:api` shape nothing writes) are rejected.
 fn resettable_rate_limit_key(
     workspace_id: &str,
     requested: Option<&str>,
-) -> Result<String, (StatusCode, &'static str)> {
-    let prefix = format!("workspace:{workspace_id}:");
+) -> Result<(String, &'static str), (StatusCode, &'static str)> {
+    let (suffix, prefix) = crate::rate_limit::workspace_api_rate_limit_key_parts(workspace_id);
+    let enforcement_key = format!("{prefix}:{suffix}");
     match requested.map(str::trim) {
-        None => Ok(workspace_rate_limit_key(workspace_id)),
-        Some(key) if key.starts_with(&prefix) => Ok(key.to_string()),
+        None => Ok((suffix, prefix)),
+        Some(key) if key == enforcement_key => Ok((suffix, prefix)),
         Some(key) => {
             tracing::warn!(
                 key = %key,
@@ -719,12 +716,15 @@ async fn rate_limit_status(
     if let Err(e) = verify_workspace_org_claim(&headers, &state, &workspace_id).await {
         return (e.0, err_json(e.1));
     }
-    let key = format!("workspace:{}:api", workspace_id);
+    // Read the EXACT key the enforcement path writes (shared key builder in
+    // rate_limit.rs) — the old `ratelimit:workspace:{ws}:api` key was a
+    // phantom that enforcement never populated.
+    let (key, prefix) = crate::rate_limit::workspace_api_rate_limit_key_parts(&workspace_id);
     let config = RateLimitConfig {
         window_ms: 60_000,
         max_requests: 100,
         burst_limit: None,
-        key_prefix: Some("ratelimit".into()),
+        key_prefix: Some(prefix.into()),
     };
     match state.rate_limit.get_rate_limit_status(&key, &config).await {
         Ok(result) => match serialize_json(result) {
@@ -753,13 +753,15 @@ async fn rate_limit_reset(
     if let Err(e) = verify_workspace_org_claim(&headers, &state, &workspace_id).await {
         return (e.0, err_json(e.1));
     }
-    // The deletable key is restricted to this workspace's own prefix (built
-    // from the path param); arbitrary caller-supplied keys are rejected.
-    let key = match resettable_rate_limit_key(&workspace_id, Some(&body.key)) {
-        Ok(k) => k,
+    // Only this workspace's OWN enforcement key may be deleted (built from
+    // the path param via the shared key builder); arbitrary caller-supplied
+    // keys — including the old phantom `workspace:{ws}:api` shape — are
+    // rejected.
+    let (key, prefix) = match resettable_rate_limit_key(&workspace_id, Some(&body.key)) {
+        Ok(parts) => parts,
         Err(e) => return (e.0, err_json(e.1)),
     };
-    match state.rate_limit.reset_rate_limit(&key, None).await {
+    match state.rate_limit.reset_rate_limit(&key, Some(prefix)).await {
         Ok(()) => ok_json(serde_json::json!({ "status": "reset" })),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, err_json(&e.to_string())),
     }
@@ -974,6 +976,12 @@ async fn audit_query(
     if let Err(e) = verify_bearer(&headers, &state.config) {
         return (e.0, err_json(e.1));
     }
+    // Same tenant-claim check every sibling handler enforces:without it,
+    // /audit/query was the one endpoint where a claimed org could read a
+    // different organization's audit trail.
+    if let Err(e) = verify_org_claim(&headers, &params.organization_id) {
+        return (e.0, err_json(e.1));
+    }
     let q = AuditQuery {
         organization_id: params.organization_id,
         workspace_id: params.workspace_id,
@@ -1112,6 +1120,27 @@ mod tests {
         assert!(verify_org_claim(&claim_headers(None), "org-1").is_ok());
     }
 
+    /// F14 regression:/audit/query takes the organization from QUERY
+    /// params rather than the path, and previously skipped the org-claim
+    /// check every sibling enforced. The handler now runs the same
+    /// verify_org_claim on `params.organization_id` — pin that behavior
+    /// for both the mismatch (403) and match (allowed) cases.
+    #[test]
+    fn test_audit_query_org_claim_enforced() {
+        // A claimed org differing from the queried organization_id must be
+        // refused exactly like the path-based sibling handlers.
+        let err = verify_org_claim(&claim_headers(Some("org-attacker")), "org-victim")
+            .expect_err("claim mismatch on /audit/query must be rejected");
+        assert_eq!(
+            err.0,
+            StatusCode::FORBIDDEN,
+            "cross-tenant audit query must be refused"
+        );
+
+        // Matching claim (case-insensitive, like everywhere else) passes.
+        assert!(verify_org_claim(&claim_headers(Some("ORG-1")), "org-1").is_ok());
+    }
+
     #[test]
     fn test_resettable_rate_limit_key_rejects_foreign_keys() {
         // Arbitrary caller keys must be rejected…
@@ -1122,16 +1151,54 @@ mod tests {
         let err =
             resettable_rate_limit_key("ws-1", Some("global:admin")).expect_err("raw key rejected");
         assert_eq!(err.0, StatusCode::FORBIDDEN);
+
+        // The OLD phantom key shape (`workspace:{ws}:api`) is not a key the
+        // enforcement path ever writes — it must be rejected too, not
+        // silently deleted as a no-op.
+        let err = resettable_rate_limit_key("ws-1", Some("workspace:ws-1:api"))
+            .expect_err("phantom key shape must be rejected");
+        assert_eq!(err.0, StatusCode::FORBIDDEN);
     }
 
     #[test]
-    fn test_resettable_rate_limit_key_allows_own_prefix() {
-        let key = resettable_rate_limit_key("ws-1", Some("workspace:ws-1:api"))
-            .expect("own workspace key allowed");
-        assert_eq!(key, "workspace:ws-1:api");
-        // Prefix must be exact — `ws-1-evil` shares a string prefix but not
-        // the scope prefix.
-        assert!(resettable_rate_limit_key("ws-1", Some("workspace:ws-1-evil:api")).is_err());
+    fn test_resettable_rate_limit_key_allows_own_enforcement_key() {
+        // Only the workspace's OWN enforcement key is accepted, and it is
+        // built from the shared key builder so status/reset can never
+        // address a different key than enforcement writes.
+        let (suffix, prefix) = resettable_rate_limit_key("ws-1", Some("workspace:api:ws-1:api"))
+            .expect("own enforcement key allowed");
+        assert_eq!(suffix, "ws-1:api");
+        assert_eq!(prefix, "workspace:api");
+        // Default (no key supplied) resolves to the same enforcement key.
+        let (default_suffix, default_prefix) =
+            resettable_rate_limit_key("ws-1", None).expect("default resolves");
+        assert_eq!(default_suffix, suffix);
+        assert_eq!(default_prefix, prefix);
+        // Near-miss keys (foreign workspace inside the enforcement shape)
+        // are rejected.
+        assert!(resettable_rate_limit_key("ws-1", Some("workspace:api:ws-1-evil:api")).is_err());
+        assert!(resettable_rate_limit_key("ws-1", Some("workspace:api:ws-other:api")).is_err());
+    }
+
+    /// F11 regression:the status/reset endpoints must address the exact key
+    /// the enforcement path writes. Both sides build the key through the
+    /// ONE shared builder in rate_limit.rs.
+    #[test]
+    fn test_status_and_reset_share_enforcement_key() {
+        let (suffix, prefix) = crate::rate_limit::workspace_api_rate_limit_key_parts("ws-42");
+        let full_key = format!("{prefix}:{suffix}");
+
+        // The key the ENFORCEMENT path writes (check_workspace_quota's
+        // api_requests_per_minute branch, built from the same parts)…
+        assert_eq!(full_key, "workspace:api:ws-42:api");
+        // …is NOT the phantom `ratelimit:workspace:{ws}:api` key the
+        // endpoints used to read/delete.
+        assert_ne!(full_key, "ratelimit:workspace:ws-42:api");
+        // And the workspace config map uses the same prefix for the api
+        // limit, keeping every consumer on one key scheme.
+        let quota = crate::config::QuotaConfig::default();
+        let configs = crate::rate_limit::RateLimitService::get_workspace_rate_limit_configs(&quota);
+        assert_eq!(configs["api"].key_prefix.as_deref(), Some(prefix));
     }
 
     #[test]

@@ -21,7 +21,12 @@ namespace KiwiCaptcha;
  *                request_binding and issuer render as the empty segment
  *                when unset; policy_version as the configured
  *                security-policy epoch; kid as the configured signing
- *                key id, the final canonical field.
+ *                key id, the final canonical field. When a decoy
+ *                (honeypot) field is armed
+ *                ({@see self::issueWithDecoyField()}), exactly ONE more
+ *                segment is appended after the kid:
+ *                ...|{issuer}|{kid}|{decoy_field} — see
+ *                {@see self::canonicalPayload()}.
  *   signature  = hex(H), where H = hmac_sha256(K_challenge, canonical),
  *                an HKDF-derived purpose key, see {@see DerivedKeys}.
  *                The master secret is never used directly as the signing
@@ -52,6 +57,39 @@ namespace KiwiCaptcha;
  */
 final class Issuer
 {
+    /**
+     * The server-side pool of decoy (honeypot) form-field names. When a
+     * deployment arms the decoy surface
+     * ({@see self::issueWithDecoyField()}), the issuer picks one name
+     * uniformly at random (CSPRNG) per issuance: the names look like
+     * ordinary optional form fields a generic bot filler would populate,
+     * while a human never sees them (the widget driver renders the chosen
+     * name as a hidden, never-auto-filled text input).
+     *
+     * The pool alphabet is deliberately `[a-z_]` — a subset of the
+     * `[A-Za-z0-9_-]{1,64}` shape the widget driver accepts and of the
+     * validation alphabet ({@see Config::isValidDecoyFieldName()}), so no
+     * pool name can ever smuggle the `|` canonical-payload separator or
+     * any other structurally meaningful character. PHP maintains the
+     * identical pool (same names, same order) as the Rust
+     * `DECOY_FIELD_POOL`; the picked name is authenticated by the v2
+     * signature, so the two cores never need to agree on the PICK, only
+     * on the pool's alphabet and the canonical-format extension
+     * documented on {@see self::canonicalPayload()}.
+     */
+    public const DECOY_FIELD_POOL = [
+        'company_website',
+        'fax_number',
+        'secondary_phone',
+        'office_extension',
+        'alternate_email',
+        'home_address_line',
+        'middle_name',
+        'assistant_name',
+        'department_code',
+        'backup_phone',
+    ];
+
     public function __construct(
         private readonly Config $config,
         private readonly StorageInterface $storage,
@@ -118,6 +156,68 @@ final class Issuer
      */
     public function issue(string $scope, string $clientIp, ?string $requestBinding = null, ?string $hostname = null): Challenge
     {
+        return $this->issueChallenge($scope, $clientIp, $requestBinding, $hostname, null);
+    }
+
+    /**
+     * Issue a challenge with the decoy (honeypot) surface armed — the
+     * issuance-side switch of the risk engine's honeypot/decoy signals
+     * (`DecoyFieldSubmitted`, `honeypot_hit`). Identical to
+     * {@see self::issue()} in every other respect (same wire format, same
+     * signing, same storage); when `$armDecoyField` is true the issuer
+     * picks a random field name from the server-side
+     * {@see self::DECOY_FIELD_POOL} (CSPRNG; a fresh independent pick per
+     * issuance, so two challenges never share a predictable decoy), sets
+     * it on the client-facing {@see Challenge::$decoyField} (the widget
+     * driver renders the hidden input from that key) AND on the stored
+     * record's authenticated {@see ChallengeRecord::$decoyField}, signed
+     * into the v2 canonical input as the final `|<decoy_field>` segment —
+     * a client cannot strip or swap the decoy without breaking the
+     * signature the verifier re-checks. `false` (or the plain
+     * {@see self::issue()}) behaves exactly like the legacy path: no
+     * decoy, byte-identical canonical string, and neither JSON surface
+     * carries the key.
+     */
+    public function issueWithDecoyField(
+        string $scope,
+        string $clientIp,
+        bool $armDecoyField = true,
+        ?string $requestBinding = null,
+        ?string $hostname = null,
+    ): Challenge {
+        return $this->issueChallenge(
+            $scope,
+            $clientIp,
+            $requestBinding,
+            $hostname,
+            $armDecoyField ? self::pickDecoyField() : null,
+        );
+    }
+
+    /**
+     * Pick a random decoy field name from {@see self::DECOY_FIELD_POOL}
+     * with the CSPRNG (random_int; never a weak/insecure fallback — an
+     * RNG failure propagates to the caller as a Random\RandomException,
+     * exactly like the nonce/salt draws). Mirrors the Rust
+     * `pick_decoy_field`.
+     */
+    private static function pickDecoyField(): string
+    {
+        return self::DECOY_FIELD_POOL[random_int(0, \count(self::DECOY_FIELD_POOL) - 1)];
+    }
+
+    /**
+     * The shared issuance body (see the {@see self::issue()} contract);
+     * `$decoyField` is the already-picked honeypot name, or null for the
+     * legacy unarmed path.
+     */
+    private function issueChallenge(
+        string $scope,
+        string $clientIp,
+        ?string $requestBinding,
+        ?string $hostname,
+        ?string $decoyField,
+    ): Challenge {
         $scopeLen = \strlen($scope);
         if ($scopeLen < 1 || $scopeLen > 128) {
             throw new \InvalidArgumentException('scope must be 1-128 bytes');
@@ -150,6 +250,10 @@ final class Issuer
         $minDurationMs = $this->config->minDurationMs
             ?? $this->deriveMinDurationMs($targetBits);
 
+        // The decoy (honeypot) field name, when armed, was picked BEFORE
+        // the canonical input is built: it is an authenticated issuance
+        // parameter (the final `|<decoy_field>` segment), signed like
+        // every other.
         $payload = self::canonicalPayload(
             $nonce,
             $scope,
@@ -168,6 +272,7 @@ final class Issuer
             $requestBinding,
             $this->config->issuer,
             $this->config->kid,
+            $decoyField,
         );
         $signature = self::signPayloadV2($payload, $this->config->secretKey);
 
@@ -201,6 +306,7 @@ final class Issuer
             hostname: $hostname,
             issuer: $this->config->issuer,
             kid: $this->config->kid,
+            decoyField: $decoyField,
         );
         $this->storage->store($record);
 
@@ -216,6 +322,7 @@ final class Issuer
             ttlSecs: $this->config->ttlSecs,
             minDurationMs: $minDurationMs,
             prefix: $prefix,
+            decoyField: $decoyField,
         );
     }
 
@@ -377,6 +484,35 @@ final class Issuer
      * kid 1 ends the canonical with `|0||1|||1`. `kid` is the final
      * field, appended after `issuer`; it is always present (the
      * configured signing key id, default 1).
+     *
+     * # The decoy-field extension
+     *
+     * When the issuer arms a decoy (honeypot) form field
+     * ({@see self::issueWithDecoyField()}), the field name is appended as
+     * ONE extra final segment after the `kid`:
+     *
+     * ```text
+     * v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
+     *   target_bits|salt|min_duration_ms|region|policy_version|request_binding|
+     *   issuer|kid|decoy_field
+     * ```
+     *
+     * - `decoy_field` is the literal decoy name (e.g. `company_website`),
+     * drawn from {@see self::DECOY_FIELD_POOL}, so it can never contain
+     * the `|` separator (the pool alphabet is `[a-z_]`; validation
+     * accepts `[A-Za-z0-9_-]` only, 1..=64 bytes).
+     * - The segment is appended ONLY when a decoy is armed. `null` renders
+     * NOTHING extra — the canonical string is byte-identical to the
+     * pre-extension format, so outstanding challenges and cross-language
+     * records keep verifying unchanged across the upgrade, and the
+     * extension is invisible until a deployment opts in. The exact
+     * recipe: build the same 18-field base string, then append
+     * `'|' . $decoyField` if and only if the record carries a non-null
+     * `decoy_field`; sign/HMAC-verify the result with the HKDF-derived
+     * challenge key (`K_challenge`) exactly as before. The stored record
+     * JSON carries the optional string key `decoy_field` (absent when
+     * null — not a JSON `null` key); the client-facing challenge response
+     * carries the optional key `decoy_field` with the same value.
      */
     public static function canonicalPayload(
         string $nonce,
@@ -396,8 +532,9 @@ final class Issuer
         ?string $requestBinding = null,
         ?string $issuer = null,
         int $kid = 1,
+        ?string $decoyField = null,
     ): string {
-        return sprintf(
+        $base = sprintf(
             'v2|%s|%s|%s|%d|%d|%s|%d|%d|%d|%d|%s|%d|%s|%d|%s|%s|%d',
             $nonce,
             $scope,
@@ -417,6 +554,11 @@ final class Issuer
             $issuer ?? '',
             $kid,
         );
+
+        // The decoy segment is appended ONLY when armed: null renders
+        // NOTHING extra, so the unarmed canonical stays byte-identical to
+        // the legacy 18-field format.
+        return $decoyField !== null ? $base.'|'.$decoyField : $base;
     }
 
     /**

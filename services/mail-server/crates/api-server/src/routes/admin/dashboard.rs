@@ -140,7 +140,7 @@ async fn get_dashboard_stats(
     auth: AuthUser,
 ) -> Result<Json<DashboardStats>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     // Check cache
     {

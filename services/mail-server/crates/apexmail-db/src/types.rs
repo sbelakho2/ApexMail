@@ -1,8 +1,20 @@
 //! Shared database types — models used across repositories.
+//!
+//! Id-type contract (audit F8): the canonical schema uses string ids —
+//! `VARCHAR(26)` for tenant ids and ULID-style primary keys (migration
+//! 064/075/088), `VARCHAR(64)` for event ids (migration 075). Binding
+//! `Uuid` values against those columns failed at runtime with a type
+//! mismatch, so every tenant-scoped struct and repo bind uses `String`.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+/// Generate a 26-char id for `VARCHAR(26)` primary keys (canonical 064
+/// shape): a stable prefix plus 25 hex chars from a UUID.
+pub fn short_id(prefix: char) -> String {
+    format!("{prefix}{}", &Uuid::new_v4().simple().to_string()[..25])
+}
 
 // ─── Tenants ───────────────────────────────────────────────────
 
@@ -23,7 +35,8 @@ pub struct Tenant {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct User {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    /// VARCHAR(26) tenant reference (migration 064).
+    pub tenant_id: String,
     pub email: String,
     pub name: Option<String>,
     #[serde(skip_serializing)]
@@ -39,7 +52,8 @@ pub struct User {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ApiKey {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    /// VARCHAR(26) tenant reference (migration 064).
+    pub tenant_id: String,
     pub name: String,
     #[serde(skip_serializing)]
     pub key_hash: String,
@@ -82,7 +96,8 @@ pub struct Domain {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Message {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    /// VARCHAR(26) tenant reference (migration 064).
+    pub tenant_id: String,
     pub from_email: String,
     pub to_emails: serde_json::Value,
     pub cc_emails: Option<serde_json::Value>,
@@ -102,9 +117,12 @@ pub struct Message {
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Event {
-    pub id: Uuid,
-    pub tenant_id: Uuid,
-    pub message_id: Option<Uuid>,
+    /// VARCHAR(64) string id (migration 075) — NOT a UUID.
+    pub id: String,
+    /// VARCHAR(26) tenant reference (migration 064).
+    pub tenant_id: String,
+    /// VARCHAR(64) message reference (migration 075).
+    pub message_id: Option<String>,
     pub event_type: String,
     pub recipient: Option<String>,
     pub metadata: Option<serde_json::Value>,
@@ -115,8 +133,10 @@ pub struct Event {
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Template {
-    pub id: Uuid,
-    pub tenant_id: Uuid,
+    /// VARCHAR(26) string id (migration 075).
+    pub id: String,
+    /// VARCHAR(26) tenant reference.
+    pub tenant_id: String,
     pub name: String,
     pub subject: String,
     pub html_body: String,
@@ -131,8 +151,10 @@ pub struct Template {
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Suppression {
-    pub id: Uuid,
-    pub tenant_id: Uuid,
+    /// VARCHAR(26) string id (migration 088).
+    pub id: String,
+    /// VARCHAR(26) tenant reference.
+    pub tenant_id: String,
     pub email: String,
     pub reason: String,
     pub source: String,
@@ -143,8 +165,10 @@ pub struct Suppression {
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Webhook {
-    pub id: Uuid,
-    pub tenant_id: Uuid,
+    /// VARCHAR(26) string id (migration 075).
+    pub id: String,
+    /// VARCHAR(26) tenant reference.
+    pub tenant_id: String,
     pub url: String,
     pub events: serde_json::Value,
     #[serde(skip_serializing)]
@@ -156,30 +180,43 @@ pub struct Webhook {
 
 // ─── Audit Logs ────────────────────────────────────────────────
 
+/// Canonical tamper-evident audit row (migration 038 + 055). The former
+/// UUID-shaped struct (actor_id/resource_type/metadata) never matched the
+/// audit_logs table any writer in the workspace INSERTs into.
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct AuditLog {
-    pub id: Uuid,
-    pub tenant_id: Uuid,
-    pub actor_id: Option<Uuid>,
+    pub id: String,
+    pub tenant_id: Option<String>,
+    pub user_id: Option<String>,
+    pub session_id: Option<String>,
     pub action: String,
-    pub resource_type: String,
+    pub resource: String,
     pub resource_id: Option<String>,
-    pub metadata: Option<serde_json::Value>,
+    pub details: serde_json::Value,
     pub ip_address: Option<String>,
-    pub created_at: DateTime<Utc>,
+    pub user_agent: Option<String>,
+    pub outcome: String,
+    pub error_message: Option<String>,
+    pub timestamp: DateTime<Utc>,
+    pub hash: String,
+    pub previous_hash: Option<String>,
+    pub signature: String,
 }
 
 // ─── Support Tickets ───────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct SupportTicket {
-    pub id: Uuid,
-    pub tenant_id: Uuid,
+    /// VARCHAR(26) string id (migration 075).
+    pub id: String,
+    /// VARCHAR(26) tenant reference.
+    pub tenant_id: String,
     pub subject: String,
     pub description: String,
     pub priority: String,
     pub status: String,
-    pub assigned_to: Option<Uuid>,
+    /// VARCHAR(26) assignee reference (migration 075).
+    pub assigned_to: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -189,7 +226,8 @@ pub struct SupportTicket {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Contact {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    /// VARCHAR(26) tenant reference.
+    pub tenant_id: String,
     pub email: String,
     pub name: Option<String>,
     pub tags: Option<serde_json::Value>,
@@ -204,7 +242,8 @@ pub struct Contact {
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Campaign {
     pub id: Uuid,
-    pub tenant_id: Uuid,
+    /// VARCHAR(26) tenant reference.
+    pub tenant_id: String,
     pub name: String,
     pub subject: String,
     pub template_id: Option<Uuid>,
@@ -256,6 +295,18 @@ pub struct IspWarmupSchedule {
 mod tests {
     use super::*;
 
+    fn tenant_id() -> String {
+        short_id('t')
+    }
+
+    #[test]
+    fn test_short_id_fits_varchar_26() {
+        let id = short_id('t');
+        assert_eq!(id.len(), 26, "VARCHAR(26) ids must be exactly 26 chars");
+        assert!(id.starts_with('t'));
+        assert_ne!(id, short_id('t'), "ids must be unique");
+    }
+
     #[test]
     fn test_tenant_serialization() {
         let t = Tenant {
@@ -275,7 +326,7 @@ mod tests {
     fn test_message_serialization() {
         let m = Message {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            tenant_id: tenant_id(),
             from_email: "sender@test.com".into(),
             to_emails: serde_json::json!(["user@test.com"]),
             cc_emails: None,
@@ -298,7 +349,7 @@ mod tests {
     fn test_api_key_serialization() {
         let k = ApiKey {
             id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            tenant_id: tenant_id(),
             name: "Production Key".into(),
             key_hash: "abc123hash".into(),
             key_prefix: "am_live_abc".into(),
@@ -369,9 +420,9 @@ mod tests {
     #[test]
     fn test_event_types() {
         let e = Event {
-            id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
-            message_id: Some(Uuid::new_v4()),
+            id: Uuid::new_v4().to_string(),
+            tenant_id: tenant_id(),
+            message_id: Some(Uuid::new_v4().to_string()),
             event_type: "delivered".into(),
             recipient: Some("user@test.com".into()),
             metadata: None,
@@ -383,8 +434,8 @@ mod tests {
     #[test]
     fn test_suppression_reasons() {
         let s = Suppression {
-            id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            id: short_id('s'),
+            tenant_id: tenant_id(),
             email: "bounced@test.com".into(),
             reason: "hard_bounce".into(),
             source: "system".into(),

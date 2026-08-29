@@ -53,7 +53,24 @@
     {% endif %}
   {% endfor %}
   <link rel="alternate" hreflang="{{ l }}" href="{{ current_url | default(value=config.base_url) }}" />
-  <link rel="alternate" hreflang="x-default" href="{{ current_url | default(value=config.base_url) }}" />
+  {# x-default must be the language-neutral URL — the default-language (en)
+     version of this page, never the current locale's own URL (a self-
+     referring x-default told crawlers every locale was the fallback).
+     If this page has no default-language translation, no x-default is
+     emitted — there is no language-neutral URL to point at. #}
+  {% set_global xdefault_url = "" %}
+  {% if l == config.default_language %}
+    {% set_global xdefault_url = current_url | default(value=config.base_url) %}
+  {% else %}
+    {% for t in current_translations %}
+      {% if t.lang | default(value=config.default_language) == config.default_language %}
+        {% set_global xdefault_url = t.permalink %}
+      {% endif %}
+    {% endfor %}
+  {% endif %}
+  {% if xdefault_url %}
+  <link rel="alternate" hreflang="x-default" href="{{ xdefault_url }}" />
+  {% endif %}
   <meta name="robots" content="index, follow, max-video-preview:-1, max-image-preview:large, max-snippet:-1" />
   <meta name="googlebot" content="index, follow, max-video-preview:-1, max-image-preview:large, max-snippet:-1" />
   <meta name="keywords" content="email API, transactional email, email infrastructure, GDPR-oriented email, email deliverability, enterprise email, developer email API" />
@@ -121,7 +138,7 @@
   {% include "partials/analytics.html" %}
 </head>
 <body class="antialiased min-h-screen safe-area-inset-bottom flex flex-col">
-  <a href="#main-content" id="skip-to-content" tabindex="1">{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["skip_to_main"] %}{{ i18n_data[l]["a11y"]["skip_to_main"] }}{% else %}Skip to main content{% endif %}</a>
+  <a href="#main-content" id="skip-to-content">{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["skip_to_main"] %}{{ i18n_data[l]["a11y"]["skip_to_main"] }}{% else %}Skip to main content{% endif %}</a>
   <input type="checkbox" id="nav-toggle" class="nav-toggle-input" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["toggle_nav"] %}{{ i18n_data[l]["a11y"]["toggle_nav"] }}{% else %}Toggle navigation menu{% endif %}" />
   {% include "partials/header.html" %}
   <main id="main-content" class="flex-1 scroll-mt-16 lg:scroll-mt-20" tabindex="-1">

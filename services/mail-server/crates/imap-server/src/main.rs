@@ -69,6 +69,14 @@ struct ImapSession {
     uid_next: u64,
     exists: u32,
     recent: u32,
+    /// F6: session-scoped \Recent approximation — the UIDs this session
+    /// considers \Recent (unseen when first observed via SELECT, plus unseen
+    /// arrivals during the session). The store has no persistent
+    /// first-delivery marker on the wire, so multi-session \Recent semantics
+    /// are best-effort: without persistent state, two concurrent sessions can
+    /// both see the same message as \Recent. Documented approximation, not a
+    /// silent claim of RFC 3501 §2.3.2 fidelity.
+    recent_uids: HashSet<u64>,
     permanent_flags: Vec<String>,
     uid_map: Vec<u64>,
     read_only: bool,
@@ -91,6 +99,7 @@ impl ImapSession {
             uid_next: 0,
             exists: 0,
             recent: 0,
+            recent_uids: HashSet::new(),
             permanent_flags: vec![
                 "\\Seen".into(),
                 "\\Answered".into(),
@@ -114,6 +123,16 @@ impl ImapSession {
             .iter()
             .position(|&u| u == uid)
             .map(|i| i as u32 + 1)
+    }
+
+    /// Current \Recent count for this session: recent UIDs that are still in
+    /// the mailbox view (expunged messages stop being \Recent).
+    fn recent_count(&self) -> u32 {
+        self.recent_uids
+            .iter()
+            .filter(|u| self.uid_map.contains(u))
+            .count()
+            .min(u32::MAX as usize) as u32
     }
 }
 
@@ -188,6 +207,14 @@ async fn subscribed_mailboxes(account_id: &str) -> HashSet<String> {
 // failures accumulate inside the lockout window, further attempts for that
 // pair are rejected immediately — before any credential check, with no
 // artificial delay, so the response leaks nothing about the account.
+//
+// KNOWN LIMITATION (F12, documented deliberately): this state is
+// PROCESS-LOCAL. Lockout counters are not shared between server replicas and
+// do not survive a restart, so a distributed attacker rotating across
+// replicas gets per-replica budgets. Moving the counters to a shared store
+// needs a Redis client in this crate's dependency tree — none exists today
+// (only other services in the workspace depend on redis) — and adding one is
+// out of scope for this change.
 
 const AUTH_FAILURE_LIMIT: usize = 5;
 const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(5 * 60);
@@ -195,6 +222,9 @@ const AUTH_FAILURE_WINDOW: Duration = Duration::from_secs(5 * 60);
 /// usernames, so an attacker spraying many username variants from one IP
 /// cannot dodge the per-(ip, username) lockout.
 const AUTH_IP_FAILURE_LIMIT: usize = 100;
+/// Upper bound on DISTINCT IPs tracked in [`AUTH_IP_FAILURES`] (bounded
+/// memory; see [`auth_evict_oldest_ips`]).
+const AUTH_IP_MAX_TRACKED: usize = 10_000;
 
 type AuthFailureTable = HashMap<(String, String), VecDeque<std::time::Instant>>;
 static AUTH_FAILURES: LazyLock<Arc<Mutex<AuthFailureTable>>> =
@@ -206,6 +236,27 @@ static AUTH_IP_FAILURES: LazyLock<Arc<Mutex<AuthIpFailureTable>>> =
 
 fn prune_stale(failures: &mut VecDeque<std::time::Instant>, now: std::time::Instant) {
     failures.retain(|t| now.duration_since(*t) < AUTH_FAILURE_WINDOW);
+}
+
+/// F12: bounded eviction for the per-IP table. When a NEW ip would push the
+/// table past [`AUTH_IP_MAX_TRACKED`], drop the OLDEST HALF by last recorded
+/// failure instead of keeping every key forever — the table stays bounded
+/// without discarding the (recent, hostile) IPs that matter most.
+fn auth_evict_oldest_ips(ip_table: &mut AuthIpFailureTable) {
+    if ip_table.len() < AUTH_IP_MAX_TRACKED {
+        return;
+    }
+    let mut by_age: Vec<String> = ip_table.keys().cloned().collect();
+    by_age.sort_by_key(|ip| {
+        ip_table
+            .get(ip)
+            .and_then(|failures| failures.back().copied())
+            .unwrap_or_else(std::time::Instant::now)
+    });
+    let evict = by_age.len() / 2;
+    for ip in by_age.into_iter().take(evict) {
+        ip_table.remove(&ip);
+    }
 }
 
 /// Returns `true` when (ip, username) is currently locked out, either via
@@ -257,6 +308,11 @@ async fn auth_record_failure(ip: &str, username: &str) {
         prune_stale(failures, now);
         !failures.is_empty()
     });
+    // F12: bounded growth by DISTINCT IP — evict the oldest half before
+    // inserting a brand-new key (existing keys just refresh in place).
+    if !ip_table.contains_key(ip) {
+        auth_evict_oldest_ips(&mut ip_table);
+    }
     let failures = ip_table.entry(ip.to_string()).or_default();
     failures.push_back(now);
     // Hard cap the stored history so a hostile IP cannot grow it unboundedly.
@@ -266,9 +322,18 @@ async fn auth_record_failure(ip: &str, username: &str) {
 }
 
 /// Clear the failure history after a successful login.
+///
+/// F12: the per-IP AGGREGATE for this IP is cleared too — previously only the
+/// (ip, username) pair was removed, so a legitimate user who finally logged
+/// in still left their IP at the aggregate cap (one more sprayed failure away
+/// from locking every other username from that IP, e.g. behind NAT).
 async fn auth_clear_failures(ip: &str, username: &str) {
-    let mut table = AUTH_FAILURES.lock().await;
-    table.remove(&(ip.to_string(), username.to_string()));
+    {
+        let mut table = AUTH_FAILURES.lock().await;
+        table.remove(&(ip.to_string(), username.to_string()));
+    }
+    let mut ip_table = AUTH_IP_FAILURES.lock().await;
+    ip_table.remove(ip);
 }
 
 // ── Sequence set parser ──────────────────────────────────────────────────────
@@ -594,14 +659,24 @@ fn format_address_list(addrs: &[String]) -> String {
 }
 
 fn encode_nstring(s: &str) -> String {
+    // F10: a quoted string cannot carry CR, LF, NUL or other control bytes —
+    // RFC 3501 §4.3 allows only `\"` and `\\` as escapes, so the old `\r`,
+    // `\n` and `\xNN` output was an illegal quoted string. Values containing
+    // such bytes are emitted as an IMAP literal (`{octets}\r\n<raw bytes>`)
+    // instead, which the surrounding response format accepts wherever an
+    // nstring is legal. The length is in OCTETS (UTF-8 bytes), not chars.
+    let needs_literal = s
+        .as_bytes()
+        .iter()
+        .any(|&b| b == b'\r' || b == b'\n' || b.is_ascii_control());
+    if needs_literal {
+        return format!("{{{}}}\r\n{}", s.len(), s);
+    }
     let mut out = String::new();
     for ch in s.chars() {
         match ch {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
-            '\r' => out.push_str("\\r"),
-            '\n' => out.push_str("\\n"),
-            c if c.is_control() => out.push_str(&format!("\\x{:02x}", c as u32)),
             c => out.push(c),
         }
     }
@@ -1408,10 +1483,22 @@ fn auth_required(session: &ImapSession) -> bool {
 
 /// Re-list the selected mailbox so the session's UID map (and thus sequence
 /// numbers) stays correct even when other sessions modify the mailbox.
-async fn refresh_session_view(session: &mut ImapSession) {
+///
+/// F7: returns the untagged view diff (EXPUNGEs in descending sequence order,
+/// then EXISTS — the same `view_update_lines` NOOP/IDLE emit) between the old
+/// and the refreshed view. Command handlers that compute their own untagged
+/// responses against the refreshed view MUST write this diff FIRST, so the
+/// client's sequence numbers are corrected before the command's responses
+/// reference them; the previous silent refresh made e.g. a STORE's
+/// `* n FETCH (FLAGS ...)` point at the wrong message after another session
+/// had expunged. (RFC 3501 §5.2 discourages unsolicited EXPUNGEs during
+/// FETCH/STORE/SEARCH responses; the alternative — silently shifted sequence
+/// numbers — is strictly worse, and RFC 9051 removes the restriction.)
+async fn refresh_session_view(session: &mut ImapSession) -> String {
     if !mailbox_selected(session) {
-        return;
+        return String::new();
     }
+    let old_uid_map = session.uid_map.clone();
     let mut client = session.client.clone();
     let req = ListMessagesRequest {
         account_id: session.account_id.clone(),
@@ -1423,12 +1510,37 @@ async fn refresh_session_view(session: &mut ImapSession) {
     if let Ok(resp) = client.list_messages(req).await {
         let mut msgs = resp.into_inner().messages;
         msgs.sort_by_key(|m| m.uid);
-        session.uid_map = msgs.iter().map(|m| m.uid).collect();
+        let new_uid_map: Vec<u64> = msgs.iter().map(|m| m.uid).collect();
+        let diff = view_update_lines(&old_uid_map, &new_uid_map);
+        session.uid_map = new_uid_map;
         session.exists = session.uid_map.len().min(u32::MAX as usize) as u32;
+        // F6: prune \Recent for messages that left the view (expunged by
+        // another session).
+        let live: HashSet<u64> = session.uid_map.iter().copied().collect();
+        session.recent_uids.retain(|u| live.contains(u));
         if let Some(&last) = session.uid_map.last() {
             session.uid_next = session.uid_next.max(last.saturating_add(1));
         }
+        return diff;
     }
+    String::new()
+}
+
+/// F8 (RFC 9051 §6.3.4): a failed SELECT/EXAMINE leaves the connection in
+/// the Authenticated state with NO mailbox selected — the previously
+/// selected mailbox is deselected. The old code kept the previous mailbox
+/// selected on failure, so a client that SELECTed a bad name kept operating
+/// on a stale view it believes it left.
+fn deselect_mailbox(session: &mut ImapSession) {
+    session.state = SessionState::Authenticated;
+    session.mailbox.clear();
+    session.uid_validity = 0;
+    session.uid_next = 0;
+    session.exists = 0;
+    session.recent = 0;
+    session.recent_uids.clear();
+    session.uid_map.clear();
+    session.read_only = false;
 }
 
 fn mailbox_selected(session: &ImapSession) -> bool {
@@ -1779,10 +1891,12 @@ async fn handle_select<W: AsyncWrite + Unpin>(
         return write_line(writer, &tagged_bad(tag, "Mailbox name required")).await;
     }
 
+    // F8 (RFC 9051 §6.3.4): a failed SELECT deselects the previous mailbox.
     let status = match get_mailbox_status(&mut session.client, &session.account_id, &mailbox).await
     {
         Ok(s) => s.into_inner(),
         Err(e) => {
+            deselect_mailbox(session);
             if tonic_code(&e) == Some(tonic::Code::NotFound) {
                 return write_line(writer, &tagged_no(tag, "[NONEXISTENT] Mailbox not found"))
                     .await;
@@ -1799,8 +1913,8 @@ async fn handle_select<W: AsyncWrite + Unpin>(
     // L6: perform EVERY fallible step before touching the session. The old
     // order marked the session Selected before the message listing; if that
     // RPC failed, the client was left with a half-selected phantom mailbox
-    // (state Selected, empty uid_map). On any failure below the session
-    // stays exactly as it was (Authenticated with its previous view).
+    // (state Selected, empty uid_map). On any failure below the session is
+    // deselected entirely (F8): no mailbox remains selected.
     let mut client = session.client.clone();
     let list_req = ListMessagesRequest {
         account_id: session.account_id.clone(),
@@ -1812,6 +1926,7 @@ async fn handle_select<W: AsyncWrite + Unpin>(
     let list_resp = match client.list_messages(list_req).await {
         Ok(r) => r.into_inner(),
         Err(e) => {
+            deselect_mailbox(session);
             return write_line(
                 writer,
                 &tagged_no(tag, &format!("Failed to list messages: {}", e)),
@@ -1836,15 +1951,29 @@ async fn handle_select<W: AsyncWrite + Unpin>(
         .position(|m| !m.flags.clone().unwrap_or_default().seen)
         .map(|i| i as u32 + 1);
 
+    // F6: session-scoped \Recent baseline. Without a persistent
+    // first-delivery marker in the store, the closest honest approximation is
+    // "unseen when this session first observed the mailbox" — those UIDs stay
+    // \Recent for this session's lifetime (and unseen arrivals during the
+    // session join the set). Multi-session semantics are best-effort; see the
+    // field docs on `ImapSession::recent_uids`.
+    let new_recent_uids: HashSet<u64> = msgs
+        .iter()
+        .filter(|m| !m.flags.clone().unwrap_or_default().seen)
+        .map(|m| m.uid)
+        .collect();
+
     // All fallible work succeeded — NOW switch the session to the new view.
     session.mailbox = mailbox.clone();
     session.read_only = read_only;
     session.uid_validity = mb.uidvalidity.max(1);
     session.uid_next = mb.uidnext.max(1);
     session.exists = new_exists;
-    session.recent = mb.recent;
+    session.recent_uids = new_recent_uids;
     session.state = SessionState::Selected;
     session.uid_map = new_uid_map;
+    // F6: after the view is switched, report this session's recent count.
+    session.recent = session.recent_count();
 
     let mut responses = String::new();
     responses.push_str(&format!("* {} EXISTS\r\n", session.exists));
@@ -1974,6 +2103,14 @@ enum FetchItem {
     Fast,
     All,
     Full,
+    /// F5: BODY / BODYSTRUCTURE — the derived MIME structure
+    /// (RFC 3501 §7.4.2). `extended` selects BODYSTRUCTURE (extension data)
+    /// over bare BODY. Structure items are inherently peek-only: they
+    /// describe the content, they do not deliver it, so they never set
+    /// \Seen (this is what makes the FULL macro peek: true).
+    BodyStructure {
+        extended: bool,
+    },
     /// BODY[...] or RFC822[...] with its response name and whether it peeks.
     Body {
         section: BodySection,
@@ -1995,27 +2132,29 @@ fn resolve_macro_item(item: &FetchItem) -> Vec<FetchItem> {
             FetchItem::InternalDate,
             FetchItem::Envelope,
         ],
+        // F5: RFC 3501 §6.4.5 — the FULL macro is ALL + BODY (the structure).
+        // The old expansion returned BODY[] CONTENT and set \Seen on every
+        // FULL FETCH; the structure is a peek-only derived view instead.
         FetchItem::Full => vec![
             FetchItem::Flags,
             FetchItem::InternalDate,
             FetchItem::Envelope,
-            FetchItem::Body {
-                section: BodySection::Full,
-                peek: false,
-                name: "BODY[]".to_string(),
-                partial: None,
-            },
+            FetchItem::BodyStructure { extended: true },
         ],
         other => vec![other.clone()],
     }
 }
 
 fn body_item_needs_content(item: &FetchItem) -> bool {
-    matches!(item, FetchItem::Body { .. } | FetchItem::Full)
+    matches!(
+        item,
+        FetchItem::Body { .. } | FetchItem::BodyStructure { .. } | FetchItem::Full
+    )
 }
 
 fn body_item_sets_seen(item: &FetchItem) -> bool {
-    matches!(item, FetchItem::Body { peek: false, .. } | FetchItem::Full)
+    // F5: FULL expands to ALL + BODYSTRUCTURE, which never sets \Seen.
+    matches!(item, FetchItem::Body { peek: false, .. })
 }
 
 /// Split a raw message into header / text sections.
@@ -2239,6 +2378,206 @@ fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
+// ── F5: BODY/BODYSTRUCTURE rendering ────────────────────────────────────────
+//
+// The MIME structure is derived on demand from the raw message (there is no
+// persisted structure metadata), reusing the same header/multipart helpers
+// the BODY[n] section extraction uses.
+
+/// Split one `key=value` parameter token (`charset="utf-8"` → `("charset",
+/// "utf-8")`); surrounding double quotes on the value are stripped. RFC 2231
+/// extended/continued parameters are not reassembled (documented
+/// approximation).
+fn parse_header_param(segment: &str) -> (String, String) {
+    let (key, value) = segment.split_once('=').unwrap_or((segment, ""));
+    (
+        key.trim().to_string(),
+        value.trim().trim_matches('"').to_string(),
+    )
+}
+
+/// Split a Content-Type-style value into (type, subtype, parameters):
+/// `text/plain; charset="utf-8"` → ("text", "plain", [("charset", "utf-8")]).
+/// A `;` inside a quoted parameter value would split early — accepted
+/// approximation for structure rendering.
+fn parse_type_params(value: &str) -> (String, String, Vec<(String, String)>) {
+    let mut segments = value.split(';');
+    let media = segments.next().unwrap_or("").trim().to_string();
+    let (media_type, subtype) = match media.split_once('/') {
+        Some((t, s)) => (t.trim().to_string(), s.trim().to_string()),
+        None => (media, String::new()),
+    };
+    let params = segments.map(parse_header_param).collect();
+    (media_type, subtype, params)
+}
+
+/// Render a parameter list as the body-fielddata parenthesized list of
+/// strings (`("CHARSET" "utf-8")`), or NIL when empty.
+fn format_body_params(params: &[(String, String)]) -> String {
+    if params.is_empty() {
+        return "NIL".to_string();
+    }
+    let inner: Vec<String> = params
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "{} {}",
+                encode_nstring(&k.to_uppercase()),
+                encode_nstring(v)
+            )
+        })
+        .collect();
+    format!("({})", inner.join(" "))
+}
+
+/// Render an optional header value as an nstring (NIL when absent).
+fn opt_body_nstring(value: Option<&str>) -> String {
+    match value {
+        None => "NIL".to_string(),
+        Some(s) => encode_nstring(s),
+    }
+}
+
+/// The body-fld-dsp field shared by the 1part and mpart extension data:
+/// `("TYPE" (params))` from Content-Disposition, or NIL when absent.
+fn format_disposition_field(header: &[u8]) -> String {
+    match raw_header_value(header, "Content-Disposition") {
+        None => "NIL".to_string(),
+        Some(value) => {
+            let (dtype, _, params) = parse_type_params(&value);
+            let dtype = if dtype.is_empty() {
+                "INLINE".to_string()
+            } else {
+                dtype.to_uppercase()
+            };
+            format!(
+                "({} {})",
+                encode_nstring(&dtype),
+                format_body_params(&params)
+            )
+        }
+    }
+}
+
+/// Extension data for a non-multipart part (BODYSTRUCTURE only):
+/// body-fld-md5, body-fld-dsp, body-fld-lang, body-fld-loc per RFC 3501
+/// §7.4.2. MD5/language/location are not tracked and render NIL; the
+/// disposition comes from Content-Disposition.
+fn format_extension_fields(header: &[u8]) -> String {
+    format!("NIL {} NIL NIL", format_disposition_field(header))
+}
+
+/// Extension data for a multipart part (BODYSTRUCTURE only):
+/// body-fld-param, body-fld-dsp, body-fld-lang, body-fld-loc — note the
+/// multipart's extension starts with ITS OWN Content-Type parameters
+/// (boundary included), not an MD5 field.
+fn format_multipart_extension(params: &[(String, String)], header: &[u8]) -> String {
+    format!(
+        "{} {} NIL NIL",
+        format_body_params(params),
+        format_disposition_field(header)
+    )
+}
+
+/// Build a minimal ENVELOPE for an embedded message (the BODYSTRUCTURE of a
+/// message/rfc822 part carries the encapsulated message's envelope). Header
+/// values are taken verbatim; address lists are split on commas — a
+/// documented approximation of real address parsing for structure rendering.
+fn embedded_envelope(content: &[u8]) -> mail_proto::EmailEnvelope {
+    let (header, _) = split_part_header(content);
+    let get = |name: &str| raw_header_value(header, name);
+    let addr_list = |name: &str| -> Vec<String> {
+        match get(name) {
+            Some(v) if !v.trim().is_empty() => v
+                .split(',')
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty())
+                .collect(),
+            _ => Vec::new(),
+        }
+    };
+    mail_proto::EmailEnvelope {
+        from: get("From").unwrap_or_default(),
+        to: addr_list("To"),
+        cc: addr_list("Cc"),
+        bcc: addr_list("Bcc"),
+        reply_to: addr_list("Reply-To").first().cloned().unwrap_or_default(),
+        subject: get("Subject").unwrap_or_default(),
+        message_id: get("Message-ID").unwrap_or_default(),
+        in_reply_to: get("In-Reply-To").unwrap_or_default(),
+        references: vec![],
+        date: get("Date")
+            .and_then(|d| chrono::DateTime::parse_from_rfc2822(&d).ok())
+            .map(|dt| dt.timestamp())
+            .unwrap_or(0),
+    }
+}
+
+/// Render the BODY/BODYSTRUCTURE of one MIME region (its header block plus
+/// content) per RFC 3501 §7.4.2. `region` for a part is header+content
+/// concatenated; for the top-level message it is the whole raw message.
+fn format_structure_region(region: &[u8], extended: bool) -> String {
+    let (header, content) = split_part_header(region);
+    let content_type = raw_header_value(header, "Content-Type");
+    let (media_type, subtype, params) = match &content_type {
+        Some(ct) => {
+            let (t, s, p) = parse_type_params(ct);
+            (t.to_uppercase(), s.to_uppercase(), p)
+        }
+        None => ("TEXT".to_string(), "PLAIN".to_string(), Vec::new()),
+    };
+
+    if media_type == "MULTIPART" {
+        let boundary =
+            multipart_boundary(content_type.as_deref().unwrap_or("")).unwrap_or_default();
+        let parts = split_multipart(content, &boundary);
+        let substructures: Vec<String> = parts
+            .iter()
+            .map(|p| format_structure_region(&[p.header, p.content].concat(), extended))
+            .collect();
+        let mut out = format!("(\"{}\" {}", subtype, substructures.join(" "));
+        if extended {
+            out.push(' ');
+            out.push_str(&format_multipart_extension(&params, header));
+        }
+        out.push(')');
+        return out;
+    }
+
+    let encoding = raw_header_value(header, "Content-Transfer-Encoding")
+        .map(|e| e.to_uppercase())
+        .unwrap_or_else(|| "7BIT".to_string());
+    let size = content.len();
+    let lines = content.iter().filter(|&&b| b == b'\n').count();
+
+    let mut fields = vec![
+        encode_nstring(&media_type),
+        encode_nstring(&subtype),
+        format_body_params(&params),
+        opt_body_nstring(raw_header_value(header, "Content-ID").as_deref()),
+        opt_body_nstring(raw_header_value(header, "Content-Description").as_deref()),
+        encode_nstring(&encoding),
+        size.to_string(),
+    ];
+    if media_type == "MESSAGE" && subtype == "RFC822" {
+        fields.push(format_envelope(&embedded_envelope(content)));
+        fields.push(format_structure_region(content, extended));
+        fields.push(lines.to_string());
+    } else if media_type == "TEXT" {
+        fields.push(lines.to_string());
+    }
+    if extended {
+        fields.push(format_extension_fields(header));
+    }
+    format!("({})", fields.join(" "))
+}
+
+/// F5: render the top-level BODY (`extended == false`) or BODYSTRUCTURE
+/// (`extended == true`) response data for a raw message.
+fn format_body_structure(raw: &[u8], extended: bool) -> String {
+    format_structure_region(raw, extended)
+}
+
 struct GetMessageBody {
     body: Vec<u8>,
 }
@@ -2373,6 +2712,8 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
                 Some(i) => i as u32 + 1,
                 None => continue,
             };
+            // F6: \Recent is a per-session property of the message.
+            let is_recent = session.recent_uids.contains(&uid);
             emit_fetch_response(
                 writer,
                 uid,
@@ -2382,6 +2723,7 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
                 body_results.get(&uid),
                 is_uid,
                 sets_seen,
+                is_recent,
             )
             .await?;
         }
@@ -2435,11 +2777,14 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
     body: Option<&Result<GetMessageBody, tonic::Status>>,
     is_uid: bool,
     sets_seen: bool,
+    recent: bool,
 ) -> Result<()> {
     let mut flags = meta.flags.clone().unwrap_or_default();
     if sets_seen && !flags.seen {
         flags.seen = true;
     }
+    // F6: \Recent is session-scoped; it is reported, never stored.
+    flags.recent = recent;
 
     let mut attrs: Vec<String> = Vec::new();
     let mut body_payloads: Vec<(String, Vec<u8>)> = Vec::new();
@@ -2468,6 +2813,22 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
                 FetchItem::Envelope => {
                     let env = meta.envelope.clone().unwrap_or_default();
                     attrs.push(format!("ENVELOPE {}", format_envelope(&env)));
+                }
+                // F5: BODY (bare) / BODYSTRUCTURE — the derived structure.
+                FetchItem::BodyStructure { extended } => {
+                    let raw = match body {
+                        Some(Ok(b)) => &b.body,
+                        Some(Err(e)) => {
+                            warn!("Failed to get message body for UID {}: {}", uid, e);
+                            continue;
+                        }
+                        None => continue,
+                    };
+                    attrs.push(format!(
+                        "{} {}",
+                        if extended { "BODYSTRUCTURE" } else { "BODY" },
+                        format_body_structure(raw, extended)
+                    ));
                 }
                 FetchItem::Body {
                     section,
@@ -2624,11 +2985,11 @@ fn parse_fetch_items(items_str: &str) -> Result<Vec<FetchItem>> {
             "FAST" => items.push(FetchItem::Fast),
             "FULL" => items.push(FetchItem::Full),
             "ALL" => items.push(FetchItem::All),
-            // L2: BODYSTRUCTURE (and bare BODY) are not implemented —
-            // reject them with a tagged BAD instead of silently substituting
-            // ALL (which answered FLAGS+ENVELOPE as if ALL had been asked).
-            "BODYSTRUCTURE" => bail!("BODYSTRUCTURE not supported"),
-            "BODY" => bail!("BODY (body structure) not supported; request BODY[...] instead"),
+            // F5: BODY/BODYSTRUCTURE are now implemented (derived from the
+            // raw message on demand) — the old L2 rejection is superseded;
+            // the FULL macro needs them (ALL + BODYSTRUCTURE, peek).
+            "BODYSTRUCTURE" => items.push(FetchItem::BodyStructure { extended: true }),
+            "BODY" => items.push(FetchItem::BodyStructure { extended: false }),
             "RFC822" => items.push(FetchItem::Body {
                 section: BodySection::Full,
                 peek: false,
@@ -2735,6 +3096,43 @@ fn tokenize_fetch_items(s: &str) -> Vec<String> {
 }
 // ── STORE ───────────────────────────────────────────────────────────────────
 
+/// The five storable IMAP system flags (RFC 3501 §2.3.2). `\Recent is
+/// deliberately absent: it is session-scoped and not client-settable.
+const STORE_SYSTEM_FLAGS: [&str; 5] = ["\\Seen", "\\Answered", "\\Flagged", "\\Deleted", "\\Draft"];
+
+fn is_store_system_flag(token: &str) -> bool {
+    STORE_SYSTEM_FLAGS
+        .iter()
+        .any(|f| token.eq_ignore_ascii_case(f))
+}
+
+/// F4: map a STORE/APPEND flag token list to proto flags.
+///
+/// System flags match CASE-INSENSITIVELY (RFC 3501 flags are
+/// case-insensitive; APPEND already did this inline — `STORE +FLAGS
+/// (\seen)` silently no-opped before). Unknown backslash tokens are NOT
+/// dropped silently: they round-trip as custom keywords via the labels
+/// column, mirroring APPEND's custom-keyword handling. `\Recent` is ignored
+/// entirely (not client-settable, not storable as a keyword).
+fn store_flags_from_tokens(tokens: &[String]) -> MessageFlags {
+    let has = |name: &str| tokens.iter().any(|t| t.eq_ignore_ascii_case(name));
+    MessageFlags {
+        seen: has("\\Seen"),
+        answered: has("\\Answered"),
+        flagged: has("\\Flagged"),
+        deleted: has("\\Deleted"),
+        draft: has("\\Draft"),
+        recent: false,
+        custom: tokens
+            .iter()
+            .filter(|t| {
+                !is_store_system_flag(t) && !t.eq_ignore_ascii_case("\\Recent") && !t.is_empty()
+            })
+            .cloned()
+            .collect(),
+    }
+}
+
 #[derive(Debug)]
 enum StoreOp {
     Set(Vec<String>, bool),
@@ -2763,10 +3161,18 @@ async fn handle_store<W: AsyncWrite + Unpin>(
             return write_line(writer, &tagged_bad(tag, &format!("{}", e))).await;
         }
     };
-    refresh_session_view(session).await;
+    // F7: refresh the view and capture the diff — it is emitted BEFORE the
+    // command's own untagged responses so the client's sequence numbers are
+    // corrected first (see refresh_session_view).
+    let view_diff = refresh_session_view(session).await;
     let uids = resolve_sequence_set(session, &seq_part, is_uid)?;
     if uids.is_empty() {
-        return write_line(writer, &tagged_ok(tag, "STORE completed")).await;
+        // F7: the view may still have shifted; emit the diff with the OK.
+        return write_line(
+            writer,
+            &format!("{}{}", view_diff, tagged_ok(tag, "STORE completed")),
+        )
+        .await;
     }
 
     let (operation, flags, silent) = match store_op {
@@ -2780,19 +3186,9 @@ async fn handle_store<W: AsyncWrite + Unpin>(
         account_id: session.account_id.clone(),
         mailbox: session.mailbox.clone(),
         uids: uids.clone(),
-        flags: Some(MessageFlags {
-            seen: flags.contains(&"\\Seen".to_string()),
-            answered: flags.contains(&"\\Answered".to_string()),
-            flagged: flags.contains(&"\\Flagged".to_string()),
-            deleted: flags.contains(&"\\Deleted".to_string()),
-            draft: flags.contains(&"\\Draft".to_string()),
-            recent: flags.contains(&"\\Recent".to_string()),
-            custom: flags
-                .iter()
-                .filter(|f| !f.starts_with('\\'))
-                .cloned()
-                .collect(),
-        }),
+        // F4: case-insensitive system-flag matching; unknown backslash tokens
+        // survive as custom keywords instead of being dropped silently.
+        flags: Some(store_flags_from_tokens(&flags)),
         operation: operation as i32,
     };
 
@@ -2804,7 +3200,9 @@ async fn handle_store<W: AsyncWrite + Unpin>(
     };
 
     // Echo the resulting flags per message (accurate post-operation state).
-    let mut responses = String::new();
+    // F7: the view diff precedes the FETCH responses; F6: \Recent is
+    // session-scoped and reported on the echoed flags.
+    let mut responses = view_diff;
     if !silent {
         let flags_req = mail_proto::GetFlagsRequest {
             account_id: session.account_id.clone(),
@@ -2815,7 +3213,8 @@ async fn handle_store<W: AsyncWrite + Unpin>(
             let flag_map = flags_resp.into_inner().flags;
             for &uid in &uids {
                 if let Some(seq) = session.seq_for_uid(uid) {
-                    let f = flag_map.get(&uid).cloned().unwrap_or_default();
+                    let mut f = flag_map.get(&uid).cloned().unwrap_or_default();
+                    f.recent = session.recent_uids.contains(&uid);
                     responses.push_str(&format!(
                         "* {} FETCH (FLAGS {})\r\n",
                         seq,
@@ -2950,14 +3349,18 @@ async fn handle_search<W: AsyncWrite + Unpin>(
             "UNANSWERED" => keep.retain(|m| !flags_of(m).answered),
             "DRAFT" => keep.retain(|m| flags_of(m).draft),
             "UNDRAFT" => keep.retain(|m| !flags_of(m).draft),
-            // L13: \Recent semantics are not implemented (the store has no
-            // per-session recent tracking on the wire). RECENT/NEW/OLD used
-            // to silently match nothing, which is worse than an explicit
-            // BAD: clients can distinguish "unsupported" from "no matches".
-            "RECENT" | "UNRECENT" | "NEW" | "OLD" => {
+            // F6: session-scoped \Recent (see ImapSession::recent_uids).
+            // RECENT  = in this session's recent set;
+            // NEW     = RECENT and still UNSEEN (RFC 3501 §6.4.4);
+            // OLD     = not RECENT.
+            // "UNRECENT" stays a BAD — it is not an IMAP criterion.
+            "RECENT" => keep.retain(|m| session.recent_uids.contains(&m.uid)),
+            "NEW" => keep.retain(|m| session.recent_uids.contains(&m.uid) && !flags_of(m).seen),
+            "OLD" => keep.retain(|m| !session.recent_uids.contains(&m.uid)),
+            "UNRECENT" => {
                 return write_line(
                     writer,
-                    &tagged_bad(tag, "RECENT/NEW/OLD not supported by this server"),
+                    &tagged_bad(tag, "UNRECENT is not a valid SEARCH criterion"),
                 )
                 .await;
             }
@@ -3200,10 +3603,17 @@ async fn handle_copy<W: AsyncWrite + Unpin>(
             return write_line(writer, &tagged_bad(tag, &format!("{}", e))).await;
         }
     };
-    refresh_session_view(session).await;
+    // F7: view diff (EXPUNGEs/EXISTS from other sessions) is emitted before
+    // the command's own tagged response so sequence numbers are corrected.
+    let view_diff = refresh_session_view(session).await;
     let uids = resolve_sequence_set(session, &seq_part, is_uid)?;
     if uids.is_empty() {
-        return write_line(writer, &tagged_ok(tag, "COPY completed")).await;
+        // F7: the view may still have shifted; emit the diff with the OK.
+        return write_line(
+            writer,
+            &format!("{}{}", view_diff, tagged_ok(tag, "COPY completed")),
+        )
+        .await;
     }
 
     let mut client = session.client.clone();
@@ -3217,6 +3627,16 @@ async fn handle_copy<W: AsyncWrite + Unpin>(
     let resp = match client.copy_message(req).await {
         Ok(r) => r.into_inner(),
         Err(e) => {
+            // F9 (RFC 3501 §6.4.7): a NO for a nonexistent destination
+            // carries [TRYCREATE] so the client knows it may CREATE the
+            // mailbox and retry.
+            if e.code() == tonic::Code::NotFound {
+                return write_line(
+                    writer,
+                    &tagged_no(tag, "[TRYCREATE] Destination mailbox does not exist"),
+                )
+                .await;
+            }
             return write_line(writer, &tagged_no(tag, &format!("COPY failed: {}", e))).await;
         }
     };
@@ -3243,13 +3663,17 @@ async fn handle_copy<W: AsyncWrite + Unpin>(
 
     write_line(
         writer,
-        &tagged_ok(
-            tag,
-            &format!(
-                "[COPYUID {} {} {}] COPY completed",
-                dest_uidvalidity,
-                srcs.join(","),
-                dsts.join(",")
+        &format!(
+            "{}{}",
+            view_diff,
+            tagged_ok(
+                tag,
+                &format!(
+                    "[COPYUID {} {} {}] COPY completed",
+                    dest_uidvalidity,
+                    srcs.join(","),
+                    dsts.join(",")
+                ),
             ),
         ),
     )
@@ -3274,10 +3698,17 @@ async fn handle_move<W: AsyncWrite + Unpin>(
             return write_line(writer, &tagged_bad(tag, &format!("{}", e))).await;
         }
     };
-    refresh_session_view(session).await;
+    // F7: view diff first, so the EXPUNGE responses below (and the tagged
+    // response) reference sequence numbers the client has already corrected.
+    let view_diff = refresh_session_view(session).await;
     let uids = resolve_sequence_set(session, &seq_part, is_uid)?;
     if uids.is_empty() {
-        return write_line(writer, &tagged_ok(tag, "MOVE completed")).await;
+        // F7: the view may still have shifted; emit the diff with the OK.
+        return write_line(
+            writer,
+            &format!("{}{}", view_diff, tagged_ok(tag, "MOVE completed")),
+        )
+        .await;
     }
 
     let mut client = session.client.clone();
@@ -3291,6 +3722,15 @@ async fn handle_move<W: AsyncWrite + Unpin>(
     let resp = match client.move_message(req).await {
         Ok(r) => r.into_inner(),
         Err(e) => {
+            // F9 (RFC 6851 §4.3 / RFC 3501 §6.4.7): [TRYCREATE] on a
+            // nonexistent destination.
+            if e.code() == tonic::Code::NotFound {
+                return write_line(
+                    writer,
+                    &tagged_no(tag, "[TRYCREATE] Destination mailbox does not exist"),
+                )
+                .await;
+            }
             return write_line(writer, &tagged_no(tag, &format!("MOVE failed: {}", e))).await;
         }
     };
@@ -3324,8 +3764,13 @@ async fn handle_move<W: AsyncWrite + Unpin>(
     // Update the session's view: moved messages are gone from this mailbox.
     retain_except(&mut session.uid_map, &uids);
     session.exists = session.uid_map.len().min(u32::MAX as usize) as u32;
+    // F6: moved messages stop being \Recent for this session.
+    let moved: HashSet<u64> = uids.iter().copied().collect();
+    session.recent_uids.retain(|u| !moved.contains(u));
+    session.recent = session.recent_count();
 
-    let mut responses = expunge_response_lines(&expunge_seqs);
+    let mut responses = view_diff;
+    responses.push_str(&expunge_response_lines(&expunge_seqs));
     responses.push_str(&tagged_ok(
         tag,
         &format!(
@@ -3951,7 +4396,16 @@ async fn handle_status<W: AsyncWrite + Unpin>(
         parts.push(format!("MESSAGES {}", mb.exists));
     }
     if items_lower.contains("recent") {
-        parts.push(format!("RECENT {}", mb.recent));
+        // F6: recency is session-scoped; only the currently selected mailbox
+        // has a meaningful count for THIS session. Other mailboxes honestly
+        // report the store's zero (no persistent first-delivery marker).
+        let recent = if mailbox_selected(session) && session.mailbox.eq_ignore_ascii_case(&mailbox)
+        {
+            session.recent_count()
+        } else {
+            mb.recent
+        };
+        parts.push(format!("RECENT {}", recent));
     }
     if items_lower.contains("uidnext") {
         parts.push(format!("UIDNEXT {}", mb.uidnext.max(1)));
@@ -4022,27 +4476,11 @@ async fn handle_append<W: AsyncWrite + Unpin>(
             .split_whitespace()
             .map(|s| s.to_string())
             .collect();
-        flags.seen = flag_tokens.iter().any(|f| f.eq_ignore_ascii_case("\\Seen"));
-        flags.answered = flag_tokens
-            .iter()
-            .any(|f| f.eq_ignore_ascii_case("\\Answered"));
-        flags.flagged = flag_tokens
-            .iter()
-            .any(|f| f.eq_ignore_ascii_case("\\Flagged"));
-        flags.deleted = flag_tokens
-            .iter()
-            .any(|f| f.eq_ignore_ascii_case("\\Deleted"));
-        flags.draft = flag_tokens
-            .iter()
-            .any(|f| f.eq_ignore_ascii_case("\\Draft"));
-        flags.recent = flag_tokens
-            .iter()
-            .any(|f| f.eq_ignore_ascii_case("\\Recent"));
-        flags.custom = flag_tokens
-            .iter()
-            .filter(|f| !f.starts_with('\\'))
-            .cloned()
-            .collect();
+        // F4: shared flag-token mapping — case-insensitive system flags and
+        // unknown backslash tokens kept as custom keywords (previously
+        // APPEND matched case-insensitively but silently DROPPED unknown
+        // backslash tokens).
+        flags = store_flags_from_tokens(&flag_tokens);
         idx += 1;
     }
 
@@ -4103,14 +4541,20 @@ async fn handle_append<W: AsyncWrite + Unpin>(
                 .max(1),
             Err(e) => {
                 if tonic_code(&e) == Some(tonic::Code::NotFound) {
-                    return write_line(writer, &tagged_no(tag, "[NONEXISTENT] Mailbox not found"))
-                        .await;
+                    // F9 (RFC 3501 §6.3.11): the NO for a nonexistent APPEND
+                    // target carries [TRYCREATE].
+                    return write_line(
+                        writer,
+                        &tagged_no(tag, "[TRYCREATE] Mailbox does not exist"),
+                    )
+                    .await;
                 }
                 return write_line(writer, &tagged_no(tag, &format!("APPEND failed: {}", e))).await;
             }
         };
 
     // Store the message via mailstore gRPC.
+    let append_sets_seen = flags.seen;
     let mut client = session.client.clone();
     let req = StoreMessageRequest {
         account_id: session.account_id.clone(),
@@ -4151,6 +4595,12 @@ async fn handle_append<W: AsyncWrite + Unpin>(
         session.uid_map.push(resp.uid);
         session.uid_map.sort_unstable();
         session.uid_next = session.uid_next.max(resp.uid.saturating_add(1));
+        // F6: an unseen message that arrives (here: is APPENDED) during the
+        // session joins this session's \Recent set.
+        if !append_sets_seen {
+            session.recent_uids.insert(resp.uid);
+            session.recent = session.recent_count();
+        }
         responses.push_str(&format!("* {} EXISTS\r\n", session.exists));
     }
 
@@ -4176,7 +4626,10 @@ async fn handle_expunge<W: AsyncWrite + Unpin>(
         return write_line(writer, &tagged_no(tag, "[READ-ONLY] EXPUNGE not permitted")).await;
     }
 
-    refresh_session_view(session).await;
+    // F7: capture the view diff from the refresh; it is emitted BEFORE this
+    // command's own EXPUNGE responses so the client's sequence numbers are
+    // corrected for removals by other sessions first.
+    let view_diff = refresh_session_view(session).await;
 
     // UID EXPUNGE (RFC 4315 §2.2.2) restricts the expunge to the given UID
     // set: only the intersection of \Deleted and the set is removed. An empty
@@ -4190,7 +4643,13 @@ async fn handle_expunge<W: AsyncWrite + Unpin>(
                 }
             };
             if resolved.is_empty() {
-                return write_line(writer, &tagged_ok(tag, "EXPUNGE completed")).await;
+                // F7: nothing to expunge, but the refreshed view may still
+                // have shifted — emit the diff with the OK.
+                return write_line(
+                    writer,
+                    &format!("{}{}", view_diff, tagged_ok(tag, "EXPUNGE completed")),
+                )
+                .await;
             }
             resolved
         }
@@ -4211,7 +4670,7 @@ async fn handle_expunge<W: AsyncWrite + Unpin>(
         }
     };
 
-    let mut responses = String::new();
+    let mut responses = view_diff;
     let mut expunged_seqs: Vec<u32> = Vec::new();
     for uid in &resp.expunged_uids {
         if let Some(seq) = session.seq_for_uid(*uid) {
@@ -4223,6 +4682,10 @@ async fn handle_expunge<W: AsyncWrite + Unpin>(
 
     retain_except(&mut session.uid_map, &resp.expunged_uids);
     session.exists = session.uid_map.len().min(u32::MAX as usize) as u32;
+    // F6: expunged messages stop being \Recent.
+    let expunged: HashSet<u64> = resp.expunged_uids.iter().copied().collect();
+    session.recent_uids.retain(|u| !expunged.contains(u));
+    session.recent = session.recent_count();
 
     if !resp.expunged_uids.is_empty() {
         responses.push_str(&format!("* {} EXISTS\r\n", session.exists));
@@ -4259,11 +4722,22 @@ async fn handle_noop<W: AsyncWrite + Unpin>(
                 limit: 100_000,
             };
             if let Ok(resp) = client.list_messages(list_req).await {
-                let mut new_uids: Vec<u64> =
-                    resp.into_inner().messages.iter().map(|m| m.uid).collect();
-                new_uids.sort_unstable();
-                new_uids.dedup();
+                let mut msgs = resp.into_inner().messages;
+                msgs.sort_by_key(|m| m.uid);
+                msgs.dedup_by_key(|m| m.uid);
+                let new_uids: Vec<u64> = msgs.iter().map(|m| m.uid).collect();
                 responses.push_str(&view_update_lines(&old_uid_map, &new_uids));
+                // F6: unseen arrivals since the last poll join this session's
+                // \Recent set; messages that left the view drop out of it.
+                let known: HashSet<u64> = old_uid_map.iter().copied().collect();
+                for m in &msgs {
+                    if !known.contains(&m.uid) && !m.flags.as_ref().map(|f| f.seen).unwrap_or(false)
+                    {
+                        session.recent_uids.insert(m.uid);
+                    }
+                }
+                let live: HashSet<u64> = new_uids.iter().copied().collect();
+                session.recent_uids.retain(|u| live.contains(u));
                 session.uid_map = new_uids;
                 // EXISTS reports the size of the session's resolvable view
                 // (the capped uid_map), keeping sequence numbers consistent.
@@ -4272,9 +4746,12 @@ async fn handle_noop<W: AsyncWrite + Unpin>(
                     session.uid_next = session.uid_next.max(last.saturating_add(1));
                 }
             }
-            if mb.recent != session.recent {
-                responses.push_str(&format!("* {} RECENT\r\n", mb.recent));
-                session.recent = mb.recent;
+            // F6: RECENT reports this session's (approximated) recent count,
+            // not the store's always-zero counter.
+            let recent_now = session.recent_count();
+            if recent_now != session.recent {
+                responses.push_str(&format!("* {} RECENT\r\n", recent_now));
+                session.recent = recent_now;
             }
             if mb.uidnext.max(1) != session.uid_next {
                 responses.push_str(&uid_next_response(mb.uidnext.max(1)));
@@ -4324,6 +4801,7 @@ async fn handle_close<W: AsyncWrite + Unpin>(
     session.uid_map.clear();
     session.exists = 0;
     session.recent = 0;
+    session.recent_uids.clear();
     session.uid_next = 0;
     session.uid_validity = 0;
 
@@ -4466,14 +4944,16 @@ async fn process_mailbox_event<W: AsyncWrite + Unpin>(
         uid_max: u64::MAX,
         limit: 100_000,
     };
-    let new_uids: Vec<u64> = match client.list_messages(list_req).await {
+    let msgs = match client.list_messages(list_req).await {
         Ok(r) => {
-            let mut v: Vec<u64> = r.into_inner().messages.iter().map(|m| m.uid).collect();
-            v.sort_unstable();
-            v
+            let mut m = r.into_inner().messages;
+            m.sort_by_key(|x| x.uid);
+            m.dedup_by_key(|x| x.uid);
+            m
         }
         Err(_) => return Ok(()),
     };
+    let new_uids: Vec<u64> = msgs.iter().map(|m| m.uid).collect();
 
     let old_set: HashSet<u64> = old_uid_map.iter().copied().collect();
     let new_set: HashSet<u64> = new_uids.iter().copied().collect();
@@ -4488,9 +4968,20 @@ async fn process_mailbox_event<W: AsyncWrite + Unpin>(
         .filter(|u| !old_set.contains(u))
         .collect();
 
+    // F6: unseen arrivals join this session's \Recent set; departures drop
+    // out. Computed on a clone so the check below stays lock-free.
+    let mut recent_uids = session.lock().await.recent_uids.clone();
+    for m in &msgs {
+        if added.contains(&m.uid) && !m.flags.as_ref().map(|f| f.seen).unwrap_or(false) {
+            recent_uids.insert(m.uid);
+        }
+    }
+    recent_uids.retain(|u| new_set.contains(u));
+    let recent_now = recent_uids.len().min(u32::MAX as usize) as u32;
+
     let exists_changed = mb.exists != old_exists;
     let uidnext_changed = mb.uidnext.max(1) != old_uidnext;
-    let recent_changed = mb.recent != old_recent;
+    let recent_changed = recent_now != old_recent;
 
     if removed.is_empty()
         && added.is_empty()
@@ -4523,7 +5014,8 @@ async fn process_mailbox_event<W: AsyncWrite + Unpin>(
         out.push_str(&format!("* {} EXISTS\r\n", view_exists));
     }
     if recent_changed {
-        out.push_str(&format!("* {} RECENT\r\n", mb.recent));
+        // F6: this session's \Recent count, not the store's zero.
+        out.push_str(&format!("* {} RECENT\r\n", recent_now));
     }
     if uidnext_changed {
         out.push_str(&uid_next_response(mb.uidnext.max(1)));
@@ -4538,7 +5030,8 @@ async fn process_mailbox_event<W: AsyncWrite + Unpin>(
     {
         let mut g = session.lock().await;
         g.exists = view_exists;
-        g.recent = mb.recent;
+        g.recent = recent_now;
+        g.recent_uids = recent_uids;
         g.uid_next = new_uidnext;
         g.uid_map = new_uids;
     }
@@ -5969,7 +6462,7 @@ mod tests {
         let body = Ok(GetMessageBody {
             body: b"From: a\r\n\r\nhello world".to_vec(),
         });
-        emit_fetch_response(&mut w, 7, 2, &meta, &items, Some(&body), true, false)
+        emit_fetch_response(&mut w, 7, 2, &meta, &items, Some(&body), true, false, false)
             .await
             .unwrap();
         let out = w.output();
@@ -6002,9 +6495,19 @@ mod tests {
         // emitting; emit still degrades gracefully if reached directly.
         let body: Result<GetMessageBody, tonic::Status> =
             Err(tonic::Status::internal("backend down"));
-        emit_fetch_response(&mut w, 9, 1, &meta, &items, Some(&body), false, false)
-            .await
-            .unwrap();
+        emit_fetch_response(
+            &mut w,
+            9,
+            1,
+            &meta,
+            &items,
+            Some(&body),
+            false,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
         let out = w.output();
         // Metadata attrs still emitted; only the failed BODY attribute is
         // omitted rather than failing the whole FETCH.
@@ -6155,23 +6658,180 @@ mod tests {
         assert!(api.deleted.is_empty(), "source mailbox must survive");
     }
 
-    // ── L2: FETCH items must not be silently dropped ───────────────────────
+    // ── F5: BODY/BODYSTRUCTURE now parse to structure items ───────────────
 
     #[test]
-    fn fetch_bodystructure_and_bare_body_are_rejected_not_substituted() {
-        // `FETCH 1 BODYSTRUCTURE` used to fall through and push
-        // FetchItem::All — returning FLAGS+ENVELOPE as if ALL was requested.
-        assert!(
-            parse_fetch_items("BODYSTRUCTURE").is_err(),
-            "BODYSTRUCTURE must be a tagged BAD, not a silent ALL substitution"
+    fn fetch_bodystructure_and_bare_body_parse_to_structure_items() {
+        // F5: both used to be a tagged BAD ("not implemented"); the FULL
+        // macro requires them (ALL + BODYSTRUCTURE, peek), so they are real
+        // items now — NOT the old silent ALL substitution.
+        assert_eq!(
+            parse_fetch_items("BODYSTRUCTURE").unwrap(),
+            vec![FetchItem::BodyStructure { extended: true }]
         );
-        assert!(
-            parse_fetch_items("BODY").is_err(),
-            "bare BODY must be a tagged BAD"
+        assert_eq!(
+            parse_fetch_items("BODY").unwrap(),
+            vec![FetchItem::BodyStructure { extended: false }]
         );
-        // An empty item list is a syntax error, not ALL.
+        // An empty item list is still a syntax error, not ALL.
         assert!(parse_fetch_items("").is_err());
         assert!(parse_fetch_items("()").is_err());
+        // Unknown items are still BAD.
+        assert!(parse_fetch_items("MADEUP").is_err());
+    }
+
+    // ── F5: the FULL macro expands to ALL + BODYSTRUCTURE and peeks ───────
+
+    #[test]
+    fn full_macro_expands_to_all_plus_bodystructure_peek() {
+        let expanded = resolve_macro_item(&FetchItem::Full);
+        assert_eq!(
+            expanded,
+            vec![
+                FetchItem::Flags,
+                FetchItem::InternalDate,
+                FetchItem::Envelope,
+                FetchItem::BodyStructure { extended: true },
+            ]
+        );
+        // FULL needs the raw message to derive the structure, but it must
+        // NOT set \Seen (peek semantics).
+        assert!(body_item_needs_content(&FetchItem::Full));
+        assert!(!body_item_sets_seen(&FetchItem::Full));
+        assert!(!body_item_sets_seen(&FetchItem::BodyStructure {
+            extended: true
+        }));
+        // Non-peek BODY[] still sets \Seen.
+        assert!(body_item_sets_seen(&FetchItem::Body {
+            section: BodySection::Full,
+            peek: false,
+            name: "BODY[]".to_string(),
+            partial: None,
+        }));
+    }
+
+    // ── F5: BODYSTRUCTURE rendering ────────────────────────────────────────
+
+    #[test]
+    fn body_structure_renders_text_and_multipart() {
+        let raw = b"Content-Type: text/plain; charset=us-ascii\r\n\
+                    Content-Transfer-Encoding: 8BIT\r\n\
+                    Subject: hi\r\n\
+                    \r\n\
+                    line1\r\nline2\r\n";
+        // Non-extended BODY: type, subtype, params, id, description,
+        // encoding, size, lines.
+        assert_eq!(
+            format_body_structure(raw, false),
+            "(\"TEXT\" \"PLAIN\" (\"CHARSET\" \"us-ascii\") NIL NIL \"8BIT\" 14 2)"
+        );
+        // Extended adds the extension data (md5, disposition, language,
+        // location); a part without Content-Disposition renders NIL.
+        assert!(
+            format_body_structure(raw, true)
+                .starts_with("(\"TEXT\" \"PLAIN\" (\"CHARSET\" \"us-ascii\") NIL NIL \"8BIT\" 14 2 NIL NIL NIL NIL)"),
+            "got: {}",
+            format_body_structure(raw, true)
+        );
+
+        let multipart = concat!(
+            "Content-Type: multipart/mixed; boundary=\"XX\"\r\n",
+            "\r\n",
+            "preamble\r\n",
+            "--XX\r\n",
+            "Content-Type: text/plain\r\n",
+            "\r\n",
+            "part one\r\n",
+            "--XX\r\n",
+            "Content-Type: application/octet-stream; name=\"a.bin\"\r\n",
+            "Content-Transfer-Encoding: base64\r\n",
+            "Content-Disposition: attachment; filename=\"a.bin\"\r\n",
+            "\r\n",
+            "AAAA\r\n",
+            "--XX--\r\n",
+            "epilogue\r\n"
+        );
+        let structure = format_body_structure(multipart.as_bytes(), true);
+        // Multipart: ("MIXED" part part ext...) — no size/lines fields for
+        // the container; "part one" is 8 octets / 0 lines. The multipart's
+        // extension data starts with ITS OWN Content-Type params (boundary).
+        assert!(
+            structure.starts_with("(\"MIXED\" (\"TEXT\" \"PLAIN\" NIL NIL NIL \"7BIT\" 8 0 "),
+            "got: {}",
+            structure
+        );
+        assert!(
+            structure.ends_with("(\"BOUNDARY\" \"XX\") NIL NIL NIL)"),
+            "multipart extension must be params/disp/lang/loc, got: {}",
+            structure
+        );
+        assert!(
+            structure.contains(
+                "(\"APPLICATION\" \"OCTET-STREAM\" (\"NAME\" \"a.bin\") NIL NIL \"BASE64\" 4"
+            ),
+            "got: {}",
+            structure
+        );
+        // The extended part carries the disposition from Content-Disposition.
+        assert!(
+            structure
+                .contains("\"BASE64\" 4 NIL (\"ATTACHMENT\" (\"FILENAME\" \"a.bin\")) NIL NIL)"),
+            "extended fields with disposition expected, got: {}",
+            structure
+        );
+    }
+
+    // ── F4: STORE/APPEND flag-token matching ──────────────────────────────
+
+    #[test]
+    fn store_flags_match_system_flags_case_insensitively() {
+        let flags = store_flags_from_tokens(&[
+            "\\seen".to_string(),
+            "\\ANSWERED".to_string(),
+            "\\Flagged".to_string(),
+            "\\draft".to_string(),
+        ]);
+        assert!(flags.seen && flags.answered && flags.flagged && flags.draft);
+        assert!(!flags.deleted);
+        assert!(flags.custom.is_empty());
+    }
+
+    #[test]
+    fn store_flags_keep_unknown_backslash_tokens_as_keywords() {
+        let flags = store_flags_from_tokens(&[
+            "\\Seen".to_string(),
+            "MyKeyword".to_string(),
+            "\\CustomThing".to_string(),
+            "\\RECENT".to_string(),
+        ]);
+        assert!(flags.seen);
+        assert!(!flags.recent, "\\Recent is not client-settable");
+        // Unknown backslash tokens survive as keywords (round-trip via
+        // labels) instead of being dropped silently; \Recent is dropped.
+        assert_eq!(flags.custom, vec!["MyKeyword", "\\CustomThing"]);
+    }
+
+    // ── F10: nstring encoding ──────────────────────────────────────────────
+
+    #[test]
+    fn nstring_quoting_escapes_only_quote_and_backslash() {
+        assert_eq!(encode_nstring("plain"), "\"plain\"");
+        assert_eq!(encode_nstring(""), "\"\"");
+        assert_eq!(encode_nstring("a\"b"), "\"a\\\"b\"");
+        assert_eq!(encode_nstring("a\\b"), "\"a\\\\b\"");
+        // Non-control UTF-8 stays in the quoted string.
+        assert_eq!(encode_nstring("Grüße"), "\"Grüße\"");
+    }
+
+    #[test]
+    fn nstring_with_control_bytes_becomes_a_literal() {
+        // CR/LF/NUL/control bytes cannot appear in a quoted string (RFC 3501
+        // §4.3); the value is emitted as an IMAP literal with an OCTET count.
+        assert_eq!(encode_nstring("a\r\nb"), "{4}\r\na\r\nb");
+        assert_eq!(encode_nstring("x\0y"), "{3}\r\nx\0y");
+        assert_eq!(encode_nstring("\x01"), "{1}\r\n\x01");
+        // The octet count counts UTF-8 bytes, not chars.
+        assert_eq!(encode_nstring("é\tx"), "{4}\r\né\tx");
     }
 
     // ── L13: partial spec with zero octets is invalid ──────────────────────
@@ -6195,7 +6855,7 @@ mod tests {
         };
         // `UID FETCH 1 (UID FLAGS)`
         let items = vec![FetchItem::Uid, FetchItem::Flags];
-        emit_fetch_response(&mut w, 7, 1, &meta, &items, None, true, false)
+        emit_fetch_response(&mut w, 7, 1, &meta, &items, None, true, false, false)
             .await
             .unwrap();
         let out = w.output();
@@ -6658,9 +7318,19 @@ mod tests {
         let raw = b"From: a@b.c\r\nTo: x@y.z\r\nSubject: sub\r\n\r\nthe body";
         let items = parse_fetch_items("BODY.PEEK[HEADER.FIELDS (FROM SUBJECT)]").unwrap();
         let body = Ok(GetMessageBody { body: raw.to_vec() });
-        emit_fetch_response(&mut w, 3, 1, &meta, &items, Some(&body), false, false)
-            .await
-            .unwrap();
+        emit_fetch_response(
+            &mut w,
+            3,
+            1,
+            &meta,
+            &items,
+            Some(&body),
+            false,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
         let out = w.output();
         // Exactly the requested headers (plus the terminating blank line) as
         // a literal; NOT the whole message, NOT ALL-substituted flags.
@@ -6693,7 +7363,7 @@ mod tests {
         let body = Ok(GetMessageBody {
             body: MULTIPART_RAW.to_vec(),
         });
-        emit_fetch_response(&mut w, 4, 2, &meta, &items, Some(&body), true, false)
+        emit_fetch_response(&mut w, 4, 2, &meta, &items, Some(&body), true, false, false)
             .await
             .unwrap();
         let out = w.output();

@@ -6,6 +6,19 @@ use uuid::Uuid;
 use crate::types::Job;
 
 /// Weighted fair scheduler that limits per-tenant share.
+///
+/// # Callers (F10 — deliberately unwired)
+///
+/// NO production code constructs this scheduler. `queue-provider` itself is
+/// only smoke-test-wired (smoke-tests exercises `queue_provider::types`
+/// only) — no production poller dequeues from `queue_jobs`, so there is no
+/// natural place to slot a fair-scheduling pass yet. The worker-processors
+/// email path implements its own per-tenant weighted round-robin in
+/// `EmailQueue::process_batch` (outbound-queue) against `email_queue`.
+/// When a production owner adopts `PostgresQueueProvider::dequeue`, apply
+/// `schedule(dequeued, batch_size)` to the dequeued batch before dispatch
+/// (excess jobs must then be released back to pending, mirroring the
+/// release-back in worker-processors' email processor).
 pub struct FairQueueScheduler {
     /// Maximum share of total processing a single tenant can use (0.0-1.0)
     max_tenant_share: f64,

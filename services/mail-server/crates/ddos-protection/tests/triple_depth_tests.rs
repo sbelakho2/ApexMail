@@ -169,6 +169,8 @@ mod statistical_robustness_tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         // Should not panic
@@ -191,6 +193,8 @@ mod statistical_robustness_tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         // Track same endpoint multiple times
@@ -219,6 +223,8 @@ mod statistical_robustness_tests {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         };
 
         // Track first request
@@ -675,6 +681,7 @@ mod decision_helper_tests {
             difficulty: 4,
             expires_at: 0, // Already expired
             expected_time_ms: 1000,
+            signature: String::new(),
         };
 
         // Verification should fail due to expiration (verify takes u64 nonce)

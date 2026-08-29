@@ -21,6 +21,15 @@ use crate::{AttackCategory, MatchLocation, RuleMatch};
 /// WAF engine
 pub struct WafEngine {
     config: Arc<WafConfig>,
+    /// Allowlist entries parsed to canonical `IpAddr` values at construction
+    /// (audit F10): IPv4-mapped IPv6 entries (`::ffff:a.b.c.d`) are mapped to
+    /// their IPv4 form so a dual-stack listener produces one canonical
+    /// identity per client. The request IP is canonicalized the same way
+    /// before comparison.
+    allowlist_ip_addrs: Vec<IpAddr>,
+    /// Non-IP allowlist entries (anything that does not parse as an IP),
+    /// kept for exact string fallback comparison.
+    allowlist_non_ip_entries: Vec<String>,
 }
 
 /// Decision the middleware should take
@@ -64,8 +73,21 @@ pub struct HttpRequest<'a> {
 impl WafEngine {
     /// Create a new WAF engine
     pub fn new(config: WafConfig) -> Self {
+        // Parse the allowlist at construction (audit F10): exact string
+        // comparison let `::ffff:10.0.0.1` (what a dual-stack listener
+        // reports) bypass the allowlist entry `10.0.0.1` and vice versa.
+        let mut allowlist_ip_addrs = Vec::new();
+        let mut allowlist_non_ip_entries = Vec::new();
+        for entry in &config.allowlist_ips {
+            match entry.trim().parse::<IpAddr>() {
+                Ok(ip) => allowlist_ip_addrs.push(canonical_ip(ip)),
+                Err(_) => allowlist_non_ip_entries.push(entry.clone()),
+            }
+        }
         Self {
             config: Arc::new(config),
+            allowlist_ip_addrs,
+            allowlist_non_ip_entries,
         }
     }
 
@@ -74,8 +96,15 @@ impl WafEngine {
         let mut all_matches: Vec<RuleMatch> = Vec::with_capacity(16);
 
         // Check IP-level allow-lists — IP allowlist = full bypass (trusted internal scanners etc.)
-        let ip_str = req.client_ip.to_string();
-        if self.config.allowlist_ips.contains(&ip_str) {
+        // Audit F10: compare as canonical IpAddr values (v4-mapped IPv6
+        // collapses to IPv4 on both sides); string compare remains only as
+        // a fallback for non-IP allowlist entries.
+        let client_ip = canonical_ip(req.client_ip);
+        if self.allowlist_ip_addrs.contains(&client_ip)
+            || self
+                .allowlist_non_ip_entries
+                .contains(&req.client_ip.to_string())
+        {
             return ThreatInfo {
                 total_score: 0,
                 matches: Vec::new(),
@@ -625,6 +654,19 @@ impl WafEngine {
     }
 }
 
+/// Canonicalize an IP for allowlist comparison (audit F10): IPv4-mapped
+/// IPv6 addresses (`::ffff:a.b.c.d`) are mapped to their IPv4 form so both
+/// the allowlist entries and the request IP compare as plain addresses.
+fn canonical_ip(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(v6)),
+        v4 @ IpAddr::V4(_) => v4,
+    }
+}
+
 /// Rule IDs that represent malformed request structure (oversized URL,
 /// parameter/header floods, oversized headers). These are client errors and
 /// are rejected with HTTP 400 instead of 403.
@@ -894,6 +936,91 @@ mod tests {
             info.total_score, 0,
             "IP allowlisted request must bypass WAF"
         );
+    }
+
+    // ── Audit F10:canonical (v4-mapped) IP allowlist matching ────────
+
+    #[test]
+    fn test_ip_allowlist_v4_mapped_equivalence() {
+        // Entry configured as IPv4, request arrives as IPv4-mapped IPv6
+        // (what a dual-stack listener reports) — must still bypass.
+        let mut config = WafConfig::default();
+        config.allowlist_ips.push("10.0.0.1".to_string());
+        let engine = WafEngine::new(config);
+        let req = HttpRequest {
+            client_ip: "::ffff:10.0.0.1".parse().expect("valid mapped v6"),
+            method: "GET",
+            path: "/api",
+            query_string: Some("id=1+OR+1%3D1"),
+            headers: &[("Host".into(), "example.com".into())],
+            body: None,
+        };
+        assert_eq!(
+            engine.inspect(&req).total_score,
+            0,
+            "v4-mapped request IP must match the plain-v4 allowlist entry"
+        );
+
+        // Reverse direction: entry configured as v4-mapped, request is v4.
+        let mut config = WafConfig::default();
+        config.allowlist_ips.push("::ffff:192.0.2.5".to_string());
+        let engine = WafEngine::new(config);
+        let req = HttpRequest {
+            client_ip: "192.0.2.5".parse().expect("valid IP"),
+            method: "GET",
+            path: "/api",
+            query_string: Some("id=1+OR+1%3D1"),
+            headers: &[("Host".into(), "example.com".into())],
+            body: None,
+        };
+        assert_eq!(
+            engine.inspect(&req).total_score,
+            0,
+            "plain-v4 request IP must match the v4-mapped allowlist entry"
+        );
+
+        // A DIFFERENT address must not inherit the bypass.
+        let req = HttpRequest {
+            client_ip: "::ffff:10.0.0.2".parse().expect("valid mapped v6"),
+            method: "GET",
+            path: "/api",
+            query_string: Some("id=1+OR+1%3D1"),
+            headers: &[("Host".into(), "example.com".into())],
+            body: None,
+        };
+        let mut config = WafConfig::default();
+        config.allowlist_ips.push("10.0.0.1".to_string());
+        let engine = WafEngine::new(config);
+        assert!(
+            engine.inspect(&req).total_score > 0,
+            "non-allowlisted address must not bypass"
+        );
+
+        // True IPv6 entries keep working (no accidental v4 collapse).
+        let mut config = WafConfig::default();
+        config.allowlist_ips.push("2001:db8::1".to_string());
+        let engine = WafEngine::new(config);
+        let req = HttpRequest {
+            client_ip: "2001:db8::1".parse().expect("valid IPv6"),
+            method: "GET",
+            path: "/api",
+            query_string: Some("id=1+OR+1%3D1"),
+            headers: &[("Host".into(), "example.com".into())],
+            body: None,
+        };
+        assert_eq!(engine.inspect(&req).total_score, 0);
+    }
+
+    #[test]
+    fn test_canonical_ip_helper() {
+        let v4: IpAddr = "192.0.2.1".parse().expect("valid IP");
+        assert_eq!(canonical_ip(v4), v4);
+        assert_eq!(
+            canonical_ip("::ffff:192.0.2.1".parse().expect("valid mapped v6")),
+            v4
+        );
+        let v6: IpAddr = "2001:db8::1".parse().expect("valid IPv6");
+        assert_eq!(canonical_ip(v6), v6, "true IPv6 is unchanged");
     }
 
     #[test]

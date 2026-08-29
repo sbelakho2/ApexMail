@@ -48,7 +48,7 @@ class SuppressionsTest {
             Duration.ofSeconds(5),
             httpClient
         )) {
-            Suppressions.SuppressionCheckResponse response = client.suppressions().check("bad@example.com");
+            Suppressions.CheckResponse response = client.suppressions().check("bad@example.com");
 
             assertEquals("GET", httpClient.method.get());
             assertEquals("/v1/suppressions/check/bad%40example.com", httpClient.path.get());

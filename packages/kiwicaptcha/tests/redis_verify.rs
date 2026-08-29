@@ -25,6 +25,10 @@ use kiwicaptcha::redis_verify::{
 use kiwicaptcha::token::SolutionToken;
 use kiwicaptcha::verify::{solve_for_test, RequestBindingExpectation, VerifyError, VerifyOutcome};
 
+mod common;
+
+use common::{parse_resp_command, FakeEndpoint};
+
 /// Gate that flatly grants (`true`) or refuses (`false`) capacity — the
 /// trait-based admission-gate contract.
 #[derive(Clone, Copy)]
@@ -190,32 +194,6 @@ fn redis_url() -> Option<String> {
             None
         }
     }
-}
-
-/// Minimal Redis-protocol command parser for the fake-Redis test server:
-/// returns the command's argument strings and the number of bytes consumed,
-/// or `None` while the buffer holds only a partial command.
-fn parse_resp_command(buf: &[u8]) -> Option<(Vec<String>, usize)> {
-    fn split_crlf(buf: &[u8]) -> Option<(&[u8], &[u8])> {
-        let i = buf.windows(2).position(|w| w == b"\r\n")?;
-        Some((&buf[..i], &buf[i + 2..]))
-    }
-    let rest = buf.strip_prefix(b"*")?;
-    let (nline, mut rest) = split_crlf(rest)?;
-    let count: usize = std::str::from_utf8(nline).ok()?.parse().ok()?;
-    let mut args = Vec::with_capacity(count);
-    for _ in 0..count {
-        let rest2 = rest.strip_prefix(b"$")?;
-        let (llen, rest3) = split_crlf(rest2)?;
-        let len: usize = std::str::from_utf8(llen).ok()?.parse().ok()?;
-        if rest3.len() < len + 2 {
-            return None;
-        }
-        args.push(String::from_utf8_lossy(&rest3[..len]).into_owned());
-        rest = &rest3[len + 2..];
-    }
-    let consumed = buf.len() - rest.len();
-    Some((args, consumed))
 }
 
 fn sha_config(target_bits: u32) -> ChallengeConfig {
@@ -858,6 +836,7 @@ fn replay_after_valid_verify_is_identity_gated() {
             nonce: issued.record.nonce.clone(),
             request_binding: None,
             from_stored_result: false,
+            solve_duration_ms: Some(1000),
         }
     );
     // The consumed record is kept with the committed outcome — an exact
@@ -875,6 +854,7 @@ fn replay_after_valid_verify_is_identity_gated() {
             nonce: issued.record.nonce.clone(),
             request_binding: None,
             from_stored_result: true,
+            solve_duration_ms: Some(1000),
         },
         "the exact identity retry is the retained Valid"
     );
@@ -925,6 +905,7 @@ fn replay_outcomes_follow_the_operation_identity_gate() {
             nonce: issued_a.record.nonce.clone(),
             request_binding: None,
             from_stored_result: false,
+            solve_duration_ms: Some(1000),
         },
         "T + A first: fresh Valid"
     );
@@ -942,6 +923,7 @@ fn replay_outcomes_follow_the_operation_identity_gate() {
             nonce: issued_a.record.nonce.clone(),
             request_binding: None,
             from_stored_result: true,
+            solve_duration_ms: Some(1000),
         },
         "T + A exact retry: the retained Valid"
     );
@@ -979,6 +961,7 @@ fn replay_outcomes_follow_the_operation_identity_gate() {
             nonce: issued_none.record.nonce.clone(),
             request_binding: None,
             from_stored_result: false,
+            solve_duration_ms: Some(1000),
         },
         "T + None first: fresh Valid"
     );
@@ -1064,6 +1047,7 @@ fn expected_request_binding_is_enforced_in_the_cheap_phase() {
             nonce: issued.record.nonce.clone(),
             request_binding: Some("txn-1".into()),
             from_stored_result: false,
+            solve_duration_ms: Some(1000),
         },
         "a matching expected binding verifies"
     );
@@ -1158,6 +1142,7 @@ fn expected_request_binding_is_enforced_in_the_cheap_phase() {
             nonce: issued_none.record.nonce.clone(),
             request_binding: Some("txn-1".into()),
             from_stored_result: false,
+            solve_duration_ms: Some(1000),
         },
         "None disables the expected-binding check"
     );
@@ -1222,6 +1207,7 @@ fn consumed_evidence_survives_a_cheap_failure_past_expiry() {
             nonce: issued.record.nonce.clone(),
             request_binding: None,
             from_stored_result: true,
+            solve_duration_ms: Some(1000),
         },
         "the identity replay past expiry resolves the retained Valid"
     );
@@ -4289,8 +4275,10 @@ fn exempt_cheap_failure_never_masks_a_hard_verdict_on_a_consumed_replay() {
             min_duration_ms: 110_000,
             expected: VerifyError::TooFast,
         },
-        // Region precedes the IP binding in check order: the pin that the
-        // hard verdict earlier in the order keeps winning outright.
+        // The IP binding is exempt (a network circumstance): on a
+        // consumed record it routes into the identity-gated replay
+        // branch, where the compositional replay gate re-evaluates the
+        // hard set and the hard region verdict still wins outright.
         Case {
             label: "ip mismatch behind wrong region (order pin)",
             scope: "login",
@@ -4380,6 +4368,7 @@ fn exempt_circumstance_alone_still_replays_the_stored_success() {
                 nonce: nonce.clone(),
                 request_binding: None,
                 from_stored_result: true,
+                solve_duration_ms: Some(1000),
             },
             "{label}: the identity-proven retry replays the stored success"
         );
@@ -4427,6 +4416,48 @@ fn fresh_challenges_keep_the_first_error_precedence() {
         ),
         VerifyOutcome::Invalid(VerifyError::Expired),
         "the fresh path keeps the first-error precedence: Expired wins"
+    );
+}
+
+#[test]
+fn fresh_cheap_phase_follows_the_php_ip_before_deployment_precedence() {
+    // The cheap-phase first-error order mirrors the PHP
+    // cheapPhaseCheck: shape → TTL → scope+request binding → IP binding →
+    // region/policy/issuer → floor. A pending record failing BOTH the IP
+    // binding and a deployment expectation (the region here) reports the
+    // IP error, exactly like the PHP verifier — the cross-language
+    // error-code parity for multi-failure records.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("fresh-ip-precedence");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    store_for(&url, &prefix).store(&issued.record).unwrap();
+
+    let verifier = verifier_for(&url, &prefix)
+        .with_expected_region("eu")
+        .with_expected_policy_version(2)
+        .with_expected_issuer("prod");
+    assert_eq!(
+        verifier.verify(
+            &token,
+            "login",
+            "203.0.113.9", // wrong IP
+            issued.record.issued_at_ns + 1_000_000,
+            None,
+            RequestBindingExpectation::Unenforced,
+        ),
+        VerifyOutcome::Invalid(VerifyError::IpMismatch),
+        "the IP binding precedes region/policy/issuer in the cheap phase (PHP parity)"
     );
 }
 #[test]
@@ -5129,4 +5160,578 @@ fn resume_commit_requires_current_claim_ownership() {
         !raw.contains("resume_owner"),
         "the current owner's commit clears the claim from the envelope"
     );
+}
+
+// ── single-connection verify op counts (hermetic fake endpoint) ──────
+// The miniature endpoint lives in `tests/common` (shared with the HKDF
+// derivation-cache test binary): it records every command tagged with
+// its connection, answers the verifier's exact command surface from a
+// tiny record store, and drives the NOSCRIPT-then-load dance once.
+
+#[test]
+fn verify_costs_one_checkout_and_three_store_commands_on_the_happy_path() {
+    // The single-connection verify path: a full happy-path verification
+    // performs exactly ONE pool checkout (observed as the single r2d2
+    // validation PING) and THREE store commands — the runtime-state GET,
+    // the consume EVALSHA and the commit EVALSHA — all on ONE TCP
+    // connection (no checkout churn, no script re-load: the Script
+    // objects are cached per store and the endpoint's script cache stays
+    // warm). Hermetic: no Redis URL needed.
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("opcount");
+    let store = RedisChallengeStore::new(redis::Client::open(url).unwrap(), prefix.clone());
+    let verifier = ProductionVerifier::new(store, SECRET);
+
+    let issued_a = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let issued_b = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter_a = solve_for_test(&issued_a.record).expect("4-bit sha solves");
+    let counter_b = solve_for_test(&issued_b.record).expect("4-bit sha solves");
+    endpoint.seed(&prefix, &issued_a.record);
+    endpoint.seed(&prefix, &issued_b.record);
+
+    // Warm-up (outside the measured window): loads the scripts into the
+    // endpoint's cache and opens the single pooled connection.
+    assert!(matches!(
+        verifier.verify(
+            &encode_token(&issued_a.record.nonce, counter_a),
+            "login",
+            IP,
+            issued_a.record.issued_at_ns + 1_000_000,
+            None,
+            RequestBindingExpectation::Unenforced,
+        ),
+        VerifyOutcome::Valid { .. }
+    ));
+
+    // Measured window.
+    endpoint.clear_commands();
+    let outcome = verifier.verify(
+        &encode_token(&issued_b.record.nonce, counter_b),
+        "login",
+        IP,
+        issued_b.record.issued_at_ns + 1_000_000,
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        matches!(outcome, VerifyOutcome::Valid { .. }),
+        "the measured verify must succeed: {outcome:?}"
+    );
+
+    let log = endpoint.commands();
+    let count = |name: &str| log.iter().filter(|(_, a)| a[0] == name).count();
+    assert_eq!(
+        count("PING"),
+        1,
+        "exactly ONE pool checkout (the r2d2 checkout validation PING); log: {log:?}"
+    );
+    assert_eq!(count("GET"), 1, "the single runtime-state snapshot");
+    let evalsha = |argc: usize| {
+        log.iter()
+            .filter(|(_, a)| a[0] == "EVALSHA" && a.len() == argc)
+            .count()
+    };
+    assert_eq!(evalsha(5), 1, "one consume transition");
+    assert_eq!(
+        evalsha(6),
+        1,
+        "one outcome commit (6-arg EVALSHA: key + valid flag + binding)"
+    );
+    assert_eq!(
+        evalsha(4),
+        0,
+        "no delete/cancel transition on the happy path"
+    );
+    assert_eq!(
+        count("SCRIPT"),
+        0,
+        "no script re-load: the Script objects are cached per store and the endpoint cache is warm"
+    );
+    // Every command of the measured window rode the SAME pooled
+    // connection (r2d2 fills the idle pool to max_size in the background,
+    // so the endpoint may hold several TCP connections — what matters is
+    // that this verification checked out exactly one of them for all
+    // three store commands).
+    let window_conns: BTreeSet<usize> = log.iter().map(|(conn, _)| *conn).collect();
+    assert_eq!(
+        window_conns.len(),
+        1,
+        "the GET, the consume and the commit must share one pooled connection; log: {log:?}"
+    );
+}
+
+#[test]
+fn cheap_failure_costs_one_checkout_and_two_store_commands() {
+    // The cheap-failure path of the same single-connection layout: a
+    // pending record failing a cheap check (wrong scope) performs ONE
+    // checkout (one PING), the runtime-state GET and the fused
+    // delete-if-pending cleanup EVALSHA — two store commands, no consume,
+    // no commit.
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("opcount-fail");
+    let store = RedisChallengeStore::new(redis::Client::open(url).unwrap(), prefix.clone());
+    let verifier = ProductionVerifier::new(store, SECRET);
+
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    endpoint.seed(&prefix, &issued.record);
+
+    // Warm-up: one happy verify on a second record (loads the scripts and
+    // opens the connection), outside the measured window.
+    let warm = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let warm_counter = solve_for_test(&warm.record).expect("4-bit sha solves");
+    endpoint.seed(&prefix, &warm.record);
+    assert!(matches!(
+        verifier.verify(
+            &encode_token(&warm.record.nonce, warm_counter),
+            "login",
+            IP,
+            warm.record.issued_at_ns + 1_000_000,
+            None,
+            RequestBindingExpectation::Unenforced,
+        ),
+        VerifyOutcome::Valid { .. }
+    ));
+
+    // Measured window: the wrong scope fails the cheap phase on the
+    // pending record, which burns it through the fused delete transition.
+    endpoint.clear_commands();
+    let outcome = verifier.verify(
+        &encode_token(&issued.record.nonce, counter),
+        "signup",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert_eq!(outcome, VerifyOutcome::Invalid(VerifyError::WrongScope));
+
+    let log = endpoint.commands();
+    let count = |name: &str| log.iter().filter(|(_, a)| a[0] == name).count();
+    assert_eq!(count("PING"), 1, "exactly ONE pool checkout; log: {log:?}");
+    assert_eq!(count("GET"), 1, "the single runtime-state snapshot");
+    let evalsha = |argc: usize| {
+        log.iter()
+            .filter(|(_, a)| a[0] == "EVALSHA" && a.len() == argc)
+            .count()
+    };
+    assert_eq!(
+        evalsha(4),
+        1,
+        "the fused delete-if-pending cleanup (4-arg EVALSHA: key only)"
+    );
+    assert_eq!(evalsha(5), 0, "no consume on a cheap failure");
+    assert_eq!(evalsha(6), 0, "no commit on a cheap failure");
+    // The pending record was atomically deleted by the cleanup.
+    assert!(
+        !endpoint.contains_record(&format!("{prefix}{}", issued.record.nonce)),
+        "the burned pending record is deleted"
+    );
+}
+
+#[test]
+fn fresh_valid_outcome_carries_the_server_measured_solve_duration() {
+    // The PHP solveDurationMs parity: the span between the record's
+    // issued_at_ns and THIS verification's receipt instant — the same
+    // single `now_ns` the minimum-duration floor reads, never the
+    // client-reported token duration (encode_token always reports 5000).
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("solve-dur-fresh");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+    let verifier = verifier_for(&url, &prefix);
+    verifier.store().store(&issued.record).unwrap();
+
+    let outcome = verifier.verify(
+        &token,
+        "login",
+        IP,
+        issued_at_ns + 1_500_000, // 1.5 s after issuance
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+    match &outcome {
+        VerifyOutcome::Valid {
+            from_stored_result,
+            solve_duration_ms,
+            ..
+        } => {
+            assert!(!from_stored_result);
+            assert_eq!(
+                *solve_duration_ms,
+                Some(1500),
+                "the duration is the server-measured span, never the client-reported 5000 ms"
+            );
+        }
+        _ => panic!("expected a fresh Valid, got {outcome:?}"),
+    }
+    assert_eq!(
+        outcome.solve_duration_ms(),
+        Some(1500),
+        "the accessor mirrors the field"
+    );
+}
+
+#[test]
+fn sub_millisecond_spans_floor_toward_zero() {
+    // The PHP intdiv semantics: 1234.567 ms of server-measured elapsed
+    // time floors to 1234.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("solve-dur-floor");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+    let verifier = verifier_for(&url, &prefix);
+    verifier.store().store(&issued.record).unwrap();
+
+    match verifier.verify(
+        &token,
+        "login",
+        IP,
+        issued_at_ns + 1_234_567,
+        None,
+        RequestBindingExpectation::Unenforced,
+    ) {
+        VerifyOutcome::Valid {
+            solve_duration_ms, ..
+        } => assert_eq!(solve_duration_ms, Some(1234)),
+        other => panic!("expected a valid outcome, got {other:?}"),
+    }
+}
+
+#[test]
+fn stored_result_replay_carries_the_server_measured_solve_duration() {
+    // The identity-proven replay of a stored success carries the span to
+    // its own receipt instant — the PHP replay-of-valid path.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("solve-dur-replay");
+    let (nonce, token, issued_at_ns) = consumed_committed_record(&url, &prefix, 0);
+    let verifier = verifier_for(&url, &prefix);
+
+    let outcome = verifier.verify(
+        &token,
+        "login",
+        IP,
+        issued_at_ns + 30_000_000, // 30 s after issuance
+        Some("op-replay"),
+        RequestBindingExpectation::Unenforced,
+    );
+    match &outcome {
+        VerifyOutcome::Valid {
+            from_stored_result,
+            solve_duration_ms,
+            ..
+        } => {
+            assert!(
+                from_stored_result,
+                "the replay comes from the stored result"
+            );
+            assert_eq!(
+                *solve_duration_ms,
+                Some(30_000),
+                "the replay-of-valid path carries the server-measured span to its own receipt"
+            );
+        }
+        _ => panic!("expected the retained Valid, got {outcome:?}"),
+    }
+    let _ = nonce;
+}
+
+#[test]
+fn resume_commit_valid_carries_the_server_measured_solve_duration() {
+    // The resultless-consume recovery: the exact-identity resume
+    // re-derives and commits; the recovered Valid carries the span
+    // between the record's issuance clock and the resume's own receipt
+    // instant.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("solve-dur-resume");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let identity = "logical-op-solve-dur";
+    let token = encode_token(
+        &issued.record.nonce,
+        solve_for_test(&issued.record).expect("4-bit sha solves"),
+    );
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let store = store_for(&url, &prefix);
+    store.store(&issued.record).unwrap();
+    assert!(
+        store
+            .consume_with_operation_identity(&issued.record.nonce, Some(identity))
+            .unwrap()
+            .is_some(),
+        "the consume transition lands"
+    );
+    // No commit: the interrupted winner never persisted its outcome.
+
+    let verifier = verifier_for(&url, &prefix);
+    match verifier.resume_consumed_operation(
+        &token,
+        identity,
+        "login",
+        IP,
+        issued_at_ns + 2_500_000, // 2.5 s after issuance
+        RequestBindingExpectation::Unenforced,
+    ) {
+        VerifyOutcome::Valid {
+            from_stored_result,
+            solve_duration_ms,
+            ..
+        } => {
+            assert!(!from_stored_result, "the resume derives and commits fresh");
+            assert_eq!(
+                solve_duration_ms,
+                Some(2500),
+                "the resumed Valid carries the server-measured span to the resume receipt"
+            );
+        }
+        other => panic!("expected the resumed Valid, got {other:?}"),
+    }
+
+    // The retry now resolves the committed outcome: the stored-result
+    // acceptance on the resume fast path carries the duration too.
+    match verifier.resume_consumed_operation(
+        &token,
+        identity,
+        "login",
+        IP,
+        issued_at_ns + 4_000_000,
+        RequestBindingExpectation::Unenforced,
+    ) {
+        VerifyOutcome::Valid {
+            from_stored_result,
+            solve_duration_ms,
+            ..
+        } => {
+            assert!(from_stored_result, "the retry replays the committed result");
+            assert_eq!(
+                solve_duration_ms,
+                Some(4000),
+                "the resumed committed-result fast path carries the span"
+            );
+        }
+        other => panic!("expected the retained Valid, got {other:?}"),
+    }
+}
+
+#[test]
+fn skewed_receipt_still_verifies_but_the_duration_is_null() {
+    // A receipt 2 s BEFORE issuance is within the 5 s clock-skew
+    // tolerance: the floor check is skipped (the proof still verifies)
+    // and the exposed duration is null — exactly the PHP semantics, on
+    // both the fresh path and the stored-result replay.
+    let Some(url) = redis_url() else { return };
+
+    // Fresh path.
+    let fresh_prefix = prefix("solve-dur-skew");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+    let verifier = verifier_for(&url, &fresh_prefix);
+    verifier.store().store(&issued.record).unwrap();
+    match verifier.verify(
+        &token,
+        "login",
+        IP,
+        issued_at_ns.saturating_sub(2_000_000),
+        None,
+        RequestBindingExpectation::Unenforced,
+    ) {
+        VerifyOutcome::Valid {
+            solve_duration_ms, ..
+        } => assert_eq!(
+            solve_duration_ms, None,
+            "a receipt preceding issuance within the skew tolerance is unmeasurable"
+        ),
+        other => panic!("the skew window keeps the fresh verification valid, got {other:?}"),
+    }
+
+    // Stored-result replay path.
+    let replay_prefix = prefix("solve-dur-skew-replay");
+    let (_, token2, issued_at_ns2) = consumed_committed_record(&url, &replay_prefix, 0);
+    let verifier2 = verifier_for(&url, &replay_prefix);
+    match verifier2.verify(
+        &token2,
+        "login",
+        IP,
+        issued_at_ns2.saturating_sub(2_000_000),
+        Some("op-replay"),
+        RequestBindingExpectation::Unenforced,
+    ) {
+        VerifyOutcome::Valid {
+            solve_duration_ms, ..
+        } => assert_eq!(
+            solve_duration_ms, None,
+            "a skewed replay receipt is equally unmeasurable"
+        ),
+        other => panic!("the skew window keeps the replay valid, got {other:?}"),
+    }
+}
+
+#[test]
+fn invalid_outcomes_never_carry_a_solve_duration() {
+    // A refused replay (AlreadyConsumed) and a cheap-failure verdict
+    // (wrong scope) carry no duration — the field is purely additive on
+    // valid outcomes.
+    let Some(url) = redis_url() else { return };
+
+    let invalid_prefix = prefix("solve-dur-invalid");
+    let (_, token, issued_at_ns) = consumed_committed_record(&url, &invalid_prefix, 0);
+    let verifier = verifier_for(&url, &invalid_prefix);
+    let refused = verifier.verify(
+        &token,
+        "login",
+        IP,
+        issued_at_ns + 30_000_000,
+        None, // no operation identity: the stored success never replays
+        RequestBindingExpectation::Unenforced,
+    );
+    assert_eq!(
+        refused,
+        VerifyOutcome::Invalid(VerifyError::AlreadyConsumed)
+    );
+    assert_eq!(refused.solve_duration_ms(), None);
+
+    let scope_prefix = prefix("solve-dur-scope");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let token2 = encode_token(
+        &issued.record.nonce,
+        solve_for_test(&issued.record).expect("4-bit sha solves"),
+    );
+    let verifier2 = verifier_for(&url, &scope_prefix);
+    verifier2.store().store(&issued.record).unwrap();
+    let wrong_scope = verifier2.verify(
+        &token2,
+        "checkout",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert_eq!(wrong_scope, VerifyOutcome::Invalid(VerifyError::WrongScope));
+    assert_eq!(wrong_scope.solve_duration_ms(), None);
+}
+
+#[test]
+fn one_receipt_instant_feeds_both_the_floor_and_the_duration() {
+    // The single-receipt-instant property at the integration boundary: a
+    // solve received at EXACTLY the configured floor boundary passes the
+    // server-measured minimum-duration check and exposes that exact
+    // boundary as its duration — the floor and the outcome share the one
+    // `now_ns` the caller resolved; a second, later clock read would
+    // report a larger span than the floor allowed.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("solve-dur-single-instant");
+    let mut config = sha_config(4);
+    config.min_duration_ms = Some(1000);
+    let issued = issue_challenge(&config, "login", IP, now_unix(), now_micros(), 0, None).unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+    assert_eq!(issued.record.min_duration_ms, 1000);
+    let verifier = verifier_for(&url, &prefix);
+    verifier.store().store(&issued.record).unwrap();
+
+    match verifier.verify(
+        &token,
+        "login",
+        IP,
+        issued_at_ns + 1_000_000, // exactly the 1000 ms floor
+        None,
+        RequestBindingExpectation::Unenforced,
+    ) {
+        VerifyOutcome::Valid {
+            solve_duration_ms, ..
+        } => assert_eq!(
+            solve_duration_ms,
+            Some(1000),
+            "the receipt that passes the floor is the measured duration"
+        ),
+        other => panic!("the floor boundary must verify, got {other:?}"),
+    }
 }

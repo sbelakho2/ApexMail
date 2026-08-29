@@ -102,26 +102,32 @@ CREATE TABLE IF NOT EXISTS suppression_list (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (tenant_id, email)
 );
-CREATE TABLE IF NOT EXISTS subscribers (
-    email TEXT NOT NULL,
-    tenant_id TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS message_events (
-    recipient_email TEXT NOT NULL,
+-- F1: the CANONICAL event store (migration 075) — the phantom
+-- subscribers/message_events/tracking_events/engagement_events/
+-- subscriber_analytics fixtures are gone; the tests now prove the real map.
+CREATE TABLE IF NOT EXISTS events (
+    id TEXT PRIMARY KEY,
     tenant_id TEXT NOT NULL,
+    message_id TEXT,
+    event_type TEXT NOT NULL,
+    recipient TEXT,
+    metadata JSONB,
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- Canonical message store (migration 073 shape; id UUID like 052/073).
+CREATE TABLE IF NOT EXISTS messages (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id TEXT NOT NULL,
+    from_email TEXT NOT NULL,
+    to_emails JSONB NOT NULL,
+    cc_emails JSONB,
+    bcc_emails JSONB,
+    subject TEXT NOT NULL,
+    html_body TEXT,
+    text_body TEXT,
+    status TEXT NOT NULL DEFAULT 'queued',
+    tags JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE TABLE IF NOT EXISTS engagement_events (
-    email TEXT NOT NULL,
-    tenant_id TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS tracking_events (
-    email TEXT NOT NULL,
-    tenant_id TEXT NOT NULL
-);
-CREATE TABLE IF NOT EXISTS subscriber_analytics (
-    email TEXT NOT NULL,
-    tenant_id TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS contacts (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -139,7 +145,11 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id TEXT,
-    email VARCHAR(255) UNIQUE NOT NULL
+    email VARCHAR(255) UNIQUE NOT NULL,
+    name TEXT,
+    password_hash TEXT,
+    mfa_secret TEXT,
+    status TEXT NOT NULL DEFAULT 'active'
 );
 CREATE TABLE IF NOT EXISTS api_keys (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -178,8 +188,9 @@ CREATE TABLE IF NOT EXISTS audit_logs (
 CREATE TABLE IF NOT EXISTS audit_logs_archive (LIKE audit_logs INCLUDING ALL);
 "#;
 
-/// Schema where `subscribers` is a VIEW — DELETE fails with a non-missing-table
-/// error, injecting a genuine store failure (audit finding B).
+/// Schema where the CANONICAL event store is a VIEW — DELETE fails with a
+/// non-missing-table error, injecting a genuine store failure (audit
+/// finding B) against the real erasure map.
 const FAILING_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS data_subject_requests (
     id TEXT PRIMARY KEY,
@@ -196,11 +207,16 @@ CREATE TABLE IF NOT EXISTS data_subject_requests (
     expires_at TIMESTAMPTZ NOT NULL,
     result JSONB
 );
-CREATE TABLE IF NOT EXISTS subscribers_backing (
-    email TEXT NOT NULL,
-    tenant_id TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS events_backing (
+    id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    recipient TEXT,
+    timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE VIEW subscribers AS SELECT DISTINCT email, tenant_id FROM subscribers_backing;
+-- DISTINCT makes the view non-auto-updatable: DELETE FROM events fails with
+-- a non-missing-table error (SQLSTATE 42501) — a genuine store failure.
+CREATE VIEW events AS SELECT DISTINCT * FROM events_backing;
 "#;
 
 async fn isolated_pool(db_suffix: &str, schema: &str) -> Option<PgPool> {
@@ -282,6 +298,13 @@ fn test_gdpr_config() -> GdprConfig {
         system_from_address: "noreply@apexmail.ee".into(),
         outbox_flush_batch: 25,
         outbox_flush_max_attempts: 5,
+        // ClickHouse erasure step disabled in tests — the certificate then
+        // honestly reports skipped_not_configured.
+        clickhouse_erasure_enabled: false,
+        clickhouse_url: "http://clickhouse.test.invalid:8123".into(),
+        clickhouse_database: "apexmail".into(),
+        clickhouse_user: "default".into(),
+        clickhouse_password: String::new(),
     }
 }
 
@@ -353,38 +376,26 @@ async fn erasure_is_scoped_to_the_data_subject() {
     let req_id = Uuid::new_v4().to_string();
     seed_request(&pool, &req_id, &tenant, &subject, "erasure").await;
 
-    // Seed subject + unrelated data everywhere the erasure touches.
+    // Seed subject + unrelated data in every CANONICAL store the erasure
+    // touches (F1: the map now exercises events/messages/users, not the
+    // phantom fixtures).
     for email in [&subject, &other] {
-        sqlx::query("INSERT INTO subscribers (email, tenant_id) VALUES ($1,$2)")
-            .bind(email)
+        sqlx::query("INSERT INTO events (id, tenant_id, event_type, recipient) VALUES ($1,$2,'delivered',$3)")
+            .bind(Uuid::new_v4().to_string())
             .bind(&tenant)
+            .bind(email)
             .execute(&pool)
             .await
             .unwrap();
-        sqlx::query("INSERT INTO message_events (recipient_email, tenant_id) VALUES ($1,$2)")
-            .bind(email)
-            .bind(&tenant)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO engagement_events (email, tenant_id) VALUES ($1,$2)")
-            .bind(email)
-            .bind(&tenant)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO tracking_events (email, tenant_id) VALUES ($1,$2)")
-            .bind(email)
-            .bind(&tenant)
-            .execute(&pool)
-            .await
-            .unwrap();
-        sqlx::query("INSERT INTO subscriber_analytics (email, tenant_id) VALUES ($1,$2)")
-            .bind(email)
-            .bind(&tenant)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "INSERT INTO messages (tenant_id, from_email, to_emails, subject, html_body)
+             VALUES ($1, 'noreply@x.com', $2::jsonb, 'Hello there', '<p>Hello there</p>')",
+        )
+        .bind(&tenant)
+        .bind(serde_json::json!([email]))
+        .execute(&pool)
+        .await
+        .unwrap();
         sqlx::query("INSERT INTO contacts (email, tenant_id, name) VALUES ($1,$2,'n')")
             .bind(email)
             .bind(&tenant)
@@ -396,7 +407,7 @@ async fn erasure_is_scoped_to_the_data_subject() {
             .execute(&pool).await.unwrap();
         // A user account + session per email.
         let user_id: (String,) = sqlx::query_as(
-            "INSERT INTO users (tenant_id, email) VALUES ($1,$2) RETURNING id::text",
+            "INSERT INTO users (tenant_id, email, name, password_hash) VALUES ($1,$2,'Real Name','secret-hash') RETURNING id::text",
         )
         .bind(&tenant)
         .bind(email)
@@ -454,11 +465,7 @@ async fn erasure_is_scoped_to_the_data_subject() {
 
     // Subject rows are gone …
     for (table, col) in [
-        ("subscribers", "email"),
-        ("message_events", "recipient_email"),
-        ("engagement_events", "email"),
-        ("tracking_events", "email"),
-        ("subscriber_analytics", "email"),
+        ("events", "recipient"),
         ("contacts", "email"),
         ("consent_records", "email"),
     ] {
@@ -480,10 +487,66 @@ async fn erasure_is_scoped_to_the_data_subject() {
         assert_eq!(c, 1, "{table}: other users' rows must survive");
     }
 
+    // … and the subject's message copy is ANONYMIZED (F1): the row survives
+    // as a statutory sending record with the recipient array, subject line
+    // and body redacted, while the other recipient's message is untouched.
+    let subject_msg: (i64, String, Option<String>) = sqlx::query_as(
+        "SELECT COUNT(*), COALESCE(MIN(subject), ''), MIN(html_body) FILTER (WHERE html_body IS NOT NULL)
+         FROM messages WHERE tenant_id = $1 AND to_emails::text LIKE '%erased+%'",
+    )
+    .bind(&tenant)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        subject_msg.0, 1,
+        "subject's message row is anonymized, not deleted"
+    );
+    assert!(subject_msg.1.contains("erased+"), "subject line redacted");
+    assert!(subject_msg.2.is_none(), "html body nulled");
+    let other_msg_kept: (String, Option<String>) = sqlx::query_as(
+        "SELECT subject, html_body FROM messages WHERE tenant_id = $1 AND to_emails::text = $2",
+    )
+    .bind(&tenant)
+    .bind(format!("[\"{other}\"]"))
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        other_msg_kept.0, "Hello there",
+        "other recipient's subject intact"
+    );
+    assert_eq!(
+        other_msg_kept.1.as_deref(),
+        Some("<p>Hello there</p>"),
+        "other recipient's body intact"
+    );
+
+    // … and the subject's account is a TOMBSTONE (F1/F9): row kept, PII gone.
+    let tombstone: (String, Option<String>, String) = sqlx::query_as(
+        "SELECT email, name, status FROM users WHERE tenant_id = $1 AND email LIKE 'erased+%'",
+    )
+    .bind(&tenant)
+    .fetch_one(&pool)
+    .await
+    .expect("subject's user row must survive as a tombstone");
+    assert!(!tombstone.0.contains(&subject), "tombstone email redacted");
+    assert!(tombstone.1.is_none(), "tombstone name cleared");
+    assert_eq!(tombstone.2, "erased");
+    let other_user: (String,) =
+        sqlx::query_as("SELECT email FROM users WHERE tenant_id = $1 AND email = $2")
+            .bind(&tenant)
+            .bind(&other)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(other_user.0, other, "other user's account untouched");
+
     // … including the subject's session (via users.email lookup), while the
-    // other user's session survives.
+    // other user's session survives. (Sessions are deleted BEFORE the users
+    // row is tombstoned — the lookup still resolves.)
     let subject_session: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM sessions s JOIN users u ON u.id::text = s.user_id WHERE u.email = $1",
+        "SELECT COUNT(*) FROM sessions s JOIN users u ON u.id::text = s.user_id WHERE u.email = $1 OR u.email LIKE 'erased+%'",
     )
     .bind(&subject)
     .fetch_one(&pool)
@@ -557,8 +620,9 @@ async fn erasure_is_scoped_to_the_data_subject() {
         .unwrap();
     assert_eq!(hooks, 1, "webhooks must survive a subject erasure");
 
-    // Status: contact_list_members does not exist in this schema → honest
-    // `partial`, with the skipped store listed in the certificate.
+    // Status: contact_list_members does not exist in this schema and the
+    // ClickHouse step is not configured → honest `partial`, with each gap
+    // listed per store in the certificate.
     let (status, result_json) = request_status(&pool, &req_id).await;
     assert_eq!(
         status, "partial",
@@ -571,6 +635,26 @@ async fn erasure_is_scoped_to_the_data_subject() {
     assert!(cert["stores"].as_array().unwrap().iter().any(|s| {
         s["store"] == "contact_list_members" && s["status"] == "skipped_missing_table"
     }));
+    // F1: the ClickHouse store is listed honestly as not configured.
+    assert!(cert["stores"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| { s["store"] == "clickhouse_events" && s["status"] == "skipped_not_configured" }));
+    // F1: the real canonical stores are attested with their real outcomes.
+    assert!(cert["stores"].as_array().unwrap().iter().any(|s| {
+        s["store"] == "events" && s["status"] == "deleted" && s["rows_affected"] == 1
+    }));
+    assert!(cert["stores"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| { s["store"] == "messages" && s["status"] == "anonymized" }));
+    assert!(cert["stores"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|s| { s["store"] == "users" && s["status"] == "anonymized" }));
     assert!(
         !cert["confirmation"]
             .as_str()
@@ -635,14 +719,18 @@ async fn erasure_store_failure_fails_the_request_after_retries() {
     let subject = format!("fail-{}@x.com", Uuid::new_v4().simple());
     let req_id = Uuid::new_v4().to_string();
     seed_request(&pool, &req_id, &tenant, &subject, "erasure").await;
-    sqlx::query("INSERT INTO subscribers_backing (email, tenant_id) VALUES ($1,$2)")
-        .bind(&subject)
-        .bind(&tenant)
-        .execute(&pool)
-        .await
-        .unwrap();
-
     let gdpr = automation(pool.clone());
+    // A row for the subject in the (non-deletable) events view's backing.
+    sqlx::query(
+        "INSERT INTO events_backing (id, tenant_id, event_type, recipient) VALUES ($1,$2,'delivered',$3)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&tenant)
+    .bind(&subject)
+    .execute(&pool)
+    .await
+    .unwrap();
+
     // Three processing passes: attempt 1 → retrying, 2 → retrying, 3 → failed.
     let _ = gdpr.process_request(&req_id).await;
     let (status1, _) = request_status(&pool, &req_id).await;
@@ -796,15 +884,34 @@ async fn access_export_covers_all_stores_and_downloads() {
     let req_id = Uuid::new_v4().to_string();
     seed_request(&pool, &req_id, &tenant, &subject, "access").await;
 
-    sqlx::query("INSERT INTO subscribers (email, tenant_id) VALUES ($1,$2)")
+    // F1/F9: seed every CANONICAL store the export must read.
+    sqlx::query("INSERT INTO contacts (email, tenant_id, name) VALUES ($1,$2,'Subject Name')")
         .bind(&subject)
         .bind(&tenant)
         .execute(&pool)
         .await
         .unwrap();
-    sqlx::query("INSERT INTO message_events (recipient_email, tenant_id) VALUES ($1,$2)")
-        .bind(&subject)
+    sqlx::query(
+        "INSERT INTO events (id, tenant_id, event_type, recipient) VALUES ($1,$2,'delivered',$3)",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&tenant)
+    .bind(&subject)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO messages (tenant_id, from_email, to_emails, subject, html_body)
+         VALUES ($1, 'noreply@x.com', $2::jsonb, 'Your receipt', '<p>receipt</p>')",
+    )
+    .bind(&tenant)
+    .bind(serde_json::json!([subject]))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("INSERT INTO users (tenant_id, email, name, password_hash) VALUES ($1,$2,'Subject Name','secret-hash')")
         .bind(&tenant)
+        .bind(&subject)
         .execute(&pool)
         .await
         .unwrap();
@@ -820,12 +927,15 @@ async fn access_export_covers_all_stores_and_downloads() {
     .execute(&pool)
     .await
     .unwrap();
+    // Customer email stored MIXED-CASE: the export must still match it
+    // (F9 — LOWER() on both sides, like the erasure side) and the
+    // anonymized view must redact the mixed-case copy too.
     sqlx::query(
         "INSERT INTO invoices (id, tenant_id, amount_cents, customer_email) VALUES ($1,$2,42,$3)",
     )
     .bind(short_id())
     .bind(&tenant)
-    .bind(&subject)
+    .bind(subject.to_uppercase())
     .execute(&pool)
     .await
     .unwrap();
@@ -853,8 +963,10 @@ async fn access_export_covers_all_stores_and_downloads() {
             .unwrap();
     let data = export_row.0;
     for key in [
-        "profile",
-        "message_history",
+        "contacts",
+        "events",
+        "messages",
+        "users",
         "consents",
         "suppression_list",
         "invoices",
@@ -868,19 +980,46 @@ async fn access_export_covers_all_stores_and_downloads() {
     // … with an explicit manifest listing per-store outcomes + truncation.
     let manifest = &data["manifest"];
     assert_eq!(manifest["truncated"], false);
-    assert_eq!(manifest["stores"]["subscribers"]["records"], 1);
+    assert_eq!(manifest["stores"]["contacts"]["records"], 1);
+    assert_eq!(manifest["stores"]["events"]["records"], 1);
+    assert_eq!(manifest["stores"]["messages"]["records"], 1);
     assert_eq!(manifest["stores"]["suppression_list"]["records"], 1);
     // Stores present but empty are still listed with their record count —
     // nothing is silently omitted from the data map.
-    assert_eq!(manifest["stores"]["tracking_events"]["included"], true);
-    assert_eq!(manifest["stores"]["tracking_events"]["records"], 0);
-    assert_eq!(manifest["stores"]["engagement_events"]["records"], 0);
+    assert_eq!(manifest["stores"]["sessions"]["included"], true);
+    assert_eq!(manifest["stores"]["sessions"]["records"], 0);
+    // Tenant-owned resources are transparently labelled, never queried.
+    assert_eq!(manifest["stores"]["api_keys"]["included"], false);
+    assert_eq!(
+        manifest["stores"]["webhooks"]["reason"],
+        "tenant-owned resource: no personal data of the subject"
+    );
 
-    // Invoice PII is anonymized in the export.
+    // The users row is exported anonymized-readable: no credentials.
+    let users_json = serde_json::to_string(&data["users"]).unwrap();
+    assert!(users_json.contains("Subject Name"));
+    assert!(
+        !users_json.contains("secret-hash"),
+        "password hash stripped"
+    );
+    assert!(!users_json.contains("mfa_secret"), "mfa secret stripped");
+
+    // Invoice PII is anonymized in the export — INCLUDING the mixed-case
+    // copy (F9: case-insensitive matching on both the query and the
+    // redaction).
     let invoices = serde_json::to_string(&data["invoices"]).unwrap();
     assert!(
         !invoices.contains(&subject),
         "invoice export must be anonymized"
+    );
+    assert!(
+        !invoices.to_lowercase().contains(&subject),
+        "even case-folded, the invoice export must not carry the address"
+    );
+    assert_eq!(
+        data["invoices"].as_array().map(Vec::len),
+        Some(1),
+        "the mixed-case invoice must MATCH the export query (LOWER on both sides)"
     );
     assert!(invoices.contains("erased+"));
 
@@ -1425,11 +1564,13 @@ async fn queue_recovery_sweep_requeues_stuck_entries() {
         "fresh in-flight entry is untouched"
     );
 
-    // Processing the batch completes the request AND acks the entry.
+    // Processing the batch completes the request AND acks the entry. The
+    // status is honestly `partial`: the canonical deployment lacks
+    // contact_list_members (listed as skipped in the manifest/certificate).
     let results = gdpr.process_queue_batch(10).await.unwrap();
     assert_eq!(results.len(), 1);
     let (status, _) = request_status(&pool, &req_id).await;
-    assert_eq!(status, "completed");
+    assert_eq!(status, "partial");
     let processing_after: Vec<String> = redis::cmd("LRANGE")
         .arg("gdpr:request_processing")
         .arg(0)
@@ -1457,13 +1598,28 @@ CREATE TABLE IF NOT EXISTS tenants (
     settings JSONB NOT NULL DEFAULT '{}',
     metadata JSONB NOT NULL DEFAULT '{}',
     legal_hold BOOLEAN NOT NULL DEFAULT false,
+    retention_days INT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-ALTER TABLE tracking_events
-    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
-ALTER TABLE engagement_events
-    ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
+CREATE INDEX IF NOT EXISTS idx_tenants_legal_hold ON tenants (id) WHERE legal_hold;
+-- F4: the enterprise zero-retention contract flag (migration 092).
+CREATE TABLE IF NOT EXISTS ent_compliance_configs (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id VARCHAR(26) NOT NULL UNIQUE,
+    enabled_frameworks TEXT[] NOT NULL DEFAULT '{}',
+    status VARCHAR(30) NOT NULL DEFAULT 'inactive',
+    zero_retention_mode BOOLEAN NOT NULL DEFAULT FALSE,
+    encryption_at_rest BOOLEAN NOT NULL DEFAULT FALSE,
+    encryption_in_transit BOOLEAN NOT NULL DEFAULT FALSE,
+    audit_log_retention_days INTEGER NOT NULL DEFAULT 2555,
+    data_retention_days INTEGER,
+    require_mfa BOOLEAN NOT NULL DEFAULT FALSE,
+    baa_signed BOOLEAN NOT NULL DEFAULT FALSE,
+    dpa_signed BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 "#;
 
 /// A tenant id that fits tenants.id VARCHAR(26).
@@ -1480,10 +1636,11 @@ async fn sweep_pool(test_name: &str) -> Option<PgPool> {
     Some(pool)
 }
 
-/// H-6: the sweep deletes expired event rows per the registry's default
-/// durations, skips tenants on legal hold, purges expired gdpr_exports and
-/// stale outbox rows, archives old audit logs, and writes an observable
-/// retention_report row.
+/// H-6: the sweep deletes expired rows from the CANONICAL stores (events per
+/// the 30d RET-007/009/010 minimum, messages per the 7d RET-001/002 minimum),
+/// skips tenants on legal hold, purges expired gdpr_exports and stale outbox
+/// rows, archives old audit logs, and writes an observable retention_report
+/// row.
 #[tokio::test]
 async fn retention_sweep_enforces_durations_and_respects_legal_holds() {
     let Some(pool) = sweep_pool("sweep").await else {
@@ -1503,25 +1660,33 @@ async fn retention_sweep_enforces_durations_and_respects_legal_holds() {
         .unwrap();
     }
 
-    // Expired (>30d per RET-007/009/010 defaults) and fresh rows per tenant.
+    // Expired and fresh rows per tenant in every canonical sweep store.
+    // events: 30d default cutoff; messages: 7d default cutoff — 40d rows are
+    // expired for both, 5d rows fresh for both.
     for tenant in [&tenant_a, &tenant_b] {
-        for (table, col) in [
-            ("message_events", "recipient_email"),
-            ("tracking_events", "email"),
-            ("engagement_events", "email"),
-        ] {
-            for age_days in [40i64, 5] {
-                sqlx::query(&format!(
-                    "INSERT INTO {table} ({col}, tenant_id, created_at)
-                     VALUES ($1, $2, NOW() - ($3 || ' days')::interval)"
-                ))
-                .bind(format!("u-{}@x.com", &tenant[..6]))
-                .bind(tenant)
-                .bind(age_days.to_string())
-                .execute(&pool)
-                .await
-                .unwrap();
-            }
+        let email = format!("u-{}@x.com", &tenant[..6]);
+        for age_days in [40i64, 5] {
+            sqlx::query(
+                "INSERT INTO events (id, tenant_id, event_type, recipient, timestamp)
+                 VALUES ($1, $2, 'delivered', $3, NOW() - ($4 || ' days')::interval)",
+            )
+            .bind(Uuid::new_v4().to_string())
+            .bind(tenant)
+            .bind(&email)
+            .bind(age_days.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO messages (tenant_id, from_email, to_emails, subject, created_at)
+                 VALUES ($1, 'noreply@x.com', $2::jsonb, 's', NOW() - ($3 || ' days')::interval)",
+            )
+            .bind(tenant)
+            .bind(serde_json::json!([email]))
+            .bind(age_days.to_string())
+            .execute(&pool)
+            .await
+            .unwrap();
         }
     }
 
@@ -1578,36 +1743,51 @@ async fn retention_sweep_enforces_durations_and_respects_legal_holds() {
     let report = sweeper.run_sweep(&audit).await.expect("sweep runs");
 
     // Expired rows for tenant_a deleted; tenant_b (legal hold) retained;
-    // fresh rows for both retained.
-    for (table, col) in [
-        ("message_events", "recipient_email"),
-        ("tracking_events", "email"),
-        ("engagement_events", "email"),
-    ] {
-        let email = format!("u-{}@x.com", &tenant_a[..6]);
-        let remaining_a: i64 =
-            sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE {col} = $1"))
-                .bind(&email)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+    // fresh rows for both retained — in BOTH canonical stores.
+    let expected = [("events", 30u32), ("messages", 7u32)];
+    for (store, default_days) in expected {
+        let remaining_a: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM {store} WHERE tenant_id = $1"
+        ))
+        .bind(&tenant_a)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(
             remaining_a, 1,
-            "{table}: only the fresh row survives for the unheld tenant"
+            "{store}: only the fresh row survives for the unheld tenant"
         );
 
-        let email_b = format!("u-{}@x.com", &tenant_b[..6]);
-        let remaining_b: i64 =
-            sqlx::query_scalar(&format!("SELECT COUNT(*) FROM {table} WHERE {col} = $1"))
-                .bind(&email_b)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let remaining_b: i64 = sqlx::query_scalar(&format!(
+            "SELECT COUNT(*) FROM {store} WHERE tenant_id = $1"
+        ))
+        .bind(&tenant_b)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         assert_eq!(
             remaining_b, 2,
-            "{table}: legal-hold tenant rows must survive"
+            "{store}: legal-hold tenant rows must survive"
+        );
+
+        let cat = report
+            .categories
+            .iter()
+            .find(|c| c.store == store)
+            .unwrap_or_else(|| panic!("{store} must be swept"));
+        assert_eq!(cat.considered, 2, "{store}: both tenants' expired rows");
+        assert_eq!(cat.deleted, 1, "{store}: unheld tenant's row deleted");
+        assert_eq!(cat.skipped_legal_hold, 1, "{store}: held tenant skipped");
+        assert_eq!(
+            cat.retention_days, default_days,
+            "{store}: registry default drives the cutoff"
+        );
+        assert_eq!(
+            cat.legal_hold_check,
+            compliance::retention_sweep::LegalHoldCheck::TenantsTable
         );
     }
+    assert_eq!(report.categories.len(), 2, "events + messages only");
 
     // Exports: only the fresh one remains.
     let exports: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM gdpr_exports")
@@ -1620,7 +1800,8 @@ async fn retention_sweep_enforces_durations_and_respects_legal_holds() {
     );
     assert_eq!(report.gdpr_exports_deleted, 1);
 
-    // Audit rows moved to the archive by the sweep (via archive()).
+    // Audit rows moved to the archive by the sweep (via archive()). The held
+    // tenant has no rows here, so nothing is excluded by the hold filter.
     let live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs")
         .fetch_one(&pool)
         .await
@@ -1632,36 +1813,6 @@ async fn retention_sweep_enforces_durations_and_respects_legal_holds() {
         .unwrap();
     assert_eq!(archived, 2);
     assert_eq!(report.audit_logs_archived, 2);
-
-    // Per-category report numbers: considered 2 (a + b expired), deleted 1,
-    // skipped_legal_hold 1 — for every swept store.
-    for cat in &report.categories {
-        assert_eq!(
-            cat.considered, 2,
-            "{}: considered both tenants' expired rows",
-            cat.store
-        );
-        assert_eq!(
-            cat.deleted, 1,
-            "{}: deleted the unheld tenant's row",
-            cat.store
-        );
-        assert_eq!(
-            cat.skipped_legal_hold, 1,
-            "{}: held tenant's row skipped",
-            cat.store
-        );
-        assert_eq!(
-            cat.retention_days, 30,
-            "{}: registry default drives the cutoff",
-            cat.store
-        );
-        assert_eq!(
-            cat.legal_hold_check,
-            compliance::retention_sweep::LegalHoldCheck::TenantsTable
-        );
-    }
-    assert_eq!(report.categories.len(), 3);
 
     // Out-of-scope stores are listed with their registry durations.
     let oos: Vec<&str> = report.out_of_scope.iter().map(|s| s.store).collect();
@@ -1677,23 +1828,237 @@ async fn retention_sweep_enforces_durations_and_respects_legal_holds() {
             .await
             .unwrap();
     assert_eq!(ran_rows, 1, "one retention_report row per run");
-    assert_eq!(tier, "default");
+    assert_eq!(
+        tier, "default",
+        "no overrides configured — flat default tier"
+    );
     let persisted: serde_json::Value = sqlx::query_scalar("SELECT report FROM retention_report")
         .fetch_one(&pool)
         .await
         .unwrap();
-    assert_eq!(persisted["categories"].as_array().unwrap().len(), 3);
+    assert_eq!(persisted["categories"].as_array().unwrap().len(), 2);
     assert_eq!(persisted["out_of_scope"].as_array().unwrap().len(), 3);
 }
 
-/// Missing event stores are reported as skipped — never silently counted.
+/// F4: per-tenant retention overrides and zero-retention mode drive the
+/// cutoffs; an override the plan rejects falls back to the default.
+#[tokio::test]
+async fn retention_sweep_honors_per_tenant_retention_and_zero_retention() {
+    let Some(pool) = sweep_pool("sweep_tiers").await else {
+        return;
+    };
+    // free plan, override 40d — REJECTED for events (free caps RET-007 at
+    // 7d), so events fall back to the 30d default; 40d-old rows survive.
+    let tenant_override = short_tenant();
+    // zero-retention tenant: everything is purged immediately, even a row
+    // written a moment ago.
+    let tenant_zero = short_tenant();
+    sqlx::query(
+        "INSERT INTO tenants (id, name, slug, plan, legal_hold, retention_days)
+         VALUES ($1,'n',$1,'free',false,$2)",
+    )
+    .bind(&tenant_override)
+    .bind(40i32)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO tenants (id, name, slug, plan, legal_hold)
+         VALUES ($1,'n',$1,'free',false)",
+    )
+    .bind(&tenant_zero)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO ent_compliance_configs (tenant_id, zero_retention_mode)
+         VALUES ($1, true)",
+    )
+    .bind(&tenant_zero)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    for tenant in [&tenant_override, &tenant_zero] {
+        sqlx::query(
+            "INSERT INTO events (id, tenant_id, event_type, recipient, timestamp)
+             VALUES ($1, $2, 'delivered', 'z@x.com', NOW() - INTERVAL '35 days')",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(tenant)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let audit = compliance::audit_logger::AuditLogger::new(
+        pool.clone(),
+        AuditConfig {
+            retention_days: 365,
+            hash_chain_enabled: true,
+            signing_key: "sweep-tier-key-0123456789abcdef".into(),
+        },
+    );
+    audit.initialize().await.expect("audit init");
+    let sweeper = compliance::retention_sweep::RetentionSweeper::new(pool.clone(), 7, 30, 365);
+    sweeper.apply_migration().await.expect("report table");
+    let report = sweeper.run_sweep(&audit).await.expect("sweep runs");
+
+    let events = report
+        .categories
+        .iter()
+        .find(|c| c.store == "events")
+        .unwrap();
+    // The 40d override exceeds the free plan's RET-007 cap (7d) — the sweep
+    // must NOT honor it; rows older than the 30d default are deleted anyway,
+    // so both tenants' 35d rows go.
+    assert_eq!(
+        events.custom_retention_tenants, 0,
+        "plan-violating override ignored"
+    );
+    assert_eq!(
+        events.deleted, 2,
+        "both 35d rows past the 30d default cutoff"
+    );
+    assert_eq!(events.zero_retention_tenants, 1);
+
+    let override_left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant_id = $1")
+        .bind(&tenant_override)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(override_left, 0);
+    let zero_left: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE tenant_id = $1")
+        .bind(&tenant_zero)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(zero_left, 0, "zero-retention tenant fully purged");
+
+    // An override WITHIN plan bounds shrinks the window: free plan allows
+    // 1..7d for RET-007, so 5d purges a 6d-old row the default would keep.
+    let tenant_short = short_tenant();
+    sqlx::query(
+        "INSERT INTO tenants (id, name, slug, plan, legal_hold, retention_days)
+         VALUES ($1,'n',$1,'free',false,5)",
+    )
+    .bind(&tenant_short)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO events (id, tenant_id, event_type, recipient, timestamp)
+         VALUES ($1, $2, 'delivered', 'z@x.com', NOW() - INTERVAL '6 days')",
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&tenant_short)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let report2 = sweeper.run_sweep(&audit).await.expect("second sweep");
+    let events2 = report2
+        .categories
+        .iter()
+        .find(|c| c.store == "events")
+        .unwrap();
+    assert_eq!(
+        events2.custom_retention_tenants, 1,
+        "the in-bounds 5d override is honored"
+    );
+    assert_eq!(events2.deleted, 1, "the 6d-old row is past the 5d override");
+    assert_eq!(
+        report2.plan_tier, "per-tenant",
+        "overrides participated — the report says so"
+    );
+}
+
+/// F5: audit trim under legal hold — a held tenant's rows stay LIVE (not
+/// archived away), and NULL-tenant rows are kept while any hold is active.
+#[tokio::test]
+async fn audit_archive_respects_legal_holds() {
+    let Some(pool) = sweep_pool("audit_hold").await else {
+        return;
+    };
+    let held = short_tenant();
+    let normal = short_tenant();
+    for (id, is_held) in [(&held, true), (&normal, false)] {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, legal_hold)
+             VALUES ($1,'n',$1,'free',$2)",
+        )
+        .bind(id)
+        .bind(is_held)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+
+    let audit = compliance::audit_logger::AuditLogger::new(
+        pool.clone(),
+        AuditConfig {
+            retention_days: 0,
+            hash_chain_enabled: true,
+            signing_key: "audit-hold-key-0123456789abcdef".into(),
+        },
+    );
+    audit.initialize().await.expect("audit init");
+    for tenant in [&held, &normal] {
+        let ctx = LogContext {
+            tenant_id: Some(tenant.clone()),
+            user_id: None,
+            session_id: None,
+            ip_address: None,
+            user_agent: None,
+        };
+        audit
+            .log(
+                AuditAction::Read,
+                AuditResource::Subscriber,
+                Some("hold"),
+                serde_json::json!({}),
+                AuditOutcome::Success,
+                None,
+                &ctx,
+            )
+            .await
+            .unwrap();
+    }
+
+    audit
+        .archive(chrono::Utc::now() + chrono::Duration::days(1))
+        .await
+        .expect("archive");
+
+    let held_live: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE tenant_id = $1")
+        .bind(&held)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(held_live, 1, "held tenant's audit rows must stay live");
+    let normal_live: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs WHERE tenant_id = $1")
+            .bind(&normal)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(normal_live, 0, "unheld tenant's rows archive normally");
+    let archived: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_logs_archive WHERE tenant_id = $1")
+            .bind(&normal)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(archived, 1);
+}
+
+/// Missing canonical stores are reported as skipped — never silently counted.
 #[tokio::test]
 async fn retention_sweep_reports_missing_stores() {
-    // MAIN_SCHEMA has message_events but a deployment without tracking_events.
+    // MAIN_SCHEMA has events; a deployment without the messages store.
     let Some(pool) = test_pool("sweep_missing", MAIN_SCHEMA).await else {
         return;
     };
-    sqlx::query("DROP TABLE tracking_events")
+    sqlx::query("DROP TABLE messages")
         .execute(&pool)
         .await
         .unwrap();
@@ -1712,21 +2077,28 @@ async fn retention_sweep_reports_missing_stores() {
     sweeper.apply_migration().await.expect("report table");
     let report = sweeper.run_sweep(&audit).await.expect("sweep runs");
 
-    let tracking = report
+    let messages = report
         .categories
         .iter()
-        .find(|c| c.store == "tracking_events")
+        .find(|c| c.store == "messages")
         .unwrap();
     assert_eq!(
-        tracking.status,
+        messages.status,
         compliance::retention_sweep::SweepStatus::SkippedMissingStore
     );
-    assert_eq!(tracking.deleted, 0);
+    assert_eq!(messages.deleted, 0);
     // No tenants table in this deployment — reported honestly.
     assert_eq!(
-        tracking.legal_hold_check,
+        messages.legal_hold_check,
         compliance::retention_sweep::LegalHoldCheck::TenantsTableMissing
     );
+    // The sweep degrades gracefully: gdpr_exports table absent too, but the
+    // run itself completes and writes its report.
+    let report_rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM retention_report")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(report_rows, 1);
 }
 
 // ── D: DSR verification outbox ─────────────────────────────────────────────

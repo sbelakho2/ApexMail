@@ -20,8 +20,8 @@ impl EventsRepo {
     /// Create a new event.
     pub async fn create(
         pool: &PgPool,
-        tenant_id: Uuid,
-        message_id: Option<Uuid>,
+        tenant_id: &str,
+        message_id: Option<&str>,
         event_type: &str,
         recipient: Option<&str>,
         metadata: Option<serde_json::Value>,
@@ -31,7 +31,7 @@ impl EventsRepo {
              VALUES ($1, $2, $3, $4, $5, $6, NOW()) \
              RETURNING id, tenant_id, message_id, event_type, recipient, metadata, timestamp"
         )
-        .bind(Uuid::new_v4())
+        .bind(Uuid::new_v4().to_string())
         .bind(tenant_id)
         .bind(message_id)
         .bind(event_type)
@@ -44,8 +44,8 @@ impl EventsRepo {
     /// List events for a specific message.
     pub async fn list_by_message(
         pool: &PgPool,
-        tenant_id: Uuid,
-        message_id: Uuid,
+        tenant_id: &str,
+        message_id: &str,
     ) -> Result<Vec<Event>, sqlx::Error> {
         sqlx::query_as::<_, Event>(
             "SELECT id, tenant_id, message_id, event_type, recipient, metadata, timestamp \
@@ -60,7 +60,7 @@ impl EventsRepo {
     /// List events for a tenant with pagination.
     pub async fn list_by_tenant(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<Event>, sqlx::Error> {
@@ -81,10 +81,10 @@ impl EventsRepo {
     /// Uses `(timestamp, id)` tuple comparison since the events table uses `timestamp` (not `created_at`).
     pub async fn list_keyset_by_tenant(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         limit: i64,
         cursor_timestamp: Option<DateTime<Utc>>,
-        cursor_id: Option<Uuid>,
+        cursor_id: Option<&str>,
     ) -> Result<Vec<Event>, sqlx::Error> {
         let limit = limit.clamp(1, 200);
         let fetch_limit = limit + 1;
@@ -121,7 +121,7 @@ impl EventsRepo {
     /// #222:Added time bound to prevent expensive full table scans
     pub async fn count_by_type(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         since_hours: i32,
     ) -> Result<Vec<EventTypeCount>, sqlx::Error> {
         let since_hours = since_hours.clamp(1, 8760); // Max 1 year
@@ -139,7 +139,7 @@ impl EventsRepo {
     /// Event type stats with time window.
     pub async fn stats_by_type(
         pool: &PgPool,
-        tenant_id: Uuid,
+        tenant_id: &str,
         since_hours: i32,
     ) -> Result<Vec<EventTypeCount>, sqlx::Error> {
         sqlx::query_as::<_, EventTypeCount>(
@@ -163,9 +163,9 @@ mod tests {
     #[test]
     fn test_event_mock() {
         let e = Event {
-            id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
-            message_id: Some(Uuid::new_v4()),
+            id: Uuid::new_v4().to_string(),
+            tenant_id: crate::types::short_id('t'),
+            message_id: Some(Uuid::new_v4().to_string()),
             event_type: "delivered".into(),
             recipient: Some("user@example.com".into()),
             metadata: Some(serde_json::json!({"smtp_code": 250})),
@@ -187,8 +187,8 @@ mod tests {
     #[test]
     fn test_event_without_message() {
         let e = Event {
-            id: Uuid::new_v4(),
-            tenant_id: Uuid::new_v4(),
+            id: Uuid::new_v4().to_string(),
+            tenant_id: crate::types::short_id('t'),
             message_id: None,
             event_type: "complaint".into(),
             recipient: Some("spam@test.com".into()),

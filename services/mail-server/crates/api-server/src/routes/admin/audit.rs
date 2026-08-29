@@ -229,7 +229,7 @@ async fn list_audit_logs(
     Query(params): Query<AuditListQuery>,
 ) -> Result<Json<Vec<AuditLogEntry>>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     let query_plan = build_audit_query_plan(&params, Utc::now())?;
 

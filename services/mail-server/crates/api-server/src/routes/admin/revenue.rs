@@ -311,7 +311,7 @@ async fn get_revenue(
     auth: AuthUser,
 ) -> Result<Json<RevenueResponse>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    crate::middleware::auth::require_system_tenant(&auth)?;
+    crate::middleware::auth::require_system_tenant(&state, &auth).await?;
 
     let db = &state.db;
     let now = Utc::now();

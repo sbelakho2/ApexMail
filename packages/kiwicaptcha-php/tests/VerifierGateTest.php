@@ -224,7 +224,7 @@ final class VerifierGateTest extends TestCase
     public function testCapacityExhaustedReturnsCapacityExceededWithoutConsumingOrDeleting(): void
     {
         $record = $this->argon2Record();
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $gate = new class implements VerificationAdmissionGate {
             public function acquire(): ?string
@@ -247,7 +247,7 @@ final class VerifierGateTest extends TestCase
     public function testSha256VerificationNeverAcquiresTheArgonGate(): void
     {
         $record = $this->v2Sha256Record();
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $counter = $this->solveSha256($record->prefix, $record->salt, $record->targetBits);
         $gate = new class implements VerificationAdmissionGate {
@@ -279,7 +279,7 @@ final class VerifierGateTest extends TestCase
     public function testValidArgonVerificationAcquiresAndReleasesOnce(): void
     {
         $record = $this->argon2Record();
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $counter = $this->solveArgon2($record->prefix, $record->salt, $record->targetBits);
         $gate = new class implements VerificationAdmissionGate {
@@ -319,7 +319,7 @@ final class VerifierGateTest extends TestCase
         // and the consume transition then revealed the terminal state
         // as missing).
         $record = $this->argon2Record();
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $counter = $this->solveArgon2($record->prefix, $record->salt, $record->targetBits);
         $token = $this->tokenFor($record->nonce, $counter);
@@ -351,7 +351,7 @@ final class VerifierGateTest extends TestCase
         // memory-hard verifications. The pre-admission terminal-state
         // check answers RecordNotFound with zero acquires.
         $record = $this->argon2Record();
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         self::assertSame('cancelled-now', $storage->cancel($record->nonce)?->state);
 
@@ -379,7 +379,7 @@ final class VerifierGateTest extends TestCase
         // an earlier security verdict. No admission slot is acquired
         // either way.
         $record = $this->argon2Record();
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $counter = $this->solveArgon2($record->prefix, $record->salt, $record->targetBits);
         $token = $this->tokenFor($record->nonce, $counter);
@@ -408,7 +408,7 @@ final class VerifierGateTest extends TestCase
         // outcome without a second derivation and without acquiring an
         // Argon slot.
         $record = $this->argon2Record();
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $counter = $this->solveArgon2($record->prefix, $record->salt, $record->targetBits);
         $token = $this->tokenFor($record->nonce, $counter);
@@ -441,7 +441,7 @@ final class VerifierGateTest extends TestCase
         // by the pre-admission terminal-state check without acquiring
         // an Argon slot.
         $record = $this->argon2Record();
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $counter = $this->solveArgon2($record->prefix, $record->salt, $record->targetBits);
         $token = $this->tokenFor($record->nonce, $counter);
@@ -479,7 +479,7 @@ final class VerifierGateTest extends TestCase
         // pending) when A consumed and committed. B's own consume then
         // sees the consumed envelope and resolves the stored success.
         $record = $this->argon2Record();
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $counter = $this->solveArgon2($record->prefix, $record->salt, $record->targetBits);
         $token = $this->tokenFor($record->nonce, $counter);
@@ -554,7 +554,7 @@ final class VerifierGateTest extends TestCase
         // cancelled through the cancellation endpoint resolves to
         // RecordNotFound without ever touching the Argon admission
         // gate.
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $issuer = new Issuer(
             new Config(
                 secretKey: Vectors::SECRET,
@@ -608,7 +608,7 @@ final class VerifierGateTest extends TestCase
         // Argon admission slot, and the consume transition then reveals
         // the terminal state as RecordNotFound.
         $record = $this->argon2Record();
-        $inner = new ArrayStorage();
+        $inner = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $inner->store($record);
         $inner->cancel($record->nonce);
         $storage = new class($inner) implements StorageInterface {
@@ -767,7 +767,7 @@ final class VerifierGateTest extends TestCase
     public function testMalformedSaltLengthBurnsRecord(): void
     {
         $record = $this->v2Sha256Record(salt: base64_encode(random_bytes(15)));
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
 
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
@@ -780,7 +780,7 @@ final class VerifierGateTest extends TestCase
     public function testMalformedPrefixBurnsRecord(): void
     {
         $record = $this->v2Sha256Record();
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store(new ChallengeRecord(
             nonce: $record->nonce,
             scope: $record->scope,
@@ -811,7 +811,7 @@ final class VerifierGateTest extends TestCase
     {
         // expiresAt - issuedAt = 301, above the 300 s TTL ceiling.
         $record = $this->v2Sha256Record(issuedAt: self::ISSUED_AT, expiresAt: self::ISSUED_AT + 301);
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
 
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
@@ -827,7 +827,7 @@ final class VerifierGateTest extends TestCase
         // the bound, so the record is structurally valid and verifies
         // end-to-end.
         $record = $this->v2Sha256Record(issuedAt: self::ISSUED_AT, expiresAt: self::ISSUED_AT + 300);
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $counter = $this->solveSha256($record->prefix, $record->salt, $record->targetBits);
 
@@ -843,7 +843,7 @@ final class VerifierGateTest extends TestCase
         // 60 s future-skew bound; no real issuer host is that far ahead,
         // so the TTL check rejects it as Expired.
         $record = $this->v2Sha256Record(issuedAt: self::ISSUED_AT + 61, expiresAt: self::ISSUED_AT + 61 + 120);
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
 
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
@@ -859,7 +859,7 @@ final class VerifierGateTest extends TestCase
         // boundary; the future bound uses `>`, so the record is accepted
         // and verifies end-to-end.
         $record = $this->v2Sha256Record(issuedAt: self::ISSUED_AT + 60, expiresAt: self::ISSUED_AT + 60 + 120);
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $counter = $this->solveSha256($record->prefix, $record->salt, $record->targetBits);
 
@@ -887,7 +887,7 @@ final class VerifierGateTest extends TestCase
         // UnsupportedArgon2Params (not MalformedRecord): the signature
         // authenticates the parameters before the ceiling check.
         $record = $this->argon2Record(t: 32);
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
 
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
@@ -903,7 +903,7 @@ final class VerifierGateTest extends TestCase
         // negative, but the skew is inside the 5s tolerance, so the floor
         // check is skipped and the solve passes.
         $record = $this->v2Sha256Record(minDurationMs: 1000);
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $counter = $this->solveSha256($record->prefix, $record->salt, $record->targetBits);
 
@@ -924,7 +924,7 @@ final class VerifierGateTest extends TestCase
         // Receipt 6s before issuance exceeds the 5s skew tolerance: the
         // issuance timestamps cannot come from real hosts, rejected.
         $record = $this->v2Sha256Record(minDurationMs: 1000);
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
 
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
@@ -944,7 +944,7 @@ final class VerifierGateTest extends TestCase
         // No client-duration fallback anymore: an untimed record cannot
         // be verified, even with a solved proof and an enforced floor.
         $record = $this->v2Sha256Record(minDurationMs: 1000, issuedAtNs: 0);
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $counter = $this->solveSha256($record->prefix, $record->salt, $record->targetBits);
 
@@ -983,7 +983,7 @@ final class VerifierGateTest extends TestCase
             issuedAtNs: self::ISSUED_AT * 1_000_000,
             protocolVersion: 1,
         );
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $counter = $this->solveSha256($record->prefix, $record->salt, $record->targetBits);
 
@@ -1021,7 +1021,7 @@ final class VerifierGateTest extends TestCase
             issuedAtNs: self::ISSUED_AT * 1_000_000,
             protocolVersion: 1,
         );
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $counter = $this->solveSha256($record->prefix, $record->salt, $record->targetBits);
 
@@ -1034,7 +1034,7 @@ final class VerifierGateTest extends TestCase
     public function testV2RecordVerifiesEndToEnd(): void
     {
         $record = $this->v2Sha256Record();
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $counter = $this->solveSha256($record->prefix, $record->salt, $record->targetBits);
 
@@ -1047,7 +1047,7 @@ final class VerifierGateTest extends TestCase
     public function testWrongClientIpIsIpMismatch(): void
     {
         $record = $this->v2Sha256Record();
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $counter = $this->solveSha256($record->prefix, $record->salt, $record->targetBits);
 
@@ -1061,7 +1061,7 @@ final class VerifierGateTest extends TestCase
     {
         // bindingTag '' = binding disabled: any client IP passes.
         $record = $this->v2Sha256Record(bindingTag: '');
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $counter = $this->solveSha256($record->prefix, $record->salt, $record->targetBits);
 
@@ -1125,7 +1125,7 @@ final class VerifierGateTest extends TestCase
             issuedAtNs: $issuedAt * 1_000_000,
             protocolVersion: 2,
         );
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $counter = $this->solveSha256($prefix, $salt, 8);
 
@@ -1147,7 +1147,7 @@ final class VerifierGateTest extends TestCase
         // positionally as the constructor's second argument. It must be
         // treated as $now, not as an admission gate.
         $record = $this->v2Sha256Record();
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
 
         $verifier = new Verifier($storage, static fn (): int => self::ISSUED_AT + 121);
@@ -1162,7 +1162,7 @@ final class VerifierGateTest extends TestCase
         // the client IP must fail with MissingClientIp, not silently skip
         // the check (the caller must provide the IP it passed to
         // issuance).
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $secret = '0123456789abcdef0123456789abcdef';
         $issuer = new Issuer(new \KiwiCaptcha\Config(secretKey: $secret, targetBits: 8), $storage);
         $challenge = $issuer->issue('login', '198.51.100.7');
@@ -1182,7 +1182,7 @@ final class VerifierGateTest extends TestCase
         self::assertSame(VerifyError::MissingClientIp->value, $outcome->code());
 
         // BindingMode::None records (empty tag) still verify without an IP.
-        $storage2 = new ArrayStorage();
+        $storage2 = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $issuer2 = new Issuer(new \KiwiCaptcha\Config(secretKey: $secret, targetBits: 8, bindingMode: \KiwiCaptcha\BindingMode::None), $storage2);
         $ch2 = $issuer2->issue('login', '198.51.100.7');
         $rec2 = $storage2->find($ch2->nonce);
@@ -1203,7 +1203,7 @@ final class VerifierGateTest extends TestCase
         // Only protocol versions 1 (legacy migration) and 2 (current)
         // exist in the wire contract; anything else is a corrupt or
         // foreign record.
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $issuer = new Issuer(new \KiwiCaptcha\Config(secretKey: '0123456789abcdef0123456789abcdef', targetBits: 8), $storage);
         $challenge = $issuer->issue('login', '198.51.100.7');
         $record = $storage->find($challenge->nonce);
@@ -1242,7 +1242,7 @@ final class VerifierGateTest extends TestCase
         // The canonical replay id (jti) is the decoded token's nonce; a
         // valid outcome must expose it.
         $record = $this->v2Sha256Record();
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
         $counter = $this->solveSha256($record->prefix, $record->salt, $record->targetBits);
 
@@ -1256,7 +1256,7 @@ final class VerifierGateTest extends TestCase
     public function testInvalidOutcomeNonceIsNull(): void
     {
         $record = $this->v2Sha256Record();
-        $storage = new ArrayStorage();
+        $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $storage->store($record);
 
         $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT + 1000);
@@ -1278,7 +1278,7 @@ final class VerifierGateTest extends TestCase
         $raw = SolutionToken::create($nonce, 1, 1000, ['q' => '?>~?'])->encode();
         $urlSafe = strtr($raw, '+/', '-_');
         self::assertNotSame($raw, $urlSafe, 'precondition: the url-safe variant must differ');
-        $verifier = new Verifier(new ArrayStorage());
+        $verifier = new Verifier(new ArrayStorage(now: static fn (): int => self::ISSUED_AT));
         $outcome = $verifier->verify($urlSafe, Vectors::SECRET);
 
         self::assertSame(VerifyError::MalformedToken, $outcome->error);
@@ -1287,7 +1287,7 @@ final class VerifierGateTest extends TestCase
 
     public function testRecordNotFoundNonceIsNull(): void
     {
-        $verifier = new Verifier(new ArrayStorage());
+        $verifier = new Verifier(new ArrayStorage(now: static fn (): int => self::ISSUED_AT));
         $token = SolutionToken::create($this->validNonce(), 1, 5000, [])->encode();
 
         $outcome = $verifier->verify($token, Vectors::SECRET);

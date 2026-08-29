@@ -32,6 +32,16 @@ const DATA_LINE_TIMEOUT: Duration = Duration::from_secs(300);
 /// protection, mirrors the inbound server's 10-minute cap).
 const DATA_TOTAL_TIMEOUT: Duration = Duration::from_secs(600);
 
+/// F-14 (ported from inbound/submission): number of 4xx/5xx replies after
+/// which the session is closed with `421 4.7.0 Too many errors` (RFC 5321
+/// §4.3.2 recommends a small limit).
+const MAX_SESSION_ERRORS: u32 = 20;
+
+/// F-14 (ported from inbound/submission): hard wall-clock cap for a whole
+/// session. This endpoint has no authentication phase, so the cap applies
+/// unconditionally.
+const SESSION_DEADLINE: Duration = Duration::from_secs(30 * 60);
+
 /// Maximum accepted `RCPT TO` addresses per bounce transaction. Bounces are
 /// one-DSN-per-message; a handful of recipients is generous, and the bound
 /// keeps a hostile client from growing `rcpt_to` without limit.
@@ -183,6 +193,32 @@ impl BounceServer {
         let mut msgs_this_conn: u32 = 0;
         let mut line = String::new();
         let mut close_reason = "closed";
+        // F-14 (ported from inbound/submission): hard wall-clock cap for the
+        // whole session and a 4xx/5xx reply budget.
+        let session_deadline = std::time::Instant::now() + SESSION_DEADLINE;
+        let mut error_count: u32 = 0;
+
+        // Single write point for 4xx/5xx replies: every reject counts toward
+        // the error budget; at MAX_SESSION_ERRORS the session is closed with
+        // 421 (RFC 5321 §4.3.2 "too many errors"). NOTE: the `break` in the
+        // exhausted branch exits the command loop enclosing every invocation.
+        macro_rules! reject_reply {
+            ($response:expr) => {{
+                let response: &str = $response;
+                let _ = write_reply(&mut stream, "bounce", peer_ip, &session_id, response).await;
+                if response.starts_with('4') || response.starts_with('5') {
+                    error_count += 1;
+                    if error_count >= MAX_SESSION_ERRORS {
+                        let _ = write_line(
+                            &mut stream,
+                            "421 4.7.0 Too many errors, closing connection\r\n",
+                        )
+                        .await;
+                        break;
+                    }
+                }
+            }};
+        }
 
         loop {
             line.clear();
@@ -197,56 +233,45 @@ impl BounceServer {
                     // Command-phase idle timeout: tell the client why the
                     // connection is going away (421, RFC 5321 §4.2.1).
                     close_reason = "idle_timeout";
-                    let _ = write_reply(
-                        &mut stream,
-                        "bounce",
-                        peer_ip,
-                        &session_id,
-                        "421 4.4.2 Idle timeout, closing connection\r\n",
-                    )
-                    .await;
+                    reject_reply!("421 4.4.2 Idle timeout, closing connection\r\n");
                     break;
                 }
                 Ok(Ok(LineRead::TooLong)) => {
                     // Remainder drained through its newline: synchronised.
-                    let _ = write_reply(
-                        &mut stream,
-                        "bounce",
-                        peer_ip,
-                        &session_id,
-                        "500 5.5.2 Line too long\r\n",
-                    )
-                    .await;
+                    reject_reply!("500 5.5.2 Line too long\r\n");
                     continue;
                 }
                 Ok(Ok(LineRead::Overflow)) => {
                     // Resynchronisation impossible: reply and close so the
                     // leftover bytes can never be parsed as commands.
                     close_reason = "overflow";
-                    let _ = write_reply(
-                        &mut stream,
-                        "bounce",
-                        peer_ip,
-                        &session_id,
-                        "500 5.5.2 Line too long\r\n",
-                    )
-                    .await;
+                    reject_reply!("500 5.5.2 Line too long\r\n");
                     break;
                 }
                 Ok(Ok(LineRead::Line(_, LineTerminator::BareLf))) => {
                     // F-08: a bare-LF COMMAND line is refused (DATA body
                     // tolerance is unchanged).
-                    let _ = write_reply(
-                        &mut stream,
-                        "bounce",
-                        peer_ip,
-                        &session_id,
-                        "500 5.5.2 Bare LF not allowed\r\n",
-                    )
-                    .await;
+                    reject_reply!("500 5.5.2 Bare LF not allowed\r\n");
                     continue;
                 }
                 Ok(Ok(LineRead::Line(l, _))) => line = line_lossy(&l),
+            }
+
+            // F-14 (ported): the session must not outlive the deadline.
+            if std::time::Instant::now() >= session_deadline {
+                log_smtp_reject(
+                    "bounce",
+                    peer_ip,
+                    &session_id,
+                    "421 4.7.0 Session deadline exceeded",
+                );
+                close_reason = "session_deadline";
+                let _ = write_line(
+                    &mut stream,
+                    "421 4.7.0 Session deadline exceeded, closing connection\r\n",
+                )
+                .await;
+                break;
             }
 
             // F-06: the verb is matched as an exact first token.
@@ -270,14 +295,7 @@ impl BounceServer {
                 // angle brackets are stripped), so the null sender check must
                 // accept "" — anything non-empty is a real sender and rejected.
                 if !null_sender_ok(&addr) {
-                    let _ = write_reply(
-                        &mut stream,
-                        "bounce",
-                        peer_ip,
-                        &session_id,
-                        "550 5.7.1 Bounce MAIL FROM must be null (<>)\r\n",
-                    )
-                    .await;
+                    reject_reply!("550 5.7.1 Bounce MAIL FROM must be null (<>)\r\n");
                 } else {
                     mail_from_seen = true;
                     rcpt_to.clear();
@@ -285,91 +303,36 @@ impl BounceServer {
                 }
             } else if verb == "MAIL" {
                 // F-06: "MAIL FROMX:..." is a syntax error, not a MAIL.
-                let _ = write_reply(
-                    &mut stream,
-                    "bounce",
-                    peer_ip,
-                    &session_id,
-                    "501 5.5.4 Syntax: MAIL FROM:<address>\r\n",
-                )
-                .await;
+                reject_reply!("501 5.5.4 Syntax: MAIL FROM:<address>\r\n");
             } else if verb == "RCPT" && is_rcpt_to_arg(arg) {
                 let addr = extract_addr(&line);
                 if !mail_from_seen {
-                    let _ = write_reply(
-                        &mut stream,
-                        "bounce",
-                        peer_ip,
-                        &session_id,
-                        "503 5.5.1 Error: need MAIL command first\r\n",
-                    )
-                    .await;
+                    reject_reply!("503 5.5.1 Error: need MAIL command first\r\n");
                 } else if rcpt_to.len() >= MAX_RCPT_PER_TRANSACTION {
-                    let _ = write_reply(
-                        &mut stream,
-                        "bounce",
-                        peer_ip,
-                        &session_id,
-                        "452 4.5.3 Too many recipients\r\n",
-                    )
-                    .await;
+                    reject_reply!("452 4.5.3 Too many recipients\r\n");
                 } else if !bounce_rcpt_ok(&addr, &self.config.verp_domain) {
-                    let _ = write_reply(
-                        &mut stream,
-                        "bounce",
-                        peer_ip,
-                        &session_id,
-                        "550 5.1.1 Invalid bounce recipient\r\n",
-                    )
-                    .await;
+                    reject_reply!("550 5.1.1 Invalid bounce recipient\r\n");
                 } else {
                     rcpt_to.push(addr);
                     let _ = write_line(&mut stream, "250 2.0.0 Ok\r\n").await;
                 }
             } else if verb == "RCPT" {
-                let _ = write_reply(
-                    &mut stream,
-                    "bounce",
-                    peer_ip,
-                    &session_id,
-                    "501 5.5.4 Syntax: RCPT TO:<address>\r\n",
-                )
-                .await;
+                // F-06: "RCPT TOX:..." is a syntax error, not a RCPT.
+                reject_reply!("501 5.5.4 Syntax: RCPT TO:<address>\r\n");
             } else if verb == "DATA" {
                 if !mail_from_seen || rcpt_to.is_empty() {
-                    let _ = write_reply(
-                        &mut stream,
-                        "bounce",
-                        peer_ip,
-                        &session_id,
-                        "503 5.5.1 Bad sequence of commands\r\n",
-                    )
-                    .await;
+                    reject_reply!("503 5.5.1 Bad sequence of commands\r\n");
                     continue;
                 }
                 // Per-connection and per-IP message budgets (C3/H10 hardening).
                 if msgs_this_conn >= self.config.max_messages_per_connection {
-                    let _ = write_reply(
-                        &mut stream,
-                        "bounce",
-                        peer_ip,
-                        &session_id,
-                        "452 4.5.3 Too many messages from this connection\r\n",
-                    )
-                    .await;
+                    reject_reply!("452 4.5.3 Too many messages from this connection\r\n");
                     continue;
                 }
                 let ip_msgs = self.per_ip_msgs.get(&peer_ip).unwrap_or(0) + 1;
                 self.per_ip_msgs.insert(peer_ip, ip_msgs);
                 if ip_msgs > u64::from(self.config.max_messages_per_ip_per_hour) {
-                    let _ = write_reply(
-                        &mut stream,
-                        "bounce",
-                        peer_ip,
-                        &session_id,
-                        "452 4.3.2 Rate limit exceeded for your IP\r\n",
-                    )
-                    .await;
+                    reject_reply!("452 4.3.2 Rate limit exceeded for your IP\r\n");
                     continue;
                 }
 
@@ -473,35 +436,14 @@ impl BounceServer {
                 if timed_out {
                     // Slow/stalled client mid-DATA: refuse rather than wait
                     // forever (and never accept the partial payload).
-                    let _ = write_reply(
-                        &mut stream,
-                        "bounce",
-                        peer_ip,
-                        &session_id,
-                        "421 4.4.2 Data timeout exceeded\r\n",
-                    )
-                    .await;
+                    reject_reply!("421 4.4.2 Data timeout exceeded\r\n");
                 } else if overflowed {
                     // Unresynchronisable stream: reply and close.
                     close_reason = "overflow";
-                    let _ = write_reply(
-                        &mut stream,
-                        "bounce",
-                        peer_ip,
-                        &session_id,
-                        "500 5.5.2 Line too long\r\n",
-                    )
-                    .await;
+                    reject_reply!("500 5.5.2 Line too long\r\n");
                     break;
                 } else if too_large {
-                    let _ = write_reply(
-                        &mut stream,
-                        "bounce",
-                        peer_ip,
-                        &session_id,
-                        "552 5.3.4 Message size exceeds fixed maximum message size\r\n",
-                    )
-                    .await;
+                    reject_reply!("552 5.3.4 Message size exceeds fixed maximum message size\r\n");
                 } else if terminated {
                     match self.process_bounce(&rcpt_to, &message).await {
                         Ok(id) => {
@@ -510,19 +452,18 @@ impl BounceServer {
                         }
                         Err(e) => {
                             warn!(error = %e, "Bounce processing failed");
-                            let _ = write_reply(
-                                &mut stream,
-                                "bounce",
-                                peer_ip,
-                                &session_id,
-                                "451 4.3.0 Temporary failure\r\n",
-                            )
-                            .await;
+                            reject_reply!("451 4.3.0 Temporary failure\r\n");
                         }
                     }
                 }
                 msgs_this_conn += 1;
+                // RFC 5321 §4.1.1.4: end-of-DATA ends the transaction — the
+                // next message must start with a fresh MAIL FROM (the
+                // recipient state used to be cleared here but not the
+                // reverse-path flag, so a follow-up transaction could skip
+                // MAIL FROM entirely).
                 rcpt_to.clear();
+                mail_from_seen = false;
             } else if verb == "RSET" {
                 rcpt_to.clear();
                 mail_from_seen = false;
@@ -547,24 +488,10 @@ impl BounceServer {
                 )
                 .await;
             } else if verb == "STARTTLS" {
-                let _ = write_reply(
-                    &mut stream,
-                    "bounce",
-                    peer_ip,
-                    &session_id,
-                    "454 4.7.0 TLS not available on this endpoint\r\n",
-                )
-                .await;
+                reject_reply!("454 4.7.0 TLS not available on this endpoint\r\n");
             } else {
                 // F-06: unknown COMMAND is a syntax error (RFC 5321 §4.2.4).
-                let _ = write_reply(
-                    &mut stream,
-                    "bounce",
-                    peer_ip,
-                    &session_id,
-                    "500 5.5.2 Command not recognised\r\n",
-                )
-                .await;
+                reject_reply!("500 5.5.2 Command not recognised\r\n");
             }
         }
 

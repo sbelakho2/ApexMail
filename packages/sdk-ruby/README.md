@@ -95,7 +95,7 @@ health = client.domains.health('domain_id')
 # Create a webhook
 webhook = client.webhooks.create(
   url:    'https://your-app.com/webhooks/apexmail',
-  events: ['email.delivered', 'email.bounced', 'email.opened']
+  events: ['email.delivered', 'email.bounced', 'message.opened']  # valid names: see ApexMail::KNOWN_WEBHOOK_EVENTS
 )
 
 # List webhooks

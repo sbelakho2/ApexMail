@@ -9,6 +9,23 @@ namespace KiwiCaptcha;
  *
  * Wire shape matches the Rust `IssuedChallenge` exactly so the widget (and the
  * WASM solver) behave identically regardless of the backend language.
+ *
+ * The optional `decoyField` is the server-issued decoy (honeypot)
+ * form-field name armed for this challenge, when the deployment enables
+ * the decoy surface (see {@see Issuer::issueWithDecoyField()}): a random
+ * name from the server-side pool (CSPRNG-picked per issuance, matching
+ * `[A-Za-z0-9_-]{1,64}`). The widget driver renders a hidden text input
+ * with exactly this name next to the token input and never auto-fills
+ * it — a submission that carries a value in it is bot evidence. The name
+ * is authenticated: it is signed into the v2 canonical payload as the
+ * final `|<decoy_field>` segment (see {@see Issuer::canonicalPayload()}),
+ * so a client cannot strip or swap it without breaking the signature the
+ * verifier re-checks.
+ *
+ * Wire-compatible both ways: the `decoy_field` key is absent from
+ * `toArray()` (and therefore the JSON) when no decoy is armed — the old
+ * behavior, never a JSON `null` — and old payloads (no key) deserialize
+ * with null.
  */
 final class Challenge
 {
@@ -24,13 +41,16 @@ final class Challenge
         public readonly int $ttlSecs,
         public readonly int $minDurationMs,
         public readonly string $prefix,
+        // The armed decoy (honeypot) form-field name; null = no decoy
+        // (the legacy wire shape — the key is OMITTED when null).
+        public readonly ?string $decoyField = null,
     ) {
     }
 
     /** @return array<string, mixed> */
     public function toArray(): array
     {
-        return [
+        $data = [
             'nonce' => $this->nonce,
             'challenge' => $this->challenge,
             'salt' => $this->salt,
@@ -43,5 +63,14 @@ final class Challenge
             'minDurationMs' => $this->minDurationMs,
             'prefix' => $this->prefix,
         ];
+        // The decoy key is absent when no decoy is armed — the exact
+        // mirror of the Rust `skip_serializing_if = "Option::is_none"`:
+        // never a JSON `null` key, so old clients ignore the new key and
+        // unarmed responses keep the exact pre-decoy byte format.
+        if ($this->decoyField !== null) {
+            $data['decoy_field'] = $this->decoyField;
+        }
+
+        return $data;
     }
 }

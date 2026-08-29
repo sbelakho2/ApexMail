@@ -16,22 +16,41 @@ class Suppressions
     /**
      * Add an email address (or list of addresses) to the suppression list.
      *
+     * The server's CreateSuppressionRequest accepts exactly
+     * {email: string, reason: string, source?: string} for ONE address
+     * (deny_unknown_fields — the historical emails[] body was a 400/422).
+     * A single address POSTs once; a list POSTs one request per address and
+     * returns the array of responses in input order.
+     *
      * @param string|string[] $emails
      * @param string          $reason  "unsubscribe" | "bounce" | "complaint" | "manual"
+     * @return array Single response {id, email, reason, source, created_at},
+     *               or a list of such responses when an array of emails is given.
      */
     public function add(string|array $emails, string $reason = 'manual', array $options = []): array
     {
-        return $this->client->request('POST', '/v1/suppressions', array_filter([
-            'emails'  => (array) $emails,
-            'reason'  => $reason,
-            'domainId' => $options['domain_id'] ?? $options['domainId'] ?? null,
-        ], static fn ($v) => $v !== null));
+        $source = $options['source'] ?? null;
+        $list = array_values((array) $emails);
+
+        $results = [];
+        foreach ($list as $email) {
+            $results[] = $this->client->request('POST', '/v1/suppressions', array_filter([
+                'email'  => (string) $email,
+                'reason' => $reason,
+                'source' => $source,
+            ], static fn ($v) => $v !== null));
+        }
+
+        return count($results) === 1 ? $results[0] : $results;
     }
 
     /**
      * List suppressed addresses.
      *
-     * @param array $options { reason, limit, offset, cursor, tag }
+     * The server's ListSuppressionsQuery accepts {limit, offset, cursor,
+     * reason} only — unknown query parameters are rejected.
+     *
+     * @param array $options { reason, limit, offset, cursor }
      */
     public function list(array $options = []): array
     {
@@ -40,7 +59,6 @@ class Suppressions
             'limit'  => $options['limit']  ?? 50,
             'offset' => $options['offset'] ?? 0,
             'cursor' => $options['cursor'] ?? null,
-            'tag'    => $options['tag']    ?? null,
         ], static fn ($v) => $v !== null && $v !== ''));
 
         return $this->client->request('GET', '/v1/suppressions' . ($query ? '?' . $query : ''));

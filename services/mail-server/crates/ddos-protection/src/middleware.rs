@@ -14,6 +14,17 @@ pub struct DdosMiddlewareState {
     pub protector: Arc<DdosProtector>,
 }
 
+/// Well-known redemption path for DDoS PoW challenges (audit F3c). A client
+/// that received a 429 with a challenge may either POST here or retry the
+/// original request with the id/solution headers below.
+pub const DDOS_VERIFY_PATH: &str = "/__ddos/verify";
+
+/// Header carrying the challenge id on a redemption retry.
+pub const CHALLENGE_ID_HEADER: &str = "x-ddos-challenge-id";
+
+/// Header carrying the PoW solution (nonce) on a redemption retry.
+pub const CHALLENGE_SOLUTION_HEADER: &str = "x-ddos-challenge-solution";
+
 /// Extract a `RequestContext` from request metadata.
 /// In a real Axum integration, this would read from `axum::extract::ConnectInfo`,
 /// headers, etc. Here we provide a builder pattern for constructing it.
@@ -27,6 +38,8 @@ pub struct RequestContextBuilder {
     body_size: usize,
     tenant_id: Option<String>,
     api_key_id: Option<String>,
+    challenge_id: Option<String>,
+    challenge_solution: Option<u64>,
 }
 
 impl RequestContextBuilder {
@@ -42,6 +55,8 @@ impl RequestContextBuilder {
             body_size: 0,
             tenant_id: None,
             api_key_id: None,
+            challenge_id: None,
+            challenge_solution: None,
         }
     }
 
@@ -81,6 +96,14 @@ impl RequestContextBuilder {
         self
     }
 
+    /// Attach a challenge solution for redemption (audit F3c): the id from
+    /// the issued challenge and the nonce the client solved.
+    pub fn challenge_solution(mut self, challenge_id: &str, nonce: u64) -> Self {
+        self.challenge_id = Some(challenge_id.to_string());
+        self.challenge_solution = Some(nonce);
+        self
+    }
+
     /// Build the `RequestContext`
     pub fn build(self) -> RequestContext {
         RequestContext {
@@ -93,6 +116,8 @@ impl RequestContextBuilder {
             body_size: self.body_size,
             tenant_id: self.tenant_id,
             api_key_id: self.api_key_id,
+            challenge_id: self.challenge_id,
+            challenge_solution: self.challenge_solution,
         }
     }
 }
@@ -125,24 +150,55 @@ pub enum MiddlewareAction {
 
 /// Evaluate a request through the DDoS protection system and return
 /// the appropriate middleware action.
+///
+/// Redemption path (audit F3c): when the request context carries a challenge
+/// id + solution (from [`CHALLENGE_ID_HEADER`]/[`CHALLENGE_SOLUTION_HEADER`]
+/// on a retry, or a `POST` to [`DDOS_VERIFY_PATH`]), the solution is
+/// verified against the server-side issuance registry — never against
+/// client-claimed parameters. A valid solution marks the challenge solved
+/// (short allow-TTL), credits the client's reputation, and the request is
+/// re-evaluated; while the allow-TTL is active a re-evaluation that still
+/// asks for a challenge is let through.
+///
+/// Wiring dependency: callers (e.g. an HTTP framework middleware) must
+/// populate `ctx.challenge_id`/`ctx.challenge_solution` from the request
+/// headers for this path to engage; without them evaluation proceeds
+/// normally (challenge → 429 with serialized parameters).
 pub async fn evaluate_request(protector: &DdosProtector, ctx: &RequestContext) -> MiddlewareAction {
+    // Challenge redemption (audit F3c). Works both for retries of the
+    // original request with headers and for the well-known verify path.
+    #[cfg(feature = "challenges")]
+    if let (Some(challenge_id), Some(nonce)) = (&ctx.challenge_id, ctx.challenge_solution) {
+        let result = protector.verify_pow(&ctx.ip, challenge_id, nonce);
+        if result.valid {
+            // Solved: re-evaluate the request. The reputation credit from
+            // verify_pow normally lets it through; if the (slow-recovering)
+            // reputation still asks for a challenge, the solved-marker's
+            // allow-TTL redeems it.
+            return match protector.evaluate(ctx).await {
+                ProtectionDecision::Allow => MiddlewareAction::Allow,
+                ProtectionDecision::Challenge(_) if protector.pow_allow_active(challenge_id) => {
+                    if let Some(metric) = crate::metrics::REQUESTS_TOTAL.as_ref() {
+                        metric.with_label_values(&["challenged", "redeemed"]).inc();
+                    }
+                    MiddlewareAction::Allow
+                }
+                ProtectionDecision::Challenge(challenge) => challenge_action(&challenge),
+                ProtectionDecision::RateLimit { retry_after } => MiddlewareAction::RateLimit {
+                    status: 429,
+                    retry_after_secs: retry_after.as_secs(),
+                },
+                ProtectionDecision::Block => MiddlewareAction::Block { status: 403 },
+            };
+        }
+        // Invalid/unknown/replayed solution: fall through to normal
+        // evaluation (the client will simply be challenged again).
+    }
+
     match protector.evaluate(ctx).await {
         ProtectionDecision::Allow => MiddlewareAction::Allow,
 
-        ProtectionDecision::Challenge(challenge) => {
-            let body = format!(
-                r#"{{"challenge_type":"{}","message":"Challenge required"}}"#,
-                match &challenge {
-                    crate::decision::Challenge::Js(_) => "js",
-                    crate::decision::Challenge::Pow(_) => "pow",
-                    crate::decision::Challenge::Cookie(_) => "cookie",
-                    crate::decision::Challenge::Captcha(_) => "captcha",
-                    crate::decision::Challenge::None => "none",
-                    crate::decision::Challenge::Blocked => "blocked",
-                }
-            );
-            MiddlewareAction::Challenge { status: 429, body }
-        }
+        ProtectionDecision::Challenge(challenge) => challenge_action(&challenge),
 
         ProtectionDecision::RateLimit { retry_after } => MiddlewareAction::RateLimit {
             status: 429,
@@ -150,6 +206,60 @@ pub async fn evaluate_request(protector: &DdosProtector, ctx: &RequestContext) -
         },
 
         ProtectionDecision::Block => MiddlewareAction::Block { status: 403 },
+    }
+}
+
+/// Serialize a challenge into the 429 JSON body (audit F3b).
+///
+/// PoW challenges include the full parameter set (prefix/data, difficulty,
+/// expiry, id, signature) plus redemption instructions, so a legitimate
+/// client has everything needed to solve and redeem. The signature lets
+/// clients (and intermediates) detect parameter tampering; the server never
+/// trusts these values back on verification.
+fn challenge_action(challenge: &crate::decision::Challenge) -> MiddlewareAction {
+    match challenge {
+        crate::decision::Challenge::Pow(pow) => MiddlewareAction::Challenge {
+            status: 429,
+            body: serde_json::json!({
+                "challenge_type": "pow",
+                "message": "Challenge required",
+                "challenge": {
+                    "id": pow.id,
+                    "algorithm": "sha256",
+                    "data": pow.data,
+                    "difficulty": pow.difficulty,
+                    "expires_at": pow.expires_at,
+                    "signature": pow.signature,
+                    "hash_format": "sha256(\"<data>:<nonce>\") with <difficulty> leading zero bits"
+                },
+                "redeem": {
+                    "path": DDOS_VERIFY_PATH,
+                    "method": "POST",
+                    "challenge_id_header": CHALLENGE_ID_HEADER,
+                    "solution_header": CHALLENGE_SOLUTION_HEADER
+                }
+            })
+            .to_string(),
+        },
+        other => MiddlewareAction::Challenge {
+            status: 429,
+            body: serde_json::json!({
+                "challenge_type": challenge_type_label(other),
+                "message": "Challenge required",
+            })
+            .to_string(),
+        },
+    }
+}
+
+fn challenge_type_label(challenge: &crate::decision::Challenge) -> &'static str {
+    match challenge {
+        crate::decision::Challenge::Js(_) => "js",
+        crate::decision::Challenge::Pow(_) => "pow",
+        crate::decision::Challenge::Cookie(_) => "cookie",
+        crate::decision::Challenge::Captcha(_) => "captcha",
+        crate::decision::Challenge::None => "none",
+        crate::decision::Challenge::Blocked => "blocked",
     }
 }
 
@@ -598,5 +708,157 @@ mod tests {
         let ctx = RequestContextBuilder::new(ip, "/api/data", "GET").build();
         let action = evaluate_request(&protector, &ctx).await;
         assert!(matches!(action, MiddlewareAction::Block { status: 403 }));
+    }
+
+    // ── Audit F3:challenge serialization & redemption path ──────────
+
+    /// Brute-force a nonce with `difficulty` leading zero bits over
+    /// `sha256("<data>:<nonce>")` (test helper).
+    #[cfg(feature = "challenges")]
+    fn solve_pow(data: &str, difficulty: u8) -> u64 {
+        use sha2::{Digest, Sha256};
+        for nonce in 0..10_000_000u64 {
+            let input = format!("{data}:{nonce}");
+            let hash = Sha256::digest(input.as_bytes());
+            let required_bytes = (difficulty / 8) as usize;
+            let remaining_bits = difficulty % 8;
+            if hash[..required_bytes].iter().all(|b| *b == 0)
+                && (remaining_bits == 0 || hash[required_bytes] << remaining_bits == 0)
+            {
+                return nonce;
+            }
+        }
+        panic!("no nonce found");
+    }
+
+    #[cfg(feature = "challenges")]
+    #[tokio::test]
+    async fn test_challenge_body_serializes_signed_params() {
+        // Force the reputation-challenge path (fresh score 50 < 90).
+        let config = crate::config::ProtectorConfig {
+            challenge_threshold: 90,
+            ..crate::config::ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+
+        let ctx = RequestContextBuilder::new(
+            "203.0.113.90".parse().expect("hardcoded test IP"),
+            "/api/data",
+            "GET",
+        )
+        .build();
+
+        match evaluate_request(&protector, &ctx).await {
+            MiddlewareAction::Challenge { status, body } => {
+                assert_eq!(status, 429);
+                let json: serde_json::Value =
+                    serde_json::from_str(&body).expect("body is valid JSON");
+                let challenge = &json["challenge"];
+                assert_eq!(json["challenge_type"], "pow");
+                assert!(challenge["id"].as_str().is_some_and(|s| !s.is_empty()));
+                assert!(challenge["data"].as_str().is_some_and(|s| !s.is_empty()));
+                assert!(challenge["difficulty"].as_u64().is_some_and(|d| d >= 8));
+                assert!(challenge["expires_at"].as_u64().is_some());
+                assert!(
+                    challenge["signature"]
+                        .as_str()
+                        .is_some_and(|s| !s.is_empty()),
+                    "429 body must carry the server signature"
+                );
+                assert_eq!(json["redeem"]["path"], "/__ddos/verify");
+                assert_eq!(json["redeem"]["challenge_id_header"], CHALLENGE_ID_HEADER);
+                assert_eq!(json["redeem"]["solution_header"], CHALLENGE_SOLUTION_HEADER);
+            }
+            other => panic!("expected challenge action, got {other:?}"),
+        }
+    }
+
+    #[cfg(feature = "challenges")]
+    #[tokio::test]
+    async fn test_solved_challenge_redeems_the_request() {
+        let config = crate::config::ProtectorConfig {
+            challenge_threshold: 90,
+            ..crate::config::ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+
+        let client_ip: IpAddr = "203.0.113.91".parse().expect("hardcoded test IP");
+
+        // 1. Client is challenged and receives the serialized parameters.
+        let challenge = match evaluate_request(
+            &protector,
+            &RequestContextBuilder::new(client_ip, "/api/data", "GET").build(),
+        )
+        .await
+        {
+            MiddlewareAction::Challenge { body, .. } => {
+                let json: serde_json::Value =
+                    serde_json::from_str(&body).expect("challenge body is JSON");
+                let id = json["challenge"]["id"].as_str().expect("id").to_string();
+                let data = json["challenge"]["data"]
+                    .as_str()
+                    .expect("data")
+                    .to_string();
+                let difficulty = json["challenge"]["difficulty"]
+                    .as_u64()
+                    .expect("difficulty") as u8;
+                (id, data, difficulty)
+            }
+            other => panic!("expected challenge, got {other:?}"),
+        };
+
+        // 2. Client solves with the SERVER-issued parameters and retries
+        //    the original request with the redemption headers.
+        let nonce = solve_pow(&challenge.1, challenge.2);
+        let redeemed_ctx = RequestContextBuilder::new(client_ip, "/api/data", "GET")
+            .challenge_solution(&challenge.0, nonce)
+            .build();
+        let action = evaluate_request(&protector, &redeemed_ctx).await;
+        assert!(
+            matches!(action, MiddlewareAction::Allow),
+            "a correctly solved server-issued challenge must redeem the request, got {action:?}"
+        );
+
+        // 3. The same (id, nonce) cannot be replayed by a second client:
+        //    verification hits the replay cache, and the untarnished second
+        //    IP falls back to a fresh challenge instead of being redeemed.
+        let second_ip: IpAddr = "203.0.113.93".parse().expect("hardcoded test IP");
+        let replay_ctx = RequestContextBuilder::new(second_ip, "/api/data", "GET")
+            .challenge_solution(&challenge.0, nonce)
+            .build();
+        let action = evaluate_request(&protector, &replay_ctx).await;
+        assert!(
+            matches!(action, MiddlewareAction::Challenge { .. }),
+            "replayed solution must not redeem a second time, got {action:?}"
+        );
+    }
+
+    #[cfg(feature = "challenges")]
+    #[tokio::test]
+    async fn test_forged_redemption_is_rejected() {
+        let config = crate::config::ProtectorConfig {
+            challenge_threshold: 90,
+            ..crate::config::ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+
+        let client_ip: IpAddr = "203.0.113.92".parse().expect("hardcoded test IP");
+
+        // A client that never received a challenge presents a made-up id and
+        // nonce; it must NOT be allowed through.
+        let forged_ctx = RequestContextBuilder::new(client_ip, "/api/data", "GET")
+            .challenge_solution("fabricated-challenge-id", 0)
+            .build();
+        let action = evaluate_request(&protector, &forged_ctx).await;
+        assert!(
+            matches!(action, MiddlewareAction::Challenge { .. }),
+            "forged redemption must fall through to a fresh challenge, got {action:?}"
+        );
     }
 }
