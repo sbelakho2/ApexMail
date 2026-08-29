@@ -69,6 +69,8 @@ limits_config:
 compactor:
   working_directory: /loki/compactor
   retention_enabled: true
+  # Required by the pinned image whenever retention is on.
+  delete_request_store: filesystem
 
 ruler:
   alertmanager_url: http://alertmanager:9093

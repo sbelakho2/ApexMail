@@ -42,6 +42,7 @@ compactor:
 # search and traceQL queries).
 query_frontend:
   search:
+    concurrent_requests: 1000
 
 querier:
   search:
