@@ -959,7 +959,12 @@ final class SiteVerifyTest extends TestCase
 
     public function testExpiredTokenReturnsTimeoutOrDuplicate(): void
     {
-        $storage = new ArrayStorage();
+        // The retention margin (30 s) keeps the expired record readable
+        // inside the [expires_at, expires_at + margin) window — the
+        // Redis ttlMarginSecs shape the bundle forces on siteverify
+        // deployments — so the verifier's own TTL check (not storage
+        // eviction) decides the verdict: Expired → timeout-or-duplicate.
+        $storage = new ArrayStorage(retentionMarginSecs: 30);
         $issuer = new Issuer(new Config(secretKey: self::SECRET, algorithm: PoWAlgorithm::Sha256, targetBits: 8, ttlSecs: 1), $storage);
         $challenge = $issuer->issue('login', '203.0.113.7');
         $solution = $this->solveSolution($storage->find($challenge->nonce));
@@ -1781,7 +1786,13 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
      */
     public function testLateTokenCrashRecoveryReconstructsTheOriginalSuccessAfterExpiry(): void
     {
-        $storage = new ArrayStorage();
+        // The retention margin (30 s) keeps the consumed evidence
+        // readable past the signed expiry — the Redis ttlMarginSecs shape
+        // the bundle forces on siteverify deployments — so the takeover
+        // after the fixed 3 s store lease can still reconstruct the
+        // committed success after the signed expiry (the retained-state
+        // margin covers it).
+        $storage = new ArrayStorage(retentionMarginSecs: 30);
         // A token with a short lifetime: the owner verifies it ~1s after
         // issuance (remaining ~4s); the fixed 3s store lease expires
         // before the signed expiry, so the takeover happens quickly and

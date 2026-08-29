@@ -166,7 +166,6 @@ impl TemplatesRepo {
 mod tests {
     use crate::types::Template;
     use chrono::Utc;
-    use uuid::Uuid;
 
     #[test]
     fn test_template_draft() {

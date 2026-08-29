@@ -69,6 +69,19 @@ use KiwiCaptcha\ChallengeRuntimeState;
  * a verifier fail-closed on a record the storage still holds is an
  * availability property, never a security one.
  *
+ * Retention margin ({@see self::$retentionMarginSecs}, default 0): the
+ * storage keeps a record readable for `retentionMarginSecs` seconds
+ * BEYOND its signed expires_at — the exact mirror of the Redis
+ * backend's `ttlMarginSecs` (the bundle forces that margin on
+ * siteverify deployments so the retained consumed-state evidence
+ * outlives the maximum takeover/retry horizon). With the default 0 the
+ * boundary is exactly `expires_at`, the Redis-margin-0 shape; with a
+ * margin the record stays physically present inside the window
+ * `[expires_at, expires_at + margin)`, where the verifier's own TTL
+ * check still rejects it as Expired (or resolves a retained outcome
+ * through the replay-exempt consumed branch) — never a security
+ * weakening, only the retention window the production margin gives.
+ *
  * Bounded retention: store() first prunes expired entries, and when the
  * map is at the hard cap ({@see self::DEFAULT_MAX_ENTRIES}, or the
  * constructor's $maxEntries) it evicts the oldest-EXPIRING entries
@@ -90,25 +103,47 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
     private array $records = [];
 
     /**
-     * @param \Closure|null $now        the clock override (epoch seconds)
-     *                                  used for the resume-claim lease AND
-     *                                  the expiry semantics; defaults to
-     *                                  `time()`. Test seam, same style as
-     *                                  {@see Verifier}'s `$now`.
-     * @param int           $maxEntries the hard cap on retained entries
-     *                                  (>= 1). store() prunes expired
-     *                                  records first and evicts the
-     *                                  oldest-expiring entries only when
-     *                                  the cap would be exceeded.
+     * @param \Closure|null $now                  the clock override (epoch
+     *                                            seconds) used for the
+     *                                            resume-claim lease AND the
+     *                                            expiry semantics; defaults
+     *                                            to `time()`. Test seam,
+     *                                            same style as
+     *                                            {@see Verifier}'s `$now`.
+     * @param int           $maxEntries           the hard cap on retained
+     *                                            entries (>= 1). store()
+     *                                            prunes expired records
+     *                                            first and evicts the
+     *                                            oldest-expiring entries
+     *                                            only when the cap would be
+     *                                            exceeded.
+     * @param int           $retentionMarginSecs  extra retention beyond the
+     *                                            signed expires_at (>= 0),
+     *                                            mirroring the Redis
+     *                                            backend's `ttlMarginSecs`:
+     *                                            the storage keeps the
+     *                                            record readable inside
+     *                                            `[expires_at, expires_at +
+     *                                            margin)` so retained
+     *                                            consumed-state evidence
+     *                                            outlives the signed
+     *                                            lifetime (default 0 = the
+     *                                            strict Redis-TTL-parity
+     *                                            boundary).
      *
-     * @throws \InvalidArgumentException when $maxEntries is below 1
+     * @throws \InvalidArgumentException when $maxEntries is below 1, or
+     *                                   $retentionMarginSecs below 0
      */
     public function __construct(
         private readonly ?\Closure $now = null,
         private readonly int $maxEntries = self::DEFAULT_MAX_ENTRIES,
+        private readonly int $retentionMarginSecs = 0,
     ) {
         if ($this->maxEntries < 1) {
             throw new \InvalidArgumentException('maxEntries must be at least 1');
+        }
+        if ($this->retentionMarginSecs < 0) {
+            throw new \InvalidArgumentException('retentionMarginSecs must be at least 0');
         }
     }
 
@@ -339,9 +374,13 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
      * from a missing one on every read and transition (find returns
      * null, consume reports missing, the runtime state is Missing, the
      * cleanup is missing, cancel is idempotently null). The expiry
-     * boundary matches the verifier's own (`now >= expires_at`), so a
-     * record this backend reports present is exactly one the verifier
-     * would not immediately fail as Expired. The lazy unset also evicts
+     * boundary is `now >= expires_at + retentionMarginSecs` — with the
+     * default margin 0 exactly the verifier's own (`now >= expires_at`),
+     * so a record this backend reports present is exactly one the
+     * verifier would not immediately fail as Expired; inside a
+     * configured margin window the record stays readable while the
+     * verifier's TTL check still rejects it (the retained-evidence
+     * window the Redis ttlMarginSecs gives). The lazy unset also evicts
      * the expired entry from the map on first observation.
      *
      * @return array{record: ChallengeRecord, consumed: bool, cancelled: bool, result: ConsumedResult|null, operationIdentity: string|null, claim: string|null, claimUntil: int|null}|null
@@ -352,7 +391,7 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
         if ($entry === null) {
             return null;
         }
-        if ($this->nowInSeconds() >= $entry['record']->expiresAt) {
+        if ($this->nowInSeconds() >= $entry['record']->expiresAt + $this->retentionMarginSecs) {
             unset($this->records[$nonce]);
 
             return null;
@@ -370,7 +409,7 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
     {
         $now = $this->nowInSeconds();
         foreach ($this->records as $nonce => $entry) {
-            if ($now >= $entry['record']->expiresAt) {
+            if ($now >= $entry['record']->expiresAt + $this->retentionMarginSecs) {
                 unset($this->records[$nonce]);
             }
         }

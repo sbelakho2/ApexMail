@@ -17,20 +17,32 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests\Fixtures;
  *    tokenized-lease semaphore and the sliding-window rate limiter.
  *  - hincrbyfloat: one hash field bump (the calibration score-bucket
  *    outcome counters).
- *  - eval: interprets the bundle's Lua scripts by their shape — semaphore
- *    acquire/release, outstanding-challenge issue/solve, the rate
- *    limiter, calibration confirm/correction and the outcome-ledger
- *    confirm/correct, mirroring the scripts' semantics. It also
- *    interprets the kiwicaptcha core's consume, cancel,
- *    delete-if-pending and commit-result scripts, so the same fake
- *    drives the core RedisStorage for the cancellation endpoint's
- *    record transitions.
+ *  - eval/evalsha/script: interprets the bundle's Lua scripts by their
+ *    shape — semaphore acquire/release, outstanding-challenge
+ *    issue/solve, the rate limiter, calibration confirm/correction and
+ *    the outcome-ledger confirm/correct, mirroring the scripts'
+ *    semantics. It also interprets the kiwicaptcha core's consume,
+ *    cancel, delete-if-pending and commit-result scripts, so the same
+ *    fake drives the core RedisStorage for the cancellation endpoint's
+ *    record transitions. EVALSHA resolves the sha back to the body
+ *    through the SCRIPT LOAD registry (a real Redis caches EVAL'd
+ *    bodies the same way); an unloaded sha raises the same NOSCRIPT
+ *    ServerException the server would, so the storage's reload
+ *    fallback is exercised for real.
  *
  * Every call is recorded in {@see FakePredisClient::$calls} so tests can
  * assert on the Redis commands issued.
  */
 final class FakePredisClient extends \Predis\Client
 {
+    /** @var array<string, string> sha => script body registry (SCRIPT LOAD and EVAL both populate it, like a real Redis) */
+    private array $scriptsBySha = [];
+
+    /** @var list<string> the body of every script registered through SCRIPT LOAD */
+    private array $scriptLoads = [];
+
+    /** @var list<string> the sha of every EVALSHA issued so far */
+    private array $evalshas = [];
     /** @var array<string, array<string, float>> sorted sets: key => member => score */
     public array $zsets = [];
 
@@ -136,6 +148,8 @@ final class FakePredisClient extends \Predis\Client
             'EXPIRE' => $this->fakePexpire($arguments),
             'DEL' => $this->fakeDel($arguments),
             'EVAL' => $this->fakeEval($arguments),
+            'EVALSHA' => $this->fakeEvalSha($arguments),
+            'SCRIPT' => $this->fakeScript($arguments),
             'INCR' => $this->fakeIncr($arguments),
             'DECR' => $this->fakeDecr($arguments),
             'GET' => $this->fakeGet($arguments),
@@ -411,6 +425,49 @@ final class FakePredisClient extends \Predis\Client
         return $removed;
     }
 
+    /**
+     * SCRIPT LOAD: register the body under sha1(body) like a real Redis
+     * script cache and return the sha (the storage's EVALSHA path
+     * resolves through this registry). Any other SCRIPT subcommand
+     * returns '' — never a loadable sha.
+     *
+     * @param list<mixed> $arguments [subcommand, body]
+     */
+    private function fakeScript(array $arguments): string
+    {
+        if (strtoupper((string) ($arguments[0] ?? '')) !== 'LOAD') {
+            return '';
+        }
+        $script = (string) ($arguments[1] ?? '');
+        $sha = sha1($script);
+        $this->scriptsBySha[$sha] = $script;
+        $this->scriptLoads[] = $script;
+
+        return $sha;
+    }
+
+    /**
+     * EVALSHA: resolve the sha back to its body through the SCRIPT LOAD
+     * registry and run it through the same interpreter as EVAL. An
+     * unknown sha raises the same NOSCRIPT ServerException the server
+     * would, so the storage's reload fallback is exercised for real.
+     *
+     * @param list<mixed> $arguments [sha, numKeys, key1..keyN, arg1..argN]
+     */
+    private function fakeEvalSha(array $arguments): mixed
+    {
+        $sha = (string) ($arguments[0] ?? '');
+        if (!isset($this->scriptsBySha[$sha])) {
+            throw new \Predis\Response\ServerException('NOSCRIPT No matching script. Please use EVAL.');
+        }
+        $this->evalshas[] = $sha;
+        $script = $this->scriptsBySha[$sha];
+        $numKeys = (int) $arguments[1];
+        $keysAndArgs = \array_slice($arguments, 2);
+
+        return $this->fakeEval([$script, $numKeys, ...$keysAndArgs]);
+    }
+
     /** @param list<mixed> $arguments */
     private function fakeEval(array $arguments): mixed
     {
@@ -419,6 +476,9 @@ final class FakePredisClient extends \Predis\Client
         $keysAndArgs = \array_slice($arguments, 2);
         $keys = \array_slice($keysAndArgs, 0, $numKeys);
         $rest = \array_slice($keysAndArgs, $numKeys);
+        // A real Redis caches the body of every EVAL under its sha too,
+        // so a later EVALSHA for the same script succeeds.
+        $this->scriptsBySha[sha1($script)] = $script;
 
         if (str_contains($script, 'Outstanding challenge issuance')) {
             // OutstandingChallenges::issue: keys[1] the per-source

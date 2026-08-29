@@ -152,4 +152,40 @@ final class ArrayStorageExpiryTest extends TestCase
         $this->expectException(\InvalidArgumentException::class);
         new ArrayStorage(now: null, maxEntries: 0);
     }
+
+    public function testRetentionMarginKeepsExpiredRecordsReadableInsideTheWindow(): void
+    {
+        // The Redis ttlMarginSecs shape: with a configured retention
+        // margin the storage keeps the record readable inside
+        // [expires_at, expires_at + margin) — the verifier's own TTL
+        // check still rejects it there (Expired), and the retained
+        // consumed evidence survives for the replay-exempt resolution.
+        // Default 0 (used by every other test here) stays the strict
+        // boundary.
+        $storage = new ArrayStorage(
+            now: fn (): int => $this->clock,
+            retentionMarginSecs: 30,
+        );
+        $storage->store($this->makeRecord('margined', $this->clock + 60));
+        self::assertNotNull($storage->consume('margined'));
+
+        // Inside the margin window: expired to the verifier, still
+        // readable at the storage boundary.
+        $this->clock += 61;
+        self::assertNotNull($storage->find('margined'), 'the record stays readable inside the margin window');
+        self::assertNotNull($storage->consumedState('margined'), 'the retained consumed evidence outlives the signed lifetime inside the margin');
+        self::assertSame(ChallengeRuntimeStateKind::Consumed, $storage->runtimeState('margined')->kind);
+
+        // Past the margin the key is gone, exactly like the Redis TTL.
+        $this->clock += 30;
+        self::assertNull($storage->find('margined'));
+        self::assertNull($storage->consumedState('margined'));
+        self::assertSame(ChallengeRuntimeStateKind::Missing, $storage->runtimeState('margined')->kind);
+    }
+
+    public function testRetentionMarginBelowZeroIsRejected(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        new ArrayStorage(now: null, retentionMarginSecs: -1);
+    }
 }

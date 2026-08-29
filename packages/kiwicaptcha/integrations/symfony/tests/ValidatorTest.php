@@ -3381,8 +3381,11 @@ final class ValidatorTest extends TestCase
         // disposition record (TTL = Config::MAX_TTL_secs + margin = 305 s)
         // must outlive the token AND the retained consumed core result
         // (token lifetime + the same margin = 7 s) — the disposition never
-        // dies while the core result could still be replayed.
-        $storage = new ArrayStorage();
+        // dies while the core result could still be replayed. The core
+        // storage carries the matching retention margin (the Redis
+        // ttlMarginSecs shape), so the consumed evidence outlives the
+        // signed lifetime.
+        $storage = new ArrayStorage(retentionMarginSecs: 5);
         $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 2), $storage);
         $verifier = new Verifier($storage);
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);

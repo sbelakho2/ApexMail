@@ -424,7 +424,8 @@ mod tests {
         assert_eq!(records[1], MxRecord::new(5, "primary example com"));
     }
 
-    // ── E-2: invalidate_domain reaches DKIM selector keys ─────────────────    #[test]
+    // ── E-2: invalidate_domain reaches DKIM selector keys ─────────────────
+    #[test]
     fn invalidate_domain_invalidates_dkim_selector_keys() {
         let resolver = CachedDnsResolver::default_resolver().expect("resolver construction");
         resolver.cache.insert(

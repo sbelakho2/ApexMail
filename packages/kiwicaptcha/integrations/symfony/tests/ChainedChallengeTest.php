@@ -450,7 +450,11 @@ final class ChainedChallengeTest extends TestCase
         // P1: a signed-expired-but-retained pending record is atomically
         // retired (pending->cancelled) before the chain rearm — the old
         // nonce becomes provably non-redeemable, never merely abandoned.
-        $storage = new ArrayStorage();
+        // The retention margin (30 s) keeps the expired record physically
+        // present inside the [expires_at, expires_at + margin) window —
+        // the Redis ttlMarginSecs shape the bundle forces — so the
+        // retirement path can still observe and retire it.
+        $storage = new ArrayStorage(retentionMarginSecs: 30);
         $chainStore = new ArrayChainedChallengeStateStore();
         $chainService = $this->chainService($chainStore);
         $requirement = $chainService->requireStage2($this->nonce(), 'login', 'txn-alpha', 1, RiskAction::Argon32, time() + 300);
@@ -471,7 +475,7 @@ final class ChainedChallengeTest extends TestCase
         $storage->delete($nonce);
         $expired = new \KiwiCaptcha\ChallengeRecord(
             nonce: $record->nonce, scope: $record->scope, bindingTag: $record->bindingTag,
-            issuedAt: $record->issuedAt, expiresAt: 1, algorithm: $record->algorithm,
+            issuedAt: $record->issuedAt, expiresAt: time() - 1, algorithm: $record->algorithm,
             mKib: $record->mKib, t: $record->t, p: $record->p, targetBits: $record->targetBits,
             salt: $record->salt, prefix: $record->prefix, challenge: $record->challenge,
             minDurationMs: $record->minDurationMs, issuedAtNs: $record->issuedAtNs,

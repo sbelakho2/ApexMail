@@ -148,7 +148,6 @@ impl SuppressionsRepo {
 mod tests {
     use crate::types::Suppression;
     use chrono::Utc;
-    use uuid::Uuid;
 
     #[test]
     fn test_suppression_mock() {

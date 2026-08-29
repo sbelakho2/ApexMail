@@ -89,7 +89,6 @@ impl SupportTicketsRepo {
 mod tests {
     use crate::types::SupportTicket;
     use chrono::Utc;
-    use uuid::Uuid;
 
     #[test]
     fn test_ticket_mock() {

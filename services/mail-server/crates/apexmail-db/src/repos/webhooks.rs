@@ -163,7 +163,6 @@ impl WebhooksRepo {
 mod tests {
     use crate::types::Webhook;
     use chrono::Utc;
-    use uuid::Uuid;
 
     #[test]
     fn test_webhook_mock() {
