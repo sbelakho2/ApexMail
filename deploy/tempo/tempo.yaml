@@ -42,18 +42,12 @@ compactor:
 # search and traceQL queries).
 query_frontend:
   search:
-    # Enable the search API endpoint
-    enabled: true
-    # Duration of the search request, cached results are returned within this window
-    duration: 24h
 
 querier:
   search:
     # Number of concurrent jobs to execute while searching
     external_hedge_requests_at: 8s
     external_hedge_requests_up_to: 2
-    # Maximum number of spans to return in a search query
-    max_spans_per_query: 10000
 
 # ── Metrics-generator ───────────────────────────────────────────────────────
 # Enables span metrics (RED metrics: Rate, Errors, Duration) derived from traces.
@@ -96,7 +90,8 @@ storage:
       secret_key: ${TEMPO_S3_SECRET_KEY:}
       region: ${TEMPO_S3_REGION:-eu-central-1}
       # SECURITY: Force path-style access (required for MinIO)
-      forcepathstyle: ${TEMPO_S3_FORCE_PATH_STYLE:-true}
+      # Bool fields cannot come from env expansion (string vs bool).
+      forcepathstyle: true
     local:
       path: /var/tempo/traces
     wal:

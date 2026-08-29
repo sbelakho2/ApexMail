@@ -170,6 +170,7 @@ services:
     volumes:
       - ./deploy/otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
     environment:
+      OTEL_TRACES_SAMPLING_PERCENTAGE: ${OTEL_TRACES_SAMPLING_PERCENTAGE:-10}
       OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT:-tempo:4317}
     ports:
       - "127.0.0.1:${OTEL_GRPC_PORT:-4317}:4317"
@@ -1203,7 +1204,7 @@ services:
       - apparmor:docker-default
     environment:
       REDIS_ADDR: redis://redis:6379
-      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password_json
       # Export the length of the tracking-service WAL list (backing the
       # TrackingWalBacklog alert in deploy/alerting-rules.yml). A single
       # exact key — no SCAN pattern cost.
@@ -1214,7 +1215,7 @@ services:
     profiles:
       - monitoring
     secrets:
-      - redis_password
+      - redis_password_json
     logging: *default-logging
 
   # =========================================================================
@@ -1367,6 +1368,9 @@ secrets:
   postgres_password:
     file: ./secrets/postgres_password.txt
   redis_password:
+  # redis_exporter's REDIS_PASSWORD_FILE expects a JSON-encoded value.
+  redis_password_json:
+    file: ${PROD_REDIS_PASSWORD_JSON_FILE:?PROD_REDIS_PASSWORD_JSON_FILE is required in production}
     file: ./secrets/redis_password.txt
   clickhouse_password:
     file: ./secrets/clickhouse_password.txt

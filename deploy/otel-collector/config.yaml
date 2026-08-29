@@ -44,7 +44,7 @@ processors:
   # Samples 10% of traces by default; override with OTEL_TRACES_SAMPLING_RATIO
   probabilistic_sampler:
     hash_seed: 42
-    sampling_percentage: ${env:OTEL_TRACES_SAMPLING_PERCENTAGE:-10}
+    sampling_percentage: ${env:OTEL_TRACES_SAMPLING_PERCENTAGE}
   batch:
     timeout: 5s
     send_batch_size: 512
