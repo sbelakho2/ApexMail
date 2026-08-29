@@ -8346,6 +8346,9 @@ mod tests {
             let response = app
                 .oneshot(
                     Request::post("/web/contacts/import")
+                        // Double-submit CSRF: the form `_csrf` must be
+                        // accompanied by the matching csrf_token cookie.
+                        .header("cookie", format!("csrf_token={token}"))
                         .header(
                             "content-type",
                             format!("multipart/form-data; boundary={boundary}"),
