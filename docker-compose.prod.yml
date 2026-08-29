@@ -360,6 +360,8 @@ services:
       JWT_PRIVATE_KEY_PEM_FILE: /run/secrets/jwt_private_key_pem
       JWT_PUBLIC_KEY_PEM_FILE: /run/secrets/jwt_public_key_pem
       SESSION_SECRET_FILE: /run/secrets/session_secret
+      CP_SESSION_SECRET: ""
+      CP_SESSION_SECRET_FILE: /run/secrets/cp_session_secret
       IMPERSONATION_SECRET_FILE: /run/secrets/impersonation_secret
       CSRF_SECRET_FILE: /run/secrets/csrf_secret
       DKIM_PRIVATE_KEY_ENCRYPTION_KEY_FILE: /run/secrets/dkim_private_key_encryption_key
@@ -432,6 +434,7 @@ services:
       - jwt_private_key_pem
       - jwt_public_key_pem
       - session_secret
+      - cp_session_secret
       - impersonation_secret
       - csrf_secret
       - dkim_private_key_encryption_key
@@ -1374,6 +1377,9 @@ secrets:
     file: ${PROD_JWT_PUBLIC_KEY_FILE:?PROD_JWT_PUBLIC_KEY_FILE is required in production}
   session_secret:
     file: ${PROD_SESSION_SECRET_FILE:?PROD_SESSION_SECRET_FILE is required in production}
+  # Control-plane session cookie signing key (cp_auth fail-fast).
+  cp_session_secret:
+    file: ${PROD_CP_SESSION_SECRET_FILE:?PROD_CP_SESSION_SECRET_FILE is required in production}
   impersonation_secret:
     file: ${PROD_IMPERSONATION_SECRET_FILE:?PROD_IMPERSONATION_SECRET_FILE is required in production}
   csrf_secret:

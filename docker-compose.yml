@@ -1070,7 +1070,9 @@ services:
     image: grafana/loki:3.0.0
     container_name: apexmail-loki
     restart: unless-stopped
-    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    # expand-env: the config interpolates ${LOKI_*} values (object store
+    # selection, credentials) at startup.
+    command: ["-config.file=/etc/loki/loki-config.yaml", "-config.expand-env=true"]
     volumes:
       - ./deploy/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
       - loki_data:/loki
