@@ -60,42 +60,42 @@ use KiwiCaptcha\ChallengeRuntimeState;
  * claim lease TTL is >= 1 second.
  *
  * Expiry semantics (Redis TTL parity): a record whose expires_at has
- * passed on the storage clock is ABSENT — find() returns null, consume
- * and the consume-with-identity transition report missing, the retained
- * consumed state is null, the runtime state is Missing, the fused
- * cleanup answers missing, cancel is idempotently null and the result
- * commit refuses — exactly what the Redis backend's key TTLs give. The
- * expiry boundary matches the verifier's own (`now >= expires_at`), and
- * a verifier fail-closed on a record the storage still holds is an
- * availability property, never a security one.
+ * passed on the storage clock is absent. `find()` returns null, consume
+ * and the consume-with-identity transition report missing, and the
+ * retained consumed state is null. The runtime state is Missing, the
+ * fused cleanup answers missing, cancel is idempotently null and the
+ * result commit refuses, exactly what the Redis backend's key TTLs
+ * give. The expiry boundary matches the verifier's own
+ * (`now >= expires_at`). A verifier fail-closed on a record the storage
+ * still holds is an availability property, never a security one.
  *
- * Retention margin ({@see self::$retentionMarginSecs}, default 0): the
+ * Retention margin, {@see self::$retentionMarginSecs} with default 0: the
  * storage keeps a record readable for `retentionMarginSecs` seconds
- * BEYOND its signed expires_at — the exact mirror of the Redis
- * backend's `ttlMarginSecs` (the bundle forces that margin on
+ * beyond its signed expires_at, the exact mirror of the Redis
+ * backend's `ttlMarginSecs`. The bundle forces that margin on
  * siteverify deployments so the retained consumed-state evidence
- * outlives the maximum takeover/retry horizon). With the default 0 the
- * boundary is exactly `expires_at`, the Redis-margin-0 shape; with a
- * margin the record stays physically present inside the window
- * `[expires_at, expires_at + margin)`, where the verifier's own TTL
- * check still rejects it as Expired (or resolves a retained outcome
- * through the replay-exempt consumed branch) — never a security
+ * outlives the maximum takeover and retry horizon. With the default 0
+ * the boundary is exactly `expires_at`, the Redis-margin-0 shape. With
+ * a margin the record stays physically present inside the window
+ * `[expires_at, expires_at + margin)`. There the verifier's own TTL
+ * check still rejects it as Expired, or resolves a retained outcome
+ * through the replay-exempt consumed branch. This is never a security
  * weakening, only the retention window the production margin gives.
  *
- * Bounded retention: store() first prunes expired entries, and when the
- * map is at the hard cap ({@see self::DEFAULT_MAX_ENTRIES}, or the
- * constructor's $maxEntries) it evicts the oldest-EXPIRING entries
+ * Bounded retention: `store()` first prunes expired entries. When the
+ * map is at the hard cap, {@see self::DEFAULT_MAX_ENTRIES} or the
+ * constructor's $maxEntries, it evicts the oldest-expiring entries
  * first, so a long-lived CLI process sharing one storage instance can
  * never accumulate unbounded state.
  */
 final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface, \KiwiCaptcha\ChallengeRuntimeStateReadableInterface, ResumeDerivationClaimInterface
 {
     /**
-     * The default hard cap on retained entries: store() prunes expired
-     * records first and then, only when the map is at the cap, evicts
-     * the oldest-EXPIRING entries, so a long-lived CLI process sharing
-     * one storage instance stays memory-bounded (matching what the
-     * Redis backend gets for free from key TTLs).
+     * The default hard cap on retained entries. `store()` prunes
+     * expired records first and then, only when the map is at the cap,
+     * evicts the oldest-expiring entries. A long-lived CLI process
+     * sharing one storage instance stays memory-bounded, matching what
+     * the Redis backend gets for free from key TTLs.
      */
     public const DEFAULT_MAX_ENTRIES = 10_000;
 
@@ -105,13 +105,13 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
     /**
      * @param \Closure|null $now                  the clock override (epoch
      *                                            seconds) used for the
-     *                                            resume-claim lease AND the
+     *                                            resume-claim lease and the
      *                                            expiry semantics; defaults
      *                                            to `time()`. Test seam,
      *                                            same style as
      *                                            {@see Verifier}'s `$now`.
      * @param int           $maxEntries           the hard cap on retained
-     *                                            entries (>= 1). store()
+     *                                            entries (>= 1). `store()`
      *                                            prunes expired records
      *                                            first and evicts the
      *                                            oldest-expiring entries
@@ -120,16 +120,16 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
      * @param int           $retentionMarginSecs  extra retention beyond the
      *                                            signed expires_at (>= 0),
      *                                            mirroring the Redis
-     *                                            backend's `ttlMarginSecs`:
-     *                                            the storage keeps the
+     *                                            backend's `ttlMarginSecs`.
+     *                                            The storage keeps the
      *                                            record readable inside
      *                                            `[expires_at, expires_at +
      *                                            margin)` so retained
      *                                            consumed-state evidence
      *                                            outlives the signed
-     *                                            lifetime (default 0 = the
-     *                                            strict Redis-TTL-parity
-     *                                            boundary).
+     *                                            lifetime; the default 0 is
+     *                                            the strict Redis-TTL-parity
+     *                                            boundary.
      *
      * @throws \InvalidArgumentException when $maxEntries is below 1, or
      *                                   $retentionMarginSecs below 0
@@ -369,19 +369,20 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
     }
 
     /**
-     * The live entry, or null when the nonce is absent OR its record has
-     * expired — Redis TTL semantics: an expired key is indistinguishable
-     * from a missing one on every read and transition (find returns
-     * null, consume reports missing, the runtime state is Missing, the
-     * cleanup is missing, cancel is idempotently null). The expiry
-     * boundary is `now >= expires_at + retentionMarginSecs` — with the
-     * default margin 0 exactly the verifier's own (`now >= expires_at`),
-     * so a record this backend reports present is exactly one the
-     * verifier would not immediately fail as Expired; inside a
-     * configured margin window the record stays readable while the
-     * verifier's TTL check still rejects it (the retained-evidence
-     * window the Redis ttlMarginSecs gives). The lazy unset also evicts
-     * the expired entry from the map on first observation.
+     * The live entry, or null when the nonce is absent or its record
+     * has expired, the Redis TTL semantics: an expired key is
+     * indistinguishable from a missing one on every read and transition.
+     * `find()` returns null, consume reports missing, the runtime state
+     * is Missing, the cleanup is missing, and cancel is idempotently
+     * null. The expiry boundary is
+     * `now >= expires_at + retentionMarginSecs`. With the default margin
+     * 0 that is exactly the verifier's own `now >= expires_at`, so a
+     * record this backend reports present is exactly one the verifier
+     * would not immediately fail as Expired. Inside a configured margin
+     * window the record stays readable while the verifier's TTL check
+     * still rejects it, the retained-evidence window the Redis
+     * ttlMarginSecs gives. The lazy unset also evicts the expired entry
+     * from the map on first observation.
      *
      * @return array{record: ChallengeRecord, consumed: bool, cancelled: bool, result: ConsumedResult|null, operationIdentity: string|null, claim: string|null, claimUntil: int|null}|null
      */

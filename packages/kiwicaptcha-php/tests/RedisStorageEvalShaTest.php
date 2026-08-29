@@ -11,13 +11,13 @@ use KiwiCaptcha\Tests\Fixtures\FakePredisClient;
 use PHPUnit\Framework\TestCase;
 
 /**
- * The EVALSHA transport of RedisStorage's Lua scripts: every transition
- * script runs through EVALSHA with a per-script sha established once by
- * SCRIPT LOAD (mirroring RedisRiskStateStore's cached-sha pattern), so
+ * The `EVALSHA` transport of RedisStorage's Lua scripts: every transition
+ * script runs through `EVALSHA` with a per-script sha established once by
+ * `SCRIPT` `LOAD` (mirroring RedisRiskStateStore's cached-sha pattern), so
  * the ~2KB script body is never shipped on the steady-state path. The
  * second invocation of every script must reuse the cached sha and send
- * no script body, and a server-side script-cache loss (NOSCRIPT) is
- * repaired by one reload plus an EVALSHA retry — never by falling back
+ * no script body, and a server-side script-cache loss (`NOSCRIPT`) is
+ * repaired by one reload plus an `EVALSHA` retry — never by falling back
  * to shipping the body.
  */
 final class RedisStorageEvalShaTest extends TestCase

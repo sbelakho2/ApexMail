@@ -2309,7 +2309,7 @@ impl ProductionVerifier {
         //    is released (drop) before every replay-resolution return:
         //    resolve_consumed may re-establish the replication fence on
         //    its own checkout, and a single-connection pool
-        //    (with_pool_size(1)) must never contend with a held checkout.
+        //    `with_pool_size(1)` must never contend with a held checkout.
         let mut conn = match self.store.checkout() {
             Ok(conn) => conn,
             Err(_) => return VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
@@ -2417,7 +2417,7 @@ impl ProductionVerifier {
                         // replay resolution: resolve_consumed may
                         // re-establish the replication fence on its own
                         // checkout, and a single-connection pool
-                        // (with_pool_size(1)) must never contend with the
+                        // `with_pool_size(1)` must never contend with the
                         // checkout held across this verification.
                         drop(conn);
                         return self.resolve_consumed(*state, operation_identity, now_ns);

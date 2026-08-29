@@ -463,22 +463,23 @@ final class RiskGateway
      *
      * Solve duration (graded evidence, partially consumed): the optional
      * $solveDurationMs carries the server-measured solve duration of the
-     * verified outcome (computed from the unforgeable issuedAtNs receipt
-     * time — never the client-reported durationMs). The risk-v1/v2
-     * feedback surface is CATEGORICAL: RiskEventKind is a fixed
-     * cross-language contract (values 1..21 byte-identical with the Rust
-     * mirror and the canonical risk.lua), the risk-v2 context carries
-     * only categorical fields (honeypot bool, context/TLS tags) and its
-     * numeric 0..1000 signals are derived INSIDE the engine, never
-     * caller-supplied. A graded fast-solve bucket (e.g. below a
-     * configurable multiple of the min-duration floor) therefore cannot
-     * be expressed without a protocol change — a new additive risk-v2
+     * verified outcome, computed from the unforgeable issuedAtNs receipt
+     * time, never the client-reported durationMs. The risk-v1/v2
+     * feedback surface is categorical: RiskEventKind is a fixed
+     * cross-language contract, values 1..21 byte-identical with the Rust
+     * mirror and the canonical risk.lua. The risk-v2 context carries
+     * only categorical fields, honeypot bool and context/TLS tags, and
+     * its numeric 0..1000 signals are derived inside the engine, never
+     * caller-supplied. A graded fast-solve bucket, e.g. below a
+     * configurable multiple of the min-duration floor, therefore cannot
+     * be expressed without a protocol change: a new additive risk-v2
      * context/signal/weight triple mirrored in PHP, Rust and Lua. Until
      * such a channel exists the measured duration is consumed as
-     * bounded observability only (a debug log line, scope + duration,
-     * no IP, no identity) so operators can alert on implausibly fast
-     * solves today, and the plumbing is live: the moment the engine
-     * grows a graded input, this parameter is the single wiring point.
+     * bounded observability only, a debug log line with scope and
+     * duration, no IP, no identity, so operators can alert on
+     * implausibly fast solves today. The plumbing is live: the moment
+     * the engine grows a graded input, this parameter is the single
+     * wiring point.
      */
     public function solveOutcome(string $scope, ?string $ip, ?string $session, ?VerifyError $error, ?string $decisionId = null, ?int $solveDurationMs = null): void
     {
@@ -500,13 +501,14 @@ final class RiskGateway
 
     /**
      * Null-safe extraction of the core VerifyOutcome's additive
-     * solve-duration surface (round-97 core addition, computed from the
-     * unforgeable issuedAtNs): returns the measured duration in
-     * milliseconds when the installed core exposes it (method or public
-     * property, ms first, a microsecond variant converted), null when the
-     * core predates the field or the value is not a measurable non-negative
-     * integer. The bridge is feature-checked so the consumption activates
-     * the moment the core lands, without requiring a hard dependency bump.
+     * solve-duration surface, a round-97 core addition computed from the
+     * unforgeable issuedAtNs. Returns the measured duration in
+     * milliseconds when the installed core exposes it, method or public
+     * property, ms first with a microsecond variant converted. Returns
+     * null when the core predates the field, or when the value is not a
+     * measurable non-negative integer. The bridge is feature-checked so
+     * the consumption activates the moment the core lands, without
+     * requiring a hard dependency bump.
      */
     public static function solveDurationMsOf(object $outcome): ?int
     {

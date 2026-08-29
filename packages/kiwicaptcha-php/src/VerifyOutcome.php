@@ -22,11 +22,11 @@ namespace KiwiCaptcha;
  * A valid outcome additionally exposes the server-measured solve
  * duration via {@see self::solveDurationMs()}: the span between the
  * record's signed issuance clock (issued_at_ns) and the verification
- * receipt, computed WITHOUT trusting any client-reported timing (the
- * token's durationMs is forgeable and never consulted). Null when no
- * duration was measurable — a record without issued_at_ns, or a receipt
- * preceding issuance within the verifier's clock-skew tolerance (see
- * the Verifier docblock) — and for every non-valid outcome; absent
+ * receipt, computed without trusting any client-reported timing, the
+ * token's durationMs is forgeable and never consulted. Null when no
+ * duration was measurable: a record without issued_at_ns, or a receipt
+ * preceding issuance within the verifier's clock-skew tolerance, see
+ * the Verifier docblock. Null for every non-valid outcome; absent
  * always meant "unmeasurable" in older consumers, so the field is
  * purely additive.
  */
@@ -93,13 +93,13 @@ final class VerifyOutcome
      * outcome is valid AND a duration was measurable, else null.
      *
      * The value is the gap between the record's issued_at_ns and the
-     * verification receipt clock — unforgeable behavioral evidence the
-     * risk layer can consume as a graded signal (the client-reported
-     * duration never feeds it). Null on every non-valid outcome, for a
+     * verification receipt clock: unforgeable behavioral evidence the
+     * risk layer can consume as a graded signal, the client-reported
+     * duration never feeds it. Null on every non-valid outcome, for a
      * record whose issuance clock is unknown, and for a receipt that
      * precedes issuance within the verifier's clock-skew tolerance,
-     * where the elapsed time cannot be measured reliably (mirroring the
-     * semantics of the verifier's minimum-duration floor).
+     * where the elapsed time cannot be measured reliably. This mirrors
+     * the semantics of the verifier's minimum-duration floor.
      */
     public function solveDurationMs(): ?int
     {

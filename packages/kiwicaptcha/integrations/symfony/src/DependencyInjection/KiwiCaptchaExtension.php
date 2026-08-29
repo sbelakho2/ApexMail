@@ -1940,12 +1940,12 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     }
 
     /**
-     * Resolve the %%parameter%% placeholders inside a definition's class
-     * (e.g. `class: '%app.cache.class%'`) to the literal class name, or
-     * null when the class is not a resolvable string (a missing parameter
-     * is NOT silently ignored — the caller's unresolvable path applies,
+     * Resolve the %%parameter%% placeholders inside a definition's class,
+     * e.g. `class: '%app.cache.class%'`, to the literal class name, or
+     * null when the class is not a resolvable string. A missing parameter
+     * is NOT silently ignored: the caller's unresolvable path applies,
      * mirroring requireAtomicStorageWhenNeeded()'s %param% class handling
-     * but for any placeholder position, not only whole-string params).
+     * but for any placeholder position, not only whole-string params.
      */
     private function resolveParameterizedClass(?string $class, ContainerBuilder $container): ?string
     {
@@ -1965,27 +1965,27 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     }
 
     /**
-     * The class of a service id, or null when unresolvable. The id is as
-     * strict as the storage path's class resolution:
+     * The class of a service id, or null when unresolvable. The id is
+     * as strict as the storage path's class resolution.
      *  - %%parameter%% placeholders in the service id itself are resolved
-     *    through the parameter bag first (a parameter-indirected id such
+     *    through the parameter bag first. A parameter-indirected id such
      *    as `%kiwi.rate_pool%` must not survive unresolved and be treated
-     *    as an opaque external id);
-     *  - alias chains are followed to the END (bounded, cycle-guarded) —
-     *    a two-hop alias must resolve to its final target, not exit the
-     *    walk after one hop;
-     *  - a definition may inherit its class from a parent
-     *    (ChildDefinition — exactly what framework.cache.pools generates
-     *    for `parent: cache.adapter.array`), and the extension loads
-     *    before ResolveChildDefinitionsPass flattens those chains, so the
-     *    parent chain is walked here;
+     *    as an opaque external id.
+     *  - alias chains are followed to the END, bounded and cycle-guarded.
+     *    A two-hop alias must resolve to its final target, not exit the
+     *    walk after one hop.
+     *  - a definition may inherit its class from a parent,
+     *    ChildDefinition, exactly what framework.cache.pools generates
+     *    for `parent: cache.adapter.array`. The extension loads before
+     *    ResolveChildDefinitionsPass flattens those chains, so the
+     *    parent chain is walked here.
      *  - a %%param%% class on any definition in the chain is resolved
-     *    through the parameter bag (a parameterized class that cannot be
-     *    resolved yields null, never a silent pass).
+     *    through the parameter bag. A parameterized class that cannot be
+     *    resolved yields null, never a silent pass.
      * The first non-null class in the child->parent chain wins; a chain
      * that ends without a class, an unknown parent, a cycle or an
-     * unresolvable parameter yields null (the service cannot be
-     * inspected and the caller's unresolvable-services path applies).
+     * unresolvable parameter yields null, so the service cannot be
+     * inspected and the caller's unresolvable-services path applies.
      */
     private function definitionClass(string $id, ContainerBuilder $container): ?string
     {

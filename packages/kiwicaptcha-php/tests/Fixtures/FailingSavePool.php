@@ -30,7 +30,7 @@ final class FailingSavePool implements CacheItemPoolInterface
     /**
      * @param int|null $failFromAttempt the 1-based save() call number
      *                                  from which on saves may report
-     *                                  failure; null (the default) fails
+     *                                  failure. Null, the default, fails
      *                                  every save
      * @param int|null $failUntilAttempt when set together with
      *                                  $failFromAttempt, the inclusive

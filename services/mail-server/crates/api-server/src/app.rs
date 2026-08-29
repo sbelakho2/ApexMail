@@ -3955,7 +3955,10 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
         let claims = crate::middleware::cp_auth::CpSessionClaims {
             sub: user_id.to_string(),
-            tenant_id: "system".into(),
+            // The seeded system tenant row's id — cp_auth re-checks the user
+            // against users.tenant_id, so the literal `system` sentinel
+            // (static API keys only) would 401 as "user no longer exists".
+            tenant_id: "system_internal_tenant01".into(),
             email: email.to_string(),
             role: "owner".into(),
             mfa_enabled,
@@ -4200,7 +4203,7 @@ mod tests {
         let (user_id, _email, _password) = cp_gate_seed_operator(&db, true).await;
         sqlx::query(
             "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, created_at)
-             VALUES ($1, 'system', 'a@apexmail.ee', '[\"b@example.com\"]'::jsonb, 's', NOW())",
+             VALUES ($1, 'system_internal_tenant01', 'a@apexmail.ee', '[\"b@example.com\"]'::jsonb, 's', NOW())",
         )
         .bind(uuid::Uuid::new_v4())
         .execute(&db)
@@ -4210,7 +4213,10 @@ mod tests {
         let now = chrono::Utc::now().timestamp();
         let claims = crate::middleware::auth::JwtClaims {
             sub: user_id,
-            tenant_id: "system".into(),
+            // The seeded operator's tenant (cp_gate_seed_operator); the
+            // per-request user recheck joins on users.tenant_id, so the
+            // literal `system` sentinel would 401 as "user no longer exists".
+            tenant_id: "system_internal_tenant01".into(),
             scopes: vec!["messages:read".into()],
             exp: now + 3600,
             iat: now,

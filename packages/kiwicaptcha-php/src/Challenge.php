@@ -12,20 +12,20 @@ namespace KiwiCaptcha;
  *
  * The optional `decoyField` is the server-issued decoy (honeypot)
  * form-field name armed for this challenge, when the deployment enables
- * the decoy surface (see {@see Issuer::issueWithDecoyField()}): a random
- * name from the server-side pool (CSPRNG-picked per issuance, matching
+ * the decoy surface, see {@see Issuer::issueWithDecoyField()}: a random
+ * name from the server-side pool (`CSPRNG`-picked per issuance, matching
  * `[A-Za-z0-9_-]{1,64}`). The widget driver renders a hidden text input
  * with exactly this name next to the token input and never auto-fills
- * it — a submission that carries a value in it is bot evidence. The name
+ * it. A submission that carries a value in it is bot evidence. The name
  * is authenticated: it is signed into the v2 canonical payload as the
- * final `|<decoy_field>` segment (see {@see Issuer::canonicalPayload()}),
+ * final `|<decoy_field>` segment, see {@see Issuer::canonicalPayload()},
  * so a client cannot strip or swap it without breaking the signature the
  * verifier re-checks.
  *
  * Wire-compatible both ways: the `decoy_field` key is absent from
- * `toArray()` (and therefore the JSON) when no decoy is armed — the old
- * behavior, never a JSON `null` — and old payloads (no key) deserialize
- * with null.
+ * `toArray()` (and therefore the JSON) when no decoy is armed. That is
+ * the old behavior, never a JSON `null`, and old payloads (no key)
+ * deserialize with null.
  */
 final class Challenge
 {

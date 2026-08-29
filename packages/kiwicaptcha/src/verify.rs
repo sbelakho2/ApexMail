@@ -4624,8 +4624,8 @@ mod tests {
     #[test]
     fn valid_outcome_carries_the_server_measured_solve_duration() {
         // The server-measured span between the record's issued_at_ns and
-        // the verification receipt instant — the client-reported
-        // duration_ms (5000 in the verify() helper) is forgeable and must
+        // the verification receipt instant. The client-reported
+        // duration_ms, 5000 in the verify() helper, is forgeable and must
         // never leak into the outcome.
         let mut record = make_record(8);
         let counter = solve_for_test(&record).expect("8-bit sha solves");

@@ -17,14 +17,14 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * The server-measured solve duration exposed on valid outcomes
- * ({@see \KiwiCaptcha\VerifyOutcome::solveDurationMs()}): computed from
- * the record's issued_at_ns and the verification receipt clock only —
- * never the client-reported token duration — with the exact
- * skew-tolerance semantics of the minimum-duration floor: a receipt
- * preceding issuance within the 5s tolerance is unmeasurable (null),
- * and beyond it the record is TooFast (never a valid outcome at all).
- * Null on every non-valid outcome; purely additive.
+ * The server-measured solve duration exposed on valid outcomes, see
+ * {@see \KiwiCaptcha\VerifyOutcome::solveDurationMs()}: computed from
+ * the record's issued_at_ns and the verification receipt clock only,
+ * never the client-reported token duration. The exact
+ * skew-tolerance semantics of the minimum-duration floor apply: a
+ * receipt preceding issuance within the 5s tolerance is unmeasurable
+ * (null), and beyond it the record is TooFast, never a valid outcome
+ * at all. Null on every non-valid outcome; purely additive.
  */
 final class VerifyOutcomeSolveDurationTest extends TestCase
 {

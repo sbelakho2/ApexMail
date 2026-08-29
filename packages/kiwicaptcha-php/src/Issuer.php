@@ -17,18 +17,18 @@ namespace KiwiCaptcha;
  *   canonical  = "v2|{nonce}|{scope}|{binding_tag}|{issued_at}|{expires_at}|
  *                {algorithm}|{m_kib}|{t}|{p}|{target_bits}|{salt}|
  *                {min_duration_ms}|{region}|{policy_version}|
- *                {request_binding}|{issuer}|{kid}". Region,
- *                request_binding and issuer render as the empty segment
- *                when unset; policy_version as the configured
- *                security-policy epoch; kid as the configured signing
- *                key id, the final canonical field. When a decoy
- *                (honeypot) field is armed
- *                ({@see self::issueWithDecoyField()}), exactly ONE more
- *                segment is appended after the kid:
- *                ...|{issuer}|{kid}|{decoy_field} — see
- *                {@see self::canonicalPayload()}.
+  *                {request_binding}|{issuer}|{kid}". Region,
+  *                request_binding and issuer render as the empty segment
+  *                when unset; policy_version as the configured
+  *                security-policy epoch; kid as the configured signing
+  *                key id, the final canonical field. When a decoy
+  *                (honeypot) field is armed, see
+  *                {@see self::issueWithDecoyField()}, exactly one more
+  *                segment is appended after the kid:
+  *                ...|{issuer}|{kid}|{decoy_field} — see
+  *                {@see self::canonicalPayload()}.
  *   signature  = hex(H), where H = hmac_sha256(K_challenge, canonical),
- *                an HKDF-derived purpose key, see {@see DerivedKeys}.
+ *                an `HKDF`-derived purpose key, see {@see DerivedKeys}.
  *                The master secret is never used directly as the signing
  *                key.
  *   challenge  = base64(canonical) . "." . signature.
@@ -36,7 +36,7 @@ namespace KiwiCaptcha;
  *   target     = effective difficulty for the configured algorithm.
  *   min_duration_ms = configured override or derived from difficulty.
  *
- * The nonce-bound binding tag is keyed by the HKDF-derived K_ip_bind
+ * The nonce-bound binding tag is keyed by the `HKDF`-derived K_ip_bind
  * purpose key (never the master secret). The record additionally carries
  * a region (deployment metadata) that is part of the v2 canonical
  * payload, so it is signed into the record like every other immutable v2
@@ -59,21 +59,21 @@ final class Issuer
 {
     /**
      * The server-side pool of decoy (honeypot) form-field names. When a
-     * deployment arms the decoy surface
-     * ({@see self::issueWithDecoyField()}), the issuer picks one name
-     * uniformly at random (CSPRNG) per issuance: the names look like
+     * deployment arms the decoy surface, see
+     * {@see self::issueWithDecoyField()}, the issuer picks one name
+     * uniformly at random (`CSPRNG`) per issuance. The names look like
      * ordinary optional form fields a generic bot filler would populate,
-     * while a human never sees them (the widget driver renders the chosen
-     * name as a hidden, never-auto-filled text input).
+     * while a human never sees them: the widget driver renders the chosen
+     * name as a hidden, never-auto-filled text input.
      *
-     * The pool alphabet is deliberately `[a-z_]` — a subset of the
+     * The pool alphabet is deliberately `[a-z_]`, a subset of the
      * `[A-Za-z0-9_-]{1,64}` shape the widget driver accepts and of the
-     * validation alphabet ({@see Config::isValidDecoyFieldName()}), so no
-     * pool name can ever smuggle the `|` canonical-payload separator or
-     * any other structurally meaningful character. PHP maintains the
+     * validation alphabet, see {@see Config::isValidDecoyFieldName()}.
+     * No pool name can ever smuggle the `|` canonical-payload separator
+     * or any other structurally meaningful character. PHP maintains the
      * identical pool (same names, same order) as the Rust
-     * `DECOY_FIELD_POOL`; the picked name is authenticated by the v2
-     * signature, so the two cores never need to agree on the PICK, only
+     * `DECOY_FIELD_POOL`. The picked name is authenticated by the v2
+     * signature, so the two cores never need to agree on the pick, only
      * on the pool's alphabet and the canonical-format extension
      * documented on {@see self::canonicalPayload()}.
      */
@@ -160,23 +160,24 @@ final class Issuer
     }
 
     /**
-     * Issue a challenge with the decoy (honeypot) surface armed — the
+     * Issue a challenge with the decoy (honeypot) surface armed, the
      * issuance-side switch of the risk engine's honeypot/decoy signals
      * (`DecoyFieldSubmitted`, `honeypot_hit`). Identical to
-     * {@see self::issue()} in every other respect (same wire format, same
-     * signing, same storage); when `$armDecoyField` is true the issuer
-     * picks a random field name from the server-side
-     * {@see self::DECOY_FIELD_POOL} (CSPRNG; a fresh independent pick per
-     * issuance, so two challenges never share a predictable decoy), sets
-     * it on the client-facing {@see Challenge::$decoyField} (the widget
-     * driver renders the hidden input from that key) AND on the stored
-     * record's authenticated {@see ChallengeRecord::$decoyField}, signed
-     * into the v2 canonical input as the final `|<decoy_field>` segment —
-     * a client cannot strip or swap the decoy without breaking the
-     * signature the verifier re-checks. `false` (or the plain
-     * {@see self::issue()}) behaves exactly like the legacy path: no
-     * decoy, byte-identical canonical string, and neither JSON surface
-     * carries the key.
+     * {@see self::issue()} in every other respect: same wire format,
+     * same signing, same storage. When `$armDecoyField` is true the
+     * issuer picks a random field name from the server-side
+     * {@see self::DECOY_FIELD_POOL}, `CSPRNG`, a fresh independent pick
+     * per issuance so two challenges never share a predictable decoy.
+     * The name is set on the client-facing
+     * {@see Challenge::$decoyField}, the key the widget driver renders
+     * the hidden input from, and on the stored record's authenticated
+     * {@see ChallengeRecord::$decoyField}. It is signed into the v2
+     * canonical input as the final `|<decoy_field>` segment. A client
+     * cannot strip or swap the decoy without breaking the signature the
+     * verifier re-checks. `false` (or
+     * the plain {@see self::issue()}) behaves exactly like the legacy
+     * path: no decoy, byte-identical canonical string, and neither JSON
+     * surface carries the key.
      */
     public function issueWithDecoyField(
         string $scope,
@@ -196,10 +197,10 @@ final class Issuer
 
     /**
      * Pick a random decoy field name from {@see self::DECOY_FIELD_POOL}
-     * with the CSPRNG (random_int; never a weak/insecure fallback — an
-     * RNG failure propagates to the caller as a Random\RandomException,
-     * exactly like the nonce/salt draws). Mirrors the Rust
-     * `pick_decoy_field`.
+     * with the `CSPRNG`, `random_int`, never a weak or insecure
+     * fallback. An RNG failure propagates to the caller as a
+     * Random\RandomException, exactly like the nonce/salt draws.
+     * Mirrors the Rust `pick_decoy_field`.
      */
     private static function pickDecoyField(): string
     {
@@ -207,7 +208,7 @@ final class Issuer
     }
 
     /**
-     * The shared issuance body (see the {@see self::issue()} contract);
+     * The shared issuance body, see the {@see self::issue()} contract;
      * `$decoyField` is the already-picked honeypot name, or null for the
      * legacy unarmed path.
      */
@@ -414,7 +415,7 @@ final class Issuer
      * Protocol v2 nonce-bound IP binding tag.
      *
      * HMAC-SHA256 over the canonical form of the client IP, keyed by the
-     * HKDF-derived IP-binding purpose key (K_ip_bind, see
+     * `HKDF`-derived IP-binding purpose key (K_ip_bind, see
      * {@see DerivedKeys}; never the master secret itself) and bound to
      * the challenge nonce. The stored binding is unique per challenge and
      * never a stable identifier that follows the client across requests.
@@ -487,9 +488,9 @@ final class Issuer
      *
      * # The decoy-field extension
      *
-     * When the issuer arms a decoy (honeypot) form field
-     * ({@see self::issueWithDecoyField()}), the field name is appended as
-     * ONE extra final segment after the `kid`:
+     * When the issuer arms a decoy (honeypot) form field, the field
+     * name is appended as one extra final segment after the `kid`; see
+     * {@see self::issueWithDecoyField()}.
      *
      * ```text
      * v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
@@ -501,14 +502,14 @@ final class Issuer
      * drawn from {@see self::DECOY_FIELD_POOL}, so it can never contain
      * the `|` separator (the pool alphabet is `[a-z_]`; validation
      * accepts `[A-Za-z0-9_-]` only, 1..=64 bytes).
-     * - The segment is appended ONLY when a decoy is armed. `null` renders
-     * NOTHING extra — the canonical string is byte-identical to the
-     * pre-extension format, so outstanding challenges and cross-language
+     * - The segment is appended only when a decoy is armed. `null` renders
+     * nothing extra, so the canonical string is byte-identical to the
+     * pre-extension format. Outstanding challenges and cross-language
      * records keep verifying unchanged across the upgrade, and the
      * extension is invisible until a deployment opts in. The exact
      * recipe: build the same 18-field base string, then append
      * `'|' . $decoyField` if and only if the record carries a non-null
-     * `decoy_field`; sign/HMAC-verify the result with the HKDF-derived
+     * `decoy_field`; sign/HMAC-verify the result with the `HKDF`-derived
      * challenge key (`K_challenge`) exactly as before. The stored record
      * JSON carries the optional string key `decoy_field` (absent when
      * null — not a JSON `null` key); the client-facing challenge response
@@ -576,7 +577,7 @@ final class Issuer
      * with the master secret used directly as the key, byte-identical to
      * the Rust crate's v1 path. This is the historical format; v1 is
      * only kept for the migration window. Protocol v2 signatures use the
-     * HKDF-derived challenge key via {@see self::signPayloadV2()}.
+     * `HKDF`-derived challenge key via {@see self::signPayloadV2()}.
      */
     public static function signPayload(string $canonicalPayload, string $secretKey): string
     {
@@ -585,7 +586,7 @@ final class Issuer
 
     /**
      * Protocol v2 signature: hex HMAC-SHA256 of the canonical v2 payload
-     * keyed by the HKDF-derived challenge-signing purpose key
+     * keyed by the `HKDF`-derived challenge-signing purpose key
      * (K_challenge). See {@see DerivedKeys}. The master secret is never
      * used directly as the signing key. Byte-identical to the Rust
      * crate's `sign_canonical_v2`.

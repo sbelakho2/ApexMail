@@ -109,20 +109,20 @@ namespace KiwiCaptcha;
  * cancelled record is never redeemable and can never produce a
  * successful outcome.
  *
- * Server-measured solve duration: every valid outcome — the fresh
+ * Server-measured solve duration: every valid outcome, the fresh
  * consumed/valid path, the identity-proven replay of a stored success,
- * and the resumed-operation recoveries — carries
+ * and the resumed-operation recoveries, carries
  * {@see VerifyOutcome::solveDurationMs()}, the span between the
  * record's issued_at_ns and the verification receipt clock. It is
- * computed only from server-written timestamps (the client-reported
- * token duration is forgeable and never consulted), so the risk layer
+ * computed only from server-written timestamps, the client-reported
+ * token duration is forgeable and never consulted, so the risk layer
  * can consume it as unforgeable graded behavioral evidence. The field
  * is nullable and additive: null on every non-valid outcome, for a
  * record whose issuance clock is unknown, and for a receipt preceding
- * issuance within the clock-skew tolerance — exactly the skew
+ * issuance within the clock-skew tolerance. That is exactly the skew
  * semantics of the minimum-duration floor, where the elapsed time
- * cannot be measured reliably (see
- * {@see self::measurableSolveDurationMs()}).
+ * cannot be measured reliably, see
+ * {@see self::measurableSolveDurationMs()}.
  */
 final class Verifier
 {
@@ -192,8 +192,8 @@ final class Verifier
      * claim must cover the maximum supported derivation duration so a
      * legitimate derivation never outlives its own claim. 60 seconds is
      * far beyond the worst Argon2id derivation under the process
-     * ceilings ({@see self::MAX_ARGON_MEMORY_KIB} x
-     * {@see self::MAX_ARGON_TIME}, a few seconds at most) plus the
+     * ceilings, {@see self::MAX_ARGON_MEMORY_KIB} x
+     * {@see self::MAX_ARGON_TIME}, a few seconds at most, plus the
      * surrounding cheap phase and commit. The {@see VerificationAdmissionGate}
      * interface exposes no lease TTL to read (the bundle's semaphore
      * lease is internal), so the claim keeps the Rust `CLAIM_TTL_SECS`
@@ -223,9 +223,10 @@ final class Verifier
 
     /**
      * @var int|null the newest configured kid of the secretsByKid set,
-     *               resolved once (max of the immutable kid keys) — the
-     *               rollback/forward guard compared it against
-     *               max(array_keys(...)) on every secret lookup before
+     *               resolved once as the max of the immutable kid keys.
+     *               The rollback/forward guard compared the record kid
+     *               against it on every secret lookup before the
+     *               resolution was cached.
      */
     private ?int $newestKid = null;
 
@@ -304,8 +305,8 @@ final class Verifier
          * efficiency property. A severely CPU-starved host could exceed
          * the default in one Argon2id derivation, so the conservative
          * lower bound is the maximum supported derivation duration
-         * under the process ceilings ({@see self::MAX_ARGON_MEMORY_KIB}
-         * x {@see self::MAX_ARGON_TIME}); operators may raise it.
+         * under the process ceilings, {@see self::MAX_ARGON_MEMORY_KIB}
+         * x {@see self::MAX_ARGON_TIME}; operators may raise it.
          */
         private readonly int $resumeClaimTtlSecs = self::RESUME_CLAIM_TTL_SECS,
     ) {
@@ -456,7 +457,7 @@ final class Verifier
 
         // The server receipt clock, resolved once: the minimum-duration
         // floor of the cheap phase and the exposed server-measured solve
-        // duration ({@see self::measurableSolveDurationMs()}) read the
+        // duration, see {@see self::measurableSolveDurationMs()}, read the
         // same receipt instant, never two separately timed microtime
         // reads of one verification.
         $receiptNs = $nowNs ?? (int) (microtime(true) * 1_000_000);
@@ -559,7 +560,7 @@ final class Verifier
         $failure = $this->cheapPhaseCheck($peek, $secretKey, $expectedScope, $clientIp, true, $receiptNs, $expectation);
         if ($failure !== null) {
             // The cleanup runs through the fused atomic transition when
-            // the storage offers it ({@see AtomicDeleteIfPendingInterface}):
+            // the storage offers it, see {@see AtomicDeleteIfPendingInterface}:
             // the delete decision and the delete itself are one script,
             // so a record a concurrent redeemer consumes (and commits)
             // between this failure and the cleanup is observed in its
@@ -957,8 +958,8 @@ final class Verifier
      * ConsumeIndeterminate.
      *
      * The identity-proven replay of a stored success carries the
-     * server-measured solve duration
-     * ({@see self::measurableSolveDurationMs()}) computed from the
+     * server-measured solve duration, see
+     * {@see self::measurableSolveDurationMs()}, computed from the
      * replayed record's issuance clock and this verification's receipt
      * — unforgeable behavioral evidence for the risk layer, never the
      * client-reported duration.
@@ -1144,8 +1145,8 @@ final class Verifier
         }
 
         // The server receipt clock for the resume's exposed solve
-        // duration ({@see self::measurableSolveDurationMs()}) — the
-        // same receipt instant feeds every valid-returning path below.
+        // duration, see {@see self::measurableSolveDurationMs()}, the
+        // same receipt instant that feeds every valid-returning path below.
         $receiptNs = (int) (microtime(true) * 1_000_000);
 
         // The retained consumed state must be readable (the bundle enforces
@@ -1521,11 +1522,11 @@ final class Verifier
      *
      * The decoy (honeypot) field name is an authenticated v2 canonical
      * field: when present it must match the exact shape the issuer mints
-     * and the widget driver renders — 1..=64 bytes of `[A-Za-z0-9_-]` (no
-     * `.`, `:` or `|`, so the canonical segment structure can never be
-     * altered by a stored value). A non-conforming name is a corrupt or
-     * foreign record: MalformedRecord (the Rust validate_record decoy
-     * check).
+     * and the widget driver renders, 1..=64 bytes of `[A-Za-z0-9_-]`.
+     * No `.`, `:` or `|` is allowed, so the canonical segment structure
+     * can never be altered by a stored value. A non-conforming name is
+     * a corrupt or foreign record: MalformedRecord, the Rust
+     * `validate_record` decoy check.
      *
      * Argon2id memory/time/parallelism are not bounded here: the
      * absolute process ceilings apply to the signed parameters after
@@ -2011,12 +2012,12 @@ final class Verifier
      * is never consulted.
      *
      * The skew-tolerance semantics mirror {@see self::checkMinDuration()}
-     * exactly: a receipt that precedes issuance is unmeasurable
-     * (within the tolerance the two hosts' clocks are unsynced, so the
-     * elapsed time cannot be measured reliably — null; beyond the
+     * exactly: a receipt that precedes issuance is unmeasurable.
+     * Within the tolerance the two hosts' clocks are unsynced, so the
+     * elapsed time cannot be measured reliably, null; beyond the
      * tolerance the record is rejected as TooFast and never reaches a
-     * valid outcome). A record whose issuance clock is unknown
-     * (issued_at_ns <= 0) is equally unmeasurable. Sub-millisecond
+     * valid outcome. A record whose issuance clock is unknown,
+     * `issued_at_ns <= 0`, is equally unmeasurable. Sub-millisecond
      * spans floor toward zero.
      */
     private function measurableSolveDurationMs(ChallengeRecord $record, ?int $receiptNs): ?int
@@ -2065,8 +2066,8 @@ final class Verifier
 
     /**
      * The retained consumed-state tri-state, best-effort read. The
-     * storage seam is the retained consumed-state read
-     * ({@see ConsumedStateReadableInterface}, implemented by the Redis
+     * storage seam is the retained consumed-state read, {@see ConsumedStateReadableInterface},
+     * implemented by the Redis
      * and array backends; the plain {@see StorageInterface::find()}
      * record carries no runtime state).
      *
@@ -2207,8 +2208,8 @@ final class Verifier
      * whole record is authentic; used in the cheap phase and re-applied to
      * the consumed instance (the proof-phase re-check). When the record
      * carries an armed decoy (honeypot) field, the name is covered too —
-     * it is the FINAL `|<decoy_field>` segment appended after the kid
-     * (see {@see Issuer::canonicalPayload()}), so stripping, renaming or
+     * it is the final `|<decoy_field>` segment appended after the kid
+     * see {@see Issuer::canonicalPayload()}, so stripping, renaming or
      * splicing it breaks the signature. An unarmed record renders the
      * legacy 18-field canonical bytes, byte-identical to the
      * pre-extension format.
@@ -2256,8 +2257,8 @@ final class Verifier
      * returned, yielding UnknownKid, when the kid is unknown or exceeds
      * the newest configured kid: the rollback/forward guard that keeps a
      * future-keyed challenge from verifying on an older node. The newest
-     * kid is resolved once per process (the set is immutable), not
-     * re-derived with max(array_keys(...)) on every lookup.
+     * kid is resolved once per process, the set is immutable, not
+     * re-derived on every lookup.
      */
     private function secretForKey(ChallengeRecord $record, string $legacySecret): ?string
     {

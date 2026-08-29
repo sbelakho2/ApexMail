@@ -68,14 +68,14 @@ final class RedisAdmissionSemaphore implements VerificationAdmissionGate
      * at 0) in the same script. When a cap is saturated the contender is
      * refused right away and the counter is incremented with the lease
      * lifetime's TTL. Once the counter exceeds the saturation-pressure
-     * cap (strictly AFTER the post-INCR value; the boundary value equal
-     * to the cap does NOT trip), the script returns the distinguishable
-     * capacity sentinel -1 after removing the contender's own entry, so
-     * the gauge can never grow unboundedly under a saturation storm and
-     * acquire() can map the over-cap refusal to its explicit fast-fail
-     * CapacityExceeded path (observable through
-     * {@see self::lastAcquireFastFailed()}; the lease contract is
-     * unchanged — null, no slot held, no counter residue). The counter
+     * cap, strictly after the post-INCR value and the boundary value
+     * equal to the cap does not trip, the script returns the
+     * distinguishable capacity sentinel -1 after removing the
+     * contender's own entry. The gauge can never grow unboundedly under
+     * a saturation storm, and acquire() can map the over-cap refusal to
+     * its explicit fast-fail CapacityExceeded path, observable through
+     * {@see self::lastAcquireFastFailed()}. The lease contract is
+     * unchanged: null, no slot held, no counter residue. The counter
      * stays global, one shared gauge regardless of which cap refused.
      * Returns 1 when the lease was granted, 0 when refused by a cap, -1
      * when refused by the saturation-pressure bound.
@@ -160,7 +160,7 @@ LUA;
     private readonly string $waitersKey;
 
     /**
-     * @var bool whether the LAST acquire() was refused by the
+     * @var bool whether the last acquire() was refused by the
      *           saturation-pressure fast-fail (the script's -1 sentinel:
      *           the waiters gauge was already at the cap when this
      *           contender was refused). Observability for callers and
@@ -254,13 +254,13 @@ LUA;
      * null right away and the "waiters" counter records the
      * saturation-pressure spike. When that counter is already AT the
      * saturation-pressure cap, the contender trips the fast-fail: the
-     * script returns its distinguishable sentinel (-1) after removing the
-     * contender's own counter entry, and acquire() maps it to the
-     * explicit CapacityExceeded path — null, no slot held, no counter
-     * residue — surfacing the distinction through
+     * script returns its distinguishable sentinel (-1) after removing
+     * the contender's own counter entry. `acquire()` maps it to the
+     * explicit CapacityExceeded path, null, no slot held, no counter
+     * residue, surfacing the distinction through
      * {@see self::lastAcquireFastFailed()}. A rejected request is never
-     * queued, polled or later admitted (the counter is a gauge, not a
-     * queue).
+     * queued, polled or later admitted: the counter is a gauge, not a
+     * queue.
      *
      * @param string|null $scope the scope string (the challenge's scope) for
      *                           the per-scope concentration cap: the scope's

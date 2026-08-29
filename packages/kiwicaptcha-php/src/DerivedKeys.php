@@ -11,17 +11,17 @@ namespace KiwiCaptcha;
  * master secret, so a key compromise in one purpose (challenge signing,
  * IP binding, result tokens) does not leak the others:
  *
- *     PRK        = HKDF-Extract(SHA-256, salt = deploy-salt, ikm = master).
- *     K_challenge = HKDF-Expand(PRK, "kiwi/v2/challenge-sign", 32).
- *     K_ip_bind   = HKDF-Expand(PRK, "kiwi/v2/ip-bind", 32).
- *     K_result    = HKDF-Expand(PRK, "kiwi/v2/result-token", 32).
+ *     PRK        = `HKDF`-Extract(SHA-256, salt = deploy-salt, ikm = master).
+ *     K_challenge = `HKDF`-Expand(PRK, "kiwi/v2/challenge-sign", 32).
+ *     K_ip_bind   = `HKDF`-Expand(PRK, "kiwi/v2/ip-bind", 32).
+ *     K_result    = `HKDF`-Expand(PRK, "kiwi/v2/result-token", 32).
  *
  * Tenant-scoped deployments additionally derive a per-tenant root and
  * the three purpose keys under it:
  *
- *     tenant_root = HKDF-Expand(PRK, "kiwi/v2/tenant/" + tenant_id, 32).
- *     PRK_t       = HKDF-Extract(SHA-256, salt = "", ikm = tenant_root).
- *     K_x_tenant  = HKDF-Expand(PRK_t, "kiwi/v2/" + purpose, 32).
+ *     tenant_root = `HKDF`-Expand(PRK, "kiwi/v2/tenant/" + tenant_id, 32).
+ *     PRK_t       = `HKDF`-Extract(SHA-256, salt = "", ikm = tenant_root).
+ *     K_x_tenant  = `HKDF`-Expand(PRK_t, "kiwi/v2/" + purpose, 32).
  *
  * Cross-language parity, byte-for-byte with the Rust crate: the
  * construction above is exactly PHP's `hash_hkdf('sha256', $ikm, 32,
@@ -53,12 +53,12 @@ final class DerivedKeys
 
     /**
      * Cap of the per-process derivation memo below. A deployment holds a
-     * handful of immutable master secrets (the configured signing kids —
-     * the documented FPM model constructs the Issuer/Verifier once per
-     * process), so the memo is tiny in practice; a pathological caller
-     * deriving for many distinct secrets (e.g. a long-lived CLI walking
-     * tenant keys) resets it instead of growing unboundedly, degrading
-     * gracefully to a fresh derivation per call.
+     * handful of immutable master secrets: the configured signing kids,
+     * since the documented FPM model constructs the Issuer and Verifier
+     * once per process. The memo is tiny in practice. A pathological
+     * caller deriving for many distinct secrets, e.g. a long-lived CLI
+     * walking tenant keys, resets it instead of growing unboundedly,
+     * degrading gracefully to a fresh derivation per call.
      */
     private const CACHE_LIMIT = 64;
 
@@ -66,10 +66,10 @@ final class DerivedKeys
      * Per-process memo of derived key sets, keyed by a collision-free
      * composite of the tenant id ("" when absent) and the master secret.
      * The master secret is immutable for a deployment's lifetime, so a
-     * memoized entry can never go stale within a process; the derivation
-     * is three HKDF steps that the issuance and verification statics
-     * ({@see \KiwiCaptcha\Issuer::signPayloadV2()} and
-     * {@see \KiwiCaptcha\Issuer::bindingTag()}) otherwise repeat for
+     * memoized entry can never go stale within a process. The derivation
+     * is three `HKDF` steps that the issuance and verification statics,
+     * {@see \KiwiCaptcha\Issuer::signPayloadV2()} and
+     * {@see \KiwiCaptcha\Issuer::bindingTag()}, otherwise repeat for
      * every single operation. The memoized values are exactly as
      * sensitive as the master secrets their callers already hold in
      * memory, so the cache adds no new exposure class.
@@ -100,7 +100,7 @@ final class DerivedKeys
     /**
      * Derive the three purpose keys from the master secret. Memoized per
      * master secret (and tenant id) for the process lifetime: the
-     * secrets are immutable deployment configuration, so the three HKDF
+     * secrets are immutable deployment configuration, so the three `HKDF`
      * steps run once per distinct secret instead of per operation.
      *
      * @param string      $master   the deployment master secret (the HMAC

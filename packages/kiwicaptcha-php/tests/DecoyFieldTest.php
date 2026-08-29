@@ -24,17 +24,19 @@ use PHPUnit\Framework\TestCase;
  * `issue_challenge_with_decoy` / `decoy_field` extension.
  *
  * The contract, pinned byte-for-byte against the Rust crate:
- *  - armed: the canonical v2 signing input gains exactly ONE segment,
- *    `|<decoy_field>`, appended AFTER the kid (19 segments, decoy last);
- *    the name comes from the shared server-side pool;
+ *  - armed: the canonical v2 signing input gains exactly one segment,
+ *    `|<decoy_field>`, appended after the kid, 19 segments with the
+ *    decoy last. The name comes from the shared server-side pool.
  *  - unarmed: the canonical input is byte-identical to the pre-extension
- *    18-field format, and neither JSON surface (client-facing challenge,
- *    stored record) carries the `decoy_field` key — absent, not null;
+ *    18-field format, and neither JSON surface, client-facing challenge
+ *    nor stored record, carries the `decoy_field` key; it is absent, not
+ *    null.
  *  - the decoy is authenticated: stripping, renaming or splicing it
- *    breaks the v2 signature the verifier re-checks;
- *  - stored values must match `[A-Za-z0-9_-]{1,64}` (malformed-record
- *    fail-closed);
- *  - legacy records/tokens (no decoy key anywhere) keep verifying.
+ *    breaks the v2 signature the verifier re-checks.
+ *  - stored values must match `[A-Za-z0-9_-]{1,64}`, the malformed-record
+ *    fail-closed.
+ *  - legacy records and tokens with no decoy key anywhere keep
+ *    verifying.
  */
 final class DecoyFieldTest extends TestCase
 {

@@ -40,17 +40,17 @@ namespace KiwiCaptcha\Tests\Fixtures;
  *
  * Every call is recorded in {@see FakePredisClient::$calls} so tests
  * can assert on the Redis commands issued (Lua usage, EX expiration,
- * and the like). Every Lua invocation — plain EVAL or EVALSHA — also
+ * and the like). Every Lua invocation, plain EVAL or `EVALSHA`, also
  * records its key count and key list in
  * {@see FakePredisClient::$evals}, so tests can prove the single-key
- * invariant of the claim transitions (never `CROSSSLOT`) and identify
- * which script ran regardless of the transport. EVALSHA resolves the
- * sha back to the body through the SCRIPT LOAD registry
- * {@see FakePredisClient::$scriptsBySha} (a real Redis caches EVAL'd
- * bodies the same way); an unloaded sha raises the same NOSCRIPT
+ * invariant of the claim transitions, never `CROSSSLOT`, and identify
+ * which script ran regardless of the transport. `EVALSHA` resolves the
+ * sha back to the body through the `SCRIPT` `LOAD` registry
+ * {@see FakePredisClient::$scriptsBySha}; a real Redis caches EVAL'd
+ * bodies the same way. An unloaded sha raises the same `NOSCRIPT`
  * ServerException the server would, exercising the storage's reload
- * fallback. The sha of every EVALSHA is recorded in
- * {@see FakePredisClient::$evalshas} and every SCRIPT LOAD body in
+ * fallback. The sha of every `EVALSHA` is recorded in
+ * {@see FakePredisClient::$evalshas} and every `SCRIPT` `LOAD` body in
  * {@see FakePredisClient::$scriptLoads}.
  */
 final class FakePredisClient extends \Predis\Client
@@ -159,10 +159,10 @@ final class FakePredisClient extends \Predis\Client
     }
 
     /**
-     * SCRIPT LOAD: register the body under its sha1 (the server's own
+     * `SCRIPT` `LOAD`: register the body under its sha1 (the server's own
      * script-cache key) and return the sha, like a real Redis.
      *
-     * @param list<mixed> $arguments ['LOAD', script]
+     * @param list<mixed> $arguments ['`LOAD`', script]
      */
     private function fakeScript(array $arguments): string
     {
@@ -178,8 +178,8 @@ final class FakePredisClient extends \Predis\Client
     }
 
     /**
-     * EVALSHA: resolve the sha back to its body through the SCRIPT LOAD
-     * registry and run it. An unknown sha raises the same NOSCRIPT
+     * `EVALSHA`: resolve the sha back to its body through the `SCRIPT` `LOAD`
+     * registry and run it. An unknown sha raises the same `NOSCRIPT`
      * ServerException the server would, so the storage's reload
      * fallback is exercised for real.
      *

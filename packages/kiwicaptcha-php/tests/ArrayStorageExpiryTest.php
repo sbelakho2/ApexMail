@@ -12,9 +12,9 @@ use PHPUnit\Framework\TestCase;
 
 /**
  * ArrayStorage's Redis-TTL-parity expiry semantics and bounded
- * retention: an expired record is ABSENT to every read and transition
- * (matching what Redis key TTLs give the other backend), and store()
- * prunes expired entries plus a hard size cap evicting the
+ * retention. An expired record is absent to every read and transition,
+ * matching what Redis key TTLs give the other backend. `store()`
+ * prunes expired entries, and a hard size cap evicts the
  * oldest-expiring first, so a long-lived process stays memory-bounded.
  */
 final class ArrayStorageExpiryTest extends TestCase
@@ -147,7 +147,7 @@ final class ArrayStorageExpiryTest extends TestCase
 
     public function testTheDefaultCapIsTenThousand(): void
     {
-        // The documented default: bounded by DEFAULT_MAX_ENTRIES.
+        // The documented default: bounded by `DEFAULT_MAX_ENTRIES`.
         self::assertSame(10_000, ArrayStorage::DEFAULT_MAX_ENTRIES);
         $this->expectException(\InvalidArgumentException::class);
         new ArrayStorage(now: null, maxEntries: 0);

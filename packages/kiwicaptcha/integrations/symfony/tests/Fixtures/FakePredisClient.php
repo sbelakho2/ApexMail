@@ -24,9 +24,9 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests\Fixtures;
  *    semantics. It also interprets the kiwicaptcha core's consume,
  *    cancel, delete-if-pending and commit-result scripts, so the same
  *    fake drives the core RedisStorage for the cancellation endpoint's
- *    record transitions. EVALSHA resolves the sha back to the body
- *    through the SCRIPT LOAD registry (a real Redis caches EVAL'd
- *    bodies the same way); an unloaded sha raises the same NOSCRIPT
+ *    record transitions. `EVALSHA` resolves the sha back to the body
+ *    through the `SCRIPT` `LOAD` registry, a real Redis caches EVAL'd
+ *    bodies the same way. An unloaded sha raises the same `NOSCRIPT`
  *    ServerException the server would, so the storage's reload
  *    fallback is exercised for real.
  *
@@ -426,9 +426,9 @@ final class FakePredisClient extends \Predis\Client
     }
 
     /**
-     * SCRIPT LOAD: register the body under sha1(body) like a real Redis
-     * script cache and return the sha (the storage's EVALSHA path
-     * resolves through this registry). Any other SCRIPT subcommand
+     * `SCRIPT` `LOAD`: register the body under sha1(body) like a real Redis
+     * script cache and return the sha (the storage's `EVALSHA` path
+     * resolves through this registry). Any other `SCRIPT` subcommand
      * returns '' — never a loadable sha.
      *
      * @param list<mixed> $arguments [subcommand, body]
@@ -447,9 +447,9 @@ final class FakePredisClient extends \Predis\Client
     }
 
     /**
-     * EVALSHA: resolve the sha back to its body through the SCRIPT LOAD
+     * `EVALSHA`: resolve the sha back to its body through the `SCRIPT` `LOAD`
      * registry and run it through the same interpreter as EVAL. An
-     * unknown sha raises the same NOSCRIPT ServerException the server
+     * unknown sha raises the same `NOSCRIPT` ServerException the server
      * would, so the storage's reload fallback is exercised for real.
      *
      * @param list<mixed> $arguments [sha, numKeys, key1..keyN, arg1..argN]

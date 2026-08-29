@@ -10,13 +10,13 @@ namespace KiwiCaptcha\Storage;
  * === false contract.
  *
  * Thrown fail-closed by {@see Psr6Storage} on the two writes whose
- * silent loss would corrupt the one-shot security model:
+ * silent loss would corrupt the one-shot security model.
  *
  *  - store(): a challenge handed to a client whose record never landed
- *    would 404 at verify time (the client did the work for nothing).
+ *    would 404 at verify time, the client did the work for nothing.
  *  - consume(): a pending→consumed flip whose save failed would leave
  *    the record pending while the verifier proceeds as the consume
- *    winner — a sequential replay window.
+ *    winner, a sequential replay window.
  *
  * The exception escapes store() before the challenge is returned, and
  * the Verifier maps a consume() throw onto its existing typed

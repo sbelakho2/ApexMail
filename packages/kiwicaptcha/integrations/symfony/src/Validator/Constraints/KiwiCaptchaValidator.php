@@ -374,8 +374,9 @@ final class KiwiCaptchaValidator extends ConstraintValidator
                 // ambiguous-identity kind, so the closest existing kind
                 // — MalformedToken (VerifyError::MalformedToken), the
                 // wire/shape corruption bucket — carries the signal.
-                // Attribution: only the direct socket peer (REMOTE_ADDR,
-                // never a header-derived guess) is attributable here;
+                // Attribution: only the direct socket peer
+                // (`REMOTE_ADDR`, never a header-derived guess) is
+                // attributable here;
                 // the canonical client IP is exactly what could NOT be
                 // resolved. No peer means no feedback (like every
                 // no-client-IP path, never an empty-string pseudonym).
@@ -604,7 +605,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             //     attribute — no feedback, just the violation;
             //   - the ambiguous-forwarding refusal above: it feeds its
             //     MalformedToken evidence separately, attributed to the
-            //     direct socket peer (REMOTE_ADDR) only — the canonical
+            //     direct socket peer (`REMOTE_ADDR`) only — the canonical
             //     client IP is exactly what could not be resolved, and a
             //     header-derived guess is never used as the identity.
             if ($clientIp !== null) {

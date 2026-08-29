@@ -56,12 +56,12 @@ use Psr\Cache\CacheItemPoolInterface;
  *
  * Fail-closed saves: PSR-6 permits `save()` to report failure without
  * raising. The two writes whose silent loss would corrupt the one-shot
- * model refuse it — `store()` throws
- * {@see StorageWriteException} before the challenge is returned (a
- * challenge whose record never landed would 404 at verify time), and
+ * model refuse it. `store()` throws
+ * {@see StorageWriteException} before the challenge is returned: a
+ * challenge whose record never landed would 404 at verify time.
  * `consume()` throws instead of reporting itself the consume winner
- * while the record stays pending (a sequential replay window; the
- * Verifier maps the throw onto its typed indeterminate outcome).
+ * while the record stays pending, a sequential replay window; the
+ * Verifier maps the throw onto its typed indeterminate outcome.
  * `commitResult()` keeps its boolean contract and simply returns the
  * `save()` result, as before.
  */

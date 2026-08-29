@@ -81,22 +81,22 @@ namespace KiwiCaptcha;
  * `decoyField` is the server-issued decoy (honeypot) form-field name
  * armed for this challenge (see {@see Issuer::DECOY_FIELD_POOL}). Null =
  * no decoy armed (the default, and the shape every pre-decoy record
- * carries). The name is an authenticated v2 canonical field — the FINAL
+ * carries). The name is an authenticated v2 canonical field: the final
  * segment `|<decoy_field>`, appended after the `kid` (see
- * {@see Issuer::canonicalPayload()}) — so a stored/tampered record cannot
+ * {@see Issuer::canonicalPayload()}), so a stored/tampered record cannot
  * change or drop it without breaking the signature. Wire-compatible both
  * directions: the JSON key is absent when null (`skip_serializing_if`),
  * so pre-decoy writers and readers keep their exact byte format, and a
  * decoy-armed record simply carries one extra string key. Absent in
  * legacy stored records; a present value must match the decoy alphabet
- * `[A-Za-z0-9_-]{1,64}` ({@see Config::isValidDecoyFieldName()}),
- * enforced on read and by the verifier's malformed-record path.
+ * `[A-Za-z0-9_-]{1,64}`, see {@see Config::isValidDecoyFieldName()},
+ * and is enforced on read and by the verifier's malformed-record path.
  *
  * `fromArray()` is the strict serde-mirror parser: it accepts exactly
  * what the Rust `serde_json::from_str::<ChallengeRecord>` accepts.
  * Whitelisted keys only, exact lowercase algorithm values, strict
- * integer types and ranges, strings capped at 4096 bytes, nulls only
- * where `Option` allows them. Anything else throws
+ * integer types and ranges, strings capped at 4096 bytes, and nulls
+ * only where `Option` allows them. Anything else throws
  * {@see \KiwiCaptcha\MalformedRecordException}. base64 validation is
  * deliberately absent: serde treats `nonce`/`salt` as plain strings at
  * parse time, and the differential fuzz corpus pins both parsers to the
@@ -111,7 +111,7 @@ final class ChallengeRecord
      * is the deployment identity, always present, null when
      * unset. `kid` is the signing key id, always present,
      * default 1. `decoy_field` is the optional honeypot name —
-     * unlike the always-present Option keys it is OMITTED from
+     * unlike the always-present Option keys it is omitted from
      * `toArray()` when null (the Rust `skip_serializing_if` mirror).
      */
     public const WIRE_KEYS = [

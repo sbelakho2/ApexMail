@@ -25,19 +25,19 @@ use Psr\Cache\CacheItemPoolInterface;
  *     bound.
  *  2. PSR-6 pool (shared, best-effort): when a shared pool is configured but
  *     no Redis client exists, the per-client window is kept in the pool. The
- *     deployment-global window lives in ONE dedicated cache item
- *     (`kr_global`, or `kr_global_<namespace>` when a deployment namespace
- *     is configured — shared by every client identity of that deployment,
- *     distinct from the per-client `kr_`+hex keys). Both PSR-6 key families
- *     fold the constructor namespace in (the empty namespace keeps the
- *     legacy `kr_`/`kr_global` key shapes unchanged), so two deployments
- *     sharing one pool never contend on one literal item: their windows are
- *     as independent as their Redis keys always were. A PSR-6 pool cannot
- *     express an atomic read-modify-write, so the shared global window is
- *     cross-worker best-effort: concurrent requests racing the
- *     read-modify-write may briefly exceed the cap (N workers can admit up
- *     to ~N x cap in a race). It is a soft bound, never an exact
- *     distributed gate.
+ *     deployment-global window lives in ONE dedicated cache item,
+ *     `kr_global`, or `kr_global_<namespace>` when a deployment namespace
+ *     is configured, shared by every client identity of that deployment
+ *     and distinct from the per-client `kr_`+hex keys. Both PSR-6 key
+ *     families fold the constructor namespace in; the empty namespace
+ *     keeps the legacy `kr_`/`kr_global` key shapes unchanged. Two
+ *     deployments sharing one pool never contend on one literal item,
+ *     their windows are as independent as their Redis keys always were.
+ *     A PSR-6 pool cannot express an atomic read-modify-write, so the
+ *     shared global window is cross-worker best-effort: concurrent
+ *     requests racing the read-modify-write may briefly exceed the cap,
+ *     N workers can admit up to ~N x cap in a race. It is a soft bound,
+ *     never an exact distributed gate.
  *  3. Object memory (long-lived runtime only): the fallback when no pool
  *     is configured. The windows live in this object's fields, so they are
  *     exact for one persistent worker process (RoadRunner, Swoole, amphp
@@ -136,7 +136,7 @@ final class IssuanceRateLimiter
      * must stay distinct from the per-client keys ('kr_' + 60 hex
      * chars): this literal contains non-hex characters, so it can never
      * collide with a client-HMAC key, and it must never be rotated (the
-     * global budget is rotation-independent by design). A NAMED
+     * global budget is rotation-independent by design). A named
      * deployment uses {@see self::globalCacheKey()} instead, so two
      * deployments sharing one pool keep independent global budgets.
      */
@@ -150,12 +150,12 @@ final class IssuanceRateLimiter
     private const NS_KEY_BUDGET = 20;
 
     /**
-     * The namespace segment of a PSR-6 key: the (already sanitized)
-     * namespace truncated to the key budget, with any character outside
-     * PSR-6's guaranteed-supported set (A-Z a-z 0-9 _ . — note the
+     * The namespace segment of a PSR-6 key: the already sanitized
+     * namespace, truncated to the key budget, with any character outside
+     * PSR-6's guaranteed-supported set, A-Z a-z 0-9 _ . — note the
      * namespace sanitizer permits '-', which Redis keys allow but strict
-     * pools may reject) folded to '_'. Two deployments whose sanitized
-     * prefixes agree after this mapping share a key segment — distinct
+     * pools may reject — folded to '_'. Two deployments whose sanitized
+     * prefixes agree after this mapping share a key segment. Distinct
      * deployments on one shared pool must differ within it.
      */
     private static function namespaceKeySegment(string $namespace): string
@@ -165,12 +165,13 @@ final class IssuanceRateLimiter
 
     /**
      * PSR-6 cache key for a client identity. The empty namespace keeps
-     * the legacy shape ('kr_' + the first 60 hex chars of the identity =
-     * 63 chars). A NAMED namespace folds the deployment discriminator
-     * into the key ('kr_' + the bounded PSR-6-safe namespace segment +
-     * '_' + hex), so two deployments sharing one PSR-6 pool never
-     * contend on one literal item: their per-client windows are as
-     * independent as their Redis keys always were. The '_' separator
+     * the legacy shape: 'kr_' plus the first 60 hex chars of the
+     * identity, 63 chars total. A named namespace folds the deployment
+     * discriminator into the key: 'kr_' plus the bounded PSR-6-safe
+     * namespace segment plus '_' plus hex. Two deployments sharing one
+     * PSR-6 pool never contend on one literal item, their per-client
+     * windows are as independent as their Redis keys always were. The
+     * '_' separator
      * cannot appear in the hex segment, so no two namespaces (and no
      * namespaced key vs a legacy 'kr_global'/'kr_'-hex key) can ever
      * collide.
@@ -194,7 +195,7 @@ final class IssuanceRateLimiter
      * PSR-6 cache key for the deployment-global window: the legacy
      * literal when no namespace is configured, else 'kr_global_' + the
      * (bounded, PSR-6-safe) namespace segment — one dedicated item PER
-     * DEPLOYMENT, never rotated, shared by every client identity of that
+     * deployment, never rotated, shared by every client identity of that
      * deployment. The non-hex 'global' segment can never collide with a
      * per-client key.
      */

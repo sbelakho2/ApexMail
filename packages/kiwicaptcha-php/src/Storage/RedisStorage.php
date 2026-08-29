@@ -40,11 +40,11 @@ use KiwiCaptcha\ResumeDerivationClaimInterface;
  * acknowledged-writes-can-never-vanish must back the one-shot security
  * state with a consensus-capable store instead.
  *
- * - phpredis (\Redis): evalSha() with the script's sha1 (SCRIPT LOAD
- *   once per script, sha cached per storage instance); a NOSCRIPT
+ * - phpredis (\Redis): evalSha() with the script's sha1 (`SCRIPT` `LOAD`
+ *   once per script, sha cached per storage instance); a `NOSCRIPT`
  *   reply falls back to one plain eval() that ships the body.
  * - Predis: evalsha() the same way (the server must support Lua, i.e.
- *   any Redis >= 2.6); a NOSCRIPT ServerException re-runs SCRIPT LOAD
+ *   any Redis >= 2.6); a `NOSCRIPT` ServerException re-runs `SCRIPT` `LOAD`
  *   once and retries evalsha().
  *
  * Records are stored as JSON in the canonical `ChallengeRecord` wire
@@ -662,7 +662,7 @@ LUA;
     /**
      * The shared consume implementation of both public entry points
      * (the plain consume passes '' as the identity argument, which the
-     * Lua leaves untouched). The returned envelope is parsed ONCE by
+     * Lua leaves untouched). The returned envelope is parsed once by
      * {@see self::decodeEnvelope()}: the ChallengeRecord, the committed
      * result and the recorded operation identity are all derived from
      * a single json_decode of the same bytes.
@@ -1087,12 +1087,12 @@ LUA;
     }
 
     /**
-     * Cached sha1 of every static Lua script (SCRIPT LOAD once per
+     * Cached sha1 of every static Lua script (`SCRIPT` `LOAD` once per
      * script, cached for the storage instance's lifetime — the mirror
      * of RedisRiskStateStore's sha cache). The scripts are immutable
      * class constants, so a cached sha can never go stale within a
-     * process; a server-side SCRIPT FLUSH or restart is absorbed by
-     * the NOSCRIPT fallback below, which reloads and retries.
+     * process; a server-side `SCRIPT` `FLUSH` or restart is absorbed by
+     * the `NOSCRIPT` fallback below, which reloads and retries.
      *
      * @var array<string, string>
      */
@@ -1106,13 +1106,13 @@ LUA;
     private int $envelopeDecodes = 0;
 
     /**
-     * Run one of the class's Lua scripts through EVALSHA with the
+     * Run one of the class's Lua scripts through `EVALSHA` with the
      * cached sha instead of shipping the ~2KB source on every call
      * (the mirror of RedisRiskStateStore::runScript). The sha is
-     * established once per script per process with SCRIPT LOAD; a
-     * NOSCRIPT reply (the script cache was flushed or the server
-     * restarted) falls back to reloading — and, on phpredis, to one
-     * plain EVAL — so the observable transition semantics and the
+     * established once per script per process with `SCRIPT` `LOAD`. A
+     * `NOSCRIPT` reply (the script cache was flushed or the server
+     * restarted) falls back to reloading and, on phpredis, to one
+     * plain `EVAL`, so the observable transition semantics and the
      * error propagation of the previous EVAL-only path are unchanged.
      *
      * @param list<mixed> $args    key(s) then script arguments
@@ -1163,7 +1163,7 @@ LUA;
     }
 
     /**
-     * Whether a phpredis exception carries the server's NOSCRIPT error
+     * Whether a phpredis exception carries the server's `NOSCRIPT` error
      * (the missing-script reply that triggers the reload fallback).
      */
     private static function isNoScriptError(\RedisException $e): bool
@@ -1178,7 +1178,7 @@ LUA;
     }
 
     /**
-     * SCRIPT LOAD the body and return the server's sha. Any client
+     * `SCRIPT` `LOAD` the body and return the server's sha. Any client
      * failure propagates raw, like every other command of this class.
      */
     private function loadScript(string $script): string
@@ -1258,11 +1258,11 @@ LUA;
     /**
      * Decode the record AND the recorded logical-operation identity from
      * ONE json_decode of the same stored envelope bytes. The identity is
-     * lifted BEFORE the runtime fields are stripped (decode() alone
+     * lifted before the runtime fields are stripped: `decode()` alone
      * unsets `operation_identity`, which the strict record parse must
-     * never see), so the identical source is never parsed twice — the
-     * consume and retained-state paths used to pay a second full
-     * json_decode per call just for the identity.
+     * never see. The identical source is therefore never parsed twice,
+     * where the consume and retained-state paths used to pay a second
+     * full json_decode per call just for the identity.
      *
      * @return array{record: ChallengeRecord, identity: string|null}|null
      *         null under the same contract as {@see self::decode()}
