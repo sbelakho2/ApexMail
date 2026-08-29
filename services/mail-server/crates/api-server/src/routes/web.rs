@@ -9146,14 +9146,23 @@ mod tests {
         /// 6 digits) so the confirm/verify handlers can be exercised with
         /// a VALID code.
         fn current_totp_code(secret_bytes: &[u8]) -> String {
+            totp_code_at_offset(secret_bytes, 0)
+        }
+
+        /// A code from `offset` 30s steps away from now. The replay guard
+        /// burns the exact step a code was accepted in, so a test that both
+        /// CONFIRMS an MFA enrollment and then SIGNS IN must spend two
+        /// different steps: -1 stays inside the ±1 acceptance window while
+        /// using a different replay key.
+        fn totp_code_at_offset(secret_bytes: &[u8], step_offset: i64) -> String {
             use hmac::{Hmac, Mac};
             use sha2::Sha256;
             type HmacSha256 = Hmac<Sha256>;
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
-                .as_secs();
-            let counter = now / 30;
+                .as_secs() as i64;
+            let counter = (now / 30) + step_offset;
             let mut mac = HmacSha256::new_from_slice(secret_bytes).unwrap();
             mac.update(&counter.to_be_bytes());
             let result = mac.finalize().into_bytes();
@@ -9378,7 +9387,7 @@ mod tests {
                             .collect::<Vec<_>>()
                     );
                 });
-            let code = current_totp_code(&secret_bytes);
+            let code = totp_code_at_offset(&secret_bytes, -1);
             let verify_body = csrf_body(&state, &[("code", &code), ("email", &email)]);
             let response = login_app
                 .oneshot(
