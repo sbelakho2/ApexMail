@@ -452,9 +452,20 @@ final class RiskGateway
      * abuse. An unparseable client IP is not a risk signal and is skipped
      * too (the engine's identity derivation requires a valid IPv4/IPv6
      * address).
+     *
+     * A missing source address (null or empty — a request without a
+     * usable remoteip, e.g. a Siteverify redemption with `remoteip`
+     * omitted under binding_mode: none) has nothing to attribute the
+     * signal to: the feedback is skipped entirely, never a throw. This
+     * mirrors {@see recordFeedback()}'s unusable-IP skip, but one level
+     * up, so callers may pass a nullable IP without a TypeError under
+     * strict_types.
      */
-    public function solveOutcome(string $scope, string $ip, ?string $session, ?VerifyError $error, ?string $decisionId = null): void
+    public function solveOutcome(string $scope, ?string $ip, ?string $session, ?VerifyError $error, ?string $decisionId = null): void
     {
+        if ($ip === null || $ip === '') {
+            return;
+        }
         $event = RiskFeedback::eventFor($error);
         if ($event === null) {
             return;

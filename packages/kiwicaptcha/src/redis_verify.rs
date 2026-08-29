@@ -77,8 +77,9 @@
 //! atomic single-use enforced by the consumed-state transition:
 //!
 //! ```text
-//! token decode → runtime state (ONE GET; the record rides on the state for
-//! every non-missing kind, so the peek and the gate below are one snapshot)
+//! token decode → runtime state (ONE GET; the single record source —
+//! the record rides on the state for every non-missing kind, so the
+//! peek and the gate below are one snapshot)
 //! → cheap validation (structure, v1 gate, signature, TTL incl. the
 //! future-time bound, scope, region, policy epoch, issuer, expected request
 //! binding, IP binding, server-measured min duration) → terminal gate (a
@@ -93,6 +94,13 @@
 //! final re-validation with a fresh clock read + current expectations →
 //! leading-zero check → best-effort commit_result
 //! ```
+//!
+//! The runtime-state snapshot is the single record source on the
+//! verification and replay paths. Cheap-failure cleanup
+//! (delete-if-pending) and the other storage transitions may add
+//! further operations after the snapshot, but they never weaken the
+//! one-shot consume authority: exactly one caller can win the
+//! pending→consumed transition.
 //!
 //! # One-shot semantics (why exactly one derive per nonce)
 //!
@@ -327,6 +335,14 @@ impl r2d2::ManageConnection for StoreConnectionManager {
 /// lower bound is the longest single resume, and the lease only
 /// protects the single-derivation efficiency property, never
 /// correctness.
+///
+/// Contract: the core minimum is 1 second — the storage boundary
+/// (`validate_claim_ttl`) rejects a lower TTL, and a sub-second
+/// lease would expire before the claim is even usable (the lease
+/// would be non-functional). The bundle production policy is at
+/// least 60 seconds (the Symfony `resume_claim_ttl_secs` lower
+/// bound): the claim TTL is an efficiency bound, fencing stays
+/// correct on expiry, and a stale owner can never commit.
 const CLAIM_TTL_SECS: u64 = 60;
 
 const CONSUME_TRANSITION_LUA: &str = r#"
@@ -552,7 +568,10 @@ pub struct ConsumedState {
 /// any admission or consume: the peeked record and the terminal
 /// classification (cancelled / consumed) come from the same snapshot, so
 /// a terminal record never occupies a scarce admission slot and the
-/// retained-outcome replay never needs a second read.
+/// retained-outcome replay never needs a second read. It is the single
+/// record source for the verification and replay paths; cheap-failure
+/// cleanup and the other storage transitions may add further
+/// operations after the snapshot.
 #[derive(Debug, Clone)]
 pub enum RuntimeState {
     /// No record exists under the key (never issued, or expired away).
@@ -900,7 +919,24 @@ impl RedisChallengeStore {
     /// [`RedisChallengeStore::claim_resume_derivation`] still rejects
     /// a value below 1 second before any Redis interaction. Default:
     /// [`CLAIM_TTL_SECS`] (60 seconds), matching the PHP core.
+    ///
+    /// Contract: the core minimum is 1 second, enforced here at
+    /// construction time (the same boundary as
+    /// [`RedisChallengeStore::claim_resume_derivation`]) — a
+    /// sub-second lease would be non-functional, expiring before the
+    /// claim is usable. The bundle production policy is at least 60
+    /// seconds (the Symfony `resume_claim_ttl_secs` lower bound): the
+    /// claim TTL is an efficiency bound, fencing stays correct on
+    /// expiry, and a stale owner can never commit.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `ttl_secs` is 0.
     pub fn with_resume_claim_ttl(mut self, ttl_secs: u64) -> Self {
+        assert!(
+            ttl_secs >= 1,
+            "the resume claim TTL must be at least 1 second"
+        );
         self.resume_claim_ttl_secs = ttl_secs;
         self
     }
@@ -1076,8 +1112,11 @@ impl RedisChallengeStore {
     /// Load a record without consuming it (Redis GET) — the legacy
     /// standalone peek. The verify flow no longer calls this: the
     /// combined [`Self::runtime_state`] read carries the record for every
-    /// non-missing kind, so verification costs one GET instead of two.
-    /// Kept for the other callers (resume-path helpers, tests).
+    /// non-missing kind, so the verification admission path costs one
+    /// GET instead of two. Cheap-failure cleanup and the other
+    /// storage transitions may add further operations after that
+    /// snapshot. Kept for the other callers (resume-path helpers,
+    /// tests).
     ///
     /// Returns `None` when the key is absent, when the stored value is not
     /// valid JSON, or when it does not map onto a [`ChallengeRecord`] — a
@@ -1818,6 +1857,17 @@ impl fmt::Debug for RedisChallengeStore {
 /// derived and never consume the record. Only Argon2id records are gated
 /// (SHA-256 records are cheap to verify and never gated), matching the
 /// PHP verifier.
+///
+/// Lease-duration contract: the lease must exceed the maximum
+/// verification runtime by a safety margin. The crate ships no
+/// concrete gate, so the duration is the implementor's choice; the
+/// Symfony bundle makes its `argon2_lease_ms` configurable and
+/// refuses too-short values at compile time, and the same invariant
+/// applies here. A lease shorter than the runtime lets a second
+/// verification displace the first before its derive finishes. The
+/// hard Argon2id ceilings (memory 65536 KiB, time cost 16,
+/// parallelism 4) bound the worst-case derivation, and a production
+/// lease should exceed that bound with margin.
 pub trait ArgonAdmissionGate: Send + Sync {
     /// Try to acquire a capacity lease for one verification of `record`.
     ///
@@ -1964,7 +2014,9 @@ impl ProductionVerifier {
     /// Add an Argon2id admission gate (default: none). `acquire` returning
     /// `Ok(None)` rejects with [`VerifyError::CapacityExceeded`]; returning
     /// `Err(_)` rejects with [`VerifyError::AdmissionUnavailable`] — both
-    /// before any hash derivation, without consuming the record.
+    /// before any hash derivation, without consuming the record. The
+    /// gate's lease must exceed the maximum verification runtime by a
+    /// safety margin — see the [`ArgonAdmissionGate`] contract.
     pub fn with_argon_gate(mut self, gate: impl ArgonAdmissionGate + 'static) -> Self {
         self.argon_gate = Some(Box::new(gate));
         self
@@ -2085,9 +2137,11 @@ impl ProductionVerifier {
     ///   outcome). There is no implicit "None disables" — the bypass
     ///   must be named, exactly like the PHP `RequestBindingExpectation`.
     ///
-    /// Flow: decode → runtime state (ONE GET: the record rides on the
-    /// state for every non-missing kind, so the peek and the
-    /// runtime-state gate fold into a single snapshot) → cheap
+    /// Flow: decode → runtime state (ONE GET: the single record
+    /// source — the record rides on the state for every non-missing
+    /// kind, so the peek and the runtime-state gate fold into one
+    /// snapshot; cheap-failure cleanup may add a further
+    /// delete-if-pending transition) → cheap
     /// validation on that record → terminal gate (a cancelled record
     /// fails as RecordNotFound and a consumed record resolves through
     /// the identity gate, both from the same snapshot with no second
@@ -2150,11 +2204,15 @@ impl ProductionVerifier {
             Err(_) => return VerifyOutcome::Invalid(VerifyError::MalformedToken),
         };
 
-        // 2. The single combined read (ONE GET): the runtime state
-        //    carries the decoded record for every non-missing kind, so
-        //    the peek and the runtime-state gate below fold into one
-        //    snapshot — the round-95 mirror of the PHP combined read,
-        //    where the verifier skips find() entirely. Missing →
+        // 2. The single runtime-state snapshot (ONE GET): the runtime
+        //    state carries the decoded record for every non-missing
+        //    kind, so the peek and the runtime-state gate below fold
+        //    into one snapshot — the round-95 mirror of the PHP
+        //    combined read, where the verifier skips find() entirely.
+        //    This snapshot is the single record source on the
+        //    verification path; cheap-failure cleanup (step 3) and the
+        //    other transitions below may add further storage
+        //    operations. Missing →
         //    RecordNotFound — the record was never issued, was already
         //    consumed (consumed is classified below), or expired away;
         //    an undecodable value also reads as Missing (the lenient
@@ -4023,6 +4081,36 @@ mod tests {
             err.kind(),
             redis::ErrorKind::InvalidClientConfig,
             "a TTL of 0 is a configuration error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn with_resume_claim_ttl_rejects_zero_at_construction() {
+        // The builder enforces the core minimum (>= 1 second) at
+        // construction time, like the other config setters
+        // (with_pool_size): a sub-second lease would be non-functional.
+        // No Redis connection is ever attempted (the pool is lazy).
+        let store = RedisChallengeStore::new(
+            redis::Client::open("redis://127.0.0.1:1").unwrap(),
+            "kiwitest:builder-ttl:",
+        );
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            store.with_resume_claim_ttl(0);
+        }));
+        assert!(panic.is_err(), "a TTL of 0 must panic at construction");
+    }
+
+    #[test]
+    fn with_resume_claim_ttl_accepts_one_and_defaults_to_sixty() {
+        let store = RedisChallengeStore::new(
+            redis::Client::open("redis://127.0.0.1:1").unwrap(),
+            "kiwitest:builder-ttl:",
+        );
+        assert_eq!(store.resume_claim_ttl_secs(), CLAIM_TTL_SECS);
+        assert_eq!(
+            store.with_resume_claim_ttl(1).resume_claim_ttl_secs(),
+            1,
+            "the core minimum of 1 second is accepted"
         );
     }
 

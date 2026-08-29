@@ -1743,6 +1743,35 @@ final class VerifierResumeTest extends TestCase
         self::assertTrue($outcome->isOk(), sprintf('the configured-TTL resume must derive and commit, got %s', $outcome->code()));
         self::assertSame(300, $configured->lastTtl, 'the configured claim TTL reaches the storage verbatim');
     }
+
+    public function testResumeClaimTtlBelowOneRejectedAtConstruction(): void
+    {
+        // The core minimum is 1 second: the storage boundary rejects a
+        // claim TTL below 1, and the verifier enforces the same floor
+        // at construction, so a non-functional lease can never be
+        // built (the bundle production policy stays >= 60 via its
+        // Symfony config node).
+        foreach ([0, -1, -60] as $bad) {
+            try {
+                new Verifier(new ArrayStorage(), resumeClaimTtlSecs: $bad);
+                self::fail('a resume claim TTL below 1 must be rejected at construction');
+            } catch (\InvalidArgumentException) {
+                // expected
+            }
+        }
+        self::assertTrue(true);
+    }
+
+    public function testResumeClaimTtlOneIsAcceptedAsTheCoreMinimum(): void
+    {
+        // 1 second is the documented core minimum, accepted by both
+        // the storage boundary and the verifier. The claim TTL is an
+        // efficiency bound; fencing stays correct on expiry either
+        // way, while the bundle production policy keeps >= 60 in
+        // real deployments.
+        $verifier = new Verifier(new ArrayStorage(), resumeClaimTtlSecs: 1);
+        self::assertInstanceOf(Verifier::class, $verifier);
+    }
 }
 
 /**

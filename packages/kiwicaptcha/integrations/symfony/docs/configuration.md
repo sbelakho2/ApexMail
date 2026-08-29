@@ -181,6 +181,29 @@ is never forced) are the privacy contract; see
     #                                    # weighted-fair scheduler, and it
     #                                    # must be strictly below the
     #                                    # global cap (refused otherwise).
+    #                                    # Anti-monopoly across scopes
+    #                                    # requires a global concurrency of
+    #                                    # at least 2: with a global cap of
+    #                                    # exactly 1 there is only one
+    #                                    # shared slot, so no implementation
+    #                                    # can reserve capacity for another
+    #                                    # scope.
+    # argon2_lease_ms: 45000              # tokenized Redis lease lifetime in
+    #                                    # ms; must exceed
+    #                                    # argon2_max_verification_runtime_ms
+    #                                    # by the 5000 ms safety margin
+    #                                    # (compiled, see operations.md).
+    # argon2_max_verification_runtime_ms: 30000
+    #                                    # maximum wall-clock a single Argon2
+    #                                    # verification derivation may take
+    #                                    # in this deployment, in ms. The
+    #                                    # lease must exceed it by the 5000
+    #                                    # ms safety margin (defaults: 45000
+    #                                    # > 30000 + 5000 = 35000), enforced
+    #                                    # at container compile time; the
+    #                                    # runtime cap is a deployment bound
+    #                                    # only, never enforced per-request
+    #                                    # inside the blocking hash.
     # argon2_semaphore_namespace: '%kernel.project_dir%'
     #                                       # per-deployment discriminator for
     #                                       # the Redis lease set and the
@@ -196,16 +219,20 @@ is never forced) are the privacy contract; see
     #                                       # storage's own client is reused
     #                                       # if storage is RedisStorage
     # strict_kid_verification: false        # OPTIONAL strict current-kid
-    #                                       # verification: when true, the
-    #                                       # verifier resolves EVERY
-    #                                       # record's kid against exactly
-    #                                       # the current signing key even
-    #                                       # with an empty historical map
-    #                                       # (any other kid -> UnknownKid
-    #                                       # from the first deployment).
-    #                                       # Default false keeps the
-    #                                       # legacy any-kid single-secret
-    #                                       # semantics (see
+    #                                       # verification: when true,
+    #                                       # strict keyring resolution is
+    #                                       # enabled even before the first
+    #                                       # rotation: the current kid must
+    #                                       # match from the first deployment
+    #                                       # (any other kid -> UnknownKid),
+    #                                       # and historical keys keep
+    #                                       # verifying under rotation grace
+    #                                       # when secrets_by_kid is
+    #                                       # populated (historical +
+    #                                       # current, never the current key
+    #                                       # alone). Default false keeps
+    #                                       # the legacy any-kid
+    #                                       # single-secret semantics (see
     #                                       # security-hardening.md).
     # resume_claim_ttl_secs: 60             # recovery-derivation claim lease
     #                                       # (min 60): must cover the

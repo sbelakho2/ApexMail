@@ -77,6 +77,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
 {
     private const ARRAY_STORAGE_ID = 'kiwi_captcha.storage.array';
 
+    /**
+     * The mechanical safety margin (ms) between the Argon admission lease
+     * (argon2_lease_ms) and the deployment's maximum verification runtime
+     * (argon2_max_verification_runtime_ms): the lease must exceed the
+     * runtime by at least this margin, or the container refuses to
+     * compile. The margin absorbs clock skew and lease bookkeeping so the
+     * lease-expiry-before-hash-termination invariant holds by
+     * construction, not by operator promise.
+     */
+    private const ARGON_LEASE_SAFETY_MARGIN_MS = 5000;
+
     public function getAlias(): string
     {
         return 'kiwi_captcha';
@@ -282,6 +293,35 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 ));
             }
         }
+
+        // The Argon admission lease must outlive any verification: the
+        // Redis semaphore stores leases in a ZSET with `ZREMRANGEBYSCORE`
+        // pruning and no renewal, so under CPU starvation a lease that
+        // expires while the Argon hash still runs admits more derivations
+        // than the configured concurrency cap (positive feedback: more
+        // contention -> longer hashes -> more expiries). Renewal during
+        // the blocking native hash is impractical in PHP, so the
+        // invariant is made mechanical: the deployment bounds the
+        // maximum verification runtime
+        // (argon2_max_verification_runtime_ms) and the lease must exceed
+        // it by the safety margin, enforced at container compile time in
+        // every environment (a misconfiguration is fatal everywhere,
+        // exactly like the other argon validations). The runtime cap is
+        // a deployment bound only: it is never enforced per-request
+        // inside the blocking hash, and the semaphore keeps using
+        // argon2_lease_ms as today.
+        if ($config['argon2_lease_ms'] <= $config['argon2_max_verification_runtime_ms'] + self::ARGON_LEASE_SAFETY_MARGIN_MS) {
+            throw new \LogicException(sprintf(
+                'kiwi_captcha.argon2_lease_ms %d must exceed argon2_max_verification_runtime_ms %d by the safety margin of %d ms (%d <= %d + %d = %d): a Redis admission lease that can expire while an Argon2 verification is still running admits more derivations than the configured concurrency cap (ZREMRANGEBYSCORE pruning, no lease renewal), and the positive-feedback cycle (more contention -> longer hashes -> more expiries) amplifies it. Raise argon2_lease_ms or lower argon2_max_verification_runtime_ms; the runtime cap is the mechanical bound that guarantees the lease outlives any permitted verification.',
+                $config['argon2_lease_ms'],
+                $config['argon2_max_verification_runtime_ms'],
+                self::ARGON_LEASE_SAFETY_MARGIN_MS,
+                $config['argon2_lease_ms'],
+                $config['argon2_max_verification_runtime_ms'],
+                self::ARGON_LEASE_SAFETY_MARGIN_MS,
+                $config['argon2_max_verification_runtime_ms'] + self::ARGON_LEASE_SAFETY_MARGIN_MS,
+            ));
+        }
         // A static transaction binding must satisfy the same shape rule
         // the controller enforces per request (1..128 bytes of
         // [A-Za-z0-9._:-]), so a broken static value is refused at compile
@@ -392,10 +432,18 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // items per process, so under PHP-FPM the guard above would
             // pass while the rate-limit state is request-local. When the
             // pool's class is resolvable at extension time and is (a
-            // subclass of) ArrayAdapter, refuse in production with an
-            // actionable message. External or unresolvable pool services
-            // pass (their class cannot be inspected here).
-            if (($config['rate_limit_cache'] ?? null) !== null) {
+            // subclass of) ArrayAdapter, refuse in production — but only
+            // when the pool is the effective limiter backend: with a
+            // Redis client wired the atomic distributed limiter wins and
+            // the pool is never selected, and with both temporal limits
+            // disabled the limiter is not wired at all, so an
+            // in-memory pool is harmless in both cases. External or
+            // unresolvable pool services pass (their class cannot be
+            // inspected here).
+            if (($config['rate_limit_cache'] ?? null) !== null
+                && $redisRef === null
+                && ($config['rate_limit'] > 0 || $config['rate_limit_global'] > 0)
+            ) {
                 $poolClass = $this->definitionClass($config['rate_limit_cache'], $container);
                 if ($poolClass !== null && \is_a($poolClass, ArrayAdapter::class, true)) {
                     throw new \LogicException(sprintf(

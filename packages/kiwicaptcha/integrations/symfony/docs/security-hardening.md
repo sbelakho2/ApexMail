@@ -235,7 +235,8 @@ The bundle defines three strictly separated credential classes:
 
 With an empty `secrets_by_kid` map the core's legacy single-secret mode accepts ANY record kid under the current secret.
 That is the compatible default (`strict_kid_verification: false`), and it stays available.
-The hardening option is `strict_kid_verification: true`: the effective keyring is always `[currentKid => currentSecret]`, even with an empty historical map, so the verifier strictly resolves `record.kid == currentKid` from the very first deployment.
+The hardening option is `strict_kid_verification: true`: strict keyring resolution is enabled even before the first rotation, so the verifier strictly resolves `record.kid == currentKid` from the very first deployment.
+With a non-empty historical map strict mode returns historical + current (rotation grace preserved), never the current key alone.
 Any other kid fails with `UnknownKid` before signature work, so an issuer holding the same HMAC secret under a different kid cannot verify unless issuer/region isolation is configured.
 Strict mode changes nothing once a historical ring exists, because the rotation ring is already exact per kid.
 The Siteverify security-context digest reflects the strict ring automatically, so a cached provider result cannot outlive a mode switch.
@@ -434,6 +435,7 @@ During an Argon2id saturation storm the counter can never grow unboundedly.
 `argon2_max_per_tenant` (unset by default; the extension derives `max(1, global cap - 1)`, so with the default global cap of 2 the effective cap is 1; min 1 when explicit) gives every scope string its own Argon2id admission cap.
 The semaphore checks a per-scope lease set (`{kiwicaptcha:argon2:leases:<ns>}:<scope>`) in addition to the global `argon2_max_concurrent_verifications` cap.
 It is a concentration cap, not a guaranteed share and not a weighted-fair scheduler: with per-tenant below global it prevents one busy scope from monopolizing the shared capacity, but it never reserves a specific share for any tenant.
+Anti-monopoly across scopes requires a global concurrency of at least 2: with a global cap of exactly 1 there is only one shared slot, so no implementation can reserve capacity for another scope.
 Explicit values must be strictly below the global cap when the global cap is positive (a cap at or above the global cap can never bind, so the config tree refuses it).
 The global cap stays the deployment-wide memory invariant.
 The validator passes the constraint scope into `acquire()` (via the request-scope-aware gate wrapper).

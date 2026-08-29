@@ -338,13 +338,12 @@ final class ProdArrayStorageGuardTest extends TestCase
         );
     }
 
-    public function testProductionArrayAdapterRateLimitCacheIsRefusedEvenWithoutTemporalLimits(): void
+    public function testProductionArrayAdapterRateLimitCacheCompilesWithBothTemporalLimitsDisabled(): void
     {
-        // The refusal is unconditional: an in-memory pool configured for
-        // rate limiting is a config trap whether or not a limit is
-        // currently nonzero.
-        $this->expectException(\LogicException::class);
-        $this->expectExceptionMessage('my.cache.pool');
+        // Round-96: the in-memory-adapter refusal fires only when the
+        // pool is the effective limiter backend. With both temporal
+        // limits disabled the limiter is not wired at all, so an
+        // in-memory pool is harmless and the config compiles.
         $container = new ContainerBuilder();
         $container->setParameter('kernel.environment', 'prod');
         $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
@@ -354,12 +353,45 @@ final class ProdArrayStorageGuardTest extends TestCase
                 'secret_key' => str_repeat('a', 32),
                 'storage' => 'my.psr6.storage',
                 'allow_best_effort_storage' => true,
+                'rate_limit' => 0,
+                'rate_limit_global' => 0,
                 'rate_limit_cache' => 'my.cache.pool',
                 'allow_local_argon_admission_fallback' => true,
                 'public_base_url' => 'https://captcha.example.com',
             ]],
             $container,
         );
+
+        self::assertFalse($container->hasDefinition('kiwi_captcha.rate_limiter'), 'both temporal limits disabled means the limiter is not wired');
+    }
+
+    public function testProductionArrayAdapterRateLimitCacheCompilesWhenRedisIsWired(): void
+    {
+        // Round-96: the in-memory-adapter refusal fires only when the
+        // pool is the effective limiter backend. With a Redis client
+        // wired, the atomic distributed limiter wins and the pool is
+        // never selected, so an in-memory pool is harmless and the
+        // config compiles.
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
+        $container->setDefinition('my.cache.pool', new Definition(ArrayAdapter::class, []));
+        $container->setDefinition('my.redis.client', new Definition(\Predis\Client::class, [['host' => '127.0.0.1']]));
+        (new KiwiCaptchaExtension())->load(
+            [[
+                'secret_key' => str_repeat('a', 32),
+                'storage' => 'my.psr6.storage',
+                'allow_best_effort_storage' => true,
+                'rate_limit' => 10,
+                'rate_limit_global' => 0,
+                'rate_limit_cache' => 'my.cache.pool',
+                'redis_service' => 'my.redis.client',
+                'public_base_url' => 'https://captcha.example.com',
+            ]],
+            $container,
+        );
+
+        self::assertTrue($container->hasDefinition('kiwi_captcha.rate_limiter'), 'the atomic distributed limiter is wired from the Redis client');
     }
 
     public function testProductionArrayAdapterSubclassRateLimitCacheIsRefused(): void

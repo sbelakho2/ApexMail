@@ -6,17 +6,27 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
 use BelConsulting\KiwiCaptchaBundle\Risk\RequestBindingAuthorityInterface;
+use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
+use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Security\RedisAdmissionSemaphore;
 use BelConsulting\KiwiCaptchaBundle\Security\RequestScopeAdmissionGate;
 use KiwiCaptcha\VerificationAdmissionGate;
+use KiwiCaptcha\BindingMode;
+use KiwiCaptcha\Risk\AdaptiveRiskEngine;
+use KiwiCaptcha\Risk\Network\CidrNetworkClassifier;
+use KiwiCaptcha\Risk\RiskEventKind;
+use KiwiCaptcha\Risk\RiskIdentityFactory;
 use KiwiCaptcha\Risk\RiskKeys;
+use KiwiCaptcha\Risk\RiskPolicy;
+use KiwiCaptcha\Risk\RiskScorer;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyMetadata;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyMetadataStore;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\ArraySiteVerifyIdempotencyStore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
@@ -96,11 +106,42 @@ final class SiteVerifyTest extends TestCase
         ?\BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore $idempotencyStore = null,
         ?ArrayStorage $storage = null,
         float $waitSecs = 2.0,
+        ?RiskGateway $riskGateway = null,
     ): SiteVerifyController {
         $storage ??= new ArrayStorage();
         $verifier = new Verifier($storage);
 
-        return new SiteVerifyController($verifier, self::SECRET, $secrets, $storage, null, $metadataStore, $idempotencyStore, null, $waitSecs);
+        return new SiteVerifyController($verifier, self::SECRET, $secrets, $storage, null, $metadataStore, $idempotencyStore, null, $waitSecs, 0, null, null, null, null, null, null, riskGateway: $riskGateway);
+    }
+
+    /**
+     * The bundle risk stack with an in-memory fake store (the same
+     * wiring as RiskIntegrationTest): a real RiskGateway over the
+     * adaptive engine, so solveOutcome feedback lands in
+     * `$store->observations`.
+     * The no-remoteip tests assert "no risk source event recorded"
+     * through the store.
+     *
+     * @return array{gateway: RiskGateway, store: FakeRiskStateStore}
+     */
+    private function riskStack(): array
+    {
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $identityFactory = new RiskIdentityFactory($keys);
+        $classifier = new CidrNetworkClassifier([]);
+        $scorer = new RiskScorer();
+        $policy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $store = new FakeRiskStateStore();
+        $engine = new AdaptiveRiskEngine($store, $classifier, $identityFactory, $scorer, $policy, $keys);
+        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], policy: $policy);
+
+        return ['gateway' => $gateway, 'store' => $store];
     }
 
     /**
@@ -734,6 +775,110 @@ final class SiteVerifyTest extends TestCase
         $json = json_decode((string) $replay->getContent(), true);
         self::assertFalse($json['success'], 'a replayed response must not succeed again');
         self::assertSame(['timeout-or-duplicate'], $json['error-codes']);
+    }
+
+    /**
+     * The round-96 no-remoteip matrix: with risk enabled, an omitted
+     * `remoteip` must never reach the risk gateway's feedback with a
+     * null source address.
+     * `solveOutcome()` skips the feedback instead of throwing under
+     * strict_types, so the provider response is the ordinary one:
+     * success under binding_mode: none, or the MissingClientIp
+     * vocabulary for a bound challenge, never a 503 internal-error.
+     */
+    public function testRiskEnabledBindingNoneValidTokenWithoutRemoteipSucceedsConsumesAndRecordsNoRiskEvent(): void
+    {
+        ['gateway' => $gateway, 'store' => $store] = $this->riskStack();
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120, bindingMode: BindingMode::None), $storage);
+        $challenge = $issuer->issue('login', '127.0.0.1');
+        $solution = $this->solveSolution($storage->find($challenge->nonce));
+        usleep(((int) $challenge->minDurationMs + 10) * 1000);
+        $controller = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, riskGateway: $gateway);
+
+        // binding_mode: none means a valid token needs no remoteip: the
+        // verification succeeds and the token is consumed. Before the
+        // round-96 fix the post-verify feedback TypeError turned this
+        // committed redemption into a 503 internal-error, losing the
+        // redemption for a caller without an idempotency key.
+        $first = $controller->siteverify($this->siteverifyRequest(['response' => $solution, 'secret' => self::SITEVERIFY_SECRET]));
+        $body = json_decode((string) $first->getContent(), true);
+        self::assertSame(200, $first->getStatusCode());
+        self::assertTrue($body['success'] ?? null, 'a valid token under binding_mode: none must succeed with remoteip omitted: '.(string) $first->getContent());
+        self::assertSame([], $body['error-codes'] ?? null);
+
+        // The token is redeemed: a second redemption of the same token
+        // answers the duplicate vocabulary (AlreadyConsumed semantics),
+        // never success again.
+        $second = $controller->siteverify($this->siteverifyRequest(['response' => $solution, 'secret' => self::SITEVERIFY_SECRET]));
+        $replayBody = json_decode((string) $second->getContent(), true);
+        self::assertFalse($replayBody['success'] ?? null, 'the first redemption must consume the token');
+        self::assertSame(['timeout-or-duplicate'], $replayBody['error-codes'] ?? null);
+
+        // No risk source event: without a remoteip there is no source to
+        // attribute the signal to — the feedback is skipped, never thrown.
+        self::assertSame([], $store->observations, 'an omitted remoteip must record NO risk source event (the feedback is skipped, never thrown)');
+    }
+
+    public function testRiskEnabledIpBoundChallengeWithoutRemoteipIsProviderInvalidResponseNot503(): void
+    {
+        ['gateway' => $gateway, 'store' => $store] = $this->riskStack();
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
+        $challenge = $issuer->issue('login', '127.0.0.1');
+        $solution = $this->solveSolution($storage->find($challenge->nonce));
+        usleep(((int) $challenge->minDurationMs + 10) * 1000);
+        $controller = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, riskGateway: $gateway);
+
+        // A bound challenge without a remoteip fails closed in the core
+        // (MissingClientIp). The feedback for that outcome must be
+        // skipped, not thrown: the provider answers the normal
+        // invalid-input-response, never a 503 internal-error.
+        $response = $controller->siteverify($this->siteverifyRequest(['response' => $solution, 'secret' => self::SITEVERIFY_SECRET]));
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertNotSame(503, $response->getStatusCode(), 'a missing remoteip on a bound challenge must never surface as the retryable 503');
+        self::assertSame(200, $response->getStatusCode());
+        self::assertFalse($body['success'] ?? null);
+        self::assertSame(['invalid-input-response'], $body['error-codes'] ?? null, 'the MissingClientIp outcome maps to the normal provider invalid-response vocabulary');
+        self::assertSame([], $store->observations, 'a missing remoteip must record NO risk source event');
+    }
+
+    public function testRiskEnabledMalformedTokenWithoutRemoteipIsDeterministicProviderInvalidResponseNever503(): void
+    {
+        ['gateway' => $gateway, 'store' => $store] = $this->riskStack();
+        $controller = $this->controller(riskGateway: $gateway);
+
+        // A malformed token without a remoteip: the MalformedToken
+        // feedback has no source address to attribute, so it is skipped —
+        // the deterministic provider invalid response is preserved, never
+        // a 503.
+        $response = $controller->siteverify($this->siteverifyRequest(['response' => 'not-a-kiwi-token', 'secret' => self::SITEVERIFY_SECRET]));
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertNotSame(503, $response->getStatusCode(), 'a malformed token without remoteip must never surface as the retryable 503');
+        self::assertSame(200, $response->getStatusCode());
+        self::assertFalse($body['success'] ?? null);
+        self::assertSame(['invalid-input-response'], $body['error-codes'] ?? null);
+        self::assertSame([], $store->observations, 'the MalformedToken feedback must be skipped without a source address, never thrown');
+    }
+
+    public function testRiskEnabledRemoteipPresentRecordsTheRiskEvent(): void
+    {
+        ['gateway' => $gateway, 'store' => $store] = $this->riskStack();
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
+        $challenge = $issuer->issue('login', '203.0.113.7');
+        $solution = $this->solveSolution($storage->find($challenge->nonce));
+        usleep(((int) $challenge->minDurationMs + 10) * 1000);
+        $controller = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, riskGateway: $gateway);
+
+        // The positive path is unchanged: with a usable source address the
+        // SolveSuccess feedback IS recorded.
+        $response = $controller->siteverify($this->siteverifyRequest(['response' => $solution, 'secret' => self::SITEVERIFY_SECRET, 'remoteip' => '203.0.113.7']));
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame(200, $response->getStatusCode());
+        self::assertTrue($body['success'] ?? null, 'the existing positive path must stay green: '.(string) $response->getContent());
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $store->observations);
+        self::assertSame([RiskEventKind::SolveSuccess], $events, 'a successful solve with a usable source address records the SolveSuccess risk event');
     }
 
     public function testCrossSecretScopeEscalationIsRejected(): void

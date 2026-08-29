@@ -64,7 +64,10 @@ namespace KiwiCaptcha;
  * {@see ChallengeRuntimeStateReadableInterface} seam, implemented by
  * the Redis and array backends) reads the record and the terminal
  * state in a single snapshot GET that doubles as the peek (round-95
- * audit fix). Verification costs exactly one record read. A
+ * audit fix). The runtime-state snapshot is the single record source
+ * on the verification and replay paths. Cheap-failure cleanup and
+ * exotic-storage fallbacks may add further storage transitions, which
+ * never weaken the one-shot consume authority. A
  * cancelled or missing record answers RecordNotFound directly. An
  * already-consumed record resolves through the shared identity-gated
  * resolution of the consume-returned envelope, decoded from the same
@@ -164,6 +167,12 @@ final class Verifier
      * The default resume re-derivation claim lease, in seconds, the
      * constructor's `$resumeClaimTtlSecs` parameter default (the bundle
      * can raise it via the `resume_claim_ttl_secs` config value). The
+     * core minimum is 1 second: the storage boundary rejects a TTL
+     * below 1, where the lease would be non-functional. The bundle
+     * production policy is >= 60 seconds: the Symfony config node
+     * enforces min 60, so a legitimate derivation can never outlive
+     * its own claim. The claim TTL is an efficiency bound — fencing
+     * stays correct on expiry, a stale owner can never commit. The
      * claim must cover the maximum supported derivation duration so a
      * legitimate derivation never outlives its own claim. 60 seconds is
      * far beyond the worst Argon2id derivation under the process
@@ -257,16 +266,22 @@ final class Verifier
          * configurable override of {@see self::RESUME_CLAIM_TTL_SECS}
          * (the bundle wires the `resume_claim_ttl_secs` config value
          * here; the default keeps the Rust `CLAIM_TTL_SECS` mirror at
-         * 60). The lease must cover the maximum supported derivation
-         * duration so a legitimate derivation never outlives its own
-         * claim; fencing stays correct when it expires, because a stale
-         * owner can never commit through a claim it no longer holds.
-         * The TTL exists to preserve the single-derivation efficiency
-         * property. A severely CPU-starved host could exceed the
-         * default in one Argon2id derivation, so the conservative lower
-         * bound is the maximum supported derivation duration under the
-         * process ceilings ({@see self::MAX_ARGON_MEMORY_KIB} x
-         * {@see self::MAX_ARGON_TIME}); operators may raise it.
+         * 60). The core minimum is 1 second: the storage boundary
+         * rejects a TTL below 1, where the lease would be
+         * non-functional, and a value below 1 throws an
+         * InvalidArgumentException at construction. The bundle
+         * production policy is >= 60 seconds, enforced by its Symfony
+         * config node, so a legitimate derivation can never outlive
+         * its own claim. The lease must cover the maximum supported
+         * derivation duration so a legitimate derivation never outlives
+         * its own claim; fencing stays correct when it expires, because
+         * a stale owner can never commit through a claim it no longer
+         * holds. The TTL exists to preserve the single-derivation
+         * efficiency property. A severely CPU-starved host could exceed
+         * the default in one Argon2id derivation, so the conservative
+         * lower bound is the maximum supported derivation duration
+         * under the process ceilings ({@see self::MAX_ARGON_MEMORY_KIB}
+         * x {@see self::MAX_ARGON_TIME}); operators may raise it.
          */
         private readonly int $resumeClaimTtlSecs = self::RESUME_CLAIM_TTL_SECS,
     ) {
@@ -297,6 +312,11 @@ final class Verifier
                     'revokedKids values must be positive integer kid values 1..N'
                 );
             }
+        }
+        if ($resumeClaimTtlSecs < 1) {
+            throw new \InvalidArgumentException(
+                'resumeClaimTtlSecs must be >= 1'
+            );
         }
         // A non-atomic storage (the {@see NonAtomicStorageInterface}
         // capability marker, e.g. the PSR-6 backend) keeps best-effort
@@ -417,8 +437,10 @@ final class Verifier
         // retained consumed envelope — from one GET. The old flow read
         // the same key three times: find() here, runtimeState() at
         // step 7b, consumedState() on the consumed branch. The cheap
-        // phase below and the terminal-state gate at step 7b therefore
-        // consume the exact same snapshot, never a second read. A
+        // phase below and the terminal-state gate at step 7b consume
+        // the exact same snapshot on the main path; only the
+        // cheap-failure cleanup transitions and the exotic
+        // no-envelope fallback add further storage operations. A
         // storage without the capability keeps the legacy find() peek
         // byte-identically.
         $runtime = null;
@@ -619,11 +641,14 @@ final class Verifier
         }
 
         // 7b. Terminal-state resolution before the Argon admission gate
-        //     (round-94 audit fix, single-snapshot since round-95): a
+        //     (round-94 audit fix, single-snapshot on the main path
+        //     since round-95): a
         //     cancelled or already-consumed record must never acquire a
         //     scarce admission slot, and a terminal record's outcome is
         //     fully determined. The gate now decides on the same
-        //     snapshot that produced the peek, so no second read occurs. A
+        //     snapshot that produced the peek, so no second read occurs
+        //     on the main path (the exotic no-envelope fallback below
+        //     is the only re-read). A
         //     cancelled record is never consumable, so a well-formed
         //     token for it always resolved to RecordNotFound via the
         //     consume transition; the same verdict is answered directly

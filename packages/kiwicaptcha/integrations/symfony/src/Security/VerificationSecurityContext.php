@@ -22,10 +22,13 @@ namespace BelConsulting\KiwiCaptchaBundle\Security;
  * kid above the newest ring key is unknown. With an empty historical
  * map the ring stays empty: the core's legacy single-secret path stays,
  * verify() with the current secret keeps the pre-rotation behavior
- * byte-for-byte. With strictKidMode enabled the ring is always
- * [currentKid => currentSecret] even when the historical map is empty,
- * so the verifier strictly resolves record.kid == currentKid from the
- * very first deployment (any other kid -> UnknownKid).
+ * byte-for-byte. With strictKidMode enabled, strict keyring resolution
+ * is enabled even before the first rotation: the ring is always
+ * [currentKid => currentSecret] even when the historical map is empty.
+ * The verifier then strictly resolves record.kid == currentKid from
+ * the very first deployment (any other kid -> UnknownKid). With a
+ * non-empty historical map strict mode returns historical + current
+ * (rotation grace preserved), never the current key alone.
  *
  * contextDigest() hashes a versioned canonical serialization of the
  * whole signing context. It covers a version marker, the issuer and
@@ -74,9 +77,11 @@ final class VerificationSecurityContext
      * map merged with the current signing key, numerically sorted by
      * kid. Empty when there are no historical secrets, which keeps the
      * core's legacy single-secret verification path untouched. With
-     * strictKidMode enabled the ring is always the current key alone, so
-     * the verifier strictly resolves record.kid == currentKid even with
-     * an empty historical map.
+     * strictKidMode enabled the ring is always the current key even when
+     * the historical map is empty, so the verifier strictly resolves
+     * record.kid == currentKid from the first deployment.
+     * With a non-empty historical map the ring stays historical +
+     * current (rotation grace preserved).
      *
      * @return array<int, string>
      */
