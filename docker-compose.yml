@@ -1369,10 +1369,10 @@ secrets:
   postgres_password:
     file: ./secrets/postgres_password.txt
   redis_password:
+    file: ./secrets/redis_password.txt
   # redis_exporter's REDIS_PASSWORD_FILE expects a JSON-encoded value.
   redis_password_json:
     file: ${PROD_REDIS_PASSWORD_JSON_FILE:?PROD_REDIS_PASSWORD_JSON_FILE is required in production}
-    file: ./secrets/redis_password.txt
   clickhouse_password:
     file: ./secrets/clickhouse_password.txt
 
