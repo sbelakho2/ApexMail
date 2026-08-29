@@ -40,9 +40,11 @@ compactor:
 # ── Query-frontend / Search ─────────────────────────────────────────────────
 # Enables trace search functionality (required for Grafana Tempo datasource
 # search and traceQL queries).
-# query_frontend.search: the pinned image accepts no fields here that are
-# worth setting; defaults enable TraceQL search.
+# query_frontend: the pinned image defaults several knobs to 0 without an
+# explicit value; the classic defaults keep TraceQL search usable.
 query_frontend:
+  max_batch_size: 5
+  max_outstanding_per_tenant: 100
 
 querier:
   search:
