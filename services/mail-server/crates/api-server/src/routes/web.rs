@@ -9037,7 +9037,13 @@ mod tests {
             // keygen) so `session_cookie_for_user` succeeds for the login
             // cases.
             let key_pair = apexmail_lib::dkim::generate_dkim_keypair().expect("rsa keypair");
-            let redis = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
+            // Honor the CI-provided ephemeral Redis like web_test_state does:
+            // with the dead default the MFA replay guard silently degrades to
+            // its in-process fallback, which tests cannot clear between
+            // phases (and which differs from the CI-deployed behavior).
+            let redis_url =
+                std::env::var("TEST_REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:1".into());
+            let redis = deadpool_redis::Config::from_url(&redis_url)
                 .create_pool(Some(deadpool_redis::Runtime::Tokio1))
                 .expect("lazy redis pool");
             let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
