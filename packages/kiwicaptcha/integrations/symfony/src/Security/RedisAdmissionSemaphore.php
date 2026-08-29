@@ -39,10 +39,10 @@ final class RedisAdmissionSemaphore implements VerificationAdmissionGate
     private const DEFAULT_LEASE_MS = 45_000;
 
     /**
-     * Atomic acquire with the bounded waiters guard and the per-scope
-     * budget:
+     * Atomic acquire with the bounded saturation-pressure counter and the
+     * per-scope concentration cap:
      *   KEYS[1]  = lease set key (global).
-     *   KEYS[2]  = waiters counter key.
+     *   KEYS[2]  = saturation-pressure counter key.
      *   KEYS[3]  = per-scope lease set key. The global lease set key is
      *              declared in its place when there is no scope (a real
      *              same-slot key, never an empty placeholder), gated by
@@ -51,25 +51,27 @@ final class RedisAdmissionSemaphore implements VerificationAdmissionGate
      *   ARGV[1]  = max concurrent leases (global cap).
      *   ARGV[2]  = lease lifetime in ms (LEASE_MS).
      *   ARGV[3]  = unique lease token.
-     *   ARGV[4]  = max waiters (argon2_max_waiters).
-     *   ARGV[5]  = per-scope cap (argon2_max_per_tenant).
+     *   ARGV[4]  = saturation-pressure cap (argon2_saturation_pressure_cap).
+     *   ARGV[5]  = per-scope concentration cap (argon2_max_per_tenant).
      *   ARGV[6]  = 1 when KEYS[3] is a live per-scope set, else 0.
      *
      * Lease semantics are unchanged: expired leases are pruned, the lease
      * is granted when a slot is free. The per-scope set is checked in
      * addition to the global cap: a scope whose own set is full is refused
-     * even when the global set has room (per-tenant fairness: one busy
-     * scope can never starve the others' Argon budget). The global cap
-     * always wins (the deployment-wide memory invariant). A granted caller
-     * is a served waiter, so the waiters counter is decremented (floored
-     * at 0) in the same script. When a cap is saturated the caller would
-     * block behind the gate: the global waiters counter is incremented
-     * with the lease lifetime's TTL. Once the waiter count exceeds
-     * maxWaiters, the acquire returns null immediately, the caller refused
-     * without queueing (CapacityExceeded surfaces as the 429/violation),
-     * and its waiter entry is removed in the same script. The counter can
-     * therefore never grow unboundedly under a saturation storm. The
-     * waiters guard stays global, one shared bounded queue regardless of
+     * even when the global set has room. The per-scope cap is a
+     * concentration cap: it prevents one busy scope from monopolizing the
+     * shared capacity, it never reserves a specific share for any tenant.
+     * The global cap always wins (the deployment-wide memory invariant).
+     * Admission is immediate and non-blocking: a refused contender is
+     * never queued, polled or later admitted. A granted caller is a
+     * served contender, so the saturation counter is decremented (floored
+     * at 0) in the same script. When a cap is saturated the contender is
+     * refused right away and the counter is incremented with the lease
+     * lifetime's TTL. Once the counter exceeds the saturation-pressure
+     * cap, the acquire returns null immediately (CapacityExceeded
+     * surfaces as the 429/violation) and the entry is removed in the same
+     * script, so the gauge can never grow unboundedly under a saturation
+     * storm. The counter stays global, one shared gauge regardless of
      * which cap refused. Returns 1 when the lease was granted, 0 when
      * refused.
      */
@@ -149,53 +151,60 @@ LUA;
 
     private readonly string $key;
 
-    /** The waiters counter key — same hash tag as the lease set (Cluster safe). */
+    /** The saturation-pressure counter key — same hash tag as the lease set (Cluster safe). */
     private readonly string $waitersKey;
 
     /**
-     * @param \Redis|\Predis\Client $client       Redis client (phpredis or
-     *                                            Predis; the same clients
-     *                                            RedisStorage accepts, and
-     *                                            the bundle itself has no
-     *                                            hard dependency on either).
-     * @param int                   $maxConcurrent cap; <= 0 disables the cap.
-     * @param string                $namespace     per-deployment discriminator
-     *                                             (sanitized to
-     *                                             [A-Za-z0-9_.-]).
-     * @param int                   $maxWaiters    bounded waiters guard
-     *                                             (argon2_max_waiters, >= 1):
-     *                                             when a cap is saturated and
-     *                                             the waiter count exceeds it,
-     *                                             acquire() refuses immediately
-     *                                             instead of queueing.
-     * @param int                   $maxPerScope   per-scope budget
-     *                                             (argon2_max_per_tenant, >= 1):
-     *                                             each scope string has its
-     *                                             own lease set checked in
-     *                                             addition to the global cap.
+     * @param \Redis|\Predis\Client $client                 Redis client (phpredis or
+     *                                                      Predis; the same clients
+     *                                                      RedisStorage accepts, and
+     *                                                      the bundle itself has no
+     *                                                      hard dependency on either).
+     * @param int                   $maxConcurrent          cap; <= 0 disables the cap.
+     * @param string                $namespace              per-deployment discriminator
+     *                                                      (sanitized to
+     *                                                      [A-Za-z0-9_.-]).
+     * @param int                   $saturationPressureCap  bounded saturation-pressure
+     *                                                      counter
+     *                                                      (argon2_saturation_pressure_cap,
+     *                                                      >= 1): when a cap is
+     *                                                      saturated and the counter
+     *                                                      exceeds it, acquire()
+     *                                                      refuses immediately. The
+     *                                                      counter is a gauge, never
+     *                                                      a queue: admission is
+     *                                                      immediate and non-blocking.
+     * @param int                   $maxPerScope            per-scope concentration cap
+     *                                                      (argon2_max_per_tenant,
+     *                                                      >= 1): each scope string
+     *                                                      has its own lease set
+     *                                                      checked in addition to the
+     *                                                      global cap, so one busy
+     *                                                      scope cannot monopolize the
+     *                                                      shared capacity.
      */
     public function __construct(
         private readonly \Redis|\Predis\Client $client,
         private readonly int $maxConcurrent,
         string $namespace = 'default',
         private readonly int $leaseMs = self::DEFAULT_LEASE_MS,
-        private readonly int $maxWaiters = 64,
+        private readonly int $saturationPressureCap = 64,
         private readonly int $maxPerScope = 8,
     ) {
         if ($leaseMs < 1_000) {
             throw new \InvalidArgumentException('leaseMs must be >= 1000');
         }
-        if ($maxWaiters < 1) {
-            throw new \InvalidArgumentException('maxWaiters must be >= 1');
+        if ($saturationPressureCap < 1) {
+            throw new \InvalidArgumentException('saturationPressureCap must be >= 1');
         }
         if ($maxPerScope < 1) {
             throw new \InvalidArgumentException('maxPerScope must be >= 1');
         }
         $suffix = preg_replace('/[^A-Za-z0-9_.-]/', '_', $namespace) ?: 'default';
         $this->key = 'kiwicaptcha:argon2:leases:'.$suffix;
-        // The waiters counter must live in the same hash slot as the lease
-        // set (one EVAL script touches both keys), so it is hash-tagged with
-        // the lease key's tag family.
+        // The saturation counter must live in the same hash slot as the
+        // lease set (one EVAL script touches both keys), so it is
+        // hash-tagged with the lease key's tag family.
         $this->waitersKey = '{kiwicaptcha:argon2:leases:'.$suffix.'}:sem:waiters';
     }
 
@@ -207,7 +216,7 @@ LUA;
      * polled or later admitted (the counter is a gauge, not a queue).
      *
      * @param string|null $scope the scope string (the challenge's scope) for
-     *                           the per-scope budget: the scope's
+     *                           the per-scope concentration cap: the scope's
      *                           own lease set ({kiwicaptcha:argon2:leases:
      *                           <ns>}:<sha256(scope)>) is checked against
      *                           argon2_max_per_tenant in addition to the
@@ -218,7 +227,7 @@ LUA;
      *                           native validator and the Siteverify
      *                           endpoint stamp before verification (an
      *                           unscoped acquire would silently skip the
-     *                           per-scope budget).
+     *                           per-scope cap).
      */
     public function acquire(?string $scope = null): ?string
     {
@@ -230,13 +239,13 @@ LUA;
         $hasScope = false;
         if ($scope !== null && $scope !== '') {
         // Per-scope set: {kiwicaptcha:argon2:leases:<ns>}:<sha256(scope)>
-        // — hash-tagged with the same family as the waiters counter
+        // — hash-tagged with the same family as the saturation counter
         // (Cluster safe). The scope is hashed, never sanitized: a
         // lossy sanitization would collapse distinct legitimate scopes
-        // (tenant:a and tenant_a share one per-tenant budget, letting
-        // one starve the other) and would leak scope names into the
-        // key. The token carries the hashed scope suffix so release()
-        // can remove the lease from both sets.
+        // (tenant:a and tenant_a share one per-tenant cap, letting
+        // one monopolize the other's share) and would leak scope names
+        // into the key. The token carries the hashed scope suffix so
+        // release() can remove the lease from both sets.
             $scopeSuffix = hash('sha256', $scope);
             $scopeKey = '{'.$this->key.'}:'.$scopeSuffix;
             $token .= '.'.$scopeSuffix;
@@ -245,7 +254,7 @@ LUA;
         $result = $this->eval(
             self::ACQUIRE_SCRIPT,
             [$this->key, $this->waitersKey, $scopeKey !== '' ? $scopeKey : $this->key],
-            [(string) $this->maxConcurrent, (string) $this->leaseMs, $token, (string) $this->maxWaiters, (string) $this->maxPerScope, $hasScope ? '1' : '0'],
+            [(string) $this->maxConcurrent, (string) $this->leaseMs, $token, (string) $this->saturationPressureCap, (string) $this->maxPerScope, $hasScope ? '1' : '0'],
         );
 
         return $result === 1 ? $token : null;

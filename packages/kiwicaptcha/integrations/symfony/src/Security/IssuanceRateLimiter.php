@@ -41,6 +41,17 @@ use Psr\Cache\CacheItemPoolInterface;
  *     request-local: the windows provide no temporal limiting across
  *     requests at all.
  *
+ * Object-memory internal structure: the per-client state is bucketed by
+ * time epochs. The epoch period is the rotation period when pseudonym
+ * rotation is enabled (the identity key rotates per epoch) and the window
+ * itself when rotation is off (the identity key stays the plain
+ * pseudonym). The sliding-window union is therefore always exactly the
+ * two live epochs: the current and the previous bucket. The lazy epoch
+ * GC drops every bucket older than the previous epoch on the next check,
+ * so memory stays bounded by the identities active in the last ~two
+ * windows. Each unset is O(1): the bucket's identities are never
+ * traversed.
+ *
  * Lifecycle model: Redis is the exact distributed backend. A shared PSR-6
  * pool (`rate_limit_cache`) is the only no-Redis mode that survives across
  * requests, giving a cross-request best-effort window (never an exact
@@ -212,35 +223,13 @@ redis.call('PEXPIRE', KEYS[3], tonumber(ARGV[3]) + 1000)
 return 1
 LUA;
 
-    /** @var array<string, list<float>> sliding-window hit timestamps, per process */
-    private array $hits = [];
-
-    /**
-     * Object-memory GC cadence (non-rotated mode): every this many local
-     * admissions the limiter sweeps the per-identity hit map once,
-     * dropping buckets whose latest hit has slid out of the window, so
-     * abandoned identities cannot keep their buckets for the process
-     * lifetime. Amortized O(1) per admission; the sweep only ever
-     * removes window-expired identities, so no decision can change.
-     */
-    private const OBJECT_MEMORY_GC_INTERVAL = 256;
-
-    /**
-     * Admissions since the last object-memory GC sweep (non-rotated mode
-     * only): the bounded cadence driver of the per-identity map sweep
-     * `OBJECT_MEMORY_GC_INTERVAL`. The rotated path is
-     * epoch-GC'd on every check and the deployment-global window is a
-     * single list pruned per check, so only the non-rotated per-identity
-     * map needs the admission counter.
-     */
-    private int $localAdmissionsSinceGc = 0;
-
     /**
      * Rotated object-memory state: epoch -> identity-key -> hit timestamps.
      * Only the current and the previous epoch can intersect the sliding
-     * window (the constructor enforces rotationSecs >= windowSecs), so every
-     * older epoch bucket is lazily garbage-collected on the next rotated
-     * check, keeping this map bounded in long-lived runtimes.
+     * window, so every older epoch bucket is lazily garbage-collected on
+     * the next check, keeping this map bounded in long-lived runtimes.
+     * The constructor enforces rotationSecs >= windowSecs; when rotation
+     * is disabled the window itself is the epoch period.
      *
      * @var array<int, array<string, list<float>>>
      */
@@ -378,7 +367,7 @@ LUA;
             // is guaranteed here (global-only short-circuited above).
             return $this->pool !== null
                 ? $this->checkSharedTwoEpoch($identityPrev, $identityCur)
-                : $this->checkLocalTwoEpoch($identityPrev, $identityCur);
+                : $this->checkLocalTwoEpoch($identityPrev, $identityCur, $this->rateLimitRotationSecs);
         }
 
         $key = hash_hmac('sha256', $identity, $this->pepper);
@@ -390,8 +379,15 @@ LUA;
         // Non-Redis fallback: ONE transactional per-request decision over
         // the per-client and deployment-global windows (deny = 0 when the
         // client is full, deny = -1 when the global is full), mirroring
-        // the Redis script's check order.
-        return $this->pool !== null ? $this->checkShared($key) : $this->checkLocal($key);
+        // the Redis script's check order. With no pool the object-memory
+        // path uses the same time-epoch bucketing as the rotated path,
+        // with the window as the epoch period and the plain pseudonym as
+        // the identity key (rotation is off), so the lazy epoch GC covers
+        // both paths and memory stays bounded by the identities active in
+        // the last ~two windows.
+        return $this->pool !== null
+            ? $this->checkShared($key)
+            : $this->checkLocalTwoEpoch($key, $key, $this->windowSecs);
     }
 
     private function epochIdentity(string $identity, int $epoch): string
@@ -506,21 +502,41 @@ LUA;
     }
 
     /**
-     * Transactional combined fallback decision (no rotation, in-memory):
-     * read and prune the per-client window, then read and prune the
-     * deployment-global window, in ONE pass per request. A denied request
-     * writes nothing — neither the client window nor the global window —
-     * so a victim refused by global saturation never consumes their own
-     * allowance. A denial can never reset a window either: pruning is
-     * idempotent, and the next read re-prunes with a newer clock.
-     * An admitted request commits both hits. The in-process decision is
-     * exact. Return codes match the Redis script: 1 = allowed, 0 =
-     * per-client full, -1 = global full.
+     * Transactional combined fallback decision (object memory, both the
+     * rotated and the non-rotated path): the previous- and current-epoch
+     * pseudonym windows are read, pruned and merged, then the
+     * deployment-global window is read and pruned, in ONE pass per
+     * request. Same deny-writes-nothing semantics as the other fallback
+     * paths: a global-saturation denial never consumes the client's
+     * allowance in either epoch, and no denial can reset any window. New
+     * hits are written to the current epoch only; the global window is
+     * shared and never rotated. With rotation disabled the two identities
+     * are the same plain pseudonym and the epoch period is the window
+     * itself (the sliding-window union is exactly the two live epochs).
      */
-    private function checkLocal(string $key): int
+    private function checkLocalTwoEpoch(string $identityPrev, string $identityCur, int $epochSecs): int
     {
         $now = $this->now();
-        $hits = $this->prune($this->hits[$key] ?? [], $now);
+        // Lazy epoch GC: only the current and the previous epoch can
+        // intersect the sliding window (rotationSecs >= windowSecs is
+        // enforced in the constructor; with rotation off the window is
+        // the epoch period), so every bucket from an epoch older than
+        // (current - 1) is dropped on this check. In a long-lived
+        // runtime the map therefore never grows with historical admitted
+        // traffic: each unset is O(1) and the dropped bucket's
+        // identities are never traversed, so a check costs at most the
+        // stale-epoch bucket count plus two live bucket reads.
+        $epoch = (int) floor($now / $epochSecs);
+        foreach (array_keys($this->hitsByEpoch) as $storedEpoch) {
+            if ($storedEpoch < $epoch - 1) {
+                unset($this->hitsByEpoch[$storedEpoch]);
+            }
+        }
+        $hits = $this->pruneTwo(
+            $this->hitsByEpoch[$epoch - 1][$identityPrev] ?? [],
+            $this->hitsByEpoch[$epoch][$identityCur] ?? [],
+            $now,
+        );
 
         if (\count($hits) >= $this->maxChallenges) {
             return 0;
@@ -534,50 +550,17 @@ LUA;
             }
         }
 
-        $hits[] = $now;
-        $this->hits[$key] = $hits;
+        $this->hitsByEpoch[$epoch][$identityCur][] = $now;
         $globalHits[] = $now;
         $this->globalHits = $globalHits;
-
-        // Bounded object-memory GC (long-lived-runtime hygiene): every
-        // `OBJECT_MEMORY_GC_INTERVAL`-th local admission sweeps the
-        // per-identity map once, dropping buckets whose latest hit has
-        // slid out of the window. Amortized O(1) per admission; the
-        // sweep never touches live windows. Only the non-rotated path
-        // needs it: the rotated path is epoch-GC'd on every check and
-        // the global window is a single list pruned per check. The
-        // current client's bucket was just written with $now, so it is
-        // never swept.
-        if (++$this->localAdmissionsSinceGc % self::OBJECT_MEMORY_GC_INTERVAL === 0) {
-            $this->sweepStaleLocalHits($now);
-        }
 
         return 1;
     }
 
     /**
-     * Sweep the non-rotated object-memory hit map once: unset every
-     * identity bucket whose latest hit is older than now - windowSecs.
-     * Uses the same strict cutoff as {@see self::prune()}, so a bucket
-     * whose last hit sits exactly at the boundary is dead. Runs at the
-     * `OBJECT_MEMORY_GC_INTERVAL` cadence from the non-rotated local
-     * admit path only; decisions are unaffected, since only
-     * window-expired identities are removed.
-     */
-    private function sweepStaleLocalHits(float $now): void
-    {
-        $cutoff = $now - $this->windowSecs;
-        foreach ($this->hits as $key => $hits) {
-            if (max($hits) <= $cutoff) {
-                unset($this->hits[$key]);
-            }
-        }
-    }
-
-    /**
      * Transactional combined fallback decision (no rotation, shared PSR-6):
-     * same read-then-decide flow as {@see self::checkLocal()}, with the
-     * windows held in the pool. A denied request saves neither item; an
+     * same read-then-decide flow as {@see self::checkLocalTwoEpoch()}, with
+     * the windows held in the pool. A denied request saves neither item; an
      * admitted request saves both (the client item and the `kr_global`
      * item). The per-request semantics are transactional, but a generic
      * PSR-6 pool cannot make the two item writes atomic across workers:
@@ -632,56 +615,6 @@ LUA;
         $cutoff = $now - $this->windowSecs;
 
         return array_values(array_filter(array_merge($a, $b), static fn (float $ts): bool => $ts > $cutoff));
-    }
-
-    /**
-     * Transactional combined fallback decision (epoch-rotated, object
-     * memory): the previous- and current-epoch pseudonym windows are read,
-     * pruned and merged, then the deployment-global window is read and
-     * pruned, in ONE pass per request. Same deny-writes-nothing semantics
-     * as {@see self::checkLocal()}: a global-saturation denial never
-     * consumes the client's allowance in either epoch, and no denial can
-     * reset any window. New hits are written to the current epoch only;
-     * the global window is shared and never rotated.
-     */
-    private function checkLocalTwoEpoch(string $identityPrev, string $identityCur): int
-    {
-        $now = $this->now();
-        // Lazy epoch GC: only the current and the previous epoch can
-        // intersect the sliding window (rotationSecs >= windowSecs is
-        // enforced in the constructor), so every bucket from an epoch
-        // older than (current - 1) is dropped on this check. In a
-        // long-lived runtime the map therefore never grows with
-        // historical admitted traffic.
-        $epoch = (int) floor($now / $this->rateLimitRotationSecs);
-        foreach (array_keys($this->hitsByEpoch) as $storedEpoch) {
-            if ($storedEpoch < $epoch - 1) {
-                unset($this->hitsByEpoch[$storedEpoch]);
-            }
-        }
-        $hits = $this->pruneTwo(
-            $this->hitsByEpoch[$epoch - 1][$identityPrev] ?? [],
-            $this->hitsByEpoch[$epoch][$identityCur] ?? [],
-            $now,
-        );
-
-        if (\count($hits) >= $this->maxChallenges) {
-            return 0;
-        }
-
-        $globalHits = [];
-        if ($this->globalMax > 0) {
-            $globalHits = $this->prune($this->globalHits, $now);
-            if (\count($globalHits) >= $this->globalMax) {
-                return -1;
-            }
-        }
-
-        $this->hitsByEpoch[$epoch][$identityCur][] = $now;
-        $globalHits[] = $now;
-        $this->globalHits = $globalHits;
-
-        return 1;
     }
 
     /**

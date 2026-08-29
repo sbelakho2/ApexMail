@@ -105,13 +105,19 @@ is never forced) are the privacy contract; see
     #                                       # used as the SHARED multi-process
     #                                       # fallback when no Redis client
     #                                       # exists (e.g. a Redis-backed
-    #                                       # Symfony Cache pool). Without it,
-    #                                       # the fallback is a per-object
-    #                                       # in-memory window: temporal
-    #                                       # cross-request limiting under
-    #                                       # conventional PHP-FPM requires
-    #                                       # Redis or a genuinely shared
-    #                                       # PSR-6 pool.
+    #                                       # Symfony Cache pool). The pool
+    #                                       # must be genuinely cross-worker:
+    #                                       # a known in-memory adapter
+    #                                       # (Symfony Cache ArrayAdapter or
+    #                                       # a subclass) is REFUSED in
+    #                                       # production, since its items
+    #                                       # live per process. Without a
+    #                                       # pool, the fallback is a
+    #                                       # per-object in-memory window:
+    #                                       # temporal cross-request limiting
+    #                                       # under conventional PHP-FPM
+    #                                       # requires Redis or a genuinely
+    #                                       # shared PSR-6 pool.
     # allow_nonredis_rate_limit_fallback: false
     #                                       # explicitly accepts the
     #                                       # non-Redis rate limiter in
@@ -134,22 +140,47 @@ is never forced) are the privacy contract; see
     #                                       # Raw client IPs are never stored:
     #                                       # every key is a peppered HMAC of
     #                                       # the IP (rate_limit_pepper
-    #                                       # defaults to secret_key). Set a
-    #                                       # dedicated stable pepper: routine
-    #                                       # signing-key rotation must not
-    #                                       # reset the per-client rate-limit
-    #                                       # memory.
+    #                                       # defaults to secret_key — a
+    #                                       # compatibility fallback only).
+    #                                       # The normal deployment model is
+    #                                       # a dedicated stable pepper:
+    #                                       # routine signing-key rotation
+    #                                       # must not reset the per-client
+    #                                       # rate-limit memory (the HMAC
+    #                                       # identities anchor that memory,
+    #                                       # and a fresh pepper derives
+    #                                       # fresh identities, restarting
+    #                                       # every client window empty).
+    # rate_limit_pepper: '%env(KIWI_RATE_LIMIT_PEPPER)%'
+    #                                       # dedicated stable abuse-identity
+    #                                       # key (K_abuse-identity): HMAC
+    #                                       # pepper for the per-IP rate-limit
+    #                                       # pseudonyms. Stays stable across
+    #                                       # routine signing-key rotations.
     # Aggregate Argon2id verification concurrency cap (default 2; 0 =
     # unlimited). Each Argon2id verification allocates argon_m_kib of memory —
     # size this to available memory. With a Redis client the cap is enforced
     # across ALL PHP-FPM workers (see the Argon2 section in operations.md).
     # argon2_max_concurrent_verifications: 2
-    # argon2_max_waiters: 64             # bounded waiters guard (see
-    #                                    # security-hardening.md)
-    # argon2_max_per_tenant: 8           # PER-SCOPE Argon2 budget: each scope
-    #                                    # gets its own lease set in addition
-    #                                    # to the global cap (multi-tenant
-    #                                    # fairness)
+    # argon2_saturation_pressure_cap: 64 # bounded SATURATION-PRESSURE
+    #                                    # counter (NOT a queue: admission
+    #                                    # is immediate and non-blocking —
+    #                                    # nothing waits or queues behind
+    #                                    # a saturated gate). The
+    #                                    # deprecated argon2_max_waiters
+    #                                    # name still works as an alias.
+    # argon2_max_per_tenant: null        # PER-SCOPE CONCENTRATION cap: each
+    #                                    # scope gets its own lease set in
+    #                                    # addition to the global cap.
+    #                                    # Null (default) derives
+    #                                    # max(1, global - 1), so with the
+    #                                    # default global cap of 2 one scope
+    #                                    # can never occupy both slots. It
+    #                                    # is a concentration cap, not a
+    #                                    # guaranteed share or a
+    #                                    # weighted-fair scheduler, and it
+    #                                    # must be strictly below the
+    #                                    # global cap (refused otherwise).
     # argon2_semaphore_namespace: '%kernel.project_dir%'
     #                                       # per-deployment discriminator for
     #                                       # the Redis lease set and the
@@ -164,6 +195,25 @@ is never forced) are the privacy contract; see
     #                                       # limiter; when null, the
     #                                       # storage's own client is reused
     #                                       # if storage is RedisStorage
+    # strict_kid_verification: false        # OPTIONAL strict current-kid
+    #                                       # verification: when true, the
+    #                                       # verifier resolves EVERY
+    #                                       # record's kid against exactly
+    #                                       # the current signing key even
+    #                                       # with an empty historical map
+    #                                       # (any other kid -> UnknownKid
+    #                                       # from the first deployment).
+    #                                       # Default false keeps the
+    #                                       # legacy any-kid single-secret
+    #                                       # semantics (see
+    #                                       # security-hardening.md).
+    # resume_claim_ttl_secs: 60             # recovery-derivation claim lease
+    #                                       # (min 60): must cover the
+    #                                       # maximum supported derivation
+    #                                       # duration; fencing stays
+    #                                       # correct on expiry (an
+    #                                       # expired claim is released and
+    #                                       # a retry re-claims it)
 ```
 
 ## Risk configuration
@@ -216,6 +266,17 @@ kiwi_captcha:
         # risk.enabled without any Predis client fails at container compile.
         # redis_service: kiwicaptcha.risk.redis
         namespace: '%kernel.project_dir%'   # {kiwi:<namespace>} hash tag
+        # master_secret: '%env(KIWI_RISK_SECRET)%'
+        #                                   # HKDF master for the risk
+        #                                   # identity keys. The normal
+        #                                   # deployment model is a
+        #                                   # dedicated stable secret
+        #                                   # (K_abuse-identity): routine
+        #                                   # signing-key rotation must
+        #                                   # not reset the adaptive-risk
+        #                                   # memory. When null, the keys
+        #                                   # derive from secret_key
+        #                                   # (compatibility fallback only).
         # source_epoch_secs: 900            # source identity rotation
         # subnet_epoch_secs: 900            # subnet (/24, /56) rotation
         # state_ttl_secs: 1800              # live counter TTL
@@ -513,6 +574,42 @@ record values and the values the final POST carries, so a challenge minted
 under a valid identifier can never be redeemed under a different one. See
 [Identifier validation](security-hardening.md#identifier-validation) for
 the endpoint-level enforcement.
+
+## Signing-key rotation and abuse-identity secrets
+
+The deployment keeps two secret families with different lifetimes:
+
+- **K_signing** (the signing key): `secret_key` plus the historical
+  `secrets_by_kid` map and `revoked_kids`. Routine rotation moves the
+  superseded key into the historical map, sets the new `secret_key`, and
+  bumps `kid`. Rotating K_signing must be a routine, low-risk operation.
+- **K_abuse-identity** (the rate/risk root keys): `rate_limit_pepper` and
+  `risk.master_secret`. These derive the pseudonymous identities that
+  anchor the per-client rate-limit memory and the adaptive-risk memory.
+
+The normal deployment model is dedicated, stable root keys:
+
+```yaml
+kiwi_captcha:
+    secret_key: '%env(KIWI_SECRET_KEY)%'            # K_signing, rotates
+    rate_limit_pepper: '%env(KIWI_RATE_LIMIT_PEPPER)%'  # K_abuse-identity, stable
+    risk:
+        enabled: true
+        master_secret: '%env(KIWI_RISK_SECRET)%'    # K_abuse-identity, stable
+```
+
+K_signing rotates on a schedule; K_abuse-identity stays stable for the
+life of the deployment. A routine signing-key rotation therefore changes
+nothing about the rate-limit windows or the risk state. An emergency root
+compromise may intentionally rotate everything, resetting both families.
+
+The derivation defaults (`rate_limit_pepper` and `risk.master_secret`
+falling back to `secret_key`) are documented as a compatibility fallback
+only: with those defaults in place, a routine signing-key rotation
+silently resets every per-client rate-limit identity and every risk
+pseudonym. The extension logs an advisory note at container build time
+when rotation is configured (`kid` above 1 or a non-empty
+`secrets_by_kid`) without dedicated root keys; the note never throws.
 
 ## Related documentation
 

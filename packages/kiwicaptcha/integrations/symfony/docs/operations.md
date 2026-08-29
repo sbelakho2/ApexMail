@@ -14,6 +14,8 @@ Three backends, in priority order:
   PSR-6 cannot express an atomic read-modify-write, so concurrent requests may briefly exceed the limit.
   This is a bound, not a gate.
   A shared pool is the only no-Redis mode whose windows survive across requests, so it is the only no-Redis fallback that keeps the per-client and global limits temporal under conventional PHP-FPM.
+  The pool must be genuinely cross-worker: a known in-memory adapter (Symfony Cache `ArrayAdapter` or a subclass) is refused in production, since its items live per process.
+  Use a Redis-backed pool (`RedisAdapter`) or another shared backend.
 - Object memory (long-lived runtime only). The fallback when no pool is configured.
   The windows live in the limiter object, so they are exact for one persistent worker process (RoadRunner, Swoole, amphp, or a single CLI process).
   Under conventional PHP-FPM each request rebuilds the bundle services, so the object windows are per-request and provide no temporal limiting across requests.
@@ -27,6 +29,8 @@ Raw client IPs are never stored.
 Every key is a peppered HMAC of the IP (`hash_hmac('sha256', $ip, $pepper)` with `rate_limit_pepper`, defaulting to the bundle secret), in Redis, the shared pool, and the object-memory buckets.
 Configure a dedicated, stable `rate_limit_pepper`: the HMAC identities anchor the per-client rate-limit memory, and a routine signing-key rotation must not silently reset that memory.
 A fresh pepper derives fresh identities, so every client window would restart empty.
+The dedicated stable pepper is the normal deployment model: K_abuse-identity stays stable while K_signing rotates, see [configuration.md](configuration.md#signing-key-rotation-and-abuse-identity-secrets).
+The secret_key derivation is a compatibility fallback, and the extension logs an advisory at container build time when rotation is configured without dedicated root keys.
 `rate_limit: 0` and `rate_limit_global: 0` disable the respective limit; both default to nonzero (10 / 500).
 The deployment-global cap is enforced on every backend, with the ladder: Redis exact distributed window, shared PSR-6 best-effort window, object-memory exact window for one persistent worker.
 Global-only mode (`rate_limit: 0` with a positive `rate_limit_global`) works on all backends.
@@ -59,7 +63,9 @@ Two gate backends:
   Each `acquire()` mints a unique 16-byte lease token stored as a sorted-set member scored at its expiry (45 s), and `release()` removes exactly that token.
   A stale release, releasing a lease that expired or was already released, can never remove a newer lease (`ZREM` of an absent member is a no-op).
   Expired leases (crashed workers) are reaped by the acquire script.
-  The acquire script additionally carries the bounded waiters guard (`argon2_max_waiters`, default 64) and the per-scope budget (`argon2_max_per_tenant`, default 8).
+  The acquire script additionally carries the bounded saturation-pressure counter (`argon2_saturation_pressure_cap`, default 64; the deprecated `argon2_max_waiters` name still works) and the per-scope concentration cap (`argon2_max_per_tenant`, unset by default and derived as `max(1, global cap - 1)`).
+  Nothing queues or waits: admission is immediate and non-blocking, and the counter is a gauge of saturation pressure, never a queue.
+  The per-scope cap is a concentration cap, not a guaranteed share: it prevents one busy scope from monopolizing the shared capacity, and explicit values must be strictly below the global cap.
   See [security-hardening.md](security-hardening.md#argon2-admission-wait-queue-bound).
   For the cap to be an absolute operational invariant, the maximum verification request runtime must stay below the lease lifetime (`argon2_lease_ms`, default 45000 ms).
   Otherwise a lease can expire while its Argon2 hash is still running and another worker may enter.

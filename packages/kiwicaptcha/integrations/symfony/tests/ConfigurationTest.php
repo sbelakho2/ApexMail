@@ -338,15 +338,27 @@ final class ConfigurationTest extends TestCase
         self::assertSame(3.75, $calibration['false_negative_cost']);
     }
 
-    public function testArgon2MaxWaitersDefaultsAndBounds(): void
+    public function testArgon2SaturationPressureCapDefaultsAndBounds(): void
     {
-        self::assertSame(64, $this->process()['argon2_max_waiters'], 'argon2_max_waiters defaults to 64 (bounded waiters guard of the Argon2 admission semaphore)');
-        self::assertSame(1, $this->process(['argon2_max_waiters' => 1])['argon2_max_waiters']);
-        self::assertSame(128, $this->process(['argon2_max_waiters' => 128])['argon2_max_waiters']);
+        self::assertNull($this->process()['argon2_saturation_pressure_cap'], 'argon2_saturation_pressure_cap defaults to null (resolved to 64 by the extension)');
+        self::assertSame(1, $this->process(['argon2_saturation_pressure_cap' => 1])['argon2_saturation_pressure_cap']);
+        self::assertSame(128, $this->process(['argon2_saturation_pressure_cap' => 128])['argon2_saturation_pressure_cap']);
     }
 
-    public function testArgon2MaxWaitersBelowOneIsRejected(): void
+    public function testArgon2SaturationPressureCapBelowOneIsRejected(): void
     {
+        $this->expectException(\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException::class);
+        $this->process(['argon2_saturation_pressure_cap' => 0]);
+    }
+
+    public function testLegacyArgon2MaxWaitersNameStillProcesses(): void
+    {
+        // The deprecated alias keeps its own default (64) and its bounds:
+        // an old config that only sets argon2_max_waiters stays valid and
+        // the extension resolves it (OR semantics).
+        self::assertSame(64, $this->process()['argon2_max_waiters'], 'the deprecated argon2_max_waiters alias keeps its default 64');
+        self::assertSame(12, $this->process(['argon2_max_waiters' => 12])['argon2_max_waiters']);
+
         $this->expectException(\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException::class);
         $this->process(['argon2_max_waiters' => 0]);
     }
@@ -690,15 +702,68 @@ final class ConfigurationTest extends TestCase
 
     public function testArgon2MaxPerTenantDefaultsAndBounds(): void
     {
-        self::assertSame(8, $this->process()['argon2_max_per_tenant'], 'argon2_max_per_tenant defaults to 8 (per-scope Argon budget)');
+        // The default is null: the extension derives the effective
+        // per-scope concentration cap from the global cap as
+        // max(1, global - 1), so with the default global cap of 2 the
+        // derived cap is 1, and one scope can never monopolize both
+        // slots.
+        self::assertNull($this->process()['argon2_max_per_tenant'], 'argon2_max_per_tenant defaults to null (derived from the global cap by the extension)');
         self::assertSame(1, $this->process(['argon2_max_per_tenant' => 1])['argon2_max_per_tenant']);
-        self::assertSame(25, $this->process(['argon2_max_per_tenant' => 25])['argon2_max_per_tenant']);
+        self::assertSame(25, $this->process(['argon2_max_concurrent_verifications' => 30, 'argon2_max_per_tenant' => 25])['argon2_max_per_tenant']);
     }
 
     public function testArgon2MaxPerTenantBelowOneIsRejected(): void
     {
         $this->expectException(InvalidConfigurationException::class);
         $this->process(['argon2_max_per_tenant' => 0]);
+    }
+
+    public function testArgon2MaxPerTenantAtOrAboveTheGlobalCapIsRefused(): void
+    {
+        // A per-scope concentration cap at or above the global cap can
+        // never bind (the global cap admits fewer), so it provides no
+        // anti-starvation — refused with the exact actionable message.
+        try {
+            $this->process(['argon2_max_concurrent_verifications' => 2, 'argon2_max_per_tenant' => 2]);
+            self::fail('a per-scope cap equal to the global cap must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertSame(
+                'Invalid configuration for path "kiwi_captcha": kiwi_captcha.argon2_max_per_tenant must be strictly below argon2_max_concurrent_verifications when the global cap is positive: a per-scope concentration cap at or above the global cap can never bind (the global cap admits fewer), so it provides no anti-starvation. Leave the option unset to derive max(1, global - 1) or set it strictly below the global cap',
+                $e->getMessage(),
+            );
+        }
+        try {
+            $this->process(['argon2_max_concurrent_verifications' => 2, 'argon2_max_per_tenant' => 8]);
+            self::fail('a per-scope cap above the global cap must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertSame(
+                'Invalid configuration for path "kiwi_captcha": kiwi_captcha.argon2_max_per_tenant must be strictly below argon2_max_concurrent_verifications when the global cap is positive: a per-scope concentration cap at or above the global cap can never bind (the global cap admits fewer), so it provides no anti-starvation. Leave the option unset to derive max(1, global - 1) or set it strictly below the global cap',
+                $e->getMessage(),
+            );
+        }
+
+        // The default stays valid: null is never refused, and a cap with
+        // an unlimited global (0) is still meaningful on its own.
+        $this->process([]);
+        self::assertSame(3, $this->process(['argon2_max_concurrent_verifications' => 0, 'argon2_max_per_tenant' => 3])['argon2_max_per_tenant']);
+    }
+
+    public function testStrictKidVerificationDefaultsToFalse(): void
+    {
+        self::assertFalse($this->process()['strict_kid_verification'], 'strict_kid_verification defaults to false (legacy any-kid single-secret semantics)');
+        self::assertTrue($this->process(['strict_kid_verification' => true])['strict_kid_verification']);
+    }
+
+    public function testResumeClaimTtlSecsDefaultsAndBounds(): void
+    {
+        self::assertSame(60, $this->process()['resume_claim_ttl_secs'], 'resume_claim_ttl_secs defaults to 60 (the recovery-derivation claim lease)');
+        self::assertSame(120, $this->process(['resume_claim_ttl_secs' => 120])['resume_claim_ttl_secs']);
+    }
+
+    public function testResumeClaimTtlSecsBelowTheOneMinuteFloorIsRejected(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+        $this->process(['resume_claim_ttl_secs' => 59]);
     }
 
     public function testRiskPolicyVersionIsTheChallengeSecurityEpoch(): void

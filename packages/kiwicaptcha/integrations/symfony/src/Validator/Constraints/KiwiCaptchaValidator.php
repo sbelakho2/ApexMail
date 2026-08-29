@@ -382,8 +382,8 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // core Verifier calls acquire() without arguments, so the scope
         // travels through the request: stamp it here and let the bundle's
         // RequestScopeAdmissionGate forward it into the semaphore's
-        // per-scope budget (argon2_max_per_tenant, checked in addition to
-        // the global cap).
+        // per-scope concentration cap (argon2_max_per_tenant, checked in
+        // addition to the global cap).
         $request?->attributes->set(\BelConsulting\KiwiCaptchaBundle\Security\RequestScopeAdmissionGate::SCOPE_ATTRIBUTE, $constraint->scope);
 
         // Transaction binding, resolved before the core verification.

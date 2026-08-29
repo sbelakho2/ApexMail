@@ -875,14 +875,15 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame([169], $epochs(), 'no epoch older than current - 1 remains (166 and 167 were dropped)');
     }
 
-    public function testObjectMemoryStateGarbageCollectsStaleIdentitiesAtTheSweepBoundary(): void
+    public function testObjectMemoryEpochGcDropsStaleIdentitiesAfterTwoWindows(): void
     {
         // Long-lived-runtime hygiene with rotation disabled: the
-        // non-rotated per-identity hit map is swept at a bounded
-        // cadence, so identities that never return cannot keep their
-        // buckets for the process lifetime. The sweep fires on the
-        // `OBJECT_MEMORY_GC_INTERVAL`-th local admission and drops only
-        // buckets whose latest hit has slid out of the window.
+        // object-memory state uses the same time-epoch bucketing as the
+        // rotated path, with the window (60 s) as the epoch period and
+        // the plain pseudonym as the identity key. The lazy epoch GC
+        // drops every bucket older than the previous epoch on the next
+        // check, so an identity that never returns cannot keep its
+        // buckets for the process lifetime.
         $clock = 10_000.0;
         $limiter = new IssuanceRateLimiter(
             maxChallenges: 10,
@@ -894,51 +895,108 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
             globalMax: 0,
             rateLimitRotationSecs: 0,
         );
-        $hitsProp = new \ReflectionProperty(IssuanceRateLimiter::class, 'hits');
-        $gcProp = new \ReflectionProperty(IssuanceRateLimiter::class, 'localAdmissionsSinceGc');
-        $bucketKeys = static fn (): array => array_keys($hitsProp->getValue($limiter));
+        $prop = new \ReflectionProperty(IssuanceRateLimiter::class, 'hitsByEpoch');
+        $buckets = static fn (): array => array_map('intval', array_keys($prop->getValue($limiter)));
         $keyOf = static fn (string $ip): string => hash_hmac('sha256', Issuer::canonicalIpFamily($ip), 'pepper');
-        $admissions = static fn (): int => $gcProp->getValue($limiter);
 
-        // Admit identity A at t0: its bucket exists, the counter is 1.
+        // Admit identity A at t0: epoch 166 (floor 10000/60).
         self::assertSame(1, $limiter->check('198.51.100.7'), 'admit A at t0');
-        self::assertContains($keyOf('198.51.100.7'), $bucketKeys());
-        self::assertSame(1, $admissions());
+        $epochs = $prop->getValue($limiter);
+        self::assertSame([166], array_keys($epochs), 'A\'s bucket lives in epoch 166');
+        self::assertArrayHasKey($keyOf('198.51.100.7'), $epochs[166]);
 
-        // Drive the counter below the sweep boundary, admit B, and prove
-        // the sweep has NOT run yet: both live buckets are still there.
-        $gcProp->setValue($limiter, 254);
-        $clock = 10_010.0;
-        self::assertSame(1, $limiter->check('198.51.100.8'), 'admit B before the sweep boundary');
-        self::assertSame(255, $admissions(), 'no sweep below the boundary');
-        self::assertContains($keyOf('198.51.100.7'), $bucketKeys(), 'A\'s live bucket survives below the boundary');
-        self::assertContains($keyOf('198.51.100.8'), $bucketKeys(), 'B\'s live bucket survives below the boundary');
+        // Advance past 2+ windows (epoch 169, well beyond current + 1):
+        // the stale buckets survive until the next check (lazy GC), then
+        // a fresh identity's admission drops them.
+        $clock = 10_180.0;
+        self::assertSame([166], $buckets(), 'stale buckets survive until the next check (lazy GC)');
+        self::assertSame(1, $limiter->check('198.51.100.8'), 'admit a fresh identity B: the lazy GC runs on this check');
+        $epochs = $prop->getValue($limiter);
+        self::assertSame([169], array_keys($epochs), 'no epoch older than current - 1 remains (166 was dropped)');
+        self::assertArrayNotHasKey($keyOf('198.51.100.7'), $epochs[169], 'A\'s bucket is gone');
+        self::assertArrayHasKey($keyOf('198.51.100.8'), $epochs[169], 'B\'s fresh bucket survives');
 
-        // Cross the boundary after both hits are window-expired: the
-        // sweep drops A and B, the fresh C bucket survives.
-        $gcProp->setValue($limiter, 255);
-        $clock = 10_100.0;
-        self::assertSame(1, $limiter->check('198.51.100.9'), 'admit C and cross the sweep boundary');
-        self::assertSame(256, $admissions());
-        self::assertNotContains($keyOf('198.51.100.7'), $bucketKeys(), 'A\'s expired bucket was swept');
-        self::assertNotContains($keyOf('198.51.100.8'), $bucketKeys(), 'B\'s expired bucket was swept');
-        self::assertContains($keyOf('198.51.100.9'), $bucketKeys(), 'the current client\'s fresh bucket survives the sweep');
+        // The current decision is unaffected: A restarts a fresh window.
+        self::assertSame(1, $limiter->check('198.51.100.7'), 'a GC\'d identity restarts a fresh bucket');
+        self::assertSame(1, $limiter->check('198.51.100.7'));
+        self::assertSame(1, $limiter->check('198.51.100.7'));
+    }
 
-        // Behavior is unchanged after the sweep: the current client's
-        // window still counts its own hits, and a swept identity
-        // restarts a fresh bucket.
-        self::assertSame(1, $limiter->check('198.51.100.9'), 'the current client admits again within its cap');
-        self::assertSame(1, $limiter->check('198.51.100.7'), 'a swept identity restarts a fresh bucket');
+    public function testObjectMemoryLiveIdentitiesSurviveEpochGc(): void
+    {
+        // Identities admitted inside the last window must survive the
+        // lazy epoch GC: with rotation disabled the previous-epoch bucket
+        // is retained exactly like the rotated path, so a hit from the
+        // previous epoch still counts until the window slides.
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(
+            maxChallenges: 1,
+            windowSecs: 60,
+            now: static function () use (&$clock): float {
+                return $clock;
+            },
+            pepper: 'pepper',
+            globalMax: 0,
+            rateLimitRotationSecs: 0,
+        );
+        $prop = new \ReflectionProperty(IssuanceRateLimiter::class, 'hitsByEpoch');
+        $keyOf = static fn (string $ip): string => hash_hmac('sha256', Issuer::canonicalIpFamily($ip), 'pepper');
 
-        // Live buckets are never swept: D admitted now is still inside
-        // the window at the next sweep boundary.
-        $clock = 10_100.0;
-        self::assertSame(1, $limiter->check('198.51.100.10'), 'admit D');
-        $gcProp->setValue($limiter, 511);
-        $clock = 10_130.0;
-        self::assertSame(1, $limiter->check('198.51.100.11'), 'admit E and cross the next boundary');
-        self::assertContains($keyOf('198.51.100.10'), $bucketKeys(), 'D\'s live bucket survives the sweep (latest hit inside the window)');
-        self::assertContains($keyOf('198.51.100.11'), $bucketKeys(), 'the current client\'s bucket survives the sweep');
+        // Admit A at 10050: epoch 167 (floor 10050/60). The hit stays
+        // live until 10110, across the epoch boundary at 10080.
+        $clock = 10_050.0;
+        self::assertSame(1, $limiter->check('198.51.100.7'), 'admit A in epoch 167');
+        $clock = 10_085.0;
+        self::assertSame(1, $limiter->check('198.51.100.8'), 'admit B in epoch 168 (the lazy GC runs on this check)');
+        $epochs = $prop->getValue($limiter);
+        $sorted = array_keys($epochs);
+        sort($sorted);
+        self::assertSame([167, 168], $sorted, 'current and previous epochs coexist after the boundary');
+        self::assertArrayHasKey($keyOf('198.51.100.7'), $epochs[167], 'A\'s previous-epoch bucket survives the GC (admitted within the last window)');
+
+        // Exact accounting across the boundary: A's previous-epoch hit
+        // (10050) is still inside the window (cutoff 10026) and counts.
+        $clock = 10_086.0;
+        self::assertSame(0, $limiter->check('198.51.100.7'), 'the previous-epoch hit still counts against the per-client cap (deny)');
+        $clock = 10_111.0;
+        self::assertSame(1, $limiter->check('198.51.100.7'), 'the hit has slid out of the window: the cap is free again');
+    }
+
+    public function testObjectMemoryPreviousEpochBucketRetainedAcrossTheBoundaryForExactAccounting(): void
+    {
+        // Mirror of the rotated-path boundary assertions with rotation
+        // disabled: the previous-epoch bucket is retained across the
+        // epoch boundary long enough for exact sliding-window accounting,
+        // and dropped lazily once two epochs have passed.
+        $clock = 9_990.0;
+        $limiter = new IssuanceRateLimiter(
+            maxChallenges: 1,
+            windowSecs: 60,
+            now: static function () use (&$clock): float {
+                return $clock;
+            },
+            pepper: 'pepper',
+            globalMax: 0,
+            rateLimitRotationSecs: 0,
+        );
+        $prop = new \ReflectionProperty(IssuanceRateLimiter::class, 'hitsByEpoch');
+        $epochs = static fn (): array => array_map('intval', array_keys($prop->getValue($limiter)));
+
+        self::assertSame(1, $limiter->check('198.51.100.7'), 'admit in epoch 166 (floor(9990/60))');
+        self::assertSame([166], $epochs());
+
+        // Cross the boundary into epoch 167 within the window: the
+        // previous-epoch hit still counts against the per-client cap.
+        $clock = 10_020.0;
+        self::assertSame(0, $limiter->check('198.51.100.7'), 'the epoch-166 hit still counts inside the window (deny, nothing written)');
+        self::assertSame([166], $epochs(), 'a denial writes nothing: no epoch-167 bucket appears');
+
+        // Advance two epochs without a check: the stale bucket is still
+        // there (lazy), then one check at epoch 169 drops it and admits.
+        $clock = 10_140.0;
+        self::assertSame([166], $epochs(), 'stale buckets survive until the next check (lazy GC)');
+        self::assertSame(1, $limiter->check('198.51.100.7'), 'the check at epoch 169 admits after the GC');
+        self::assertSame([169], $epochs(), 'no epoch older than current - 1 remains (166 was dropped)');
     }
 
     // ── Redis backend (atomic, cross-worker) ──────────────────────────────

@@ -8,6 +8,8 @@ use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
 use KiwiCaptcha\Storage\Psr6Storage;
 use KiwiCaptcha\Storage\RedisStorage;
 use PHPUnit\Framework\TestCase;
+use Symfony\Component\Cache\Adapter\ArrayAdapter;
+use Symfony\Component\Cache\Adapter\FilesystemAdapter;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Definition;
 
@@ -305,6 +307,136 @@ final class ProdArrayStorageGuardTest extends TestCase
         );
 
         self::assertTrue($container->hasDefinition('kiwi_captcha.rate_limiter'), 'the limiter is wired with the pool fallback');
+    }
+
+    public function testProductionArrayAdapterRateLimitCacheIsRefused(): void
+    {
+        // Symfony's in-memory ArrayAdapter holds its items per process,
+        // so under PHP-FPM the rate-limit state would be request-local
+        // while the production guard believes a shared pool exists. The
+        // extension refuses the combination when the pool's class is
+        // resolvable at extension time.
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('in-memory adapter');
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
+        $container->setDefinition('my.cache.pool', new Definition(ArrayAdapter::class, []));
+        (new KiwiCaptchaExtension())->load(
+            [[
+                'secret_key' => str_repeat('a', 32),
+                'storage' => 'my.psr6.storage',
+                'allow_best_effort_storage' => true,
+                'rate_limit' => 10,
+                'rate_limit_global' => 0,
+                'rate_limit_cache' => 'my.cache.pool',
+                'allow_local_argon_admission_fallback' => true,
+                'public_base_url' => 'https://captcha.example.com',
+            ]],
+            $container,
+        );
+    }
+
+    public function testProductionArrayAdapterRateLimitCacheIsRefusedEvenWithoutTemporalLimits(): void
+    {
+        // The refusal is unconditional: an in-memory pool configured for
+        // rate limiting is a config trap whether or not a limit is
+        // currently nonzero.
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('my.cache.pool');
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
+        $container->setDefinition('my.cache.pool', new Definition(ArrayAdapter::class, []));
+        (new KiwiCaptchaExtension())->load(
+            [[
+                'secret_key' => str_repeat('a', 32),
+                'storage' => 'my.psr6.storage',
+                'allow_best_effort_storage' => true,
+                'rate_limit_cache' => 'my.cache.pool',
+                'allow_local_argon_admission_fallback' => true,
+                'public_base_url' => 'https://captcha.example.com',
+            ]],
+            $container,
+        );
+    }
+
+    public function testProductionArrayAdapterSubclassRateLimitCacheIsRefused(): void
+    {
+        // A subclass of ArrayAdapter is equally per-process: the guard
+        // checks instanceof via the definition class.
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('in-memory adapter');
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
+        $subclass = new class extends ArrayAdapter {
+        };
+        $container->setDefinition('my.cache.pool', new Definition($subclass::class, []));
+        (new KiwiCaptchaExtension())->load(
+            [[
+                'secret_key' => str_repeat('a', 32),
+                'storage' => 'my.psr6.storage',
+                'allow_best_effort_storage' => true,
+                'rate_limit_cache' => 'my.cache.pool',
+                'allow_local_argon_admission_fallback' => true,
+                'public_base_url' => 'https://captcha.example.com',
+            ]],
+            $container,
+        );
+    }
+
+    public function testProductionGenuinelySharedPoolClassCompiles(): void
+    {
+        // A non-memory adapter (e.g. Symfony's FilesystemAdapter, whose
+        // items live on disk and are shared by all workers) passes the
+        // production guard: the class is resolvable and is not an
+        // in-memory adapter.
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
+        $container->setDefinition('my.cache.pool', new Definition(FilesystemAdapter::class, []));
+        (new KiwiCaptchaExtension())->load(
+            [[
+                'secret_key' => str_repeat('a', 32),
+                'storage' => 'my.psr6.storage',
+                'allow_best_effort_storage' => true,
+                'rate_limit' => 10,
+                'rate_limit_global' => 0,
+                'rate_limit_cache' => 'my.cache.pool',
+                'allow_local_argon_admission_fallback' => true,
+                'public_base_url' => 'https://captcha.example.com',
+            ]],
+            $container,
+        );
+
+        self::assertTrue($container->hasDefinition('kiwi_captcha.rate_limiter'), 'a genuinely shared pool class passes the guard and wires the limiter');
+    }
+
+    public function testProductionUnresolvableRateLimitCacheServicePasses(): void
+    {
+        // A pool service id without a visible definition (external
+        // service) cannot be inspected at extension time: it passes the
+        // in-memory-adapter guard (the temporal-limit guard itself still
+        // requires some non-Redis backend, which the pool id provides).
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
+        (new KiwiCaptchaExtension())->load(
+            [[
+                'secret_key' => str_repeat('a', 32),
+                'storage' => 'my.psr6.storage',
+                'allow_best_effort_storage' => true,
+                'rate_limit' => 10,
+                'rate_limit_global' => 0,
+                'rate_limit_cache' => 'external.pool',
+                'allow_local_argon_admission_fallback' => true,
+                'public_base_url' => 'https://captcha.example.com',
+            ]],
+            $container,
+        );
+
+        self::assertTrue($container->hasDefinition('kiwi_captcha.rate_limiter'), 'an unresolvable pool service id passes (its class cannot be inspected here)');
     }
 
     public function testProductionPerClientOnlyLimitCompilesWithTheNonRedisFallbackFlag(): void

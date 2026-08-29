@@ -65,6 +65,7 @@ use KiwiCaptcha\ConsumedStateReadableInterface;
 use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 use KiwiCaptcha\StorageInterface;
 use KiwiCaptcha\Verifier;
+use Symfony\Component\Cache\Adapter\ArrayAdapter;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Definition;
 use Symfony\Component\DependencyInjection\Extension\Extension;
@@ -126,6 +127,21 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // keys ('02', '0', text) and duplicate canonical kids, so this
         // pass is a pure int-key projection.
         $config['secrets_by_kid'] = self::canonicalHistoricalSecrets($config['secrets_by_kid']);
+
+        // Advisory build notes (never throw): signing-key rotation
+        // (kid > 1 or a non-empty historical map) is the documented
+        // deployment model, and a routine rotation must not silently
+        // reset the abuse-identity secrets. When the rate/risk root keys
+        // are left at their derivation default (secret_key), the notes
+        // tell the operator to configure dedicated stable keys; the
+        // derivation fallbacks stay the compatibility default.
+        $rotationConfigured = $config['kid'] > 1 || $config['secrets_by_kid'] !== [];
+        if ($rotationConfigured && $config['rate_limit_pepper'] === null) {
+            $container->log(new KiwiConfigAdvisoryPass(), 'kiwi_captcha.rate_limit_pepper is not configured, so the per-client rate-limit identities derive from secret_key. A routine signing-key rotation will therefore reset every per-client rate-limit identity (fresh HMAC keys, so every client window restarts empty). Configure a dedicated, stable rate_limit_pepper so routine rotations of the signing key never reset the rate-limit memory; an emergency root compromise may intentionally rotate everything.');
+        }
+        if ($rotationConfigured && $config['risk']['enabled'] && $config['risk']['master_secret'] === null) {
+            $container->log(new KiwiConfigAdvisoryPass(), 'kiwi_captcha.risk.master_secret is not configured, so the risk identity keys derive from secret_key. A routine signing-key rotation will therefore reset every risk pseudonym (fresh derived keys, so every source/subnet/session counter restarts at zero). Configure a dedicated, stable risk.master_secret so routine rotations of the signing key never reset the adaptive-risk memory; an emergency root compromise may intentionally rotate everything.');
+        }
 
         // Privacy posture enforcement: 'strict' (default) forces the
         // privacy-sensitive options off or true:
@@ -370,6 +386,24 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                     $config['argon2_max_concurrent_verifications'],
                 ));
             }
+            // A "configured" rate_limit_cache pool cannot be proven
+            // cross-worker: Symfony's in-memory ArrayAdapter keeps its
+            // items per process, so under PHP-FPM the guard above would
+            // pass while the rate-limit state is request-local. When the
+            // pool's class is resolvable at extension time and is (a
+            // subclass of) ArrayAdapter, refuse in production with an
+            // actionable message. External or unresolvable pool services
+            // pass (their class cannot be inspected here).
+            if (($config['rate_limit_cache'] ?? null) !== null) {
+                $poolClass = $this->definitionClass($config['rate_limit_cache'], $container);
+                if ($poolClass !== null && \is_a($poolClass, ArrayAdapter::class, true)) {
+                    throw new \LogicException(sprintf(
+                        'kiwi_captcha.rate_limit_cache ("%s", class %s) is an in-memory adapter (Symfony\Cache\Adapter\ArrayAdapter or a subclass): its items live per process, so it cannot be a shared cross-worker rate-limit pool under PHP-FPM. Use a genuinely shared pool (e.g. a Redis-backed Symfony Cache pool such as RedisAdapter) or leave rate_limit_cache unset and accept the object-memory semantics (long-lived-runtime-only).',
+                        $config['rate_limit_cache'],
+                        $poolClass,
+                    ));
+                }
+            }
         }
 
         // The risk.redis knobs (wait_replicas / wait_timeout_ms /
@@ -447,6 +481,22 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // record actually says Argon2id.
         $gateRef = null;
         if ($config['argon2_max_concurrent_verifications'] > 0) {
+            // Effective per-scope concentration cap: the explicitly
+            // configured value, or derived from the global cap when unset
+            // as max(1, global - 1), so one scope can never monopolize the
+            // shared slots. The config tree refuses explicit values at or
+            // above the global cap; with the default global cap of 2 the
+            // derived default is 1. The semaphore is only wired when the
+            // global cap is positive, so the derived value is always >= 1.
+            $perTenantCap = $config['argon2_max_per_tenant']
+                ?? ($config['argon2_max_concurrent_verifications'] > 0
+                    ? max(1, $config['argon2_max_concurrent_verifications'] - 1)
+                    : null);
+            // The bounded saturation-pressure counter: the canonical name
+            // argon2_saturation_pressure_cap wins, the deprecated
+            // argon2_max_waiters alias still wires the same value (OR
+            // semantics like the allow_nonredis_rate_limit_fallback flag).
+            $saturationPressureCap = $config['argon2_saturation_pressure_cap'] ?? $config['argon2_max_waiters'];
             if ($redisRef !== null) {
                 $container->setDefinition(
                     'kiwi_captcha.argon2_redis_semaphore',
@@ -455,11 +505,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                         $config['argon2_max_concurrent_verifications'],
                         $config['argon2_semaphore_namespace'],
                         $config['argon2_lease_ms'],
-                        $config['argon2_max_waiters'],
-                        // Per-scope budget (argon2_max_per_tenant): the
-                        // semaphore checks the scope's own lease set in
-                        // addition to the global cap.
-                        $config['argon2_max_per_tenant'],
+                        $saturationPressureCap,
+                        // Per-scope concentration cap (argon2_max_per_tenant,
+                        // resolved above): the semaphore checks the scope's
+                        // own lease set in addition to the global cap.
+                        $perTenantCap,
                     ]))->setPublic(true),
                 );
                 // The verifier consumes the gate through the
@@ -500,6 +550,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $config['revoked_kids'],
             $config['issuer'],
             $config['risk']['region'],
+            $config['strict_kid_verification'],
         );
 
         $container->setDefinition('kiwi_captcha.verifier', (new Definition(Verifier::class, [
@@ -522,6 +573,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setArgument('$secretsByKid', $securityContext->acceptedKeys())
             ->setArgument('$revokedKids', $config['revoked_kids'])
             ->setPublic(true));
+        // The recovery-claim derivation TTL (resume_claim_ttl_secs) is
+        // wired by name ($resumeClaimTtlSecs) when the installed core's
+        // Verifier declares the parameter (added in the round-94 core);
+        // an older core simply keeps its constructor default. The guard
+        // exists because Symfony's ResolveNamedArgumentsPass refuses a
+        // named argument the class does not declare at container compile
+        // time, so the wiring must follow the installed core.
+        if (self::coreVerifierAcceptsResumeClaimTtlSecs()) {
+            $container->getDefinition('kiwi_captcha.verifier')
+                ->setArgument('$resumeClaimTtlSecs', $config['resume_claim_ttl_secs']);
+        }
         if ($config['risk']['region'] !== null) {
             $container->getDefinition('kiwi_captcha.verifier')
                 ->setArgument('$region', $config['risk']['region']);
@@ -1827,5 +1889,27 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         ksort($canonical, SORT_NUMERIC);
 
         return $canonical;
+    }
+
+    /**
+     * Whether the installed core's Verifier constructor declares the
+     * `$resumeClaimTtlSecs` parameter (the round-94 recovery-claim TTL).
+     * The bundle wires the named argument only when the parameter exists,
+     * because Symfony's ResolveNamedArgumentsPass refuses named arguments
+     * the class does not declare, at container compile time.
+     */
+    private static function coreVerifierAcceptsResumeClaimTtlSecs(): bool
+    {
+        $constructor = (new \ReflectionClass(Verifier::class))->getConstructor();
+        if ($constructor === null) {
+            return false;
+        }
+        foreach ($constructor->getParameters() as $parameter) {
+            if ($parameter->getName() === 'resumeClaimTtlSecs') {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

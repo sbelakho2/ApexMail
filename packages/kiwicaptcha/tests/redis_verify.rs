@@ -87,6 +87,49 @@ impl ArgonAdmissionGate for CountingGate {
     }
 }
 
+/// The racer variant of the counting gate: counts acquires and leases
+/// like [`CountingGate`], and additionally synchronizes every acquire on
+/// a barrier. With the runtime-state gate in front of admission, two
+/// racers must both pass their state reads before either may consume:
+/// the barrier inside `acquire` forces both racers to reach the gate
+/// before any lease is granted, so the Pending race is deterministic
+/// (both racers read Pending, both acquire, exactly one derives).
+struct RacerGate {
+    barrier: Arc<Barrier>,
+    active: Arc<AtomicUsize>,
+    acquired: Arc<AtomicUsize>,
+    released: Arc<AtomicUsize>,
+}
+
+struct RacerLease {
+    active: Arc<AtomicUsize>,
+    released: Arc<AtomicUsize>,
+}
+
+impl ArgonLease for RacerLease {}
+
+impl Drop for RacerLease {
+    fn drop(&mut self) {
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        self.released.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl ArgonAdmissionGate for RacerGate {
+    fn acquire(
+        &self,
+        _record: &ChallengeRecord,
+    ) -> Result<Option<Box<dyn ArgonLease>>, AdmissionError> {
+        self.acquired.fetch_add(1, Ordering::SeqCst);
+        self.active.fetch_add(1, Ordering::SeqCst);
+        self.barrier.wait();
+        Ok(Some(Box::new(RacerLease {
+            active: Arc::clone(&self.active),
+            released: Arc::clone(&self.released),
+        })))
+    }
+}
+
 /// Gate whose capacity backend is unavailable.
 struct UnavailableGate;
 
@@ -422,9 +465,10 @@ fn two_concurrent_verifies_exactly_one_derives() {
     // RecordNotFound — or ConsumeIndeterminate when it races between the
     // transition and the outcome commit. Exactly one derive
     // happens: commit_result stores exactly once, so the single stored
-    // `consumed_result` (valid=true) pins the derive count; the counting
-    // gate proves both racers passed through the Argon gate (the gate runs
-    // before the transition, so both acquire; only the winner derives).
+    // `consumed_result` (valid=true) pins the derive count; the barrier
+    // gate proves both racers passed through the Argon gate (the runtime-
+    // state read and the gate run before the transition, so both racers
+    // read Pending and both acquire; only the winner derives).
     let Some(url) = redis_url() else { return };
     let prefix = prefix("race");
     let issued = issue_challenge(
@@ -444,11 +488,16 @@ fn two_concurrent_verifies_exactly_one_derives() {
     let active = Arc::new(AtomicUsize::new(0));
     let acquired = Arc::new(AtomicUsize::new(0));
     let released = Arc::new(AtomicUsize::new(0));
-    let gate = CountingGate {
+    // The in-gate barrier has the two racing threads as its only
+    // participants: each verify must pass its runtime-state read and
+    // reach the gate before either may consume, so the Pending race is
+    // deterministic (both racers read Pending, both acquire, exactly one
+    // derives).
+    let gate = RacerGate {
+        barrier: Arc::new(Barrier::new(2)),
         active: Arc::clone(&active),
         acquired: Arc::clone(&acquired),
         released: Arc::clone(&released),
-        accept: true,
     };
     let verifier = Arc::new(verifier_for(&url, &prefix).with_argon_gate(gate));
     verifier.store().store(&issued.record).unwrap();
@@ -529,6 +578,245 @@ fn two_concurrent_verifies_exactly_one_derives() {
     );
     assert_eq!(active.load(Ordering::SeqCst), 0, "no lease left in flight");
     assert_eq!(released.load(Ordering::SeqCst), 2, "every lease released");
+}
+
+#[test]
+fn cancelled_argon_record_never_acquires_an_admission_slot() {
+    // Round-94 audit: a cancelled Argon record is terminal, so verify()
+    // reads the runtime state after the cheap phase and before the
+    // admission gate: RecordNotFound with zero acquires. An attacker who
+    // cancels a challenge once cannot then flood syntactically valid
+    // tokens (any bounded counter passes the cheap phase) to capture and
+    // release scarce admission slots and starve legitimate memory-hard
+    // verifications. The malformed-signature variant fails the cheap
+    // phase itself, also with zero acquires.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("cancel-admission");
+    let issued = issue_challenge(
+        &argon_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit argon solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let arbitrary = encode_token(&issued.record.nonce, 0);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let store = store_for(&url, &prefix);
+    store.store(&issued.record).unwrap();
+    assert_eq!(
+        store.cancel(&issued.record.nonce).unwrap(),
+        Some(CancelResult::CancelledNow),
+        "the pending record flips to cancelled"
+    );
+
+    let gate = CountingGate {
+        active: Arc::new(AtomicUsize::new(0)),
+        acquired: Arc::new(AtomicUsize::new(0)),
+        released: Arc::new(AtomicUsize::new(0)),
+        accept: true,
+    };
+    let acquired = gate.acquired.clone();
+    let verifier = verifier_for(&url, &prefix).with_argon_gate(gate);
+
+    assert_eq!(
+        verify_at(&verifier, &token, issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+        "a solved token for a cancelled record fails closed without admission"
+    );
+    assert_eq!(
+        verify_at(&verifier, &arbitrary, issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+        "an arbitrary bounded counter for the same cancelled record also returns without admission"
+    );
+    assert_eq!(
+        acquired.load(Ordering::SeqCst),
+        0,
+        "a cancelled record must never acquire an admission slot"
+    );
+
+    // The malformed-signature variant: the cheap phase fails it
+    // (BadSignature) before the state gate, also with zero acquires.
+    let tampered = issue_challenge(
+        &argon_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let mut record = tampered.record.clone();
+    record.challenge.push_str("00");
+    record.prefix = format!("{}|{}|", record.challenge, record.salt);
+    let malformed = encode_token(&record.nonce, counter);
+    store.store(&record).unwrap();
+    assert_eq!(
+        store.cancel(&record.nonce).unwrap(),
+        Some(CancelResult::CancelledNow),
+        "the malformed-signature record is cancelled too"
+    );
+    assert_eq!(
+        verify_at(&verifier, &malformed, tampered.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::BadSignature),
+        "the malformed-signature token fails the cheap phase"
+    );
+    assert_eq!(
+        acquired.load(Ordering::SeqCst),
+        0,
+        "the malformed-signature variant must never acquire either"
+    );
+}
+
+#[test]
+fn consumed_argon_record_with_matching_identity_replays_without_admission() {
+    // Round-94 audit: an already-consumed Argon record resolves through
+    // the identity gate from the runtime-state read, before the
+    // admission gate: a same-operation replay returns the retained
+    // stored outcome with zero acquires.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("consumed-replay-admission");
+    let issued = issue_challenge(
+        &argon_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let identity = "logical-op-consumed-admission";
+    let counter = solve_for_test(&issued.record).expect("4-bit argon solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let store = store_for(&url, &prefix);
+    store.store(&issued.record).unwrap();
+    assert!(
+        store
+            .consume_with_operation_identity(&issued.record.nonce, Some(identity))
+            .unwrap()
+            .expect("the pending record consumes")
+            .first
+    );
+    store
+        .commit_result(
+            &issued.record.nonce,
+            true,
+            issued.record.request_binding.as_deref(),
+        )
+        .unwrap();
+
+    let gate = CountingGate {
+        active: Arc::new(AtomicUsize::new(0)),
+        acquired: Arc::new(AtomicUsize::new(0)),
+        released: Arc::new(AtomicUsize::new(0)),
+        accept: true,
+    };
+    let acquired = gate.acquired.clone();
+    let verifier = verifier_for(&url, &prefix).with_argon_gate(gate);
+
+    let outcome = verify_with(
+        &verifier,
+        &token,
+        issued_at_ns,
+        Some(identity),
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        matches!(
+            outcome,
+            VerifyOutcome::Valid {
+                from_stored_result: true,
+                ..
+            }
+        ),
+        "the same-operation replay returns the retained stored success: {outcome:?}"
+    );
+    assert_eq!(
+        acquired.load(Ordering::SeqCst),
+        0,
+        "a consumed record must never acquire an admission slot"
+    );
+}
+
+#[test]
+fn consumed_argon_record_with_wrong_or_null_identity_is_already_consumed_without_admission() {
+    // Round-94 audit: the wrong-identity and no-identity replays of an
+    // already-consumed Argon record resolve as AlreadyConsumed from the
+    // runtime-state read, with zero acquires — one solved token never
+    // funds a second operation and never captures admission capacity.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("consumed-identity-admission");
+    let issued = issue_challenge(
+        &argon_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let identity = "logical-op-consumed-identity";
+    let counter = solve_for_test(&issued.record).expect("4-bit argon solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let store = store_for(&url, &prefix);
+    store.store(&issued.record).unwrap();
+    assert!(
+        store
+            .consume_with_operation_identity(&issued.record.nonce, Some(identity))
+            .unwrap()
+            .expect("the pending record consumes")
+            .first
+    );
+    store
+        .commit_result(
+            &issued.record.nonce,
+            true,
+            issued.record.request_binding.as_deref(),
+        )
+        .unwrap();
+
+    let gate = CountingGate {
+        active: Arc::new(AtomicUsize::new(0)),
+        acquired: Arc::new(AtomicUsize::new(0)),
+        released: Arc::new(AtomicUsize::new(0)),
+        accept: true,
+    };
+    let acquired = gate.acquired.clone();
+    let verifier = verifier_for(&url, &prefix).with_argon_gate(gate);
+
+    assert_eq!(
+        verify_with(
+            &verifier,
+            &token,
+            issued_at_ns,
+            Some("logical-op-someone-else"),
+            RequestBindingExpectation::Unenforced
+        ),
+        VerifyOutcome::Invalid(VerifyError::AlreadyConsumed),
+        "a wrong operation identity on the consumed record is AlreadyConsumed"
+    );
+    assert_eq!(
+        verify_at(&verifier, &token, issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::AlreadyConsumed),
+        "a no-identity replay of the consumed record is AlreadyConsumed"
+    );
+    assert_eq!(
+        acquired.load(Ordering::SeqCst),
+        0,
+        "the refused replays must never acquire an admission slot"
+    );
 }
 
 #[test]

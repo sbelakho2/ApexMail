@@ -217,7 +217,6 @@ The JSON can never be re-sniffed as HTML.
 The health responses (`/health/live`, `/health/ready`) carry the same `Cache-Control: no-store` + `Pragma: no-cache` contract.
 
 ## Sitekey publicity
-
 No client-visible identifier confers any privileged capability.
 The bundle defines three strictly separated credential classes:
 
@@ -228,7 +227,19 @@ The bundle defines three strictly separated credential classes:
   Client-supplied identifiers are never accepted, so none can be abused.
 - Server API credential: `kiwi_captcha.secret_key` (and `risk.master_secret`, `rate_limit_pepper`) signs/verifies challenges and derives every keyed pseudonym.
   It must live only in server configuration/environment; the widget never receives it.
-  `risk.master_secret` and `rate_limit_pepper` should be dedicated, stable secrets: the identities they derive anchor the adaptive risk and rate-limit memory, so a routine signing-key rotation must not silently reset that memory.
+  Dedicated, stable `risk.master_secret` and `rate_limit_pepper` keys are the normal deployment model: K_abuse-identity stays stable while K_signing rotates, see [configuration.md](configuration.md#signing-key-rotation-and-abuse-identity-secrets).
+  The identities they derive anchor the adaptive risk and rate-limit memory, so a routine signing-key rotation must not silently reset that memory.
+  The secret_key derivation defaults are a compatibility fallback, and the extension logs an advisory at container build time when rotation is configured without dedicated root keys.
+
+## Strict current-kid verification
+
+With an empty `secrets_by_kid` map the core's legacy single-secret mode accepts ANY record kid under the current secret.
+That is the compatible default (`strict_kid_verification: false`), and it stays available.
+The hardening option is `strict_kid_verification: true`: the effective keyring is always `[currentKid => currentSecret]`, even with an empty historical map, so the verifier strictly resolves `record.kid == currentKid` from the very first deployment.
+Any other kid fails with `UnknownKid` before signature work, so an issuer holding the same HMAC secret under a different kid cannot verify unless issuer/region isolation is configured.
+Strict mode changes nothing once a historical ring exists, because the rotation ring is already exact per kid.
+The Siteverify security-context digest reflects the strict ring automatically, so a cached provider result cannot outlive a mode switch.
+See [configuration.md](configuration.md#production-hardening).
 - Admin + control-plane: the security Redis (policy hash, calibration state) and the deployment secrets are control-plane material with independent privileges: read vs write roles, scoped machine credentials, and audit logging.
   See the control-plane threat model in [operations.md](operations.md#control-plane-threat-model).
   No component of the client-facing protocol can reach this plane.
@@ -409,23 +420,25 @@ Stage-2 issuance transitions the chain to issued.
 Only successful verification of that exact stage-2 nonce transitions it to the terminal verified state.
 See [chained-challenges.md](chained-challenges.md).
 
-## Argon2 admission wait-queue bound
+## Argon2 admission saturation-pressure bound
 
-`argon2_max_waiters` (default 64) bounds the Redis semaphore's waiters counter (`{..}:sem:waiters`, hash-tagged with the lease set).
-When the concurrency cap is saturated, contenders are counted with the lease lifetime's TTL.
-Once the waiter count exceeds `argon2_max_waiters`, `acquire()` returns null immediately (CapacityExceeded → the captcha violation / 429) instead of queueing behind the saturated gate.
-A waiter is removed when a lease is granted or the acquire returns null (best-effort, same Lua).
-During an Argon2id saturation storm the waiters counter can never grow unboundedly.
+`argon2_saturation_pressure_cap` (default 64; the deprecated `argon2_max_waiters` name still works) bounds the Redis semaphore's saturation-pressure counter (`{..}:sem:waiters`, hash-tagged with the lease set).
+When a cap is saturated, each refused contender is counted with the lease lifetime's TTL.
+Once the counter exceeds the cap, `acquire()` returns null immediately (CapacityExceeded → the captcha violation / 429).
+Nothing queues, blocks or waits: admission is immediate and non-blocking, and the counter is a gauge of saturation pressure, never a queue.
+A counter entry is removed when a lease is granted or the acquire returns null (best-effort, same Lua).
+During an Argon2id saturation storm the counter can never grow unboundedly.
 
-## Per-scope Argon2 fairness
+## Per-scope Argon2 concentration cap
 
-`argon2_max_per_tenant` (default 8, min 1) gives every scope string its own Argon2id admission budget.
+`argon2_max_per_tenant` (unset by default; the extension derives `max(1, global cap - 1)`, so with the default global cap of 2 the effective cap is 1; min 1 when explicit) gives every scope string its own Argon2id admission cap.
 The semaphore checks a per-scope lease set (`{kiwicaptcha:argon2:leases:<ns>}:<scope>`) in addition to the global `argon2_max_concurrent_verifications` cap.
-One busy scope (tenant/endpoint mapped to a scope) can fill its own budget without starving the other scopes' share of the memory-hard capacity.
+It is a concentration cap, not a guaranteed share and not a weighted-fair scheduler: with per-tenant below global it prevents one busy scope from monopolizing the shared capacity, but it never reserves a specific share for any tenant.
+Explicit values must be strictly below the global cap when the global cap is positive (a cap at or above the global cap can never bind, so the config tree refuses it).
 The global cap stays the deployment-wide memory invariant.
 The validator passes the constraint scope into `acquire()` (via the request-scope-aware gate wrapper).
-The waiters guard stays global.
-The in-process fallback gate has no per-scope budget (per-process, single-worker best-effort).
+The saturation-pressure counter stays global.
+The in-process fallback gate has no per-scope cap (per-process, single-worker best-effort).
 
 ## Related documents
 

@@ -123,4 +123,26 @@ final class InvalidKidRotationConfigTest extends TestCase
             'secrets_by_kid keys must be distinct canonical kids: two entries that resolve to the same integer would silently overwrite one historical secret'
         );
     }
+
+    public function testPerScopeCapAtOrAboveTheGlobalCapIsRefusedWithTheExactMessage(): void
+    {
+        // The per-scope concentration cap is inert at or above the global
+        // cap (the global cap admits fewer), so it can never provide
+        // anti-starvation — refused at configuration time. The default
+        // stays valid: null, derived as max(1, global - 1).
+        $message = 'kiwi_captcha.argon2_max_per_tenant must be strictly below argon2_max_concurrent_verifications when the global cap is positive: a per-scope concentration cap at or above the global cap can never bind (the global cap admits fewer), so it provides no anti-starvation. Leave the option unset to derive max(1, global - 1) or set it strictly below the global cap';
+        foreach ([
+            'equal to the global cap' => ['argon2_max_concurrent_verifications' => 2, 'argon2_max_per_tenant' => 2],
+            'above the global cap' => ['argon2_max_concurrent_verifications' => 2, 'argon2_max_per_tenant' => 8],
+            'global 8, per-tenant 10' => ['argon2_max_concurrent_verifications' => 8, 'argon2_max_per_tenant' => 10],
+        ] as $case) {
+            $this->expectRefused($case, $message);
+        }
+
+        // Valid shapes: unset (the default), strictly below the global
+        // cap, and a cap with an unlimited global (0).
+        $this->load([]);
+        $this->load(['argon2_max_concurrent_verifications' => 8, 'argon2_max_per_tenant' => 3]);
+        $this->load(['argon2_max_concurrent_verifications' => 0, 'argon2_max_per_tenant' => 3]);
+    }
 }

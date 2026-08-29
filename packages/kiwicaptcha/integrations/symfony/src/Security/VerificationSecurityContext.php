@@ -22,7 +22,10 @@ namespace BelConsulting\KiwiCaptchaBundle\Security;
  * kid above the newest ring key is unknown. With an empty historical
  * map the ring stays empty: the core's legacy single-secret path stays,
  * verify() with the current secret keeps the pre-rotation behavior
- * byte-for-byte.
+ * byte-for-byte. With strictKidMode enabled the ring is always
+ * [currentKid => currentSecret] even when the historical map is empty,
+ * so the verifier strictly resolves record.kid == currentKid from the
+ * very first deployment (any other kid -> UnknownKid).
  *
  * contextDigest() hashes a versioned canonical serialization of the
  * whole signing context. It covers a version marker, the issuer and
@@ -50,6 +53,7 @@ final class VerificationSecurityContext
         private readonly array $revokedKids,
         private readonly ?string $issuer = null,
         private readonly ?string $region = null,
+        private readonly bool $strictKidMode = false,
     ) {
         // Defense-in-depth guard: canonicalization happens exactly once,
         // in the extension, and is the single source of truth. A
@@ -69,14 +73,24 @@ final class VerificationSecurityContext
      * The effective verification keyring: the historical secrets_by_kid
      * map merged with the current signing key, numerically sorted by
      * kid. Empty when there are no historical secrets, which keeps the
-     * core's legacy single-secret verification path untouched.
+     * core's legacy single-secret verification path untouched. With
+     * strictKidMode enabled the ring is always the current key alone, so
+     * the verifier strictly resolves record.kid == currentKid even with
+     * an empty historical map.
      *
      * @return array<int, string>
      */
     public function acceptedKeys(): array
     {
         if ($this->historicalSecrets === []) {
-            return [];
+            if (!$this->strictKidMode) {
+                return [];
+            }
+
+            $keys = [$this->currentKid => $this->currentSecret];
+            ksort($keys, SORT_NUMERIC);
+
+            return $keys;
         }
 
         $keys = [];

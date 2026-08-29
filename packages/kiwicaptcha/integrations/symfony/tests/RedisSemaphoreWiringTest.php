@@ -61,7 +61,7 @@ final class RedisSemaphoreWiringTest extends TestCase
         self::assertSame(RedisAdmissionSemaphore::class, $semaphore->getClass());
         self::assertEquals(new Reference('my.redis.client'), $semaphore->getArgument(0));
         self::assertSame('deployment-a', $semaphore->getArgument(2), 'the configured namespace must reach the semaphore');
-        self::assertSame(64, $semaphore->getArgument(4), 'argon2_max_waiters (default 64) must reach the semaphore\'s bounded waiters guard');
+        self::assertSame(64, $semaphore->getArgument(4), 'argon2_saturation_pressure_cap (default 64) must reach the semaphore\'s bounded saturation-pressure counter');
 
         // The verifier consumes the gate through the request-scope-aware
         // wrapper (the validator passes the scope into acquire).
@@ -73,32 +73,71 @@ final class RedisSemaphoreWiringTest extends TestCase
         self::assertEquals(new Reference('kiwi_captcha.argon2_redis_semaphore'), $scopeGate->getArgument(0), 'the scope gate wraps the Redis semaphore');
     }
 
-    public function testArgon2MaxWaitersFlowsToTheRedisSemaphore(): void
+    public function testArgon2SaturationPressureCapFlowsToTheRedisSemaphore(): void
     {
         $container = $this->load(self::ARGON2 + [
             'argon2_max_concurrent_verifications' => 2,
-            'argon2_max_waiters' => 12,
+            'argon2_saturation_pressure_cap' => 12,
             'redis_service' => 'my.redis.client',
         ], static function (ContainerBuilder $c): void {
             $c->register('my.redis.client', \Redis::class);
         });
 
         $semaphore = $container->getDefinition('kiwi_captcha.argon2_redis_semaphore');
-        self::assertSame(12, $semaphore->getArgument(4), 'the configured argon2_max_waiters must reach the semaphore');
+        self::assertSame(12, $semaphore->getArgument(4), 'the configured argon2_saturation_pressure_cap must reach the semaphore');
+    }
+
+    /**
+     * @group legacy
+     */
+    public function testLegacyArgon2MaxWaitersAliasStillWiresTheSemaphoreWithDeprecation(): void
+    {
+        // The old name described a waiters guard, but the value is a
+        // bounded saturation-pressure counter (admission is immediate and
+        // non-blocking; nothing queues). The alias still wires the same
+        // value, and the config tree raises the Symfony deprecation
+        // pointing at the new name.
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'test');
+        $container->register('my.redis.client', \Redis::class);
+        $deprecations = [];
+        $previous = set_error_handler(static function (int $errno, string $errstr) use (&$deprecations): bool {
+            if ($errno === \E_USER_DEPRECATED) {
+                $deprecations[] = $errstr;
+            }
+
+            return true;
+        });
+        try {
+            (new KiwiCaptchaExtension())->load([array_merge(self::ARGON2, [
+                'secret_key' => str_repeat('a', 32),
+                'argon2_max_concurrent_verifications' => 2,
+                'argon2_max_waiters' => 12,
+                'redis_service' => 'my.redis.client',
+            ])], $container);
+        } finally {
+            restore_error_handler();
+        }
+
+        $semaphore = $container->getDefinition('kiwi_captcha.argon2_redis_semaphore');
+        self::assertSame(12, $semaphore->getArgument(4), 'the deprecated argon2_max_waiters alias must still wire the saturation-pressure counter');
+        self::assertNotEmpty($deprecations, 'using the deprecated option name must raise a Symfony deprecation');
+        self::assertStringContainsString('argon2_max_waiters', implode("\n", $deprecations), 'the deprecation names the deprecated option');
+        self::assertStringContainsString('argon2_saturation_pressure_cap', implode("\n", $deprecations), 'the deprecation points at the new option');
     }
 
     public function testArgon2MaxPerTenantFlowsToTheRedisSemaphore(): void
     {
         $container = $this->load(self::ARGON2 + [
-            'argon2_max_concurrent_verifications' => 2,
-            'argon2_max_per_tenant' => 15,
+            'argon2_max_concurrent_verifications' => 10,
+            'argon2_max_per_tenant' => 5,
             'redis_service' => 'my.redis.client',
         ], static function (ContainerBuilder $c): void {
             $c->register('my.redis.client', \Redis::class);
         });
 
         $semaphore = $container->getDefinition('kiwi_captcha.argon2_redis_semaphore');
-        self::assertSame(15, $semaphore->getArgument(5), 'the configured argon2_max_per_tenant must reach the semaphore');
+        self::assertSame(5, $semaphore->getArgument(5), 'the configured argon2_max_per_tenant must reach the semaphore');
 
         $container = $this->load(self::ARGON2 + [
             'argon2_max_concurrent_verifications' => 2,
@@ -106,7 +145,27 @@ final class RedisSemaphoreWiringTest extends TestCase
         ], static function (ContainerBuilder $c): void {
             $c->register('my.redis.client', \Redis::class);
         });
-        self::assertSame(8, $container->getDefinition('kiwi_captcha.argon2_redis_semaphore')->getArgument(5), 'argon2_max_per_tenant defaults to 8');
+        self::assertSame(1, $container->getDefinition('kiwi_captcha.argon2_redis_semaphore')->getArgument(5), 'the unset argon2_max_per_tenant resolves to max(1, global cap - 1): with the default global cap of 2 the effective per-scope cap is 1 (one scope can never monopolize both slots)');
+    }
+
+    public function testArgon2MaxPerTenantResolutionTracksTheGlobalCap(): void
+    {
+        // The derived default follows the global cap: with a global cap
+        // of 8 the effective per-scope cap is 7; an explicit value wins.
+        $load = static fn (array $extra): ContainerBuilder => (function () use ($extra): ContainerBuilder {
+            $container = new ContainerBuilder();
+            $container->setParameter('kernel.environment', 'test');
+            $container->register('my.redis.client', \Redis::class);
+            (new KiwiCaptchaExtension())->load([array_merge(self::ARGON2, [
+                'secret_key' => str_repeat('a', 32),
+                'redis_service' => 'my.redis.client',
+            ], $extra)], $container);
+
+            return $container;
+        })();
+
+        self::assertSame(7, $load(['argon2_max_concurrent_verifications' => 8])->getDefinition('kiwi_captcha.argon2_redis_semaphore')->getArgument(5), 'unset: max(1, 8 - 1) = 7');
+        self::assertSame(3, $load(['argon2_max_concurrent_verifications' => 8, 'argon2_max_per_tenant' => 3])->getDefinition('kiwi_captcha.argon2_redis_semaphore')->getArgument(5), 'explicit: 3 wins');
     }
 
     public function testRedisStorageStorageWiresRedisSemaphoreFromItsClient(): void

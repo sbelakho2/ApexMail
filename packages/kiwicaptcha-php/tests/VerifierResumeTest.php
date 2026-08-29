@@ -1556,6 +1556,144 @@ final class VerifierResumeTest extends TestCase
         $outcome = (new Verifier($inner, now: static fn (): int => self::ISSUED_AT))->resumeConsumedOperation($token, Vectors::SECRET, $identity, 'login', self::CLIENT_IP, null);
         self::assertTrue($outcome->isOk(), 'the correct context resolves the retained Valid');
     }
+
+    // ── The configurable resume-claim TTL (round-94 audit fix) ─────────
+
+    public function testResumeClaimTtlDefaultsToSixtyAndIsConfigurable(): void
+    {
+        // The claim lease must cover the maximum supported derivation
+        // duration; a severely CPU-starved host could exceed the 60s
+        // default in one derivation, so the constructor parameter lets
+        // the bundle wire a `resume_claim_ttl_secs` config value in
+        // (fencing stays correct on expiry either way). The default
+        // keeps the Rust `CLAIM_TTL_SECS` mirror at 60, and a custom
+        // value reaches the storage's claimResumeDerivation() verbatim.
+        [$inner, $record, $token] = $this->issueAndSolveArgon();
+        $inner->consumeWithOperationIdentity($record->nonce, $this->identity('claim-ttl'));
+
+        $defaults = new class($inner) implements StorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, \KiwiCaptcha\ResumeDerivationClaimInterface {
+            public ?int $lastTtl = null;
+
+            public function __construct(private readonly ArrayStorage $inner)
+            {
+            }
+
+            public function store(ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consumedState(string $nonce): ?ConsumedRecord
+            {
+                return $this->inner->consumedState($nonce);
+            }
+
+            public function consume(string $nonce): ?ConsumedRecord
+            {
+                return $this->inner->consume($nonce);
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+
+            public function claimResumeDerivation(string $nonce, int $ttlSecs = 60): ?string
+            {
+                $this->lastTtl = $ttlSecs;
+
+                return $this->inner->claimResumeDerivation($nonce, $ttlSecs);
+            }
+
+            public function releaseResumeDerivation(string $nonce, string $owner): bool
+            {
+                return $this->inner->releaseResumeDerivation($nonce, $owner);
+            }
+
+            public function commitResultResume(string $nonce, bool $valid, ?string $binding, string $owner): bool
+            {
+                return $this->inner->commitResultResume($nonce, $valid, $binding, $owner);
+            }
+        };
+
+        $outcome = (new Verifier($defaults))->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('claim-ttl'), 'login', self::CLIENT_IP);
+        self::assertTrue($outcome->isOk(), sprintf('the default-TTL resume must derive and commit, got %s', $outcome->code()));
+        self::assertSame(60, $defaults->lastTtl, 'the default claim TTL keeps the Rust CLAIM_TTL_SECS mirror at 60');
+
+        // A second record: the first resume already committed its
+        // deterministic result, and a committed record resolves through
+        // the fast path without ever claiming.
+        [$inner2, $record2, $token2] = $this->issueAndSolveArgon();
+        $inner2->consumeWithOperationIdentity($record2->nonce, $this->identity('claim-ttl-configured'));
+        $configured = new class($inner2) implements StorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, \KiwiCaptcha\ResumeDerivationClaimInterface {
+            public ?int $lastTtl = null;
+
+            public function __construct(private readonly ArrayStorage $inner)
+            {
+            }
+
+            public function store(ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consumedState(string $nonce): ?ConsumedRecord
+            {
+                return $this->inner->consumedState($nonce);
+            }
+
+            public function consume(string $nonce): ?ConsumedRecord
+            {
+                return $this->inner->consume($nonce);
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+
+            public function claimResumeDerivation(string $nonce, int $ttlSecs = 60): ?string
+            {
+                $this->lastTtl = $ttlSecs;
+
+                return $this->inner->claimResumeDerivation($nonce, $ttlSecs);
+            }
+
+            public function releaseResumeDerivation(string $nonce, string $owner): bool
+            {
+                return $this->inner->releaseResumeDerivation($nonce, $owner);
+            }
+
+            public function commitResultResume(string $nonce, bool $valid, ?string $binding, string $owner): bool
+            {
+                return $this->inner->commitResultResume($nonce, $valid, $binding, $owner);
+            }
+        };
+
+        $outcome = (new Verifier($configured, resumeClaimTtlSecs: 300))->resumeConsumedOperation($token2, Vectors::SECRET, $this->identity('claim-ttl-configured'), 'login', self::CLIENT_IP);
+        self::assertTrue($outcome->isOk(), sprintf('the configured-TTL resume must derive and commit, got %s', $outcome->code()));
+        self::assertSame(300, $configured->lastTtl, 'the configured claim TTL reaches the storage verbatim');
+    }
 }
 
 /**

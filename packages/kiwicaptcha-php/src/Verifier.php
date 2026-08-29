@@ -58,9 +58,16 @@ namespace KiwiCaptcha;
  * security-policy epoch, the deployment issuer, and the
  * server-measured minimum duration. Records without issued_at_ns are
  * malformed; receipt preceding issuance beyond the skew tolerance is
- * rejected as TooFast. Then the optional telemetry gate runs, and the
- * optional Argon2id admission gate (exhaustion yields CapacityExceeded
- * without burning the record). The consume-and-re-derive proof phase
+ * rejected as TooFast. Then the optional telemetry gate runs. The
+ * Argon2id admission gate follows (exhaustion yields CapacityExceeded
+ * without burning the record). A runtime-state capable storage (the
+ * {@see ChallengeRuntimeStateReadableInterface} seam, implemented by
+ * the Redis and array backends) resolves terminal records between the
+ * two. A cancelled or missing record answers RecordNotFound directly.
+ * An already-consumed record resolves through the shared identity-gated
+ * resolution of the consume-returned envelope. Neither ever burns a
+ * scarce Argon admission slot (round-94 audit fix). The
+ * consume-and-re-derive proof phase
  * follows, and a post-derive final revalidation against the current
  * server clock and the current expectations precedes the commit of the
  * deterministic result.
@@ -151,18 +158,24 @@ final class Verifier
     public const MAX_PARALLELISM = 4;
 
     /**
-     * The resume re-derivation claim lease, in seconds. The claim must
-     * cover the maximum supported derivation duration so a legitimate
-     * derivation never outlives its own claim. 60 seconds is far beyond
-     * the worst Argon2id derivation under the process ceilings
-     * ({@see self::MAX_ARGON_MEMORY_KIB} x {@see self::MAX_ARGON_TIME},
-     * a few seconds at most) plus the surrounding cheap phase and
-     * commit. The {@see VerificationAdmissionGate} interface exposes no
-     * lease TTL to read (the bundle's semaphore lease is internal), so
-     * the claim keeps the Rust `CLAIM_TTL_SECS` value. Fencing is still
-     * correct when the claim expires: a stale owner can never commit
-     * through a claim it no longer holds; the TTL exists to preserve
-     * the single-derivation efficiency property.
+     * The default resume re-derivation claim lease, in seconds, the
+     * constructor's `$resumeClaimTtlSecs` parameter default (the bundle
+     * can raise it via the `resume_claim_ttl_secs` config value). The
+     * claim must cover the maximum supported derivation duration so a
+     * legitimate derivation never outlives its own claim. 60 seconds is
+     * far beyond the worst Argon2id derivation under the process
+     * ceilings ({@see self::MAX_ARGON_MEMORY_KIB} x
+     * {@see self::MAX_ARGON_TIME}, a few seconds at most) plus the
+     * surrounding cheap phase and commit. The {@see VerificationAdmissionGate}
+     * interface exposes no lease TTL to read (the bundle's semaphore
+     * lease is internal), so the claim keeps the Rust `CLAIM_TTL_SECS`
+     * value as its default. Fencing is still correct when the claim
+     * expires: a stale owner can never commit through a claim it no
+     * longer holds; the TTL exists to preserve the single-derivation
+     * efficiency property. A severely CPU-starved host could exceed the
+     * default in one derivation, so the lower bound must cover the
+     * maximum supported derivation duration; operators may raise it
+     * through the constructor parameter.
      */
     private const RESUME_CLAIM_TTL_SECS = 60;
 
@@ -236,6 +249,23 @@ final class Verifier
          * disables the revocation set.
          */
         private readonly array $revokedKids = [],
+        /**
+         * The resume re-derivation claim lease length in seconds, the
+         * configurable override of {@see self::RESUME_CLAIM_TTL_SECS}
+         * (the bundle wires the `resume_claim_ttl_secs` config value
+         * here; the default keeps the Rust `CLAIM_TTL_SECS` mirror at
+         * 60). The lease must cover the maximum supported derivation
+         * duration so a legitimate derivation never outlives its own
+         * claim; fencing stays correct when it expires, because a stale
+         * owner can never commit through a claim it no longer holds.
+         * The TTL exists to preserve the single-derivation efficiency
+         * property. A severely CPU-starved host could exceed the
+         * default in one Argon2id derivation, so the conservative lower
+         * bound is the maximum supported derivation duration under the
+         * process ceilings ({@see self::MAX_ARGON_MEMORY_KIB} x
+         * {@see self::MAX_ARGON_TIME}); operators may raise it.
+         */
+        private readonly int $resumeClaimTtlSecs = self::RESUME_CLAIM_TTL_SECS,
     ) {
         // Backward-compatibility shim: callers may pass the clock override
         // positionally in the second slot. A Closure there is $now, not an
@@ -549,6 +579,71 @@ final class Verifier
             }
         }
 
+        // 7b. Terminal-state resolution before the Argon admission gate
+        //     (round-94 audit fix): a cancelled or already-consumed
+        //     record must never acquire a scarce admission slot, and a
+        //     terminal record's outcome is fully determined. A cancelled
+        //     record is never consumable, so a well-formed token for it
+        //     always resolved to RecordNotFound via the consume
+        //     transition; the same verdict is now answered directly
+        //     from the single-snapshot runtime state, with no slot
+        //     burned. An already-consumed record resolves through the
+        //     identical consumed-record resolution the consume-returned
+        //     envelope uses via {@see self::resolveConsumedRecord()}, again
+        //     with no slot burned. A backend failure on either retained
+        //     read maps exactly like the find() failure: the retryable
+        //     StorageUnavailable, never a new error class. A pending
+        //     record falls through to the legacy admission -> consume
+        //     winner/loser flow unchanged: both racing requests may
+        //     briefly hold admission, which is the documented first-race
+        //     window.
+        if ($this->storage instanceof ChallengeRuntimeStateReadableInterface) {
+            try {
+                $runtime = $this->storage->runtimeState($token->nonce);
+            } catch (\Throwable) {
+                // Backend failure on the state read: typed result,
+                // challenge presumed intact (the client can retry once
+                // storage recovers), exactly the find() mapping.
+                return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+            }
+            if ($runtime->kind === ChallengeRuntimeStateKind::Missing
+                || $runtime->kind === ChallengeRuntimeStateKind::Cancelled
+            ) {
+                // Missing: the record expired or vanished between the
+                // cheap phase and here, where the consume transition
+                // would return null and produce exactly this verdict.
+                // Cancelled: the terminal marker of the cancellation
+                // endpoint; the record is dead but retained, and the
+                // consume transition reports it as missing. Both are
+                // the pinned RecordNotFound, answered without admission
+                // and without consume.
+                return VerifyOutcome::invalid(VerifyError::RecordNotFound);
+            }
+            if ($runtime->kind === ChallengeRuntimeStateKind::Consumed) {
+                // The retained envelope resolves through the exact same
+                // identity-gated resolution the consume-returned
+                // ConsumedRecord uses, so the two paths can never
+                // diverge. A storage with the runtime-state capability
+                // but without the consumed-state capability is
+                // impossible for the shipped backends (both implement
+                // both); if one appears, the legacy admission path
+                // below stays, preserving today's behavior
+                // byte-identically (the consume transition then
+                // decides). The envelope re-read can also race an
+                // expiry; that falls through the same legacy path.
+                if ($this->storage instanceof ConsumedStateReadableInterface) {
+                    try {
+                        $retained = $this->storage->consumedState($token->nonce);
+                    } catch (\Throwable) {
+                        return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+                    }
+                    if ($retained !== null) {
+                        return $this->resolveConsumedRecord($retained, $operationIdentity);
+                    }
+                }
+            }
+        }
+
         // 8. Argon2id admission: the memory-hard hash is expensive, so an
         //    optional gate bounds concurrency. Exhaustion rejects without
         //    consuming or deleting the record; the client can retry.
@@ -604,39 +699,13 @@ final class Verifier
             // (crash between consume and commit) is ambiguous, and the
             // caller treats it as such.
             if ($consumed->consumedBefore) {
-                if ($consumed->consumedResult !== null) {
-                    if (!$consumed->consumedResult->valid) {
-                        return VerifyOutcome::invalid(VerifyError::InsufficientWork);
-                    }
-                    if (
-                        $operationIdentity !== null
-                        && $consumed->operationIdentity !== null
-                        && hash_equals($consumed->operationIdentity, $operationIdentity)
-                    ) {
-                        // Failed-barrier replay guard: the consume/commit
-                        // mutations that produced this stored success may
-                        // have landed on the primary with their WAIT
-                        // failing. Accepting the stored result read-only
-                        // would return a success that a promotion could
-                        // lose — the barrier is re-established before the
-                        // acceptance, and a barrier/shortfall failure maps
-                        // to the retryable StorageUnavailable (never a
-                        // generic exception escaping the verifier).
-                        try {
-                            if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
-                                $this->storage->establishReplicationFence('the stored-result replay acceptance');
-                            }
-                        } catch (\Throwable) {
-                            return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
-                        }
-
-                        return VerifyOutcome::valid($consumed->record->nonce, $consumed->consumedResult->binding, true);
-                    }
-
-                    return VerifyOutcome::invalid(VerifyError::AlreadyConsumed);
-                }
-
-                return VerifyOutcome::invalid(VerifyError::ConsumeIndeterminate);
+                // Consumed-state retry: an already-consumed record replays
+                // its committed deterministic result without re-deriving
+                // the proof. The resolution is the single shared helper
+                // {@see self::resolveConsumedRecord()}, used by both this
+                // consume path and the pre-admission terminal-state
+                // check, so the two can never diverge.
+                return $this->resolveConsumedRecord($consumed, $operationIdentity);
             }
             $record = $consumed->record;
 
@@ -741,6 +810,65 @@ final class Verifier
                 }
             }
         }
+    }
+
+    /**
+     * Resolve an already-consumed record's retained state into the
+     * deterministic verification outcome, shared by the consume-returned
+     * envelope of {@see self::verify()} and that method's pre-admission
+     * terminal-state check, so the two paths can never diverge.
+     *
+     * A stored invalid outcome is deterministic and replays to any
+     * caller. A stored success is an authorization grant: it replays
+     * only when the caller proves the exact logical operation, the
+     * identity recorded atomically with the pending→consumed
+     * transition. A retry with a null or different identity is refused
+     * as AlreadyConsumed. A consumed record without a committed result
+     * (crash between consume and commit) is ambiguous and reported as
+     * ConsumeIndeterminate.
+     *
+     * The failed-barrier replay guard runs before a stored success is
+     * accepted: the consume and commit mutations that produced it may
+     * have landed on the primary with their WAIT failing. Accepting the
+     * stored result read-only would return a success a promotion could
+     * lose, so the barrier is re-established before the acceptance, and
+     * a barrier or shortfall failure maps to the retryable
+     * StorageUnavailable, never a generic exception escaping the
+     * verifier.
+     */
+    private function resolveConsumedRecord(ConsumedRecord $consumed, ?string $operationIdentity): VerifyOutcome
+    {
+        if ($consumed->consumedResult === null) {
+            return VerifyOutcome::invalid(VerifyError::ConsumeIndeterminate);
+        }
+        if (!$consumed->consumedResult->valid) {
+            return VerifyOutcome::invalid(VerifyError::InsufficientWork);
+        }
+        if (
+            $operationIdentity !== null
+            && $consumed->operationIdentity !== null
+            && hash_equals($consumed->operationIdentity, $operationIdentity)
+        ) {
+            // Failed-barrier replay guard: the consume/commit mutations
+            // that produced this stored success may have landed on the
+            // primary with their WAIT failing. Accepting the stored
+            // result read-only would return a success that a promotion
+            // could lose — the barrier is re-established before the
+            // acceptance, and a barrier/shortfall failure maps to the
+            // retryable StorageUnavailable (never a generic exception
+            // escaping the verifier).
+            try {
+                if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
+                    $this->storage->establishReplicationFence('the stored-result replay acceptance');
+                }
+            } catch (\Throwable) {
+                return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+            }
+
+            return VerifyOutcome::valid($consumed->record->nonce, $consumed->consumedResult->binding, true);
+        }
+
+        return VerifyOutcome::invalid(VerifyError::AlreadyConsumed);
     }
 
     /**
@@ -1011,7 +1139,7 @@ final class Verifier
         $claimOwner = null;
         if ($this->storage instanceof ResumeDerivationClaimInterface) {
             try {
-                $claimOwner = $this->storage->claimResumeDerivation($record->nonce, self::RESUME_CLAIM_TTL_SECS);
+                $claimOwner = $this->storage->claimResumeDerivation($record->nonce, $this->resumeClaimTtlSecs);
             } catch (\Throwable) {
                 // Fail closed: a claim that cannot be established must
                 // never fall back to an unsynchronized derive storm (the

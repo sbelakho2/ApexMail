@@ -181,6 +181,46 @@ final class VerifierGateTest extends TestCase
         return SolutionToken::create($nonce, $counter, 5000, [])->encode();
     }
 
+    /**
+     * An admission gate that counts every acquire and release and
+     * tracks the live permits, so the verifier's gate interaction is
+     * observable. Saturation is modelled by pre-setting `live` to the
+     * capacity before the call (a slot held from the outside).
+     *
+     * @param array{acquires?: int, releases?: int, live?: int} $counters
+     */
+    private function countingGate(int $capacity, array &$counters): VerificationAdmissionGate
+    {
+        return new class($capacity, $counters) implements VerificationAdmissionGate {
+            private int $capacity;
+
+            private array $counters;
+
+            public function __construct(int $capacity, array &$counters)
+            {
+                $this->capacity = $capacity;
+                $this->counters = &$counters;
+            }
+
+            public function acquire(): ?string
+            {
+                $this->counters['acquires']++;
+                if ($this->counters['live'] >= $this->capacity) {
+                    return null;
+                }
+                $this->counters['live']++;
+
+                return 'lease-'.$this->counters['acquires'];
+            }
+
+            public function release(string $lease): void
+            {
+                $this->counters['releases']++;
+                $this->counters['live']--;
+            }
+        };
+    }
+
     public function testCapacityExhaustedReturnsCapacityExceededWithoutConsumingOrDeleting(): void
     {
         $record = $this->argon2Record();
@@ -266,6 +306,326 @@ final class VerifierGateTest extends TestCase
         self::assertTrue($outcome->isOk(), sprintf('expected valid, got %s', $outcome->code()));
         self::assertSame(1, $gate->acquires);
         self::assertSame(1, $gate->releases, 'the lease must be released exactly once after a successful acquire');
+    }
+
+    // ── Terminal-state admission pre-check (round-94 audit fix) ─────────
+
+    public function testCancelledArgonRecordReturnsRecordNotFoundWithoutAcquiringAdmission(): void
+    {
+        // A well-formed solved token for a cancelled Argon record
+        // resolves to the pinned RecordNotFound through the
+        // pre-admission terminal-state check, without acquiring an
+        // Argon admission slot (previously the admission happened first
+        // and the consume transition then revealed the terminal state
+        // as missing).
+        $record = $this->argon2Record();
+        $storage = new ArrayStorage();
+        $storage->store($record);
+        $counter = $this->solveArgon2($record->prefix, $record->salt, $record->targetBits);
+        $token = $this->tokenFor($record->nonce, $counter);
+        self::assertSame('cancelled-now', $storage->cancel($record->nonce)?->state);
+
+        $counters = ['acquires' => 0, 'releases' => 0, 'live' => 0];
+        $gate = $this->countingGate(1, $counters);
+        $outcome = (new Verifier($storage, $gate, now: static fn (): int => self::ISSUED_AT))->verify(
+            $token,
+            Vectors::SECRET,
+            'login',
+            self::CLIENT_IP,
+        );
+
+        self::assertSame(VerifyError::RecordNotFound, $outcome->error, 'a cancelled challenge fails closed as RecordNotFound');
+        self::assertSame(0, $counters['acquires'], 'a cancelled record must NEVER acquire an Argon admission slot');
+        self::assertSame(0, $counters['releases']);
+        self::assertSame(0, $counters['live']);
+        self::assertNotNull($storage->find($record->nonce), 'the cancelled record is retained until its TTL');
+    }
+
+    public function testCancelledArgonRecordWithBadSignatureKeepsTheCheapVerdictWithoutAcquiring(): void
+    {
+        // A token whose record fails the cheap-phase signature re-check
+        // on a cancelled record keeps its cheap-phase verdict
+        // (BadSignature): the terminal-state pre-check runs only after
+        // the cheap phase, so the RecordNotFound pin can never override
+        // an earlier security verdict. No admission slot is acquired
+        // either way.
+        $record = $this->argon2Record();
+        $storage = new ArrayStorage();
+        $storage->store($record);
+        $counter = $this->solveArgon2($record->prefix, $record->salt, $record->targetBits);
+        $token = $this->tokenFor($record->nonce, $counter);
+        self::assertSame('cancelled-now', $storage->cancel($record->nonce)?->state);
+
+        $counters = ['acquires' => 0, 'releases' => 0, 'live' => 0];
+        $gate = $this->countingGate(1, $counters);
+        $outcome = (new Verifier($storage, $gate, now: static fn (): int => self::ISSUED_AT))->verify(
+            $token,
+            str_rot13(Vectors::SECRET),
+            'login',
+            self::CLIENT_IP,
+        );
+
+        self::assertSame(VerifyError::BadSignature, $outcome->error, 'the cheap-phase verdict stands on a cancelled record');
+        self::assertSame(0, $counters['acquires']);
+        self::assertSame(0, $counters['releases']);
+        self::assertSame(0, $counters['live']);
+    }
+
+    public function testConsumedArgonRecordReplayWithMatchingIdentityDoesNotAcquireAdmission(): void
+    {
+        // An already-consumed Argon record whose committed stored
+        // success replays to the exact logical operation: the
+        // pre-admission terminal-state check resolves the stored
+        // outcome without a second derivation and without acquiring an
+        // Argon slot.
+        $record = $this->argon2Record();
+        $storage = new ArrayStorage();
+        $storage->store($record);
+        $counter = $this->solveArgon2($record->prefix, $record->salt, $record->targetBits);
+        $token = $this->tokenFor($record->nonce, $counter);
+        $identity = 'op-'.hash('sha256', 'terminal-replay');
+        $storage->consumeWithOperationIdentity($record->nonce, $identity);
+        self::assertTrue($storage->commitResult($record->nonce, true, null), 'the committed stored success lands');
+
+        $counters = ['acquires' => 0, 'releases' => 0, 'live' => 0];
+        $gate = $this->countingGate(1, $counters);
+        $outcome = (new Verifier($storage, $gate, now: static fn (): int => self::ISSUED_AT))->verify(
+            $token,
+            Vectors::SECRET,
+            'login',
+            self::CLIENT_IP,
+            operationIdentity: $identity,
+        );
+
+        self::assertTrue($outcome->isOk(), sprintf('the identity-proven replay must resolve the stored success, got %s', $outcome->code()));
+        self::assertTrue($outcome->fromStoredResult, 'the replay comes from the stored result, never a second derivation');
+        self::assertSame(0, $counters['acquires'], 'a consumed record must never acquire an Argon admission slot');
+        self::assertSame(0, $counters['releases']);
+        self::assertSame(0, $counters['live']);
+        self::assertNotNull($storage->find($record->nonce), 'the consumed evidence is retained until its TTL');
+    }
+
+    public function testConsumedArgonRecordReplayWithWrongOrNullIdentityDoesNotAcquireAdmission(): void
+    {
+        // A retry of a consumed Argon record whose stored success
+        // cannot prove the logical operation: AlreadyConsumed, resolved
+        // by the pre-admission terminal-state check without acquiring
+        // an Argon slot.
+        $record = $this->argon2Record();
+        $storage = new ArrayStorage();
+        $storage->store($record);
+        $counter = $this->solveArgon2($record->prefix, $record->salt, $record->targetBits);
+        $token = $this->tokenFor($record->nonce, $counter);
+        $storage->consumeWithOperationIdentity($record->nonce, 'op-'.hash('sha256', 'terminal-replay'));
+        self::assertTrue($storage->commitResult($record->nonce, true, null), 'the committed stored success lands');
+
+        foreach ([null, 'op-'.hash('sha256', 'other-operation')] as $identity) {
+            $counters = ['acquires' => 0, 'releases' => 0, 'live' => 0];
+            $gate = $this->countingGate(1, $counters);
+            $outcome = (new Verifier($storage, $gate, now: static fn (): int => self::ISSUED_AT))->verify(
+                $token,
+                Vectors::SECRET,
+                'login',
+                self::CLIENT_IP,
+                operationIdentity: $identity,
+            );
+            self::assertSame(VerifyError::AlreadyConsumed, $outcome->error, 'a replay without the proven identity is AlreadyConsumed');
+            self::assertSame(0, $counters['acquires'], 'a consumed record must never acquire an Argon admission slot');
+            self::assertSame(0, $counters['releases']);
+            self::assertSame(0, $counters['live']);
+            self::assertNotNull($storage->find($record->nonce), 'the consumed evidence is retained');
+        }
+    }
+
+    public function testPendingRaceBothRacersAcquireAndExactlyOneDerives(): void
+    {
+        // The pending first-race window: both racing requests pass the
+        // terminal-state pre-check while the record is still pending,
+        // so both acquire an Argon admission slot, exactly one wins the
+        // consume and derives, and the loser resolves the winner's
+        // committed stored outcome without a second derivation. The
+        // race is emulated deterministically: racer B's admission
+        // acquire runs racer A's full verification to completion, so B
+        // had already passed the pre-check (the record was still
+        // pending) when A consumed and committed. B's own consume then
+        // sees the consumed envelope and resolves the stored success.
+        $record = $this->argon2Record();
+        $storage = new ArrayStorage();
+        $storage->store($record);
+        $counter = $this->solveArgon2($record->prefix, $record->salt, $record->targetBits);
+        $token = $this->tokenFor($record->nonce, $counter);
+        $identity = 'op-'.hash('sha256', 'pending-race');
+
+        $gate = new class implements VerificationAdmissionGate {
+            public int $acquires = 0;
+
+            public int $releases = 0;
+
+            public ?\KiwiCaptcha\VerifyOutcome $racerOutcome = null;
+
+            private bool $racerFired = false;
+
+            private ?\Closure $racer = null;
+
+            public function setRacer(\Closure $racer): void
+            {
+                $this->racer = $racer;
+            }
+
+            public function acquire(): ?string
+            {
+                $this->acquires++;
+                if (!$this->racerFired) {
+                    $this->racerFired = true;
+                    if ($this->racer !== null) {
+                        $this->racerOutcome = ($this->racer)();
+                    }
+                }
+
+                return 'lease-'.$this->acquires;
+            }
+
+            public function release(string $lease): void
+            {
+                $this->releases++;
+            }
+        };
+        $gate->setRacer(static function () use ($storage, $gate, $token, $identity): \KiwiCaptcha\VerifyOutcome {
+            return (new Verifier($storage, $gate, now: static fn (): int => self::ISSUED_AT))->verify(
+                $token,
+                Vectors::SECRET,
+                'login',
+                self::CLIENT_IP,
+                operationIdentity: $identity,
+            );
+        });
+
+        $loser = (new Verifier($storage, $gate, now: static fn (): int => self::ISSUED_AT))->verify(
+            $token,
+            Vectors::SECRET,
+            'login',
+            self::CLIENT_IP,
+            operationIdentity: $identity,
+        );
+
+        self::assertTrue($loser->isOk(), sprintf('racer B must resolve the stored outcome, got %s', $loser->code()));
+        self::assertTrue($loser->fromStoredResult, "racer B replays the winner's stored result, never a second derivation");
+        self::assertNotNull($gate->racerOutcome, 'racer A ran inside racer B admission');
+        self::assertTrue($gate->racerOutcome->isOk(), 'racer A derives and commits');
+        self::assertFalse($gate->racerOutcome->fromStoredResult, 'racer A is the fresh derivation');
+        self::assertSame(2, $gate->acquires, 'both racers acquire an Argon slot in the pending first-race window');
+        self::assertSame(2, $gate->releases, 'every acquired lease is released');
+        self::assertNotNull($storage->consumedState($record->nonce)?->consumedResult, 'the winner committed the deterministic result');
+    }
+
+    public function testCancelledArgonRecordInProcessEndToEndNeverAcquiresAdmission(): void
+    {
+        // The in-process (ArrayStorage) variant of the cancelled-Argon
+        // admission fix: a real issued-and-solved Argon challenge
+        // cancelled through the cancellation endpoint resolves to
+        // RecordNotFound without ever touching the Argon admission
+        // gate.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(
+            new Config(
+                secretKey: Vectors::SECRET,
+                algorithm: PoWAlgorithm::Argon2id,
+                mKib: 64,
+                t: 3,
+                p: 1,
+                argon2TargetBits: 4,
+                ttlSecs: 120,
+                minDurationMs: 0,
+            ),
+            $storage,
+            now: static fn (): int => self::ISSUED_AT,
+        );
+        $challenge = $issuer->issue('login', self::CLIENT_IP);
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+        self::assertSame(PoWAlgorithm::Argon2id, $record->algorithm);
+
+        $saltBytes = base64_decode($record->salt, true);
+        $counter = 0;
+        do {
+            $hash = sodium_crypto_pwhash(32, $record->prefix.$counter, $saltBytes, $record->t, $record->mKib * 1024, SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13);
+            $counter++;
+        } while (Verifier::leadingZeroBits($hash) < $record->targetBits);
+        --$counter;
+        $token = $this->tokenFor($record->nonce, $counter);
+        self::assertSame('cancelled-now', $storage->cancel($record->nonce)?->state);
+
+        $counters = ['acquires' => 0, 'releases' => 0, 'live' => 0];
+        $gate = $this->countingGate(1, $counters);
+        $outcome = (new Verifier($storage, $gate, now: static fn (): int => self::ISSUED_AT))->verify(
+            $token,
+            Vectors::SECRET,
+            'login',
+            self::CLIENT_IP,
+            nowNs: $record->issuedAtNs + 1_000_000,
+        );
+
+        self::assertSame(VerifyError::RecordNotFound, $outcome->error, 'a cancelled challenge fails closed as RecordNotFound');
+        self::assertSame(0, $counters['acquires'], 'the cancelled record must never acquire an Argon admission slot');
+        self::assertSame(0, $counters['releases']);
+        self::assertSame(0, $counters['live']);
+    }
+
+    public function testNoCapabilityStorageKeepsTheLegacyAdmissionThenRecordNotFoundBehavior(): void
+    {
+        // A storage without the runtime-state capability (and without
+        // the consumed-state capability) keeps the OLD behavior: a
+        // well-formed token for a cancelled record still acquires an
+        // Argon admission slot, and the consume transition then reveals
+        // the terminal state as RecordNotFound.
+        $record = $this->argon2Record();
+        $inner = new ArrayStorage();
+        $inner->store($record);
+        $inner->cancel($record->nonce);
+        $storage = new class($inner) implements StorageInterface {
+            public function __construct(private readonly ArrayStorage $inner)
+            {
+            }
+
+            public function store(ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return $this->inner->consume($nonce);
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+        };
+
+        $counters = ['acquires' => 0, 'releases' => 0, 'live' => 0];
+        $gate = $this->countingGate(1, $counters);
+        $outcome = (new Verifier($storage, $gate, now: static fn (): int => self::ISSUED_AT))->verify(
+            $this->tokenFor($record->nonce, 0),
+            Vectors::SECRET,
+            'login',
+            self::CLIENT_IP,
+        );
+
+        self::assertSame(VerifyError::RecordNotFound, $outcome->error, 'the legacy path still reports the cancelled record as missing');
+        self::assertSame(1, $counters['acquires'], 'the legacy path still acquires before the consume reveals the cancelled state');
+        self::assertSame(1, $counters['releases'], 'the acquired lease is released');
+        self::assertSame(0, $counters['live'], 'no Argon permit remains live');
     }
 
     public function testToctouConsumedRecordDiffersFromPeekedIsMalformed(): void

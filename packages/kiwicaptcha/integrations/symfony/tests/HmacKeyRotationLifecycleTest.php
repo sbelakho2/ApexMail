@@ -116,6 +116,75 @@ final class HmacKeyRotationLifecycleTest extends TestCase
         ));
     }
 
+    public function testStrictKidModeRejectsForeignKidsFromTheFirstDeployment(): void
+    {
+        // The finding: with an empty historical map the core's legacy
+        // single-secret mode accepts ANY record kid, so an issuer holding
+        // the same HMAC secret under a different kid verifies. Strict
+        // mode wires [currentKid => currentSecret] as the ring even with
+        // an empty historical map: the verifier then strictly resolves
+        // record.kid == currentKid, so a kid-5 record fails UnknownKid
+        // from the very first deployment while a kid-3 record verifies.
+        $storage = new ArrayStorage();
+        $issuer5 = $this->issuer($storage, 5, self::KEY_A);
+        $foreignChallenge = $issuer5->issue('login', self::IP);
+
+        $strictContext = new VerificationSecurityContext(3, self::KEY_A, [], [], null, null, strictKidMode: true);
+        self::assertSame(
+            [3 => self::KEY_A],
+            $strictContext->acceptedKeys(),
+            'strict mode: the ring is the current key alone with an empty historical map (canonical int keys)'
+        );
+        $strictVerifier = $this->verifier($storage, $strictContext, []);
+        $outcome = $strictVerifier->verify($this->solveToken($foreignChallenge), self::KEY_A, 'login', self::IP);
+        self::assertSame(VerifyError::UnknownKid, $outcome->error, sprintf(
+            'strict mode: a kid-5 record must fail UnknownKid even though the secret matches (got %s: %s)',
+            $outcome->code(),
+            (string) $outcome->detail,
+        ));
+
+        $issuer3 = $this->issuer($storage, 3, self::KEY_A);
+        $currentChallenge = $issuer3->issue('login', self::IP);
+        $outcome = $strictVerifier->verify($this->solveToken($currentChallenge), self::KEY_A, 'login', self::IP);
+        self::assertTrue($outcome->isOk(), sprintf(
+            'strict mode: a kid-3 record matching the configured kid must verify (got %s: %s)',
+            $outcome->code(),
+            (string) $outcome->detail,
+        ));
+    }
+
+    public function testDefaultLegacyAnyKidSingleSecretSemanticsAreUnchanged(): void
+    {
+        // Default (strictKidMode false, empty historical map): the ring
+        // stays empty and the core's legacy single-secret path accepts
+        // any record kid under the current secret — the pre-fix behavior
+        // is preserved byte-for-byte.
+        $storage = new ArrayStorage();
+        $issuer5 = $this->issuer($storage, 5, self::KEY_A);
+        $foreignChallenge = $issuer5->issue('login', self::IP);
+
+        $legacyContext = new VerificationSecurityContext(3, self::KEY_A, [], []);
+        self::assertSame([], $legacyContext->acceptedKeys(), 'default: the legacy empty ring is untouched');
+        $legacyVerifier = $this->verifier($storage, $legacyContext, []);
+        $outcome = $legacyVerifier->verify($this->solveToken($foreignChallenge), self::KEY_A, 'login', self::IP);
+        self::assertTrue($outcome->isOk(), sprintf(
+            'default: a kid-5 record with the same secret must still verify (legacy any-kid semantics, got %s: %s)',
+            $outcome->code(),
+            (string) $outcome->detail,
+        ));
+    }
+
+    public function testStrictKidModeDigestReflectsTheStrictRing(): void
+    {
+        // contextDigest() hashes the accepted ring, so the Siteverify
+        // idempotency identity changes between the legacy empty ring and
+        // the strict current-key ring — a cached provider result cannot
+        // outlive the mode switch.
+        $legacy = new VerificationSecurityContext(3, self::KEY_A, [], []);
+        $strict = new VerificationSecurityContext(3, self::KEY_A, [], [], null, null, strictKidMode: true);
+        self::assertNotSame($legacy->contextDigest(), $strict->contextDigest(), 'the strict ring must change the security-context digest');
+    }
+
     private function issuer(ArrayStorage $storage, int $kid, string $secret): Issuer
     {
         return new Issuer(new Config(

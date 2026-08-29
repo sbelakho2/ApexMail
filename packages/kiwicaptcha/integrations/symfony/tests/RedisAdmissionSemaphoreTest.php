@@ -356,8 +356,8 @@ final class RedisAdmissionSemaphoreTest extends TestCase
         for ($i = 0; $i < 10; $i++) {
             self::assertNull($semaphore->acquire(), 'saturated acquires always refuse (CapacityExceeded)');
         }
-        self::assertLessThanOrEqual(3, $client->counters[$this->waitersKey('waiters-bound')] ?? 0, 'the waiters counter must never exceed maxWaiters: overflowing contenders are refused WITHOUT queueing (entry removed in the same Lua)');
-        self::assertSame(3, $client->counters[$this->waitersKey('waiters-bound')] ?? 0, 'after the bound, each overflow attempt increments then removes its own waiter (steady state = maxWaiters)');
+        self::assertLessThanOrEqual(3, $client->counters[$this->waitersKey('waiters-bound')] ?? 0, 'the saturation-pressure counter must never exceed the cap: overflowing contenders are refused WITHOUT queueing (entry removed in the same Lua)');
+        self::assertSame(3, $client->counters[$this->waitersKey('waiters-bound')] ?? 0, 'after the bound, each overflow attempt increments then removes its own entry (steady state = the cap)');
     }
 
     public function testGrantedLeaseServesOneWaiter(): void

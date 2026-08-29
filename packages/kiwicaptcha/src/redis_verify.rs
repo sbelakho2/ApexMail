@@ -22,6 +22,11 @@
 //! between transition and commit) gets
 //! [`VerifyError::ConsumeIndeterminate`].
 //!
+//! In normal verification an already-consumed record is resolved from the
+//! [`RedisChallengeStore::runtime_state`] read before the Argon admission
+//! gate (see the check order below), so the retained outcome replay never
+//! occupies a scarce admission slot.
+//!
 //! Interrupted-redemption recovery exists: [`ProductionVerifier::resume_consumed_operation`]
 //! reconstructs a same-operation redemption that consumed on the primary
 //! but lost its reply before the commit — the constant-time operation-
@@ -60,7 +65,10 @@
 //! [`VerifyError::RecordNotFound`], the verifier's fail-closed equivalent
 //! of an unavailable record), never recoverable (the consumed-state reads
 //! never surface it), and never eagerly deleted (the delete-if-pending
-//! cleanup keeps it). The fresh pending→cancelled flip is
+//! cleanup keeps it). The verify flow's runtime-state gate returns
+//! `RecordNotFound` for a cancelled record before any admission or
+//! consume, so the terminal state never spends a scarce admission slot.
+//! The fresh pending→cancelled flip is
 //! durability-critical and carries the same verified replica wait as the
 //! other transitions, so a cancelled record can never resurrect as pending
 //! on a promoted stale replica.
@@ -72,7 +80,9 @@
 //! token decode → store.find(nonce) peek (GET) → cheap validation (structure,
 //! v1 gate, signature, TTL incl. the future-time bound, scope, region,
 //! policy epoch, issuer, expected request binding, IP binding,
-//! server-measured min duration) → optional Argon admission gate →
+//! server-measured min duration) → runtime-state gate (one GET; a cancelled
+//! record fails as RecordNotFound and a consumed record resolves through
+//! the identity gate, before any admission) → optional Argon admission gate →
 //! store.consume(nonce) (Lua transition; the operation identity is recorded
 //! atomically when supplied) → first=false → the identity-gated retained
 //! outcome (stored Valid only for the recording operation identity;
@@ -87,6 +97,10 @@
 //! The cheap phase and the Argon admission gate run against the peeked
 //! record and never consume: a malformed/expired/mismatched challenge or a
 //! gate rejection leaves the record in the store, so the client can retry.
+//! The runtime-state gate is a second non-consuming peek that runs after
+//! the cheap phase: a terminal record (cancelled, or consumed) resolves or
+//! fails before the admission gate, so a scarce admission slot is never
+//! spent on a record that cannot derive.
 //! Consumption happens exactly once, immediately before hash derivation,
 //! via the atomic Lua transition (pending → consumed). Under concurrency
 //! exactly one caller can ever win the transition: two racing `verify()`
@@ -95,7 +109,10 @@
 //! (the loser with no operation identity sees
 //! [`VerifyError::AlreadyConsumed`], or
 //! [`VerifyError::ConsumeIndeterminate`] if it races before the commit) —
-//! the loser never reaches hash derivation, so each nonce drives at most one
+//! a racer whose runtime-state read observes the winner's consumed
+//! transition resolves identically from that read; one that still reads
+//! Pending takes the transition itself and loses it. Either way the
+//! loser never reaches hash derivation, so each nonce drives at most one
 //! expensive Argon2id/SHA-256 computation no matter how many requests race
 //! for it. This is the distributed bound the caller-managed attempt counter
 //! in [`crate::verify::verify_solution`] cannot provide: that counter lives
@@ -298,10 +315,16 @@ impl r2d2::ManageConnection for StoreConnectionManager {
 /// would rewrite large integers (`issued_at_ns` ~1.7e15) in scientific
 /// notation, which the strict cross-language parsers reject. PHP mirrors
 /// this script byte-for-byte.
-/// The resume-claim TTL: a crashed recovery leaves only this short
-/// lease before a later retry may claim again (a 60s poison marker
-/// would block resultless recovery for its full TTL even when nothing
-/// is running).
+/// The default resume-claim TTL in seconds: the initial value of
+/// [`RedisChallengeStore::resume_claim_ttl_secs`]. A crashed recovery
+/// leaves only this short lease before a later retry may claim again —
+/// a long poison marker would block resultless recovery for its full
+/// TTL even when nothing is running. The configured lease must cover
+/// the maximum supported derivation and request duration: fencing
+/// stays correct on expiry (a stale owner can never commit), so the
+/// lower bound is the longest single resume, and the lease only
+/// protects the single-derivation efficiency property, never
+/// correctness.
 const CLAIM_TTL_SECS: u64 = 60;
 
 const CONSUME_TRANSITION_LUA: &str = r#"
@@ -513,6 +536,33 @@ pub struct ConsumedState {
     /// The recorded logical-operation identity, when the consume recorded
     /// one.
     pub operation_identity: Option<String>,
+}
+
+/// The single-snapshot runtime state of a stored challenge record, the
+/// answer of [`RedisChallengeStore::runtime_state`]. Mirrors the PHP
+/// `ChallengeRuntimeState` / `ChallengeRuntimeStateKind` pair: one GET
+/// classifies the retained record as missing, pending, consumed or
+/// cancelled, with the consumed envelope decoded from the same bytes the
+/// state transition wrote, never from two separate reads that could race.
+///
+/// The verify flow reads this after the cheap phase and before any
+/// admission or consume, so a terminal record (cancelled or consumed)
+/// never occupies a scarce admission slot.
+#[derive(Debug, Clone)]
+pub enum RuntimeState {
+    /// No record exists under the key (never issued, or expired away).
+    Missing,
+    /// The record exists and is pending: consumable and derivable.
+    Pending,
+    /// The record is retained in the terminal consumed state, with its
+    /// envelope (the committed outcome and the recorded operation
+    /// identity) decoded from the same snapshot. Boxed: the consumed
+    /// state dominates the enum's size, and the common paths (missing /
+    /// pending / cancelled) stay pointer-sized.
+    Consumed(Box<ConsumedState>),
+    /// The record is retained in the terminal cancelled state: dead but
+    /// kept until its TTL.
+    Cancelled,
 }
 
 /// A committed verification outcome, persisted at the storage layer so a
@@ -757,6 +807,10 @@ pub struct RedisChallengeStore {
     /// Extra seconds added to the EX TTL (`expires_at - now + margin`,
     /// min 1 s) so a challenge survives replica lag / clock skew.
     ttl_margin_secs: i64,
+    /// The resume-path re-derivation claim lease in seconds (default
+    /// [`CLAIM_TTL_SECS`]); the [`RedisChallengeStore::with_resume_claim_ttl`]
+    /// configuration.
+    resume_claim_ttl_secs: u64,
 }
 
 impl RedisChallengeStore {
@@ -794,6 +848,7 @@ impl RedisChallengeStore {
             wait_replicas: 0,
             wait_timeout_ms: 0,
             ttl_margin_secs: 0,
+            resume_claim_ttl_secs: CLAIM_TTL_SECS,
         }
     }
 
@@ -827,6 +882,27 @@ impl RedisChallengeStore {
     pub fn with_ttl_margin(mut self, ttl_margin_secs: i64) -> Self {
         self.ttl_margin_secs = ttl_margin_secs;
         self
+    }
+
+    /// Configure the resume-path re-derivation claim lease in seconds.
+    ///
+    /// The lease must cover the maximum supported derivation and
+    /// request duration. A lease shorter than one full resume lets a
+    /// second recovery claim while the first is still deriving, and
+    /// the single-derivation efficiency property is lost; fencing
+    /// stays correct on expiry (a stale owner can never commit). The
+    /// claim-time boundary gate of
+    /// [`RedisChallengeStore::claim_resume_derivation`] still rejects
+    /// a value below 1 second before any Redis interaction. Default:
+    /// [`CLAIM_TTL_SECS`] (60 seconds), matching the PHP core.
+    pub fn with_resume_claim_ttl(mut self, ttl_secs: u64) -> Self {
+        self.resume_claim_ttl_secs = ttl_secs;
+        self
+    }
+
+    /// The configured resume-path re-derivation claim lease in seconds.
+    pub fn resume_claim_ttl_secs(&self) -> u64 {
+        self.resume_claim_ttl_secs
     }
 
     /// The configured replica-wait requirement `(replicas, timeout_ms)`.
@@ -1140,6 +1216,49 @@ impl RedisChallengeStore {
                 None
             }
         }))
+    }
+
+    /// Read the record's runtime state in ONE snapshot — the PHP
+    /// `ChallengeRuntimeStateReadableInterface::runtimeState()` mirror.
+    ///
+    /// A single GET classifies the retained record as
+    /// [`RuntimeState::Missing`], [`RuntimeState::Pending`],
+    /// [`RuntimeState::Consumed`] or [`RuntimeState::Cancelled`], with
+    /// the consumed envelope decoded from the same bytes the state
+    /// transition wrote, never from two separate reads that could
+    /// race. The state marker is parsed from the raw stored JSON,
+    /// exactly like the PHP single-snapshot read; a value with no
+    /// state marker reads as Pending, and an undecodable consumed
+    /// envelope reads as Missing (the lenient corrupt-key rule of
+    /// [`Self::consumed_state`]). An `Err` is a genuine storage failure
+    /// (unreachable backend, timeout).
+    ///
+    /// The verify flow runs this after the cheap phase and before the
+    /// admission gate, so a terminal record resolves without ever
+    /// acquiring an admission slot.
+    pub fn runtime_state(&self, nonce: &str) -> redis::RedisResult<RuntimeState> {
+        let key = format!("{}{}", self.prefix, nonce);
+        let mut conn = self.checkout()?;
+        let raw = Self::run_command(&mut conn, |c| {
+            redis::cmd("GET").arg(key).query::<Option<String>>(c)
+        })?;
+        let Some(raw) = raw else {
+            return Ok(RuntimeState::Missing);
+        };
+        if raw.contains("\"state\":\"cancelled\"") {
+            return Ok(RuntimeState::Cancelled);
+        }
+        if raw.contains("\"state\":\"consumed\"") {
+            return match decode_stored(&raw) {
+                Some(stored) => Ok(RuntimeState::Consumed(Box::new(ConsumedState {
+                    record: stored.record,
+                    stored_result: stored.consumed_result,
+                    operation_identity: stored.operation_identity,
+                }))),
+                None => Ok(RuntimeState::Missing),
+            };
+        }
+        Ok(RuntimeState::Pending)
     }
 
     /// Atomically claim the re-derivation ownership of a resultless
@@ -1947,12 +2066,16 @@ impl ProductionVerifier {
     ///   outcome). There is no implicit "None disables" — the bypass
     ///   must be named, exactly like the PHP `RequestBindingExpectation`.
     ///
-    /// Flow: decode → peek (GET) → cheap validation → Argon admission gate
-    /// (acquire → lease) → atomic consume (pending→consumed transition, the
-    /// operation identity recorded atomically when supplied) → identity-
-    /// gated resolution of the retained state when the record was already
-    /// consumed → re-validation of the consumed record → single derive →
-    /// leading-zero check → lease released by Drop. Terminal cheap failures
+    /// Flow: decode → peek (GET) → cheap validation → runtime-state
+    /// gate (one snapshot GET: a cancelled record fails as
+    /// RecordNotFound and a consumed record resolves through the
+    /// identity gate, both before any admission or consume) → Argon
+    /// admission gate (acquire → lease) → atomic consume (pending→consumed
+    /// transition, the operation identity recorded atomically when
+    /// supplied) → identity-gated resolution of the retained state when
+    /// the record was already consumed → re-validation of the consumed
+    /// record → single derive → leading-zero check → lease released by
+    /// Drop. Terminal cheap failures
     /// (malformed record, unsupported protocol, bad signature, expired,
     /// wrong scope, binding mismatch, IP mismatch, TooFast) consume the
     /// record via a best-effort DEL only when it is NOT already consumed —
@@ -1964,6 +2087,17 @@ impl ProductionVerifier {
     /// concurrent loser (or a replay) resolves the retained state through
     /// the identity gate — a no-identity loser of a stored-valid record
     /// sees [`VerifyError::AlreadyConsumed`], never `RecordNotFound`.
+    ///
+    /// The runtime-state gate (a second non-consuming peek, after the
+    /// cheap phase and before the admission gate) is the terminal-record
+    /// bound: a cancelled record returns `RecordNotFound` and an
+    /// already-consumed record resolves through the identity gate with
+    /// the same [`Self::resolve_consumed`] logic the consume-loser path
+    /// uses, so a terminal record never captures or releases a scarce
+    /// admission slot. A pending snapshot racing a concurrent consume
+    /// keeps today's semantics: both racers may briefly hold admission,
+    /// exactly one wins the transition, and the loser resolves through
+    /// the same identity gate.
     ///
     /// Storage failure semantics (see the module docs): a `find()` /
     /// checkout failure rejects with [`VerifyError::StorageUnavailable`]
@@ -2098,7 +2232,40 @@ impl ProductionVerifier {
             }
         }
 
-        // 4. Argon2id admission gate (optional): capacity control before the
+        // 4. Runtime-state gate (one snapshot GET): a terminal record
+        //    never occupies an admission slot and is never consumed.
+        //    The cheap phase above preserved every existing
+        //    signature/security outcome; this read decides only what
+        //    happens after it:
+        //    - Missing (the record vanished between the peek and here)
+        //      or Cancelled (dead but retained) → RecordNotFound, with
+        //      no admission and no consume — a cancel-once attacker
+        //      cannot flood tokens through scarce admission capacity to
+        //      starve legitimate memory-hard verifications;
+        //    - Consumed → the exact same identity-gated replay
+        //      resolution as the consume-loser path
+        //      ([`Self::resolve_consumed`]): same-operation identity
+        //      with a committed result → the stored outcome; wrong or
+        //      null identity → AlreadyConsumed; resultless →
+        //      ConsumeIndeterminate. No admission;
+        //    - Pending → the admission gate and the atomic consume
+        //      below, unchanged.
+        //    A failed state read is a storage failure: the record may
+        //    be retained consumed evidence, so it is never deleted and
+        //    the retryable StorageUnavailable answers (the challenge
+        //    is presumed intact).
+        match self.store.runtime_state(&token.nonce) {
+            Ok(RuntimeState::Missing) | Ok(RuntimeState::Cancelled) => {
+                return VerifyOutcome::Invalid(VerifyError::RecordNotFound);
+            }
+            Ok(RuntimeState::Consumed(state)) => {
+                return self.resolve_consumed(*state, operation_identity);
+            }
+            Ok(RuntimeState::Pending) => {}
+            Err(_) => return VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
+        }
+
+        // 5. Argon2id admission gate (optional): capacity control before the
         //    memory-hard hash. Only Argon2id records are gated, matching PHP.
         //    acquire() hands out a lease: exactly one acquire
         //    corresponds to exactly one release (Drop). The lease binding
@@ -2121,7 +2288,7 @@ impl ProductionVerifier {
             None
         };
 
-        // 5. Atomic consume (the pending → consumed transition).
+        // 6. Atomic consume (the pending → consumed transition).
         //    The one-shot bound: exactly one caller wins the transition and
         //    derives; a concurrent loser observes `first == false` and
         //    resolves the retained state through the identity gate (the
@@ -2154,7 +2321,7 @@ impl ProductionVerifier {
         }
         let record = consumed.record;
 
-        // 6. Re-validation of the consumed record: it must carry the
+        // 7. Re-validation of the consumed record: it must carry the
         //    exact challenge that was peeked (constant-time string compare,
         //    like the PHP hash_equals) and must pass the full cheap phase
         //    again — a swapped/racing record fails closed instead of being
@@ -2168,13 +2335,13 @@ impl ProductionVerifier {
             return VerifyOutcome::Invalid(e);
         }
 
-        // 7. Single derive.
+        // 8. Single derive.
         let hash = match derive_hash(&record, token.counter) {
             Ok(hash) => hash,
             Err(e) => return VerifyOutcome::Invalid(e),
         };
 
-        // 7b. Post-derive final re-validation: the server clock is
+        // 8b. Post-derive final re-validation: the server clock is
         //     re-read (the challenge may have expired during the
         //     expensive derivation — the clock is the one truly dynamic
         //     input), and the expectations are re-checked against the
@@ -2196,7 +2363,7 @@ impl ProductionVerifier {
             return VerifyOutcome::Invalid(e);
         }
 
-        // 8. Leading-zero check + best-effort outcome commit:
+        // 9. Leading-zero check + best-effort outcome commit:
         //    the winner stores the proof verdict so concurrent/retried
         //    consumers return the same outcome without re-deriving. The
         //    commit is best-effort — a storage failure must never change
@@ -2328,7 +2495,7 @@ impl ProductionVerifier {
         //    and never acquires an Argon capacity slot.
         let claim_owner = match self
             .store
-            .claim_resume_derivation(&token.nonce, CLAIM_TTL_SECS)
+            .claim_resume_derivation(&token.nonce, self.store.resume_claim_ttl_secs())
         {
             Ok(Some(owner)) => owner,
             Ok(None) => {
@@ -2475,6 +2642,13 @@ impl ProductionVerifier {
     ///   Every other caller — no identity, a record consumed without one,
     ///   or a mismatched identity — sees [`VerifyError::AlreadyConsumed`]:
     ///   one solved token can never fund a second operation.
+    ///
+    /// This is the shared replay-resolution helper of the verify flow:
+    /// the consume-loser branch (a racer that observed `first == false`
+    /// on the transition) and the pre-admission runtime-state gate (a
+    /// record already consumed when the state snapshot was read) both
+    /// resolve through exactly this logic, so the two paths can never
+    /// diverge on what a retained outcome means.
     fn resolve_consumed(
         &self,
         state: ConsumedState,
@@ -3319,6 +3493,94 @@ mod tests {
             VerifyOutcome::Invalid(VerifyError::RecordNotFound),
             "a valid token for a cancelled record fails closed as RecordNotFound"
         );
+    }
+
+    #[test]
+    fn runtime_state_classifies_missing_pending_consumed_and_cancelled() {
+        // The single-snapshot runtime-state read: ONE GET classifies the
+        // retained record as Missing / Pending / Consumed / Cancelled,
+        // with the consumed envelope (the committed outcome and the
+        // operation identity) decoded from the same bytes the transition
+        // wrote.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:runtime-state:{}:", std::process::id());
+        let store =
+            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+
+        assert!(matches!(
+            store.runtime_state("never-stored-nonce").unwrap(),
+            RuntimeState::Missing
+        ));
+
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&issued.record).unwrap();
+        assert!(matches!(
+            store.runtime_state(&issued.record.nonce).unwrap(),
+            RuntimeState::Pending
+        ));
+
+        let identity = "logical-op-runtime-state";
+        assert!(
+            store
+                .consume_with_operation_identity(&issued.record.nonce, Some(identity))
+                .unwrap()
+                .expect("the pending record consumes")
+                .first
+        );
+        match store.runtime_state(&issued.record.nonce).unwrap() {
+            RuntimeState::Consumed(state) => {
+                assert_eq!(state.operation_identity.as_deref(), Some(identity));
+                assert!(
+                    state.stored_result.is_none(),
+                    "still resultless before the commit"
+                );
+            }
+            other => panic!("expected Consumed before the commit, got {other:?}"),
+        }
+
+        // The committed outcome rides back on a later snapshot.
+        store
+            .commit_result(&issued.record.nonce, true, None)
+            .unwrap();
+        match store.runtime_state(&issued.record.nonce).unwrap() {
+            RuntimeState::Consumed(state) => {
+                assert_eq!(
+                    state.stored_result.as_ref().map(|r| r.valid),
+                    Some(true),
+                    "the committed outcome rides back on the snapshot"
+                );
+            }
+            other => panic!("expected Consumed after the commit, got {other:?}"),
+        }
+
+        let cancelled = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .unwrap();
+        store.store(&cancelled.record).unwrap();
+        assert_eq!(
+            store.cancel(&cancelled.record.nonce).unwrap(),
+            Some(CancelResult::CancelledNow)
+        );
+        assert!(matches!(
+            store.runtime_state(&cancelled.record.nonce).unwrap(),
+            RuntimeState::Cancelled
+        ));
     }
 
     #[test]

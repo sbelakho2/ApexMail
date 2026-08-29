@@ -104,6 +104,10 @@ final class Configuration implements ConfigurationInterface
                     ->integerPrototype()->min(1)->max(4294967295)->end()
                     ->defaultValue([])
                 ->end()
+                ->booleanNode('strict_kid_verification')
+                    ->info('OPTIONAL strict current-kid mode (default false): when true, the verifier resolves EVERY record\'s kid against exactly the current signing key (kid => secret_key) even when the historical secrets_by_kid map is empty — a record whose kid differs is rejected with UnknownKid from the very first deployment. Default false keeps the legacy any-kid single-secret semantics: with an empty historical map the core accepts any record kid under the current secret, so an issuer holding the same HMAC secret under a different kid would verify unless issuer/region isolation is configured.')
+                    ->defaultFalse()
+                ->end()
                 ->enumNode('algorithm')
                     ->values(['sha256', 'argon2id'])
                     ->defaultValue('sha256')
@@ -148,6 +152,11 @@ final class Configuration implements ConfigurationInterface
                     ->defaultValue(60)
                     ->min(1)
                     ->max(3600)
+                ->end()
+                ->integerNode('resume_claim_ttl_secs')
+                    ->info('The recovery-derivation claim lease in seconds (default 60, lower bound 60): the recovery path claims the derivation of a resume claim under this lease, and the TTL must cover the maximum supported derivation duration. Fencing stays correct on expiry: an expired claim is released and a retry may re-claim the derivation.')
+                    ->defaultValue(60)
+                    ->min(60)
                 ->end()
                 ->integerNode('argon2_lease_ms')
                     ->info('Tokenized Redis lease lifetime in ms (default 45000). Must exceed the maximum verification request runtime (e.g. PHP request_terminate_timeout) by a safety margin — otherwise a lease can expire while its Argon2 hash is still running and another worker may enter.')
@@ -247,7 +256,7 @@ final class Configuration implements ConfigurationInterface
                     ->defaultValue('/kiwi-captcha')
                 ->end()
                 ->scalarNode('rate_limit_cache')
-                    ->info('Optional service id of a PSR-6 pool (Psr\\Cache\\CacheItemPoolInterface) used as SHARED, multi-process rate-limit state, e.g. a Redis-backed Symfony Cache pool. Only used when no Redis client is available for the atomic limiter. When omitted, a per-process in-memory sliding window is used (single-worker only — PHP-FPM workers share no memory).')
+                    ->info('Optional service id of a PSR-6 pool (Psr\\Cache\\CacheItemPoolInterface) used as SHARED, multi-process rate-limit state, e.g. a Redis-backed Symfony Cache pool. Only used when no Redis client is available for the atomic limiter. The pool must be genuinely cross-worker: a known in-memory adapter (Symfony Cache ArrayAdapter or a subclass) is refused in production, since its items live per process and provide no cross-worker limiting under PHP-FPM. When omitted, a per-process in-memory sliding window is used (single-worker only — PHP-FPM workers share no memory).')
                     ->defaultNull()
                 ->end()
                 ->scalarNode('rate_limit_pepper')
@@ -259,8 +268,14 @@ final class Configuration implements ConfigurationInterface
                     ->defaultValue(2)
                     ->min(0)
                 ->end()
+                ->integerNode('argon2_saturation_pressure_cap')
+                    ->info('BOUNDED SATURATION-PRESSURE COUNTER of the Redis-backed Argon2id admission semaphore (default 64): when a cap is saturated, each refused contender increments a {..}:sem:waiters counter (with the lease lifetime\'s TTL); once the counter EXCEEDS this cap, acquire() returns null IMMEDIATELY (CapacityExceeded — surfaced as the captcha violation/429). Admission is immediate and non-blocking: nothing queues, blocks or waits behind a saturated gate — the counter is a gauge of saturation pressure, never a queue. A counter entry is removed when a lease is granted or the acquire returns null (best-effort, same Lua), so the gauge can never grow unboundedly during an Argon2id saturation storm.')
+                    ->defaultNull()
+                    ->min(1)
+                ->end()
                 ->integerNode('argon2_max_waiters')
-                    ->info('Bounded waiters guard of the Redis-backed Argon2id admission semaphore (default 64): when the concurrency cap is saturated, contenders are counted in a {..}:sem:waiters counter with the lease lifetime\'s TTL; once the waiter count EXCEEDS argon2_max_waiters, acquire() returns null IMMEDIATELY (CapacityExceeded — surfaced as the captcha violation/429) instead of queueing behind the saturated gate. A waiter is removed when a lease is granted or the acquire returns null (best-effort, same Lua). Hard bound against unbounded waiter accumulation during Argon2id saturation storms.')
+                    ->info('DEPRECATED alias for argon2_saturation_pressure_cap: the old name described a bounded waiters guard, but the value is a bounded saturation-pressure counter — the semaphore never queues, waits or blocks; admission is immediate and non-blocking. The old name still wires the same value.')
+                    ->setDeprecated('bel-consulting/kiwicaptcha-symfony', '1.x', 'The "%node%" option is deprecated; use "argon2_saturation_pressure_cap" instead.')
                     ->defaultValue(64)
                     ->min(1)
                 ->end()
@@ -269,8 +284,8 @@ final class Configuration implements ConfigurationInterface
                     ->defaultNull()
                 ->end()
                 ->integerNode('argon2_max_per_tenant')
-                    ->info('PER-SCOPE budget of the Redis-backed Argon2id admission semaphore (default 8): each scope string gets its OWN lease set ({kiwicaptcha:argon2:leases:<ns>}:<scope>, checked IN ADDITION to the global argon2_max_concurrent_verifications cap), so one busy scope can never starve the other scopes\' Argon capacity while the global cap stays the deployment-wide invariant. The waiters guard stays global. Fairness knob for multi-tenant deployments (a tenant/endpoint mapped to a scope gets a guaranteed share of the memory-hard budget).')
-                    ->defaultValue(8)
+                    ->info('PER-SCOPE CONCENTRATION cap of the Redis-backed Argon2id admission semaphore: each scope string gets its OWN lease set ({kiwicaptcha:argon2:leases:<ns>}:<scope>, checked IN ADDITION to the global argon2_max_concurrent_verifications cap). A per-scope cap BELOW the global cap prevents one busy scope from monopolizing the shared capacity — it is a concentration cap, not a guaranteed share and not a weighted-fair scheduler: it never reserves a specific share for any tenant, it only bounds how much of the global capacity a single scope may occupy. Null (default) derives the effective cap from the global cap (max(1, global - 1)), so with the default global cap of 2 one scope can never occupy both slots. Explicit values must be strictly below the global cap when the global cap is positive (a cap at or above the global cap can never bind, so it is refused); the waiters guard stays global.')
+                    ->defaultNull()
                     ->min(1)
                 ->end()
                 ->arrayNode('resource_capacity')
@@ -846,6 +861,18 @@ final class Configuration implements ConfigurationInterface
                     return false;
                 })
                 ->thenInvalid('every kiwi_captcha.secrets_by_kid key must be strictly below kiwi_captcha.kid: the map holds historical signing keys only, and a future key would silently extend the verifier rollback/forward guard (a record kid above the newest ring key) so no deployment should accept it. Bump kid above the newest historical key when rotating')
+            ->end()
+            // Cross-field Argon admission invariant: an explicit per-scope
+            // concentration cap at or above the global cap can never bind
+            // (the global cap admits fewer), so it provides no
+            // anti-starvation and is refused here. The default (null)
+            // derives the effective cap as max(1, global - 1) in the
+            // extension, so the default configuration stays valid.
+            ->validate()
+                ->ifTrue(static fn (array $v): bool => $v['argon2_max_per_tenant'] !== null
+                    && $v['argon2_max_concurrent_verifications'] > 0
+                    && $v['argon2_max_per_tenant'] >= $v['argon2_max_concurrent_verifications'])
+                ->thenInvalid('kiwi_captcha.argon2_max_per_tenant must be strictly below argon2_max_concurrent_verifications when the global cap is positive: a per-scope concentration cap at or above the global cap can never bind (the global cap admits fewer), so it provides no anti-starvation. Leave the option unset to derive max(1, global - 1) or set it strictly below the global cap')
             ->end();
 
         return $treeBuilder;
