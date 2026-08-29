@@ -341,6 +341,35 @@ final class VerifierGateTest extends TestCase
         self::assertNotNull($storage->find($record->nonce), 'the cancelled record is retained until its TTL');
     }
 
+    public function testCancelledArgonRecordWithArbitraryBoundedCounterNeverAcquiresAdmission(): void
+    {
+        // The Rust mirror's arbitrary-counter variant: an attacker who
+        // cancels a challenge once cannot then flood syntactically valid
+        // tokens (any bounded counter passes the cheap phase — the
+        // counter is proof-phase input, never a cheap check) to capture
+        // and release scarce admission slots and starve legitimate
+        // memory-hard verifications. The pre-admission terminal-state
+        // check answers RecordNotFound with zero acquires.
+        $record = $this->argon2Record();
+        $storage = new ArrayStorage();
+        $storage->store($record);
+        self::assertSame('cancelled-now', $storage->cancel($record->nonce)?->state);
+
+        $counters = ['acquires' => 0, 'releases' => 0, 'live' => 0];
+        $gate = $this->countingGate(1, $counters);
+        $outcome = (new Verifier($storage, $gate, now: static fn (): int => self::ISSUED_AT))->verify(
+            $this->tokenFor($record->nonce, 0),
+            Vectors::SECRET,
+            'login',
+            self::CLIENT_IP,
+        );
+
+        self::assertSame(VerifyError::RecordNotFound, $outcome->error, 'a cancelled challenge with an arbitrary bounded counter fails closed as RecordNotFound');
+        self::assertSame(0, $counters['acquires'], 'the arbitrary-counter token must NEVER acquire an Argon admission slot');
+        self::assertSame(0, $counters['releases']);
+        self::assertSame(0, $counters['live']);
+    }
+
     public function testCancelledArgonRecordWithBadSignatureKeepsTheCheapVerdictWithoutAcquiring(): void
     {
         // A token whose record fails the cheap-phase signature re-check
