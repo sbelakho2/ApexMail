@@ -7267,6 +7267,16 @@ mod tests {
                 .join("&")
         }
 
+        /// The double-submit `csrf_token` cookie value for a body built by
+        /// `csrf_body` (the `_csrf` pair is always first and URL-safe).
+        fn csrf_cookie_of(body: &str) -> String {
+            body.split('&')
+                .find_map(|pair| pair.strip_prefix("_csrf="))
+                .filter(|token| !token.is_empty())
+                .map(|token| format!("csrf_token={token}"))
+                .expect("csrf_body output always carries a _csrf pair")
+        }
+
         fn post_form(uri: &str, body: &str) -> Request<Body> {
             // Audit F4 (double-submit CSRF): when the body carries a `_csrf`
             // token, attach the matching `csrf_token` cookie exactly as a
@@ -7563,14 +7573,10 @@ mod tests {
             let csv = "Email,Name\ndup@t.io,Dup\nfresh@t.io,\"Fresh, Inc\"\nfresh@t.io,Again\nnot-an-email,Bad\n";
             let response = app
                 .clone()
-                .oneshot(
-                    Request::builder()
-                        .method("POST")
-                        .uri("/web/contacts/import")
-                        .header("content-type", "application/x-www-form-urlencoded")
-                        .body(Body::from(csrf_body(&state, &[("csv", csv)])))
-                        .unwrap(),
-                )
+                .oneshot(post_form(
+                    "/web/contacts/import",
+                    &csrf_body(&state, &[("csv", csv)]),
+                ))
                 .await
                 .unwrap();
             assert_eq!(response.status(), StatusCode::SEE_OTHER);
@@ -8258,7 +8264,10 @@ mod tests {
                     .header("content-type", "application/x-www-form-urlencoded")
                     .header(
                         header::COOKIE,
-                        format!("apexmail_login_challenge={challenge}"),
+                        format!(
+                            "apexmail_login_challenge={challenge}; {}",
+                            csrf_cookie_of(body)
+                        ),
                     )
                     .body(Body::from(body.to_string()))
                     .unwrap()
@@ -9300,6 +9309,7 @@ mod tests {
                 &sign_mfa_setup(&state.config, &user_id.to_string(), &secret_b32),
             );
             let code = current_totp_code(&secret_bytes);
+            let confirm_body = csrf_body(&state, &[("code", &code)]);
             let response = app
                 .clone()
                 .oneshot(
@@ -9307,8 +9317,14 @@ mod tests {
                         .method("POST")
                         .uri("/web/auth/mfa/confirm")
                         .header("content-type", "application/x-www-form-urlencoded")
-                        .header(header::COOKIE, format!("apexmail_mfa_setup={setup_value}"))
-                        .body(Body::from(csrf_body(&state, &[("code", &code)])))
+                        .header(
+                            header::COOKIE,
+                            format!(
+                                "apexmail_mfa_setup={setup_value}; {}",
+                                csrf_cookie_of(&confirm_body)
+                            ),
+                        )
+                        .body(Body::from(confirm_body))
                         .unwrap(),
                 )
                 .await
