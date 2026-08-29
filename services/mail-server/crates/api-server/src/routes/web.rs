@@ -9379,6 +9379,7 @@ mod tests {
                     );
                 });
             let code = current_totp_code(&secret_bytes);
+            let verify_body = csrf_body(&state, &[("code", &code), ("email", &email)]);
             let response = login_app
                 .oneshot(
                     Request::builder()
@@ -9387,12 +9388,12 @@ mod tests {
                         .header("content-type", "application/x-www-form-urlencoded")
                         .header(
                             header::COOKIE,
-                            format!("apexmail_login_challenge={challenge}"),
+                            format!(
+                                "apexmail_login_challenge={challenge}; {}",
+                                csrf_cookie_of(&verify_body)
+                            ),
                         )
-                        .body(Body::from(csrf_body(
-                            &state,
-                            &[("code", &code), ("email", &email)],
-                        )))
+                        .body(Body::from(verify_body))
                         .unwrap(),
                 )
                 .await
