@@ -62,15 +62,18 @@ namespace KiwiCaptcha;
  * Argon2id admission gate follows (exhaustion yields CapacityExceeded
  * without burning the record). A runtime-state capable storage (the
  * {@see ChallengeRuntimeStateReadableInterface} seam, implemented by
- * the Redis and array backends) resolves terminal records between the
- * two. A cancelled or missing record answers RecordNotFound directly.
- * An already-consumed record resolves through the shared identity-gated
- * resolution of the consume-returned envelope. Neither ever burns a
- * scarce Argon admission slot (round-94 audit fix). The
- * consume-and-re-derive proof phase
+ * the Redis and array backends) reads the record and the terminal
+ * state in a single snapshot GET that doubles as the peek (round-95
+ * audit fix). Verification costs exactly one record read. A
+ * cancelled or missing record answers RecordNotFound directly. An
+ * already-consumed record resolves through the shared identity-gated
+ * resolution of the consume-returned envelope, decoded from the same
+ * snapshot bytes. Neither ever burns a scarce Argon admission slot
+ * (round-94 audit fix). The consume-and-re-derive proof phase
  * follows, and a post-derive final revalidation against the current
- * server clock and the current expectations precedes the commit of the
- * deterministic result.
+ * server clock and the current expectations precedes the commit of
+ * the deterministic result, for both valid and invalid derivations
+ * (round-95 audit fix, Rust parity).
  *
  * The cheap-phase checks are shared with the narrowly authorized
  * consumed-operation resume path. See {@see self::resumeConsumedOperation()}.
@@ -407,15 +410,51 @@ final class Verifier
             return VerifyOutcome::malformedToken($e->getMessage());
         }
 
-        try {
-            $peek = $this->storage->find($token->nonce);
-        } catch (\Throwable) {
-            // Backend failure: typed result, challenge presumed intact
-            // (the client can retry once storage recovers).
-            return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+        // The record source is a single snapshot for storages with the
+        // {@see ChallengeRuntimeStateReadableInterface} capability
+        // (round-95 audit fix): runtimeState() decodes the full
+        // envelope — the record for every non-Missing kind, plus the
+        // retained consumed envelope — from one GET. The old flow read
+        // the same key three times: find() here, runtimeState() at
+        // step 7b, consumedState() on the consumed branch. The cheap
+        // phase below and the terminal-state gate at step 7b therefore
+        // consume the exact same snapshot, never a second read. A
+        // storage without the capability keeps the legacy find() peek
+        // byte-identically.
+        $runtime = null;
+        $peek = null;
+        if ($this->storage instanceof ChallengeRuntimeStateReadableInterface) {
+            try {
+                $runtime = $this->storage->runtimeState($token->nonce);
+            } catch (\Throwable) {
+                // Backend failure on the state read: typed result,
+                // challenge presumed intact (the client can retry once
+                // storage recovers), exactly the find() mapping.
+                return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+            }
+            if ($runtime->kind === ChallengeRuntimeStateKind::Missing) {
+                // The record expired or vanished: the find-null mapping,
+                // answered before any cheap phase (there is no record to
+                // check).
+                return VerifyOutcome::invalid(VerifyError::RecordNotFound);
+            }
+            $peek = $runtime->record;
         }
         if ($peek === null) {
-            return VerifyOutcome::invalid(VerifyError::RecordNotFound);
+            // Either a storage without the runtime-state capability, or
+            // an exotic capable storage that reported a non-Missing kind
+            // without a record: the legacy find() peek runs unchanged
+            // (the byte-identical legacy path for both cases).
+            try {
+                $peek = $this->storage->find($token->nonce);
+            } catch (\Throwable) {
+                // Backend failure: typed result, challenge presumed intact
+                // (the client can retry once storage recovers).
+                return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
+            }
+            if ($peek === null) {
+                return VerifyOutcome::invalid(VerifyError::RecordNotFound);
+            }
         }
 
         // 1-6. The cheap-phase security checks — structural validation,
@@ -580,57 +619,50 @@ final class Verifier
         }
 
         // 7b. Terminal-state resolution before the Argon admission gate
-        //     (round-94 audit fix): a cancelled or already-consumed
-        //     record must never acquire a scarce admission slot, and a
-        //     terminal record's outcome is fully determined. A cancelled
-        //     record is never consumable, so a well-formed token for it
-        //     always resolved to RecordNotFound via the consume
-        //     transition; the same verdict is now answered directly
-        //     from the single-snapshot runtime state, with no slot
-        //     burned. An already-consumed record resolves through the
-        //     identical consumed-record resolution the consume-returned
-        //     envelope uses via {@see self::resolveConsumedRecord()}, again
-        //     with no slot burned. A backend failure on either retained
-        //     read maps exactly like the find() failure: the retryable
-        //     StorageUnavailable, never a new error class. A pending
-        //     record falls through to the legacy admission -> consume
-        //     winner/loser flow unchanged: both racing requests may
-        //     briefly hold admission, which is the documented first-race
-        //     window.
-        if ($this->storage instanceof ChallengeRuntimeStateReadableInterface) {
-            try {
-                $runtime = $this->storage->runtimeState($token->nonce);
-            } catch (\Throwable) {
-                // Backend failure on the state read: typed result,
-                // challenge presumed intact (the client can retry once
-                // storage recovers), exactly the find() mapping.
-                return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
-            }
-            if ($runtime->kind === ChallengeRuntimeStateKind::Missing
-                || $runtime->kind === ChallengeRuntimeStateKind::Cancelled
-            ) {
-                // Missing: the record expired or vanished between the
-                // cheap phase and here, where the consume transition
-                // would return null and produce exactly this verdict.
+        //     (round-94 audit fix, single-snapshot since round-95): a
+        //     cancelled or already-consumed record must never acquire a
+        //     scarce admission slot, and a terminal record's outcome is
+        //     fully determined. The gate now decides on the same
+        //     snapshot that produced the peek, so no second read occurs. A
+        //     cancelled record is never consumable, so a well-formed
+        //     token for it always resolved to RecordNotFound via the
+        //     consume transition; the same verdict is answered directly
+        //     from the snapshot, with no slot burned. An already-consumed
+        //     record resolves through the identical consumed-record
+        //     resolution the consume-returned envelope uses via
+        //     {@see self::resolveConsumedRecord()}, again with no slot
+        //     burned, from the envelope that rode on the snapshot (the
+        //     round-95 fix deleted the old second GET). A backend failure
+        //     on the retained read maps exactly like the find() failure:
+        //     the retryable StorageUnavailable, never a new error class.
+        //     A pending record falls through to the legacy admission ->
+        //     consume winner/loser flow unchanged: both racing requests
+        //     may briefly hold admission, which is the documented
+        //     first-race window. A record that vanishes after the
+        //     snapshot (a pending read, then a concurrent delete) is
+        //     answered by the consume transition's null as RecordNotFound,
+        //     exactly the pre-round-95 interleaving.
+        if ($runtime !== null) {
+            if ($runtime->kind === ChallengeRuntimeStateKind::Cancelled) {
                 // Cancelled: the terminal marker of the cancellation
                 // endpoint; the record is dead but retained, and the
-                // consume transition reports it as missing. Both are
-                // the pinned RecordNotFound, answered without admission
-                // and without consume.
+                // consume transition reports it as missing. The pinned
+                // RecordNotFound, answered without admission and without
+                // consume.
                 return VerifyOutcome::invalid(VerifyError::RecordNotFound);
             }
             if ($runtime->kind === ChallengeRuntimeStateKind::Consumed) {
-                // The retained envelope resolves through the exact same
-                // identity-gated resolution the consume-returned
-                // ConsumedRecord uses, so the two paths can never
-                // diverge. A storage with the runtime-state capability
-                // but without the consumed-state capability is
-                // impossible for the shipped backends (both implement
-                // both); if one appears, the legacy admission path
-                // below stays, preserving today's behavior
-                // byte-identically (the consume transition then
-                // decides). The envelope re-read can also race an
-                // expiry; that falls through the same legacy path.
+                // The retained envelope rides on the same snapshot GET
+                // that produced the peek: resolve it directly, never a
+                // second read.
+                if ($runtime->consumed !== null) {
+                    return $this->resolveConsumedRecord($runtime->consumed, $operationIdentity);
+                }
+                // Safety net kept only for an exotic storage that
+                // reported Consumed without the envelope: re-read via
+                // consumedState(), the old second GET. The shipped
+                // backends decode the record and the envelope from the
+                // same bytes, so this branch never runs for them.
                 if ($this->storage instanceof ConsumedStateReadableInterface) {
                     try {
                         $retained = $this->storage->consumedState($token->nonce);
@@ -762,23 +794,22 @@ final class Verifier
                     ? VerifyError::UnsupportedArgon2Params
                     : VerifyError::MalformedRecord);
             }
-            if (self::leadingZeroBits($hash) < $record->targetBits) {
-                // Commit the deterministic invalid outcome (best-effort) so
-                // a retry sees the same InsufficientWork without re-deriving.
-                $this->bestEffortCommit($record->nonce, false, $record->requestBinding);
 
-                return VerifyOutcome::invalid(VerifyError::InsufficientWork);
-            }
-
-            // 10. Post-derive final revalidation: the expensive
-            //     derivation succeeded, so re-check against the current
-            //     server clock and the current expectations before
-            //     accepting. The challenge may have expired during the
-            //     derivation (the clock read here is the verifier's now
-            //     closure, so tests can drive it), and the policy epoch,
-            //     region and issuer may have rotated mid-derivation. The
-            //     expectation values read here are the current ones, not a
-            //     snapshot from the cheap phase.
+            // 10. Post-derive final revalidation: re-check against the
+            //     current server clock and the current expectations
+            //     before the leading-zero verdict, matching the Rust
+            //     mirror's unconditional final_revalidate (round-95
+            //     audit fix). The check runs for both a valid and an
+            //     invalid derivation, so a record that expired during
+            //     the derivation commits Expired even when the proof
+            //     was insufficient — never a stale InsufficientWork.
+            //     The challenge may have expired during the derivation
+            //     (the clock read here is the verifier's now closure,
+            //     so tests can drive it), and the policy epoch, region
+            //     and issuer may have rotated mid-derivation. The
+            //     expectation values read here are the current ones,
+            //     not a snapshot from the cheap phase. Nothing is
+            //     committed on a failure.
             $now = $this->now !== null ? (int) ($this->now)() : time();
             if ($now >= $record->expiresAt) {
                 return VerifyOutcome::invalid(VerifyError::Expired);
@@ -791,6 +822,14 @@ final class Verifier
             }
             if ($this->expectedIssuer !== null && $record->issuer !== $this->expectedIssuer) {
                 return VerifyOutcome::invalid(VerifyError::WrongIssuer);
+            }
+
+            if (self::leadingZeroBits($hash) < $record->targetBits) {
+                // Commit the deterministic invalid outcome (best-effort) so
+                // a retry sees the same InsufficientWork without re-deriving.
+                $this->bestEffortCommit($record->nonce, false, $record->requestBinding);
+
+                return VerifyOutcome::invalid(VerifyError::InsufficientWork);
             }
 
             // Commit the deterministic valid outcome (best-effort: a
@@ -910,7 +949,10 @@ final class Verifier
      * are re-checked like the ordinary post-derive final revalidation:
      * the expiry re-read, then the policy epoch, region and issuer. A
      * deadline crossing or a rotation landing mid-derivation refuses the
-     * resume. The minimum-duration floor is exempt (it was passed before
+     * resume, for both a valid and an invalid derivation (round-95 audit
+     * fix, Rust parity): an insufficient proof on an expired record
+     * commits Expired, never InsufficientWork. The minimum-duration
+     * floor is exempt (it was passed before
      * the consume; it is not a security deadline). The signed expiry is
      * exempt only on the committed-result recovery: that result was
      * durably recorded only after the original final expiry check
@@ -1205,33 +1247,36 @@ final class Verifier
 
             // Post-derive final revalidation: the same current-clock and
             // current-expectation re-check the ordinary verify() runs
-            // after its derivation, step 10 of {@see self::verify()}.
-            // First the expiry is re-read against the current clock: a
-            // derivation that started before the signed deadline but
-            // finished after it commits Expired, exactly the ordinary
-            // acceptance boundary. Then the policy epoch, region and
-            // issuer are re-checked so a rotation that lands between the
-            // pre-derive revalidation and the commit refuses the resumed
-            // derivation; the values read here are current, never a
-            // snapshot from the cheap phase. Nothing is committed on
-            // failure, so the retained record stays
-            // consumed-without-result for a later same-identity resume.
-            // The minimum-duration floor remains exempt (it was passed
-            // before the consume; it is not a security deadline).
-            if ($valid) {
-                $now = $this->now !== null ? (int) ($this->now)() : time();
-                if ($now >= $record->expiresAt) {
-                    return VerifyOutcome::invalid(VerifyError::Expired);
-                }
-                if ($this->expectedPolicyVersion !== null && ($record->policyVersion ?? 1) !== $this->expectedPolicyVersion) {
-                    return VerifyOutcome::invalid(VerifyError::WrongPolicyVersion);
-                }
-                if ($this->region !== null && $record->region !== $this->region) {
-                    return VerifyOutcome::invalid(VerifyError::WrongRegion);
-                }
-                if ($this->expectedIssuer !== null && $record->issuer !== $this->expectedIssuer) {
-                    return VerifyOutcome::invalid(VerifyError::WrongIssuer);
-                }
+            // after its derivation, step 10 of {@see self::verify()}. It
+            // runs for both a valid and an invalid derivation (round-95
+            // audit fix): the Rust mirror re-reads the clock after the
+            // derivation before the leading-zero verdict, so an invalid
+            // derivation on a record that expired mid-derive commits
+            // Expired, never a stale InsufficientWork. First the expiry
+            // is re-read against the current clock: a derivation that
+            // started before the signed deadline but finished after it
+            // commits Expired, exactly the ordinary acceptance boundary.
+            // Then the policy epoch, region and issuer are re-checked so
+            // a rotation that lands between the pre-derive revalidation
+            // and the commit refuses the resumed derivation; the values
+            // read here are current, never a snapshot from the cheap
+            // phase. Nothing is committed on failure, so the retained
+            // record stays consumed-without-result for a later
+            // same-identity resume. The minimum-duration floor remains
+            // exempt (it was passed before the consume; it is not a
+            // security deadline).
+            $now = $this->now !== null ? (int) ($this->now)() : time();
+            if ($now >= $record->expiresAt) {
+                return VerifyOutcome::invalid(VerifyError::Expired);
+            }
+            if ($this->expectedPolicyVersion !== null && ($record->policyVersion ?? 1) !== $this->expectedPolicyVersion) {
+                return VerifyOutcome::invalid(VerifyError::WrongPolicyVersion);
+            }
+            if ($this->region !== null && $record->region !== $this->region) {
+                return VerifyOutcome::invalid(VerifyError::WrongRegion);
+            }
+            if ($this->expectedIssuer !== null && $record->issuer !== $this->expectedIssuer) {
+                return VerifyOutcome::invalid(VerifyError::WrongIssuer);
             }
 
             // Commit the resumed deterministic outcome, not best-effort:

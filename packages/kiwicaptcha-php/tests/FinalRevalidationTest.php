@@ -243,4 +243,38 @@ final class FinalRevalidationTest extends TestCase
         self::assertTrue($retry->consumedBefore);
         self::assertNull($retry->consumedResult, 'no deterministic result may be committed for a final-recheck-rejected outcome');
     }
+
+    public function testFinalRecheckRejectsExpiredEvenForAnInsufficientDerivation(): void
+    {
+        // Round-95 audit fix, Rust parity: the post-derive final
+        // revalidation runs before the leading-zero verdict for both
+        // outcomes, so an insufficient proof on a record that expired
+        // during the derivation commits Expired, never a stale
+        // InsufficientWork (the Rust mirror runs final_revalidate
+        // before the leading-zero check).
+        [$record, $token] = $this->issueAndSolve($this->shaConfig(ttlSecs: 1));
+        $storage = new ArrayStorage();
+        $storage->store($record);
+
+        $wrongCounter = 0;
+        $saltBytes = base64_decode($record->salt, true);
+        while (Verifier::leadingZeroBits(hash('sha256', $record->prefix.$wrongCounter.$saltBytes, true)) >= $record->targetBits) {
+            ++$wrongCounter;
+        }
+        $wrongToken = SolutionToken::create($record->nonce, $wrongCounter, 5000, [])->encode();
+
+        $calls = 0;
+        $clock = function () use (&$calls): int {
+            ++$calls;
+
+            return $calls === 1 ? self::ISSUED_AT : self::ISSUED_AT + 1;
+        };
+
+        $verifier = new Verifier($storage, now: $clock);
+        $outcome = $verifier->verify($wrongToken, Vectors::SECRET, 'login', self::CLIENT_IP, nowNs: $record->issuedAtNs + 1_000_000);
+
+        self::assertSame(VerifyError::Expired, $outcome->error, 'an insufficient derivation on a record expiring mid-derive must commit Expired (Rust parity), never InsufficientWork');
+        self::assertSame(2, $calls, 'the verifier clock must be read once for the cheap TTL check and once for the final re-check');
+        self::assertNull($storage->consumedState($record->nonce)?->consumedResult, 'the expired verification must not commit an invalid result');
+    }
 }

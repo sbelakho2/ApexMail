@@ -229,4 +229,34 @@ final class VerifierTerminalStateRealRedisTest extends TestCase
         self::assertSame(0, $counters['releases']);
         self::assertSame(0, $counters['live']);
     }
+
+    public function testConsumedArgonRecordOnRealRedisWithoutCommittedResultIsIndeterminate(): void
+    {
+        // The replay-path counterpart of the committed-result tests: a
+        // consumed record whose derivation crashed before the commit
+        // carries no deterministic result, so the runtime-snapshot
+        // consumed branch resolves ConsumeIndeterminate (retryable)
+        // without acquiring an Argon slot and without re-deriving.
+        $client = $this->redisOrSkip();
+        self::assertNotNull($client);
+        [$storage, $record, $token] = $this->issueAndSolveArgon($client);
+        $identity = 'op-'.hash('sha256', 'real-redis-resultless');
+        $storage->consumeWithOperationIdentity($record->nonce, $identity);
+        self::assertNull($storage->consumedState($record->nonce)?->consumedResult, 'precondition: no committed result');
+
+        $counters = ['acquires' => 0, 'releases' => 0, 'live' => 0];
+        $gate = $this->countingGate(1, $counters);
+        $outcome = (new Verifier($storage, $gate, now: static fn (): int => self::ISSUED_AT))->verify(
+            $token,
+            Vectors::SECRET,
+            'login',
+            '198.51.100.7',
+            operationIdentity: $identity,
+        );
+
+        self::assertSame(VerifyError::ConsumeIndeterminate, $outcome->error, 'a consumed record without a committed result is ambiguous');
+        self::assertSame(0, $counters['acquires'], 'the resultless replay must never acquire an Argon admission slot');
+        self::assertSame(0, $counters['releases']);
+        self::assertSame(0, $counters['live']);
+    }
 }

@@ -81,6 +81,18 @@ final class VerifierResumeTest extends TestCase
         return SolutionToken::create($record->nonce, $wrong, 5000, [])->encode();
     }
 
+    /** A token whose counter provably fails the record's Argon2id target. */
+    private function wrongArgonCounterToken(ChallengeRecord $record): string
+    {
+        $saltBytes = base64_decode($record->salt, true);
+        $wrong = 0;
+        while (Verifier::leadingZeroBits(sodium_crypto_pwhash(32, $record->prefix.$wrong, $saltBytes, $record->t, $record->mKib * 1024, SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13)) >= $record->targetBits) {
+            ++$wrong;
+        }
+
+        return SolutionToken::create($record->nonce, $wrong, 5000, [])->encode();
+    }
+
     private function identity(string $suffix): string
     {
         return hash('sha256', 'logical-operation-'.$suffix);
@@ -511,6 +523,43 @@ final class VerifierResumeTest extends TestCase
         // Expired (the clock is past the signed deadline now) — the same
         // logical redemption can never become Valid.
         $replay = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('expire-mid-derive'), 'login', self::CLIENT_IP);
+        self::assertSame(VerifyError::Expired, $replay->error, 'a second resume must reproduce the identical Expired');
+        self::assertNull($storage->consumedState($record->nonce)?->consumedResult, 'nothing is ever committed once the derivation crossed the signed deadline');
+    }
+
+    public function testResultlessResumeExpiringDuringDerivationWithInvalidProofIsExpired(): void
+    {
+        // Round-95 audit fix, Rust parity: the post-derive revalidation
+        // runs for both a valid and an invalid derivation, so an
+        // insufficient proof on a record that expires mid-derive
+        // commits Expired, never a stale InsufficientWork (the Rust
+        // mirror re-reads the clock after the derivation before the
+        // leading-zero verdict).
+        [$storage, $record, $token] = $this->issueAndSolveArgon(ttlSecs: 1);
+        $storage->consumeWithOperationIdentity($record->nonce, $this->identity('expire-mid-derive-invalid'));
+        $wrongToken = $this->wrongArgonCounterToken($record);
+
+        $clock = self::ISSUED_AT;
+        $now = static function () use (&$clock): int {
+            return $clock;
+        };
+        $gate = $this->rotatingGate(static function () use (&$clock): void {
+            // The admission lands between the pre-derive expiry gate and
+            // the post-derive re-read: the clock advances past the
+            // record's signed expiry (issued_at + 1).
+            $clock = self::ISSUED_AT + 10;
+        });
+        $verifier = new Verifier($storage, $gate, now: $now);
+
+        $outcome = $verifier->resumeConsumedOperation($wrongToken, Vectors::SECRET, $this->identity('expire-mid-derive-invalid'), 'login', self::CLIENT_IP);
+        self::assertSame(VerifyError::Expired, $outcome->error, 'an invalid derivation on a record expiring mid-derive must commit Expired (Rust parity), never InsufficientWork');
+        $after = $storage->consumedState($record->nonce);
+        self::assertNull($after?->consumedResult, 'the mid-derivation expiry must NOT commit anything');
+
+        // Deterministic: a second resume reproduces the identical
+        // Expired (the clock is past the signed deadline now) — the same
+        // logical redemption can never become Valid.
+        $replay = $verifier->resumeConsumedOperation($wrongToken, Vectors::SECRET, $this->identity('expire-mid-derive-invalid'), 'login', self::CLIENT_IP);
         self::assertSame(VerifyError::Expired, $replay->error, 'a second resume must reproduce the identical Expired');
         self::assertNull($storage->consumedState($record->nonce)?->consumedResult, 'nothing is ever committed once the derivation crossed the signed deadline');
     }

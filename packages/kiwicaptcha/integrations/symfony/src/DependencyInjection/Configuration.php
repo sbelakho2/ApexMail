@@ -256,7 +256,7 @@ final class Configuration implements ConfigurationInterface
                     ->defaultValue('/kiwi-captcha')
                 ->end()
                 ->scalarNode('rate_limit_cache')
-                    ->info('Optional service id of a PSR-6 pool (Psr\\Cache\\CacheItemPoolInterface) used as SHARED, multi-process rate-limit state, e.g. a Redis-backed Symfony Cache pool. Only used when no Redis client is available for the atomic limiter. The pool must be genuinely cross-worker: a known in-memory adapter (Symfony Cache ArrayAdapter or a subclass) is refused in production, since its items live per process and provide no cross-worker limiting under PHP-FPM. When omitted, a per-process in-memory sliding window is used (single-worker only — PHP-FPM workers share no memory).')
+                    ->info('Optional service id of a PSR-6 pool (Psr\\Cache\\CacheItemPoolInterface) used as SHARED, multi-process rate-limit state, e.g. a Redis-backed Symfony Cache pool. Only used when no Redis client is available for the atomic limiter. The pool must be genuinely cross-worker: a known in-memory adapter (Symfony Cache ArrayAdapter or a subclass) is refused in production, since its items live per process and provide no cross-worker limiting under PHP-FPM. The class check follows parent-declared pools too, so a framework.cache.pools entry with `parent: cache.adapter.array` is refused the same way. When omitted, a per-process in-memory sliding window is used (single-worker only — PHP-FPM workers share no memory).')
                     ->defaultNull()
                 ->end()
                 ->scalarNode('rate_limit_pepper')

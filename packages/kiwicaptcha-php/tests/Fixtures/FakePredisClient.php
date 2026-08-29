@@ -58,6 +58,12 @@ final class FakePredisClient extends \Predis\Client
     /** @var list<array{0: string, 1: list<mixed>}> */
     public array $calls = [];
 
+    /** Number of GET commands issued so far (the record-read counter). */
+    public int $gets = 0;
+
+    /** @var list<string> the key of every GET issued so far */
+    public array $getKeys = [];
+
     /** @var list<array{script: string, keys: list<string>}> every EVAL's key list */
     public array $evals = [];
 
@@ -71,7 +77,7 @@ final class FakePredisClient extends \Predis\Client
         $this->calls[] = [strtoupper((string) $commandID), $arguments];
 
         return match (strtoupper((string) $commandID)) {
-            'GET' => $this->store[(string) $arguments[0]] ?? null,
+            'GET' => $this->fakeGet($arguments),
             'SET' => $this->fakeSet($arguments),
             'DEL' => $this->fakeDel($arguments),
             'EXISTS' => isset($this->store[(string) $arguments[0]]) ? 1 : 0,
@@ -79,6 +85,15 @@ final class FakePredisClient extends \Predis\Client
             'WAIT' => $this->waitAck,
             default => null,
         };
+    }
+
+    /** @param list<mixed> $arguments */
+    private function fakeGet(array $arguments): ?string
+    {
+        $this->gets++;
+        $this->getKeys[] = (string) $arguments[0];
+
+        return $this->store[(string) $arguments[0]] ?? null;
     }
 
     /**

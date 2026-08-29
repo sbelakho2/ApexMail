@@ -551,8 +551,14 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // client is never punished for a backend or rollout
             // condition). Previously the failures returned here without
             // any evidence, leaving bad_proof, malformed and replay
-            // counters fed only by issuance debt and velocity.
-            $this->risk?->solveOutcome($constraint->scope, $ip, $session, $outcome->error);
+            // counters fed only by issuance debt and velocity. The
+            // evidence carries the canonical client IP only when one
+            // exists: a request without a client IP produces no per-IP
+            // signal, never an empty-string pseudonym, and the session
+            // argument is null (the validator has no session here).
+            if ($clientIp !== null) {
+                $this->risk?->solveOutcome($constraint->scope, $clientIp, null, $outcome->error);
+            }
             $code = $this->publicCode($outcome->error);
             if ($outcome->error !== null && $code !== KiwiCaptcha::INVALID_OR_EXPIRED_ERROR) {
                 $this->logger?->info('KiwiCaptcha: verification refused', [
@@ -624,7 +630,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // as the retryable temporary_unavailable violation — never a
         // silent pass.
         try {
-            [$disposition, $replayed, $requirement] = $this->resolveFinalDisposition($value, $outcome, $request, $constraint, (string) ($clientIp ?? ''), $canonicalBinding);
+            [$disposition, $replayed, $requirement] = $this->resolveFinalDisposition($value, $outcome, $request, $constraint, $clientIp, $canonicalBinding);
         } catch (PostSolveDispositionUnavailableException $e) {
             $this->logger?->info('KiwiCaptcha: post-solve disposition unavailable', [
                 'scope' => $constraint->scope,
@@ -943,7 +949,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      *                                                 disposition could not
      *                                                 be resolved durably
      */
-    private function resolveFinalDisposition(string $token, VerifyOutcome $outcome, ?Request $request, KiwiCaptcha $constraint, string $ip, ?string $canonicalBinding): array
+    private function resolveFinalDisposition(string $token, VerifyOutcome $outcome, ?Request $request, KiwiCaptcha $constraint, ?string $clientIp, ?string $canonicalBinding): array
     {
         $nonce = $this->verifiedNonceOf($token);
         if ($nonce === null || $nonce === '') {
@@ -978,7 +984,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // {@see PostSolveDispositionStore::claim()}).
             $decisionId = $this->consumeDecisionForToken($token);
 
-            $final = $this->assessFinalDisposition($token, $outcome, $request, $constraint, $ip, $session, $nonce, $canonicalBinding, $decisionId, $requirement);
+            $final = $this->assessFinalDisposition($token, $outcome, $request, $constraint, $clientIp, $session, $nonce, $canonicalBinding, $decisionId, $requirement);
 
             return [$final, false, $requirement];
         }
@@ -1101,7 +1107,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         }
         $storedDecisionId = $claimRecord->decisionId;
 
-        $disposition = $this->assessFinalDisposition($token, $outcome, $request, $constraint, $ip, $session, $nonce, $canonicalBinding, $storedDecisionId, $requirement);
+        $disposition = $this->assessFinalDisposition($token, $outcome, $request, $constraint, $clientIp, $session, $nonce, $canonicalBinding, $storedDecisionId, $requirement);
 
         try {
             $outcome = $this->dispositionStore->finalizeGuarded($nonce, $owner, $disposition, $obligationId, $snapshotChainId, $requirement?->stage2Nonce);
@@ -1192,7 +1198,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
      *                                      {@see resolveFinalDisposition()},
      *                                      never re-read here.
      */
-    private function assessFinalDisposition(string $token, VerifyOutcome $outcome, ?Request $request, KiwiCaptcha $constraint, string $ip, ?string $session, string $nonce, ?string $canonicalBinding, ?string $originalDecisionId, ?ChainRequirement $requirement): PostSolveDisposition
+    private function assessFinalDisposition(string $token, VerifyOutcome $outcome, ?Request $request, KiwiCaptcha $constraint, ?string $clientIp, ?string $session, string $nonce, ?string $canonicalBinding, ?string $originalDecisionId, ?ChainRequirement $requirement): PostSolveDisposition
     {
         $postSolveScope = $this->risk !== null && $this->risk->postSolveCheck($constraint->scope);
 
@@ -1279,6 +1285,16 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             $this->risk->setCurrentDecisionId($originalDecisionId);
         }
 
+        // The post-solve assessment and the honeypot evidence consume a
+        // string-typed IP: a missing client IP (no request, or a request
+        // without one) coerces to the empty string, the risk engine's
+        // documented "no usable risk signal" value that the gateway
+        // skips (or the scope's degraded decision applies, see below).
+        // Only the solveOutcome feedback calls are guarded by the
+        // non-null check instead: they must never invent an empty-string
+        // per-IP pseudonym.
+        $ip = (string) ($clientIp ?? '');
+
         // Honeypot evidence: recorded with its nonce-derived idempotency
         // key, so a crash-taken-over re-assessment or a concurrent retry
         // that wins the takeover re-uses the same dedupe identity and
@@ -1306,9 +1322,13 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // ConfirmedLegitimate / ConfirmedAbuse are
             // application-only signals). The scope string is never
             // validated against the policy map here — unknown scopes
-            // are handled by the gateway.
-            if ($this->risk !== null) {
-                $this->risk->solveOutcome($constraint->scope, $ip, $session, $outcome->error);
+            // are handled by the gateway. The evidence carries the
+            // canonical client IP only when one exists: a request
+            // without a client IP produces no per-IP signal, never an
+            // empty-string pseudonym, and the session argument is null
+            // like the provider surface.
+            if ($this->risk !== null && $clientIp !== null) {
+                $this->risk->solveOutcome($constraint->scope, $clientIp, null, $outcome->error);
             }
 
             return new PostSolveDisposition(PostSolveDispositionKind::Pass, $originalDecisionId);

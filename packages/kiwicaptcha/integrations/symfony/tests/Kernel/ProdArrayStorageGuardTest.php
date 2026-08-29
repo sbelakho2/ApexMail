@@ -11,6 +11,7 @@ use PHPUnit\Framework\TestCase;
 use Symfony\Component\Cache\Adapter\ArrayAdapter;
 use Symfony\Component\Cache\Adapter\FilesystemAdapter;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
+use Symfony\Component\DependencyInjection\ChildDefinition;
 use Symfony\Component\DependencyInjection\Definition;
 
 /**
@@ -384,6 +385,120 @@ final class ProdArrayStorageGuardTest extends TestCase
             ]],
             $container,
         );
+    }
+
+    public function testProductionParentDeclaredArrayAdapterRateLimitCacheIsRefused(): void
+    {
+        // The canonical framework.cache.pools shape: the pool service is
+        // a ChildDefinition whose class lives on the parent
+        // (cache.adapter.array). The extension loads before
+        // ResolveChildDefinitionsPass flattens the chain, so the guard
+        // must resolve the parent itself — a class-less child used to
+        // slip through as "unresolvable".
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('in-memory adapter');
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
+        $container->setDefinition('cache.adapter.array', new Definition(ArrayAdapter::class, []));
+        $container->setDefinition('my.cache.pool', new ChildDefinition('cache.adapter.array'));
+        (new KiwiCaptchaExtension())->load(
+            [[
+                'secret_key' => str_repeat('a', 32),
+                'storage' => 'my.psr6.storage',
+                'allow_best_effort_storage' => true,
+                'rate_limit' => 10,
+                'rate_limit_global' => 0,
+                'rate_limit_cache' => 'my.cache.pool',
+                'allow_local_argon_admission_fallback' => true,
+                'public_base_url' => 'https://captcha.example.com',
+            ]],
+            $container,
+        );
+    }
+
+    public function testProductionGrandparentArrayAdapterClassIsRefused(): void
+    {
+        // A multi-level chain: the pool inherits the class from its
+        // grandparent. The walk must follow the whole chain, not just
+        // the immediate parent.
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('in-memory adapter');
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
+        $container->setDefinition('cache.adapter.base', new Definition(ArrayAdapter::class, []));
+        $container->setDefinition('cache.adapter.mid', new ChildDefinition('cache.adapter.base'));
+        $container->setDefinition('my.cache.pool', new ChildDefinition('cache.adapter.mid'));
+        (new KiwiCaptchaExtension())->load(
+            [[
+                'secret_key' => str_repeat('a', 32),
+                'storage' => 'my.psr6.storage',
+                'allow_best_effort_storage' => true,
+                'rate_limit' => 10,
+                'rate_limit_global' => 0,
+                'rate_limit_cache' => 'my.cache.pool',
+                'allow_local_argon_admission_fallback' => true,
+                'public_base_url' => 'https://captcha.example.com',
+            ]],
+            $container,
+        );
+    }
+
+    public function testProductionChildClassOverrideToSharedAdapterCompiles(): void
+    {
+        // The child may override the parent's class: a child of the
+        // array adapter whose own class is a genuinely shared adapter
+        // must pass the guard (the first non-null class in the
+        // child->parent chain wins).
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
+        $container->setDefinition('cache.adapter.array', new Definition(ArrayAdapter::class, []));
+        $child = new ChildDefinition('cache.adapter.array');
+        $child->setClass(FilesystemAdapter::class);
+        $container->setDefinition('my.cache.pool', $child);
+        (new KiwiCaptchaExtension())->load(
+            [[
+                'secret_key' => str_repeat('a', 32),
+                'storage' => 'my.psr6.storage',
+                'allow_best_effort_storage' => true,
+                'rate_limit' => 10,
+                'rate_limit_global' => 0,
+                'rate_limit_cache' => 'my.cache.pool',
+                'allow_local_argon_admission_fallback' => true,
+                'public_base_url' => 'https://captcha.example.com',
+            ]],
+            $container,
+        );
+
+        self::assertTrue($container->hasDefinition('kiwi_captcha.rate_limiter'), 'a child class override to a genuinely shared adapter passes the guard and wires the limiter');
+    }
+
+    public function testProductionChildWithUnknownParentPasses(): void
+    {
+        // A ChildDefinition whose parent id has no definition cannot be
+        // inspected at extension time: it passes the guard like other
+        // unresolvable pool services.
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
+        $container->setDefinition('my.cache.pool', new ChildDefinition('unknown.parent.service'));
+        (new KiwiCaptchaExtension())->load(
+            [[
+                'secret_key' => str_repeat('a', 32),
+                'storage' => 'my.psr6.storage',
+                'allow_best_effort_storage' => true,
+                'rate_limit' => 10,
+                'rate_limit_global' => 0,
+                'rate_limit_cache' => 'my.cache.pool',
+                'allow_local_argon_admission_fallback' => true,
+                'public_base_url' => 'https://captcha.example.com',
+            ]],
+            $container,
+        );
+
+        self::assertTrue($container->hasDefinition('kiwi_captcha.rate_limiter'), 'a child with an unresolvable parent passes (its class cannot be inspected here)');
     }
 
     public function testProductionGenuinelySharedPoolClassCompiles(): void

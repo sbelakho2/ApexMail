@@ -37,6 +37,7 @@ use KiwiCaptcha\Risk\RiskEventKind;
 use KiwiCaptcha\Risk\RiskIdentityFactory;
 use KiwiCaptcha\Risk\RiskKeys;
 use KiwiCaptcha\Risk\RiskAction;
+use KiwiCaptcha\Risk\RiskObservation;
 use KiwiCaptcha\Risk\RiskPolicy;
 use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Risk\RiskV2Weights;
@@ -104,6 +105,71 @@ final class ValidatorTest extends TestCase
         --$counter;
 
         return \KiwiCaptcha\SolutionToken::create($nonce, $counter, 5000, [])->encode();
+    }
+
+    /**
+     * A deterministic near-miss solve: the hash meets targetBits minus 2
+     * leading zero bits but not the full targetBits, so the verifier
+     * always answers InsufficientWork. The scan skips full-valid
+     * counters (a counter meeting targetBits minus 2 lands on a valid
+     * proof 25% of the time), bounding the search so the test can never
+     * flake on the proof strength.
+     */
+    private function solveInsufficientWorkToken(string $prefix, string $salt, int $targetBits, string $nonce): string
+    {
+        $saltBytes = base64_decode($salt, true);
+        $counter = null;
+        for ($i = 0; $i < 100_000; $i++) {
+            $bits = Verifier::leadingZeroBits(hash('sha256', $prefix.$i.$saltBytes, true));
+            if ($bits >= $targetBits - 2 && $bits < $targetBits) {
+                $counter = $i;
+                break;
+            }
+        }
+        self::assertNotNull($counter, 'a near-miss proof must exist within the bounded scan');
+
+        return \KiwiCaptcha\SolutionToken::create($nonce, (int) $counter, 5000, [])->encode();
+    }
+
+    /**
+     * Validate one token through the full Symfony validation pipeline
+     * with a risk-wired validator, observing the recorded risk feedback.
+     * The request carries the given server array; pass null to run with
+     * no request at all.
+     *
+     * @param array<string, string|null>|null $server
+     *
+     * @return array{0: ConstraintViolationListInterface, 1: FakeRiskStateStore}
+     */
+    private function validateWithRisk(Verifier $verifier, string $token, ?array $server): array
+    {
+        $risk = $this->riskStack(1, 'allow', 'allow', false);
+        $stack = new RequestStack();
+        if ($server !== null) {
+            $stack->push(Request::create('/', 'POST', [], [], [], $server));
+        }
+        $validator = new KiwiCaptchaValidator($verifier, $stack, self::SECRET, false, $risk['gateway']);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        return [$engine->validate($dto), $risk['store']];
+    }
+
+    /**
+     * The expected source pseudonym of a recorded observation: the same
+     * deterministic HMAC the engine derives from the raw client IP at
+     * the observation's epoch, so the feedback's IP is proven to be the
+     * canonical client IP.
+     */
+    private function expectedSourcePseudonym(string $ip, RiskObservation $observation): string
+    {
+        return (new RiskIdentityFactory(RiskKeys::fromMaster(self::SECRET)))->sourceId($ip, $observation->sourceEpoch * 900);
     }
 
     /**
@@ -369,6 +435,114 @@ final class ValidatorTest extends TestCase
 
         self::assertNull($stack->getMainRequest()?->attributes->get(KiwiCaptchaValidator::VERIFIED_JTI_ATTRIBUTE), 'a failed verification must never expose a jti');
         self::assertNull($validator->verifiedJti());
+    }
+
+// ── failure-path risk feedback (round-95) ─────────────────────────────────
+
+    public function testFailedSolveWithRiskEnabledRecordsFailureFeedbackAndViolates(): void
+    {
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveInsufficientWorkToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        [$violations, $store] = $this->validateWithRisk($this->verifier, $token, ['REMOTE_ADDR' => '198.51.100.7']);
+
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode(), 'a failed verification is a form violation, never a 500');
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $store->observations);
+        self::assertSame([RiskEventKind::InvalidProof], $events, 'the failed solve must enrich the model with the InvalidProof event');
+        $obs = $store->observations[0];
+        self::assertSame($this->expectedSourcePseudonym('198.51.100.7', $obs), $obs->sourceId, 'the failure feedback must carry the canonical client IP pseudonym');
+        self::assertNull($obs->sessionId, 'the validator has no session: the feedback session must be null');
+        self::assertSame(1, $obs->scope, 'the feedback must carry the configured scope id');
+    }
+
+    public function testMalformedTokenWithRiskEnabledRecordsMalformedFeedbackAndViolates(): void
+    {
+        [$violations, $store] = $this->validateWithRisk($this->verifier, 'not-a-token', ['REMOTE_ADDR' => '198.51.100.7']);
+
+        self::assertCount(1, $violations);
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $store->observations);
+        self::assertSame([RiskEventKind::MalformedToken], $events, 'an undecodable token must record the MalformedToken event, never a 500');
+    }
+
+    public function testFailedSolveWithoutClientIpRecordsNoRiskFeedbackButStillViolates(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, bindingMode: BindingMode::None), $storage);
+        $verifier = new Verifier($storage);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveInsufficientWorkToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        // No request at all: $clientIp is null.
+        [$violations, $store] = $this->validateWithRisk($verifier, $token, null);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode());
+        self::assertSame([], $store->observations, 'no client IP means no per-IP risk evidence, never an empty-string pseudonym');
+
+        // A request without a remote_addr server variable: $clientIp is
+        // null too.
+        [$violations, $store] = $this->validateWithRisk($verifier, $token, ['REMOTE_ADDR' => null]);
+        self::assertCount(1, $violations);
+        self::assertSame([], $store->observations, 'a request without a client IP must record no risk evidence either');
+    }
+
+    public function testFailedSolveWithRiskDisabledStillViolatesWithoutFeedback(): void
+    {
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveInsufficientWorkToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        $stack = new RequestStack();
+        $stack->push(Request::create('/', 'POST', [], [], [], ['REMOTE_ADDR' => '198.51.100.7']));
+        $validator = new KiwiCaptchaValidator($this->verifier, $stack, self::SECRET);
+        $factory = new ConstraintValidatorFactory([KiwiCaptchaValidator::class => $validator]);
+        $engine = Validation::createValidatorBuilder()->setConstraintValidatorFactory($factory)->getValidator();
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode(), 'the risk-gateway-absent path stays a plain violation (the optional call is a no-op)');
+    }
+
+// ── success-path risk feedback (round-95) ────────────────────────────────
+
+    public function testValidSolveWithoutReassessmentRecordsSolveSuccessFeedbackWithClientIp(): void
+    {
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        [$violations, $store] = $this->validateWithRisk($this->verifier, $token, ['REMOTE_ADDR' => '198.51.100.7']);
+
+        self::assertCount(0, $violations);
+        $events = array_map(static fn ($o): RiskEventKind => $o->event, $store->observations);
+        self::assertSame([RiskEventKind::SolveSuccess], $events, 'the no-reassessment valid solve must feed SolveSuccess feedback');
+        $obs = $store->observations[0];
+        self::assertSame($this->expectedSourcePseudonym('198.51.100.7', $obs), $obs->sourceId, 'the SolveSuccess feedback must carry the canonical client IP pseudonym');
+        self::assertNull($obs->sessionId, 'the success feedback session must be null like the provider surface');
+        self::assertSame(1, $obs->scope, 'the success feedback must carry the configured scope id');
+    }
+
+    public function testValidSolveWithoutClientIpRecordsNoSolveSuccessFeedback(): void
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, bindingMode: BindingMode::None), $storage);
+        $verifier = new Verifier($storage);
+        $challenge = $issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+
+        [$violations, $store] = $this->validateWithRisk($verifier, $token, null);
+
+        self::assertCount(0, $violations, 'a valid solve passes without a client IP');
+        self::assertSame([], $store->observations, 'no client IP means no per-IP evidence, never an empty-string pseudonym');
     }
 
     public function testValidSolveDecrementsTheOutstandingCounter(): void

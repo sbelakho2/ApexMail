@@ -66,6 +66,7 @@ use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 use KiwiCaptcha\StorageInterface;
 use KiwiCaptcha\Verifier;
 use Symfony\Component\Cache\Adapter\ArrayAdapter;
+use Symfony\Component\DependencyInjection\ChildDefinition;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Definition;
 use Symfony\Component\DependencyInjection\Extension\Extension;
@@ -1856,17 +1857,37 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         );
     }
 
-    /** The class of a service id (following aliases), or null when invisible. */
+    /**
+     * The class of a service id (following aliases), or null when
+     * invisible. A definition may inherit its class from a parent
+     * (ChildDefinition — exactly what framework.cache.pools generates
+     * for `parent: cache.adapter.array`), and the extension loads
+     * before ResolveChildDefinitionsPass flattens those chains, so the
+     * parent chain is walked here. The first non-null class in the
+     * child->parent chain wins; a chain that ends without a class, an
+     * unknown parent or a cycle yields null (the service cannot be
+     * inspected and the caller's unresolvable-services path applies).
+     */
     private function definitionClass(string $id, ContainerBuilder $container): ?string
     {
         if ($container->hasAlias($id)) {
             $id = (string) $container->getAlias($id);
         }
-        if (!$container->hasDefinition($id)) {
-            return null;
+        $seen = [];
+        while ($container->hasDefinition($id) && !isset($seen[$id])) {
+            $seen[$id] = true;
+            $definition = $container->getDefinition($id);
+            $class = $definition->getClass();
+            if ($class !== null) {
+                return $class;
+            }
+            if (!$definition instanceof ChildDefinition) {
+                return null;
+            }
+            $id = $definition->getParent();
         }
 
-        return $container->getDefinition($id)->getClass();
+        return null;
     }
 
     /**
