@@ -69,6 +69,7 @@ export_from_file TRACKING_SECRET_KEY      || true
 export_from_file INTERNAL_SERVICE_TOKEN   || true
 export_from_file SERVICE_AUTH_TOKEN       || true
 export_from_file SESSION_SECRET           || true
+export_from_file CP_SESSION_SECRET       || true
 export_from_file IMPERSONATION_SECRET     || true
 export_from_file CSRF_SECRET              || true
 export_from_file DKIM_PRIVATE_KEY_ENCRYPTION_KEY || true
