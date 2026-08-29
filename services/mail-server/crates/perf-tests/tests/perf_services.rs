@@ -15,6 +15,7 @@ use std::time::{Duration, Instant};
 use devex_service::sdk_manager::SdkManager;
 use devex_service::types::SdkLanguage;
 use observability_service::metrics_collector::MetricsCollector;
+mod budget;
 
 // ─── Latency percentile helper ───────────────────────────────────
 
@@ -116,7 +117,7 @@ fn test_metrics_recording_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < budget::from_secs(1),
         "100,000 metric recordings took {:?}, expected < 1s",
         elapsed
     );
@@ -149,7 +150,7 @@ fn test_sdk_registry_lookup_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_millis(500),
+        elapsed < budget::from_millis(500),
         "100,000 SDK lookups took {:?}, expected < 500ms",
         elapsed
     );

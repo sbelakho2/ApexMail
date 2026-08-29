@@ -1,10 +1,11 @@
 //! AI service performance tests.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use ai_service::analytics::AnalyticsPredictor;
 use ai_service::assistant::AiAssistant;
 use ai_service::content::ContentOptimizer;
+mod budget;
 
 #[test]
 fn test_prediction_throughput() {
@@ -34,7 +35,7 @@ fn test_prediction_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < budget::from_secs(1),
         "10,000 predictions took {:?}, expected < 1s",
         elapsed
     );
@@ -67,7 +68,7 @@ fn test_sentiment_analysis_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < budget::from_secs(1),
         "10,000 sentiment analyses took {:?}, expected < 1s",
         elapsed
     );
@@ -100,7 +101,7 @@ fn test_subject_scoring_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < budget::from_secs(1),
         "10,000 subject scorings took {:?}, expected < 1s",
         elapsed
     );

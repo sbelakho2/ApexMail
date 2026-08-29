@@ -1,10 +1,11 @@
 //! Sales autopilot performance tests.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use sales_autopilot::crm::CrmService;
 use sales_autopilot::inbox::InboxManager;
 use sales_autopilot::scrapers::WebScraper;
+mod budget;
 
 #[test]
 fn test_lead_scoring_throughput() {
@@ -26,7 +27,7 @@ fn test_lead_scoring_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < budget::from_secs(1),
         "100,000 lead scorings took {:?}, expected < 1s",
         elapsed
     );
@@ -61,7 +62,7 @@ fn test_email_extraction_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < budget::from_secs(1),
         "10,000 email extractions took {:?}, expected < 1s",
         elapsed
     );
@@ -104,7 +105,7 @@ fn test_message_categorization_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < budget::from_secs(1),
         "100,000 categorizations took {:?}, expected < 1s",
         elapsed
     );

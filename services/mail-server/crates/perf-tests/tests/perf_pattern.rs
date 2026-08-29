@@ -1,9 +1,10 @@
 //! Pattern matching performance tests.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use pattern_matcher::bot_patterns::build_bot_detector;
 use pattern_matcher::spam_patterns::spam_rules;
+mod budget;
 
 #[test]
 fn test_pattern_match_throughput() {
@@ -34,7 +35,7 @@ fn test_pattern_match_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_secs(2),
+        elapsed < budget::from_secs(2),
         "100,000 pattern matches took {:?}, expected < 2s",
         elapsed
     );
@@ -112,7 +113,7 @@ fn test_multiple_rules_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_secs(2),
+        elapsed < budget::from_secs(2),
         "10,000 multi-rule matches took {:?}, expected < 2s",
         elapsed
     );

@@ -10,13 +10,14 @@
 //! All tests carry a `_throughput` suffix to make their performance-test
 //! nature explicit.  Some may also use a `perf_` prefix where appropriate.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use apexmail_lib::crypto::create_hmac_signature;
 use apexmail_lib::error_codes::ErrorCode;
 use apexmail_lib::id::generate_id;
 use apexmail_lib::time::parse_duration;
 use apexmail_lib::validation::is_valid_email;
+mod budget;
 
 #[test]
 fn test_hmac_throughput() {
@@ -37,7 +38,7 @@ fn test_hmac_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < budget::from_secs(1),
         "10,000 HMAC operations took {:?}, expected < 1s",
         elapsed
     );
@@ -60,7 +61,7 @@ fn test_id_generation_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_secs(5),
+        elapsed < budget::from_secs(5),
         "100,000 ID generations took {:?}, expected < 5s",
         elapsed
     );
@@ -93,7 +94,7 @@ fn test_email_validation_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < budget::from_secs(1),
         "100,000 email validations took {:?}, expected < 1s",
         elapsed
     );
@@ -118,7 +119,7 @@ fn test_time_parsing_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_millis(500),
+        elapsed < budget::from_millis(500),
         "100,000 duration parses took {:?}, expected < 500ms",
         elapsed
     );
@@ -158,7 +159,7 @@ fn perf_hmac_parallel_throughput() {
         (THREADS * ITERS_PER_THREAD) as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_secs(5),
+        elapsed < budget::from_secs(5),
         "Parallel HMAC took too long: {:?} > 5s",
         elapsed
     );
@@ -195,7 +196,7 @@ fn test_error_code_mapping_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < budget::from_secs(1),
         "1,000,000 error code mappings took {:?}, expected < 1s",
         elapsed
     );

@@ -1,10 +1,11 @@
 //! Billing service performance tests.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use billing_service::invoices::calculate_vat;
 use billing_service::plans::{calculate_overage_cost, default_plans};
 use billing_service::types::RateLimitTier;
+mod budget;
 
 #[test]
 fn test_plan_lookup_throughput() {
@@ -30,7 +31,7 @@ fn test_plan_lookup_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < budget::from_secs(1),
         "100,000 plan lookups took {:?}, expected < 1s",
         elapsed
     );
@@ -63,7 +64,7 @@ fn test_payg_cost_calculation_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < budget::from_secs(1),
         "100,000 cost calculations took {:?}, expected < 1s",
         elapsed
     );
@@ -96,7 +97,7 @@ fn test_vat_calculation_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_millis(500),
+        elapsed < budget::from_millis(500),
         "100,000 VAT calculations took {:?}, expected < 500ms",
         elapsed
     );
@@ -129,7 +130,7 @@ fn test_quota_check_throughput() {
         iterations as f64 / elapsed.as_secs_f64()
     );
     assert!(
-        elapsed < Duration::from_secs(1),
+        elapsed < budget::from_secs(1),
         "100,000 quota checks took {:?}, expected < 1s",
         elapsed
     );
