@@ -752,9 +752,13 @@ mod tests {
         // Same 1s timeout as the stuck engine: the wedge threshold is 2x the
         // DISPATCHING engine's timeout, and the probe must judge the stuck
         // slot against the same clock that abandoned it.
-        let mut fast_config = SandboxConfig::default();
-        fast_config.analysis_timeout_secs = 1;
-        let fast = SandboxEngine::with_dynamic_analyzer(fast_config, Arc::new(MockDynamicFast));
+        let fast = SandboxEngine::with_dynamic_analyzer(
+            SandboxConfig {
+                analysis_timeout_secs: 1,
+                ..Default::default()
+            },
+            Arc::new(MockDynamicFast),
+        );
         let fast_result = fast.analyze(b"hello", Some("ok.txt"));
         assert!(fast_result.is_ok());
         assert!(
