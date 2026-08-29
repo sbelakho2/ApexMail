@@ -335,18 +335,31 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $redisRef = $this->resolveRedisClient((string) $storageRef, $config['redis_service'], $container);
 
         // Hard distributed-resource semantics (the architectural
-        // invariant): a deployment claiming a global issuance limit or a
-        // bounded Argon admission ceiling must not silently fall back to
-        // a process-local limiter or gate, since the aggregate of N
-        // workers could otherwise approach N times the configured
-        // ceiling. In production the container refuses the combination
-        // unless the operator explicitly names the local fallback.
+        // invariant): a deployment claiming a temporal issuance limit
+        // (per-client or global) or a bounded Argon admission ceiling
+        // must not silently fall back to a process-local limiter or
+        // gate, since the aggregate of N workers could otherwise
+        // approach N times the configured ceiling. In production the
+        // container refuses the combination unless the operator
+        // explicitly names the fallback. A configured rate_limit_cache
+        // (a shared PSR-6 pool service id) counts as a cross-request
+        // backend, so the temporal-limit guard passes when it is set.
         $environment = $this->environment($container);
         if (!\in_array($environment, ['test', 'dev'], true)) {
-            if ($config['rate_limit_global'] > 0 && $redisRef === null && !$config['allow_local_global_limit_fallback']) {
+            // The non-Redis rate-limit fallback flag now covers ANY
+            // temporal issuance limit (per-client and global). The
+            // deprecated allow_local_global_limit_fallback alias still
+            // enables the same fallback (documented alias).
+            $nonRedisRateLimitFallback = (bool) ($config['allow_nonredis_rate_limit_fallback'] ?? false)
+                || (bool) ($config['allow_local_global_limit_fallback'] ?? false);
+            if (($config['rate_limit'] > 0 || $config['rate_limit_global'] > 0)
+                && $redisRef === null
+                && ($config['rate_limit_cache'] ?? null) === null
+                && !$nonRedisRateLimitFallback
+            ) {
                 throw new \LogicException(sprintf(
-                    'kiwi_captcha: rate_limit_global=%d is a deployment-wide limit, but no Redis client is wired — the limiter will enforce it as a weaker window, not an exact distributed gate: the object-memory fallback is long-lived-runtime-only (a persistent worker such as RoadRunner/Swoole/amphp, or a single CLI process) and under conventional PHP-FPM each request rebuilds the limiter, so the object window provides no cross-request protection at all; a shared PSR-6 pool is cross-request best-effort but cannot make the window atomic under concurrent requests, so races may briefly exceed the cap. Production temporal limiting requires Redis (redis_service) or a genuinely persistent or shared PSR-6 pool (rate_limit_cache); to accept the weaker semantics, explicitly set allow_local_global_limit_fallback: true.',
-                    $config['rate_limit_global'],
+                    'kiwi_captcha: rate_limit=%d and rate_limit_global=%d are temporal issuance limits, but no Redis client is wired and no rate_limit_cache PSR-6 pool is configured — the limiter would enforce them as weaker object-memory windows, not exact distributed gates: the object-memory fallback is long-lived-runtime-only (a persistent worker such as RoadRunner/Swoole/amphp, or a single CLI process) and under conventional PHP-FPM each request rebuilds the limiter, so the per-client and the global window provide no cross-request protection at all; a shared PSR-6 pool is cross-request best-effort but cannot make the windows atomic under concurrent requests, so races may briefly exceed the caps. Production temporal limiting requires Redis (redis_service) or a genuinely persistent or shared PSR-6 pool (rate_limit_cache); to accept the weaker semantics, explicitly set allow_nonredis_rate_limit_fallback: true.',
+                    $config['rate_limit'],
                     $config['rate_limit_global'],
                 ));
             }

@@ -112,6 +112,25 @@ is never forced) are the privacy contract; see
     #                                       # conventional PHP-FPM requires
     #                                       # Redis or a genuinely shared
     #                                       # PSR-6 pool.
+    # allow_nonredis_rate_limit_fallback: false
+    #                                       # explicitly accepts the
+    #                                       # non-Redis rate limiter in
+    #                                       # production when any
+    #                                       # temporal issuance limit is
+    #                                       # set but no Redis client
+    #                                       # and no rate_limit_cache
+    #                                       # pool exist. Redis is the
+    #                                       # exact distributed window;
+    #                                       # a shared PSR-6 pool is
+    #                                       # cross-request best-effort;
+    #                                       # object memory is
+    #                                       # long-lived-runtime-only and
+    #                                       # request-local under
+    #                                       # conventional PHP-FPM. The
+    #                                       # deprecated
+    #                                       # allow_local_global_limit_fallback
+    #                                       # option still works as an
+    #                                       # alias.
     #                                       # Raw client IPs are never stored:
     #                                       # every key is a peppered HMAC of
     #                                       # the IP (rate_limit_pepper

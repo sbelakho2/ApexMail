@@ -52,7 +52,7 @@ final class ProdArrayStorageGuardTest extends TestCase
         $container->setParameter('kernel.environment', 'prod');
         $container->setDefinition('my.shared.storage', new Definition(RedisStorage::class, [new \stdClass()]));
         (new KiwiCaptchaExtension())->load(
-            [['secret_key' => str_repeat('a', 32), 'storage' => 'my.shared.storage', 'public_base_url' => 'https://captcha.example.com', 'allow_local_global_limit_fallback' => true, 'allow_local_argon_admission_fallback' => true]],
+            [['secret_key' => str_repeat('a', 32), 'storage' => 'my.shared.storage', 'public_base_url' => 'https://captcha.example.com', 'allow_nonredis_rate_limit_fallback' => true, 'allow_local_argon_admission_fallback' => true]],
             $container,
         );
 
@@ -90,7 +90,7 @@ final class ProdArrayStorageGuardTest extends TestCase
         $container->setParameter('kernel.environment', 'prod');
         $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
         (new KiwiCaptchaExtension())->load(
-            [['secret_key' => str_repeat('a', 32), 'storage' => 'my.psr6.storage', 'allow_best_effort_storage' => true, 'allow_local_global_limit_fallback' => true, 'allow_local_argon_admission_fallback' => true, 'public_base_url' => 'https://captcha.example.com']],
+            [['secret_key' => str_repeat('a', 32), 'storage' => 'my.psr6.storage', 'allow_best_effort_storage' => true, 'allow_nonredis_rate_limit_fallback' => true, 'allow_local_argon_admission_fallback' => true, 'public_base_url' => 'https://captcha.example.com']],
             $container,
         );
 
@@ -181,7 +181,7 @@ final class ProdArrayStorageGuardTest extends TestCase
                 'secret_key' => str_repeat('a', 32),
                 'storage' => 'my.psr6.storage',
                 'allow_best_effort_storage' => true,
-                'allow_local_global_limit_fallback' => true,
+                'allow_nonredis_rate_limit_fallback' => true,
                 'allow_local_argon_admission_fallback' => true,
                 'risk' => ['redis' => ['ttl_margin_secs' => 90], 'scopes' => ['login' => ['id' => 1, 'post_solve_check' => false]], 'siteverify_secrets' => ['compat-secret-42' => 'login']],
             ]],
@@ -229,7 +229,7 @@ final class ProdArrayStorageGuardTest extends TestCase
             [[
                 'secret_key' => str_repeat('a', 32),
                 'storage' => 'my.psr6.storage',
-                'allow_local_global_limit_fallback' => true,
+                'allow_nonredis_rate_limit_fallback' => true,
                 'allow_best_effort_storage' => true,
                 'public_base_url' => 'https://captcha.example.com',
             ]],
@@ -247,7 +247,7 @@ final class ProdArrayStorageGuardTest extends TestCase
             [[
                 'secret_key' => str_repeat('a', 32),
                 'storage' => 'my.psr6.storage',
-                'allow_local_global_limit_fallback' => true,
+                'allow_nonredis_rate_limit_fallback' => true,
                 'allow_local_argon_admission_fallback' => true,
                 'allow_best_effort_storage' => true,
                 'public_base_url' => 'https://captcha.example.com',
@@ -255,5 +255,121 @@ final class ProdArrayStorageGuardTest extends TestCase
             $container,
         );
         self::addToAssertionCount(1);
+    }
+
+    public function testProductionPerClientOnlyLimitRequiresDistributedBackend(): void
+    {
+        // The generalized guard: ANY temporal issuance limit (the
+        // per-client rate_limit included) without Redis and without a
+        // rate_limit_cache pool is refused in production, since under
+        // conventional PHP-FPM the object-memory window is
+        // request-local and provides no cross-request protection.
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('rate_limit=10');
+        (new KiwiCaptchaExtension())->load(
+            [[
+                'secret_key' => str_repeat('a', 32),
+                'storage' => 'my.psr6.storage',
+                'allow_best_effort_storage' => true,
+                'rate_limit' => 10,
+                'rate_limit_global' => 0,
+                'public_base_url' => 'https://captcha.example.com',
+            ]],
+            $container,
+        );
+    }
+
+    public function testProductionPerClientLimitCompilesWithRateLimitCache(): void
+    {
+        // A configured rate_limit_cache (a shared PSR-6 pool service id)
+        // counts as a cross-request backend: the temporal-limit guard
+        // passes even without Redis.
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
+        (new KiwiCaptchaExtension())->load(
+            [[
+                'secret_key' => str_repeat('a', 32),
+                'storage' => 'my.psr6.storage',
+                'allow_best_effort_storage' => true,
+                'rate_limit' => 10,
+                'rate_limit_global' => 0,
+                'rate_limit_cache' => 'my.cache.pool',
+                'allow_local_argon_admission_fallback' => true,
+                'public_base_url' => 'https://captcha.example.com',
+            ]],
+            $container,
+        );
+
+        self::assertTrue($container->hasDefinition('kiwi_captcha.rate_limiter'), 'the limiter is wired with the pool fallback');
+    }
+
+    public function testProductionPerClientOnlyLimitCompilesWithTheNonRedisFallbackFlag(): void
+    {
+        // The new flag name explicitly accepts the non-Redis limiter for
+        // ANY temporal issuance limit, per-client included.
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
+        (new KiwiCaptchaExtension())->load(
+            [[
+                'secret_key' => str_repeat('a', 32),
+                'storage' => 'my.psr6.storage',
+                'allow_best_effort_storage' => true,
+                'rate_limit' => 10,
+                'rate_limit_global' => 0,
+                'allow_nonredis_rate_limit_fallback' => true,
+                'allow_local_argon_admission_fallback' => true,
+                'public_base_url' => 'https://captcha.example.com',
+            ]],
+            $container,
+        );
+
+        self::assertTrue($container->hasDefinition('kiwi_captcha.rate_limiter'), 'the fallback flag lets the per-client-only config compile');
+    }
+
+    /**
+     * @group legacy
+     */
+    public function testLegacyFallbackFlagNameStillEnablesTheFallbackWithDeprecation(): void
+    {
+        // The old name is a documented deprecated alias: it still
+        // enables the non-Redis rate limiter in production (the
+        // extension resolves both names), and the config tree raises
+        // the Symfony deprecation pointing at the new name.
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'prod');
+        $container->setDefinition('my.psr6.storage', new Definition(Psr6Storage::class, []));
+        $deprecations = [];
+        $previous = set_error_handler(static function (int $errno, string $errstr) use (&$deprecations): bool {
+            if ($errno === \E_USER_DEPRECATED) {
+                $deprecations[] = $errstr;
+            }
+
+            return true;
+        });
+        try {
+            (new KiwiCaptchaExtension())->load(
+                [[
+                    'secret_key' => str_repeat('a', 32),
+                    'storage' => 'my.psr6.storage',
+                    'allow_best_effort_storage' => true,
+                    'allow_local_global_limit_fallback' => true,
+                    'allow_local_argon_admission_fallback' => true,
+                    'public_base_url' => 'https://captcha.example.com',
+                ]],
+                $container,
+            );
+        } finally {
+            restore_error_handler();
+        }
+
+        self::assertTrue($container->hasDefinition('kiwi_captcha.rate_limiter'), 'the deprecated alias still enables the non-Redis limiter');
+        self::assertNotEmpty($deprecations, 'using the deprecated flag name must raise a Symfony deprecation');
+        self::assertStringContainsString('allow_local_global_limit_fallback', implode("\n", $deprecations), 'the deprecation names the deprecated option');
+        self::assertStringContainsString('allow_nonredis_rate_limit_fallback', implode("\n", $deprecations), 'the deprecation points at the new option');
     }
 }

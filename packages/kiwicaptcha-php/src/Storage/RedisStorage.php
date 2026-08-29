@@ -84,6 +84,10 @@ use KiwiCaptcha\ResumeDerivationClaimInterface;
  * transition is single-slot and safe on a Redis Cluster deployment,
  * where a second unhash-tagged key would raise `CROSSSLOT`. The
  * semantics mirror the Rust production verifier byte for byte.
+ * Shared claim contract (both languages agree): a valid owner is
+ * exactly 32 lowercase hex characters (rejected with
+ * InvalidArgumentException at the storage boundary otherwise) and the
+ * claim lease TTL is >= 1 second.
  *
  * The claim's runtime envelope fields: `resume_owner` (the hex owner
  * token) and `resume_until` (epoch seconds on the server clock) exist
@@ -998,6 +1002,11 @@ LUA;
      *                     supported derivation duration so a legitimate
      *                     derivation never outlives its own claim; the
      *                     default 60 mirrors the Rust `CLAIM_TTL_SECS`.
+     *                     Shared claim contract: a TTL below 1 second is
+     *                     rejected at the storage boundary with an
+     *                     InvalidArgumentException.
+     *
+     * @throws \InvalidArgumentException when $ttlSecs is below 1
      */
     public function claimResumeDerivation(string $nonce, int $ttlSecs = self::RESUME_CLAIM_TTL_SECS): ?string
     {
@@ -1027,9 +1036,18 @@ LUA;
      * missing or owned by another token. No replica wait: the release
      * is a lease cleanup, not durability-critical state (the same as
      * the Rust side).
+     *
+     * Shared claim contract (mirrors the Rust verifier): a valid owner
+     * is exactly 32 lowercase hex characters, and any other shape is
+     * rejected at the storage boundary with an InvalidArgumentException.
+     * The validation runs before any interpolation into the Lua pattern,
+     * where non-hex characters would be pattern syntax.
+     *
+     * @throws \InvalidArgumentException when the owner is not 32 lowercase hex chars
      */
     public function releaseResumeDerivation(string $nonce, string $owner): bool
     {
+        $this->assertValidResumeOwner($owner);
         $recordKey = $this->prefix.$nonce;
         $raw = $this->evalScript(self::RELEASE_RESUME_SCRIPT, [$recordKey, $owner], 1);
 
@@ -1050,9 +1068,18 @@ LUA;
      * caller then re-reads the retained state and resolves the winner's
      * committed outcome, mirroring the Rust
      * `commit_result_clearing_claim`.
+     *
+     * Shared claim contract (mirrors the Rust verifier): a valid owner
+     * is exactly 32 lowercase hex characters, and any other shape is
+     * rejected at the storage boundary with an InvalidArgumentException.
+     * The validation runs before any interpolation into the Lua pattern,
+     * where non-hex characters would be pattern syntax.
+     *
+     * @throws \InvalidArgumentException when the owner is not 32 lowercase hex chars
      */
     public function commitResultResume(string $nonce, bool $valid, ?string $binding, string $owner): bool
     {
+        $this->assertValidResumeOwner($owner);
         $recordKey = $this->prefix.$nonce;
         $raw = $this->evalScript(self::COMMIT_SCRIPT, [$recordKey, $valid ? '1' : '0', $binding ?? '', $binding === null ? '0' : '1', $owner], 1);
         $committed = $raw === 1 || $raw === '1' || $raw === true;
@@ -1062,6 +1089,22 @@ LUA;
         }
 
         return $committed;
+    }
+
+    /**
+     * The shared resume-claim owner contract: exactly 32 lowercase hex
+     * characters (the bin2hex of 16 random bytes the claim API mints).
+     * A valid owner is safe inside the Lua patterns of the release and
+     * commit scripts, where characters like '-' and '%' are pattern
+     * syntax; any other shape is rejected here, at the storage boundary.
+     *
+     * @throws \InvalidArgumentException
+     */
+    private function assertValidResumeOwner(string $owner): void
+    {
+        if (preg_match('/^[0-9a-f]{32}$/D', $owner) !== 1) {
+            throw new \InvalidArgumentException('the resume claim owner must be exactly 32 lowercase hex characters');
+        }
     }
 
     public function delete(string $nonce): void

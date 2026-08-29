@@ -1078,9 +1078,9 @@ final class VerifierResumeTest extends TestCase
         $storage2->consumeWithOperationIdentity($record2->nonce, $this->identity('claim-wrong-owner'));
         $realOwner = $storage2->claimResumeDerivation($record2->nonce);
         self::assertIsString($realOwner);
-        self::assertFalse($storage2->commitResultResume($record2->nonce, true, $record2->requestBinding, 'not-the-owner'), 'a stale owner can never commit');
+        self::assertFalse($storage2->commitResultResume($record2->nonce, true, $record2->requestBinding, str_repeat('b', 32)), 'a stale owner can never commit');
         self::assertNull($storage2->consumedState($record2->nonce)?->consumedResult, 'the refused commit writes nothing');
-        self::assertFalse($storage2->releaseResumeDerivation($record2->nonce, 'not-the-owner'), 'a stale owner can never release');
+        self::assertFalse($storage2->releaseResumeDerivation($record2->nonce, str_repeat('b', 32)), 'a stale owner can never release');
         self::assertNull($storage2->claimResumeDerivation($record2->nonce), 'the true owner still holds the claim');
         self::assertTrue($storage2->commitResultResume($record2->nonce, true, $record2->requestBinding, $realOwner), 'the true owner commits');
         self::assertFalse($storage2->releaseResumeDerivation($record2->nonce, $realOwner), 'the commit already cleared the claim; the former owner release is a refused no-op');
@@ -1309,7 +1309,7 @@ final class VerifierResumeTest extends TestCase
         $owner = $storage->claimResumeDerivation($record->nonce, 60);
         self::assertIsString($owner, 'a consumed, resultless record is claimable');
         self::assertNull($storage->claimResumeDerivation($record->nonce), 'a live claim is refused');
-        self::assertFalse($storage->commitResultResume($record->nonce, true, null, 'not-the-owner'), 'a different owner can never commit');
+        self::assertFalse($storage->commitResultResume($record->nonce, true, null, str_repeat('b', 32)), 'a different owner can never commit');
 
         // The release-less crash path: no release, the clock advances
         // past the lease.

@@ -4453,6 +4453,106 @@ fn resume_derivation_is_serialized_by_the_atomic_claim() {
             "exactly one Argon acquisition across both resumes — the claim serialized the re-derivation"
         );
 }
+
+#[test]
+fn resume_loser_with_a_pre_held_claim_never_acquires_argon_capacity() {
+    // Round-93 audit: the claim comes first, before the Argon admission
+    // gate. A second recovery racing an already-held claim must lose at
+    // the claim and answer ConsumeIndeterminate (the resultless reread)
+    // while never acquiring an Argon capacity slot; only after the
+    // first recovery releases the claim does a resume acquire exactly
+    // one admission slot.
+    let Some(url) = redis_url() else { return };
+    let prefix = format!("kiwitest:resume-preheld:{}:", std::process::id());
+    let issued = issue_challenge(
+        &argon_config(2),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let identity = "logical-op-resume-preheld";
+    let counter = solve_for_test(&issued.record).expect("2-bit argon solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let store = RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
+    store.store(&issued.record).unwrap();
+    assert!(store
+        .consume_with_operation_identity(&issued.record.nonce, Some(identity))
+        .unwrap()
+        .is_some());
+
+    // Owner A pre-holds the recovery claim: the full resume path below
+    // runs as a claim loser (owner B).
+    let owner_a = store
+        .claim_resume_derivation(&issued.record.nonce, 60)
+        .expect("owner A must claim the resultless record")
+        .expect("the pre-held claim is taken");
+
+    let gate = CountingGate {
+        active: Arc::new(AtomicUsize::new(0)),
+        acquired: Arc::new(AtomicUsize::new(0)),
+        released: Arc::new(AtomicUsize::new(0)),
+        accept: true,
+    };
+    let acquired = gate.acquired.clone();
+    let verifier = ProductionVerifier::new(
+        RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone()),
+        SECRET,
+    )
+    .with_argon_gate(gate);
+
+    let losing = verifier.resume_consumed_operation(
+        &token,
+        identity,
+        "login",
+        IP,
+        issued_at_ns + 1_000_000,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        matches!(
+            losing,
+            VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate)
+        ),
+        "the claim loser with a resultless reread is ConsumeIndeterminate: {losing:?}"
+    );
+    assert_eq!(
+        acquired.load(Ordering::SeqCst),
+        0,
+        "the losing recovery must never acquire an Argon admission slot"
+    );
+
+    // Owner A releases the claim: the next full resume wins the claim,
+    // acquires exactly one admission slot, derives and commits.
+    assert!(
+        store
+            .release_resume_derivation(&issued.record.nonce, &owner_a)
+            .expect("the release must run"),
+        "owner A must release the pre-held claim"
+    );
+    let winning = verifier.resume_consumed_operation(
+        &token,
+        identity,
+        "login",
+        IP,
+        issued_at_ns + 1_000_000,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        matches!(winning, VerifyOutcome::Valid { .. }),
+        "after the release the resume derives and commits: {winning:?}"
+    );
+    assert_eq!(
+        acquired.load(Ordering::SeqCst),
+        1,
+        "the winner acquires exactly one Argon slot"
+    );
+}
 #[test]
 fn resume_releases_the_claim_on_an_early_return() {
     // The RAII guard: an early return (here the pre-derive expiry
@@ -4705,10 +4805,15 @@ fn resume_commit_requires_current_claim_ownership() {
         .claim_resume_derivation(&issued.record.nonce, 60)
         .unwrap()
         .expect("the fresh claim is taken");
+    const FOREIGN_OWNER: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    assert_ne!(owner, FOREIGN_OWNER, "the foreign token differs");
 
-    // The stale owner's commit is refused before any write.
+    // The stale owner's commit is refused before any write. The stale
+    // token must still be well-formed (32 lowercase hex chars): the
+    // storage boundary rejects a malformed owner before the script, so
+    // the fence refusal is proven with a valid-shape foreign token.
     let committed = store
-        .commit_result_clearing_claim(&issued.record.nonce, true, None, "stale-owner")
+        .commit_result_clearing_claim(&issued.record.nonce, true, None, FOREIGN_OWNER)
         .unwrap();
     assert!(!committed, "the stale owner's commit must be refused");
     let state = store.consumed_state(&issued.record.nonce).unwrap().unwrap();

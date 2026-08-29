@@ -69,6 +69,14 @@ final class ConfigurationTest extends TestCase
         self::assertNull($processed['rate_limit_cache']);
     }
 
+    public function testNonRedisRateLimitFallbackFlagsDefaultToFalse(): void
+    {
+        $processed = $this->process();
+
+        self::assertFalse($processed['allow_nonredis_rate_limit_fallback'], 'the canonical flag defaults to false (production refuses the non-Redis fallback)');
+        self::assertFalse($processed['allow_local_global_limit_fallback'], 'the deprecated alias defaults to false');
+    }
+
     public function testArgonTreeBoundsMatchCoreUnconditionalBounds(): void
     {
         $processed = $this->process([

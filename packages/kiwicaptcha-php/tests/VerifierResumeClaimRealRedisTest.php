@@ -136,7 +136,7 @@ final class VerifierResumeClaimRealRedisTest extends TestCase
         self::assertLessThanOrEqual(time() + 60, $data['resume_until'] ?? 0, 'the claim expiry must be the 60s lease');
 
         self::assertNull($storage->claimResumeDerivation($challenge->nonce), 'a second claim while the first is held must be refused');
-        self::assertFalse($storage->releaseResumeDerivation($challenge->nonce, 'not-the-owner'), 'a stale owner can never release');
+        self::assertFalse($storage->releaseResumeDerivation($challenge->nonce, str_repeat('b', 32)), 'a stale owner can never release');
         $data = $this->envelope($client, $storage, $challenge->nonce);
         self::assertSame($owner, $data['resume_owner'] ?? null, 'the refused release leaves the claim with its true owner');
         self::assertTrue($storage->releaseResumeDerivation($challenge->nonce, $owner), 'the true owner releases');
@@ -148,7 +148,7 @@ final class VerifierResumeClaimRealRedisTest extends TestCase
         // cleared in the same Lua script run.
         $owner = $storage->claimResumeDerivation($challenge->nonce);
         self::assertIsString($owner);
-        self::assertFalse($storage->commitResultResume($challenge->nonce, true, 'txn-1', 'not-the-owner'), 'a stale owner can never commit');
+        self::assertFalse($storage->commitResultResume($challenge->nonce, true, 'txn-1', str_repeat('b', 32)), 'a stale owner can never commit');
         $data = $this->envelope($client, $storage, $challenge->nonce);
         self::assertNull($data['consumed_result'], 'the refused commit writes nothing');
         self::assertSame($owner, $data['resume_owner'] ?? null, 'the true owner still holds the claim after the refused commit');

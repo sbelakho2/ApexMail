@@ -892,7 +892,7 @@ final class RedisStorageTest extends TestCase
         self::assertLessThanOrEqual(time() + 60, $data['resume_until'] ?? 0, 'the claim expiry must be the 60s lease');
         self::assertNull($storage->claimResumeDerivation('redis-nonce-1'), 'a second claim while the first is held must be refused');
 
-        self::assertFalse($storage->releaseResumeDerivation('redis-nonce-1', 'not-the-owner'), 'a stale owner can never release the claim');
+        self::assertFalse($storage->releaseResumeDerivation('redis-nonce-1', str_repeat('b', 32)), 'a stale owner can never release the claim');
         $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
         self::assertSame($owner, $data['resume_owner'] ?? null, 'the refused release leaves the claim with its true owner');
         self::assertTrue($storage->releaseResumeDerivation('redis-nonce-1', $owner), 'the true owner releases the claim');
@@ -904,7 +904,7 @@ final class RedisStorageTest extends TestCase
         // and the claim is cleared in the same transition.
         $owner = $storage->claimResumeDerivation('redis-nonce-1');
         self::assertIsString($owner);
-        self::assertFalse($storage->commitResultResume('redis-nonce-1', true, 'txn-1', 'not-the-owner'), 'a stale owner can never commit');
+        self::assertFalse($storage->commitResultResume('redis-nonce-1', true, 'txn-1', str_repeat('b', 32)), 'a stale owner can never commit');
         $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
         self::assertNull($data['consumed_result'], 'the refused claim-bearing commit writes nothing');
         self::assertSame($owner, $data['resume_owner'] ?? null, 'the true owner still holds the claim after the refused commit');
@@ -1020,7 +1020,7 @@ final class RedisStorageTest extends TestCase
         self::assertIsString($owner);
         self::assertSame(2, $waits(), 'the claim performs no write that needs a replica wait');
 
-        self::assertFalse($storage->commitResultResume('redis-nonce-1', true, 'txn-1', 'not-the-owner'));
+        self::assertFalse($storage->commitResultResume('redis-nonce-1', true, 'txn-1', str_repeat('b', 32)));
         self::assertSame(2, $waits(), 'a refused claim-bearing commit writes nothing and must issue NO WAIT');
 
         self::assertTrue($storage->commitResultResume('redis-nonce-1', true, 'txn-1', $owner));
@@ -1028,6 +1028,60 @@ final class RedisStorageTest extends TestCase
 
         self::assertFalse($storage->commitResultResume('redis-nonce-1', true, 'txn-1', $owner), 'a second commit is refused (already committed) and writes nothing');
         self::assertSame(3, $waits(), 'a refused replay commit must issue NO WAIT');
+    }
+
+    public function testResumeClaimTtlBelowOneIsRejectedAtTheStorageBoundary(): void
+    {
+        // Shared claim contract (mirrors the Rust verifier): the lease
+        // TTL must be >= 1 second, rejected with InvalidArgumentException
+        // at the storage boundary before any Lua can run.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+
+        $this->expectException(\InvalidArgumentException::class);
+        $this->expectExceptionMessage('TTL');
+        $storage->claimResumeDerivation('redis-nonce-1', 0);
+    }
+
+    public function testResumeOwnerShapeIsValidatedAtTheStorageBoundary(): void
+    {
+        // Shared claim contract (mirrors the Rust verifier): a valid
+        // owner is exactly 32 lowercase hex characters. Uppercase,
+        // wrong-length and non-hex owners are all rejected with
+        // InvalidArgumentException before any interpolation into the Lua
+        // pattern, where characters like '-' and '%' would be pattern
+        // syntax.
+        $client = $this->requirePredis();
+        $storage = new RedisStorage($client);
+        $storage->store($this->makeRecord());
+        $storage->consume('redis-nonce-1');
+        $owner = $storage->claimResumeDerivation('redis-nonce-1');
+        self::assertIsString($owner);
+
+        $badShapes = [
+            strtoupper($owner),
+            substr($owner, 0, 31),
+            $owner.'a',
+            'g'.substr($owner, 1),
+        ];
+        foreach ($badShapes as $shape) {
+            try {
+                $storage->releaseResumeDerivation('redis-nonce-1', $shape);
+                self::fail('a malformed release owner must be rejected: '.$shape);
+            } catch (\InvalidArgumentException) {
+                self::assertTrue(true);
+            }
+            try {
+                $storage->commitResultResume('redis-nonce-1', true, 'txn-1', $shape);
+                self::fail('a malformed commit owner must be rejected: '.$shape);
+            } catch (\InvalidArgumentException) {
+                self::assertTrue(true);
+            }
+        }
+
+        $data = json_decode((string) $client->store['kiwicaptcha:redis-nonce-1'], true, flags: JSON_THROW_ON_ERROR);
+        self::assertSame($owner, $data['resume_owner'] ?? null, 'the claim survives the malformed-owner refusals untouched');
+        self::assertTrue($storage->commitResultResume('redis-nonce-1', true, 'txn-1', $owner), 'the true owner still commits through the intact claim');
     }
 
     public function testRealRedisConsumedStateReplayRoundTrip(): void

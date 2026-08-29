@@ -54,6 +54,10 @@ use KiwiCaptcha\ChallengeRuntimeState;
  * re-claimable, and a stale owner whose claim expired can never commit.
  * The clock comes from the optional `$now` constructor closure, which
  * defaults to `time()`, the same test seam the {@see Verifier} uses.
+ * Shared claim contract (both languages agree): a valid owner is
+ * exactly 32 lowercase hex characters (rejected with
+ * InvalidArgumentException at the storage boundary otherwise) and the
+ * claim lease TTL is >= 1 second.
  */
 final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface, OperationIdentityAwareStorageInterface, \KiwiCaptcha\AtomicDeleteIfPendingInterface, \KiwiCaptcha\CancellableStorageInterface, \KiwiCaptcha\ChallengeRuntimeStateReadableInterface, ResumeDerivationClaimInterface
 {
@@ -165,6 +169,11 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
      * `$now` closure, which defaults to `time()`.
      *
      * @param int $ttlSecs the claim lease length in seconds (>= 1).
+     *                     Shared claim contract: a TTL below 1 second
+     *                     is rejected at the storage boundary with an
+     *                     InvalidArgumentException.
+     *
+     * @throws \InvalidArgumentException when $ttlSecs is below 1
      */
     public function claimResumeDerivation(string $nonce, int $ttlSecs = 60): ?string
     {
@@ -190,9 +199,17 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
      * Compare-and-delete release of the resume claim: clears the claim
      * only when it still holds exactly this owner token; a stale owner
      * can never delete a newer recovery's claim.
+     *
+     * Shared claim contract (mirrors the Redis backend and the Rust
+     * verifier): a valid owner is exactly 32 lowercase hex characters,
+     * and any other shape is rejected at the storage boundary with an
+     * InvalidArgumentException.
+     *
+     * @throws \InvalidArgumentException when the owner is not 32 lowercase hex chars
      */
     public function releaseResumeDerivation(string $nonce, string $owner): bool
     {
+        $this->assertValidResumeOwner($owner);
         $entry = $this->records[$nonce] ?? null;
         if ($entry === null || ($entry['claim'] ?? null) !== $owner) {
             return false;
@@ -210,9 +227,17 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
      * precondition. The caller must still hold a live claim; a stale
      * owner — a different token, or a token whose lease expired — can
      * never commit, and the successful write clears the claim.
+     *
+     * Shared claim contract (mirrors the Redis backend and the Rust
+     * verifier): a valid owner is exactly 32 lowercase hex characters,
+     * and any other shape is rejected at the storage boundary with an
+     * InvalidArgumentException.
+     *
+     * @throws \InvalidArgumentException when the owner is not 32 lowercase hex chars
      */
     public function commitResultResume(string $nonce, bool $valid, ?string $binding, string $owner): bool
     {
+        $this->assertValidResumeOwner($owner);
         $entry = $this->records[$nonce] ?? null;
         if ($entry === null || !$entry['consumed'] || ($entry['cancelled'] ?? false) || $entry['result'] !== null) {
             return false;
@@ -226,6 +251,20 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
         $this->records[$nonce]['claimUntil'] = null;
 
         return true;
+    }
+
+    /**
+     * The shared resume-claim owner contract: exactly 32 lowercase hex
+     * characters (the bin2hex of 16 random bytes the claim API mints),
+     * identical to the Redis backend and the Rust verifier.
+     *
+     * @throws \InvalidArgumentException
+     */
+    private function assertValidResumeOwner(string $owner): void
+    {
+        if (preg_match('/^[0-9a-f]{32}$/D', $owner) !== 1) {
+            throw new \InvalidArgumentException('the resume claim owner must be exactly 32 lowercase hex characters');
+        }
     }
 
     /**

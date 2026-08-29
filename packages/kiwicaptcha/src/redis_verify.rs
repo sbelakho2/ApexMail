@@ -1160,11 +1160,17 @@ impl RedisChallengeStore {
     /// is missing, not consumed-resultless, or already claimed by a live
     /// or unparseable owner. Mirrors the PHP
     /// `RedisStorage::claimResumeDerivation()` exactly.
+    ///
+    /// Boundary contract (shared with the PHP mirror): `ttl_secs` must be
+    /// at least 1 — a lower TTL is rejected with
+    /// `ErrorKind::InvalidClientConfig` (the Rust report of the PHP
+    /// `InvalidArgumentException`), before any Redis interaction.
     pub fn claim_resume_derivation(
         &self,
         nonce: &str,
         ttl_secs: u64,
     ) -> redis::RedisResult<Option<String>> {
+        validate_claim_ttl(ttl_secs)?;
         let record_key = format!("{}{}", self.prefix, nonce);
         // Fail closed: a distributed mutex owner must never fall back to
         // a repeatable process identifier (two recoveries in one process
@@ -1253,7 +1259,14 @@ return ARGV[1]
     /// record key only, single-slot on a Redis Cluster. The record key
     /// TTL is preserved. Returns true when the release cleared the
     /// claim, false when the claim is missing or owned by another token.
+    ///
+    /// Boundary contract (shared with the PHP mirror's `bin2hex`
+    /// owner encoding): `owner` must be exactly 32 lowercase hex
+    /// characters — any other shape is rejected with
+    /// `ErrorKind::InvalidClientConfig` before the token is interpolated
+    /// into the Lua pattern.
     pub fn release_resume_derivation(&self, nonce: &str, owner: &str) -> redis::RedisResult<bool> {
+        validate_resume_owner(owner)?;
         let record_key = format!("{}{}", self.prefix, nonce);
         let mut conn = self.checkout()?;
         let script = redis::Script::new(
@@ -1438,6 +1451,12 @@ return 1
     /// or when a refused fence on ownership-lost wrote nothing and lets
     /// the caller reread the retained state. The verified replica wait
     /// still applies to the fresh mutation.
+    ///
+    /// Boundary contract (shared with the PHP mirror's `bin2hex`
+    /// owner encoding): `claim_owner` must be exactly 32 lowercase hex
+    /// characters — any other shape is rejected with
+    /// `ErrorKind::InvalidClientConfig` before the token is interpolated
+    /// into the Lua pattern.
     pub fn commit_result_clearing_claim(
         &self,
         nonce: &str,
@@ -1445,6 +1464,7 @@ return 1
         binding: Option<&str>,
         claim_owner: &str,
     ) -> redis::RedisResult<bool> {
+        validate_resume_owner(claim_owner)?;
         let record_key = format!("{}{}", self.prefix, nonce);
         let wait_replicas = self.wait_replicas;
         let wait_timeout_ms = self.wait_timeout_ms;
@@ -1600,6 +1620,39 @@ return 1
         };
         let _ = redis::cmd("DEL").arg(key).query::<()>(&mut conn);
     }
+}
+
+/// The claim-TTL boundary gate, the shared contract with the PHP
+/// `claimResumeDerivation()` (which throws an `InvalidArgumentException`
+/// for a TTL below 1): a `ttl_secs` below 1 is a configuration error,
+/// reported the way this crate reports configuration errors, before any
+/// Redis interaction.
+fn validate_claim_ttl(ttl_secs: u64) -> redis::RedisResult<()> {
+    if ttl_secs < 1 {
+        return Err(redis::RedisError::from((
+            redis::ErrorKind::InvalidClientConfig,
+            "the resume claim TTL must be at least 1 second",
+        )));
+    }
+    Ok(())
+}
+
+/// The owner-token boundary gate: exactly 32 lowercase hex characters,
+/// the `security_random::<16>` encoding, and the PHP `bin2hex` of 16
+/// random bytes, so a PHP-produced owner always passes. A malformed
+/// owner is rejected before it is ever interpolated into a Lua pattern.
+fn validate_resume_owner(owner: &str) -> redis::RedisResult<()> {
+    let valid = owner.len() == 32
+        && owner
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+    if !valid {
+        return Err(redis::RedisError::from((
+            redis::ErrorKind::InvalidClientConfig,
+            "the resume claim owner must be exactly 32 lowercase hex characters",
+        )));
+    }
+    Ok(())
 }
 
 impl fmt::Debug for RedisChallengeStore {
@@ -2186,11 +2239,14 @@ impl ProductionVerifier {
     /// (never a needless re-derivation) → the full cheap phase → the
     /// atomic re-derivation claim (exactly one concurrent same-operation
     /// recovery derives; the losers re-read the winner's committed
-    /// outcome) → the Argon admission gate (the same capacity control as
-    /// normal verification) → the expiry gate (clock read before and
-    /// after the derivation) → deterministic commit (the verified wait
-    /// covers the fresh mutation; a later stored-result replay of the
-    /// recovered success is replication-fenced by resolve_consumed).
+    /// outcome and never acquire an Argon slot) → the signed expiry gate
+    /// (clock read before and after the derivation, both after the
+    /// claim, so an expired record never occupies an admission slot) →
+    /// the Argon admission gate (only the claim winner; a refused or
+    /// unavailable lease returns through the RAII guard, which releases
+    /// the claim) → deterministic commit (the verified wait covers the
+    /// fresh mutation; a later stored-result replay of the recovered
+    /// success is replication-fenced by resolve_consumed).
     pub fn resume_consumed_operation(
         &self,
         token: &str,
@@ -2264,34 +2320,12 @@ impl ProductionVerifier {
             return VerifyOutcome::Invalid(e);
         }
 
-        // 6. The Argon admission gate first — the same capacity control
-        //    as normal verification (the recovery must not bypass the
-        //    memory-hard verification protections). Admission rejection
-        //    is NOT the operation whose duplication is dangerous
-        //    (derivation is), so a refused/unavailable capacity lease
-        //    returns before the derivation lock is ever taken — a
-        //    temporary admission problem cannot poison the recovery
-        //    claim for later retries.
-        let _lease = if state.record.algorithm == PoWAlgorithm::Argon2id {
-            match &self.argon_gate {
-                Some(gate) => match gate.acquire(&state.record) {
-                    Ok(Some(lease)) => Some(lease),
-                    Ok(None) => return VerifyOutcome::Invalid(VerifyError::CapacityExceeded),
-                    Err(_) => return VerifyOutcome::Invalid(VerifyError::AdmissionUnavailable),
-                },
-                None => None,
-            }
-        } else {
-            None
-        };
-
-        // 7. The atomic re-derivation claim with an owner token: exactly
-        //    one concurrent same-operation recovery derives; the losers
-        //    re-read and resolve the winner's committed outcome (never
-        //    an unsynchronized derive storm). The RAII guard releases
-        //    the claim on every early return (expiry, derivation error,
-        //    store failure) so the lock never blocks later retries; a
-        //    process crash leaves only the short TTL lease.
+        // 6. The atomic re-derivation claim with an owner token — first,
+        //    before any admission-gate interaction (the PHP mirror's
+        //    order): exactly one concurrent same-operation recovery
+        //    derives. A claim loser re-reads and resolves the winner's
+        //    committed outcome (never an unsynchronized derive storm)
+        //    and never acquires an Argon capacity slot.
         let claim_owner = match self
             .store
             .claim_resume_derivation(&token.nonce, CLAIM_TTL_SECS)
@@ -2307,6 +2341,12 @@ impl ProductionVerifier {
             }
             Err(_) => return VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
         };
+
+        // 7. The RAII guard holds the won claim: dropped on every early
+        //    return (expiry, admission refusal, derivation error, store
+        //    failure) it releases the claim so the lock never blocks
+        //    later retries; a process crash leaves only the short TTL
+        //    lease.
         let mut claim_guard = ResumeClaimGuard {
             store: &self.store,
             nonce: token.nonce.clone(),
@@ -2315,13 +2355,34 @@ impl ProductionVerifier {
         };
 
         // 8. The signed expiry gate with the clock read before AND after
-        //    the re-derivation.
+        //    the re-derivation. Both reads sit after the claim, so an
+        //    expired record never occupies an admission slot.
         let receipt_now = (self.now_unix)();
         if receipt_now >= state.record.expires_at {
             return VerifyOutcome::Invalid(VerifyError::Expired);
         }
 
-        // 9. Re-derive the proof from the presented token and commit the
+        // 9. The Argon admission gate — the same capacity control as
+        //    normal verification (the recovery must not bypass the
+        //    memory-hard verification protections). Only the claim
+        //    winner reaches it: a loser returned at step 6. A refused
+        //    or unavailable lease returns through the guard, whose drop
+        //    releases the claim, so a temporary admission problem never
+        //    poisons the recovery claim for later retries.
+        let _lease = if state.record.algorithm == PoWAlgorithm::Argon2id {
+            match &self.argon_gate {
+                Some(gate) => match gate.acquire(&state.record) {
+                    Ok(Some(lease)) => Some(lease),
+                    Ok(None) => return VerifyOutcome::Invalid(VerifyError::CapacityExceeded),
+                    Err(_) => return VerifyOutcome::Invalid(VerifyError::AdmissionUnavailable),
+                },
+                None => None,
+            }
+        } else {
+            None
+        };
+
+        // 10. Re-derive the proof from the presented token and commit the
         //    deterministic outcome. The commit is a fenced mutation: the
         //    claim must still be held (ownership-lost refuses before any
         //    write), the result write clears the claim atomically, and
@@ -3415,9 +3476,14 @@ mod tests {
             .claim_resume_derivation(&rec.nonce, 60)
             .unwrap()
             .expect("claim");
+        // The foreign token must still be well-formed (32 lowercase hex
+        // chars): the boundary gate rejects a malformed owner before the
+        // script, so the refusal is proven with a valid-shape owner.
+        const FOREIGN_OWNER: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert_ne!(owner, FOREIGN_OWNER);
         assert!(
             !store
-                .release_resume_derivation(&rec.nonce, "wrong-owner")
+                .release_resume_derivation(&rec.nonce, FOREIGN_OWNER)
                 .unwrap(),
             "a different owner's release is refused"
         );
@@ -3499,9 +3565,14 @@ mod tests {
             .expect("claim");
 
         // A mismatched owner's commit is refused (return 2) with no write.
+        // The stale token must still be well-formed (32 lowercase hex
+        // chars): the boundary gate rejects a malformed owner before the
+        // script, so the fence refusal is proven with a valid-shape owner.
+        const FOREIGN_OWNER: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert_ne!(owner, FOREIGN_OWNER);
         assert!(
             !store
-                .commit_result_clearing_claim(&rec.nonce, true, None, "stale-owner")
+                .commit_result_clearing_claim(&rec.nonce, true, None, FOREIGN_OWNER)
                 .unwrap(),
             "a mismatched owner's commit is refused"
         );
@@ -3630,5 +3701,72 @@ mod tests {
         assert_eq!(decoded.record.nonce, issued.record.nonce);
         assert_eq!(decoded.state.as_deref(), Some("consumed"));
         assert_eq!(decoded.operation_identity.as_deref(), Some(identity));
+    }
+
+    #[test]
+    fn resume_claim_rejects_a_non_positive_ttl() {
+        // The boundary contract shared with the PHP
+        // claimResumeDerivation: a lease TTL below 1 is a configuration
+        // error, reported before any Redis interaction (the store's pool
+        // is lazy, so no connection is ever attempted here).
+        let store = RedisChallengeStore::new(
+            redis::Client::open("redis://127.0.0.1:1").unwrap(),
+            "kiwitest:ttl:",
+        );
+        let err = store
+            .claim_resume_derivation("never-stored-nonce", 0)
+            .unwrap_err();
+        assert_eq!(
+            err.kind(),
+            redis::ErrorKind::InvalidClientConfig,
+            "a TTL of 0 is a configuration error: {err:?}"
+        );
+    }
+
+    #[test]
+    fn resume_owner_validation_rejects_malformed_owners() {
+        // Defense-in-depth at the public storage boundary: the owner
+        // token must be exactly 32 lowercase hex characters before it is
+        // interpolated into the Lua patterns of the release and the
+        // fenced commit. The production shape — the security_random::<16>
+        // encoding, byte-identical to the PHP bin2hex of 16 random bytes
+        // — always passes.
+        let store = RedisChallengeStore::new(
+            redis::Client::open("redis://127.0.0.1:1").unwrap(),
+            "kiwitest:owner:",
+        );
+        let valid = "0123456789abcdef0123456789abcdef";
+        assert!(validate_resume_owner(valid).is_ok());
+        let random_owner: String = security_random::<16>()
+            .expect("secure RNG")
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        assert!(
+            validate_resume_owner(&random_owner).is_ok(),
+            "the production owner shape must pass"
+        );
+
+        let uppercase = "0123456789ABCDEF0123456789ABCDEF";
+        let wrong_length = "abc";
+        let non_hex = "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz";
+        for owner in [uppercase, wrong_length, non_hex] {
+            let err = validate_resume_owner(owner).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                redis::ErrorKind::InvalidClientConfig,
+                "a malformed owner is a configuration error: {owner:?}"
+            );
+            assert!(
+                store.release_resume_derivation("n", owner).is_err(),
+                "the release rejects before any Redis interaction"
+            );
+            assert!(
+                store
+                    .commit_result_clearing_claim("n", true, None, owner)
+                    .is_err(),
+                "the fenced commit rejects before any Redis interaction"
+            );
+        }
     }
 }

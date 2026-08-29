@@ -18,6 +18,8 @@ Three backends, in priority order:
   The windows live in the limiter object, so they are exact for one persistent worker process (RoadRunner, Swoole, amphp, or a single CLI process).
   Under conventional PHP-FPM each request rebuilds the bundle services, so the object windows are per-request and provide no temporal limiting across requests.
   Production temporal limiting (per-client or global) without Redis therefore requires a genuinely persistent or shared PSR-6 pool; see [configuration.md](configuration.md#production-hardening).
+The bundle refuses any temporal issuance limit without Redis or a shared PSR-6 pool in production unless `allow_nonredis_rate_limit_fallback: true` is set, since the object-memory window is long-lived-runtime-only and request-local under conventional PHP-FPM.
+The old `allow_local_global_limit_fallback` option still works as a deprecated alias.
 
 All backends use a true sliding window.
 The state is a set of hit timestamps pruned on every check, so a burst straddling a window boundary can never double the rate.

@@ -875,6 +875,72 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         self::assertSame([169], $epochs(), 'no epoch older than current - 1 remains (166 and 167 were dropped)');
     }
 
+    public function testObjectMemoryStateGarbageCollectsStaleIdentitiesAtTheSweepBoundary(): void
+    {
+        // Long-lived-runtime hygiene with rotation disabled: the
+        // non-rotated per-identity hit map is swept at a bounded
+        // cadence, so identities that never return cannot keep their
+        // buckets for the process lifetime. The sweep fires on the
+        // `OBJECT_MEMORY_GC_INTERVAL`-th local admission and drops only
+        // buckets whose latest hit has slid out of the window.
+        $clock = 10_000.0;
+        $limiter = new IssuanceRateLimiter(
+            maxChallenges: 10,
+            windowSecs: 60,
+            now: static function () use (&$clock): float {
+                return $clock;
+            },
+            pepper: 'pepper',
+            globalMax: 0,
+            rateLimitRotationSecs: 0,
+        );
+        $hitsProp = new \ReflectionProperty(IssuanceRateLimiter::class, 'hits');
+        $gcProp = new \ReflectionProperty(IssuanceRateLimiter::class, 'localAdmissionsSinceGc');
+        $bucketKeys = static fn (): array => array_keys($hitsProp->getValue($limiter));
+        $keyOf = static fn (string $ip): string => hash_hmac('sha256', Issuer::canonicalIpFamily($ip), 'pepper');
+        $admissions = static fn (): int => $gcProp->getValue($limiter);
+
+        // Admit identity A at t0: its bucket exists, the counter is 1.
+        self::assertSame(1, $limiter->check('198.51.100.7'), 'admit A at t0');
+        self::assertContains($keyOf('198.51.100.7'), $bucketKeys());
+        self::assertSame(1, $admissions());
+
+        // Drive the counter below the sweep boundary, admit B, and prove
+        // the sweep has NOT run yet: both live buckets are still there.
+        $gcProp->setValue($limiter, 254);
+        $clock = 10_010.0;
+        self::assertSame(1, $limiter->check('198.51.100.8'), 'admit B before the sweep boundary');
+        self::assertSame(255, $admissions(), 'no sweep below the boundary');
+        self::assertContains($keyOf('198.51.100.7'), $bucketKeys(), 'A\'s live bucket survives below the boundary');
+        self::assertContains($keyOf('198.51.100.8'), $bucketKeys(), 'B\'s live bucket survives below the boundary');
+
+        // Cross the boundary after both hits are window-expired: the
+        // sweep drops A and B, the fresh C bucket survives.
+        $gcProp->setValue($limiter, 255);
+        $clock = 10_100.0;
+        self::assertSame(1, $limiter->check('198.51.100.9'), 'admit C and cross the sweep boundary');
+        self::assertSame(256, $admissions());
+        self::assertNotContains($keyOf('198.51.100.7'), $bucketKeys(), 'A\'s expired bucket was swept');
+        self::assertNotContains($keyOf('198.51.100.8'), $bucketKeys(), 'B\'s expired bucket was swept');
+        self::assertContains($keyOf('198.51.100.9'), $bucketKeys(), 'the current client\'s fresh bucket survives the sweep');
+
+        // Behavior is unchanged after the sweep: the current client's
+        // window still counts its own hits, and a swept identity
+        // restarts a fresh bucket.
+        self::assertSame(1, $limiter->check('198.51.100.9'), 'the current client admits again within its cap');
+        self::assertSame(1, $limiter->check('198.51.100.7'), 'a swept identity restarts a fresh bucket');
+
+        // Live buckets are never swept: D admitted now is still inside
+        // the window at the next sweep boundary.
+        $clock = 10_100.0;
+        self::assertSame(1, $limiter->check('198.51.100.10'), 'admit D');
+        $gcProp->setValue($limiter, 511);
+        $clock = 10_130.0;
+        self::assertSame(1, $limiter->check('198.51.100.11'), 'admit E and cross the next boundary');
+        self::assertContains($keyOf('198.51.100.10'), $bucketKeys(), 'D\'s live bucket survives the sweep (latest hit inside the window)');
+        self::assertContains($keyOf('198.51.100.11'), $bucketKeys(), 'the current client\'s bucket survives the sweep');
+    }
+
     // ── Redis backend (atomic, cross-worker) ──────────────────────────────
 
     private function requireRedisClient(): FakePredisClient

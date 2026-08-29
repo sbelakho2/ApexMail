@@ -58,9 +58,9 @@ use Psr\Cache\CacheItemPoolInterface;
  * persistent worker. The global cap is enforced on ALL backends: without
  * Redis the limiter keeps a real global window (the shared `kr_global`
  * item when a pool is configured, the process-local list otherwise)
- * instead of disabling the cap. `allow_local_global_limit_fallback`
+ * instead of disabling the cap. `allow_nonredis_rate_limit_fallback`
  * therefore means "long-lived-runtime-only object window / shared
- * best-effort window", never "no global cap at all".
+ * best-effort window", never "no temporal limit at all".
  *
  * Transactional fallback decisions: on the non-Redis backends each request
  * is ONE read-then-decide pass over the per-client and global windows —
@@ -214,6 +214,26 @@ LUA;
 
     /** @var array<string, list<float>> sliding-window hit timestamps, per process */
     private array $hits = [];
+
+    /**
+     * Object-memory GC cadence (non-rotated mode): every this many local
+     * admissions the limiter sweeps the per-identity hit map once,
+     * dropping buckets whose latest hit has slid out of the window, so
+     * abandoned identities cannot keep their buckets for the process
+     * lifetime. Amortized O(1) per admission; the sweep only ever
+     * removes window-expired identities, so no decision can change.
+     */
+    private const OBJECT_MEMORY_GC_INTERVAL = 256;
+
+    /**
+     * Admissions since the last object-memory GC sweep (non-rotated mode
+     * only): the bounded cadence driver of the per-identity map sweep
+     * `OBJECT_MEMORY_GC_INTERVAL`. The rotated path is
+     * epoch-GC'd on every check and the deployment-global window is a
+     * single list pruned per check, so only the non-rotated per-identity
+     * map needs the admission counter.
+     */
+    private int $localAdmissionsSinceGc = 0;
 
     /**
      * Rotated object-memory state: epoch -> identity-key -> hit timestamps.
@@ -519,7 +539,39 @@ LUA;
         $globalHits[] = $now;
         $this->globalHits = $globalHits;
 
+        // Bounded object-memory GC (long-lived-runtime hygiene): every
+        // `OBJECT_MEMORY_GC_INTERVAL`-th local admission sweeps the
+        // per-identity map once, dropping buckets whose latest hit has
+        // slid out of the window. Amortized O(1) per admission; the
+        // sweep never touches live windows. Only the non-rotated path
+        // needs it: the rotated path is epoch-GC'd on every check and
+        // the global window is a single list pruned per check. The
+        // current client's bucket was just written with $now, so it is
+        // never swept.
+        if (++$this->localAdmissionsSinceGc % self::OBJECT_MEMORY_GC_INTERVAL === 0) {
+            $this->sweepStaleLocalHits($now);
+        }
+
         return 1;
+    }
+
+    /**
+     * Sweep the non-rotated object-memory hit map once: unset every
+     * identity bucket whose latest hit is older than now - windowSecs.
+     * Uses the same strict cutoff as {@see self::prune()}, so a bucket
+     * whose last hit sits exactly at the boundary is dead. Runs at the
+     * `OBJECT_MEMORY_GC_INTERVAL` cadence from the non-rotated local
+     * admit path only; decisions are unaffected, since only
+     * window-expired identities are removed.
+     */
+    private function sweepStaleLocalHits(float $now): void
+    {
+        $cutoff = $now - $this->windowSecs;
+        foreach ($this->hits as $key => $hits) {
+            if (max($hits) <= $cutoff) {
+                unset($this->hits[$key]);
+            }
+        }
     }
 
     /**
