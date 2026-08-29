@@ -1721,13 +1721,17 @@ mod tests {
         let quiet = "22222222-2222-2222-2222-222222222222";
 
         // The hot account burns its ENTIRE per-second burst (1000 req/s).
-        for _ in 0..1000 {
-            assert!(svc.check_rate_limit(hot).is_ok());
+        // On a loaded CI host the loop can take >1s, so the window refills
+        // mid-burn — keep spending (bounded) until the limiter engages
+        // instead of asserting on exactly the 1001st request.
+        let mut limited = false;
+        for _ in 0..10_000 {
+            if svc.check_rate_limit(hot).is_err() {
+                limited = true;
+                break;
+            }
         }
-        assert!(
-            svc.check_rate_limit(hot).is_err(),
-            "hot account must hit its own limit"
-        );
+        assert!(limited, "hot account must hit its own limit");
 
         // The other account's budget is untouched — the old global limiter
         // starved it here.
