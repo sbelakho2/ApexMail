@@ -9387,7 +9387,33 @@ mod tests {
                             .collect::<Vec<_>>()
                     );
                 });
-            let code = totp_code_at_offset(&secret_bytes, -1);
+            // The replay guard atomically burns the code's ±1 acceptance
+            // windows, so the confirm above has already claimed this
+            // secret's current window — an immediate sign-in with ANY code
+            // inside it is (correctly) rejected as a replay. Clear this
+            // secret's replay keys to simulate the 30s window having
+            // passed; the key set is fingerprint-unique so parallel tests
+            // sharing the ephemeral Redis are untouched.
+            {
+                use sha2::Digest as _;
+                let fingerprint = hex::encode(sha2::Sha256::digest(secret_b32.as_bytes()));
+                let step = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    / 30;
+                if let Ok(mut conn) = state.redis.get().await {
+                    for claimed in [step.wrapping_sub(1), step, step + 1] {
+                        let _: Result<(), _> = deadpool_redis::redis::cmd("DEL")
+                            .arg(format!(
+                                "apexmail:auth:mfa_totp_replay:{fingerprint}:{claimed}"
+                            ))
+                            .query_async(&mut *conn)
+                            .await;
+                    }
+                }
+            }
+            let code = current_totp_code(&secret_bytes);
             let verify_body = csrf_body(&state, &[("code", &code), ("email", &email)]);
             let response = login_app
                 .oneshot(
