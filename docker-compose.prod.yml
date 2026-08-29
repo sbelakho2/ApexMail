@@ -1264,7 +1264,10 @@ services:
       - ${BACKUP_SSH_KNOWN_HOSTS_FILE:-/var/run/apexmail-backup-ssh/known_hosts}:/root/.ssh/known_hosts:ro
     environment:
       CLICKHOUSE_HOST: clickhouse
-      CLICKHOUSE_PORT: "8123"
+      # clickhouse-client speaks the NATIVE protocol: 9000, not the HTTP
+      # 8123 port (pointing the client at 8123 yields connection resets and
+      # the backup script silently sees zero non-system tables).
+      CLICKHOUSE_PORT: "9000"
       CLICKHOUSE_USER: ${CLICKHOUSE_USER:-apexmail}
       CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
       BACKUP_DIR: /backups
