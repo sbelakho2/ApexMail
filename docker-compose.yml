@@ -1205,7 +1205,10 @@ services:
       - apparmor:docker-default
     environment:
       REDIS_ADDR: redis://redis:6379
-      REDIS_PASSWORD_FILE: /run/secrets/redis_password_json
+      # The scratch image reads the password from the env (the multi-password
+      # REDIS_PASSWORD_FILE JSON map proved brittle across exporter versions;
+      # the env value comes from the deployment .env, same as the dev file).
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
       # Export the length of the tracking-service WAL list (backing the
       # TrackingWalBacklog alert in deploy/alerting-rules.yml). A single
       # exact key — no SCAN pattern cost.
@@ -1215,8 +1218,6 @@ services:
       - apexmail_data_internal
     profiles:
       - monitoring
-    secrets:
-      - redis_password_json
     logging: *default-logging
 
   # =========================================================================
@@ -1370,9 +1371,6 @@ secrets:
     file: ./secrets/postgres_password.txt
   redis_password:
     file: ./secrets/redis_password.txt
-  # redis_exporter's REDIS_PASSWORD_FILE expects a JSON-encoded value.
-  redis_password_json:
-    file: ${PROD_REDIS_PASSWORD_JSON_FILE:?PROD_REDIS_PASSWORD_JSON_FILE is required in production}
   clickhouse_password:
     file: ./secrets/clickhouse_password.txt
 

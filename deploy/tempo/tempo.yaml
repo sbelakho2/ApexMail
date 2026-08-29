@@ -40,9 +40,9 @@ compactor:
 # ── Query-frontend / Search ─────────────────────────────────────────────────
 # Enables trace search functionality (required for Grafana Tempo datasource
 # search and traceQL queries).
+# query_frontend.search: the pinned image accepts no fields here that are
+# worth setting; defaults enable TraceQL search.
 query_frontend:
-  search:
-    concurrent_requests: 1000
 
 querier:
   search:
