@@ -73,22 +73,24 @@ metrics_generator:
 #     store: etcd
 #     etcd:
 #       endpoints:
-#         - ${TEMPO_ETCD_ENDPOINT:-localhost:2379}
+#         - 
 #     # or for consul:
 #     # store: consul
 #     # consul:
-#     #   host: ${TEMPO_CONSUL_ENDPOINT:-localhost:8500}
+#     #   host: 
 
 storage:
   trace:
-    # Env-var-driven backend: "s3" for production, "local" (default) for dev
-    backend: ${TEMPO_STORAGE_BACKEND:-local}
+    # The pinned image's expand-env supports only bare ${var} (no defaults),
+    # so the deployment default (local filesystem) is written statically.
+    # To switch to S3: backend: s3 and populate the s3: block below.
+    backend: local
     s3:
-      bucket: ${TEMPO_S3_BUCKET:}
-      endpoint: ${TEMPO_S3_ENDPOINT:-s3.amazonaws.com}
-      access_key: ${TEMPO_S3_ACCESS_KEY:}
-      secret_key: ${TEMPO_S3_SECRET_KEY:}
-      region: ${TEMPO_S3_REGION:-eu-central-1}
+      bucket: apexmail-tempo-traces
+      endpoint: s3.amazonaws.com
+      access_key: unused-in-local-mode
+      secret_key: unused-in-local-mode
+      region: eu-central-1
       # SECURITY: Force path-style access (required for MinIO)
       # Bool fields cannot come from env expansion (string vs bool).
       forcepathstyle: true

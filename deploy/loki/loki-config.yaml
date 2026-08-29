@@ -32,15 +32,9 @@ common:
   path_prefix: /loki
   storage:
     # S3-compatible object storage (fallback: local filesystem)
-    s3:
-      bucketnames: apexmail-loki-chunks
-      endpoint: s3.amazonaws.com
-      access_key_id: unused-in-filesystem-mode
-      secret_access_key: unused-in-filesystem-mode
-      region: eu-central-1
-      # SECURITY: Use path-style access (required for MinIO and some S3-compatible stores)
-      # Set to false for virtual-hosted-style access (default for AWS S3)
-      s3forcepathstyle: true
+    # S3 wiring: the pinned image's expand-env supports no default syntax —
+    # to switch to S3, replace the filesystem backend below and populate
+    # an s3: block (see git history for the previous shape).
     filesystem:
       chunks_directory: /loki/chunks
       rules_directory: /loki/rules
