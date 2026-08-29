@@ -65,23 +65,16 @@ exporters:
     endpoint: http://loki:3100/loki/api/v1/push
     tls:
       insecure: true
+    # Schema for the pinned collector: default_labels_enabled is a MAP of
+    # label -> bool; per-attribute label hints live on the pipeline's
+    # resource/log-to-attributes conversion, not an `attributes` list here.
     default_labels_enabled:
-      - job
-      - instance
-      - service_name
-      - service_version
-      - environment
-    # Map OpenTelemetry log record attributes to Loki labels
-    attributes:
-      - action: upsert
-        key: service_name
-        from_attribute: service.name
-      - action: upsert
-        key: service_version
-        from_attribute: service.version
-      - action: upsert
-        key: environment
-        from_attribute: deployment.environment
+      exporter: false
+      job: true
+      instance: true
+      service_name: true
+      service_version: true
+      environment: true
 
 service:
   pipelines:

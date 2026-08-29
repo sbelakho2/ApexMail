@@ -197,7 +197,8 @@ services:
     image: grafana/tempo:2.6.1
     container_name: apexmail-tempo
     restart: unless-stopped
-    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    # expand-env: the config interpolates ${TEMPO_*} values at startup.
+    command: ["-config.file=/etc/tempo/tempo.yaml", "-config.expand-env=true"]
     volumes:
       - ./deploy/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
       - tempo_data:/var/tempo

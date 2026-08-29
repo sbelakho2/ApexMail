@@ -7,7 +7,10 @@
 # Falls back to local filesystem when S3 env vars are unset.
 #
 # Production (S3):
-#   LOKI_OBJECT_STORE=s3
+#   NOTE: this deployment runs the DEFAULT filesystem store; switching to
+#   S3 requires editing common.storage.s3 below (the pinned Loki's
+#   expand-env supports only bare ${var} substitution, so defaults are
+#   written statically).
 #   LOKI_S3_BUCKET=apexmail-loki-chunks
 #   LOKI_S3_ENDPOINT=s3.amazonaws.com
 #   LOKI_S3_ACCESS_KEY_ID=<key>
@@ -31,10 +34,10 @@ common:
     # S3-compatible object storage (fallback: local filesystem)
     s3:
       bucketnames: apexmail-loki-chunks
-      endpoint: ${LOKI_S3_ENDPOINT:-s3.amazonaws.com}
-      access_key_id: ${LOKI_S3_ACCESS_KEY_ID:}
-      secret_access_key: ${LOKI_S3_SECRET_ACCESS_KEY:}
-      region: ${LOKI_S3_REGION:-eu-central-1}
+      endpoint: s3.amazonaws.com
+      access_key_id: unused-in-filesystem-mode
+      secret_access_key: unused-in-filesystem-mode
+      region: eu-central-1
       # SECURITY: Use path-style access (required for MinIO and some S3-compatible stores)
       # Set to false for virtual-hosted-style access (default for AWS S3)
       s3forcepathstyle: true
@@ -51,7 +54,7 @@ schema_config:
     - from: 2024-01-01
       store: tsdb
       # Env-var-driven object store: "s3" for production, "filesystem" (default) for dev
-      object_store: ${LOKI_OBJECT_STORE:-filesystem}
+      object_store: filesystem
       schema: v13
       index:
         prefix: index_
