@@ -125,7 +125,13 @@ async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
         }
     };
     let db_only = db_part.split('?').next().unwrap_or(db_part);
-    let isolated_db = format!("{db_only}_schema");
+    // Unique per test: nextest executes every test in its own PROCESS, so a
+    // fixed `_schema` name had each process DROP the database out from under
+    // the others. The OnceCell below still guards within one process.
+    let isolated_db = format!(
+        "{db_only}_schema_{}",
+        test_name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '_', "_")
+    );
     let isolated_url = format!("{server_part}/{isolated_db}");
     let admin_url = format!("{server_part}/postgres");
 
@@ -178,6 +184,7 @@ fn bounded_id(prefix: &str) -> String {
 fn test_config() -> Config {
     Config {
         cp_auth: Default::default(),
+        public_rate_limit_enabled: false,
         port: 3000,
         host: "0.0.0.0".into(),
         base_url: "http://localhost:3000".into(),
@@ -1007,7 +1014,38 @@ async fn concurrent_registration_same_email_no_orphaned_tenant() {
     let raw = std::env::var("TEST_DATABASE_URL").unwrap_or_default();
     let (server_part, db_part) = raw.rsplit_once('/').unwrap_or(("", &raw));
     let db_only = db_part.split('?').next().unwrap_or(db_part);
-    let register_db = format!("{db_only}_register");
+    // Unique per run: nextest executes suites in parallel, and a fixed name
+    // would race its own DROP DATABASE against sibling connections.
+    let register_db = format!(
+        "{db_only}_reg_{}",
+        &uuid::Uuid::new_v4().simple().to_string()[..10]
+    );
+    {
+        let admin_url = format!("{server_part}/postgres");
+        let admin = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&admin_url)
+            .await
+            .expect("admin connect");
+        sqlx::query(&format!(r#"CREATE DATABASE "{register_db}""#))
+            .execute(&admin)
+            .await
+            .expect("create register db");
+        admin.close().await;
+        let url = format!("{server_part}/{register_db}");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect register db");
+        let migrations_dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
+        let migrator = sqlx::migrate::Migrator::new(migrations_dir)
+            .await
+            .expect("load canonical migrations");
+        migrator.run(&pool).await.expect("apply canonical chain");
+        pool.close().await;
+    }
 
     // Reuse the canonical-chain database registration_test_app builds
     // (freshly migrated each run). The concurrent INSERTs below race on the

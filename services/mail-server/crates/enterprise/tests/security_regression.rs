@@ -197,16 +197,46 @@ async fn try_setup() -> Option<TestApp> {
     config.log_stream.encryption_key = "test-log-stream-secret-key".to_string();
 
     let recorder = PrometheusBuilder::new().build_recorder();
+    // The canonical chain (migration 064) made EVERY tenant id VARCHAR(26):
+    // the legacy UUID-format fixtures from the 058 era (36 chars) violate
+    // tenants.id/ent_* FKs and can never be seeded. Keep DISTINCT ids so
+    // cross-tenant isolation is still exercised.
+    let tenant_a = format!("t{}", &Uuid::new_v4().simple().to_string()[..25]);
+    let tenant_b = format!("s{}", &Uuid::new_v4().simple().to_string()[..25]);
+    let uuid_tenant_a = format!("u{}", &Uuid::new_v4().simple().to_string()[..25]);
+    let uuid_tenant_b = format!("v{}", &Uuid::new_v4().simple().to_string()[..25]);
+    // The chain's ent_* tables carry tenant_id FOREIGN KEYs (064 re-added
+    // them RESTRICT via 116): fixtures must exist as tenant rows before any
+    // deployment/IP/contract insert. plan='free' matches what the signature
+    // test asserts is untouched by a self-signature.
+    for (id, name) in [
+        (tenant_a.clone(), "Test Tenant A"),
+        (tenant_b.clone(), "Test Tenant B"),
+        (uuid_tenant_a.clone(), "Test UUID Tenant A"),
+        (uuid_tenant_b.clone(), "Test UUID Tenant B"),
+    ] {
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at) \
+             VALUES ($1, $2, $1, 'free', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW()) \
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(id)
+        .bind(name)
+        .execute(&db)
+        .await
+        .ok();
+    }
+
     let state = Arc::new(AppState::new(db.clone(), config, recorder.handle()));
     let app = router(state);
 
     Some(TestApp {
         app,
         db,
-        tenant_a: format!("t{}", &Uuid::new_v4().simple().to_string()[..25]),
-        tenant_b: format!("t{}", &Uuid::new_v4().simple().to_string()[..25]),
-        uuid_tenant_a: Uuid::new_v4().to_string(),
-        uuid_tenant_b: Uuid::new_v4().to_string(),
+        tenant_a,
+        tenant_b,
+        uuid_tenant_a,
+        uuid_tenant_b,
     })
 }
 
@@ -674,11 +704,17 @@ async fn tenant_self_signature_does_not_activate_or_promote_plan() {
     let admin = app.token(&app.tenant_a, true);
     let member = app.token(&app.tenant_a, false);
 
-    sqlx::query("INSERT INTO tenants (id, name) VALUES ($1, 'Test Tenant A')")
-        .bind(&app.tenant_a)
-        .execute(&app.db)
-        .await
-        .unwrap();
+    // Seeded by try_setup for every fixture tenant (the chain's ent_* FKs
+    // require the row); re-assert idempotently in case of ordering changes.
+    sqlx::query(
+        "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at) \
+         VALUES ($1, 'Test Tenant A', $1, 'free', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW()) \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(&app.tenant_a)
+    .execute(&app.db)
+    .await
+    .unwrap();
 
     let start = chrono::Utc::now() - chrono::Duration::days(1);
     let end = chrono::Utc::now() + chrono::Duration::days(365);
@@ -1326,9 +1362,19 @@ async fn ip_allocation_validated_against_pool() {
         skip_notice("test");
         return;
     };
-    // This family uses UUID-shaped tenant ids (ip_pool_available.allocated_to
-    // is a UUID column).
-    let tenant_a = Uuid::new_v4().to_string();
+    // Tenant ids are canonical VARCHAR(26) strings (migration 064; 120
+    // converged ip_pool_available.allocated_to, the last UUID holdout). The
+    // chain's ent_dedicated_ips FK requires the tenant row to exist first.
+    let tenant_a = format!("w{}", &Uuid::new_v4().simple().to_string()[..25]);
+    sqlx::query(
+        "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at) \
+         VALUES ($1, 'IP Alloc Tenant', $1, 'free', 'active', '{}'::jsonb, '{}'::jsonb, NOW(), NOW()) \
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(&tenant_a)
+    .execute(&app.db)
+    .await
+    .unwrap();
     let a = app.token(&tenant_a, false);
 
     let octet_a = (Uuid::new_v4().as_u128() % 100) as u8 + 100; // 100..199

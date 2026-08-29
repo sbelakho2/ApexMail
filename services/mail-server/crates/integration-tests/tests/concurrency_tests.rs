@@ -42,7 +42,13 @@ async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
         }
     };
     let db_only = db_part.split('?').next().unwrap_or(db_part);
-    let isolated_db = format!("{db_only}_concurrency");
+    // Unique per test: nextest runs each test in its own process; the fixed
+    // `_concurrency` name had sibling processes dropping each other's DB.
+    // Each test still exercises true concurrency via its own tokio tasks.
+    let isolated_db = format!(
+        "{db_only}_conc_{}",
+        test_name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '_', "_")
+    );
     let isolated_url = format!("{server_part}/{isolated_db}");
     let admin_url = format!("{server_part}/postgres");
 

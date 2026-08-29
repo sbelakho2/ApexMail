@@ -1706,6 +1706,7 @@ mod tests {
             session_secret: "test-session-secret-1234567890ab".into(),
             impersonation_secret: "test-impersonation-secret-12345".into(),
             csrf_secret: "test-csrf-secret-1234567890abcd".into(),
+            public_rate_limit_enabled: false,
             control_plane_api_key: None,
             sales_autopilot_base_url: "http://localhost:3010".into(),
             internal_service_token: None,

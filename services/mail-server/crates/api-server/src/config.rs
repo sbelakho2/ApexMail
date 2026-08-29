@@ -102,6 +102,12 @@ pub struct Config {
     pub session_secret: String,
     pub impersonation_secret: String,
     pub csrf_secret: String,
+    /// Production-only strictness for the public-auth rate limiter: false
+    /// disables the middleware OUTSIDE production (the test suite's parallel
+    /// tests share one Redis and one socket-less fallback path bucket, which
+    /// turns the 20/min cap into cross-test 429 coupling). Production always
+    /// enforces the limiter regardless of this flag.
+    pub public_rate_limit_enabled: bool,
 
     // ── Control Plane ───────────────────────────────────────
     /// Static API key used by the control-plane backend to authenticate
@@ -848,6 +854,12 @@ impl Config {
             host: env_or("HOST", "0.0.0.0"),
             base_url,
             environment,
+            public_rate_limit_enabled: matches!(
+                env_or("PUBLIC_RATE_LIMIT_ENABLED", "true")
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "true" | "1" | "yes" | "on"
+            ),
 
             db_host: env_or("DB_HOST", "127.0.0.1"),
             db_port: parse_u16("DB_PORT", &env_or("DB_PORT", "5432"))?,
@@ -1357,6 +1369,7 @@ pub(crate) mod tests {
 
     pub(crate) fn valid_production_config() -> Config {
         Config {
+            public_rate_limit_enabled: true,
             port: 3000,
             host: "0.0.0.0".into(),
             base_url: "https://app.example.com".into(),
@@ -1503,6 +1516,7 @@ pub(crate) mod tests {
     #[test]
     fn ui_surface_for_host_prefers_explicit_host_maps() {
         let config = Config {
+            public_rate_limit_enabled: false,
             port: 3000,
             host: "0.0.0.0".into(),
             base_url: "http://localhost:3000".into(),

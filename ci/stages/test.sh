@@ -148,18 +148,30 @@ run_cargo_tests() {
     fi
 }
 
-# Apply the canonical DDL (apexmail_db::migrations::SCHEMA — the same bootstrap
-# load-gate.yml uses) to the ephemeral test database, best-effort like the
-# dev bootstrap: individual idempotent statements may already exist.
+# Apply the CANONICAL MIGRATION CHAIN to the ephemeral test database.
+#
+# This used to apply the apexmail-db SCHEMA constant (a hand-maintained DDL
+# shadow of the chain) — the two drifted apart wholesale (uuid-vs-text ids on
+# campaigns/templates/events, missing columns across users/webhooks/messages/
+# events/...), so the DB-backed test suite failed against the bootstrap the
+# moment CI_TEST_DB=ephemeral became the default. The chain (embedded by the
+# migrator at build time) is the single source of truth the production
+# database actually runs — the ephemeral database must be provisioned from
+# the SAME chain or the suite validates a schema that does not exist.
 apply_test_schema() {
-    _schema_file=$RUN_DIR/test-schema.sql
-    awk '/^pub const SCHEMA: &str = r#"$/{f=1; next} /^"#;$/{f=0} f' \
-        "$WS/crates/apexmail-db/src/migrations.rs" >"$_schema_file"
-    [ -s "$_schema_file" ] || { ci_err "could not extract SCHEMA from apexmail-db"; return "$CI_EXIT_FAIL"; }
-    ci_info "applying canonical SCHEMA ($(wc -l <"$_schema_file" | tr -d ' ') lines) to the ephemeral DB"
-    docker exec -i apexmail-ci-test-pg \
-        psql -U apexmail -d apexmail_test -v ON_ERROR_STOP=0 <"$_schema_file" >>"$CI_STAGE_LOG" 2>&1 \
-        || ci_warn "schema apply reported errors — continuing (best-effort bootstrap)"
+    ci_info "building the migrator (canonical chain embedded at compile time)"
+    # sqlx::migrate! embeds via include_dir; some cargo versions miss new
+    # files in the tracked dir on incremental rebuilds — force a rebuild so a
+    # freshly added migration can never be silently absent from the binary.
+    touch "$WS/crates/migrator/src/main.rs"
+    (cd "$WS" && cargo build -q -p migrator) >>"$CI_STAGE_LOG" 2>&1 \
+        || { ci_err "cargo build -p migrator failed"; return "$CI_EXIT_FAIL"; }
+    _pg_port=$(docker port apexmail-ci-test-pg 5432/tcp 2>/dev/null | head -1 | sed 's/.*://')
+    [ -n "$_pg_port" ] || { ci_err "could not resolve the ephemeral postgres port"; return "$CI_EXIT_FAIL"; }
+    ci_info "applying the canonical chain (migrator) to the ephemeral DB on port $_pg_port"
+    (cd "$WS" && DATABASE_URL="postgres://apexmail:apexmail@127.0.0.1:$_pg_port/apexmail_test" \
+        ./target/debug/migrator) >>"$CI_STAGE_LOG" 2>&1 \
+        || { ci_err "migrator failed against the ephemeral DB — see $CI_STAGE_LOG"; return "$CI_EXIT_FAIL"; }
 }
 
 # --- 7. PHP suites ---------------------------------------------------------------------

@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS users (
     mfa_enabled         BOOLEAN     NOT NULL DEFAULT FALSE,
     mfa_secret          TEXT,
     mfa_recovery_hashes JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    email_verified      BOOLEAN     NOT NULL DEFAULT FALSE,
+    metadata            JSONB       NOT NULL DEFAULT '{}'::jsonb,
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -177,16 +179,56 @@ CREATE INDEX IF NOT EXISTS idx_suppressions_email  ON suppressions(tenant_id, em
 
 -- ── Webhooks ────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS webhooks (
-    id              UUID PRIMARY KEY,
-    tenant_id       VARCHAR(26)        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-    url             TEXT        NOT NULL,
-    events          JSONB       NOT NULL DEFAULT '[]'::jsonb,
-    secret          TEXT        NOT NULL,
-    status          TEXT        NOT NULL DEFAULT 'active',
+    id               TEXT PRIMARY KEY,
+    tenant_id        VARCHAR(26)        NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+    url              TEXT        NOT NULL,
+    events           JSONB       NOT NULL DEFAULT '[]'::jsonb,
+    secret           TEXT        NOT NULL,
+    previous_secret  TEXT,
+    status           TEXT        NOT NULL DEFAULT 'active',
+    enabled          BOOLEAN     NOT NULL DEFAULT TRUE,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (tenant_id, url)
+);
+CREATE INDEX IF NOT EXISTS idx_webhooks_tenant ON webhooks(tenant_id);
+
+-- gdpr_requests (canonical: migration 069) — the compliance submit path
+-- writes this CP mirror on every DSR.
+CREATE TABLE IF NOT EXISTS gdpr_requests (
+    id              VARCHAR(26) PRIMARY KEY,
+    tenant_id       VARCHAR(26) NOT NULL,
+    email           VARCHAR(320) NOT NULL,
+    request_type    VARCHAR(20) NOT NULL,
+    status          VARCHAR(20) NOT NULL DEFAULT 'pending',
+    token_hash      VARCHAR(128),
+    fulfilled_at    TIMESTAMPTZ,
     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-CREATE INDEX IF NOT EXISTS idx_webhooks_tenant ON webhooks(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_gdpr_requests_tenant ON gdpr_requests(tenant_id, created_at DESC);
+
+-- system_alerts (canonical: migration 052 + 108's writer columns) — the
+-- console alerts surface reads it; 108 added component/source/fingerprint
+-- with a dedupe index for alertmanager webhook redelivery.
+CREATE TABLE IF NOT EXISTS system_alerts (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id       VARCHAR(26),
+    alert_type      TEXT NOT NULL,
+    message         TEXT NOT NULL,
+    severity        TEXT NOT NULL DEFAULT 'warning',
+    acknowledged    BOOLEAN NOT NULL DEFAULT FALSE,
+    acknowledged_by TEXT,
+    acknowledged_at TIMESTAMPTZ,
+    metadata        JSONB,
+    component       TEXT,
+    source          VARCHAR(64) NOT NULL DEFAULT 'system',
+    fingerprint     VARCHAR(128),
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_system_alerts_source_fingerprint
+    ON system_alerts (source, fingerprint)
+    WHERE source <> 'system' AND fingerprint IS NOT NULL;
 
 -- ── Audit Logs ──────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS audit_logs (

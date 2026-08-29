@@ -366,6 +366,16 @@ pub async fn public_rate_limit_middleware(
     req: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
+    // Test/dev opt-out ONLY: production always enforces the public limiter
+    // (see Config::public_rate_limit_enabled). The suite's parallel tests
+    // share one Redis and one socket-less fallback path bucket; without this
+    // the 20/min cap couples tests (429 instead of the asserted 400).
+    if state.config.environment != crate::config::Environment::Production
+        && !state.config.public_rate_limit_enabled
+    {
+        return next.run(req).await;
+    }
+
     let path = req.uri().path().to_string();
     let socket_ip = req
         .extensions()

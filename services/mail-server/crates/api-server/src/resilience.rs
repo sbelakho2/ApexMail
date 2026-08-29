@@ -628,6 +628,7 @@ mod tests {
             host: "0.0.0.0".into(),
             base_url: "http://localhost:3000".into(),
             environment: Environment::Development,
+            public_rate_limit_enabled: false,
             db_host: "localhost".into(),
             db_port: 5432,
             db_name: "apexmail".into(),

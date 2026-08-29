@@ -731,9 +731,30 @@ mod tests {
         );
 
         // Let the slot age past 2x the timeout, then dispatch a fast
-        // analysis — the wedge check must fire.
-        std::thread::sleep(std::time::Duration::from_millis(1_500));
-        let fast = SandboxEngine::with_config(SandboxConfig::default());
+        // analysis — the wedge check must fire. The 2.6s wait gives the
+        // slot a >=0.6s margin over the 2x(1s) threshold: under a fully
+        // parallel test run the first dispatch's own scheduling delay eats
+        // into a 1.5s wait and the check races the threshold.
+        std::thread::sleep(std::time::Duration::from_millis(2_600));
+        // The wedge sweep runs on the DYNAMIC-analyzer dispatch path — the
+        // probe must be a fast DYNAMIC analyzer, not the static-only
+        // with_config engine (whose analyze never reaches the check).
+        struct MockDynamicFast;
+        impl DynamicAnalyzer for MockDynamicFast {
+            fn analyze(
+                &self,
+                _data: &[u8],
+                _filename: Option<&str>,
+            ) -> Option<DynamicAnalysisFinding> {
+                None
+            }
+        }
+        // Same 1s timeout as the stuck engine: the wedge threshold is 2x the
+        // DISPATCHING engine's timeout, and the probe must judge the stuck
+        // slot against the same clock that abandoned it.
+        let mut fast_config = SandboxConfig::default();
+        fast_config.analysis_timeout_secs = 1;
+        let fast = SandboxEngine::with_dynamic_analyzer(fast_config, Arc::new(MockDynamicFast));
         let fast_result = fast.analyze(b"hello", Some("ok.txt"));
         assert!(fast_result.is_ok());
         assert!(
