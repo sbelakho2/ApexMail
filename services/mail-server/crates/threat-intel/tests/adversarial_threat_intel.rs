@@ -11,12 +11,32 @@
 
 use chrono::{Duration, Utc};
 use threat_intel::background_task::{purge_once, FeedRefreshConfig};
+use threat_intel::config::{FeedEnforcementMode, FeedFormat, FeedSource, ThreatIntelConfig};
 use threat_intel::domain_blocklist::DomainBlockEntry;
 use threat_intel::engine::ThreatAction;
 use threat_intel::ip_blocklist::{IpBlockEntry, ThreatCategory};
 use threat_intel::ThreatIntelEngine;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
+
+/// Engine whose config registers "test-feed" as a trusted Enforce feed —
+/// mirroring the in-crate `configured_engine()` fixture. Audit F6 made
+/// sources absent from `config.feeds` low-trust/monitor-only, so entries
+/// constructed by `spam_entry`/`domain_entry` (source "test-feed") can only
+/// reach a Block verdict on an engine that explicitly trusts that feed.
+fn configured_engine() -> ThreatIntelEngine {
+    let mut config = ThreatIntelConfig::default();
+    config.feeds.push(FeedSource {
+        name: "test-feed".into(),
+        url: "https://example.invalid/feed.txt".into(),
+        format: FeedFormat::PlainText,
+        refresh_interval_secs: 3600,
+        enabled: true,
+        trust_score: 9.5,
+        enforcement_mode: FeedEnforcementMode::Enforce,
+    });
+    ThreatIntelEngine::with_config(config)
+}
 
 fn spam_entry(ip_str: &str, expires_in_secs: i64) -> IpBlockEntry {
     let now = Utc::now();
@@ -47,7 +67,7 @@ fn domain_entry(domain: &str, expires_in_secs: i64) -> DomainBlockEntry {
 /// IP added to blocklist must be flagged as a threat.
 #[test]
 fn test_blocked_ip_flagged() {
-    let engine = ThreatIntelEngine::new();
+    let engine = configured_engine();
     engine
         .ip_blocklist()
         .add_ip_str("198.51.100.1", spam_entry("198.51.100.1", 3600));
@@ -95,7 +115,7 @@ fn test_malformed_ip_no_panic() {
 /// An IP inside a blocked CIDR must be flagged.
 #[test]
 fn test_cidr_match_inside_range() {
-    let engine = ThreatIntelEngine::new();
+    let engine = configured_engine();
     engine
         .ip_blocklist()
         .add_cidr("198.51.100.0/24", spam_entry("198.51.100.0/24", 3600))
@@ -168,7 +188,7 @@ fn test_expired_entry_purged_and_no_longer_blocked() {
 /// Valid (non-expired) entries must survive a purge run.
 #[test]
 fn test_valid_entry_survives_purge() {
-    let engine = ThreatIntelEngine::new();
+    let engine = configured_engine();
     engine
         .ip_blocklist()
         .add_ip_str("198.51.100.77", spam_entry("198.51.100.77", 86400)); // expires in 24h
@@ -193,7 +213,7 @@ fn test_valid_entry_survives_purge() {
 /// Blocked domain must yield a Block action.
 #[test]
 fn test_blocked_domain_flagged() {
-    let engine = ThreatIntelEngine::new();
+    let engine = configured_engine();
     engine.domain_blocklist().add(
         "evil-phishing-site.com",
         domain_entry("evil-phishing-site.com", 3600),
@@ -224,7 +244,7 @@ fn test_clean_domain_not_flagged() {
 /// so blocking a parent domain automatically blocks all subdomains.
 #[test]
 fn test_subdomain_not_matched_by_base_domain_block() {
-    let engine = ThreatIntelEngine::new();
+    let engine = configured_engine();
     engine
         .domain_blocklist()
         .add("phishing.com", domain_entry("phishing.com", 3600));

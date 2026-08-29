@@ -1290,6 +1290,113 @@ async fn audit_chain_survives_concurrent_appends() {
     assert_eq!(result.entries_checked, 50);
 }
 
+/// E-3 (regression, deterministic): two INDEPENDENT AuditLogger instances —
+/// what two service processes / pods appending to the same database are —
+/// must never fork one tenant's chain, even appending concurrently. The old
+/// code read the chain head from each logger's private in-memory cache, so
+/// logger B built its entries on a head logger A had already superseded (a
+/// fork); the advisory transaction lock plus the authoritative DB head read
+/// in `log()` make the read-head → append critical section cross-process
+/// atomic.
+#[tokio::test]
+async fn audit_chain_survives_concurrent_appends_from_independent_loggers() {
+    let Some(pool) = test_pool("multi_logger", MAIN_SCHEMA).await else {
+        return;
+    };
+    let make_logger = || {
+        compliance::audit_logger::AuditLogger::new(
+            pool.clone(),
+            AuditConfig {
+                retention_days: 365,
+                hash_chain_enabled: true,
+                signing_key: "multi-logger-audit-key-0123456789".into(),
+            },
+        )
+    };
+    let logger_a = std::sync::Arc::new(make_logger());
+    let logger_b = std::sync::Arc::new(make_logger());
+    logger_a.initialize().await.expect("init a");
+    logger_b.initialize().await.expect("init b");
+
+    let tenant = unique_tenant();
+    let ctx = LogContext {
+        tenant_id: Some(tenant.clone()),
+        user_id: None,
+        session_id: None,
+        ip_address: None,
+        user_agent: None,
+    };
+
+    // Seed one entry so both loggers initialize their view of a NON-empty
+    // chain head (the fork-prone state: both caches hold this head).
+    logger_a
+        .log(
+            AuditAction::Create,
+            AuditResource::Subscriber,
+            Some("seed"),
+            serde_json::json!({"seed": true}),
+            AuditOutcome::Success,
+            None,
+            &ctx,
+        )
+        .await
+        .expect("seed entry");
+
+    // Barrier-synchronized concurrent appends from both loggers.
+    const PER_LOGGER: usize = 25;
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let mut handles = Vec::new();
+    for (tag, logger) in [("a", logger_a.clone()), ("b", logger_b.clone())] {
+        let barrier = barrier.clone();
+        let tenant = tenant.clone();
+        handles.push(tokio::spawn(async move {
+            barrier.wait().await;
+            for i in 0..PER_LOGGER {
+                let ctx = LogContext {
+                    tenant_id: Some(tenant.clone()),
+                    user_id: Some(format!("{tag}-{i}")),
+                    session_id: None,
+                    ip_address: None,
+                    user_agent: None,
+                };
+                logger
+                    .log(
+                        AuditAction::Update,
+                        AuditResource::Subscriber,
+                        Some(&format!("{tag}-{i}")),
+                        serde_json::json!({"logger": tag, "i": i}),
+                        AuditOutcome::Success,
+                        None,
+                        &ctx,
+                    )
+                    .await
+                    .expect("log entry persisted");
+            }
+        }));
+    }
+    for h in handles {
+        h.await.expect("join");
+    }
+
+    // Exactly ONE linear chain: seed + 2×PER_LOGGER entries, no fork, no
+    // gap — verified through a fresh logger that re-reads everything.
+    let verifier = make_logger();
+    let result = verifier
+        .verify_chain(Some(&tenant), None, None)
+        .await
+        .unwrap();
+    assert!(
+        result.valid,
+        "two independent loggers must produce one linear chain: {:?}",
+        result.error
+    );
+    assert_eq!(
+        result.entries_checked,
+        1 + 2 * PER_LOGGER,
+        "every append must be on the single chain (no forked/lost entries)"
+    );
+}
+
 /// E-2: archival preserves conflicting originals and verify/export span both
 /// tables.
 #[tokio::test]

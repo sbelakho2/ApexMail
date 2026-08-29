@@ -21,6 +21,15 @@ use crate::types::*;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Truncate a timestamp to whole microseconds — the exact precision Postgres
+/// `TIMESTAMPTZ` stores. Entry hashes cover the rfc3339 timestamp, so any
+/// sub-microsecond digit would be lost on the write/read round-trip and the
+/// hash could never be re-verified (E-3).
+fn truncate_to_micros(ts: DateTime<Utc>) -> DateTime<Utc> {
+    DateTime::<Utc>::from_timestamp(ts.timestamp(), ts.timestamp_subsec_nanos() / 1000 * 1000)
+        .expect("truncating a valid timestamp to microseconds is always valid")
+}
+
 pub struct AuditLogger {
     db: PgPool,
     #[expect(
@@ -29,11 +38,15 @@ pub struct AuditLogger {
     )]
     config: AuditConfig,
     signing_key: Vec<u8>,
-    /// In-memory cache of last hash per chain key. Primary source:/// Redis `audit:lasthash:{key}`, falling back to DB.
+    /// In-memory mirror of the last hash per chain key, warmed by
+    /// `initialize()`. NOT authoritative: since E-3, `log()` re-reads the
+    /// chain head from the database under an advisory lock, because other
+    /// processes may have appended entries this cache has never seen.
     last_hashes: RwLock<HashMap<String, String>>,
-    /// E-1: per-chain append locks. Held across the read-last-hash → INSERT →
+    /// E-1: per-chain append locks. Held across the read-head → INSERT →
     /// cache-update sequence so concurrent `log()` calls cannot fork the hash
-    /// chain by reading the same `previous_hash`.
+    /// chain by reading the same `previous_hash`. In-process fast path only —
+    /// E-3 adds the cross-process advisory transaction lock in `log()`.
     chain_locks: tokio::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
 }
 
@@ -115,6 +128,26 @@ impl AuditLogger {
     // ── Core logging ────────────────────────────────────────
 
     /// Log a single audit event. Returns the persisted entry.
+    ///
+    /// E-3 (chain fork race): the read-head → compute → INSERT critical
+    /// section is serialized ACROSS PROCESSES with a Postgres advisory
+    /// transaction lock (`pg_advisory_xact_lock` keyed on the chain), taken
+    /// in the SAME transaction as the INSERT. The in-process per-chain mutex
+    /// (E-1) remains as a cheap contention reducer, but it cannot see other
+    /// service instances: two loggers (or two pods) that both cached the
+    /// same head used to INSERT two entries with the same `previous_hash`,
+    /// forking the chain. Inside the lock the chain head is re-read from the
+    /// DATABASE (live ∪ archive) — the authoritative value — instead of
+    /// trusting the in-memory cache.
+    ///
+    /// The entry timestamp is truncated to whole microseconds (Postgres
+    /// `TIMESTAMPTZ` stores exactly microseconds) BEFORE hashing, so the
+    /// hashed value survives the write/read round-trip bit-for-bit — a
+    /// nanosecond-precision clock (Linux vDSO) otherwise produced hashes
+    /// that could never be re-verified from the stored row. It is also
+    /// floored to `head.timestamp + 1µs`, keeping timestamps strictly
+    /// increasing per chain so the chain order and the timestamp order
+    /// verification relies on can never disagree.
     #[allow(clippy::too_many_arguments)]
     pub async fn log(
         &self,
@@ -127,19 +160,41 @@ impl AuditLogger {
         ctx: &LogContext,
     ) -> Result<AuditLogEntry, String> {
         let id = Uuid::new_v4().to_string();
-        let timestamp = Utc::now();
         let chain_key = ctx.tenant_id.clone().unwrap_or_else(|| "global".into());
 
-        // E-1: serialize chain appends per chain — read-last-hash, INSERT and
-        // cache update happen under the lock so two concurrent log() calls
-        // can never build on the same previous_hash (chain fork).
+        // E-1: serialize chain appends per chain in-process — cheap fast path
+        // that also cuts advisory-lock churn; correctness comes from the DB
+        // lock below.
         let lock = self.chain_lock(&chain_key).await;
         let _chain_guard = lock.lock().await;
 
-        let previous_hash = {
-            let map = self.last_hashes.read().await;
-            map.get(&chain_key).cloned()
-        };
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
+
+        // E-3: cross-process serialization of the read-head → append critical
+        // section. The lock is transaction-scoped: it is released on COMMIT /
+        // ROLLBACK, so a panicking or crashed appender cannot wedge the chain.
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(format!("audit-chain:{chain_key}"))
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| format!("DB error: {e}"))?;
+
+        // Authoritative chain head (live ∪ archive, F12) under the lock.
+        let head: Option<(String, DateTime<Utc>)> =
+            Self::chain_head(&mut tx, ctx.tenant_id.as_deref()).await?;
+        let previous_hash = head.as_ref().map(|(hash, _)| hash.clone());
+
+        // Microsecond-precision, strictly-increasing per chain (see doc above).
+        let mut timestamp = truncate_to_micros(Utc::now());
+        if let Some((_, head_ts)) = &head {
+            if timestamp <= *head_ts {
+                timestamp = *head_ts + chrono::Duration::microseconds(1);
+            }
+        }
 
         let hash = self.compute_hash(
             &id,
@@ -179,15 +234,60 @@ impl AuditLogger {
             signature,
         };
 
-        self.persist_entry(&entry).await?;
+        Self::persist_entry(&mut tx, &entry).await?;
+        tx.commit().await.map_err(|e| format!("DB error: {e}"))?;
 
-        // Update last hash cache
+        // Update last hash cache (diagnostic mirror; log() itself always
+        // re-reads the authoritative head from the database).
         {
             let mut map = self.last_hashes.write().await;
             map.insert(chain_key, hash);
         }
 
         Ok(entry)
+    }
+
+    /// The current chain head `(hash, timestamp)` for a tenant (or the
+    /// global chain when `tenant_id` is `None`), spanning BOTH the live
+    /// table and the archive (F12 — the chain continues across archival).
+    /// Deployments without an archive table fall back to the live-only head.
+    /// Caller must already hold the chain's advisory lock.
+    async fn chain_head(
+        tx: &mut sqlx::PgConnection,
+        tenant_id: Option<&str>,
+    ) -> Result<Option<(String, DateTime<Utc>)>, String> {
+        const SPANNING: &str = "SELECT hash, timestamp FROM (
+               SELECT tenant_id, timestamp, hash FROM audit_logs
+               UNION ALL
+               SELECT tenant_id, timestamp, hash FROM audit_logs_archive
+             ) entries
+             WHERE CASE WHEN $1::text IS NULL THEN tenant_id IS NULL
+                        ELSE tenant_id = $1 END
+             ORDER BY timestamp DESC
+             LIMIT 1";
+        const LIVE_ONLY: &str = "SELECT hash, timestamp FROM audit_logs
+             WHERE CASE WHEN $1::text IS NULL THEN tenant_id IS NULL
+                        ELSE tenant_id = $1 END
+             ORDER BY timestamp DESC
+             LIMIT 1";
+
+        let row: Option<(String, DateTime<Utc>)> = match sqlx::query_as(SPANNING)
+            .bind(tenant_id)
+            .fetch_optional(&mut *tx)
+            .await
+        {
+            Ok(row) => row,
+            Err(e) if is_undefined_table(&e) => {
+                tracing::warn!("audit_logs_archive absent — chain head read from live table only");
+                sqlx::query_as(LIVE_ONLY)
+                    .bind(tenant_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| format!("DB error: {e}"))?
+            }
+            Err(e) => return Err(format!("DB error: {e}")),
+        };
+        Ok(row)
     }
 
     // ── Convenience wrappers ────────────────────────────────
@@ -848,7 +948,13 @@ impl AuditLogger {
         Ok(hex::encode(mac.finalize().into_bytes()))
     }
 
-    async fn persist_entry(&self, entry: &AuditLogEntry) -> Result<(), String> {
+    /// Persist an entry INSIDE the caller's transaction — the INSERT commits
+    /// atomically with the advisory chain lock held by `log()`, so the head
+    /// read and the append are one indivisible critical section.
+    async fn persist_entry(
+        tx: &mut sqlx::PgConnection,
+        entry: &AuditLogEntry,
+    ) -> Result<(), String> {
         sqlx::query(
             "INSERT INTO audit_logs
                (id, tenant_id, user_id, session_id, action, resource, resource_id,
@@ -872,7 +978,7 @@ impl AuditLogger {
         .bind(&entry.hash)
         .bind(&entry.previous_hash)
         .bind(&entry.signature)
-        .execute(&self.db)
+        .execute(&mut *tx)
         .await
         .map_err(|e| format!("DB error: {e}"))?;
 
@@ -1547,5 +1653,27 @@ mod tests {
             let map = logger.last_hashes.blocking_read();
             assert_eq!(map.get("tenant-a").unwrap(), "hash123");
         }
+    }
+
+    /// E-3: entry timestamps are hashed at microsecond precision because
+    /// Postgres `TIMESTAMPTZ` stores whole microseconds. On nanosecond
+    /// clocks (Linux vDSO) an untruncated `Utc::now()` hashed 9 fractional
+    /// digits that the stored row could never reproduce on read-back, so
+    /// `verify_chain` failed with "Hash mismatch at entry …" even for a
+    /// single sequential append. `log()` therefore truncates with
+    /// `truncate_to_micros` before hashing; this pins that invariant.
+    #[test]
+    fn test_appended_timestamps_are_microsecond_aligned() {
+        let mut submicro = 0;
+        for _ in 0..100_000 {
+            let ts = truncate_to_micros(Utc::now());
+            if !ts.timestamp_subsec_nanos().is_multiple_of(1000) {
+                submicro += 1;
+            }
+        }
+        assert_eq!(
+            submicro, 0,
+            "truncate_to_micros must yield PG-round-trippable microsecond timestamps"
+        );
     }
 }
