@@ -4423,7 +4423,7 @@ fn fresh_challenges_keep_the_first_error_precedence() {
 fn fresh_cheap_phase_follows_the_php_ip_before_deployment_precedence() {
     // The cheap-phase first-error order mirrors the PHP
     // cheapPhaseCheck: shape → TTL → scope+request binding → IP binding →
-    // region/policy/issuer → floor. A pending record failing BOTH the IP
+    // region/policy/issuer → floor. A pending record failing both the IP
     // binding and a deployment expectation (the region here) reports the
     // IP error, exactly like the PHP verifier — the cross-language
     // error-code parity for multi-failure records.
@@ -5163,17 +5163,17 @@ fn resume_commit_requires_current_claim_ownership() {
 }
 
 // ── single-connection verify op counts (hermetic fake endpoint) ──────
-// The miniature endpoint lives in `tests/common` (shared with the HKDF
+// The miniature endpoint lives in `tests/common` (shared with the `HKDF`
 // derivation-cache test binary): it records every command tagged with
 // its connection, answers the verifier's exact command surface from a
-// tiny record store, and drives the NOSCRIPT-then-load dance once.
+// tiny record store, and drives the `NOSCRIPT`-then-load dance once.
 
 #[test]
 fn verify_costs_one_checkout_and_three_store_commands_on_the_happy_path() {
     // The single-connection verify path: a full happy-path verification
     // performs exactly ONE pool checkout (observed as the single r2d2
-    // validation PING) and THREE store commands — the runtime-state GET,
-    // the consume EVALSHA and the commit EVALSHA — all on ONE TCP
+    // validation PING) and three store commands — the runtime-state GET,
+    // the consume `EVALSHA` and the commit `EVALSHA` — all on ONE TCP
     // connection (no checkout churn, no script re-load: the Script
     // objects are cached per store and the endpoint's script cache stays
     // warm). Hermetic: no Redis URL needed.
@@ -5265,7 +5265,7 @@ fn verify_costs_one_checkout_and_three_store_commands_on_the_happy_path() {
         0,
         "no script re-load: the Script objects are cached per store and the endpoint cache is warm"
     );
-    // Every command of the measured window rode the SAME pooled
+    // Every command of the measured window rode the same pooled
     // connection (r2d2 fills the idle pool to max_size in the background,
     // so the endpoint may hold several TCP connections — what matters is
     // that this verification checked out exactly one of them for all
@@ -5283,7 +5283,7 @@ fn cheap_failure_costs_one_checkout_and_two_store_commands() {
     // The cheap-failure path of the same single-connection layout: a
     // pending record failing a cheap check (wrong scope) performs ONE
     // checkout (one PING), the runtime-state GET and the fused
-    // delete-if-pending cleanup EVALSHA — two store commands, no consume,
+    // delete-if-pending cleanup `EVALSHA` — two store commands, no consume,
     // no commit.
     let (url, endpoint) = FakeEndpoint::spawn();
     let prefix = prefix("opcount-fail");
@@ -5368,7 +5368,7 @@ fn cheap_failure_costs_one_checkout_and_two_store_commands() {
 #[test]
 fn fresh_valid_outcome_carries_the_server_measured_solve_duration() {
     // The PHP solveDurationMs parity: the span between the record's
-    // issued_at_ns and THIS verification's receipt instant — the same
+    // issued_at_ns and this verification's receipt instant — the same
     // single `now_ns` the minimum-duration floor reads, never the
     // client-reported token duration (encode_token always reports 5000).
     let Some(url) = redis_url() else { return };
@@ -5582,7 +5582,7 @@ fn resume_commit_valid_carries_the_server_measured_solve_duration() {
 
 #[test]
 fn skewed_receipt_still_verifies_but_the_duration_is_null() {
-    // A receipt 2 s BEFORE issuance is within the 5 s clock-skew
+    // A receipt 2 s before issuance is within the 5 s clock-skew
     // tolerance: the floor check is skipped (the proof still verifies)
     // and the exposed duration is null — exactly the PHP semantics, on
     // both the fresh path and the stored-result replay.
@@ -5700,7 +5700,7 @@ fn invalid_outcomes_never_carry_a_solve_duration() {
 #[test]
 fn one_receipt_instant_feeds_both_the_floor_and_the_duration() {
     // The single-receipt-instant property at the integration boundary: a
-    // solve received at EXACTLY the configured floor boundary passes the
+    // solve received at exactly the configured floor boundary passes the
     // server-measured minimum-duration check and exposes that exact
     // boundary as its duration — the floor and the outcome share the one
     // `now_ns` the caller resolved; a second, later clock read would

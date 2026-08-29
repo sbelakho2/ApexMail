@@ -35,13 +35,13 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests\Fixtures;
  */
 final class FakePredisClient extends \Predis\Client
 {
-    /** @var array<string, string> sha => script body registry (SCRIPT LOAD and EVAL both populate it, like a real Redis) */
+    /** @var array<string, string> sha => script body registry (`SCRIPT` `LOAD` and EVAL both populate it, like a real Redis) */
     private array $scriptsBySha = [];
 
-    /** @var list<string> the body of every script registered through SCRIPT LOAD */
+    /** @var list<string> the body of every script registered through `SCRIPT` `LOAD` */
     private array $scriptLoads = [];
 
-    /** @var list<string> the sha of every EVALSHA issued so far */
+    /** @var list<string> the sha of every `EVALSHA` issued so far */
     private array $evalshas = [];
     /** @var array<string, array<string, float>> sorted sets: key => member => score */
     public array $zsets = [];
@@ -477,7 +477,7 @@ final class FakePredisClient extends \Predis\Client
         $keys = \array_slice($keysAndArgs, 0, $numKeys);
         $rest = \array_slice($keysAndArgs, $numKeys);
         // A real Redis caches the body of every EVAL under its sha too,
-        // so a later EVALSHA for the same script succeeds.
+        // so a later `EVALSHA` for the same script succeeds.
         $this->scriptsBySha[sha1($script)] = $script;
 
         if (str_contains($script, 'Outstanding challenge issuance')) {

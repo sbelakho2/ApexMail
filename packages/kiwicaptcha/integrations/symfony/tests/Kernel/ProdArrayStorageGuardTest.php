@@ -599,7 +599,7 @@ final class ProdArrayStorageGuardTest extends TestCase
     {
         // `rate_limit_cache: '%kiwi.rate_pool%'` with the parameter
         // pointing at an ArrayAdapter-backed pool: the placeholder must
-        // be RESOLVED before the lookup, so the in-memory-adapter refusal
+        // be resolved before the lookup, so the in-memory-adapter refusal
         // fires instead of the unresolved id string slipping past
         // hasDefinition() as an opaque external id.
         $this->expectException(\LogicException::class);

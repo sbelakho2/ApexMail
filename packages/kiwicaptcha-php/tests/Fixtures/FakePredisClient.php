@@ -73,16 +73,16 @@ final class FakePredisClient extends \Predis\Client
     /** @var list<string> the key of every GET issued so far */
     public array $getKeys = [];
 
-    /** @var list<array{script: string, keys: list<string>}> every Lua invocation's key list (EVAL or EVALSHA) */
+    /** @var list<array{script: string, keys: list<string>}> every Lua invocation's key list (EVAL or `EVALSHA`) */
     public array $evals = [];
 
-    /** @var list<string> the sha of every EVALSHA issued so far */
+    /** @var list<string> the sha of every `EVALSHA` issued so far */
     public array $evalshas = [];
 
-    /** @var list<string> the body of every script registered through SCRIPT LOAD */
+    /** @var list<string> the body of every script registered through `SCRIPT` `LOAD` */
     public array $scriptLoads = [];
 
-    /** @var array<string, string> sha => script body registry (SCRIPT LOAD and EVAL both populate it, like a real Redis) */
+    /** @var array<string, string> sha => script body registry (`SCRIPT` `LOAD` and EVAL both populate it, like a real Redis) */
     public array $scriptsBySha = [];
 
     public function __construct()
@@ -213,7 +213,7 @@ final class FakePredisClient extends \Predis\Client
         $keys = \array_slice($keysAndArgs, 0, $numKeys);
         $args = \array_slice($keysAndArgs, $numKeys);
         // A real Redis caches the body of every EVAL under its sha too,
-        // so a later EVALSHA for the same script succeeds.
+        // so a later `EVALSHA` for the same script succeeds.
         $this->scriptsBySha[sha1($script)] = $script;
         $this->evals[] = ['script' => $script, 'keys' => array_map('strval', $keys)];
 

@@ -454,7 +454,7 @@ final class Verifier
             return VerifyOutcome::malformedToken($e->getMessage());
         }
 
-        // The server receipt clock, resolved ONCE: the minimum-duration
+        // The server receipt clock, resolved once: the minimum-duration
         // floor of the cheap phase and the exposed server-measured solve
         // duration ({@see self::measurableSolveDurationMs()}) read the
         // same receipt instant, never two separately timed microtime

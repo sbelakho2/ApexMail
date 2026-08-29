@@ -86,7 +86,7 @@ final class DecoyFieldTest extends TestCase
         return $counter - 1;
     }
 
-    // ── (a) armed issuance: pool name, 19 segments, decoy LAST ──────
+    // ── (a) armed issuance: pool name, 19 segments, decoy last ──────
 
     public function testArmedIssuanceSignsAPoolNameAsTheFinalCanonicalSegment(): void
     {
@@ -104,7 +104,7 @@ final class DecoyFieldTest extends TestCase
         self::assertSame($decoy, $record->decoyField);
 
         // The canonical signing input: 18 base fields + the decoy segment,
-        // decoy LAST (after the kid), matching the Rust mirror.
+        // decoy last (after the kid), matching the Rust mirror.
         $canonical = $this->decodedCanonical($challenge);
         $segments = explode('|', $canonical);
         self::assertCount(19, $segments, 'v2 canonical input: 18 base fields + the decoy segment');
@@ -112,7 +112,7 @@ final class DecoyFieldTest extends TestCase
         self::assertSame((string) ($record->kid ?? 1), $segments[17], 'the kid stays immediately before the decoy');
         self::assertStringEndsWith('|'.$decoy, $canonical);
 
-        // Two armed issuances pick independently (a fresh CSPRNG draw per
+        // Two armed issuances pick independently (a fresh `CSPRNG` draw per
         // challenge; across a handful of issuances at least two names
         // appear — the picks must not collapse to a constant).
         $seen = [];
@@ -143,7 +143,7 @@ final class DecoyFieldTest extends TestCase
             5,
         ));
 
-        // An explicit null decoy renders NOTHING extra — byte-identical
+        // An explicit null decoy renders nothing extra — byte-identical
         // to the legacy call without the argument.
         self::assertSame(self::LEGACY_CANONICAL, Issuer::canonicalPayload(
             'nonce123',

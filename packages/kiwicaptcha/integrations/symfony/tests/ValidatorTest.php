@@ -553,10 +553,10 @@ final class ValidatorTest extends TestCase
         // The classic replay of a solved token — a stored-valid,
         // same-identity retained-state outcome with no explicit
         // operation id — used to return the replayed_token violation
-        // with ZERO risk-model signal. The replay branch now feeds the
+        // with zero risk-model signal. The replay branch now feeds the
         // ReplayAttempt event (AlreadyConsumed through the shared
         // RiskFeedback taxonomy), guarded by a resolved client IP and
-        // fired BEFORE the violation is built.
+        // fired before the violation is built.
         $challenge = $this->issuer->issue('login', '198.51.100.7');
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
@@ -634,12 +634,12 @@ final class ValidatorTest extends TestCase
 
     public function testAmbiguousForwardingFeedsMalformedEvidenceOnTheSocketPeerAndViolates(): void
     {
-        // A trusted peer sending BOTH forwarding headers is partially
+        // A trusted peer sending both forwarding headers is partially
         // attacker-triggerable (a client behind an appending proxy can
         // present both). The refusal now feeds MalformedToken evidence
         // (the closest existing kind — RiskFeedback has no dedicated
-        // ambiguous-identity bucket), attributed to the DIRECT SOCKET
-        // PEER only: the canonical client IP is exactly what could not
+        // ambiguous-identity bucket), attributed to the direct socket
+        // peer only: the canonical client IP is exactly what could not
         // be resolved, so a header-derived guess is never the identity.
         $challenge = $this->issuer->issue('login', '198.51.100.7');
         usleep(($challenge->minDurationMs + 10) * 1000);
@@ -676,7 +676,7 @@ final class ValidatorTest extends TestCase
         $obs = $risk['store']->observations[0];
         self::assertSame($this->expectedSourcePseudonym('203.0.113.10', $obs), $obs->sourceId, 'the evidence is attributed to the direct socket peer (the trusted proxy), never a header-derived guess');
 
-        // The ambiguous-identity refusal fires BEFORE the token is even
+        // The ambiguous-identity refusal fires before the token is even
         // decoded: a garbage token behind the same ambiguous proxy pair
         // yields the identical single MalformedToken evidence (the
         // branch returns before the failure path could double-feed).

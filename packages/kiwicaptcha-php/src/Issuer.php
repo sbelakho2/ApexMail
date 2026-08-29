@@ -250,7 +250,7 @@ final class Issuer
         $minDurationMs = $this->config->minDurationMs
             ?? $this->deriveMinDurationMs($targetBits);
 
-        // The decoy (honeypot) field name, when armed, was picked BEFORE
+        // The decoy (honeypot) field name, when armed, was picked before
         // the canonical input is built: it is an authenticated issuance
         // parameter (the final `|<decoy_field>` segment), signed like
         // every other.
@@ -555,8 +555,8 @@ final class Issuer
             $kid,
         );
 
-        // The decoy segment is appended ONLY when armed: null renders
-        // NOTHING extra, so the unarmed canonical stays byte-identical to
+        // The decoy segment is appended only when armed: null renders
+        // nothing extra, so the unarmed canonical stays byte-identical to
         // the legacy 18-field format.
         return $decoyField !== null ? $base.'|'.$decoyField : $base;
     }

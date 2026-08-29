@@ -235,7 +235,7 @@ pub struct ChallengeRecord {
     /// The server-issued decoy (honeypot) form-field name armed for this
     /// challenge (see [`DECOY_FIELD_POOL`]). `None` = no decoy armed (the
     /// default, and the shape every pre-decoy record carries). The name is
-    /// an authenticated v2 canonical field — the FINAL segment
+    /// an authenticated v2 canonical field — the final segment
     /// `|<decoy_field>`, appended after the `kid` (the v2 canonical
     /// signing input, documented below) — so a stored/tampered record
     /// cannot change or drop it without breaking the signature.
@@ -425,7 +425,7 @@ pub fn hash_ip(ip: &str, salt: &str) -> String {
 /// "\\0" || family || canonical_ip_bytes)` where `family` is a single byte
 /// `0x04` (IPv4) or `0x06` (IPv6), `canonical_ip_bytes` is the inet_pton
 /// byte sequence with IPv4-mapped IPv6 addresses (`::ffff:a.b.c.d`) normalized
-/// to 4-byte IPv4, and `K_ip_bind` is the HKDF-derived IP-binding purpose key
+/// to 4-byte IPv4, and `K_ip_bind` is the `HKDF`-derived IP-binding purpose key
 /// (see [`crate::keys::DerivedKeys`]; never the master secret
 /// itself).
 ///
@@ -439,10 +439,10 @@ pub fn binding_tag(nonce: &str, ip: &str, secret: &str) -> Result<String, SignEr
     binding_tag_with_keys(nonce, ip, &DerivedKeys::from_master(secret, None))
 }
 
-/// The nonce-bound IP binding tag computed with an ALREADY derived
-/// IP-binding key — the cached-HKDF seam for the production verifier,
+/// The nonce-bound IP binding tag computed with an already derived
+/// IP-binding key — the cached-`HKDF` seam for the production verifier,
 /// which derives the purpose keys once per key id (see
-/// [`crate::keys::DerivedKeys`]) instead of re-running HKDF on every
+/// [`crate::keys::DerivedKeys`]) instead of re-running `HKDF` on every
 /// check. Identical output to [`binding_tag`] for the same master secret.
 pub(crate) fn binding_tag_with_keys(
     nonce: &str,
@@ -533,15 +533,15 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 ///   from [`DECOY_FIELD_POOL`], so it can never contain the `|` separator
 ///   (the pool alphabet is `[a-z_]`; validation accepts `[A-Za-z0-9_-]`
 ///   only, 1..=64 bytes).
-/// - The segment is appended ONLY when a decoy is armed. `None` renders
-///   NOTHING extra — the canonical string is byte-identical to the
+/// - The segment is appended only when a decoy is armed. `None` renders
+///   nothing extra — the canonical string is byte-identical to the
 ///   pre-extension format, so outstanding challenges and cross-language
 ///   records keep verifying unchanged across the upgrade, and the extension
 ///   is invisible until a deployment opts in.
 /// - PHP parity (exact recipe for the PHP core): build the same 18-field
 ///   base string, then append `'|' . $decoyField` if and only if the record
 ///   carries a non-null `decoy_field`; sign/HMAC-verify the result with the
-///   HKDF-derived challenge key (`K_challenge`) exactly as before. The
+///   `HKDF`-derived challenge key (`K_challenge`) exactly as before. The
 ///   stored record JSON carries the optional string key `decoy_field`
 ///   (absent when null — not a JSON `null` key); the client-facing
 ///   challenge response carries the optional key `decoy_field` with the
@@ -575,7 +575,7 @@ pub(crate) fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
 
 /// Sign a canonical input with the secret key, returning a hex HMAC tag
 /// (protocol v1 legacy path — the master key is used directly; v2 records use
-/// the HKDF-derived challenge key via [`sign_canonical_v2`]).
+/// the `HKDF`-derived challenge key via [`sign_canonical_v2`]).
 ///
 /// The secret key must be at least 16 bytes (the same minimum the PHP
 /// implementation enforces); 32 random bytes is the recommended size. Shorter
@@ -590,7 +590,7 @@ fn sign_canonical(canonical: &str, secret_key: &str) -> Result<String, SignError
     Ok(hex::encode(&mac.finalize().into_bytes()))
 }
 
-/// Sign a canonical input with the HKDF-derived challenge-signing purpose key
+/// Sign a canonical input with the `HKDF`-derived challenge-signing purpose key
 /// (`K_challenge` — protocol v2). The master secret is never used
 /// directly as the signing key.
 pub(crate) fn sign_canonical_v2(canonical: &str, secret_key: &str) -> Result<String, SignError> {
@@ -633,7 +633,7 @@ pub fn verify_signature(
 /// Verify a signature over the protocol v2 canonical input of a record.
 ///
 /// Same constant-time guarantee as [`verify_signature`]. The signature is
-/// checked against the HKDF-derived challenge-signing key (`K_challenge`),
+/// checked against the `HKDF`-derived challenge-signing key (`K_challenge`),
 /// never the master secret directly.
 pub fn verify_signature_v2(
     record: &ChallengeRecord,
@@ -643,8 +643,8 @@ pub fn verify_signature_v2(
     verify_canonical_v2(&canonical_signing_input_v2(record), signature, secret_key)
 }
 
-/// Verify a v2 signature with an ALREADY derived challenge-signing key —
-/// the cached-HKDF seam for the production verifier (the purpose keys are
+/// Verify a v2 signature with an already derived challenge-signing key —
+/// the cached-`HKDF` seam for the production verifier (the purpose keys are
 /// derived once per key id, see [`crate::keys::DerivedKeys`]). Identical
 /// verdicts to [`verify_signature_v2`] for the same master secret; same
 /// constant-time guarantee (the full HMAC tag is processed regardless of
@@ -679,7 +679,7 @@ fn verify_canonical(canonical: &str, signature: &str, secret_key: &str) -> Resul
     Ok(mac.verify_slice(&signature_bytes).is_ok())
 }
 
-/// Verify a canonical input against the HKDF-derived challenge key (protocol
+/// Verify a canonical input against the `HKDF`-derived challenge key (protocol
 /// v2). Same constant-time guarantee as [`verify_canonical`].
 fn verify_canonical_v2(
     canonical: &str,
@@ -831,7 +831,7 @@ pub const SHA256_SOLVER_HASHES_PER_SEC: f64 = 5e9;
 
 /// The server-side pool of decoy (honeypot) form-field names. When a
 /// deployment arms the decoy surface ([`issue_challenge_with_decoy`]), the
-/// issuer picks one name uniformly at random (CSPRNG) per issuance: the
+/// issuer picks one name uniformly at random (`CSPRNG`) per issuance: the
 /// names look like ordinary optional form fields a generic bot filler
 /// would populate, while a human never sees them (the widget driver
 /// renders the chosen name as a hidden, never-auto-filled text input).
@@ -842,7 +842,7 @@ pub const SHA256_SOLVER_HASHES_PER_SEC: f64 = 5e9;
 /// canonical-payload separator or any other structurally meaningful
 /// character. PHP maintains the identical pool (same names, same order);
 /// the picked name is authenticated by the v2 signature, so the two cores
-/// never need to agree on the PICK, only on the pool's alphabet and the
+/// never need to agree on the pick, only on the pool's alphabet and the
 /// canonical-format extension documented on
 /// [`canonical_signing_input_v2`].
 pub const DECOY_FIELD_POOL: &[&str] = &[
@@ -870,7 +870,7 @@ pub(crate) fn valid_decoy_field_name(s: &str) -> bool {
 }
 
 /// Pick a random decoy field name from [`DECOY_FIELD_POOL`] with the
-/// CSPRNG (never a weak/insecure fallback — an RNG failure propagates to
+/// `CSPRNG` (never a weak/insecure fallback — an RNG failure propagates to
 /// the caller as [`SignError::Rng`], exactly like the nonce/salt draws).
 fn pick_decoy_field() -> Result<&'static str, SignError> {
     let byte = security_random::<1>().map_err(|_| SignError::Rng)?[0];
@@ -1036,7 +1036,7 @@ pub fn issue_challenge(
 /// (`DecoyFieldSubmitted`, `honeypot_hit`). Identical to
 /// [`issue_challenge`] in every other respect (same wire format, same
 /// signing, same storage); when `arm_decoy_field` is true the issuer picks
-/// a random field name from the server-side [`DECOY_FIELD_POOL`] (CSPRNG;
+/// a random field name from the server-side [`DECOY_FIELD_POOL`] (`CSPRNG`;
 /// a fresh independent pick per issuance, so two challenges never share a
 /// predictable decoy), sets it on the client-facing
 /// [`IssuedChallenge::decoy_field`] (the widget driver renders the hidden
@@ -1196,10 +1196,10 @@ fn issue_challenge_inner(
     // parameter (algorithm, difficulty, TTL, salt, …) can be tampered with
     // without breaking the signature. The challenge string is
     // `base64(canonical).hex_tag` — same structure as v1. The signature is
-    // computed with the HKDF-derived challenge key, never the
+    // computed with the `HKDF`-derived challenge key, never the
     // master secret directly.
     //
-    // The decoy (honeypot) field name, when armed, is picked BEFORE the
+    // The decoy (honeypot) field name, when armed, is picked before the
     // canonical input is built: it is an authenticated issuance parameter
     // (the final `|<decoy_field>` segment), signed like every other.
     let decoy_field: Option<String> = if arm_decoy_field {
@@ -2112,7 +2112,7 @@ mod tests {
         let decoded = B64.decode(payload).expect("challenge payload decodes");
         assert!(String::from_utf8_lossy(&decoded).ends_with(&decoy));
 
-        // Two armed issuances pick independently (a fresh CSPRNG draw per
+        // Two armed issuances pick independently (a fresh `CSPRNG` draw per
         // challenge; across a handful of issuances at least two names
         // appear — the picks must not collapse to a constant).
         let mut seen = std::collections::HashSet::new();

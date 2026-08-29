@@ -287,7 +287,7 @@ pub enum VerifyOutcome {
         /// epoch microseconds) and this verification's receipt instant —
         /// unforgeable behavioral evidence the risk layer can consume as a
         /// graded signal. The client-reported token `duration_ms` is
-        /// forgeable and is NEVER consulted; only server-written
+        /// forgeable and is never consulted; only server-written
         /// timestamps feed this value. Mirrors the PHP
         /// `VerifyOutcome::solveDurationMs()`: `None` when no duration
         /// was measurable — a record without an issuance clock
@@ -672,7 +672,7 @@ pub(crate) fn check_argon2_ceilings(record: &ChallengeRecord) -> Result<(), Veri
 ///    records can never drive expensive verification work.
 /// 3. Re-verify the HMAC signature over the protocol-appropriate canonical
 ///    input (v1 for `protocol_version == 1` records, v2 otherwise; v2
-///    signatures use the HKDF-derived challenge key). When
+///    signatures use the `HKDF`-derived challenge key). When
 ///    `secrets_by_kid` is configured, the record's `kid` selects the secret:
 ///    an unknown — or future — kid rejects with
 ///    [`VerifyError::UnknownKid`] before any signature work. A revoked kid
@@ -731,7 +731,7 @@ pub(crate) fn real_now_unix() -> u64 {
 /// milliseconds: the span between the record's high-resolution
 /// issuance timestamp (`issued_at_ns`, epoch microseconds written by
 /// the issuing host) and this verification's receipt instant — the
-/// SAME single receipt the server-measured minimum-duration floor
+/// same single receipt the server-measured minimum-duration floor
 /// reads, never a second clock read. Carried on every valid outcome
 /// as unforgeable behavioral evidence for the risk layer — the
 /// client-reported token duration is forgeable and never consulted.
@@ -882,7 +882,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     //     binding is disabled (BindingMode::None) and the check is skipped; a
     //     non-empty tag means the challenge is bound, so a missing client IP
     //     fails closed (MissingClientIp) instead of silently skipping the
-    //     check. Checked BEFORE the region/policy/issuer expectations, the
+    //     check. Checked before the region/policy/issuer expectations, the
     //     PHP cheapPhaseCheck precedence (shape → TTL → scope+request
     //     binding → IP binding → deployment expectations → floor), so a
     //     record failing several invariants reports the same error code in
@@ -1015,7 +1015,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     if leading_zero_bits(&hash) >= ctx.record.target_bits {
         // The outcome carries the consumed canonical nonce (jti) so callers
         // can correlate the result without re-decoding the solution. The
-        // server-measured solve duration is computed from the SAME receipt
+        // server-measured solve duration is computed from the same receipt
         // instant the minimum-duration floor read above (`ctx.now_ns`),
         // never a second clock read.
         VerifyOutcome::Valid {
@@ -1425,7 +1425,7 @@ mod tests {
     fn generic_path_follows_the_php_ip_before_deployment_precedence() {
         // The generic verifier's first-error order mirrors the PHP
         // cheapPhaseCheck: shape → TTL → scope + request binding → IP
-        // binding → region/policy/issuer → floor. A record failing BOTH
+        // binding → region/policy/issuer → floor. A record failing both
         // the IP binding and a deployment expectation reports the IP
         // error, exactly like the PHP core (cross-language error-code
         // parity for multi-failure records).
@@ -4673,7 +4673,7 @@ mod tests {
 
     #[test]
     fn receipt_preceding_issuance_within_the_skew_tolerance_is_unmeasurable() {
-        // A receipt 2 s BEFORE issuance: within the 5 s skew tolerance the
+        // A receipt 2 s before issuance: within the 5 s skew tolerance the
         // two hosts' clocks are unsynced, so the elapsed time cannot be
         // measured reliably — the floor check is skipped (the proof still
         // verifies) and the exposed duration is null, exactly the PHP
@@ -4715,7 +4715,7 @@ mod tests {
     #[test]
     fn one_receipt_instant_feeds_both_the_floor_and_the_duration() {
         // The single-receipt-instant property: the exposed duration is
-        // computed from the SAME now_ns the minimum-duration floor reads
+        // computed from the same now_ns the minimum-duration floor reads
         // (never a second clock read). A solve at exactly the floor
         // boundary passes the floor and exposes that exact boundary as
         // its duration — a second, later read would report a larger span.

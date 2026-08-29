@@ -145,7 +145,7 @@ final class RedisStorageEvalShaTest extends TestCase
         $this->resetCounters($client);
 
         // First invocation: the sha is established with exactly one
-        // SCRIPT LOAD, then the script runs through EVALSHA.
+        // `SCRIPT` `LOAD`, then the script runs through `EVALSHA`.
         $op($storage, self::NONCE);
         $loads = $client->scriptLoads;
         self::assertCount(1, $loads, 'the first invocation SCRIPT LOADs the script exactly once');
@@ -156,8 +156,8 @@ final class RedisStorageEvalShaTest extends TestCase
 
         $this->resetCounters($client);
 
-        // Second invocation: the cached sha serves — no SCRIPT LOAD, no
-        // body, the same sha through EVALSHA.
+        // Second invocation: the cached sha serves — no `SCRIPT` `LOAD`, no
+        // body, the same sha through `EVALSHA`.
         $op($storage, self::NONCE);
         self::assertSame([], $client->scriptLoads, 'the cached sha must serve; no SCRIPT LOAD on the second invocation');
         self::assertCount(1, $client->evalshas, 'the second invocation runs the script through EVALSHA');
@@ -165,7 +165,7 @@ final class RedisStorageEvalShaTest extends TestCase
         self::assertSame([], $this->commands($client, 'EVAL'), 'the script body is never shipped through plain EVAL');
         self::assertCount(1, $client->evals, 'exactly one Lua invocation ran');
 
-        // No EVALSHA argument is the script body: the first argument is
+        // No `EVALSHA` argument is the script body: the first argument is
         // the 40-hex sha and nothing carries the Lua source.
         foreach ($this->commands($client, 'EVALSHA') as $call) {
             self::assertSame(1, preg_match('/^[0-9a-f]{40}$/', (string) $call[1][0]), 'EVALSHA sends the sha, not a body');
@@ -177,10 +177,10 @@ final class RedisStorageEvalShaTest extends TestCase
 
     public function testNoScriptIsRepairedByOneReloadAndAnEvalShaRetry(): void
     {
-        // A server-side script-cache loss (SCRIPT FLUSH or a restart):
+        // A server-side script-cache loss (`SCRIPT` `FLUSH` or a restart):
         // the cached sha no longer resolves, the server answers
-        // NOSCRIPT, and the storage reloads once and retries through
-        // EVALSHA — the body is still never shipped through plain EVAL.
+        // `NOSCRIPT`, and the storage reloads once and retries through
+        // `EVALSHA` — the body is still never shipped through plain EVAL.
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
         $storage->store($this->makeRecord());

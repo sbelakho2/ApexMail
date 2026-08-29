@@ -68,7 +68,7 @@ final class ArrayStorageExpiryTest extends TestCase
 
         // The clock passes expires_at: the key is gone, exactly like a
         // Redis TTL expiry — every lookup and transition reports
-        // absence, including for the RETAINED consumed envelope.
+        // absence, including for the retained consumed envelope.
         $this->clock += 61;
 
         self::assertNull($storage->find('expired-nonce'), 'an expired record is absent to find()');
@@ -115,12 +115,12 @@ final class ArrayStorageExpiryTest extends TestCase
     public function testHardCapEvictsTheOldestExpiringEntriesFirst(): void
     {
         $storage = $this->storage(maxEntries: 3);
-        $storage->store($this->makeRecord('a', $this->clock + 300)); // expires LAST
-        $storage->store($this->makeRecord('b', $this->clock + 100)); // expires FIRST
+        $storage->store($this->makeRecord('a', $this->clock + 300)); // expires last
+        $storage->store($this->makeRecord('b', $this->clock + 100)); // expires first
         $storage->store($this->makeRecord('c', $this->clock + 200));
         self::assertSame(3, $this->retainedCount($storage));
 
-        // At the cap, the next insert drops the oldest-EXPIRING entry
+        // At the cap, the next insert drops the oldest-expiring entry
         // ('b'), never the oldest-inserted ('a').
         $storage->store($this->makeRecord('d', $this->clock + 400));
 

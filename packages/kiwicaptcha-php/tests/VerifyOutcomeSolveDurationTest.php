@@ -70,7 +70,7 @@ final class VerifyOutcomeSolveDurationTest extends TestCase
         --$counter;
 
         // The token reports a client-chosen 5000ms duration: the exposed
-        // duration must NEVER be this forgeable value.
+        // duration must never be this forgeable value.
         return [$storage, $record, SolutionToken::create($challenge->nonce, $counter, 5000, [])->encode()];
     }
 
@@ -130,7 +130,7 @@ final class VerifyOutcomeSolveDurationTest extends TestCase
         $client = new FakePredisClient();
         [$storage, $record, $token] = $this->issueAndSolve($client, 'dur-skew-');
 
-        // Receipt 2s BEFORE issuance: within the 5s skew tolerance the
+        // Receipt 2s before issuance: within the 5s skew tolerance the
         // two hosts' clocks are unsynced, so the elapsed time cannot be
         // measured reliably — exactly the semantics of the
         // minimum-duration floor's skip. The verification itself still
@@ -180,7 +180,7 @@ final class VerifyOutcomeSolveDurationTest extends TestCase
         $client = new FakePredisClient();
         [$storage, $record, $token] = $this->issueAndSolve($client, 'dur-invalid-');
 
-        // A replay of a stored success WITHOUT the operation identity is
+        // A replay of a stored success without the operation identity is
         // refused (AlreadyConsumed) — no duration.
         $storage->consume($record->nonce);
         self::assertTrue($storage->commitResult($record->nonce, true, null));

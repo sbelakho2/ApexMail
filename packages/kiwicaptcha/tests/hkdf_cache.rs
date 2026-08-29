@@ -1,17 +1,17 @@
-//! The HKDF derivation-cache counting test — a dedicated test binary on
+//! The `HKDF` derivation-cache counting test — a dedicated test binary on
 //! purpose: the counting seam
 //! (`kiwicaptcha::keys::from_master_call_count`) is PROCESS-global, and
 //! the main lib test binary runs issuance/verification tests in parallel
-//! threads that each derive HKDF keys, polluting any exact-count window.
-//! In this binary the counting test is the ONLY test, so the counts are
+//! threads that each derive `HKDF` keys, polluting any exact-count window.
+//! In this binary the counting test is the only test, so the counts are
 //! exact: from_master runs once per key id per verifier, and never again
 //! for the verifier's lifetime.
 //!
 //! The store side runs against the hermetic fake endpoint from
 //! `tests/common` (no real Redis needed): a full `verify()` drives the
-//! cheap phase TWICE per verification (the peek plus the post-consume
+//! cheap phase twice per verification (the peek plus the post-consume
 //! re-check), each hitting the v2 signature check AND the IP-binding
-//! re-derivation — four HKDF derivations per verification without the
+//! re-derivation — four `HKDF` derivations per verification without the
 //! cache, zero with it (after the once-per-kid map build).
 
 #![cfg(feature = "redis")]
@@ -114,7 +114,7 @@ fn from_master_runs_once_per_kid_per_verifier_process() {
     endpoint.seed(&prefix, &issued_1.record);
     endpoint.seed(&prefix, &issued_2.record);
 
-    // First verification under kid 1: the verifier builds its FULL
+    // First verification under kid 1: the verifier builds its full
     // per-kid derived-keys map (one derivation per configured kid — 2),
     // then the whole verification (cheap phase × 2: peek + post-consume
     // re-check; signature + IP binding each) runs on the cache.
@@ -137,7 +137,7 @@ fn from_master_runs_once_per_kid_per_verifier_process() {
     );
 
     // Every later verification — the second kid AND repeats of the first
-    // — derives NOTHING: the per-kid map is cached for the verifier's
+    // — derives nothing: the per-kid map is cached for the verifier's
     // lifetime (each verification would derive 4 times without the
     // cache).
     let before_more = keys::from_master_call_count();

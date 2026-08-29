@@ -9,6 +9,7 @@ use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
+use KiwiCaptcha\RequestBindingExpectation;
 use KiwiCaptcha\Storage\RedisStorage;
 use KiwiCaptcha\Tests\Fixtures\FakePredisClient;
 use KiwiCaptcha\Verifier;
@@ -1168,7 +1169,12 @@ final class RedisStorageTest extends TestCase
 
         $verifier = new Verifier($storage);
         $identity = 'op-'.hash('sha256', 'backend|uuid|response');
-        $first = $verifier->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7', operationIdentity: $identity);
+        // The round-96 exact-binding default would refuse the bound
+        // record; the test pins the stored-binding exposure, so the
+        // expectation is named unenforced (the binding is merely
+        // returned on the valid outcome).
+        $unenforced = RequestBindingExpectation::unenforced();
+        $first = $verifier->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7', operationIdentity: $identity, bindingExpectation: $unenforced);
         self::assertTrue($first->isOk(), 'the first verification must succeed (got '.$first->code().')');
 
         // The consumed record persists with its exact integers intact;
@@ -1180,7 +1186,7 @@ final class RedisStorageTest extends TestCase
 
         // Deterministic retry: the exact same logical operation returns
         // the same stored result without re-deriving.
-        $replay = $verifier->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7', operationIdentity: $identity);
+        $replay = $verifier->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7', operationIdentity: $identity, bindingExpectation: $unenforced);
         self::assertTrue($replay->isOk(), 'the replay must return the stored result (got '.$replay->code().')');
         self::assertTrue($replay->fromStoredResult, 'the replay must come from the stored result');
         self::assertSame('txn-A', $replay->requestBinding, 'the stored binding must be exposed');
@@ -1740,7 +1746,7 @@ final class LostEvalReplyRetryConnection implements \Predis\Connection\NodeConne
     /** @var array<string, string> in-memory keys, the fake "server" state */
     public array $store = [];
 
-    /** Number of times the fake connection received the Lua script (EVAL or EVALSHA). */
+    /** Number of times the fake connection received the Lua script (EVAL or `EVALSHA`). */
     public int $evalInvocations = 0;
 
     private \Predis\Connection\ParametersInterface $parameters;
@@ -1757,7 +1763,7 @@ final class LostEvalReplyRetryConnection implements \Predis\Connection\NodeConne
     public function executeCommand(\Predis\Command\CommandInterface $command)
     {
         if ($command->getId() === 'SCRIPT') {
-            // SCRIPT LOAD: the server registers the body and answers
+            // `SCRIPT` `LOAD`: the server registers the body and answers
             // with its sha1 (the storage's per-script sha cache).
             $args = $command->getArguments();
             if (strtoupper((string) ($args[0] ?? '')) === 'LOAD') {
@@ -1770,7 +1776,7 @@ final class LostEvalReplyRetryConnection implements \Predis\Connection\NodeConne
             return null;
         }
         $this->evalInvocations++;
-        // EVAL layout: [script, numKeys, key1..]; EVALSHA layout:
+        // EVAL layout: [script, numKeys, key1..]; `EVALSHA` layout:
         // [sha, numKeys, key1..] — the key sits at index 2 either way.
         $key = (string) ($command->getArguments()[2] ?? '');
 

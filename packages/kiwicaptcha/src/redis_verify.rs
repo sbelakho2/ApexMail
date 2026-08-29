@@ -68,7 +68,7 @@
 //! cleanup keeps it). The verify flow's runtime-state gate returns
 //! `RecordNotFound` for a cancelled record before any admission or
 //! consume, so the terminal state never spends a scarce admission slot.
-//! The cheap phase still runs BEFORE that gate for a cancelled record —
+//! The cheap phase still runs before that gate for a cancelled record —
 //! a cancelled record failing a cheap check returns that typed error
 //! (e.g. `BadSignature`), exactly like the PHP verifier's order, so the
 //! cross-language error codes stay aligned for terminal records too.
@@ -1236,7 +1236,7 @@ impl RedisChallengeStore {
         self.consume_with_operation_identity_with_conn(&mut conn, nonce, operation_identity)
     }
 
-    /// The consume transition on an ALREADY checked-out connection — the
+    /// The consume transition on an already checked-out connection — the
     /// internal seam of the single-connection verify path (see
     /// [`Self::runtime_state_with_conn`]). Semantics identical to
     /// [`Self::consume_with_operation_identity`]; any command failure
@@ -1343,7 +1343,7 @@ impl RedisChallengeStore {
         self.runtime_state_with_conn(&mut conn, nonce)
     }
 
-    /// The single-snapshot runtime-state read on an ALREADY checked-out
+    /// The single-snapshot runtime-state read on an already checked-out
     /// connection — the internal seam
     /// [`ProductionVerifier::verify`] uses to run the whole sequential
     /// verification (snapshot GET → consume → commit / cleanup) on ONE
@@ -1563,7 +1563,7 @@ return 1
         self.delete_if_pending_with_conn(&mut conn, nonce)
     }
 
-    /// The delete-if-pending cleanup on an ALREADY checked-out connection
+    /// The delete-if-pending cleanup on an already checked-out connection
     /// — the internal seam of the single-connection verify path (see
     /// [`Self::runtime_state_with_conn`]). Semantics identical to
     /// [`Self::delete_if_pending`].
@@ -1672,7 +1672,7 @@ return 1
         self.commit_result_with_conn(&mut conn, nonce, valid, binding)
     }
 
-    /// The outcome commit on an ALREADY checked-out connection — the
+    /// The outcome commit on an already checked-out connection — the
     /// internal seam of the single-connection verify path (see
     /// [`Self::runtime_state_with_conn`]). Semantics identical to
     /// [`Self::commit_result`]; best-effort (the caller ignores failures),
@@ -2004,10 +2004,10 @@ pub struct ProductionVerifier {
     expected_region: Option<String>,
     expected_policy_version: Option<u32>,
     expected_issuer: Option<String>,
-    /// The HKDF purpose keys per signing key id, derived ONCE per kid for
+    /// The `HKDF` purpose keys per signing key id, derived once per kid for
     /// the verifier's lifetime (the verifier owns immutable secrets — a
     /// master secret never changes under a running verifier). The cheap
-    /// phase runs up to four HKDF derivations per verification without
+    /// phase runs up to four `HKDF` derivations per verification without
     /// this cache (signature + IP binding, each re-checked after the
     /// consume); with it, every signature / binding check after the first
     /// per kid reuses the cached [`DerivedKeys`] — see
@@ -2334,7 +2334,7 @@ impl ProductionVerifier {
             Ok(state) => state,
             Err(_) => return VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
         };
-        // The peek is BORROWED from the snapshot (no record clone): the
+        // The peek is borrowed from the snapshot (no record clone): the
         // cheap phase and the replay gate read through the borrow, and the
         // authoritative copy arrives from the consume transition below
         // (the gate at step 4 moves the snapshot; the borrow ends at the
@@ -2413,7 +2413,7 @@ impl ProductionVerifier {
                             // and the hard failure is the outcome.
                             return VerifyOutcome::Invalid(hard);
                         }
-                        // The held connection is released BEFORE the
+                        // The held connection is released before the
                         // replay resolution: resolve_consumed may
                         // re-establish the replication fence on its own
                         // checkout, and a single-connection pool
@@ -2448,7 +2448,7 @@ impl ProductionVerifier {
         }
 
         // 4. Runtime-state gate — the same single snapshot from step 2,
-        //    never a second read, MOVED here (the cheap-phase borrow
+        //    never a second read, moved here (the cheap-phase borrow
         //    ended with the last early return above; the pending record
         //    is taken by value, so no copy is made of the 12-string
         //    record on any path). A terminal record never occupies an
@@ -2475,7 +2475,7 @@ impl ProductionVerifier {
                 return VerifyOutcome::Invalid(VerifyError::RecordNotFound);
             }
             RuntimeState::Consumed(state) => {
-                // The held connection is released BEFORE the replay
+                // The held connection is released before the replay
                 // resolution (see the drop in the step-3 cheap-failure
                 // path): resolve_consumed may re-establish the
                 // replication fence on its own checkout.
@@ -2532,7 +2532,7 @@ impl ProductionVerifier {
             Err(_) => return VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
         };
         if !consumed.first {
-            // The held connection is released BEFORE the replay
+            // The held connection is released before the replay
             // resolution (see the drop in the step-3 cheap-failure path):
             // resolve_consumed may re-establish the replication fence on
             // its own checkout.
@@ -2602,7 +2602,7 @@ impl ProductionVerifier {
                 request_binding: record.request_binding.clone(),
                 from_stored_result: false,
                 // The server-measured solve duration is computed from the
-                // SAME receipt instant the cheap phase's minimum-duration
+                // same receipt instant the cheap phase's minimum-duration
                 // floor read (`now_ns` — the caller resolves one receipt
                 // per verification), never a second clock read.
                 solve_duration_ms: measurable_solve_duration_ms(&record, now_ns),
@@ -2815,7 +2815,7 @@ impl ProductionVerifier {
                 request_binding: state.record.request_binding.clone(),
                 from_stored_result: false,
                 // The server-measured solve duration is computed from the
-                // SAME receipt instant the cheap phase's minimum-duration
+                // same receipt instant the cheap phase's minimum-duration
                 // floor read (`now_ns` — the caller resolves one receipt
                 // per verification), never a second clock read.
                 solve_duration_ms: measurable_solve_duration_ms(&state.record, now_ns),
@@ -2934,7 +2934,7 @@ impl ProductionVerifier {
                     {
                         return VerifyOutcome::Invalid(VerifyError::StorageUnavailable);
                     }
-                    // The duration is computed BEFORE the record fields are
+                    // The duration is computed before the record fields are
                     // moved into the outcome.
                     let solve_duration_ms = measurable_solve_duration_ms(&state.record, now_ns);
                     VerifyOutcome::Valid {
@@ -2955,7 +2955,7 @@ impl ProductionVerifier {
     /// gate, the signature re-check, TTL, scope, the expected request
     /// binding, IP binding, region, policy epoch, issuer, and the
     /// server-measured minimum duration — the checks PHP runs against the
-    /// peeked record before the Argon admission gate, in the SAME
+    /// peeked record before the Argon admission gate, in the same
     /// first-error precedence as the PHP `cheapPhaseCheck` (shape →
     /// TTL → scope+request-binding → IP binding → region/policy/issuer →
     /// floor), so a record failing several invariants reports the same
@@ -3059,7 +3059,7 @@ impl ProductionVerifier {
         let secret = self.resolve_signing_secret(record)?;
 
         // 3c. Signature re-check over the protocol-appropriate canonical
-        //     input. The v2 check runs on the CACHED HKDF purpose keys
+        //     input. The v2 check runs on the cached `HKDF` purpose keys
         //     (derived once per kid — see `resolve_derived_keys`), never
         //     re-deriving per verification.
         let sig = signature_from_challenge(record);
@@ -3106,7 +3106,7 @@ impl ProductionVerifier {
         }
     }
 
-    /// The HKDF purpose keys of the record's signing secret, derived once
+    /// The `HKDF` purpose keys of the record's signing secret, derived once
     /// per key id and cached for the verifier's lifetime (the secrets are
     /// immutable, so the derivation is a pure function of the kid). The
     /// cache is precomputed as ONE map on first use — every configured
@@ -3222,7 +3222,7 @@ impl ProductionVerifier {
         client_ip: &str,
     ) -> Result<(), VerifyError> {
         if !record.binding_tag.is_empty() {
-            // The v2 tag runs on the CACHED HKDF purpose keys (derived
+            // The v2 tag runs on the cached `HKDF` purpose keys (derived
             // once per kid — see `resolve_derived_keys`), like the v2
             // signature check above.
             let expected = match record.protocol_version {
@@ -3330,9 +3330,9 @@ mod tests {
         .encode()
     }
 
-    /// The per-kid HKDF derivation cache (race-free half): the cheap
+    /// The per-kid `HKDF` derivation cache (race-free half): the cheap
     /// phase's v2 signature check and IP-binding re-derivation run against
-    /// a per-kid [`DerivedKeys`] cache, not a fresh HKDF derivation per
+    /// a per-kid [`DerivedKeys`] cache, not a fresh `HKDF` derivation per
     /// call. Pointer identity across resolves proves the once-per-kid
     /// reuse (a re-derivation would allocate a NEW Arc); the exact
     /// once-per-kid call counting — immune to this binary's parallel
@@ -3363,7 +3363,7 @@ mod tests {
         let issued_2 = issue_challenge(&config_2, "login", IP, now_unix(), now_micros(), 0, None)
             .expect("kid 2 issuance");
 
-        // Same kid → the SAME cached allocation (never re-derived);
+        // Same kid → the same cached allocation (never re-derived);
         // a different kid → a different one.
         let keys_1 = verifier
             .resolve_derived_keys(&issued_1.record)

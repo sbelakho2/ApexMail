@@ -440,7 +440,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // the pool is never selected, and with both temporal limits
             // disabled the limiter is not wired at all, so an
             // in-memory pool is harmless in both cases. A pool id that
-            // STILL cannot be resolved to a class after all that fails
+            // still cannot be resolved to a class after all that fails
             // closed exactly like the storage path's unresolvable-class
             // refusal: an uninspectable pool cannot be proven shared, so
             // production refuses the combination and asks for a concrete

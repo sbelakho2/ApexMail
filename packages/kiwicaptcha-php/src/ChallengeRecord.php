@@ -161,8 +161,8 @@ final class ChallengeRecord
         public readonly ?string $hostname = null,
         // The server-issued decoy (honeypot) form-field name armed for
         // this challenge (see Issuer::DECOY_FIELD_POOL); null = no decoy
-        // (the legacy shape). Signed as the FINAL v2 canonical segment,
-        // appended after the kid; the JSON key is OMITTED when null.
+        // (the legacy shape). Signed as the final v2 canonical segment,
+        // appended after the kid; the JSON key is omitted when null.
         public readonly ?string $decoyField = null,
     ) {
     }

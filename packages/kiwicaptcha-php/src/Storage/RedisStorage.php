@@ -1129,13 +1129,13 @@ LUA;
                 }
                 // phpredis builds exist that report a missing script as
                 // a plain false instead of raising the server's
-                // NOSCRIPT error, and false is also phpredis's mapping
+                // `NOSCRIPT` error, and false is also phpredis's mapping
                 // of a Lua nil reply. Every script of this class
                 // replies nil only on a no-mutation path (a missing,
                 // refused or terminal record), so treating false as a
-                // suspected NOSCRIPT and re-running through plain EVAL
+                // suspected `NOSCRIPT` and re-running through plain EVAL
                 // is safe: the re-run is idempotent and returns the
-                // same answer, while a genuine NOSCRIPT is repaired.
+                // same answer, while a genuine `NOSCRIPT` is repaired.
             } catch (\RedisException $e) {
                 if (!self::isNoScriptError($e)) {
                     throw $e;
@@ -1152,9 +1152,9 @@ LUA;
             if (!str_contains($e->getMessage(), 'NOSCRIPT')) {
                 throw $e;
             }
-            // The server lost its script cache (SCRIPT FLUSH or a
+            // The server lost its script cache (`SCRIPT` `FLUSH` or a
             // restart): load the body again, refresh the cache, and
-            // retry EVALSHA once. A failure of the retry propagates
+            // retry `EVALSHA` once. A failure of the retry propagates
             // raw, exactly like a failed EVAL did.
             $sha = $this->scriptShas[$script] = $this->loadScript($script);
 
@@ -1171,7 +1171,7 @@ LUA;
         return stripos($e->getMessage(), 'NOSCRIPT') !== false;
     }
 
-    /** Cached sha of a script, SCRIPT LOADing it exactly once. */
+    /** Cached sha of a script, `SCRIPT` LOADing it exactly once. */
     private function shaOf(string $script): string
     {
         return $this->scriptShas[$script] ??= $this->loadScript($script);

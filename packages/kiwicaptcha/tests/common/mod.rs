@@ -4,8 +4,8 @@
 //! A miniature Redis-protocol TCP endpoint (no real Redis needed) that
 //! records every command tagged with its connection, answers the
 //! production verifier's exact command surface (GET, PING, the Lua
-//! transitions by their ARGV shape, SCRIPT LOAD) from a tiny in-memory
-//! record store, and drives the NOSCRIPT-then-load dance exactly once so
+//! transitions by their ARGV shape, `SCRIPT` `LOAD`) from a tiny in-memory
+//! record store, and drives the `NOSCRIPT`-then-load dance exactly once so
 //! script-caching behavior is observable.
 //!
 //! This module is compiled into each integration test binary that
@@ -47,7 +47,7 @@ pub fn parse_resp_command(buf: &[u8]) -> Option<(Vec<String>, usize)> {
 /// string store (the runtime-envelope JSON of stored records), a full
 /// command log tagged with the id of the TCP connection each command
 /// arrived on, a TCP-connection counter and a script-cache flag (the
-/// first EVALSHA misses with NOSCRIPT, the load warms it, exactly like a
+/// first `EVALSHA` misses with `NOSCRIPT`, the load warms it, exactly like a
 /// real server).
 #[derive(Default)]
 pub struct FakeEndpoint {
@@ -135,7 +135,7 @@ impl FakeEndpoint {
 
     /// Handles one parsed command (tagged with its connection id); `None`
     /// closes nothing (every reply is written). Scripts are classified
-    /// by their ARGV SHAPE, not their sha: `EVALSHA sha 1 key` is the
+    /// by their ARGV shape, not their sha: `EVALSHA sha 1 key` is the
     /// delete/cancel family, `EVALSHA sha 1 key <identity>` the consume
     /// transition (the empty identity of the no-identity call),
     /// `EVALSHA sha 1 key <0|1> <binding>` the outcome commit.
@@ -156,7 +156,7 @@ impl FakeEndpoint {
                 let stored = self.records.lock().unwrap().get(&key).cloned();
                 match args.len() {
                     // delete-if-pending / cancel family (no argv):
-                    // [EVALSHA, sha, numkeys, key].
+                    // [`EVALSHA`, sha, numkeys, key].
                     4 => Some(match stored {
                         Some(v) if v.contains("\"state\":\"pending\"") => {
                             self.records.lock().unwrap().remove(&key);
@@ -167,7 +167,7 @@ impl FakeEndpoint {
                         }
                         _ => "*1\r\n$7\r\nmissing\r\n".to_string(),
                     }),
-                    // consume ([EVALSHA, sha, numkeys, key, identity] —
+                    // consume ([`EVALSHA`, sha, numkeys, key, identity] —
                     // the empty identity of the no-identity call).
                     5 => Some(match stored {
                         Some(v) if v.contains("\"state\":\"pending\"") => {
@@ -181,13 +181,13 @@ impl FakeEndpoint {
                         }
                         _ => "$-1\r\n".to_string(),
                     }),
-                    // commit ([EVALSHA, sha, numkeys, key, valid, binding]).
+                    // commit ([`EVALSHA`, sha, numkeys, key, valid, binding]).
                     6 if args[4] == "0" || args[4] == "1" => Some(":1\r\n".to_string()),
                     _ => Some("-ERR unknown script shape\r\n".to_string()),
                 }
             }
             "SCRIPT" => {
-                // SCRIPT LOAD <source>: warm the cache (the source itself
+                // `SCRIPT` `LOAD` <source>: warm the cache (the source itself
                 // identifies the script; the reply sha is never compared
                 // by the client's invoke path).
                 self.script_loaded.store(1, Ordering::SeqCst);

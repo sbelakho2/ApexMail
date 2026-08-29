@@ -42,7 +42,7 @@ final class Challenge
         public readonly int $minDurationMs,
         public readonly string $prefix,
         // The armed decoy (honeypot) form-field name; null = no decoy
-        // (the legacy wire shape — the key is OMITTED when null).
+        // (the legacy wire shape — the key is omitted when null).
         public readonly ?string $decoyField = null,
     ) {
     }

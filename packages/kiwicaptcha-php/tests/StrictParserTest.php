@@ -346,7 +346,7 @@ final class StrictParserTest extends TestCase
 
     public function testWireKeySetIsPinnedTo24(): void
     {
-        // decoy_field is the one Option key OMITTED from toArray() when
+        // decoy_field is the one Option key omitted from toArray() when
         // null (the Rust skip_serializing_if mirror); every other key is
         // always present.
         self::assertSame([

@@ -541,14 +541,14 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // Native replay risk feedback (round-97): the classic replay
             // of a solved token — a stored-valid, same-identity
             // retained-state retry without an explicit operation id —
-            // previously returned here with ZERO risk-model signal, so a
+            // previously returned here with zero risk-model signal, so a
             // static identity replaying a consumed token polluted no
             // counters. The feedback is the same ReplayAttempt outcome
             // the core's AlreadyConsumed path feeds (RiskFeedback), with
             // the measured solve duration when the outcome carries one
             // (null-safe: cores predating the solve-duration field feed
             // no duration). Guarded exactly like the failure-path call:
-            // only when a client IP resolves, and BEFORE the violation is
+            // only when a client IP resolves, and before the violation is
             // built so the evidence always precedes the refusal.
             if ($clientIp !== null) {
                 $this->risk?->solveOutcome(
@@ -597,7 +597,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // measured solve duration rides along when the outcome
             // carries one (observability until the engine gains a graded
             // channel, see RiskGateway::solveOutcome()). Two refusal
-            // paths deliberately sit OUTSIDE this block, each a precise
+            // paths deliberately sit outside this block, each a precise
             // carve-out:
             //   - the empty-value branch above (null/'' token): no token
             //     means no solve attempt, so there is no attempt to

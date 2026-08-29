@@ -176,7 +176,7 @@ impl ConnectionPool {
     }
 
     /// Runs one unit of Redis work on the next slot's connection. Any
-    /// command-level failure EVICTS the slot (the connection is dropped out
+    /// command-level failure evicts the slot (the connection is dropped out
     /// of it) before the error is mapped and propagated, so the next
     /// acquire on that slot reconnects: a timed-out or failed reply may
     /// still be in flight on the socket, and reusing the connection could
@@ -1043,7 +1043,7 @@ mod tests {
 
     /// A failed invocation evicts its pool slot: the connection is dropped
     /// (never returned to the slot), and the next acquire on that slot
-    /// opens a FRESH TCP connection. A miniature endpoint accepts a
+    /// opens a fresh TCP connection. A miniature endpoint accepts a
     /// connection, swallows the first command bytes and then closes the
     /// socket without replying — the in-flight invocation fails with an
     /// I/O error, exactly the "reply timed out / backend died mid-command"
@@ -1086,7 +1086,7 @@ mod tests {
         );
         assert_eq!(accepted.load(Ordering::SeqCst), 1);
 
-        // The evicted slot reconnects on its next acquire: a SECOND TCP
+        // The evicted slot reconnects on its next acquire: a second TCP
         // connection is accepted by the endpoint. Without eviction the
         // stale (closed-socket) connection would sit in the slot and the
         // next invocation would fail on it without any new connection.

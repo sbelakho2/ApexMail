@@ -378,7 +378,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
         // one literal `kr_global` item (and on identical per-client items
         // when the peppers matched). The namespace now keys both PSR-6
         // families, so each deployment keeps its own global budget and
-        // its own per-client items over the SAME pool.
+        // its own per-client items over the same pool.
         $pool = new ArrayAdapter();
         $clock = 10_000.0;
         $now = static function () use (&$clock): float {
