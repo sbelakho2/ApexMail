@@ -434,9 +434,9 @@ pub fn export_records(
     let filtered: Vec<&SuppressionRecord> = records
         .iter()
         .filter(|r| {
-            params.scope.map_or(true, |s| r.scope == s)
-                && params.scope_id.as_ref().map_or(true, |id| r.scope_id == *id)
-                && params.reason.map_or(true, |rea| r.reason == rea)
+            params.scope.as_ref().is_none_or(|s| r.scope == *s)
+                && params.scope_id.as_ref().is_none_or(|id| r.scope_id == *id)
+                && params.reason.as_ref().is_none_or(|rea| r.reason == rea)
                 && params.start_date.map_or(true, |d| r.timestamp >= d)
                 && params.end_date.map_or(true, |d| r.timestamp <= d)
                 && params.active_only.map_or(true, |a| !a || r.is_active())

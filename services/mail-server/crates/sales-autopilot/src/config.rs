@@ -200,12 +200,7 @@ pub fn require_tenant_allowlist_in_production(
     config: &SalesConfig,
     is_production: bool,
 ) -> Result<(), String> {
-    if is_production
-        && config
-            .allowed_tenants
-            .as_ref()
-            .map_or(true, |t| t.is_empty())
-    {
+    if is_production && config.allowed_tenants.as_ref().is_none_or(|t| t.is_empty()) {
         return Err(
             "SALES_ALLOWED_TENANTS must list the tenants this service may address              (comma-separated). The internal token is shared; without an allowlist              any token holder can act on every tenant."
                 .to_string(),
