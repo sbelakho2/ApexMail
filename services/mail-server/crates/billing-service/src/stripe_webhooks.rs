@@ -1289,6 +1289,34 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
 /// CONFLICT clause rejected the update (the local row is bound to a
 /// different tenant) — callers use that to decide whether payment recovery
 /// is legitimate (Fix F4).
+/// Parse a Stripe decimal-string amount ("65.00", "0.40") into integer
+/// cents without floating point. Returns None on malformed input.
+fn stripe_decimal_to_cents(value: &str) -> Option<i64> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let (whole, frac) = match value.split_once('.') {
+        Some((w, f)) => (w, f),
+        None => (value, ""),
+    };
+    if whole.is_empty() || !whole.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    if frac.len() > 2 || !frac.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let whole: i64 = whole.parse().ok()?;
+    let frac_parsed: i64 = if frac.is_empty() {
+        0
+    } else if frac.len() == 1 {
+        frac.parse::<i64>().ok()? * 10
+    } else {
+        frac.parse().ok()?
+    };
+    Some(whole * 100 + frac_parsed)
+}
+
 async fn insert_paid_invoice_from_stripe(
     state: &AppState,
     invoice: &InvoiceEvent,
@@ -1317,8 +1345,15 @@ async fn insert_paid_invoice_from_stripe(
                         amount,
                         if vat_rate > 0.0 { vat_rate } else { 0.0 },
                     );
-                    let net = amount - vat_amount;
                     let quantity = line.quantity.unwrap_or(1).max(1);
+                    // Prefer Stripe's VAT-exclusive unit amount when present;
+                    // fall back to deriving net from amount − VAT.
+                    let net = line
+                        .unit_amount_excluding_tax
+                        .as_deref()
+                        .and_then(stripe_decimal_to_cents)
+                        .map(|unit_cents| unit_cents * quantity)
+                        .unwrap_or(amount - vat_amount);
                     serde_json::json!({
                         "description": line.description.clone().unwrap_or_else(|| "Subscription".to_string()),
                         "quantity": quantity,
