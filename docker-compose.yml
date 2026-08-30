@@ -691,8 +691,8 @@ services:
       resources:
         limits:
           memory: 512M
-          reservations:
-            memory: 64M
+        reservations:
+          memory: 64M
     security_opt:
       - no-new-privileges:true
       - apparmor:docker-default

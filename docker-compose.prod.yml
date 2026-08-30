@@ -1465,7 +1465,7 @@ networks:
 
 secrets:
   redis_password_map:
-    file: ${PROD_REDIS_PASSWORD_MAP_FILE:/opt/apexmail/secrets/redis_password_map.json}
+    file: ${PROD_REDIS_PASSWORD_MAP_FILE:-/opt/apexmail/secrets/redis_password_map.json}
   postgres_password:
     file: ${PROD_POSTGRES_PASSWORD_FILE:?PROD_POSTGRES_PASSWORD_FILE is required in production}
   redis_password:
