@@ -37,7 +37,12 @@ stage_main() {
 
     # --- 1. build everything through deploy.sh (the single implementation) -------
     ci_info "building all images via deploy/scripts/deploy.sh --build-only"
-    ci_exec bash deploy/scripts/deploy.sh --build-only \
+    # The pipeline holds the deploy flock for the whole run; deploy.sh would
+    # try to flock the SAME file as a child and refuse (self-deadlock — the
+    # first end-to-end images run hit exactly this). The flag makes deploy.sh
+    # inherit the parent's lock instead of re-acquiring it; standalone
+    # manual deploy.sh runs are unaffected.
+    APEXMAIL_DEPLOY_LOCK_INHERITED=1 ci_exec bash deploy/scripts/deploy.sh --build-only \
         || { ci_err "deploy.sh --build-only failed"; return "$CI_EXIT_FAIL"; }
 
     # --- 2. tag :<sha> rollback pins ------------------------------------------------

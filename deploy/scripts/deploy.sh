@@ -117,7 +117,13 @@ step "Step 0: Verify environment"
 # ci/pipeline.sh acquires exactly this file before running its stages.
 LOCK_FILE="${APEXMAIL_DEPLOY_LOCK:-${DEPLOY_DIR}/.deploy.lock}"
 mkdir -p "$(dirname "$LOCK_FILE")" 2>/dev/null || true
-if command -v flock >/dev/null 2>&1; then
+if [ "${APEXMAIL_DEPLOY_LOCK_INHERITED:-0}" = "1" ]; then
+    # Invoked BY the CI pipeline, which already holds the deploy flock for
+    # this run — re-acquiring it here would self-deadlock (different open
+    # file description, same file). Mutual exclusion vs manual runs is
+    # provided by the pipeline's lock.
+    log "Deploy lock inherited from the CI pipeline (${LOCK_FILE})."
+elif command -v flock >/dev/null 2>&1; then
     exec 9>"$LOCK_FILE"
     if ! flock -n 9; then
         error "another deploy.sh run holds ${LOCK_FILE} — refusing to start (concurrent deploys corrupt image tags)"
