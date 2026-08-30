@@ -224,6 +224,9 @@ if ! $NO_BUILD; then
     step "Step 3: Build service images"
 
     for svc in "${BUILD_LIST[@]}"; do
+        # pdf-renderer builds from its own Dockerfile/context in Step 3b —
+        # it has no stage in the mail-server Dockerfile.
+        [[ "$svc" == "pdf-renderer" ]] && continue
         image="${GHCR_NS}/${svc}:latest"
         target="${BUILD_TARGETS[${svc}]:-$svc}"
         log "Building: $image (Dockerfile target: $target)"
