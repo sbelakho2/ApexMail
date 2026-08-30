@@ -8196,8 +8196,11 @@ mod tests {
                 .is_some();
             assert!(session_cookie, "a verified account must receive a session");
 
-            // (c) Duplicate signup gets the friendly error (the unique
-            // constraint race is additionally handled at the INSERT).
+            // (c) Duplicate signup is INDISTINGUISHABLE from the first
+            // signup (anti-enumeration, mirroring the JSON register flow's
+            // identical-202 contract): same success flash, never an error
+            // that reveals the address is registered. The unique-constraint
+            // race is still handled at the INSERT.
             let response = app
                 .clone()
                 .oneshot(post_form("/web/auth/signup", &signup_body))
@@ -8207,9 +8210,15 @@ mod tests {
             assert!(
                 flash.iter().any(|message| matches!(
                     message.kind,
-                    ui_foundation::flash::FlashKind::Error
-                ) && message.text.to_lowercase().contains("already")),
-                "duplicate signup must be a friendly error, flash was {flash:?}"
+                    ui_foundation::flash::FlashKind::Success
+                ) && message.text.contains("Check your email")),
+                "duplicate signup must return the same generic success flash                  (no account enumeration), flash was {flash:?}"
+            );
+            assert!(
+                !flash
+                    .iter()
+                    .any(|message| message.text.to_lowercase().contains("already")),
+                "duplicate signup must never disclose an existing account, flash was {flash:?}"
             );
 
             match had_dkim_key {
