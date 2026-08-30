@@ -18,7 +18,6 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
     let (num, suffix) = s
         .strip_suffix(['s', 'm', 'h', 'd'])
         .zip(s.chars().last().map(|c| c.to_string()))
-        .map(|(n, suf)| (n, suf))
         .ok_or_else(|| format!("Unknown duration suffix in '{}'", s))?;
     let value: u64 = num
         .parse()

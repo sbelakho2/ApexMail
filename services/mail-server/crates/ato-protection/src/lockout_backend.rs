@@ -303,9 +303,7 @@ impl RedisLockoutBackend {
                 }
             }
         }
-        let Some(conn) = guard.as_mut() else {
-            return None;
-        };
+        let conn = guard.as_mut()?;
         match f(conn) {
             Ok(v) => Some(v),
             Err(e) => {
