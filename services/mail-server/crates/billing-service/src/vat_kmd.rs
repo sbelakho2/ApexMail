@@ -639,7 +639,7 @@ mod tests {
             );
             assert_eq!(
                 vat_rates::get_eu_vat_rate(code),
-                Some(*expected_rate as f64),
+                Some(*expected_rate),
                 "Country {code} should have VAT rate {expected_rate}"
             );
         }

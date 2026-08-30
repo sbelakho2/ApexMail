@@ -1024,7 +1024,7 @@ mod tests {
         for (code, expected_rate) in &expected {
             let (rate, _) = calculate_vat(10000, code, None);
             assert_eq!(
-                rate, *expected_rate as f64,
+                rate, *expected_rate,
                 "Country {code} should have VAT rate {expected_rate}"
             );
         }
