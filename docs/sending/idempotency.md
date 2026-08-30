@@ -7,7 +7,7 @@ Idempotency keys prevent duplicate email sends when a network error or timeout o
 Send an `Idempotency-Key` header with your request. If ApexMail receives the same key within 24 hours, it returns the original response without sending a duplicate email. The key is scoped to your API key — the same idempotency key used by different API keys produces independent requests.
 
 ```bash
-curl -s -X POST https://api.apexmail.ee/v1/emails \
+curl -s -X POST https://api.apexmail.ee/v1/messages \
   -H "Authorization: Bearer $APEXMAIL_API_KEY" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: ord_78901_send_confirmation" \
@@ -142,7 +142,7 @@ def send_email_safe(payload):
     for attempt in range(max_retries):
         try:
             response = requests.post(
-                "https://api.apexmail.ee/v1/emails",
+                "https://api.apexmail.ee/v1/messages",
                 json=payload,
                 headers={
                     "Authorization": f"Bearer {API_KEY}",

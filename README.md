@@ -116,12 +116,9 @@ apexmail/
 │   ├── sdk-php/
 │   ├── sdk-python/
 │   └── sdk-ruby/
-├── Lobster/                 # Standalone Lobster-language calculator proof of concept kept as an in-repo experiment
 ├── tools/                   # Python and shell operational tooling
 └── deploy/                  # Deployment manifests and configs
 ```
-
-`Lobster/` is not part of the ApexMail mail runtime. It is a small, separate proof-of-concept app kept in the repository as a language/UI experiment.
 
 ## API Reference
 
@@ -261,9 +258,9 @@ paths are the GH Actions + Docker Compose pipeline and the Makefile emergency fa
 # Start dependencies
 docker compose up -d postgres redis
 
-# Build and run auth-server
+# Build and run the API server (REST + SSR console)
 cargo build --release --manifest-path services/mail-server/Cargo.toml
-./services/mail-server/target/release/auth-server
+./services/mail-server/target/release/api-server
 
 # Build marketing site
 zola build --root apps/marketing-zola

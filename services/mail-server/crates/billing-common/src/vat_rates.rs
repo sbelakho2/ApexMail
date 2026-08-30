@@ -17,7 +17,7 @@ use std::sync::LazyLock;
 // ---------------------------------------------------------------------------
 
 /// Estonian standard VAT rate (24 %, effective since 1 July 2025).
-pub const ESTONIA_VAT_RATE: i32 = 24;
+pub const ESTONIA_VAT_RATE: f64 = 24.0;
 
 /// Default 27 EU member state ISO 3166-1 alpha-2 country codes.
 const DEFAULT_EU_COUNTRIES: &[&str] = &[
@@ -26,34 +26,38 @@ const DEFAULT_EU_COUNTRIES: &[&str] = &[
 ];
 
 /// Default standard VAT rates for all 27 EU member states.
-const DEFAULT_VAT_RATES: &[(&str, i32)] = &[
-    ("AT", 20),
-    ("BE", 21),
-    ("BG", 20),
-    ("HR", 25),
-    ("CY", 19),
-    ("CZ", 21),
-    ("DK", 25),
-    ("EE", 24),
-    ("FI", 26),
-    ("FR", 20),
-    ("DE", 19),
-    ("GR", 24),
-    ("HU", 27),
-    ("IE", 23),
-    ("IT", 22),
-    ("LV", 21),
-    ("LT", 21),
-    ("LU", 17),
-    ("MT", 18),
-    ("NL", 21),
-    ("PL", 23),
-    ("PT", 23),
-    ("RO", 19),
-    ("SK", 23),
-    ("SI", 22),
-    ("ES", 21),
-    ("SE", 25),
+///
+/// Rates are percent and may be fractional: Finland's standard rate has been
+/// 25.5 % since 1 September 2024 and must not be rounded — overcharging a
+/// statutory rate is a legal defect, not a cosmetic one.
+const DEFAULT_VAT_RATES: &[(&str, f64)] = &[
+    ("AT", 20.0),
+    ("BE", 21.0),
+    ("BG", 20.0),
+    ("HR", 25.0),
+    ("CY", 19.0),
+    ("CZ", 21.0),
+    ("DK", 25.0),
+    ("EE", 24.0),
+    ("FI", 25.5),
+    ("FR", 20.0),
+    ("DE", 19.0),
+    ("GR", 24.0),
+    ("HU", 27.0),
+    ("IE", 23.0),
+    ("IT", 22.0),
+    ("LV", 21.0),
+    ("LT", 21.0),
+    ("LU", 17.0),
+    ("MT", 18.0),
+    ("NL", 21.0),
+    ("PL", 23.0),
+    ("PT", 23.0),
+    ("RO", 19.0),
+    ("SK", 23.0),
+    ("SI", 22.0),
+    ("ES", 21.0),
+    ("SE", 25.0),
 ];
 
 // ---------------------------------------------------------------------------
@@ -77,15 +81,15 @@ pub static EU_COUNTRIES: LazyLock<HashSet<String>> = LazyLock::new(|| {
 /// alpha-2 country code.
 ///
 /// The map can be overridden at runtime via the `EU_VAT_RATES` environment
-/// variable (comma-separated `CODE=rate` pairs, e.g. `DE=19,FR=20`).
+/// variable (comma-separated `CODE=rate` pairs, e.g. `DE=19,FI=25.5`).
 /// When unset, the built-in defaults below are used.
-pub static EU_VAT_RATES: LazyLock<HashMap<String, i32>> = LazyLock::new(|| {
+pub static EU_VAT_RATES: LazyLock<HashMap<String, f64>> = LazyLock::new(|| {
     let mut map = HashMap::new();
     if let Ok(raw) = std::env::var("EU_VAT_RATES") {
         for pair in raw.split(',') {
             let mut parts = pair.split('=');
             if let (Some(country), Some(rate)) = (parts.next(), parts.next()) {
-                if let Ok(rate) = rate.trim().parse::<i32>() {
+                if let Ok(rate) = rate.trim().parse::<f64>() {
                     map.insert(country.trim().to_uppercase(), rate);
                 }
             }
@@ -116,8 +120,28 @@ pub fn is_eu_country(country: &str) -> bool {
 /// Returns `None` for non-EU countries.
 ///
 /// This is a convenience wrapper around [`EU_VAT_RATES`].
-pub fn get_eu_vat_rate(country: &str) -> Option<i32> {
+pub fn get_eu_vat_rate(country: &str) -> Option<f64> {
     EU_VAT_RATES.get(&country.to_uppercase()).copied()
+}
+
+/// Round-half-up VAT in integer cents for a rate in percent (possibly
+/// fractional, e.g. Finland's 25.5 %). All VAT money math goes through here —
+/// never floating point.
+pub fn vat_amount_half_up(amount_cents: i64, rate_percent: f64) -> i64 {
+    // Scale the rate to tenths of a percent (255 for 25.5 %) so the entire
+    // computation stays in integers: VAT cents = amount × rate_tenths / 1000,
+    // rounded half-up.
+    let rate_tenths = (rate_percent * 10.0).round() as i64;
+    ((amount_cents * rate_tenths) + 500) / 1000
+}
+
+/// Format a VAT rate for display: `24` renders as "24", `25.5` as "25.5".
+pub fn format_vat_rate(rate_percent: f64) -> String {
+    if (rate_percent - rate_percent.round()).abs() < f64::EPSILON {
+        format!("{}", rate_percent.round() as i64)
+    } else {
+        format!("{rate_percent}")
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -126,12 +150,12 @@ pub fn get_eu_vat_rate(country: &str) -> Option<i32> {
 
 /// Error returned when a country is listed in `EU_COUNTRIES` but has no
 /// entry in `EU_VAT_RATES` and the deployed policy treats that as fatal.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct VatRateMapMissError {
     /// The country whose rate lookup failed.
     pub country: String,
     /// What the fallback policy would have used (for logging/context).
-    pub fallback_rate: i32,
+    pub fallback_rate: f64,
 }
 
 impl std::fmt::Display for VatRateMapMissError {
@@ -190,7 +214,7 @@ pub fn resolve_map_miss_rate(
     miss_country: &str,
     policy: VatMapMissPolicy,
     fallback_country: &str,
-) -> Result<i32, VatRateMapMissError> {
+) -> Result<f64, VatRateMapMissError> {
     let fallback_rate = get_eu_vat_rate(fallback_country).unwrap_or(ESTONIA_VAT_RATE);
     match policy {
         VatMapMissPolicy::Error => Err(VatRateMapMissError {
@@ -289,14 +313,14 @@ pub fn is_valid_vat_number(vat: &str, country: Option<&str>) -> bool {
 /// behaviour is replaced by the built-in Estonian rate **and** an explicit
 /// error log so the misconfiguration is visible. Use
 /// [`calculate_vat_strict`] when the caller must refuse on a miss.
-pub fn calculate_vat(subtotal: i64, country: &str, vat_number: Option<&str>) -> (i32, i64) {
+pub fn calculate_vat(subtotal: i64, country: &str, vat_number: Option<&str>) -> (f64, i64) {
     if subtotal <= 0 {
-        return (0, 0);
+        return (0.0, 0);
     }
     let country = country.to_uppercase();
 
     if country == "EE" {
-        let amt = ((subtotal * ESTONIA_VAT_RATE as i64) + 50) / 100;
+        let amt = vat_amount_half_up(subtotal, ESTONIA_VAT_RATE);
         return (ESTONIA_VAT_RATE, amt);
     }
 
@@ -306,7 +330,7 @@ pub fn calculate_vat(subtotal: i64, country: &str, vat_number: Option<&str>) -> 
             .unwrap_or(false)
         {
             // EU B2B — reverse charge (0 %)
-            return (0, 0);
+            return (0.0, 0);
         }
         // EU B2C — destination-country VAT. An explicit map miss goes
         // through the deployed policy (audit item 3d): never again a
@@ -340,12 +364,12 @@ pub fn calculate_vat(subtotal: i64, country: &str, vat_number: Option<&str>) -> 
                 }
             }
         };
-        let amt = ((subtotal * rate as i64) + 50) / 100;
+        let amt = vat_amount_half_up(subtotal, rate);
         return (rate, amt);
     }
 
     // Non-EU — 0 %
-    (0, 0)
+    (0.0, 0)
 }
 
 /// Strict variant of [`calculate_vat`] (audit item 3d): returns
@@ -356,9 +380,9 @@ pub fn calculate_vat_strict(
     subtotal: i64,
     country: &str,
     vat_number: Option<&str>,
-) -> Result<(i32, i64), VatRateMapMissError> {
+) -> Result<(f64, i64), VatRateMapMissError> {
     if subtotal <= 0 {
-        return Ok((0, 0));
+        return Ok((0.0, 0));
     }
     let upper = country.to_uppercase();
 
@@ -371,17 +395,17 @@ pub fn calculate_vat_strict(
             .map(|vat| is_valid_vat_number(vat, Some(&upper)))
             .unwrap_or(false)
         {
-            return Ok((0, 0));
+            return Ok((0.0, 0));
         }
         let rate = EU_VAT_RATES.get(&upper).copied().map_or_else(
             || resolve_map_miss_rate(&upper, VatMapMissPolicy::Error, &VAT_FALLBACK_COUNTRY),
             Ok,
         )?;
-        let amt = ((subtotal * rate as i64) + 50) / 100;
+        let amt = vat_amount_half_up(subtotal, rate);
         return Ok((rate, amt));
     }
 
-    Ok((0, 0))
+    Ok((0.0, 0))
 }
 
 // ---------------------------------------------------------------------------
@@ -436,7 +460,7 @@ mod tests {
 
     #[test]
     fn get_eu_vat_rate_ee() {
-        assert_eq!(get_eu_vat_rate("EE"), Some(24));
+        assert_eq!(get_eu_vat_rate("EE"), Some(24.0));
         assert_eq!(get_eu_vat_rate("US"), None);
     }
 
@@ -444,7 +468,7 @@ mod tests {
     fn calculate_vat_estonia_returns_24_percent() {
         let subtotal = 1000_i64; // €10.00 in cents
         let (rate, amount) = calculate_vat(subtotal, "EE", None);
-        assert_eq!(rate, 24);
+        assert_eq!(rate, 24.0);
         assert_eq!(amount, 240); // €10.00 × 24 % = €2.40
     }
 
@@ -452,7 +476,7 @@ mod tests {
     fn calculate_vat_eu_b2b_reverse_charge() {
         let subtotal = 1000_i64;
         let (rate, amount) = calculate_vat(subtotal, "DE", Some("DE123456789"));
-        assert_eq!(rate, 0, "reverse charge must be 0 %");
+        assert_eq!(rate, 0.0, "reverse charge must be 0 %");
         assert_eq!(amount, 0);
     }
 
@@ -460,7 +484,7 @@ mod tests {
     fn calculate_vat_eu_b2c_destination_rate() {
         let subtotal = 1000_i64;
         let (rate, amount) = calculate_vat(subtotal, "DE", None);
-        assert_eq!(rate, 19);
+        assert_eq!(rate, 19.0);
         assert_eq!(amount, 190); // €10.00 × 19 % = €1.90
     }
 
@@ -468,24 +492,24 @@ mod tests {
     fn calculate_vat_non_eu_zero() {
         let subtotal = 1000_i64;
         let (rate, amount) = calculate_vat(subtotal, "US", None);
-        assert_eq!(rate, 0);
+        assert_eq!(rate, 0.0);
         assert_eq!(amount, 0);
     }
 
     #[test]
     fn calculate_vat_case_insensitive_country() {
         let (rate, amount) = calculate_vat(1000, "ee", None);
-        assert_eq!(rate, 24);
+        assert_eq!(rate, 24.0);
         assert_eq!(amount, 240);
 
         let (rate, amount) = calculate_vat(1000, "de", None);
-        assert_eq!(rate, 19);
+        assert_eq!(rate, 19.0);
         assert_eq!(amount, 190);
     }
     #[test]
     fn calculate_vat_non_positive_subtotal_zero() {
-        assert_eq!(calculate_vat(0, "DE", None), (0, 0));
-        assert_eq!(calculate_vat(-1000, "EE", None), (0, 0));
+        assert_eq!(calculate_vat(0, "DE", None), (0.0, 0));
+        assert_eq!(calculate_vat(-1000, "EE", None), (0.0, 0));
     }
 
     // ------------------------------------------------------------------
@@ -530,29 +554,29 @@ mod tests {
     fn calculate_vat_invalid_vat_number_charges_normal_rate() {
         // Garbage VAT numbers must NOT trigger reverse charge.
         let (rate, amount) = calculate_vat(10_000, "DE", Some("1"));
-        assert_eq!(rate, 19);
+        assert_eq!(rate, 19.0);
         assert_eq!(amount, 1_900);
 
         let (rate, _) = calculate_vat(10_000, "DE", Some(""));
-        assert_eq!(rate, 19);
+        assert_eq!(rate, 19.0);
 
         let (rate, _) = calculate_vat(10_000, "DE", Some("x"));
-        assert_eq!(rate, 19);
+        assert_eq!(rate, 19.0);
 
         // Mismatched prefix: VAT number says DE, billing country is FR.
         let (rate, amount) = calculate_vat(10_000, "FR", Some("DE123456789"));
-        assert_eq!(rate, 20);
+        assert_eq!(rate, 20.0);
         assert_eq!(amount, 2_000);
     }
 
     #[test]
     fn calculate_vat_valid_vat_number_still_reverse_charges() {
         let (rate, amount) = calculate_vat(10_000, "DE", Some("DE123456789"));
-        assert_eq!(rate, 0);
+        assert_eq!(rate, 0.0);
         assert_eq!(amount, 0);
 
         let (rate, amount) = calculate_vat(10_000, "FR", Some("FRXX123456789"));
-        assert_eq!(rate, 0);
+        assert_eq!(rate, 0.0);
         assert_eq!(amount, 0);
     }
 
@@ -560,7 +584,7 @@ mod tests {
     fn estonia_never_reverse_charges_even_with_vat_number() {
         // Local EE sales always charge 24 % regardless of VAT number.
         let (rate, amount) = calculate_vat(10_000, "EE", Some("EE100591102"));
-        assert_eq!(rate, 24);
+        assert_eq!(rate, 24.0);
         assert_eq!(amount, 2_400);
     }
 
@@ -602,7 +626,7 @@ mod tests {
         // With DE as the configured fallback country, a miss charges 19 %.
         let rate = resolve_map_miss_rate("XX", VatMapMissPolicy::FallbackCountry, "DE")
             .expect("fallback policy resolves");
-        assert_eq!(rate, 19);
+        assert_eq!(rate, 19.0);
 
         // Default fallback (EE) charges 24 % — rate-identical to the old
         // silent behaviour, but now an explicit, logged, configurable
@@ -643,11 +667,11 @@ mod tests {
         // Non-EU and EE both short-circuit before the map lookup.
         assert_eq!(
             calculate_vat_strict(10_000, "US", None).expect("non-EU"),
-            (0, 0)
+            (0.0, 0)
         );
         assert_eq!(
             calculate_vat_strict(10_000, "EE", None).expect("local"),
-            (24, 2_400)
+            (24.0, 2_400)
         );
     }
 
@@ -668,5 +692,18 @@ mod tests {
         // yields the documented defaults.)
         assert_eq!(*VAT_MAP_MISS_POLICY, VatMapMissPolicy::FallbackCountry);
         assert_eq!(*VAT_FALLBACK_COUNTRY, "EE");
+    }
+
+    #[test]
+    fn calculate_vat_finland_uses_fractional_rate() {
+        // Finland's standard rate is 25.5 % (since 1 September 2024); it must
+        // not be rounded to 26 %, which would overcharge every Finnish B2C
+        // invoice by half a percentage point.
+        let (rate, amount) = calculate_vat(10_000, "FI", None);
+        assert_eq!(rate, 25.5);
+        assert_eq!(amount, 2_550); // €100.00 × 25.5 % = €25.50
+
+        assert_eq!(format_vat_rate(25.5), "25.5");
+        assert_eq!(format_vat_rate(24.0), "24");
     }
 }

@@ -39,7 +39,7 @@ comparison_sections = [
     { feature = "Email entrante", apex = 'Planes Scale y Enterprise', comp = 'Sí — rutas entrantes con acciones de reenvío, almacenamiento y webhooks<sup><a href="#src-mg4">4</a></sup>', winner = "none" }
   ]},
   { title = "MODELOS DE DESPLIEGUE", rows = [
-    { feature = "Nube compartida", apex = 'Sí (todos los planes) — multi-tenant en Hetzner', comp = 'Sí (todos los planes)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
+    { feature = "Nube compartida", apex = 'Sí (todos los planes) — multi-tenant, alojado en la UE', comp = 'Sí (todos los planes)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "IP dedicada", apex = 'Complemento aprobado en Pro; 1 incluida en Growth, 3 en Scale', comp = 'Disponible como complemento en el plan Foundation y superiores<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "Inquilino dedicado", apex = 'Sujeto a revisión de arquitectura y contractual', comp = 'Consulte la documentación del proveedor<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "BYOC / despliegue privado", apex = 'Sujeto a revisión de arquitectura y contractual', comp = 'Consulte la documentación del proveedor<sup><a href="#src-mg5">5</a></sup>', winner = "none" }

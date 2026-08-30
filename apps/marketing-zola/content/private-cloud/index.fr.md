@@ -4,5 +4,5 @@ description = "Évaluation d'un déploiement cloud privé pour les clients Enter
 template = "private-cloud.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

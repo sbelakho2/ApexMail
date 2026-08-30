@@ -4,5 +4,5 @@ description = "Infraestructura de email Enterprise con revisión contractual, op
 template = "prose.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

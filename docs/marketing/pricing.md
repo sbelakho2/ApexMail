@@ -64,7 +64,7 @@ Annual plans are billed at 10× monthly price (2 months free; ~17% discount).
 
 ## Enterprise CTA
 
-Enterprise plan routes to `/contact/sales/` for custom onboarding, annual contracts, dedicated CSM, HIPAA BAA lifecycle, SOC 2 evidence workflows, SIG/CAIQ/HECVAT answer packs, and white-label deployment.
+Enterprise plan routes to `/contact/sales/` for custom onboarding, annual contracts, dedicated CSM, white-label deployment.
 
 ## Related
 

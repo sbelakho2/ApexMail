@@ -10,7 +10,7 @@ Send your first email through the ApexMail REST API.
 ## Send an Email
 
 ```bash
-curl -s -X POST https://api.apexmail.ee/v1/emails \
+curl -s -X POST https://api.apexmail.ee/v1/messages \
   -H "Authorization: Bearer $APEXMAIL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -37,7 +37,7 @@ curl -s -X POST https://api.apexmail.ee/v1/emails \
 Transactional streams allow you to separate sending configurations for different types of email:
 
 ```bash
-curl -s -X POST https://api.apexmail.ee/v1/emails \
+curl -s -X POST https://api.apexmail.ee/v1/messages \
   -H "Authorization: Bearer $APEXMAIL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -56,7 +56,7 @@ curl -s -X POST https://api.apexmail.ee/v1/emails \
 import requests
 
 API_KEY = "am_live_xxxxxxxxxxxxxxxxxxxx"
-url = "https://api.apexmail.ee/v1/emails"
+url = "https://api.apexmail.ee/v1/messages"
 
 payload = {
     "from": "hello@example.com",
@@ -81,7 +81,7 @@ print(response.json())
 ## Node.js Example
 
 ```javascript
-const response = await fetch("https://api.apexmail.ee/v1/emails", {
+const response = await fetch("https://api.apexmail.ee/v1/messages", {
   method: "POST",
   headers: {
     "Authorization": `Bearer ${process.env.APEXMAIL_API_KEY}`,
@@ -102,7 +102,7 @@ console.log(await response.json());
 ## Check Delivery Status
 
 ```bash
-curl -s https://api.apexmail.ee/v1/emails/msg_01JABCDEFGHIJKLM \
+curl -s https://api.apexmail.ee/v1/messages/msg_01JABCDEFGHIJKLM \
   -H "Authorization: Bearer $APEXMAIL_API_KEY" \
   | jq .
 ```

@@ -9,5 +9,4 @@ pub mod enrichment;
 pub mod inbox;
 pub mod routes;
 pub mod scheduler;
-pub mod scrapers;
 pub mod types;

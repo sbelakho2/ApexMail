@@ -640,7 +640,7 @@ fn cp_row_actions(
             }
             if matches!(status.as_str(), "pending" | "active" | "suspended") {
                 buttons.push(format!(
-                    "<a href=\"/confirm?intent=delete-tenant&amp;id={id}&amp;return_to=%2Ftenants\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-destructive/30 bg-destructive/5 px-2.5 py-1 text-xs font-bold text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete</a>",
+                    "<form method=\"get\" action=\"/confirm\" class=\"inline-flex\"><input type=\"hidden\" name=\"intent\" value=\"delete-tenant\"><input type=\"hidden\" name=\"id\" value=\"{id}\"><input type=\"hidden\" name=\"return_to\" value=\"/tenants\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-destructive/30 bg-destructive/5 px-2.5 py-1 text-xs font-bold text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete</button></form>",
                     id = html_escape(&row.id),
                 ));
             }
@@ -878,8 +878,12 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                             }
                         }
                         if let Some(intent) = &data.delete_intent {
+                            // Destructive actions render as a button inside a
+                            // form (correct affordance), GETting the signed
+                            // confirmation page — never as a plain
+                            // navigation-styled link.
                             actions.push(format!(
-                            "<a href=\"/confirm?intent={intent}&amp;id={id}&amp;return_to={return_to}\" class=\"inline-flex items-center justify-center rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-bold text-destructive transition-colors hover:bg-destructive/10\">Delete</a>",
+                            "<form method=\"get\" action=\"/confirm\" class=\"inline-flex\"><input type=\"hidden\" name=\"intent\" value=\"{intent}\"><input type=\"hidden\" name=\"id\" value=\"{id}\"><input type=\"hidden\" name=\"return_to\" value=\"{return_to}\"><button type=\"submit\" class=\"inline-flex items-center justify-center rounded-sm border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm font-bold text-destructive transition-colors hover:bg-destructive/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete</button></form>",
                             intent = html_escape(intent),
                             id = html_escape(&row.id),
                             return_to = urlencode_path(&data.base_path),
@@ -1627,22 +1631,22 @@ pub fn control_plane_sales_page() -> String {
                     <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                         <article class="rounded-sm border border-white/10 bg-black/25 p-4">
                             <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Pipeline value</p>
-                            <p class="mt-2 text-2xl font-bold tracking-tight text-white">$412k</p>
+                            <p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p>
                             <p class="mt-1 text-xs text-surface-400">Weighted annual contract value</p>
                         </article>
                         <article class="rounded-sm border border-white/10 bg-black/25 p-4">
                             <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Approvals queue</p>
-                            <p class="mt-2 text-2xl font-bold tracking-tight text-warning-200">11</p>
+                            <p class="mt-2 text-2xl font-bold tracking-tight text-warning-200">—</p>
                             <p class="mt-1 text-xs text-surface-400">7 high confidence, 4 review required</p>
                         </article>
                         <article class="rounded-sm border border-white/10 bg-black/25 p-4">
                             <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Campaigns live</p>
-                            <p class="mt-2 text-2xl font-bold tracking-tight text-success-200">4</p>
+                            <p class="mt-2 text-2xl font-bold tracking-tight text-success-200">—</p>
                             <p class="mt-1 text-xs text-surface-400">1,268 recipients in active cadence</p>
                         </article>
                         <article class="rounded-sm border border-white/10 bg-black/25 p-4">
                             <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Conversion pace</p>
-                            <p class="mt-2 text-2xl font-bold tracking-tight text-white">18.4%</p>
+                            <p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p>
                             <p class="mt-1 text-xs text-surface-400">From qualified to contract signature</p>
                         </article>
                     </div>
@@ -1687,10 +1691,10 @@ pub fn control_plane_sales_page() -> String {
                     </form>
 
                     <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Total leads</p><p class="mt-2 text-2xl font-bold tracking-tight text-white">184</p><p class="mt-1 text-xs text-surface-400">Across all active stages</p></div>
-                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Ready now</p><p class="mt-2 text-2xl font-bold tracking-tight text-success-200">27</p><p class="mt-1 text-xs text-surface-400">No blockers, proposal eligible</p></div>
-                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Needs legal</p><p class="mt-2 text-2xl font-bold tracking-tight text-warning-200">9</p><p class="mt-1 text-xs text-surface-400">DPA or procurement exception</p></div>
-                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Average score</p><p class="mt-2 text-2xl font-bold tracking-tight text-white">78</p><p class="mt-1 text-xs text-surface-400">Weighted by buying intent + fit</p></div>
+                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Total leads</p><p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p><p class="mt-1 text-xs text-surface-400">Across all active stages</p></div>
+                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Ready now</p><p class="mt-2 text-2xl font-bold tracking-tight text-success-200">—</p><p class="mt-1 text-xs text-surface-400">No blockers, proposal eligible</p></div>
+                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Needs legal</p><p class="mt-2 text-2xl font-bold tracking-tight text-warning-200">—</p><p class="mt-1 text-xs text-surface-400">DPA or procurement exception</p></div>
+                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Average score</p><p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p><p class="mt-1 text-xs text-surface-400">Weighted by buying intent + fit</p></div>
                     </div>
 
                     <form method="post" action="/web/admin/sales/leads/update" class="mt-6 block">
@@ -1707,27 +1711,9 @@ pub fn control_plane_sales_page() -> String {
                                 </thead>
                                 <tbody class="divide-y divide-white/10 text-surface-200">
                                     <tr>
-                                        <td class="px-4 py-3"><input type="checkbox" name="lead_ids" value="lead-nordic" aria-label="Select Nordic Payments Group" /></td>
-                                        <td class="px-4 py-3">Nordic Payments Group</td>
-                                        <td class="px-4 py-3">Security review</td>
-                                        <td class="px-4 py-3">91</td>
-                                        <td class="px-4 py-3">SIG legal signoff</td>
+                                        <td class="px-4 py-3 text-surface-400" colspan="5">No leads loaded — rows appear here when the discovery pipeline has data for this tenant.</td>
                                     </tr>
-                                    <tr>
-                                        <td class="px-4 py-3"><input type="checkbox" name="lead_ids" value="lead-helios" aria-label="Select Helios Health Systems" /></td>
-                                        <td class="px-4 py-3">Helios Health Systems</td>
-                                        <td class="px-4 py-3">Proposal</td>
-                                        <td class="px-4 py-3">84</td>
-                                        <td class="px-4 py-3">Private cloud architecture review</td>
-                                    </tr>
-                                    <tr>
-                                        <td class="px-4 py-3"><input type="checkbox" name="lead_ids" value="lead-aster" aria-label="Select Aster Compliance Cloud" /></td>
-                                        <td class="px-4 py-3">Aster Compliance Cloud</td>
-                                        <td class="px-4 py-3">Negotiation</td>
-                                        <td class="px-4 py-3">88</td>
-                                        <td class="px-4 py-3">Commercial terms confirmation</td>
-                                    </tr>
-                                </tbody>
+                                    </tbody>
                             </table>
                         </div>
                         <div class="mt-4 flex flex-wrap items-center gap-3">
@@ -1783,15 +1769,17 @@ pub fn control_plane_sales_page() -> String {
                             <input type="hidden" name="action" value="start-cycle" />
                             <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Start cycle</span><span class="mt-1 block text-xs text-surface-400">Fetch candidates and stage risk filters</span></button>
                         </form>
-                        <form method="post" action="/web/admin/sales/leads/update" class="contents">
+                        <form method="post" action="/web/admin/sales/leads/update" class="grid gap-2">
                             <input type="hidden" name="status" value="approved" />
-                            <input type="hidden" name="lead_ids" value="lead-nordic" />
-                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Approve selected</span><span class="mt-1 block text-xs text-surface-400">Promote high-confidence accounts only (pick rows in the queue)</span></button>
+                            <label for="sales-approve-ids" class="text-xs text-surface-400">Lead IDs to approve (comma-separated, from the queue)</label>
+                            <input id="sales-approve-ids" name="lead_ids" value="" required class="rounded-sm border border-white/10 bg-surface-950 px-3 py-2 text-sm text-white outline-none transition focus:border-primary" />
+                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Approve listed leads</span><span class="mt-1 block text-xs text-surface-400">Promote high-confidence accounts only</span></button>
                         </form>
-                        <form method="post" action="/web/admin/sales/leads/update" class="contents">
+                        <form method="post" action="/web/admin/sales/leads/update" class="grid gap-2">
                             <input type="hidden" name="status" value="escalated" />
-                            <input type="hidden" name="lead_ids" value="lead-nordic" />
-                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Escalate blockers</span><span class="mt-1 block text-xs text-surface-400">Route legal or security blockers to desk owners</span></button>
+                            <label for="sales-escalate-ids" class="text-xs text-surface-400">Lead IDs to escalate (comma-separated)</label>
+                            <input id="sales-escalate-ids" name="lead_ids" value="" required class="rounded-sm border border-white/10 bg-surface-950 px-3 py-2 text-sm text-white outline-none transition focus:border-primary" />
+                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Escalate listed leads</span><span class="mt-1 block text-xs text-surface-400">Route legal or security blockers to desk owners</span></button>
                         </form>
                     </div>
                 </section>
@@ -1829,8 +1817,11 @@ pub fn control_plane_sales_page() -> String {
                             <label for="sales-template-name" class="block text-surface-300">Template</label>
                             <input id="sales-template-name" name="template_name" value="enterprise_owner_intro" class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
                         </div>
-                        <input type="hidden" name="lead_ids" value="lead-nordic" />
-                        <button type="submit" class="rounded-sm bg-success-300 px-4 py-2 text-sm font-bold text-surface-950 transition hover:bg-success-200">Launch outreach for selected leads</button>
+                        <div class="space-y-2 text-sm">
+                            <label for="sales-lead-ids" class="block text-surface-300">Lead IDs (comma-separated)</label>
+                            <input id="sales-lead-ids" name="lead_ids" value="" required class="w-full rounded-sm border border-white/10 bg-surface-950 px-4 py-3 text-sm text-white outline-none transition focus:border-primary" />
+                        </div>
+                        <button type="submit" class="rounded-sm bg-success-300 px-4 py-2 text-sm font-bold text-surface-950 transition hover:bg-success-200">Launch outreach for the listed leads</button>
                     </form>
                 </section>
 
@@ -1851,6 +1842,7 @@ pub fn control_plane_sales_page() -> String {
         .trim()
         .to_string()
 }
+
 
 // ─── Marketing pages ────────────────────────────────────────
 

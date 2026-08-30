@@ -4,7 +4,7 @@ template = "prose.html"
 description = "ApexMail consulta Google Postmaster Tools y Microsoft SNDS cada seis horas, puntúa su reputación de envío y limita automáticamente el tráfico saliente cuando los datos indican que conviene frenar."
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++
 
 ## Ubicación en bandeja de entrada, respaldada por los propios proveedores de buzón

@@ -170,7 +170,7 @@ validate_repo_gates() {
 image_name_guard() {
     _canonical="api-server mta imap-server mailstore worker enterprise tracking-service
                 observability marketing status-server billing-service sales-autopilot
-                compliance migrator"
+                compliance analytics-worker pdf-renderer migrator"
     _third_party="nginx: certbot/certbot: prodrigestivill/postgres-backup-local:
                  postgres: redis: clickhouse/clickhouse-server:"
     _errs=0

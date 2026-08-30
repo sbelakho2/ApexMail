@@ -4,5 +4,5 @@ description = "Calcule sus costes de envío de email y compare los precios de Ap
 template = "calculator.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

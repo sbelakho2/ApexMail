@@ -20,15 +20,15 @@ ApexMail Enterprise provides:
 
 | Feature | Documentation | Status |
 |---------|--------------|--------|
-| SSO | [sso.md](./sso.md) | ✅ Production |
-| Sub-Accounts | [sub-accounts.md](./sub-accounts.md) | ✅ Production |
-| White Labeling | [whitelabel.md](./whitelabel.md) | ✅ Production |
-| Template Approval | [template-approval.md](./template-approval.md) | ✅ Production |
-| Log Streaming | [log-streaming.md](./log-streaming.md) | ✅ Production |
-| Compliance | [compliance.md](./compliance.md) | ✅ Production |
-| Private Cloud | [private-cloud.md](./private-cloud.md) | ✅ Production |
-| Support | [support.md](./support.md) | ✅ Production |
-| QBR | [qbr.md](./qbr.md) | ✅ Production |
+| SSO | [sso.md](./sso.md) | Production |
+| Sub-Accounts | [sub-accounts.md](./sub-accounts.md) | Production |
+| White Labeling | [whitelabel.md](./whitelabel.md) | Production |
+| Template Approval | [template-approval.md](./template-approval.md) | Production |
+| Log Streaming | [log-streaming.md](./log-streaming.md) | Production |
+| Compliance | [compliance.md](./compliance.md) | Production |
+| Private Cloud | [private-cloud.md](./private-cloud.md) | Production |
+| Support | [support.md](./support.md) | Production |
+| QBR | [qbr.md](./qbr.md) | Production |
 
 ## Enterprise API
 
@@ -54,13 +54,9 @@ See the [API Reference](../api/sdk-reference.md) for complete documentation.
 
 ## Support
 
-Enterprise customers receive dedicated support with guaranteed SLAs:
-
-| Priority | First Response | Resolution Target |
-|----------|---------------|------------------|
-| Critical | 15 minutes | 4 hours |
-| High | 1 hour | 8 hours |
-| Medium | 4 hours | 24 hours |
-| Low | 8 hours | 48 hours |
+Enterprise customers receive dedicated support. Response commitments are
+defined in [support.md](support.md) — the authoritative tier table
+(Enterprise: 4-hour contractual first response during business hours);
+do not quote numbers from this summary.
 
 Contact: support@apexmail.ee

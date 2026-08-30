@@ -5,7 +5,7 @@ Send multiple emails in a single API request.
 ## Batch Endpoint
 
 ```
-POST /v1/emails/batch
+POST /v1/messages/batch
 ```
 
 ## Request
@@ -104,7 +104,7 @@ def send_batch(emails):
     for i in range(0, len(batch["messages"]), 100):
         chunk = {"messages": batch["messages"][i:i+100]}
         response = requests.post(
-            "https://api.apexmail.ee/v1/emails/batch",
+            "https://api.apexmail.ee/v1/messages/batch",
             json=chunk,
             headers={"Authorization": f"Bearer {API_KEY}"}
         )

@@ -39,7 +39,7 @@ comparison_sections = [
     { feature = "Email entrante", apex = 'Planes Scale y Enterprise', comp = 'Sí — reglas de recepción de SES con acciones S3, Lambda, SNS y SQS<sup><a href="#src-ses5">5</a></sup>', winner = "none" }
   ]},
   { title = "MODELOS DE DESPLIEGUE", rows = [
-    { feature = "Nube compartida", apex = 'Sí (todos los planes) — multi-tenant gestionado en Hetzner', comp = 'Sí (todas las cuentas) — pool de IP compartido por defecto<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "Nube compartida", apex = 'Sí (todos los planes) — multi-tenant gestionado, alojado en la UE', comp = 'Sí (todas las cuentas) — pool de IP compartido por defecto<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "IP dedicada", apex = 'Complemento aprobado en Pro; 1 incluida en Growth, 3 en Scale', comp = 'Sí — €22.95 (US$24.95)/mes por IP dedicada; gestión de pools de IP disponible<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "Inquilino dedicado", apex = 'Sujeto a revisión de arquitectura y contractual', comp = 'Autogestionado — el cliente diseña su inquilino dedicado en AWS usando SES como componente de servicio<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "BYOC / despliegue privado", apex = 'Sujeto a revisión de arquitectura y contractual', comp = 'Inherente — el cliente opera en su propia cuenta de AWS; SES es un servicio de AWS<sup><a href="#src-ses6">6</a></sup>', winner = "none" }

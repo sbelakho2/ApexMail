@@ -5,11 +5,11 @@ Cancel scheduled emails before they are delivered.
 ## Cancel a Scheduled Email
 
 ```
-DELETE /v1/emails/:id/schedule
+POST /v1/messages/:id/cancel
 ```
 
 ```bash
-curl -s -X DELETE https://api.apexmail.ee/v1/emails/msg_xxx/schedule \
+curl -s -X POST https://api.apexmail.ee/v1/messages/msg_xxx/cancel \
   -H "Authorization: Bearer $APEXMAIL_API_KEY" \
   | jq .
 ```
@@ -58,11 +58,11 @@ def cancel_scheduled_emails(tag):
     headers = {"Authorization": f"Bearer {API_KEY}"}
 
     # List scheduled emails by tag
-    url = f"https://api.apexmail.ee/v1/emails?status=scheduled&tag={tag}"
+    url = f"https://api.apexmail.ee/v1/messages?status=scheduled&tag={tag}"
     emails = requests.get(url, headers=headers).json()
 
     for email in emails["data"]:
-        cancel_url = f"https://api.apexmail.ee/v1/emails/{email['id']}/schedule"
+        cancel_url = f"https://api.apexmail.ee/v1/messages/{email['id']}/cancel"
         resp = requests.delete(cancel_url, headers=headers)
         print(f"Cancelled {email['id']}: {resp.json()['status']}")
 ```

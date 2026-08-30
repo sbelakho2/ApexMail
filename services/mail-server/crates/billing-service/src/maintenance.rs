@@ -239,6 +239,24 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                     error!(error = %error_message, "failed to process monthly SLA credits");
                 }
             }
+
+            // End-of-period overage invoicing (idempotent per tenant+period;
+            // paid subscriptions may send into an overage allowance — see
+            // usage::record_with_quota_check and the overage module).
+            match crate::overage::sweep_period_overage(sla_state.as_ref()).await {
+                Ok(result) if result.invoices_created > 0 || result.skipped_no_address > 0 => {
+                    info!(
+                        periods_checked = result.periods_checked,
+                        invoices_created = result.invoices_created,
+                        deferred_no_address = result.skipped_no_address,
+                        "processed period overage invoices"
+                    );
+                }
+                Ok(_) => {}
+                Err(error_message) => {
+                    error!(error = %error_message, "failed to sweep period overage");
+                }
+            }
         }
     });
 

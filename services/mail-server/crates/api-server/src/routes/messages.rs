@@ -1285,7 +1285,9 @@ async fn reserve_email_quota(
     })?;
 
     if !quota.allowed {
-        return Err(ApiError::Forbidden("email quota exceeded".into()));
+        return Err(ApiError::Forbidden(
+                    "email quota exceeded: the plan volume and its overage allowance are exhausted — upgrade the plan or contact sales for a higher ceiling".into(),
+                ));
     }
 
     Ok(reservation)

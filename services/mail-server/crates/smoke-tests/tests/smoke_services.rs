@@ -212,7 +212,7 @@ mod billing_tests {
     #[test]
     fn test_billing_config() {
         let cfg = billing_service::config::BillingConfig::default();
-        assert_eq!(cfg.estonia_vat_rate, 24, "Estonia VAT rate should be 24%");
+        
         assert_eq!(cfg.listen_addr, "0.0.0.0:4100");
 
         let payg = billing_service::config::PaygPricing::default();
@@ -232,18 +232,18 @@ mod billing_tests {
     fn test_billing_vat_calculation() {
         // Estonian customer:full 24% VAT
         let (rate, amount) = billing_service::invoices::calculate_vat(10_000, "EE", None);
-        assert_eq!(rate, 24);
+        assert_eq!(rate, 24.0);
         assert_eq!(amount, 2_400);
 
         // EU B2B with VAT number:reverse charge = 0%
         let (rate, amount) =
             billing_service::invoices::calculate_vat(10_000, "DE", Some("DE123456789"));
-        assert_eq!(rate, 0);
+        assert_eq!(rate, 0.0);
         assert_eq!(amount, 0);
 
         // Non-EU:0%
         let (rate, amount) = billing_service::invoices::calculate_vat(10_000, "US", None);
-        assert_eq!(rate, 0);
+        assert_eq!(rate, 0.0);
         assert_eq!(amount, 0);
     }
 }

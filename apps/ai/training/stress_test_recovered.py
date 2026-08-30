@@ -8,8 +8,8 @@ Extracted from git history:
 - stress_test_extra.py (~80 tests, 12 categories)
 
 All pricing transformed to canonical:
-  Free=$0/30K/300K, Starter=$25/50K/500K, Pro=$65/150K/2M,
-  Growth=$150/500K/5M, Scale=$350/2M/20M, Enterprise=$3,000/5M/∞
+  Free=€0/30K/300K, Starter=€25/50K/500K, Pro=€65/150K/2M,
+  Growth=€150/500K/5M, Scale=€350/2M/20M, Enterprise=€3,000/5M/∞
 """
 
 RECOVERED_STRESS_TESTS = {
@@ -114,11 +114,11 @@ RECOVERED_STRESS_TESTS = {
         {"q": "What's the difference between IP reputation and domain reputation?",
          "checks": {"must_contain": ["IP", "domain"], "must_contain_any": ["separate", "both", "different", "independent"]}},
         {"q": "I want separate IPs for transactional and marketing email. What plans support this?",
-         "checks": {"must_contain_any": ["Scale", "$350", "Enterprise", "IP pool"]}},
+         "checks": {"must_contain_any": ["Scale", "€350", "Enterprise", "IP pool"]}},
         {"q": "How do I check if I'm on a blocklist like Spamhaus?",
          "checks": {"must_contain_any": ["Spamhaus", "check.spamhaus.org", "blocklist", "DNSBL"]}},
         {"q": "I'm on the Free plan. Can I get a dedicated IP address?",
-         "checks": {"must_contain_any": ["no", "Pro", "$65", "not available"]}},
+         "checks": {"must_contain_any": ["no", "Pro", "€65", "not available"]}},
     ],
 
     "template_rendering": [
@@ -237,7 +237,7 @@ RECOVERED_STRESS_TESTS = {
         {"q": "Can I bring my own IP address (BYOIP)?",
          "checks": {"must_contain_any": ["Enterprise", "contact", "BYOIP"]}},
         {"q": "How much does an additional dedicated IP cost?",
-         "checks": {"must_contain_any": ["$30", "30", "month"]}},
+         "checks": {"must_contain_any": ["€30", "30", "month"]}},
     ],
 
     "message_diagnostics": [
@@ -278,7 +278,7 @@ RECOVERED_STRESS_TESTS = {
 
     "billing_sla": [
         {"q": "What's the email overage rate per 1,000 emails?",
-         "checks": {"must_contain_any": ["$0.40", "0.40", "40 cent"]}},
+         "checks": {"must_contain_any": ["€0.40", "0.40", "40 cent"]}},
         {"q": "What's the ApexMail uptime SLA?",
          "checks": {"must_contain_any": ["99.9", "SLA"]}},
         {"q": "How do I get credits for downtime?",
@@ -352,7 +352,7 @@ RECOVERED_STRESS_TESTS = {
         {"q": "Free plan: emails, API calls, team size, domains - all the limits please.",
          "checks": {"must_contain": ["3,000"], "must_contain_any": ["50,000", "1", "team", "domain"]}},
         {"q": "Scale plan: everything - price, emails, API, team, domains, IPs, features.",
-         "checks": {"must_contain": ["$350"], "must_contain_any": ["2,000,000", "20,000,000", "SSO", "IP"]}},
+         "checks": {"must_contain": ["€350"], "must_contain_any": ["2,000,000", "20,000,000", "SSO", "IP"]}},
     ],
 
 }

@@ -1475,6 +1475,7 @@ dependencies = [
  "mail-common",
  "metrics",
  "metrics-exporter-prometheus",
+ "moka",
  "observability-service",
  "redis",
  "reqwest",

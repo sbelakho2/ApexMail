@@ -1,13 +1,13 @@
 """
 Extended Customer Profiles — Recovered from deleted files with canonical pricing.
 
-Canonical pricing:
-  Free: $0, 30K emails, 300K API
-  Starter: $25, 50K emails, 500K API  
-  Pro: $65, 150K emails, 2M API
-  Growth: $150, 500K emails, 5M API
-  Scale: $350, 2M emails, 20M API
-  Enterprise: $3,000, 5M emails, unlimited API
+Canonical pricing (EUR; runtime source: billing-service/src/plans.rs):
+  Free: €0, 30K emails, 300K API
+  Starter: €25, 50K emails, 500K API
+  Pro: €65, 150K emails, 2M API
+  Growth: €150, 500K emails, 5M API
+  Scale: €350, 2M emails, 20M API
+  Enterprise: €3,000, 5M emails, unlimited API
 """
 
 EXTENDED_PROFILES = {
@@ -16,9 +16,9 @@ EXTENDED_PROFILES = {
         "plan_name": "Free",
         "plan_price": "0",
         "emails_sent": "2,850",
-        "email_limit": "3,000",
+        "email_limit": "30,000",
         "api_calls": "45,000",
-        "api_call_limit": "50,000",
+        "api_call_limit": "300,000",
         "team_count": "1",
         "team_limit": "1",
         "created_at": "2026-01-28",
@@ -32,9 +32,9 @@ EXTENDED_PROFILES = {
         "plan_name": "Free",
         "plan_price": "0",
         "emails_sent": "1,350",
-        "email_limit": "3,000",
+        "email_limit": "30,000",
         "api_calls": "12,000",
-        "api_call_limit": "50,000",
+        "api_call_limit": "300,000",
         "created_at": "2025-12-01",
         "domain_count": "1",
         "domain_details": "- petgrooming.co: Verified (SPF: fail \u2014 multiple SPF records, DKIM: pass, DMARC: none)",
@@ -50,7 +50,7 @@ EXTENDED_PROFILES = {
         "api_calls": "285,000",
         "api_call_limit": "500,000",
         "team_count": "2",
-        "team_limit": "3",
+        "team_limit": "5",
         "created_at": "2025-06-15",
         "domain_count": "1",
         "domain_details": "- acmecorp.com: Verified (SPF: pass, DKIM: pass, DMARC: pass)",
@@ -66,7 +66,7 @@ EXTENDED_PROFILES = {
         "api_calls": "178,000",
         "api_call_limit": "500,000",
         "team_count": "2",
-        "team_limit": "3",
+        "team_limit": "5",
         "created_at": "2025-08-22",
         "domain_details": "- bakerydelight.com: Verified (SPF: pass, DKIM: pass, DMARC: quarantine)",
         "open_issues": "- Webhook wh_bd01 auto-disabled after 8 consecutive failures (HTTP 500) over 24 hours"
@@ -80,7 +80,7 @@ EXTENDED_PROFILES = {
         "api_calls": "95,000",
         "api_call_limit": "500,000",
         "team_count": "1",
-        "team_limit": "3",
+        "team_limit": "5",
         "domain_details": "- newsletters.example.com: Verified (SPF: pass, DKIM: pass, DMARC: quarantine)",
         "recent_events": "- 18,500 sent, 16,650 delivered (90.0%), 925 quarantined (5.0%)",
         "open_issues": "- DMARC policy causing quarantine of 5% of emails to strict ISPs"

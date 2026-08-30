@@ -101,7 +101,7 @@ TEST_CASES = [
         "name": "pricing_starter",
         "input": "What's the Starter plan price?",
         "required": ["€25", "50,000 emails", "500,000 API"],
-        "forbidden": ["€20", "€15", "250,000 API"],
+        "forbidden": ["€20", "€25", "250,000 API"],
     },
     {
         "name": "pricing_scale",

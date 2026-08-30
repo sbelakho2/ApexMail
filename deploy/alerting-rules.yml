@@ -237,6 +237,26 @@ groups:
           description: "More than 50,000 pending or deferred emails have been waiting for 5 minutes."
           runbook_url: "https://apexmail.ee/docs/alerts#critical-email-queue-backlog"
 
+      - alert: EmailDeadLetterQueue
+        expr: apexmail_email_queue_depth{status="failed"} > 100
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Email dead-letter queue is growing"
+          description: "More than 100 email jobs are in the dead-letter state ('failed') for 15 minutes — permanently failed deliveries awaiting review. Inspect the last_error column and the DLQ runbook."
+          runbook_url: "https://apexmail.ee/docs/alerts#email-dead-letter-queue"
+
+      - alert: EmailDeadLetterQueueCritical
+        expr: apexmail_email_queue_depth{status="failed"} > 1000
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Critical email dead-letter backlog"
+          description: "More than 1,000 permanently failed email jobs are queued for review — customer mail is being lost to a systemic fault."
+          runbook_url: "https://apexmail.ee/docs/alerts#email-dead-letter-queue"
+
       - alert: RedisMemoryPressure
         expr: redis_memory_used_bytes{job="redis"} / redis_memory_max_bytes{job="redis"} > 0.80
         for: 10m

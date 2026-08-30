@@ -640,6 +640,82 @@ def validate_built_output(errors: list[str]) -> None:
         check(stale not in output, f"generated marketing output contains stale token {stale!r}", errors)
 
 
+
+def validate_extended_artifacts(catalog: dict[str, ParsedPlan], errors: list[str]) -> None:
+    """Cover the artifacts that historically drifted while this validator
+    passed: the tools/ pricing mirror, the training corpus fixtures, and the
+    marketing feature bullets (retention, limits) that the card checks never
+    read."""
+    mirror = ROOT / "tools/lib/pricing.py"
+    if not mirror.exists():
+        check(False, "tools/lib/pricing.py (declared single source of truth) is missing", errors)
+    else:
+        source = read(mirror)
+        free = catalog.get("free")
+        enterprise = catalog.get("enterprise")
+        if free is not None:
+            plain = str(free.email_limit)
+            grouped = f"{free.email_limit:,}"
+            underscore = f"{free.email_limit:_}"
+            check(
+                f'"Free":' in source and (plain in source or grouped in source or underscore in source),
+                f"tools/lib/pricing.py Free email limit must be {free.email_limit} (was drifted to 3,000)",
+                errors,
+            )
+        if enterprise is not None:
+            check(
+                '"api_calls": -1' in source or '"api_calls": -1,' in source,
+                "tools/lib/pricing.py Enterprise API calls must be unlimited (-1), not a finite number",
+                errors,
+            )
+        check("$" not in source.replace("$0.001", "").replace("$", ""),
+              "tools/lib/pricing.py must not carry USD prices", errors)
+        check("€" in source or "EUR" in source,
+              "tools/lib/pricing.py must state EUR as the currency", errors)
+
+    payg_fix = ROOT / "tools/fix_payg_calculations.py"
+    if payg_fix.exists():
+        source = read(payg_fix)
+        check("€" in source, "tools/fix_payg_calculations.py must quote EUR amounts", errors)
+        check("$" not in source, "tools/fix_payg_calculations.py must not write USD amounts", errors)
+
+    profiles = ROOT / "apps/ai/training/new_customer_profiles.py"
+    if profiles.exists():
+        source = read(profiles)
+        check('"email_limit": "30,000"' in source,
+              "training profiles must carry the canonical Free limit 30,000", errors)
+        check('"api_call_limit": "300,000"' in source,
+              "training profiles must carry the canonical Free API limit 300,000", errors)
+        check("$" not in source,
+              "training profiles must not quote USD prices (platform is EUR-only)", errors)
+
+    # Marketing feature bullets: retention is a runtime plan feature
+    # (max_retention_days) and was published as 365 against 730.
+    enterprise_runtime = catalog.get("enterprise")
+    if enterprise_runtime is not None:
+        retention = getattr(enterprise_runtime, "retention_days", None)
+        if retention:
+            for path, label in (
+                (MARKETING_PLANS, "pricing cards"),
+                (ROOT / "apps/marketing-zola/content/enterprise/index.md", "enterprise page"),
+                (ROOT / "apps/marketing-zola/content/privacy/index.md", "privacy page"),
+            ):
+                if not path.exists():
+                    continue
+                source = read(path)
+                check(
+                    f"{retention}-day event retention" in source or f"{retention} days" in source,
+                    f"{label}: Enterprise event retention must be {retention} days",
+                    errors,
+                )
+                stale = {365: "365", 730: "365"}.get(retention)
+                if stale and stale != str(retention):
+                    check(
+                        f"{stale}-day event retention" not in source and f"| {stale} days |" not in source,
+                        f"{label}: stale Enterprise retention {stale} days contradicts runtime {retention}",
+                        errors,
+                    )
+
 def main() -> int:
     errors: list[str] = []
     catalog = validate_runtime_catalog(errors)
@@ -648,6 +724,8 @@ def main() -> int:
         validate_marketing_data(catalog, errors)
         validate_marketing_source(catalog, errors)
     validate_canonical_artifacts(errors)
+    if catalog:
+        validate_extended_artifacts(catalog, errors)
     validate_entitlement_boundaries(errors)
     validate_lifecycle_docs(errors)
     validate_built_output(errors)

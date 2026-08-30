@@ -107,7 +107,7 @@ fn fuzz_vat_never_exceeds_100_percent() {
         };
         let (rate, amount) = calculate_vat(subtotal, country, vat_number);
         assert!(
-            (0..=100).contains(&rate),
+            (0.0..=100.0).contains(&rate),
             "VAT rate out of range: {rate} for country={country}"
         );
         assert!(
@@ -141,7 +141,7 @@ fn fuzz_invoice_total_consistent() {
                 quantity,
                 unit_price,
                 amount,
-                vat_rate: 0,
+                vat_rate: 0.0,
                 vat_amount: 0,
             });
         }

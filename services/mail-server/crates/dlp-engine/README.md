@@ -1,5 +1,8 @@
 # dlp-engine
 
+> **STATUS — READ BEFORE RELYING ON THIS CRATE**
+> NOT WIRED INTO PRODUCTION: no service in this workspace (in particular, not the outbound delivery worker) depends on this crate, so no outbound content policy is enforced by it today. Do not represent it as an active control.
+
 Data Loss Prevention engine — PII detection, sensitive data scanning, document watermarking, and outbound content policies.
 
 ## Overview

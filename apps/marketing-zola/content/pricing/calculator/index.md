@@ -4,5 +4,5 @@ description = "Calculate your email sending costs and compare ApexMail pricing a
 template = "calculator.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

@@ -45,9 +45,9 @@ La liste actuelle des sous-traitants autorisés est tenue dans le [Registre des 
 
 | Sous-traitant | Finalité | Localisation | Garantie de transfert |
 |---|---|---|---|
-| Hetzner Online GmbH | Infrastructure principale (calcul, stockage) | Région UE/EEE configurée | Confirmer le déploiement actif et la garantie de transfert applicable |
-| Amazon Web Services, Inc. | Stockage d'objets de télémétrie lorsqu'il est activé | Région S3 configurée (par défaut : `eu-central-1`) | Confirmer le déploiement actif et la garantie de transfert applicable |
-| Amazon Web Services, Inc. | Transport de livraison d'email lorsqu'il est activé | Région SES configurée | Confirmer le déploiement actif et la garantie de transfert applicable |
+| Hetzner Online GmbH | Infrastructure principale (calcul, stockage) | Région UE/EEE configurée | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| Amazon Web Services, Inc. | Stockage d'objets de télémétrie lorsqu'il est activé | Région S3 configurée (par défaut : `eu-central-1`) | Clauses contractuelles types de l'UE (DPA AWS) |
+| Amazon Web Services, Inc. | Transport de livraison d'email lorsqu'il est activé | Région SES configurée | Clauses contractuelles types de l'UE (DPA AWS) |
 | Google LLC | Authentification OAuth optionnelle | Mondial (entité américaine, données traitées selon la configuration OAuth) | Clauses contractuelles types |
 | GitHub, Inc. | Authentification OAuth optionnelle | Mondial (entité américaine) | Clauses contractuelles types |
 | Stripe, Inc. | Traitement des paiements | États-Unis (principal), Inde (support) | Clauses contractuelles types |

@@ -36,9 +36,9 @@ set -eu
 # can never treat their containers as orphans (a long-standing compose v2
 # quirk with inactive-profile services).
 STACK_SERVICES="api-server mta imap-server mailstore worker enterprise tracking
-                observability marketing status-server billing-service sales-autopilot
-                compliance
-                postgres-backup clickhouse-backup nginx certbot postgres redis clickhouse
+                 observability marketing status-server billing-service sales-autopilot
+                 compliance analytics-worker pdf-renderer
+                 postgres-backup clickhouse-backup nginx certbot postgres redis clickhouse
                 prometheus grafana loki alertmanager tempo otel-collector
                 node-exporter blackbox-exporter postgres-exporter redis-exporter
                 clickhouse-exporter synthetic-monitor"

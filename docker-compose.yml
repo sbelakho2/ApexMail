@@ -38,7 +38,7 @@ services:
     # SECURITY: Port exposure controlled via environment variable
     # Set to empty in production to disable host binding
     ports:
-      - "${POSTGRES_PORT:-127.0.0.1:5432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-apexmail} -d ${POSTGRES_DB:-apexmail}"]
       interval: 10s
@@ -87,7 +87,7 @@ services:
       - ./deploy/redis/entrypoint.sh:/usr/local/bin/redis-entrypoint.sh:ro
     # SECURITY: Port exposure controlled via environment variable
     ports:
-      - "${REDIS_PORT:-127.0.0.1:6379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
     healthcheck:
       test: ["CMD-SHELL", "export REDISCLI_AUTH=\"$(cat /run/secrets/redis_password 2>/dev/null || echo '')\"; redis-cli --no-auth-warning ping | grep -q PONG"]
       interval: 10s
@@ -488,6 +488,9 @@ services:
       dockerfile: services/mail-server/Dockerfile
       target: mta
     restart: unless-stopped
+    # Drain in-flight SMTP transactions before SIGKILL (default 10s kills
+    # accepted-but-unpersisted submission DATA on every redeploy).
+    stop_grace_period: 90s
     ports:
       - "25:25"
       - "587:587"
@@ -630,6 +633,66 @@ services:
           memory: 512M
         reservations:
           memory: 128M
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    read_only: true
+    tmpfs:
+      - /tmp
+    secrets:
+      - postgres_password
+      - redis_password
+    logging: *default-logging
+
+  # ===========================================================================
+  # ANALYTICS WORKER (events compaction → cold storage, retention, reconciliation)
+  # ===========================================================================
+  # Internal-only cron worker: the ONLY mechanism aging events out of the
+  # Postgres `events` table (hot_retention_days → cold storage, then
+  # retention delete) and running reconciliation checks. No ports; runs a
+  # nightly schedule (ANALYTICS_* env). Deployment without this service is
+  # what previously left Postgres events growing unboundedly.
+  analytics-worker:
+    build:
+      context: .
+      dockerfile: services/mail-server/Dockerfile
+      target: analytics-worker
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "analytics-worker"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+      - analytics-cold:/var/lib/apexmail/analytics
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RUST_LOG: ${RUST_LOG:-info,analytics=info}
+      # ── Database / Redis (URLs assembled by the entrypoint wrapper) ───────
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      # ── Compaction / retention policy ──────────────────────────────────────
+      ANALYTICS_STORAGE_PATH: /var/lib/apexmail/analytics
+      ANALYTICS_COMPACTION_ENABLED: ${ANALYTICS_COMPACTION_ENABLED:-true}
+      ANALYTICS_HOT_RETENTION_DAYS: ${ANALYTICS_HOT_RETENTION_DAYS:-90}
+      ANALYTICS_COLD_RETENTION_DAYS: ${ANALYTICS_COLD_RETENTION_DAYS:-730}
+      ANALYTICS_STO_HMAC_KEY: ${ANALYTICS_STO_HMAC_KEY:-}
+    networks:
+      - apexmail_backend
+      - apexmail_data_internal
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          reservations:
+            memory: 64M
     security_opt:
       - no-new-privileges:true
       - apparmor:docker-default
@@ -891,8 +954,8 @@ services:
       - ./deploy/clickhouse/initdb:/docker-entrypoint-initdb.d:ro
       - ./deploy/load-secret-env.sh:/usr/local/bin/load-secret-env.sh:ro
     ports:
-      - "${CLICKHOUSE_HTTP_PORT:-127.0.0.1:8123}:8123"
-      - "${CLICKHOUSE_NATIVE_PORT:-127.0.0.1:9000}:9000"
+      - "127.0.0.1:${CLICKHOUSE_HTTP_PORT:-8123}:8123"
+      - "127.0.0.1:${CLICKHOUSE_NATIVE_PORT:-9000}:9000"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8123/ping || exit 1"]
       interval: 10s
@@ -1193,11 +1256,15 @@ services:
   redis-exporter:
     image: oliver006/redis_exporter:v1.62.0
     container_name: apexmail-redis-exporter
-    # The redis_exporter image is FROM scratch (no shell): it reads the
-    # Docker secret itself via its native REDIS_PASSWORD_FILE env var — a
-    # /bin/sh wrapper entrypoint cannot execute here (OCI "exec /bin/sh:
-    # no such file or directory" aborts every compose up).
+    # DEV/DEFAULT: password via env. The scratch image has no shell, and the
+    # exporter's --redis.password-file only accepts a JSON MAP of
+    # {"redis://addr": "password"} (a plain password file is a parse error
+    # that crash-loops the container). The production overlay overrides this
+    # with a dedicated JSON-map Docker secret, keeping the credential out of
+    # `docker inspect` there.
     entrypoint: ["/redis_exporter"]
+    command:
+      - --redis.addr=redis://redis:6379
     restart: unless-stopped
     read_only: true
     security_opt:
@@ -1205,9 +1272,6 @@ services:
       - apparmor:docker-default
     environment:
       REDIS_ADDR: redis://redis:6379
-      # The scratch image reads the password from the env (the multi-password
-      # REDIS_PASSWORD_FILE JSON map proved brittle across exporter versions;
-      # the env value comes from the deployment .env, same as the dev file).
       REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD is required}
       # Export the length of the tracking-service WAL list (backing the
       # TrackingWalBacklog alert in deploy/alerting-rules.yml). A single
@@ -1353,6 +1417,7 @@ services:
 # VOLUMES
 # ===========================================================================
 volumes:
+  analytics-cold:
   postgres_data:
   redis_data:
   clickhouse_data:

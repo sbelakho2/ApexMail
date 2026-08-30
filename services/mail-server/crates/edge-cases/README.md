@@ -1,5 +1,8 @@
 # edge-cases
 
+> **STATUS — READ BEFORE RELYING ON THIS CRATE**
+> NOT DEPLOYED: this crate's server binary is not in the deployment Dockerfile or compose files. Compile/test target only.
+
 ApexMail edge-cases — EAI validation, attachment scanning, calendar, delivery edge cases.
 
 ## Overview

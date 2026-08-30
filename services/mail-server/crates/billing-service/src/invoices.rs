@@ -141,9 +141,10 @@ pub struct NewLineItem {
     pub unit_price: i64,
 }
 
-/// Round-half-up VAT for a single base amount (integer cents).
-pub(crate) fn round_vat(amount: i64, rate: i32) -> i64 {
-    ((amount * rate as i64) + 50) / 100
+/// Round-half-up VAT for a single base amount (integer cents, fractional
+/// percent rates supported via billing_common).
+pub fn round_vat(amount: i64, rate: f64) -> i64 {
+    billing_common::vat_rates::vat_amount_half_up(amount, rate)
 }
 
 /// Allocate VAT across invoice lines following the EU convention: round each
@@ -152,8 +153,12 @@ pub(crate) fn round_vat(amount: i64, rate: i32) -> i64 {
 /// invoice total. Without this, sums of per-line rounding drift by ±1 cent
 /// from the headline `vat_total`, breaking KMD returns and PDF totals.
 ///
+/// This is the platform's single VAT-allocation algorithm; every invoice
+/// writer (billing-service and the api-server admin route) must use it so
+/// per-line VAT never diverges between paths.
+///
 /// Returns the VAT amount (cents) per line, aligned with `amounts`.
-pub(crate) fn allocate_vat_across_lines(amounts: &[i64], rate: i32) -> Vec<i64> {
+pub fn allocate_vat_across_lines(amounts: &[i64], rate: f64) -> Vec<i64> {
     let mut allocated: Vec<i64> = amounts.iter().map(|&a| round_vat(a, rate)).collect();
     let total: i64 = amounts.iter().sum();
     let target = round_vat(total, rate);
@@ -312,6 +317,64 @@ pub async fn generate_invoice_pdf(
         })
         .collect();
 
+    // Buyer identification is mandatory on a VAT invoice; pull the tenant's
+    // billing address so the PDF carries it (previously rendered
+    // "Customer details not available" on every stored invoice).
+    let bill_to: Option<serde_json::Value> = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)>(
+        "SELECT company_name, vat_number, address_line1, city, postal_code, country \
+         FROM billing_addresses WHERE tenant_id = $1",
+    )
+    .bind(&invoice.tenant_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(InvoiceError::Db)?
+    .map(|(company, vat, address, city, postal, country)| {
+        let mut v = serde_json::Map::new();
+        if let Some(company) = company.filter(|s| !s.is_empty()) {
+            v.insert("company".into(), escape_html(&company).into());
+        }
+        if let Some(vat) = vat.filter(|s| !s.is_empty()) {
+            v.insert("vat_number".into(), escape_html(&vat).into());
+        }
+        if let Some(address) = address.filter(|s| !s.is_empty()) {
+            v.insert("address".into(), escape_html(&address).into());
+        }
+        if let Some(city) = city.filter(|s| !s.is_empty()) {
+            v.insert("city".into(), escape_html(&city).into());
+        }
+        if let Some(postal) = postal.filter(|s| !s.is_empty()) {
+            // fold postal code into the city line so the template stays simple
+            let city_line = match v.get("city") {
+                Some(c) => format!("{} {}", c.as_str().unwrap_or_default(), postal),
+                None => postal,
+            };
+            v.insert("city".into(), escape_html(&city_line).into());
+        }
+        if let Some(country) = country.filter(|s| !s.is_empty()) {
+            v.insert("country".into(), escape_html(&country).to_uppercase().into());
+        }
+        serde_json::Value::Object(v)
+    });
+
+    // Seller identity and bank details come from configuration. The bank is
+    // Wise; account identifiers are only rendered when actually configured,
+    // never hardcoded placeholder values.
+    let bank_iban = std::env::var("BILLING_COMPANY_IBAN").unwrap_or_default();
+    let bank_bic = std::env::var("BILLING_COMPANY_BIC").unwrap_or_default();
+    let bank_name = std::env::var("BILLING_COMPANY_BANK").unwrap_or_else(|_| "Wise".to_string());
+    let bank = if bank_iban.is_empty() && bank_bic.is_empty() {
+        serde_json::json!({ "name": bank_name })
+    } else {
+        serde_json::json!({ "name": bank_name, "iban": bank_iban, "bic": bank_bic })
+    };
+
+    let seller = serde_json::json!({
+        "name": "Bel Consulting OÜ",
+        "address": "Sakala 7-2, 10141 Tallinn, Estonia",
+        "vat_number": "EE102951727",
+        "registry_code": "16588745",
+    });
+
     // Build the JSON payload expected by the invoice.typ template
     let pdf_data = serde_json::json!({
         "invoice_number": escape_html(&invoice.invoice_number),
@@ -326,6 +389,9 @@ pub async fn generate_invoice_pdf(
         "vat_total": invoice.vat_total,
         "total": invoice.total,
         "line_items": sanitized_line_items,
+        "seller": seller,
+        "bank": bank,
+        "bill_to": bill_to,
     });
 
     let render_request = serde_json::json!({
@@ -738,7 +804,7 @@ mod tests {
     #[test]
     fn vat_estonia_always_charged() {
         let (rate, amt) = calculate_vat(10_000, "EE", None);
-        assert_eq!(rate, 24);
+        assert_eq!(rate, 24.0);
         assert_eq!(amt, 2_400); // 24 % of 10 000
     }
 
@@ -750,7 +816,7 @@ mod tests {
     fn allocate_vat_lines_sums_to_total_rounded_vat() {
         // Three lines of 3 cents each at 24 %: per-line rounding gives
         // 1+1+1 = 3, but round(9 * 24%) = 2. The last line absorbs the -1.
-        let allocated = allocate_vat_across_lines(&[3, 3, 3], 24);
+        let allocated = allocate_vat_across_lines(&[3, 3, 3], 24.0);
 
         assert_eq!(allocated, vec![1, 1, 0]);
         assert_eq!(allocated.iter().sum::<i64>(), ((3 + 3 + 3) * 24 + 50) / 100);
@@ -760,7 +826,7 @@ mod tests {
     fn allocate_vat_lines_absorbs_plus_one_cent_drift() {
         // Lines of 1 cent at 24 %: each line rounds to 0, but the total
         // rounds to 1 — the final line is adjusted up by +1.
-        let allocated = allocate_vat_across_lines(&[1, 1, 1], 24);
+        let allocated = allocate_vat_across_lines(&[1, 1, 1], 24.0);
 
         assert_eq!(allocated, vec![0, 0, 1]);
         assert_eq!(allocated.iter().sum::<i64>(), ((1 + 1 + 1) * 24 + 50) / 100);
@@ -768,7 +834,7 @@ mod tests {
 
     #[test]
     fn allocate_vat_lines_exact_rounding_needs_no_adjustment() {
-        let allocated = allocate_vat_across_lines(&[10_000, 5_000], 24);
+        let allocated = allocate_vat_across_lines(&[10_000, 5_000], 24.0);
 
         // Exact per-line rounding already reconciles — no drift to absorb.
         assert_eq!(
@@ -779,15 +845,15 @@ mod tests {
 
     #[test]
     fn allocate_vat_lines_zero_rate_and_empty_inputs() {
-        assert!(allocate_vat_across_lines(&[], 24).is_empty());
-        assert_eq!(allocate_vat_across_lines(&[100, 200], 0), vec![0, 0]);
+        assert!(allocate_vat_across_lines(&[], 24.0).is_empty());
+        assert_eq!(allocate_vat_across_lines(&[100, 200], 0.0), vec![0, 0]);
     }
 
     #[test]
     fn allocate_vat_lines_adjusts_last_nonzero_line_only() {
         // A trailing zero-amount line must not receive the reconciliation
         // adjustment; the last *non-zero* line absorbs it instead.
-        let allocated = allocate_vat_across_lines(&[3, 3, 3, 0], 24);
+        let allocated = allocate_vat_across_lines(&[3, 3, 3, 0], 24.0);
 
         assert_eq!(allocated, vec![1, 1, 0, 0]);
         assert_eq!(allocated.iter().sum::<i64>(), 2);
@@ -796,7 +862,7 @@ mod tests {
     #[test]
     fn vat_eu_b2b_reverse_charge() {
         let (rate, amt) = calculate_vat(10_000, "DE", Some("DE123456789"));
-        assert_eq!(rate, 0);
+        assert_eq!(rate, 0.0);
         assert_eq!(amt, 0);
     }
 
@@ -804,14 +870,14 @@ mod tests {
     fn vat_eu_b2c_charged() {
         let (rate, amt) = calculate_vat(10_000, "FR", None);
         // France standard VAT rate is 20% (destination-based)
-        assert_eq!(rate, 20);
+        assert_eq!(rate, 20.0);
         assert_eq!(amt, 2_000);
     }
 
     #[test]
     fn vat_non_eu_zero() {
         let (rate, amt) = calculate_vat(50_000, "US", None);
-        assert_eq!(rate, 0);
+        assert_eq!(rate, 0.0);
         assert_eq!(amt, 0);
     }
 
@@ -847,7 +913,7 @@ mod tests {
             quantity: 1,
             unit_price: 1000,
             amount: 1000,
-            vat_rate: 24,
+            vat_rate: 24.0,
             vat_amount: 240,
         }];
 
@@ -865,7 +931,7 @@ mod tests {
             quantity: 2,
             unit_price: 500,
             amount: 1000,
-            vat_rate: 0,
+            vat_rate: 0.0,
             vat_amount: 0,
         }])
         .expect("versioned invoice line items should serialize");
@@ -900,34 +966,34 @@ mod tests {
     /// EU_VAT_RATES and are listed in EU_COUNTRIES.
     #[test]
     fn test_all_eu_countries_have_vat_rates() {
-        let expected: [(&str, i32); 27] = [
-            ("AT", 20),
-            ("BE", 21),
-            ("BG", 20),
-            ("HR", 25),
-            ("CY", 19),
-            ("CZ", 21),
-            ("DK", 25),
-            ("EE", 24),
-            ("FI", 26),
-            ("FR", 20),
-            ("DE", 19),
-            ("GR", 24),
-            ("HU", 27),
-            ("IE", 23),
-            ("IT", 22),
-            ("LV", 21),
-            ("LT", 21),
-            ("LU", 17),
-            ("MT", 18),
-            ("NL", 21),
-            ("PL", 23),
-            ("PT", 23),
-            ("RO", 19),
-            ("SK", 23),
-            ("SI", 22),
-            ("ES", 21),
-            ("SE", 25),
+        let expected: [(&str, f64); 27] = [
+            ("AT", 20.0),
+            ("BE", 21.0),
+            ("BG", 20.0),
+            ("HR", 25.0),
+            ("CY", 19.0),
+            ("CZ", 21.0),
+            ("DK", 25.0),
+            ("EE", 24.0),
+            ("FI", 25.5),
+            ("FR", 20.0),
+            ("DE", 19.0),
+            ("GR", 24.0),
+            ("HU", 27.0),
+            ("IE", 23.0),
+            ("IT", 22.0),
+            ("LV", 21.0),
+            ("LT", 21.0),
+            ("LU", 17.0),
+            ("MT", 18.0),
+            ("NL", 21.0),
+            ("PL", 23.0),
+            ("PT", 23.0),
+            ("RO", 19.0),
+            ("SK", 23.0),
+            ("SI", 22.0),
+            ("ES", 21.0),
+            ("SE", 25.0),
         ];
 
         // Initially EU_VAT_RATES is empty by default (env var not set),
@@ -945,7 +1011,7 @@ mod tests {
         for (code, expected_rate) in &expected {
             let (rate, _) = calculate_vat(10000, code, None);
             assert_eq!(
-                rate, *expected_rate,
+                rate, *expected_rate as f64,
                 "Country {code} should have VAT rate {expected_rate}"
             );
         }

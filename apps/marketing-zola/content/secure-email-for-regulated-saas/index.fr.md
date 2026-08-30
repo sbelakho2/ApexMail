@@ -4,7 +4,7 @@ template = "prose.html"
 description = "Email transactionnel avec workflows orientés RGPD, contrôles d'accès, capacités d'audit et un processus de revue de sécurité factuel pour les équipes SaaS réglementées."
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++
 
 ## Livraison d'emails pensée pour une revue de sécurité

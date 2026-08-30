@@ -381,8 +381,13 @@ services:
       AWS_SECRET_ACCESS_KEY_FILE: /run/secrets/aws_secret_access_key
       SES_CONFIGURATION_SET: ${SES_CONFIGURATION_SET:-}
       PLACEMENT_ENCRYPTION_SECRET: ${PLACEMENT_ENCRYPTION_SECRET:?PLACEMENT_ENCRYPTION_SECRET is required in production}
-      BILLING_COMPANY_IBAN: ${BILLING_COMPANY_IBAN:?BILLING_COMPANY_IBAN is required in production}
-      BILLING_COMPANY_PHONE: ${BILLING_COMPANY_PHONE:?BILLING_COMPANY_PHONE is required in production}
+      # Bank is Wise; IBAN/BIC/phone are OPTIONAL — renderers omit the
+      # field entirely when unset instead of printing a placeholder on a
+      # legal document.
+      BILLING_COMPANY_BANK: ${BILLING_COMPANY_BANK:-Wise}
+      BILLING_COMPANY_IBAN: ${BILLING_COMPANY_IBAN:-}
+      BILLING_COMPANY_BIC: ${BILLING_COMPANY_BIC:-}
+      BILLING_COMPANY_PHONE: ${BILLING_COMPANY_PHONE:-}
       # ── KiwiCaptcha (native Rust login CAPTCHA protection) ────────────────
       # The proof-of-work algorithm is explicit (sha256 | argon2id). SHA-256 is
       # the default and needs no further config; Argon2id mode requires
@@ -544,6 +549,102 @@ services:
   # CLICKHOUSE_PASSWORD for the (optional) GDPR erasure pass. In production
   # (NODE_ENV=production) the binary REFUSES an ephemeral AUDIT_SIGNING_KEY —
   # the key comes from the audit_signing_key Docker secret.
+  # Invoice PDF renderer — REQUIRED in production: billing-service points
+  # at pdf-renderer:3004 (PDF_RENDERER_URL) and every invoice-creating path
+  # (Stripe webhooks, admin invoices, the overage sweep) renders through it.
+  # It was previously dev-profile-only, so production invoice PDFs silently
+  # failed. The base service is profile-gated; !override [] activates it here.
+  pdf-renderer:
+    profiles: !override []
+    image: ghcr.io/sbelakho2/apexmail/pdf-renderer:latest
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "pdf-renderer-server"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+    environment:
+      PDF_HOST: 0.0.0.0
+      PDF_PORT: "3004"
+      RUST_LOG: ${PDF_LOG_LEVEL:-info}
+      # Blank the env so the wrapper bridges the secret file.
+      INTERNAL_SERVICE_TOKEN: ""
+      INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
+    secrets:
+      - internal_service_token
+    networks:
+      - apexmail_backend
+    logging: *default-logging
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 64M
+
+  # Analytics worker — events compaction/retention cron (see base compose).
+  # Internal-only; no ports. Without it, Postgres `events` grows unboundedly.
+  analytics-worker:
+    image: ghcr.io/sbelakho2/apexmail/analytics-worker:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+      # ── Database / Redis (URLs assembled by the entrypoint wrapper) ───────
+      DATABASE_URL: ""
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      # ── Compaction / retention policy ──────────────────────────────────────
+      ANALYTICS_STORAGE_PATH: /var/lib/apexmail/analytics
+      ANALYTICS_COMPACTION_ENABLED: ${ANALYTICS_COMPACTION_ENABLED:-true}
+      ANALYTICS_HOT_RETENTION_DAYS: ${ANALYTICS_HOT_RETENTION_DAYS:-90}
+      ANALYTICS_COLD_RETENTION_DAYS: ${ANALYTICS_COLD_RETENTION_DAYS:-730}
+      ANALYTICS_STO_HMAC_KEY: ${ANALYTICS_STO_HMAC_KEY:-}
+    volumes:
+      - analytics-cold:/var/lib/apexmail/analytics
+    secrets:
+      - postgres_password
+      - redis_password
+    networks:
+      - apexmail_backend
+      - apexmail_data_internal
+    logging: *default-logging
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
+
+  # Production: the Redis password reaches the exporter via a JSON-map
+  # Docker secret (the exporter's only file-based auth format — see the
+  # note on the base service) instead of a plaintext env value visible in
+  # `docker inspect`. The map contains the SAME password as the plain
+  # redis_password secret; rotation must update both files.
+  redis-exporter:
+    command:
+      - --redis.addr=redis://redis:6379
+      - --redis.password-file=/run/secrets/redis_password_map
+    environment:
+      REDIS_PASSWORD: ""
+    secrets:
+      - redis_password_map
+
   compliance:
     image: ghcr.io/sbelakho2/apexmail/compliance:latest
     restart: unless-stopped
@@ -717,6 +818,10 @@ services:
     # Read Docker secret files before starting the binary. This keeps the
     # mailstore bearer token out of the container environment declaration.
     entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "mta-server"]
+    # Give in-flight SMTP/IMAP transactions the full window to drain before
+    # SIGKILL — the default 10s kills accepted-but-unpersisted submission
+    # DATA on every deploy.
+    stop_grace_period: 90s
     ports:
       - "25:25"
       - "587:587"
@@ -814,6 +919,10 @@ services:
     image: ghcr.io/sbelakho2/apexmail/imap-server:latest
     restart: unless-stopped
     entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "imap-server"]
+    # Give in-flight SMTP/IMAP transactions the full window to drain before
+    # SIGKILL — the default 10s kills accepted-but-unpersisted submission
+    # DATA on every deploy.
+    stop_grace_period: 90s
     ports:
       - "993:993"
     volumes:
@@ -1328,6 +1437,7 @@ services:
           memory: 1G
 
 volumes:
+  analytics-cold:
   certbot_webroot:
   postgres_backups:
   clickhouse_backups:
@@ -1354,6 +1464,8 @@ networks:
     driver: bridge
 
 secrets:
+  redis_password_map:
+    file: ${PROD_REDIS_PASSWORD_MAP_FILE:/opt/apexmail/secrets/redis_password_map.json}
   postgres_password:
     file: ${PROD_POSTGRES_PASSWORD_FILE:?PROD_POSTGRES_PASSWORD_FILE is required in production}
   redis_password:

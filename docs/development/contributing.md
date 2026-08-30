@@ -46,7 +46,8 @@ git clone https://github.com/YOUR_USERNAME/ApexMail.git
 cd ApexMail
 
 # Add upstream remote
-git remote add upstream https://github.com/sbelakho2/ApexMail.git
+# The public repository opens with the first stable release; until then
+# contributions are handled via support@apexmail.ee.
 ```
 
 #### 2. Create a Branch
@@ -128,7 +129,7 @@ See [Development Guide](./getting-started.md) for full setup instructions.
 
 Quick start:
 ```bash
-git clone https://github.com/sbelakho2/ApexMail.git
+# Clone access is granted to contributors directly (support@apexmail.ee).
 cd ApexMail
 
 docker compose up -d postgres redis
@@ -251,7 +252,7 @@ We follow [Semantic Versioning](https://semver.org/):
 ## Getting Help
 
 - **Documentation**: Read the docs first — almost every contributor question is already answered there
-- **Discussions**: [GitHub Discussions](https://github.com/sbelakho2/ApexMail/discussions) — single shared community hub
+- **Discussions**: support@apexmail.ee — single shared channel until the public repository opens
 - **Issues**: For bugs and features
 
 > Contributor support is async-first. We do not run a per-contributor or per-enterprise Discord.

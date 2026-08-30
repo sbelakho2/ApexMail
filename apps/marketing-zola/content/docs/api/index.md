@@ -72,7 +72,7 @@ These backward-compatible changes may appear within `/v1/`:
 | **Warning** | 6 months minimum | `Sunset: Sat, 01 Jan 2027 00:00:00 GMT` header on every response, plus `Warning: 299 - "v1 is deprecated, migrate to v2"` |
 | **Sunset** | After warning period | Endpoint returns `410 Gone` |
 
-Clients should monitor `Sunset` and `Deprecation` headers and migrate before the sunset date. Review the [API changelog](/docs/api/changelog/) for breaking change history.
+Clients should monitor `Sunset` and `Deprecation` headers and migrate before the sunset date. Breaking changes are announced in advance via `Sunset` headers and email to the account owner.
 
 ## Pagination
 
@@ -211,7 +211,7 @@ Payload: `{timestamp}.{raw_body}` signed with your webhook secret. Events includ
 
 ## SDKs
 
-ApexMail ships first-party SDKs for Python, Go, PHP, Ruby, and Java. **These SDKs are under active development and are not yet published to public package registries** (PyPI, pkg.go.dev, Packagist, RubyGems, Maven Central). Source is available in the [`packages/` directory of the monorepo](https://github.com/Bel-Consulting-OU/ApexMail/tree/main/packages); see the [SDKs page](/docs/sdks/) for build-from-source instructions and planned install commands. There is no Node.js SDK — Node developers should call the HTTP API directly with `fetch`.
+ApexMail ships first-party SDKs for Python, Go, PHP, Ruby, and Java. **These SDKs are under active development and are not yet published to public package registries** (PyPI, pkg.go.dev, Packagist, RubyGems, Maven Central). SDK source is distributed on request (support@apexmail.ee) until the first registry release; see the [SDKs page](/docs/sdks/) for the per-language status and planned install commands. There is no Node.js SDK — Node developers should call the HTTP API directly with `fetch`.
 
 | Language   | Module / package            | Minimum runtime | Status          |
 |------------|-----------------------------|-----------------|-----------------|

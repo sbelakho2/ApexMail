@@ -1,5 +1,8 @@
 # ids-engine
 
+> **STATUS — READ BEFORE RELYING ON THIS CRATE**
+> NOT WIRED INTO PRODUCTION: no service in this workspace depends on this crate. It is a library and test target only — it inspects zero live traffic. Do not represent it as an active control.
+
 Network-level Intrusion Detection/Prevention System: signature matching, anomaly detection, protocol analysis.
 
 ## Overview

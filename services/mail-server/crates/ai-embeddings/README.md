@@ -1,5 +1,8 @@
 # ai-embeddings
 
+> **STATUS — READ BEFORE RELYING ON THIS CRATE**
+> NOT DEPLOYED: this crate's server binary is not in the deployment Dockerfile or compose files, and no production service depends on it. Compile/test target only.
+
 AI text embeddings, vector store, and similarity search.
 
 ## Overview

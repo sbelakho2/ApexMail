@@ -171,12 +171,12 @@ Choose your integration method:
 
 > **Not yet on public registries.** The ApexMail SDKs are **not yet published to PyPI, pkg.go.dev, Packagist, RubyGems, or Maven Central** — `pip install apexmail`, `go get github.com/apexmail/apexmail-go`, and `composer require apexmail/apexmail-php` will fail until the first stable release. Until then, install from the monorepo source and pin to a specific commit, and **verify the source you vendor** before shipping it. See [SDKs](/docs/sdks/) for the per-language status.
 
-All SDKs live in the [ApexMail monorepo](https://github.com/Bel-Consulting-OU/ApexMail) under `packages/`:
-
-```bash
-git clone https://github.com/Bel-Consulting-OU/ApexMail.git
-cd ApexMail
-```
+The SDK source is distributed on request while the packages are being
+prepared for their first public registry release — email
+[support@apexmail.ee](mailto:support@apexmail.ee) (or your account manager)
+and you will receive the pinned source drop for your language, with a
+checksum, under the SDK license. Each SDK directory carries its own build
+and test instructions.
 
 **Python** (`packages/sdk-python` — install from the local path, or vendor the directory):
 

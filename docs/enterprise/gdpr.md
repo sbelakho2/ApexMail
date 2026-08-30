@@ -384,7 +384,7 @@ ApexMail OU
 Harju maakond, Tallinn, Kesklinna linnaosa
 Veskiposti tn 2-1002, 10138, Estonia
 
-Email: dpo@apexmail.ee
+Email: privacy@apexmail.ee
 Phone: +372 555 1234  (GDPR inquiries only)
 ```
 

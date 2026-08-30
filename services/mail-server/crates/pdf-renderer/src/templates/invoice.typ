@@ -17,6 +17,8 @@
 //   "line_items": [
 //     { "description": "Professional Plan", "quantity": 1, "unit_price": 9900, "amount": 9900, "vat_rate": 22, "vat_amount": 2178 }
 //   ],
+//   "seller": { "name": "Bel Consulting OÜ", "address": "Sakala 7-2, 10141 Tallinn, Estonia", "vat_number": "EE102951727", "registry_code": "16588745" },
+//   "bank": { "name": "Wise", "iban": "EE...", "bic": "..." },   // optional; rendered only when present
 //   "bill_to": {
 //     "company": "Acme Corp",
 //     "name": "Jane Doe",
@@ -29,9 +31,15 @@
 
 #let data = json("data.json")
 
+// Seller identity is passed in by billing-service; these are only fallbacks so a
+// misconfigured build still renders a self-consistent (if incomplete) document.
+#let seller = if "seller" in data { data.seller } else { (name: "Bel Consulting OÜ",) }
+#let seller-vat = if "vat_number" in seller { seller.vat_number } else { "EE102951727" }
+#let seller-reg = if "registry_code" in seller { seller.registry_code } else { "16588745" }
+
 #set document(
   title: "Invoice " + data.invoice_number,
-  author: "ApexMail OÜ",
+  author: "Bel Consulting OÜ",
 )
 
 #set page(
@@ -44,8 +52,8 @@
     #grid(
       columns: (1fr, 1fr),
       align(left)[
-        ApexMail OÜ · Reg. 16789012 · VAT EE102345678 \
-        Tornimäe 5, 10145 Tallinn, Estonia
+        #seller.name · Reg. #seller-reg · VAT #seller-vat \
+        Sakala 7-2, 10141 Tallinn, Estonia
       ],
       align(right)[
         support\@apexmail.ee · apexmail.ee \
@@ -55,17 +63,19 @@
   ],
 )
 
-#set text(font: "Inter", "DejaVu Sans", sans-serif, size: 10pt)
+#set text(font: "Noto Sans", "DejaVu Sans", sans-serif, size: 10pt)
 
 // ---------------------------------------------------------------------------
-// Helper: format cents to currency string
+// Helper: format cents to currency string (handles negative credit amounts)
 // ---------------------------------------------------------------------------
 
 #let fmt-money(cents) = {
-  let eur = calc.floor(cents / 100)
-  let ct = calc.rem(cents, 100)
+  let sign = if cents < 0 { "-" } else { "" }
+  let abs = calc.abs(cents)
+  let eur = calc.floor(abs / 100)
+  let ct = calc.rem(abs, 100)
   let ct-str = if ct < 10 { "0" + str(ct) } else { str(ct) }
-  "€" + str(eur) + "." + ct-str
+  "€" + sign + str(eur) + "." + ct-str
 }
 
 // ---------------------------------------------------------------------------
@@ -79,11 +89,10 @@
     #text(weight: "bold", size: 18pt, fill: rgb("#dc2626"))[ApexMail]
     #v(4pt)
     #text(size: 8pt, fill: luma(100))[
-      ApexMail OÜ \
-      Tornimäe 5, 10145 Tallinn \
-      Estonia \
-      VAT: EE102345678 \
-      Reg: 16789012
+      #seller.name \
+      #if "address" in seller { seller.address } else { [Sakala 7-2, 10141 Tallinn, Estonia] } \
+      VAT: #seller-vat \
+      Reg: #seller-reg
     ]
   ],
   // Invoice info (right)
@@ -119,12 +128,17 @@
   radius: 0pt,
   width: 50%,
 )[
-  #if "bill_to" in data [
-    #text(weight: "bold")[#data.bill_to.company] \
-    #data.bill_to.name \
-    #data.bill_to.address \
-    #data.bill_to.city, #data.bill_to.country \
-    #if "vat_number" in data.bill_to [
+  #if "bill_to" in data and data.bill_to != none [
+    #if "company" in data.bill_to [#text(weight: "bold")[#data.bill_to.company] \
+    ]
+    #if "name" in data.bill_to [#data.bill_to.name \
+    ]
+    #if "address" in data.bill_to [#data.bill_to.address \
+    ]
+    #if "city" in data.bill_to and "country" in data.bill_to [#data.bill_to.city, #data.bill_to.country \
+    ] else if "country" in data.bill_to [#data.bill_to.country \
+    ]
+    #if "vat_number" in data.bill_to and data.bill_to.vat_number != none and data.bill_to.vat_number != "" [
       VAT: #data.bill_to.vat_number
     ]
   ] else [
@@ -188,32 +202,49 @@
 
 // ---------------------------------------------------------------------------
 // Payment Information
+// Bank details come from billing configuration (Wise by default); the whole
+// transfer block is omitted when no account details are configured.
 // ---------------------------------------------------------------------------
 
-#text(weight: "bold", size: 11pt)[Payment Information]
-#v(4pt)
-#block(
-  fill: luma(248),
-  inset: 12pt,
-  radius: 0pt,
-  width: 100%,
-)[
-  #grid(
-    columns: (1fr, 1fr),
-    [
-      *Bank Transfer:* \
-      Bank: LHV Pank \
-      IBAN: EE867700771002345678 \
-      BIC/SWIFT: LHVBEE22
-    ],
-    [
-      *Payment Terms:* \
-      Net 30 days from invoice date \
-      Late payment interest: 0.05% per day \
-      \
-      *Reference:* #data.invoice_number
-    ],
-  )
+#if "bank" in data and data.bank != none [
+  #text(weight: "bold", size: 11pt)[Payment Information]
+  #v(4pt)
+  #block(
+    fill: luma(248),
+    inset: 12pt,
+    radius: 0pt,
+    width: 100%,
+  )[
+    #grid(
+      columns: (1fr, 1fr),
+      [
+        *Bank Transfer:* \
+        Bank: #if "name" in data.bank { data.bank.name } else { [Wise] } \
+        #if "iban" in data.bank and data.bank.iban != none and data.bank.iban != "" [IBAN: #data.bank.iban \
+        ]
+        #if "bic" in data.bank and data.bank.bic != none and data.bank.bic != "" [BIC/SWIFT: #data.bank.bic]
+      ],
+      [
+        *Payment Terms:* \
+        Net 30 days from invoice date \
+        Late payment interest: 0.05% per day \
+        \
+        *Reference:* #data.invoice_number
+      ],
+    )
+  ]
+] else [
+  #text(weight: "bold", size: 11pt)[Payment Information]
+  #v(4pt)
+  #block(
+    fill: luma(248),
+    inset: 12pt,
+    radius: 0pt,
+    width: 100%,
+  )[
+    Payments are collected automatically via the configured payment provider. \
+    *Reference:* #data.invoice_number
+  ]
 ]
 
 #if data.status == "paid" [

@@ -26,7 +26,7 @@ verdict_points = ["EU/EWR-orientierte Bereitstellungskonfiguration", "Aktueller 
 # of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "EWR-DATENVERARBEITUNG", rows = [
-    { feature = "Primäre Hosting-Region", apex = 'EU/EWR-orientierte Standardkonfiguration; aktive Bereitstellung bestätigen', comp = 'USA (EU-Region verfügbar ab Foundation 50K+ und höheren Tarifen)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
+    { feature = "Primäre Hosting-Region", apex = 'EU-Rechenzentren (Deutschland primär, Finnland Backup) — keine Verarbeitung in den USA für Kerndaten', comp = 'USA (EU-Region verfügbar ab Foundation 50K+ und höheren Tarifen)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
     { feature = "EWR-Datenverarbeitung standardmäßig", apex = 'EU/EWR-orientierte Standardkonfiguration; aktive Standorte sind vereinbarungsspezifisch', comp = 'Nein — standardmäßig US-basiert; EU-Region je Sende-Domain konfiguriert<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
     { feature = "AVV-Verfügbarkeit", apex = 'Verfügbar im Rahmen der anwendbaren ApexMail-Vereinbarung', comp = 'Verfügbar — die Sinch-AVV deckt die Mailgun-Dienste ab<sup><a href="#src-mg2">2</a></sup>', winner = "none" }
   ]},
@@ -39,7 +39,7 @@ comparison_sections = [
     { feature = "Eingehende E-Mails", apex = 'Scale- und Enterprise-Tarife', comp = 'Ja — Inbound-Routen mit Weiterleitungs-, Speicher- und Webhook-Aktionen<sup><a href="#src-mg4">4</a></sup>', winner = "none" }
   ]},
   { title = "BEREITSTELLUNGSMODELLE", rows = [
-    { feature = "Shared Cloud", apex = 'Ja (alle Tarife) — Multi-Tenant auf Hetzner', comp = 'Ja (alle Tarife)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
+    { feature = "Shared Cloud", apex = 'Ja (alle Tarife) — Multi-Tenant, in der EU gehostet', comp = 'Ja (alle Tarife)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "Dedizierte IP", apex = 'Freigegebenes Add-on ab Pro; 1 enthalten ab Growth, 3 ab Scale', comp = 'Als Add-on verfügbar ab dem Foundation-Tarif und darüber<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "Dedizierte Tenancy", apex = 'Vorbehaltlich Architektur- und Vertragsprüfung', comp = 'Siehe Anbieter-Dokumentation<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "BYOC / private Bereitstellung", apex = 'Vorbehaltlich Architektur- und Vertragsprüfung', comp = 'Siehe Anbieter-Dokumentation<sup><a href="#src-mg5">5</a></sup>', winner = "none" }

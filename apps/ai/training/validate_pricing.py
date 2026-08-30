@@ -66,19 +66,19 @@ CANONICAL_PRICE_NUMBERS = {0, 25, 65, 150, 350, 3000, 30}
 # ── Regex patterns ─────────────────────────────────────────────────────
 
 # Plan price references: "Starter (€25/month)", "Pro plan at €65/mo",
-# "Starter costs €15/month", "Growth $150/month". A bounded amount of
+# "Starter costs €25/month", "Growth €150/month". A bounded amount of
 # connecting text ("costs", "is", "at", ...) may sit between the plan name
-# and the price. Both € and $ symbols are accepted — the NUMBERS are
-# validated against the canonical table, and a '$' is itself reported as a
+# and the price. Both € and € symbols are accepted — the NUMBERS are
+# validated against the canonical table, and a '€' is itself reported as a
 # violation because all published prices are EUR.
 PLAN_PRICE_PATTERN = re.compile(
     r"(?P<plan>Free|Starter|Pro|Growth|Scale|Enterprise)"
-    r"(?:\s+plan)?[^\n€$0-9]{0,24}?[€$]\s?(?P<price>[\d,]+)\s*(?:/mo|/month|\)?)?",
+    r"(?:\s+plan)?[^\n€€0-9]{0,24}?[€€]\s?(?P<price>[\d,]+)\s*(?:/mo|/month|\)?)?",
     re.IGNORECASE,
 )
 
 # Euro/dollar amount pattern (skip known non-plan prices)
-DOLLAR_AMOUNT = re.compile(r"[€$]\d[\d,]*(?:\.\d+)?(?:/mo|/month|/email|/1,000)?")
+DOLLAR_AMOUNT = re.compile(r"[€€]\d[\d,]*(?:\.\d+)?(?:/mo|/month|/email|/1,000)?")
 
 # Competitor/3rd-party price patterns to ignore
 COMPETITOR_PATTERNS = [
@@ -123,7 +123,7 @@ def validate_pricing_in_text(
         except ValueError:
             continue
 
-        # The NUMBERS must match plans.rs; a '$' symbol is also a violation
+        # The NUMBERS must match plans.rs; a '€' symbol is also a violation
         # because every published ApexMail price is EUR.
         if found_number != expected_number:
             findings.append({
@@ -137,7 +137,7 @@ def validate_pricing_in_text(
                 "matched": match.group(),
                 "expected": expected_price,
             })
-        elif "$" in match.group():
+        elif "€" in match.group():
             findings.append({
                 "type": "error",
                 "source": source,

@@ -104,7 +104,7 @@ Any disputes arising under these Terms shall first be submitted to the Harju Cou
 
 **Direct contact and consumer authority.** For consumer disputes, please contact Bel Consulting OÜ directly at legal@apexmail.ee. Estonian consumers may also seek assistance from the Consumer Protection and Technical Regulatory Authority (Tarbijakaitse ja Tehnilise Järelevalve Amet, https://ttja.ee).
 
-**Court proceedings.** Any disputes arising under these Terms shall first be submitted to the Harju County Court, Tallinn, Estonia. Governing law: Estonian law. Nothing in this section limits your rights as a Consumer under mandatory EU or Estonian law.
+**Court proceedings.** Disputes that remain unresolved through the procedures above are subject to the dispute-resolution terms in §11.2 (Harju County Court, Tallinn, Estonia; Estonian law). Nothing in this section limits your rights as a Consumer under mandatory EU or Estonian law.
 
 ### 11.4 Supervisory Authority
 

@@ -42,7 +42,7 @@ X-ApexMail-Tag: onboarding, welcome, trial
 Filter email activity in the dashboard by tag, or use the API:
 
 ```bash
-curl -s "https://api.apexmail.ee/v1/emails?tag=onboarding" \
+curl -s "https://api.apexmail.ee/v1/messages?tag=onboarding" \
   -H "Authorization: Bearer $APEXMAIL_API_KEY" \
   | jq .
 ```

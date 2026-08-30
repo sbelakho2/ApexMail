@@ -704,13 +704,27 @@ pub async fn record_with_quota_check(
 
     let limit = quota_limit_for_event(event_type, &resolve_plan_limits(limit_row));
 
+    // Overage soft ceiling: email sending on an ACTIVE PAID subscription is
+    // not hard-blocked at the plan limit — the published behaviour lets the
+    // tenant send into an overage allowance (default 200% of the included
+    // volume) with the excess invoiced at period end by the overage sweep.
+    // Everything else (API calls, free plan, cancelled subscriptions,
+    // unlimited plans) keeps the raw limit.
+    let quota_for_gate = if matches!(event_type, MeterEventType::EmailsSent) && limit >= 0 {
+        let active_paid =
+            crate::overage::tenant_has_active_paid_subscription(pool, tenant_id).await?;
+        crate::overage::effective_email_quota(limit, active_paid)
+    } else {
+        limit
+    };
+
     // 3. Atomic check-and-increment via Lua. This is a *reservation*: if a
     //    later step fails, rollback_quota_reservation() compensates.
     let ttl_seconds: i64 = 40 * 86_400; // 40 days
 
     let new_val: i64 = redis::Script::new(QUOTA_CHECK_AND_INCR_LUA)
         .key(&counter_key)
-        .arg(limit)
+        .arg(quota_for_gate)
         .arg(quantity)
         .arg(ttl_seconds)
         .invoke_async(&mut conn)

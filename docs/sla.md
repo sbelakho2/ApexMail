@@ -51,11 +51,16 @@ by external monitoring probes.
 
 ### 2.3 API Throughput
 
-| Tier | Guaranteed Throughput | Burst Capacity |
+| Plan | Guaranteed Throughput | Burst Capacity |
 |------|----------------------|----------------|
 | Starter | 100 req/s | 200 req/s for 60s |
+| Pro | 200 req/s | 400 req/s for 60s |
 | Growth | 500 req/s | 1000 req/s for 120s |
+| Scale | 1000 req/s | 2000 req/s for 120s |
 | Enterprise | Custom (per contract) | Custom (per contract) |
+
+Throughput guarantees apply to all paid plans; the *uptime credit* regime in
+§4 is a Scale and Enterprise entitlement.
 
 > **Note:** Throughput guarantees apply per API key. Exceeding sustained
 > throughput limits will trigger rate limiting as described in
@@ -125,7 +130,7 @@ This SLA does **not** apply to:
 5. **Force majeure** — Natural disasters, war, terrorism, civil unrest, strikes,
    pandemics, or other events outside ApexMail's reasonable control.
 6. **Free-tier / trial accounts** — SLA coverage requires an active paid
-   subscription (Starter, Growth, or Enterprise plan).
+   subscription (Scale or Enterprise plan; other paid plans receive best-effort support without the credit regime).
 7. **Beta / preview features** — Features labelled as "Beta", "Preview", or
    "Early Access" are excluded from SLA coverage.
 8. **Webhook delivery** — Webhook delivery is best-effort with at-least-once

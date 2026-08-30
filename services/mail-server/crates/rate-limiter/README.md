@@ -1,5 +1,8 @@
 # rate-limiter
 
+> **STATUS — READ BEFORE RELYING ON THIS CRATE**
+> NOT WIRED INTO PRODUCTION as a middleware: the api-server uses its own middleware (api-server/src/middleware/rate_limiter.rs). This crate is a library and test target only.
+
 Reusable rate-limiting primitives for ApexMail.
 
 ## Overview

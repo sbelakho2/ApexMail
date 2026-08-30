@@ -4,5 +4,5 @@ description = "Email API for regulated teams with GDPR-oriented workflows, deliv
 template = "home.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

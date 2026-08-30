@@ -29,6 +29,10 @@ import sys
 from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parents[3] / "data"
+# The training corpus includes the Python fixture modules in this directory;
+# they historically carried USD prices and wrong Free-tier limits while the
+# validator scanned only data/*.jsonl — scan them too.
+TRAINING_DIR = Path(__file__).resolve().parent
 
 CANONICAL_PLAN_PRICES = {0: "free", 25: "starter", 65: "pro", 150: "growth",
                          350: "scale", 3000: "enterprise"}
@@ -104,9 +108,15 @@ def check_text(text: str, source: str) -> list[str]:
             continue
         if any(word in connector for word in CONNECTOR_SKIP_WORDS):
             continue
+        if "=" in m.group():
+            # computed total (plan + overage), not a plan-price quote
+            continue
         if any(word in connector for word in PLAN_WORDS):
             continue
         if any(word in after for word in AFTER_SKIP_WORDS):
+            continue
+        before = text[max(0, m.start() - 160):m.start()].lower()
+        if "annual" in before and int(value) == expected * 10:
             continue
 
         # A plan-adjacent €N is either the plan's own price, or (Pro/Growth+)
@@ -154,6 +164,47 @@ def validate_file(path: Path) -> list[str]:
     except (OSError, UnicodeDecodeError) as exc:
         return [f"{path}: unreadable ({exc})"]
 
+    if path.suffix == ".py":
+        # Plain-text fixture modules: apply the text checks to the source.
+        for line_no, line in enumerate(content.splitlines(), 1):
+            source = f"{path.name}:{line_no}"
+            stripped = line.strip()
+            # The sweep/validator scripts themselves must keep literal $N
+            # patterns to detect and rewrite remaining USD in the corpus.
+            if path.name in {"sweep_currency_to_eur.py", "validate_data_prices.py", "validate_pipeline.py"}:
+                continue
+            # Test/stress fixtures deliberately quote wrong prices to prove
+            # the scorer and validators reject them — plan-price assertions
+            # do not apply there, but the $-remains check always does.
+            is_fixture_file = path.name.startswith(("test_", "stress_", "evaluate", "verify_"))
+            is_adversarial = "?" in line and any(
+                w in line for w in ("Is the", "My friend", "wrong", "adversarial")
+            )
+            is_token_list = "must_contain" in line or '"checks"' in line
+            is_scorer_fixture = "score_golden_answer" in line or "assert score" in line
+            # $-detection must still run everywhere (no USD may remain) —
+            # except inside raw-string regexes, which must keep \$N match
+            # patterns to find and rewrite legacy USD corpus rows.
+            is_regex_line = 'r"' in line or "r'" in line
+            if not is_regex_line:
+                dollar_hits = [
+                    f"{source}: '$' price remains: {dm.group()!r}"
+                    for dm in re.finditer(r"\$\d[\d,]*(?:\.\d+)?", line)
+                ]
+                problems.extend(dollar_hits)
+            if not (
+                is_fixture_file
+                or is_adversarial
+                or is_token_list
+                or is_scorer_fixture
+            ):
+                # Raw-string regex lines keep \$N match patterns on purpose
+                # (they find legacy USD rows); strip the escapes before the
+                # text checks so only the replacement side is validated.
+                safe_line = line.replace("\\$", "") if is_regex_line else line
+                problems.extend(check_text(safe_line, source))
+        return problems
+
     if path.suffix == ".jsonl":
         for line_no, line in enumerate(content.splitlines(), 1):
             if not line.strip():
@@ -183,7 +234,11 @@ def main() -> int:
     if args.file:
         paths = [Path(f) for f in args.file]
     else:
-        paths = sorted(DATA_DIR.glob("*.jsonl")) + [DATA_DIR / "system_prompts.json"]
+        paths = (
+            sorted(DATA_DIR.glob("*.jsonl"))
+            + [DATA_DIR / "system_prompts.json"]
+            + sorted(TRAINING_DIR.glob("*.py"))
+        )
 
     all_problems: list[str] = []
     checked = 0

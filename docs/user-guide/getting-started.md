@@ -374,7 +374,7 @@ def verify_webhook(payload: bytes, signature: str, secret: str) -> bool:
 - **Documentation**: [Full API Reference](../api/authentication.md)
 - **Status Page**: https://status.apexmail.ee
 - **Support**: support@apexmail.ee
-- **Community**: [GitHub Discussions](https://github.com/sbelakho2/ApexMail/discussions)
+- **Community**: support@apexmail.ee
 
 ### Troubleshooting
 

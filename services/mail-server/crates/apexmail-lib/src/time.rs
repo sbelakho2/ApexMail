@@ -13,11 +13,17 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
     if s.len() < 2 {
         return Err(format!("Duration '{}' must have a suffix (s/m/h/d)", s));
     }
-    let (num, suffix) = s.split_at(s.len() - 1);
+    // strip_suffix operates on char boundaries — split_at(len-1) panicked
+    // when the final character was multibyte (e.g. "5ä").
+    let (num, suffix) = s
+        .strip_suffix(['s', 'm', 'h', 'd'])
+        .zip(s.chars().last().map(|c| c.to_string()))
+        .map(|(n, suf)| (n, suf))
+        .ok_or_else(|| format!("Unknown duration suffix in '{}'", s))?;
     let value: u64 = num
         .parse()
         .map_err(|_| format!("Invalid number in duration: '{}'", num))?;
-    let secs = match suffix {
+    let secs = match suffix.as_str() {
         "s" => value,
         "m" => value * 60,
         "h" => value * 3600,

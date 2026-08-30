@@ -1,5 +1,8 @@
 # spam-filter
 
+> **STATUS — READ BEFORE RELYING ON THIS CRATE**
+> NOT WIRED INTO PRODUCTION: no delivery path (mta, worker-processors) depends on this crate. It is a library and test target only. Do not represent it as an active control.
+
 Multi-layer spam & phishing detection: Bayesian classifier, URL reputation, header analysis, content scoring.
 
 ## Overview

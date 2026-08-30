@@ -271,6 +271,9 @@ fn build_test_app(db: PgPool) -> axum::Router {
     use api_server::state::AppState;
 
     let config = api_server::config::Config::default();
+    // AppState no longer carries a WAF engine field (the waf-engine crate
+    // is not wired into the live services); the stale positional argument
+    // broke compilation of this suite.
     let state = AppState::with_ddos_protector(
         db,
         Default::default(),
@@ -283,14 +286,11 @@ fn build_test_app(db: PgPool) -> axum::Router {
             ddos_protection::DdosProtector::new(ddos_protection::ProtectorConfig::default())
                 .unwrap(),
         ),
-        Arc::new(waf_engine::WafEngine::new(waf_engine::WafConfig::default())),
         None,
         None,
         api_server::resilience::ResilientClient::new_from_config(
             &api_server::config::Config::default(),
         ),
-        Arc::new(apexmail_lib::mfa::TOTPVerifier::new()),
-        None,
     );
 
     api_server::app::build_app(state)

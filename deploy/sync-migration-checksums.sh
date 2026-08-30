@@ -20,6 +20,7 @@
 # migrator will apply that migration), an extra row stays (flagged for review).
 # =============================================================================
 set -euo pipefail
+trap 'rm -f "${TSV_PATH:-}"' EXIT
 
 MIGRATIONS_DIR="$(cd "$(dirname "$0")/../services/mail-server/migrations" && pwd)"
 
@@ -31,13 +32,29 @@ fi
 command -v psql >/dev/null 2>&1 || { echo "psql required" >&2; exit 2; }
 command -v python3 >/dev/null 2>&1 || { echo "python3 required" >&2; exit 2; }
 
+# This script REWRITES the live migration ledger and thereby defeats the
+# migrator's tamper detection. It exists for one-time reconciliation only —
+# require an explicit, typed confirmation so it can never run habitually.
+if [ "${SYNC_MIGRATION_CHECKSUMS_CONFIRM:-}" != "yes" ]; then
+    cat >&2 <<'WARN'
+sync-migration-checksums rewrites _sqlx_migrations.checksum to match the
+files on disk — this DISABLES sqlx tamper detection for any edited
+migration. Use it only to reconcile a known, explained ledger drift.
+To proceed, export SYNC_MIGRATION_CHECKSUMS_CONFIRM=yes (or pass it:
+  SYNC_MIGRATION_CHECKSUMS_CONFIRM=yes ./sync-migration-checksums.sh
+after taking a database backup).
+WARN
+    exit 2
+fi
+
 TS=$(date +%Y%m%d%H%M%S)
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -c \
     "CREATE TABLE _sqlx_migrations_backup_${TS} AS SELECT * FROM _sqlx_migrations;" >/dev/null
 echo "backup: _sqlx_migrations_backup_${TS}"
 
 # version -> sha384 hex of file bytes (sqlx's checksum format)
-python3 - "$MIGRATIONS_DIR" <<'PY' > /tmp/migration-checksums.tsv
+TSV_PATH=$(mktemp /tmp/migration-checksums.XXXXXX.tsv)
+python3 - "$MIGRATIONS_DIR" <<'PY' > "$TSV_PATH"
 import hashlib, os, re, sys
 d = sys.argv[1]
 for name in sorted(os.listdir(d)):
@@ -64,6 +81,6 @@ while IFS=$'\t' read -r version checksum name; do
             "UPDATE _sqlx_migrations SET checksum = '\\x${checksum}' WHERE version = ${version};" >/dev/null
         UPDATED=$((UPDATED + 1))
     fi
-done < /tmp/migration-checksums.tsv
+done < "$TSV_PATH"
 
 echo "sync-migration-checksums: ${UPDATED} row(s) updated (backup: _sqlx_migrations_backup_${TS})"

@@ -4,5 +4,5 @@ description = "Veröffentlichte Tarif-Limits, Überschreitungsberechnung und Ent
 template = "pricing.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

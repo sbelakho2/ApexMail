@@ -4,5 +4,5 @@ description = "Debuggen Sie E-Mail-Zustellungsprobleme mit Zustellereignis-Verfo
 template = "forensic.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

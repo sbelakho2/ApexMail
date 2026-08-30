@@ -1,5 +1,8 @@
 # ai-service
 
+> **STATUS — READ BEFORE RELYING ON THIS CRATE**
+> NOT DEPLOYED: this crate's server binary is not in the deployment Dockerfile or compose files, and no production service depends on it. Compile/test target only.
+
 `ai-service` contains small, deterministic email-assistance helpers. It is **not** a model-serving, LLM, autonomous-agent, or training service.
 
 ## Supported behavior

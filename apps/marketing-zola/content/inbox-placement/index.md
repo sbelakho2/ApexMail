@@ -4,12 +4,12 @@ template = "prose.html"
 description = "ApexMail polls Google Postmaster Tools and Microsoft SNDS every six hours, scores your sender reputation, and throttles outbound automatically when the data says back off."
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++
 
 ## Inbox Placement, Backed By the Mailbox Providers Themselves
 
-Most "deliverability dashboards" are seed-list theatre. ApexMail reads the
+Most deliverability dashboards only measure a fixed seed list. ApexMail reads the
 **actual** signal that Gmail and Outlook publish about your domain — and
 acts on it.
 
@@ -50,16 +50,16 @@ Every six hours, ApexMail's reputation scheduler:
    - Green → 0% throttle (full speed)
    - Amber → 50% throttle (probabilistic deferral)
    - Red → 90% throttle (near-stop, alert sent)
-5. **Alerts** the right humans — webhook, email, or Slack — when a band drops.
+5. **Notifies your team** — webhook, email, or Slack — when a band drops.
 
 When your reputation rebounds, throttle releases without a human in the loop.
 
-## Why This Matters for Your $100k MRR
+## Why this matters for revenue
 
 A single bad batch can put a sender domain on Gmail's BAD list for 30+ days.
 Most ESPs give you the bad news in their next Quarterly Business Review.
-ApexMail caps the blast radius **the same shift** — your high-volume tenants
-keep delivering through clean lanes while the impacted domain cools off.
+ApexMail limits the damage immediately: your high-volume tenants
+keep delivering through unaffected sending lanes while the impacted domain recovers.
 
 ## Per-Provider Throttle Overrides
 

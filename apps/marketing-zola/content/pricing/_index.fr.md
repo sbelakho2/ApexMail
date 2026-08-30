@@ -4,5 +4,5 @@ description = "Limites publiées par forfait, calcul des dépassements et tarifs
 template = "pricing.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

@@ -140,12 +140,10 @@ All errors follow the standard ApexMail envelope:
 | 500 | `PERSIST_FAILED` / `DB_ERROR` | Database write or read failure |
 | 503 | `GRADER_DISABLED` | Grader is disabled in this deployment |
 
-## Limits and configuration
+## Limits
 
-| Setting | Default | Env var |
-|---------|---------|---------|
-| Public rate limit | 10 / hour / IP | `GRADER_RATE_LIMIT`, `GRADER_RATE_WINDOW` |
-| Max body size | 256 KB | `GRADER_MAX_BODY_SIZE` |
-| Domain cache TTL | 5 min | `GRADER_CACHE_TTL` |
-| Default DKIM selectors | `default,google,dkim,selector1` | `GRADER_DKIM_SELECTORS` |
-| Auth hostname | `grader.apexmail.ee` | `GRADER_AUTH_HOSTNAME` |
+| Setting | Default |
+|---------|---------|
+| Public rate limit | 10 requests / hour / IP |
+| Max body size | 256 KB |
+| Domain cache TTL | 5 minutes |

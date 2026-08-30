@@ -305,6 +305,22 @@ HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--", "compliance-server"]
 
 # =============================================================================
+# Analytics worker (events compaction + retention + reconciliation cron)
+# =============================================================================
+# The ONLY mechanism that ages events out of the Postgres `events` table
+# (hot → cold compaction, then retention delete) and runs the
+# reconciliation checks. It was compiled but never deployed, so Postgres
+# event rows grew unboundedly and the published retention policy was
+# enforced only on the ClickHouse copy. Internal-only; no ports.
+FROM runtime-base AS analytics-worker
+
+COPY --from=builder /app/target/release/analytics-worker /usr/local/bin/
+
+USER apexmail
+
+ENTRYPOINT ["/usr/bin/tini", "--", "analytics-worker"]
+
+# =============================================================================
 # Migrator (one-shot database migration job — runs BEFORE `compose up`)
 # =============================================================================
 # Applies services/mail-server/migrations via sqlx::migrate!. Run as

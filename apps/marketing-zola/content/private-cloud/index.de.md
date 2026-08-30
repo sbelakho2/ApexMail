@@ -4,5 +4,5 @@ description = "Prüfung einer Private-Cloud-Bereitstellung für Enterprise-Kunde
 template = "private-cloud.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

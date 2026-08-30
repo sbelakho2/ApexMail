@@ -11,7 +11,7 @@ competitor_description = "Twilio SendGrid es una plataforma de entrega de email 
 pricing_as_of = "2026-08-19"
 verification_date = "2026-08-19"
 currency_note = "Los precios se muestran en EUR. Cuando un proveedor solo publica precios en USD, la cifra en EUR se convierte a 1 USD = €0.92 (tipo de referencia, 2026-08-19) y se muestra entre paréntesis el precio en USD publicado por el proveedor. Impuestos no incluidos."
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 # Feature comparison counts — update when capabilities change
 apexmail_wins = 5
 competitor_wins = 0

@@ -10,8 +10,8 @@ Creates high-quality ChatML training examples based on the patterns found in:
   - industry-knowledge-base.ts (domain knowledge)
 
 All pricing uses canonical schema:
-  Free=$0/30K/300K, Starter=$25/50K/500K, Pro=$65/150K/2M,
-  Growth=$150/500K/5M, Scale=$350/2M/20M, Enterprise=$3,000/5M/∞
+  Free=€0/30K/300K, Starter=€25/50K/500K, Pro=€65/150K/2M,
+  Growth=€150/500K/5M, Scale=€350/2M/20M, Enterprise=€3,000/5M/∞
 """
 
 import json
@@ -43,9 +43,9 @@ RECOVERED_TRAINING_EXAMPLES = [
     {
         "context": "starter_healthy",
         "q": "How many emails do I have left this month?",
-        "a": """Based on your account, you've sent **32,500 out of 50,000 emails** this month on the Starter plan ($25/mo). That leaves you **17,500 emails** remaining.
+        "a": """Based on your account, you've sent **32,500 out of 50,000 emails** this month on the Starter plan (€25/mo). That leaves you **17,500 emails** remaining.
 
-You're at **65% usage** — you're on pace, but if you have a large campaign planned, keep an eye on it. If you exceed 50,000, overages are billed at **$0.40 per 1,000 extra emails**.
+You're at **65% usage** — you're on pace, but if you have a large campaign planned, keep an eye on it. If you exceed 50,000, overages are billed at **€0.40 per 1,000 extra emails**.
 
 Would you like me to check your sending rate trend to estimate if you'll hit the limit?"""
     },
@@ -55,7 +55,7 @@ Would you like me to check your sending rate trend to estimate if you'll hit the
         "q": "Can I add another team member?",
         "a": """Yes! Your Starter plan allows up to **5 team members** and you currently have **3**. You can add 2 more in **Dashboard → Settings → Team**.
 
-If you need more than 5, the Pro plan ($65/mo) supports 10 team members, and Growth ($150/mo) supports 25.
+If you need more than 5, the Pro plan (€65/mo) supports 10 team members, and Growth (€150/mo) supports 25.
 
 Team invites expire after **72 hours**, so make sure they accept promptly."""
     },
@@ -113,8 +113,8 @@ The more urgent issue is the **0.13% complaint rate** — that's above the 0.1% 
 Your options:
 
 1. **Wait for the monthly reset** — your quota resets on the 1st of each month.
-2. **Upgrade to Starter ($25/mo)** — gives you 50,000 emails/month (16x more), plus webhooks and 5 sending domains.
-3. **Switch to Pay-As-You-Go** — $0 base with per-email pricing starting at $0.001/email, so an extra 1,000 emails would cost only $1.00.
+2. **Upgrade to Starter (€25/mo)** — gives you 50,000 emails/month (16x more), plus webhooks and 5 sending domains.
+3. **Switch to Pay-As-You-Go** — €0 base with per-email pricing starting at €0.001/email, so an extra 1,000 emails would cost only €1.00.
 
 Given your volume (~2,850 emails/month), Starter would give you plenty of room to grow. Would you like me to walk through the upgrade process?"""
     },
@@ -232,7 +232,7 @@ Gradually increase to your normal sending volume, always prioritizing engaged re
 - If you see issues, slow down immediately
 - Maintain consistent daily sending (no spikes)
 
-Your Growth plan includes **1 dedicated IP** ($150/mo). Your current shared IP sending will continue during warmup.
+Your Growth plan includes **1 dedicated IP** (€150/mo). Your current shared IP sending will continue during warmup.
 
 Would you like me to help set up segments for the warmup phases?"""
     },
@@ -549,7 +549,7 @@ Would you like specific subject line tips?"""
 
 **Your current CTR:** Looking at your account, your newsletters average 2.3% CTR. Industry benchmark for your sector is ~2.9%.
 
-**Quick win:** Try a smaller segment test on your next campaign. ApexMail Pro ($65/mo) includes send-time optimization and custom tracking domains, while Growth adds formal A/B testing when you need experiment tooling.
+**Quick win:** Try a smaller segment test on your next campaign. ApexMail Pro (€65/mo) includes send-time optimization and custom tracking domains, while Growth adds formal A/B testing when you need experiment tooling.
 
 Want me to suggest some CTA variations for your next campaign?"""
     },
@@ -595,25 +595,25 @@ Would you like me to show the exact DNS record you need?"""
         "q": "I'm sending 60,000 emails per month now. What plan should I be on?",
         "a": """With 60,000 emails/month, you're currently over your Starter plan limit (50,000). Let me break down your options:
 
-**Current situation (Starter $25/mo):**
+**Current situation (Starter €25/mo):**
 - Limit: 50,000 emails
 - Your usage: 60,000 emails
-- Overage: 10,000 × $0.40/1K = **$4.00 extra**
-- **Total cost: $29/mo**
+- Overage: 10,000 × €0.50/1K = **€4.00 extra**
+- **Total cost: €29/mo**
 
-**If you upgrade to Pro ($65/mo):**
+**If you upgrade to Pro (€65/mo):**
 - Limit: 150,000 emails
 - Your usage: 60,000 emails
 - Overage: None ✓
-- **Total cost: $65/mo**
+- **Total cost: €65/mo**
 
-**Recommendation:** At 60,000 emails, Starter + overage ($29) is cheaper than Pro ($65). However:
+**Recommendation:** At 60,000 emails, Starter + overage (€29) is cheaper than Pro (€65). However:
 
 - If you expect growth beyond 150,000/mo, Pro becomes better value
 - Pro includes **send-time optimization** and custom tracking domains
 - Pro includes **10 team members** vs Starter's 5
 
-**Break-even point:** At 100,000 emails/mo, Starter + overage = $45 vs Pro = $65. Pro becomes better value once you exceed 150,000 emails/mo, and it unlocks send-time optimization.
+**Break-even point:** At 100,000 emails/mo, Starter + overage = €45 vs Pro = €65. Pro becomes better value once you exceed 150,000 emails/mo, and it unlocks send-time optimization.
 
 What's your growth trajectory looking like?"""
     },
@@ -626,16 +626,16 @@ What's your growth trajectory looking like?"""
 **PAYG Tiered Pricing:**
 | Volume | Rate | Emails | Cost |
 |--------|------|--------|------|
-| First 10,000 | $0.001 | 10,000 | $10.00 |
-| 10,001 – 100,000 | $0.0008 | 90,000 | $72.00 |
-| 100,001 – 150,000 | $0.0005 | 50,000 | $25.00 |
-| **Total** | | **150,000** | **$107.00** |
+| First 10,000 | €0.001 | 10,000 | €10.00 |
+| 10,001 – 100,000 | €0.0008 | 90,000 | €72.00 |
+| 100,001 – 150,000 | €0.0005 | 50,000 | €25.00 |
+| **Total** | | **150,000** | **€107.00** |
 
 **Comparison to plans:**
-- **Growth ($150/mo):** 500,000 emails included — better if you send more than ~188K/mo
-- **Pro ($65/mo):** 150,000 emails included — break-even with PAYG at exactly your volume!
+- **Growth (€150/mo):** 500,000 emails included — better if you send more than ~188K/mo
+- **Pro (€65/mo):** 150,000 emails included — break-even with PAYG at exactly your volume!
 
-**Recommendation:** At exactly 150,000 emails/mo, the Pro plan at **$65/mo** saves you **$42/mo** compared to PAYG.
+**Recommendation:** At exactly 150,000 emails/mo, the Pro plan at **€65/mo** saves you **€42/mo** compared to PAYG.
 
 Pro also includes:
 - Send-time optimization
@@ -726,7 +726,7 @@ Looking at your recent sends:
 - Resume sending at 25% volume
 - Monitor bounce rate (target: under 2%)
 
-**Plan impact:** On Starter ($25/mo), your 50,000 email limit is still available, but your sender reputation needs recovery.
+**Plan impact:** On Starter (€25/mo), your 50,000 email limit is still available, but your sender reputation needs recovery.
 
 Your threshold is 2% — you're at 15%. This takes 2-4 weeks of clean sending to recover.
 

@@ -363,8 +363,11 @@ async fn complete_sso_login(
 
     let email_lower = email.to_lowercase();
 
-    // Look up existing user
-    let existing: Option<(uuid::Uuid, uuid::Uuid, String, Option<String>, String, String, bool)> =
+    // Look up existing user. users.id is UUID, users.tenant_id is
+    // VARCHAR(26) (migration 064) — decode both as text so the tuple type
+    // matches the auto-provision arm and sqlx never face a TEXT→Uuid
+    // decode mismatch.
+    let existing: Option<(String, String, String, Option<String>, String, String, bool)> =
         sqlx::query_as(
             "SELECT id::text, tenant_id, email, name, role, status, mfa_enabled FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1",
         )
@@ -393,16 +396,19 @@ async fn complete_sso_login(
                 "last_sso_provider": provider,
                 "last_sso_login": Utc::now().to_rfc3339(),
             }))
-            .bind(id)
+            .bind(id.as_str())
             .execute(&state.db)
             .await?;
 
             (id, tid, role)
         }
         None => {
-            // Auto-provision:create tenant + user for SSO-first signup
-            let tenant_id = uuid::Uuid::new_v4();
-            let user_id = uuid::Uuid::new_v4();
+            // Auto-provision:create tenant + user for SSO-first signup.
+            // tenants.id / users.id / users.tenant_id are VARCHAR(26) after
+            // migration 064 — binding a 36-char UUID overflowed the column
+            // and 500'd every first-time SSO signup for a new tenant.
+            let tenant_id = apexmail_lib::id::generate_id("", 26);
+            let user_id = apexmail_lib::id::generate_id("", 26);
             let now = Utc::now();
             let company_name = name.split_whitespace().next().unwrap_or("My Company");
             let slug = format!(
@@ -426,7 +432,7 @@ async fn complete_sso_login(
                 "INSERT INTO tenants (id, name, slug, plan, status, settings, metadata, created_at, updated_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
             )
-            .bind(tenant_id)
+            .bind(&tenant_id)
             .bind(company_name)
             .bind(&slug)
             .bind("free")
@@ -442,8 +448,8 @@ async fn complete_sso_login(
                 "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified, mfa_enabled, metadata, created_at, updated_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
             )
-            .bind(user_id)
-            .bind(tenant_id)
+            .bind(&user_id)
+            .bind(&tenant_id)
             .bind(&email_lower)
             .bind(name)
             .bind(&sso_placeholder_hash)

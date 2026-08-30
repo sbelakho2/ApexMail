@@ -27,7 +27,7 @@ pub(crate) const EUR_INVOICE_FILTER: &str = "UPPER(currency) = 'EUR'";
 /// A single VAT rate bucket within a KMD return breakdown.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VatRateBucket {
-    pub rate: i32,
+    pub rate: f64,
     pub taxable_amount_cents: i64,
     pub vat_amount_cents: i64,
     pub reason: Option<String>,
@@ -282,10 +282,10 @@ pub(crate) fn is_eur_currency(currency: &str) -> bool {
 /// TODO(vat-history): backfill billing_country/vat_rate for pre-101 invoices.
 pub(crate) fn effective_vat_bucket(
     stored_country: Option<&str>,
-    stored_rate: Option<i32>,
+    stored_rate: Option<f64>,
     current_country: Option<&str>,
     has_vat_number: bool,
-) -> (i32, Option<&'static str>) {
+) -> (f64, Option<&'static str>) {
     if let Some(rate) = stored_rate {
         let country = stored_country
             .or(current_country)
@@ -294,7 +294,7 @@ pub(crate) fn effective_vat_bucket(
         let is_eu = vat_rates::is_eu_country(&country);
         let reason = if country == "EE" {
             None
-        } else if is_eu && rate == 0 {
+        } else if is_eu && rate == 0.0 {
             Some("reverse_charge")
         } else if is_eu {
             Some("eu_b2c")
@@ -315,15 +315,15 @@ pub(crate) fn effective_vat_bucket(
         return (vat_rates::ESTONIA_VAT_RATE, None);
     }
     if is_eu && has_vat_number {
-        return (0, Some("reverse_charge"));
+        return (0.0, Some("reverse_charge"));
     }
     if is_eu {
         return (
-            vat_rates::get_eu_vat_rate(&country).unwrap_or(0),
+            vat_rates::get_eu_vat_rate(&country).unwrap_or(0.0),
             Some("eu_b2c"),
         );
     }
-    (0, Some("non_eu"))
+    (0.0, Some("non_eu"))
 }
 
 /// Generate a KMD VAT return for the given year/month by aggregating invoice
@@ -400,7 +400,7 @@ pub async fn generate_kmd_return(
     // on the invoice row at creation; fall back to the current billing
     // address only for pre-migration-101 rows (both stored values NULL).
     // Local alias for the rate-breakdown row shape (clippy::type_complexity).
-    type RateRow = (i64, i64, Option<String>, Option<i32>, Option<bool>, i64);
+    type RateRow = (i64, i64, Option<String>, Option<f64>, Option<bool>, i64);
     let rate_rows: Vec<RateRow> = sqlx::query_as(
         r#"
         SELECT
@@ -591,10 +591,10 @@ mod tests {
 
     #[test]
     fn test_get_eu_vat_rate_returns_known_rates() {
-        assert_eq!(vat_rates::get_eu_vat_rate("EE"), Some(24));
-        assert_eq!(vat_rates::get_eu_vat_rate("FI"), Some(26));
-        assert_eq!(vat_rates::get_eu_vat_rate("DE"), Some(19));
-        assert_eq!(vat_rates::get_eu_vat_rate("HU"), Some(27));
+        assert_eq!(vat_rates::get_eu_vat_rate("EE"), Some(24.0));
+        assert_eq!(vat_rates::get_eu_vat_rate("FI"), Some(25.5));
+        assert_eq!(vat_rates::get_eu_vat_rate("DE"), Some(19.0));
+        assert_eq!(vat_rates::get_eu_vat_rate("HU"), Some(27.0));
         assert_eq!(vat_rates::get_eu_vat_rate("US"), None);
     }
 
@@ -602,34 +602,34 @@ mod tests {
     /// that the country code list matches the rate function.
     #[test]
     fn test_all_eu_countries_have_vat_rates() {
-        let expected: [(&str, i32); 27] = [
-            ("AT", 20),
-            ("BE", 21),
-            ("BG", 20),
-            ("HR", 25),
-            ("CY", 19),
-            ("CZ", 21),
-            ("DK", 25),
-            ("EE", 24),
-            ("FI", 26),
-            ("FR", 20),
-            ("DE", 19),
-            ("GR", 24),
-            ("HU", 27),
-            ("IE", 23),
-            ("IT", 22),
-            ("LV", 21),
-            ("LT", 21),
-            ("LU", 17),
-            ("MT", 18),
-            ("NL", 21),
-            ("PL", 23),
-            ("PT", 23),
-            ("RO", 19),
-            ("SK", 23),
-            ("SI", 22),
-            ("ES", 21),
-            ("SE", 25),
+        let expected: [(&str, f64); 27] = [
+            ("AT", 20.0),
+            ("BE", 21.0),
+            ("BG", 20.0),
+            ("HR", 25.0),
+            ("CY", 19.0),
+            ("CZ", 21.0),
+            ("DK", 25.0),
+            ("EE", 24.0),
+            ("FI", 25.5),
+            ("FR", 20.0),
+            ("DE", 19.0),
+            ("GR", 24.0),
+            ("HU", 27.0),
+            ("IE", 23.0),
+            ("IT", 22.0),
+            ("LV", 21.0),
+            ("LT", 21.0),
+            ("LU", 17.0),
+            ("MT", 18.0),
+            ("NL", 21.0),
+            ("PL", 23.0),
+            ("PT", 23.0),
+            ("RO", 19.0),
+            ("SK", 23.0),
+            ("SI", 22.0),
+            ("ES", 21.0),
+            ("SE", 25.0),
         ];
 
         for (code, expected_rate) in &expected {
@@ -639,7 +639,7 @@ mod tests {
             );
             assert_eq!(
                 vat_rates::get_eu_vat_rate(code),
-                Some(*expected_rate),
+                Some(*expected_rate as f64),
                 "Country {code} should have VAT rate {expected_rate}"
             );
         }
@@ -704,14 +704,14 @@ mod tests {
     #[test]
     fn test_vat_rate_bucket_serialization() {
         let bucket = VatRateBucket {
-            rate: 24,
+            rate: 24.0,
             taxable_amount_cents: 100000,
             vat_amount_cents: 24000,
             reason: None,
             invoice_count: 10,
         };
         let json = serde_json::to_value(&bucket).unwrap();
-        assert_eq!(json["rate"], 24);
+        assert_eq!(json["rate"], 24.0);
         assert_eq!(json["taxable_amount_cents"], 100000);
         assert_eq!(json["vat_amount_cents"], 24000);
         assert!(json["reason"].is_null());
@@ -720,14 +720,14 @@ mod tests {
     #[test]
     fn test_vat_rate_bucket_with_reason_serialization() {
         let bucket = VatRateBucket {
-            rate: 0,
+            rate: 0.0,
             taxable_amount_cents: 50000,
             vat_amount_cents: 0,
             reason: Some("reverse_charge".to_string()),
             invoice_count: 5,
         };
         let json = serde_json::to_value(&bucket).unwrap();
-        assert_eq!(json["rate"], 0);
+        assert_eq!(json["rate"], 0.0);
         assert_eq!(json["reason"], "reverse_charge");
     }
 
@@ -790,22 +790,22 @@ mod tests {
         // Invoice charged 24 % EE VAT; the tenant later files a VAT-number
         // bearing DE address. The KMD bucket must stay EE/24 %, not flip to
         // reverse charge.
-        let (rate, reason) = effective_vat_bucket(Some("EE"), Some(24), Some("DE"), true);
-        assert_eq!(rate, 24);
+        let (rate, reason) = effective_vat_bucket(Some("EE"), Some(24.0), Some("DE"), true);
+        assert_eq!(rate, 24.0);
         assert_eq!(reason, None);
     }
 
     #[test]
     fn test_stored_rate_zero_keeps_reverse_charge_bucket() {
-        let (rate, reason) = effective_vat_bucket(Some("DE"), Some(0), Some("DE"), true);
-        assert_eq!(rate, 0);
+        let (rate, reason) = effective_vat_bucket(Some("DE"), Some(0.0), Some("DE"), true);
+        assert_eq!(rate, 0.0);
         assert_eq!(reason, Some("reverse_charge"));
     }
 
     #[test]
     fn test_stored_eu_b2c_rate_uses_eu_b2c_reason() {
-        let (rate, reason) = effective_vat_bucket(Some("FR"), Some(20), Some("FR"), false);
-        assert_eq!(rate, 20);
+        let (rate, reason) = effective_vat_bucket(Some("FR"), Some(20.0), Some("FR"), false);
+        assert_eq!(rate, 20.0);
         assert_eq!(reason, Some("eu_b2c"));
     }
 
@@ -813,7 +813,7 @@ mod tests {
     fn test_missing_stored_values_fall_back_to_current_address() {
         // Pre-migration rows: NULL stored rate/country — old behaviour.
         let (rate, reason) = effective_vat_bucket(None, None, Some("DE"), true);
-        assert_eq!(rate, 0);
+        assert_eq!(rate, 0.0);
         assert_eq!(reason, Some("reverse_charge"));
 
         let (rate, reason) = effective_vat_bucket(None, None, None, false);
@@ -872,14 +872,14 @@ mod tests {
         let breakdown = VatBreakdown {
             rates: vec![
                 VatRateBucket {
-                    rate: 24,
+                    rate: 24.0,
                     taxable_amount_cents: 100000,
                     vat_amount_cents: 24000,
                     reason: None,
                     invoice_count: 10,
                 },
                 VatRateBucket {
-                    rate: 0,
+                    rate: 0.0,
                     taxable_amount_cents: 50000,
                     vat_amount_cents: 0,
                     reason: Some("reverse_charge".to_string()),

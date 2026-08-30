@@ -385,11 +385,19 @@ async fn get_current_vat_summary(
     for (taxable, vat, country, vat_number) in &rate_rows {
         let country_up = country.to_uppercase();
         let is_eu = vat_rates::is_eu_country(&country_up);
-        let has_vat = vat_number.is_some();
+        // Reverse-charge classification must use the same validity gate as
+        // calculate_vat — a merely *present* VAT number that fails structural
+        // validation was charged destination VAT on the invoice and must not
+        // be summarized as reverse charge here.
+        let has_valid_vat = vat_number
+            .as_deref()
+            .filter(|value| !value.trim().is_empty())
+            .map(|value| vat_rates::is_valid_vat_number(value, Some(&country_up)))
+            .unwrap_or(false);
 
         let reason = if country_up == "EE" {
             None
-        } else if is_eu && has_vat {
+        } else if is_eu && has_valid_vat {
             Some("reverse_charge")
         } else if is_eu {
             Some("eu_b2c")
@@ -398,11 +406,11 @@ async fn get_current_vat_summary(
         };
 
         let vat_rate = if country_up == "EE" {
-            24
-        } else if is_eu && !has_vat {
-            vat_rates::get_eu_vat_rate(&country_up).unwrap_or(0)
+            vat_rates::ESTONIA_VAT_RATE
+        } else if is_eu && !has_valid_vat {
+            vat_rates::get_eu_vat_rate(&country_up).unwrap_or(0.0)
         } else {
-            0
+            0.0
         };
 
         rates.push(serde_json::json!({
@@ -564,7 +572,7 @@ mod tests {
 
     #[test]
     fn test_get_eu_vat_rate_ee() {
-        assert_eq!(vat_rates::get_eu_vat_rate("EE"), Some(24));
+        assert_eq!(vat_rates::get_eu_vat_rate("EE"), Some(24.0));
         assert_eq!(vat_rates::get_eu_vat_rate("US"), None);
     }
 
@@ -620,34 +628,34 @@ mod tests {
     /// are listed in EU_COUNTRIES.
     #[test]
     fn test_all_eu_countries_have_vat_rates() {
-        let expected: [(&str, i32); 27] = [
-            ("AT", 20),
-            ("BE", 21),
-            ("BG", 20),
-            ("HR", 25),
-            ("CY", 19),
-            ("CZ", 21),
-            ("DK", 25),
-            ("EE", 24),
-            ("FI", 26),
-            ("FR", 20),
-            ("DE", 19),
-            ("GR", 24),
-            ("HU", 27),
-            ("IE", 23),
-            ("IT", 22),
-            ("LV", 21),
-            ("LT", 21),
-            ("LU", 17),
-            ("MT", 18),
-            ("NL", 21),
-            ("PL", 23),
-            ("PT", 23),
-            ("RO", 19),
-            ("SK", 23),
-            ("SI", 22),
-            ("ES", 21),
-            ("SE", 25),
+        let expected: [(&str, f64); 27] = [
+            ("AT", 20.0),
+            ("BE", 21.0),
+            ("BG", 20.0),
+            ("HR", 25.0),
+            ("CY", 19.0),
+            ("CZ", 21.0),
+            ("DK", 25.0),
+            ("EE", 24.0),
+            ("FI", 25.5),
+            ("FR", 20.0),
+            ("DE", 19.0),
+            ("GR", 24.0),
+            ("HU", 27.0),
+            ("IE", 23.0),
+            ("IT", 22.0),
+            ("LV", 21.0),
+            ("LT", 21.0),
+            ("LU", 17.0),
+            ("MT", 18.0),
+            ("NL", 21.0),
+            ("PL", 23.0),
+            ("PT", 23.0),
+            ("RO", 19.0),
+            ("SK", 23.0),
+            ("SI", 22.0),
+            ("ES", 21.0),
+            ("SE", 25.0),
         ];
 
         for (code, expected_rate) in &expected {
@@ -657,7 +665,7 @@ mod tests {
             );
             assert_eq!(
                 vat_rates::get_eu_vat_rate(code),
-                Some(*expected_rate),
+                Some(*expected_rate as f64),
                 "Country {code} should have VAT rate {expected_rate}"
             );
         }

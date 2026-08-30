@@ -484,9 +484,9 @@ If your account has a payment failure, ApexMail follows a gradual dunning proces
 | 0    | Payment fails. First retry is scheduled.                          |
 | 1    | **Retry 1.** Email notification sent.                              |
 | 3    | **Retry 2.** Second email notification.                            |
-| 7    | **Retry 3.** ⚠️ **Soft suspension:** emails are queued but not sent. |
+| 7    | **Retry 3.** **Soft suspension:** emails are queued but not sent. |
 | 14   | **Retry 4.** Final email warning.                                  |
-| 21   | ❌ **Hard suspension:** emails are rejected (not queued). 7-day grace period begins. |
+| 21   | **Hard suspension:** emails are rejected (not queued). 7-day grace period begins. |
 | 28   | Account data scheduled for deletion if payment is not resolved.   |
 
 ### Soft Suspension (Day 7–20)

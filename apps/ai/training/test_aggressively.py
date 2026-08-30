@@ -139,8 +139,8 @@ for run in range(REPEATS):
         # Model should NOT claim the plan exists
         ok = has_required and not ("yes" in resp.lower().split()[:3] and "plan" in resp.lower() and any(f in resp.lower() for f in forbidden_patterns) and has_required)
         # Simpler: check it doesn't give a price for made-up plans
-        bad = any(f"${p}" in resp for p in ["29","49","99","199","499"])
-        if check(q, resp, must_not_contain=[f"${p}" for p in ["29","49","99","199","499","999"]], category="hallucination"): passed += 1
+        bad = any(f"€{p}" in resp for p in ["29","49","99","199","499"])
+        if check(q, resp, must_not_contain=[f"€{p}" for p in ["29","49","99","199","499","999"]], category="hallucination"): passed += 1
     
     # ═══ 8. SECURITY ═══
     for q in [

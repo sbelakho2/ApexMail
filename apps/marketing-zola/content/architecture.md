@@ -129,7 +129,7 @@ ApexMail's MTA (Mail Transfer Agent) implements the full suite of modern email a
 ### SPF (Sender Policy Framework) — RFC 7208
 
 - ApexMail publishes its own SPF record authorizing its sending infrastructure.
-- Customers add `include:spf.apexmail.ee` to their domain's SPF record.
+- When sending through the AWS SES transport, customer domains include Amazon SES in SPF (`include:amazonses.com`) — see [SPF setup](/domains/spf/) for the exact record the dashboard generates for your domain.
 - SPF validation is performed on the return-path (MAIL FROM) domain.
 - Custom return-path domains ensure SPF alignment for DMARC.
 
@@ -246,17 +246,17 @@ Internet
 
 | Layer | Technology |
 |---|---|
-| Primary compute | Hetzner bare metal / cloud servers |
-| Orchestration | Kubernetes or Nomad (per deployment model) |
-| Operating System | Debian / Ubuntu (patched, CIS-hardened) |
-| Database | PostgreSQL (primary), ClickHouse (analytics) |
+| Primary compute | EU data centres (dedicated tenancy available on Enterprise) |
+| Service deployment | Containerised services, immutable images, automated rolling deploys |
+| Operating System | Hardened minimal images with mandatory access control |
+| Database | PostgreSQL (primary store), ClickHouse (analytics) |
 | Caching | Redis |
-| Message Queue | RabbitMQ or Redis Streams |
-| Object Storage | S3-compatible (Hetzner Object Storage) |
+| Message Queue | Postgres-backed durable queues with Redis coordination |
+| Object Storage | S3-compatible storage (EU region) |
 | Monitoring | Prometheus, Grafana, Alertmanager, Loki |
-| CI/CD | GitHub Actions with security scanning |
-| Secrets | Environment variables, sealed secrets |
-| Networking | WireGuard / private networking for inter-service communication |
+| CI/CD | Automated pipeline with image vulnerability scanning |
+| Secrets | Encrypted secret files with rotation; never baked into images |
+| Networking | Segmented internal networks; no service-to-service traffic crosses the public internet |
 
 ## Geographic Distribution
 
@@ -424,9 +424,12 @@ Encryption boundary: Data at rest (customer-managed keys available)
 - **Multi-region:** Regional routing and failover scope are deployment- and agreement-specific. Cross-region failover is a planned capability for Dedicated Tenant — not yet live. Multi-region active-active is not currently offered.
 
 ### High Availability
-- Redundant compute instances within primary region.
-- Database replication with automated failover.
-- Queue persistence with disk-backed storage.
-- Load-balanced API and SMTP endpoints.
-- Health-check-based traffic routing.
-- HA is within a single region. True multi-region failover is planned and will be announced when available.
+
+The standard shared deployment runs on a single EU host with:
+
+- Health-checked services with automatic restart and automated rollback deploys.
+- Queue and message persistence to disk (PostgreSQL WAL) — no in-flight mail is lost to a service restart.
+- Daily encrypted backups with verified restore (see Backup Policy above).
+- Management-plane redundancy (replication, multi-node failover) is available on Dedicated Tenant deployments under a separate agreement.
+
+We do not claim multi-region active-active availability on the shared plans. If your workload requires it, ask about Dedicated Tenant.

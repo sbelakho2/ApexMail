@@ -4,5 +4,5 @@ template = "home.html"
 description = "API de email para equipos regulados con flujos orientados al RGPD, seguimiento de entregas, planes auditables y opciones Enterprise de despliegue privado."
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

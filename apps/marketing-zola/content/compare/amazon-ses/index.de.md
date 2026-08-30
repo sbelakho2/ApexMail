@@ -27,7 +27,7 @@ verdict_points = ["Verwaltete E-Mail-Infrastruktur mit API, Ereignissen und Supp
 # "none" (the winner_badge macro renders them as a spanned em-dash).
 comparison_sections = [
   { title = "EWR-DATENVERARBEITUNG", rows = [
-    { feature = "Primäre Hosting-Region", apex = 'EU/EWR-orientierte Standardkonfiguration; aktive Bereitstellung bestätigen', comp = 'Mehrere Regionen, darunter EU (Irland eu-west-1, Frankfurt eu-central-1 usw.)<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
+    { feature = "Primäre Hosting-Region", apex = 'EU-Rechenzentren (Deutschland primär, Finnland Backup) — keine Verarbeitung in den USA für Kerndaten', comp = 'Mehrere Regionen, darunter EU (Irland eu-west-1, Frankfurt eu-central-1 usw.)<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
     { feature = "EWR-Datenverarbeitung standardmäßig", apex = 'EU/EWR-orientierte Standardkonfiguration; aktive Standorte sind vereinbarungsspezifisch', comp = 'Verfügbar — muss explizit konfiguriert werden; Regionsauswahl je Sende-Domain erforderlich<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
     { feature = "AVV-Verfügbarkeit", apex = 'Verfügbar im Rahmen der anwendbaren ApexMail-Vereinbarung', comp = 'Verfügbar — AWS-AVV (Artifact) mit SCCs<sup><a href="#src-ses2">2</a></sup>', winner = "none" }
   ]},
@@ -39,7 +39,7 @@ comparison_sections = [
     { feature = "Eingehende E-Mails", apex = 'Scale- und Enterprise-Tarife', comp = 'Ja — SES-Empfangsregeln mit S3-, Lambda-, SNS- und SQS-Aktionen<sup><a href="#src-ses5">5</a></sup>', winner = "none" }
   ]},
   { title = "BEREITSTELLUNGSMODELLE", rows = [
-    { feature = "Shared Cloud", apex = 'Ja (alle Tarife) — verwaltet, Multi-Tenant auf Hetzner', comp = 'Ja (alle Konten) — standardmäßig gemeinsamer IP-Pool<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "Shared Cloud", apex = 'Ja (alle Tarife) — verwaltet, Multi-Tenant, in der EU gehostet', comp = 'Ja (alle Konten) — standardmäßig gemeinsamer IP-Pool<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "Dedizierte IP", apex = 'Freigegebenes Add-on ab Pro; 1 enthalten ab Growth, 3 ab Scale', comp = 'Ja — €22.95 (US$24.95)/Monat pro dedizierter IP; IP-Pool-Verwaltung verfügbar<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "Dedizierte Tenancy", apex = 'Vorbehaltlich Architektur- und Vertragsprüfung', comp = 'Selbst verwaltet — der Kunde plant dedizierte Tenancy auf AWS mit SES als Dienstkomponente<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "BYOC / private Bereitstellung", apex = 'Vorbehaltlich Architektur- und Vertragsprüfung', comp = 'Systemimmanent — der Kunde betreibt im eigenen AWS-Konto; SES ist ein AWS-Dienst<sup><a href="#src-ses6">6</a></sup>', winner = "none" }

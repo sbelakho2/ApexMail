@@ -4,7 +4,7 @@ description = "Enterprise-Transaktions-E-Mails: Jahresvertrag über €30.000 mi
 template = "prose.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++
 
 ## ApexMail Enterprise

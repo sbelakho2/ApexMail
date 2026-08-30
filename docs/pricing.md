@@ -22,8 +22,8 @@ Stripe confirms the subscription through a verified webhook.
 | `scale` | Scale | €350 | €3,500/year | 2,000,000 | 20,000,000 | Unlimited | 50 | 365 days | 3 included |
 | `enterprise` | Enterprise | €3,000 | €30,000/year | 5,000,000 | Unlimited | Unlimited | Unlimited | 730 days | 10 included |
 
-Annual billing is $10 \times$ the monthly price: two months free, or roughly a
-$17\%$ discount compared with twelve monthly payments.
+Annual billing is 10 times the monthly price: two months free, or roughly a
+17% discount compared with twelve monthly payments.
 
 ## Public purchase paths
 
@@ -54,9 +54,17 @@ confirmation and the required agreement.
 
 ## Overage and PAYG rates
 
-The billing-service subscription overage calculation is €0.40 per 1,000 extra
-emails, rounded up to the nearest cent where overage applies. No separate
-subscription-plan API-call overage price is defined by the runtime catalog.
+**Enforcement and billing:** paid plans are not hard-blocked at the included
+volume. Email sending on an active paid subscription continues into an
+overage allowance (default: +100% of the plan limit — a 50K plan may send up
+to 100K; tunable via `OVERAGE_ALLOWANCE_PERCENT`, 0 = hard stop), after which
+sends are rejected with `403 email quota exceeded`. The overage accrued in a
+billing cycle is invoiced automatically when the cycle ends: the daily
+maintenance sweep creates an `Overage:` invoice line at €0.40 per 1,000
+emails (rounded up), once per tenant per period. Free plans are hard-capped
+at the plan limit. `POST /v1/billing/overage/estimate` previews the charge.
+No separate subscription-plan API-call overage price is defined by the
+runtime catalog.
 
 PAYG pricing is metered independently of subscription plans:
 

@@ -26,7 +26,7 @@ verdict_points = ["EU/EEA-oriented deployment configuration", "Current public ca
 # of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "EEA DATA PROCESSING", rows = [
-    { feature = "Primary hosting region", apex = 'EU/EEA-oriented default configuration; confirm active deployment', comp = 'US (EU region available on Foundation 50K+ and higher plans)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
+    { feature = "Primary hosting region", apex = 'EU data centres (Germany primary, Finland backup) — no US processing for core data', comp = 'US (EU region available on Foundation 50K+ and higher plans)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
     { feature = "EEA data processing default", apex = 'EU/EEA-oriented default configuration; active locations are agreement-specific', comp = 'No — US-based by default; EU region configured per sending domain<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
     { feature = "DPA availability", apex = 'Available under the applicable ApexMail agreement', comp = 'Available — Sinch DPA covers Mailgun services<sup><a href="#src-mg2">2</a></sup>', winner = "none" }
   ]},
@@ -39,7 +39,7 @@ comparison_sections = [
     { feature = "Inbound email", apex = 'Scale and Enterprise plans', comp = 'Yes — inbound routes with forwarding, storage, and webhook actions<sup><a href="#src-mg4">4</a></sup>', winner = "none" }
   ]},
   { title = "DEPLOYMENT MODELS", rows = [
-    { feature = "Shared cloud", apex = 'Yes (all plans) — multi-tenant on Hetzner', comp = 'Yes (all plans)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
+    { feature = "Shared cloud", apex = 'Yes (all plans) — multi-tenant, EU-hosted', comp = 'Yes (all plans)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "Dedicated IP", apex = 'Approved add-on on Pro; 1 included on Growth, 3 on Scale', comp = 'Available as add-on on Foundation plan and above<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "Dedicated tenancy", apex = 'Subject to architecture and contract review', comp = 'See provider documentation<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "BYOC / private deployment", apex = 'Subject to architecture and contract review', comp = 'See provider documentation<sup><a href="#src-mg5">5</a></sup>', winner = "none" }

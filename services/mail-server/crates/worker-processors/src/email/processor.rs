@@ -761,6 +761,46 @@ fn classify_send_failure(err: &ProcessorError) -> SendFailureClass {
     }
 }
 
+/// Does this failure actually prove the RECIPIENT ADDRESS is invalid — the
+/// only justification for suppressing it tenant-wide?
+///
+/// A 5xx reply is permanent for *this message*, but most 5xx are policy
+/// verdicts about the sender or content ("550 5.7.1 spam", IP blocklists,
+/// DMARC failures of OUR alignment) and say nothing about the mailbox.
+/// Suppressing on those poisons valid recipients — one receiving domain's
+/// spam policy would silence the address for the whole tenant. Only a
+/// 5.1.x address-status enhanced code (or an explicit mailbox rejection
+/// phrase) proves address invalidity. SES `permanent` dispositions are
+/// classified at the source from typed SDK errors and stay authoritative.
+fn is_recipient_invalid(error: &ProcessorError) -> bool {
+    match error {
+        ProcessorError::Smtp { enhanced, message, .. } => {
+            if let Some(enhanced) = enhanced {
+                if enhanced.starts_with("5.1.") {
+                    return true;
+                }
+            }
+            let m = message.to_ascii_lowercase();
+            [
+                "user unknown",
+                "unknown user",
+                "no such user",
+                "no such recipient",
+                "recipient not found",
+                "mailbox not found",
+                "mailbox unavailable",
+                "bad destination mailbox",
+                "address rejected",
+                "does not exist",
+            ]
+            .iter()
+            .any(|phrase| m.contains(phrase))
+        }
+        ProcessorError::Ses { permanent: true, .. } => true,
+        _ => false,
+    }
+}
+
 /// Email processor for sending emails from the queue.
 pub struct EmailProcessor {
     db: PgPool,
@@ -770,6 +810,8 @@ pub struct EmailProcessor {
     is_running: AtomicBool,
     active_jobs: AtomicUsize,
     shutdown_notify: Arc<Notify>,
+    /// Last wall-clock time (ms) queue-depth metrics were exported.
+    queue_metrics_last_emit_ms: AtomicI64,
 
     // Caches
     suppression_cache: Cache<String, CachedSuppression>,
@@ -816,6 +858,7 @@ impl EmailProcessor {
             transport,
             is_running: AtomicBool::new(false),
             active_jobs: AtomicUsize::new(0),
+            queue_metrics_last_emit_ms: AtomicI64::new(0),
             shutdown_notify: Arc::new(Notify::new()),
             suppression_cache: Cache::builder()
                 .max_capacity(SUPPRESSION_CACHE_MAX_SIZE)
@@ -888,6 +931,7 @@ impl EmailProcessor {
     /// provides an additional hard cap and a load-shedding cooldown.
     async fn poll_loop(&self) {
         while self.is_running.load(Ordering::SeqCst) {
+            self.record_queue_depth_metrics().await;
             // ── Error rate cooldown ────────────────────────────
             let cooldown_until = self.error_cooldown_until.load(Ordering::SeqCst);
             let now = Utc::now().timestamp_millis();
@@ -1077,6 +1121,39 @@ impl EmailProcessor {
         .fetch_one(&self.db)
         .await?;
         Ok(depth.max(0) as u64)
+    }
+
+    /// Export `apexmail_email_queue_depth{status=...}` — the metric the
+    /// EmailQueueBacklog / CriticalEmailQueueBacklog alerts key on. The
+    /// original exporter lived in the outbound-queue crate, which is not
+    /// deployed, so the alerts were dead rules; the deployed worker is the
+    /// right emitter. Time-gated to avoid a grouped COUNT on every poll.
+    async fn record_queue_depth_metrics(&self) {
+        let now_ms = Utc::now().timestamp_millis();
+        let last = self
+            .queue_metrics_last_emit_ms
+            .swap(now_ms, Ordering::SeqCst);
+        if now_ms.saturating_sub(last) < 15_000 {
+            return;
+        }
+
+        let rows: Result<Vec<(String, i64)>, sqlx::Error> = sqlx::query_as(
+            "SELECT status, COUNT(*) FROM email_queue GROUP BY status",
+        )
+        .fetch_all(&self.db)
+        .await;
+
+        match rows {
+            Ok(counts) => {
+                for (status, count) in counts {
+                    metrics::gauge!("apexmail_email_queue_depth", "status" => status.clone())
+                        .set(count.max(0) as f64);
+                }
+            }
+            Err(e) => {
+                warn!(error = %e, "failed to export queue depth metrics");
+            }
+        }
     }
 
     /// F5:after a processed chunk, release rows that still owe recipients
@@ -1273,11 +1350,14 @@ impl EmailProcessor {
     }
 
     async fn process_job_inner(&self, job: &EmailJob) -> ProcessorResult<()> {
-        // Check circuit breaker
+        // Check circuit breaker. Returning the error here used to strand the
+        // claimed row in 'processing' for a full visibility lease (300 s)
+        // while the poller kept claiming fresh rows into the open breaker —
+        // a 60 s breaker window could stall the queue for minutes. Defer the
+        // row instead (5-minute requeue, same as the warmup gate).
         if !self.smtp_circuit_breaker.is_allowed() {
-            return Err(ProcessorError::CircuitOpen(
-                "SMTP circuit breaker open".into(),
-            ));
+            self.requeue_job(job, "circuit_open").await?;
+            return Ok(());
         }
 
         // Load and validate current domain state before any per-domain rate
@@ -1972,24 +2052,35 @@ impl EmailProcessor {
             return Ok(());
         }
 
-        // Add to suppressions — ONLY the bounced address. suppressions.id is
-        // VARCHAR(26), so use a short random suffix ("sup_" + 18 hex chars
-        // = 22 chars).
-        sqlx::query(
-            r#"
-            INSERT INTO suppressions (id, tenant_id, email, reason, created_at)
-            VALUES ($1, $2, $3, 'hard_bounce', NOW())
-            ON CONFLICT (tenant_id, email) DO NOTHING
-            "#,
-        )
-        .bind(format!(
-            "sup_{}",
-            &uuid::Uuid::new_v4().simple().to_string()[..18]
-        ))
-        .bind(&job.tenant_id)
-        .bind(&job.to)
-        .execute(&self.db)
-        .await?;
+        // Add to suppressions — ONLY the bounced address, and ONLY when the
+        // failure proves the address itself is invalid. Policy 5xx (spam
+        // refusals, IP blocklists, DMARC verdicts) mark this message
+        // permanently failed but must not suppress a valid mailbox.
+        // suppressions.id is VARCHAR(26), so use a short random suffix
+        // ("sup_" + 18 hex chars = 22 chars).
+        if is_recipient_invalid(error) {
+            sqlx::query(
+                r#"
+                INSERT INTO suppressions (id, tenant_id, email, reason, created_at)
+                VALUES ($1, $2, $3, 'hard_bounce', NOW())
+                ON CONFLICT (tenant_id, email) DO NOTHING
+                "#,
+            )
+            .bind(format!(
+                "sup_{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..18]
+            ))
+            .bind(&job.tenant_id)
+            .bind(&job.to)
+            .execute(&self.db)
+            .await?;
+        } else {
+            warn!(
+                job_id = %job.id,
+                recipient = %job.to,
+                "5xx permanent failure without address-proof; message dead-lettered, recipient NOT suppressed"
+            );
+        }
 
         // Record bounce event (for the bounced recipient only)
         sqlx::query(

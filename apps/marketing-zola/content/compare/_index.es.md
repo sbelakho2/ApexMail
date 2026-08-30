@@ -4,5 +4,5 @@ description = "Compare ApexMail con SendGrid, Mailgun, Postmark, Amazon SES y Re
 template = "section.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

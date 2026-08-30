@@ -45,9 +45,9 @@ The current authorised subprocessors are maintained in the [ApexMail Subprocesso
 
 | Sub-processor | Purpose | Location | Transfer Safeguard |
 |---|---|---|---|
-| Hetzner Online GmbH | Core infrastructure (compute, storage) | Configured EU/EEA region | Confirm the active deployment and applicable transfer safeguard |
-| Amazon Web Services, Inc. | Telemetry object storage when enabled | Configured S3 region (default: `eu-central-1`) | Confirm the active deployment and applicable transfer safeguard |
-| Amazon Web Services, Inc. | Email-delivery transport when enabled | Configured SES region | Confirm the active deployment and applicable transfer safeguard |
+| Hetzner Online GmbH | Core infrastructure (compute, storage) | Germany and Finland (EU) | Intra-EEA processing; GDPR Chapter V transfer rules do not apply |
+| Amazon Web Services, Inc. | Telemetry object storage when enabled | Configured S3 region (default: `eu-central-1`) | EU Standard Contractual Clauses (AWS DPA) |
+| Amazon Web Services, Inc. | Email-delivery transport when enabled | Configured SES region | EU Standard Contractual Clauses (AWS DPA) |
 | Google LLC | Optional OAuth authentication | Global (US entity, data processed per OAuth config) | Standard Contractual Clauses |
 | GitHub, Inc. | Optional OAuth authentication | Global (US entity) | Standard Contractual Clauses |
 | Stripe, Inc. | Payment processing | US (primary), India (support) | Standard Contractual Clauses |

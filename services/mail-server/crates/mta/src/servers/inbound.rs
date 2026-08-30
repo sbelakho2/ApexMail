@@ -1768,9 +1768,14 @@ fn extract_address(line: &str) -> String {
     if let Some(addr) = super::util::extract_addr_safe(line) {
         return addr.to_string();
     }
-    // Fallback:last token
+    // Fallback:first token — the address is the first argument of
+    // `MAIL FROM:`, so the LAST token is the SIZE= parameter, not the
+    // address (submission.rs takes the first; both must agree).
     line.split_whitespace()
-        .last()
+        .find(|token| {
+            let token: &str = token;
+            token != "MAIL" && token != "FROM:" && !token.is_empty()
+        })
         .unwrap_or("")
         .trim_matches(|c| c == '<' || c == '>')
         .to_string()

@@ -37,10 +37,10 @@ La configuración proporcionada apunta a regiones del EEE para los datos princip
 
 | Categoría de datos | Ubicación principal | Copia de seguridad / Réplica | Procesamiento |
 |---|---|---|---|
-| Infraestructura de correo principal (mensajes, metadatos de entrega, datos de cuenta) | Hetzner, Alemania (Falkenstein/Núremberg) | Hetzner, Finlandia (Tuusula) | EEE predeterminado; confirmar la implementación activa |
+| Infraestructura de correo principal (mensajes, metadatos de entrega, datos de cuenta) | Centro de datos de la UE — Alemania | Centro de datos de la UE — Finlandia | EEE — sin transferencia a terceros países |
 | Tokens de autenticación OAuth | Google LLC / GitHub, Inc. (entidades estadounidenses, CCT) | Gestionado por el proveedor | EE. UU. (CCT) |
 | Datos de pago y facturación | Stripe, Inc. (EE. UU., CCT) | Gestionado por el proveedor (India para soporte) | EE. UU./India (CCT) |
-| Tickets de soporte | Hetzner, Alemania | Hetzner, Finlandia | EEE predeterminado; confirmar la implementación activa |
+| Tickets de soporte | Centro de datos de la UE — Alemania | Centro de datos de la UE — Finlandia | EEE — sin transferencia a terceros países |
 
 No transferimos datos personales fuera del EEE sin garantías adecuadas (Cláusulas Contractuales Tipo o una decisión de adecuación en virtud del Artículo 45).
 
@@ -52,8 +52,8 @@ Conservamos los datos personales solo el tiempo necesario para los fines para lo
 |---|---|
 | Datos de cuenta | Duración del contrato + 30 días |
 | Registros de facturación | 7 años (ley contable estonia) |
-| Contenido de correo (cuerpo, asunto, encabezados, adjuntos) | 7 días por defecto; máximo dependiente del plan (de 1 día en el plan gratuito hasta 365 días en Enterprise) |
-| Registros de eventos (eventos de entrega, apertura y clic) | 30 días por defecto; máximo dependiente del plan (hasta 365 días en Enterprise) |
+| Contenido de correo (cuerpo, asunto, encabezados, adjuntos) | 7 días por defecto; máximo dependiente del plan (de 1 día en el plan gratuito hasta 730 días en Enterprise) |
+| Registros de eventos (eventos de entrega, apertura y clic) | 30 días por defecto; máximo dependiente del plan (hasta 730 días en Enterprise) |
 | Tickets de soporte | 2 años después de la resolución |
 
 Consulte nuestra [Política de conservación de datos](/compliance/#data-retention) para más detalles.

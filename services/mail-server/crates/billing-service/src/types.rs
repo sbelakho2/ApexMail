@@ -289,7 +289,7 @@ pub struct InvoiceLineItem {
     pub unit_price: i64,
     /// Line total in cents.
     pub amount: i64,
-    pub vat_rate: i32,
+    pub vat_rate: f64,
     pub vat_amount: i64,
 }
 
@@ -606,9 +606,9 @@ mod tests {
         let item = InvoiceLineItem {
             description: "Dedicated IP".into(),
             quantity: 2,
-            unit_price: 3000, // $30.00
+            unit_price: 3000, // €30.00
             amount: 6000,
-            vat_rate: 20,
+            vat_rate: 20.0,
             vat_amount: 1200,
         };
         assert_eq!(

@@ -16,15 +16,16 @@ Get up and running with ApexMail in just a few minutes. This guide walks through
 
 Use `am_test_` keys for sandbox and smoke tests. Use `am_live_` keys only after you are ready to send against a verified production domain.
 
-> ⚠️ **Important**: Store your API key securely. It won't be shown again.
+> **Important**: Store your API key securely. It won't be shown again.
 
 ## Step 2: Install an SDK (Optional)
 
 The ApexMail SDKs are **not yet published to public package registries** — `pip install apexmail` will fail until the first stable release. Until then, build from the monorepo source, pin to a specific commit, and verify the source you vendor:
 
 ```bash
-git clone https://github.com/Bel-Consulting-OU/ApexMail.git
-cd ApexMail
+# SDK source is distributed on request until the first public registry
+# release — email support@apexmail.ee for a pinned source drop.
+# (Replace ./packages/sdk-python with the drop you receive.)
 pip install ./packages/sdk-python   # the Go, PHP, Ruby, and Java SDKs live alongside it in packages/
 ```
 
@@ -40,7 +41,7 @@ curl -X POST https://api.apexmail.ee/v1/messages \
   -H "Content-Type: application/json" \
   -d '{
     "from": "hello@yourdomain.com",
-    "to": "user@example.com",
+    "to": ["user@example.com"],
     "subject": "Welcome to our service!",
     "html": "<h1>Welcome!</h1><p>Thanks for signing up.</p>"
   }'
@@ -109,10 +110,10 @@ We operate **async-first** support. Most answers live in the docs and the in-app
 
 - 📚 [Full API Documentation](https://apexmail.ee/docs) — first stop, includes self-debug walkthroughs
 - 🩺 In-app domain diagnostics: `GET /v1/domains/{id}/auth-score` returns structured `expected → actual → fix` output
-- 💬 [Community Forum](https://github.com/sbelakho2/ApexMail/discussions) — shared, public, searchable
+- Community — email support@apexmail.ee (a public forum opens with the first stable SDK release)
 - 📧 [Email Support](mailto:support@apexmail.ee) — Starter/Growth: 24–48h async response
 - 🛡️ [Login KiwiCaptcha Protection](./security/kiwicaptcha-login.md)
-- 🐛 [Report a Bug](https://github.com/sbelakho2/ApexMail/issues)
+- Report a bug — support@apexmail.ee (include your tenant ID and the message ID)
 
 > We do **not** run per-customer Discord servers, 24/7 live chat, or white-glove real-time support. Scale customers get priority email + a shared Slack hub; Enterprise customers get a dedicated async channel + SLA. Calls are scheduled, not on-demand.
 

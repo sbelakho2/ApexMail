@@ -1,5 +1,8 @@
 # ato-protection
 
+> **STATUS — READ BEFORE RELYING ON THIS CRATE**
+> NOT WIRED INTO PRODUCTION: no service in this workspace depends on this crate. It is a library and test target only. Do not represent it as an active control.
+
 Account Takeover Protection — behavioral biometrics, impossible travel detection, session fingerprinting, and adaptive MFA.
 
 ## Overview

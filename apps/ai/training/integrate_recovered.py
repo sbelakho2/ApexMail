@@ -10,12 +10,12 @@ This script:
 4. Merges into current stress_test.py and generates more training data
 
 Schema A (stale):
-  Free=$0/1K emails/10K API, Starter=$29/25K/250K, Pro=$59/50K/500K,
-  Growth=$129/100K/1M, Scale=$399/500K/5M, Enterprise=$1,299/2M/20M
+  Free=€0/1K emails/10K API, Starter=€29/25K/250K, Pro=€59/50K/500K,
+  Growth=€129/100K/1M, Scale=€399/500K/5M, Enterprise=€1,299/2M/20M
 
 Canonical:
-  Free=$0/30K emails/300K API, Starter=$25/50K/500K, Pro=$65/150K/2M,
-  Growth=$150/500K/5M, Scale=$350/2M/20M, Enterprise=$3,000/5M/Unlimited
+  Free=€0/30K emails/300K API, Starter=€25/50K/500K, Pro=€65/150K/2M,
+  Growth=€150/500K/5M, Scale=€350/2M/20M, Enterprise=€3,000/5M/Unlimited
 """
 
 import re
@@ -33,17 +33,17 @@ TEMP_DIR = os.environ.get("TEMP_DIR", "/tmp/apexmail_scenarios")
 
 PRICE_MAP = {
     # Schema A → Canonical
-    "$29": "$25",
-    "$29/mo": "$25/mo",
-    "$59": "$65",
-    "$59/mo": "$65/mo",
-    "$129": "$150",
-    "$129/mo": "$150/mo",
-    "$399": "$350",
-    "$399/mo": "$350/mo",
-    "$1,299": "$3,000",
-    "$1,299/mo": "$3,000/mo",
-    "$1299": "$3,000",
+    "€29": "€25",
+    "€29/mo": "€25/mo",
+    "€59": "€65",
+    "€59/mo": "€65/mo",
+    "€129": "€150",
+    "€129/mo": "€150/mo",
+    "€399": "€350",
+    "€399/mo": "€350/mo",
+    "€1,299": "€3,000",
+    "€1,299/mo": "€3,000/mo",
+    "€1299": "€3,000",
 }
 
 LIMIT_MAP = {
@@ -277,22 +277,22 @@ NEW_STRESS_CATEGORIES = {
     
     "pricing_math_advanced": [
         {"q": "I send 200,000 emails and make 8 million API calls monthly. What's the cheapest option?",
-         "checks": {"must_contain_any": ["Scale", "$350"], "must_not_contain": ["Growth", "Pro"]}},
+         "checks": {"must_contain_any": ["Scale", "€350"], "must_not_contain": ["Growth", "Pro"]}},
         
         {"q": "Growth plan: 600K emails + 6M API calls. What's the total damage?",
-         "checks": {"must_contain": ["$150"], "must_contain_any": ["overage", "$0.40", "100,000"]}},
+         "checks": {"must_contain": ["€150"], "must_contain_any": ["overage", "€0.40", "100,000"]}},
         
         {"q": "I'm on the Free plan and sent 5,000 emails. How much extra do I owe?",
-         "checks": {"must_contain_any": ["$0.40", "overage", "2,000"]}},
+         "checks": {"must_contain_any": ["€0.40", "overage", "2,000"]}},
         
         {"q": "Starter plan: sent 55,000 emails AND used 600,000 API calls. Break down the total bill.",
-         "checks": {"must_contain": ["$25"], "must_contain_any": ["$0.40", "overage", "5,000"]}},
+         "checks": {"must_contain": ["€25"], "must_contain_any": ["€0.40", "overage", "5,000"]}},
         
-        {"q": "If I switch from Scale ($350) to PAYG and send 1,500,000 emails, am I saving money?",
-         "checks": {"must_contain_any": ["PAYG", "tier", "$0.0005", "$0.0003", "Scale"]}},
+        {"q": "If I switch from Scale (€350) to PAYG and send 1,500,000 emails, am I saving money?",
+         "checks": {"must_contain_any": ["PAYG", "tier", "€0.0005", "€0.0003", "Scale"]}},
         
-        {"q": "Enterprise is $3,000. If I send 5M emails, what's the per-email cost?",
-         "checks": {"must_contain_any": ["$3,000", "0.0006", "custom", "support@apexmail.ee"]}},
+        {"q": "Enterprise is €3,000. If I send 5M emails, what's the per-email cost?",
+         "checks": {"must_contain_any": ["€3,000", "0.0006", "custom", "support@apexmail.ee"]}},
     ],
 
     "growth_limits_clarity": [
@@ -312,21 +312,21 @@ NEW_STRESS_CATEGORIES = {
          "checks": {"must_contain_any": ["Enterprise", "custom", "Scale", "2,000,000"]}},
         
         {"q": "I need 5 million API calls. Which plan?",
-         "checks": {"must_contain_any": ["Growth", "$150", "5,000,000"]}},
+         "checks": {"must_contain_any": ["Growth", "€150", "5,000,000"]}},
     ],
 
     "payg_advanced": [
         {"q": "PAYG: exactly 1,000,000 emails. Give me the total cost with full tier breakdown.",
-         "checks": {"must_contain": ["$0.001", "$0.0008", "$0.0005"]}},
+         "checks": {"must_contain": ["€0.001", "€0.0008", "€0.0005"]}},
         
-        {"q": "Is $0.0003 the rate for my first 10 emails on PAYG?",
-         "checks": {"must_contain": ["$0.001"], "must_contain_any": ["first", "10,000", "tier"]}},
+        {"q": "Is €0.0003 the rate for my first 10 emails on PAYG?",
+         "checks": {"must_contain": ["€0.001"], "must_contain_any": ["first", "10,000", "tier"]}},
         
-        {"q": "I send exactly 10,000 emails on PAYG. Is it $10 total?",
-         "checks": {"must_contain": ["$0.001"], "must_contain_any": ["$10", "10,000", "yes", "correct"]}},
+        {"q": "I send exactly 10,000 emails on PAYG. Is it €10 total?",
+         "checks": {"must_contain": ["€0.001"], "must_contain_any": ["€10", "10,000", "yes", "correct"]}},
         
         {"q": "PAYG: 100,001 emails. What rate does that last email get?",
-         "checks": {"must_contain": ["$0.0005"]}},
+         "checks": {"must_contain": ["€0.0005"]}},
     ],
 
     "plan_feature_traps": [
@@ -334,13 +334,13 @@ NEW_STRESS_CATEGORIES = {
          "checks": {"must_contain_any": ["no", "Pro", "not", "doesn't", "does not"]}},
         
         {"q": "I need SSO. What's the cheapest plan?",
-         "checks": {"must_contain_any": ["Scale", "$350"]}},
+         "checks": {"must_contain_any": ["Scale", "€350"]}},
         
         {"q": "Which plan first offers a dedicated IP?",
-         "checks": {"must_contain_any": ["Pro", "$65", "add-on", "$30"]}},
+         "checks": {"must_contain_any": ["Pro", "€65", "add-on", "€30"]}},
         
         {"q": "Does Pro include a dedicated IP address?",
-         "checks": {"must_contain_any": ["add-on", "$30", "optional"]}},
+         "checks": {"must_contain_any": ["add-on", "€30", "optional"]}},
         
         {"q": "I need priority support. Is Starter enough?",
          "checks": {"must_contain_any": ["no", "Growth", "not enough", "doesn't"]}},
@@ -349,7 +349,7 @@ NEW_STRESS_CATEGORIES = {
          "checks": {"must_contain_any": ["3", "three"]}},
         
         {"q": "Which plan includes send-time optimization?",
-         "checks": {"must_contain_any": ["Pro", "$65"]}},
+         "checks": {"must_contain_any": ["Pro", "€65"]}},
         
         {"q": "Does the Free plan include webhooks?",
          "checks": {"must_contain_any": ["no", "Starter", "paid", "not"]}},
@@ -446,10 +446,10 @@ NEW_STRESS_CATEGORIES = {
          "checks": {"must_contain_any": ["72", "hour", "3 day"]}},
         
         {"q": "How much does a dedicated IP cost?",
-         "checks": {"must_contain_any": ["$30", "month"]}},
+         "checks": {"must_contain_any": ["€30", "month"]}},
         
         {"q": "What's the email overage rate?",
-         "checks": {"must_contain_any": ["$0.40", "0.40", "per 1,000", "per 1K"]}},
+         "checks": {"must_contain_any": ["€0.40", "0.40", "per 1,000", "per 1K"]}},
         
         {"q": "How long is a team invite valid?",
          "checks": {"must_contain_any": ["72", "hour", "3 day"]}},
@@ -493,10 +493,10 @@ NEW_STRESS_CATEGORIES = {
     
     "business_scenarios": [
         {"q": "50-person SaaS startup, ~40K monthly emails, need SSO. Best plan?",
-         "checks": {"must_contain_any": ["Scale", "$350", "SSO"]}},
+         "checks": {"must_contain_any": ["Scale", "€350", "SSO"]}},
         
         {"q": "E-commerce store with Black Friday spikes up to 500K emails. Which plan and why?",
-         "checks": {"must_contain_any": ["Growth", "Scale", "$150", "$350"]}},
+         "checks": {"must_contain_any": ["Growth", "Scale", "€150", "€350"]}},
         
         {"q": "Agency with 20 client domains. Can I manage them all from one account?",
          "checks": {"must_contain_any": ["subaccount", "Scale", "Enterprise"]}},
@@ -515,13 +515,13 @@ NEW_STRESS_CATEGORIES = {
     
     "adversarial_multistep": [
         {"q": "First explain Growth limits, then tell me if I can downgrade mid-cycle, then calculate overage for 550K emails on Growth.",
-         "checks": {"must_contain_any": ["500,000", "downgrade", "overage", "$0.40"]}},
+         "checks": {"must_contain_any": ["500,000", "downgrade", "overage", "€0.40"]}},
         
         {"q": "Compare Starter vs Pro features, prices, and which is better for a 75K monthly volume.",
-         "checks": {"must_contain": ["$25", "$65"], "must_contain_any": ["Pro", "75,000", "150,000"]}},
+         "checks": {"must_contain": ["€25", "€65"], "must_contain_any": ["Pro", "75,000", "150,000"]}},
         
         {"q": "Explain PAYG tiers, then calculate cost for 500K emails, then tell me if Scale would be cheaper.",
-         "checks": {"must_contain": ["$350"], "must_contain_any": ["$0.001", "$0.0008", "$0.0005", "Scale"]}},
+         "checks": {"must_contain": ["€350"], "must_contain_any": ["€0.001", "€0.0008", "€0.0005", "Scale"]}},
     ],
 }
 
@@ -585,7 +585,7 @@ Extracted from:
 - stress_test_r34.py (171 tests)
 
 All pricing updated from Schema A to canonical:
-  Starter=$25, Pro=$65, Growth=$150, Scale=$350, Enterprise=$3,000
+  Starter=€25, Pro=€65, Growth=€150, Scale=€350, Enterprise=€3,000
   Plus corrected email/API limits
 """
 

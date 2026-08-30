@@ -180,36 +180,47 @@ impl ContactsRepo {
             return Ok(Vec::new());
         }
 
-        let mut query = String::from(
-            "INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at) VALUES "
-        );
-        let mut param_idx = 1u32;
+        // 4 bind params per row would exceed Postgres' 65,535-parameter
+        // statement limit above ~16,383 rows — insert in chunks instead of
+        // failing (or being unusable) on large imports.
+        const PARAMS_PER_ROW: usize = 4;
+        const MAX_BINDS: usize = 65_535;
+        let chunk_size = MAX_BINDS / PARAMS_PER_ROW;
 
-        for (i, _) in entries.iter().enumerate() {
-            if i > 0 {
-                query.push_str(", ");
+        let mut all = Vec::with_capacity(entries.len());
+        for chunk in entries.chunks(chunk_size) {
+            let mut query = String::from(
+                "INSERT INTO contacts (id, tenant_id, email, name, status, created_at, updated_at) VALUES "
+            );
+            let mut param_idx = 1u32;
+
+            for (i, _) in chunk.iter().enumerate() {
+                if i > 0 {
+                    query.push_str(", ");
+                }
+                query.push_str(&format!(
+                    "(${}, ${}, ${}, ${}, 'active', NOW(), NOW())",
+                    param_idx,
+                    param_idx + 1,
+                    param_idx + 2,
+                    param_idx + 3,
+                ));
+                param_idx += 4;
             }
-            query.push_str(&format!(
-                "(${}, ${}, ${}, ${}, 'active', NOW(), NOW())",
-                param_idx,
-                param_idx + 1,
-                param_idx + 2,
-                param_idx + 3,
-            ));
-            param_idx += 4;
-        }
-        query.push_str(" ON CONFLICT (tenant_id, email) DO NOTHING RETURNING id, tenant_id, email, name, status, created_at, updated_at");
+            query.push_str(" ON CONFLICT (tenant_id, email) DO NOTHING RETURNING id, tenant_id, email, name, status, created_at, updated_at");
 
-        let mut q = sqlx::query_as::<_, Contact>(&query);
-        for (email, name) in entries {
-            q = q
-                .bind(Uuid::new_v4())
-                .bind(tenant_id)
-                .bind(*email)
-                .bind(*name);
-        }
+            let mut q = sqlx::query_as::<_, Contact>(&query);
+            for (email, name) in chunk {
+                q = q
+                    .bind(Uuid::new_v4())
+                    .bind(tenant_id)
+                    .bind(*email)
+                    .bind(*name);
+            }
 
-        q.fetch_all(pool).await
+            all.extend(q.fetch_all(pool).await?);
+        }
+        Ok(all)
     }
 }
 

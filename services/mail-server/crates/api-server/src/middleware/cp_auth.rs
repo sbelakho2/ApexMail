@@ -401,9 +401,14 @@ pub async fn require_cp_auth(
         state.config.cp_auth.session_absolute_timeout_secs as i64,
         state.config.environment.is_production(),
     );
-    response
-        .headers_mut()
-        .insert("Set-Cookie", cookie.parse().expect("valid cookie header"));
+    // APPEND, never insert: `insert` replaces every existing Set-Cookie
+    // value on the response — including the signed flash cookie every CP
+    // form handler sets — so "Tenant suspended / Operator invited" feedback
+    // never reached the browser.
+    response.headers_mut().append(
+        "Set-Cookie",
+        cookie.parse().expect("valid cookie header"),
+    );
 
     Ok(response)
 }

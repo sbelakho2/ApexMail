@@ -212,12 +212,17 @@ scrape_configs:
   - job_name: 'blackbox-smtp'
     metrics_path: /probe
     params:
-      module: [tcp_connect]
+      module: [smtp_starttls]
     static_configs:
       - targets:
           - smtp.apexmail.ee:25
           - smtp.apexmail.ee:587
           - smtp.apexmail.ee:465
+          # IMAP mail access was previously unprobed: an IMAP outage had no
+          # page while customers lost mailbox access. Probed on the same
+          # host as SMTP (single-host deployment; port 993 is the IMAPS
+          # listener published by the imap-server container).
+          - smtp.apexmail.ee:993
     relabel_configs:
       - source_labels: [__address__]
         target_label: __param_target

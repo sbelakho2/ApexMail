@@ -28,7 +28,7 @@ use crate::state::AppState;
 
 const MINIMUM_MONTHLY_CHARGE_CENTS: i64 = 0;
 const SELF_SERVE_CHECKOUT_PLAN_IDS: [&str; 4] = ["starter", "pro", "growth", "scale"];
-const DEFAULT_BILLING_CURRENCY: &str = "USD";
+const DEFAULT_BILLING_CURRENCY: &str = "EUR";
 const DEFAULT_NET_DAYS: i64 = 30;
 const USAGE_QUERY_CACHE_TTL_SECONDS: u64 = 30;
 /// How long an admin-credit Idempotency-Key stays claimed in Redis (F6).
@@ -44,8 +44,7 @@ const BILLING_COMPANY_COUNTRY: &str = "Estonia";
 const BILLING_COMPANY_REGISTRY_CODE: &str = "16588745";
 const BILLING_COMPANY_VAT_NUMBER: &str = "EE102951727";
 const BILLING_COMPANY_BILLING_EMAIL: &str = "billing@apexmail.ee";
-const BILLING_COMPANY_BANK_NAME: &str = "Swedbank AS";
-const BILLING_COMPANY_BANK_BIC: &str = "HABAEE2X";
+const BILLING_COMPANY_BANK_NAME: &str = "Wise";
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -304,7 +303,8 @@ fn usage_payload(summary: billing_service::types::UsageSummary) -> serde_json::V
     let emails_sent = summary.emails_sent.max(0);
     let api_calls = summary.api_calls.max(0);
     let percent_used = if summary.emails_limit > 0 {
-        ((emails_sent as f64 / summary.emails_limit as f64) * 100.0).round() as i64
+        // Integer percentage, rounded half-up — no float round-trip.
+        (emails_sent * 100 + summary.emails_limit / 2) / summary.emails_limit
     } else {
         0
     };
@@ -793,7 +793,7 @@ struct LegacyInvoiceLineItemDto {
     quantity: i64,
     unit_price: i64,
     amount: i64,
-    vat_rate: i32,
+    vat_rate: f64,
     vat_amount: i64,
 }
 
@@ -906,6 +906,17 @@ impl StripeClient {
     fn from_env(http: &reqwest::Client) -> Result<Self, String> {
         let secret_key = std::env::var("STRIPE_SECRET_KEY")
             .map_err(|_| "Stripe secret key is not configured".to_string())?;
+
+        // A test-mode key must never silently drive real customer billing.
+        // It is only accepted when the deployment explicitly opts in.
+        if secret_key.starts_with("sk_test_")
+            && std::env::var("STRIPE_ALLOW_TEST_KEY").as_deref() != Ok("true")
+        {
+            return Err(
+                "STRIPE_SECRET_KEY is a Stripe test key; set STRIPE_ALLOW_TEST_KEY=true only in non-production development deployments"
+                    .to_string(),
+            );
+        }
 
         Ok(Self {
             http: http.clone(),
@@ -1343,24 +1354,6 @@ async fn resolve_tenant_billing_currency(state: &AppState, tenant_id: &str) -> S
     }
 }
 
-fn generate_admin_invoice_number(tenant_id: &str) -> String {
-    let year = Utc::now().year();
-    let tenant_prefix = tenant_id
-        .replace('-', "")
-        .chars()
-        .take(4)
-        .collect::<String>()
-        .to_uppercase();
-    let random_part = Uuid::new_v4()
-        .simple()
-        .to_string()
-        .chars()
-        .take(6)
-        .collect::<String>()
-        .to_uppercase();
-    format!("{year}-{tenant_prefix}-{random_part}")
-}
-
 async fn get_or_create_wallet_balance(
     state: &AppState,
     tenant_id: &str,
@@ -1533,12 +1526,23 @@ where
     serde_json::from_str(raw).unwrap_or(default)
 }
 
+/// Bank account identifiers are deployment configuration (Wise by default).
+/// They return empty when unset so renderers can omit the field entirely
+/// instead of printing a placeholder like "UNCONFIGURED" on a legal document.
 fn billing_company_iban() -> String {
-    std::env::var("BILLING_COMPANY_IBAN").unwrap_or_else(|_| "UNCONFIGURED".into())
+    std::env::var("BILLING_COMPANY_IBAN").unwrap_or_default()
+}
+
+fn billing_company_bic() -> String {
+    std::env::var("BILLING_COMPANY_BIC").unwrap_or_default()
+}
+
+fn billing_company_bank_name() -> String {
+    std::env::var("BILLING_COMPANY_BANK").unwrap_or_else(|_| BILLING_COMPANY_BANK_NAME.into())
 }
 
 fn billing_company_phone() -> String {
-    std::env::var("BILLING_COMPANY_PHONE").unwrap_or_else(|_| "UNCONFIGURED".into())
+    std::env::var("BILLING_COMPANY_PHONE").unwrap_or_default()
 }
 
 fn escape_html(value: &str) -> String {
@@ -1571,7 +1575,15 @@ fn format_invoice_currency_with(cents: i64, currency: &str) -> String {
         "GBP" => "£",
         _ => "€", // EUR default
     };
-    format!("{}{:.2}", symbol, cents as f64 / 100.0)
+    format!("{}{}", symbol, cents_to_decimal_string(cents))
+}
+
+/// Format integer cents as a plain decimal string ("123.45") using integer
+/// math only — money formatting must not round-trip through f64.
+fn cents_to_decimal_string(cents: i64) -> String {
+    let sign = if cents < 0 { "-" } else { "" };
+    let abs = cents.unsigned_abs();
+    format!("{}{}.{:02}", sign, abs / 100, abs % 100)
 }
 
 fn invoice_payment_terms_days(invoice: &LegacyInvoiceDto) -> i64 {
@@ -1584,24 +1596,21 @@ fn invoice_payment_terms_days(invoice: &LegacyInvoiceDto) -> i64 {
 }
 
 fn invoice_vat_label(invoice: &LegacyInvoiceDto) -> String {
-    let mut vat_rates: Vec<i32> = invoice
+    let mut vat_rates: Vec<f64> = invoice
         .line_items
         .iter()
         .map(|item| item.vat_rate)
         .collect();
-    vat_rates.sort_unstable();
+    vat_rates.sort_unstable_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     vat_rates.dedup();
 
+    let fmt = |rate: &f64| format!("{}%", billing_common::vat_rates::format_vat_rate(*rate));
     if vat_rates.len() <= 1 {
-        format!("VAT ({}%)", vat_rates.first().copied().unwrap_or(0))
+        format!("VAT ({})", vat_rates.first().map(fmt).unwrap_or_else(|| fmt(&0.0)))
     } else {
         format!(
             "VAT (Mixed: {})",
-            vat_rates
-                .iter()
-                .map(|rate| format!("{rate}%"))
-                .collect::<Vec<_>>()
-                .join(", ")
+            vat_rates.iter().map(fmt).collect::<Vec<_>>().join(", ")
         )
     }
 }
@@ -1684,9 +1693,22 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto, style_nonce: &str) -> String 
             )
         })
         .unwrap_or_default();
-    let reverse_charge_note = if invoice.billing_address.vat_number.is_some()
+    // The reverse-charge note may only appear on invoices where reverse charge
+    // was actually applied: a *valid* VAT number for the buyer's country,
+    // outside Estonia, and zero VAT charged. Printing it on an invoice that
+    // charged VAT (e.g. malformed VAT number) produces a self-contradicting
+    // tax document.
+    let reverse_charge_applied = invoice.vat_total == 0
         && invoice.billing_address.country != "EE"
-    {
+        && invoice
+            .billing_address
+            .vat_number
+            .as_deref()
+            .map(|vat| {
+                billing_common::vat_rates::is_valid_vat_number(vat, Some(&invoice.billing_address.country))
+            })
+            .unwrap_or(false);
+    let reverse_charge_note = if reverse_charge_applied {
         "\n  <div class=\"vat-note\">\n      Reverse charge: VAT to be paid by the recipient per Article 196, EU VAT Directive 2006/112/EC\n    </div>\n".to_string()
     } else {
         String::new()
@@ -1699,7 +1721,7 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto, style_nonce: &str) -> String 
             escape_html(&item.description),
             item.quantity,
             format_invoice_currency_with(item.unit_price, &invoice.currency),
-            item.vat_rate,
+            billing_common::vat_rates::format_vat_rate(item.vat_rate),
             format_invoice_currency_with(item.amount, &invoice.currency),
         ));
     }
@@ -1795,7 +1817,7 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto, style_nonce: &str) -> String 
   </div>{reverse_charge_note}{notes}
   <div class="footer">
     <p>Payment terms: Net {payment_terms_days} days. Please include invoice number in payment reference.</p>
-    <p>{company_name} (trading as {trading_as}) | Reg. {registry_code} | VAT: {company_vat} | IBAN: {company_iban} | BIC: {company_bic}</p>
+    <p>{company_name} (trading as {trading_as}) | Reg. {registry_code} | VAT: {company_vat}{bank_details}</p>
     <p>{company_street}, {company_postal_code} {company_city}, {company_country}</p>
     <p>Period: {period_start} to {period_end}</p>
   </div>
@@ -1831,8 +1853,19 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto, style_nonce: &str) -> String 
         reverse_charge_note = reverse_charge_note,
         notes = notes,
         payment_terms_days = invoice_payment_terms_days(invoice),
-        company_iban = escape_html(&billing_company_iban()),
-        company_bic = BILLING_COMPANY_BANK_BIC,
+        bank_details = {
+            let iban = billing_company_iban();
+            let bic = billing_company_bic();
+            let bank = billing_company_bank_name();
+            let mut parts = format!(" | Bank: {}", escape_html(&bank));
+            if !iban.is_empty() {
+                parts.push_str(&format!(" | IBAN: {}", escape_html(&iban)));
+            }
+            if !bic.is_empty() {
+                parts.push_str(&format!(" | BIC: {}", escape_html(&bic)));
+            }
+            parts
+        },
         period_start = format_invoice_date(invoice.period_start),
         period_end = format_invoice_date(invoice.period_end),
     )
@@ -1872,25 +1905,74 @@ fn render_invoice_xml(invoice: &LegacyInvoiceDto) -> String {
         })
         .unwrap_or_default();
 
+    let currency = invoice.currency.to_uppercase();
     let mut item_entries = String::new();
     for (index, item) in invoice.line_items.iter().enumerate() {
         item_entries.push_str(&format!(
-            "      <ItemEntry>\n        <RowNo>{}</RowNo>\n        <Description>{}</Description>\n        <ItemDetailInfo>\n          <ItemUnit>PCS</ItemUnit>\n          <ItemAmount>{}</ItemAmount>\n          <ItemPrice>{:.2}</ItemPrice>\n        </ItemDetailInfo>\n        <ItemSum>\n          <Amount>{:.2}</Amount>\n          <VAT>\n            <VATRate>{}</VATRate>\n            <VATSum>{:.2}</VATSum>\n            <SumBeforeVAT>{:.2}</SumBeforeVAT>\n            <SumAfterVAT>{:.2}</SumAfterVAT>\n            <Currency>EUR</Currency>\n          </VAT>\n          <TotalSum>{:.2}</TotalSum>\n        </ItemSum>\n      </ItemEntry>\n",
+            "      <ItemEntry>\n        <RowNo>{}</RowNo>\n        <Description>{}</Description>\n        <ItemDetailInfo>\n          <ItemUnit>PCS</ItemUnit>\n          <ItemAmount>{}</ItemAmount>\n          <ItemPrice>{}</ItemPrice>\n        </ItemDetailInfo>\n        <ItemSum>\n          <Amount>{}</Amount>\n          <VAT>\n            <VATRate>{}</VATRate>\n            <VATSum>{}</VATSum>\n            <SumBeforeVAT>{}</SumBeforeVAT>\n            <SumAfterVAT>{}</SumAfterVAT>\n            <Currency>{}</Currency>\n          </VAT>\n          <TotalSum>{}</TotalSum>\n        </ItemSum>\n      </ItemEntry>\n",
             index + 1,
             escape_xml(&item.description),
             item.quantity,
-            item.unit_price as f64 / 100.0,
-            item.amount as f64 / 100.0,
-            item.vat_rate,
-            item.vat_amount as f64 / 100.0,
-            item.amount as f64 / 100.0,
-            (item.amount + item.vat_amount) as f64 / 100.0,
-            (item.amount + item.vat_amount) as f64 / 100.0,
+            cents_to_decimal_string(item.unit_price),
+            cents_to_decimal_string(item.amount),
+            billing_common::vat_rates::format_vat_rate(item.vat_rate),
+            cents_to_decimal_string(item.vat_amount),
+            cents_to_decimal_string(item.amount),
+            cents_to_decimal_string(item.amount + item.vat_amount),
+            cents_to_decimal_string(item.amount + item.vat_amount),
+            escape_xml(&currency),
         ));
     }
 
+    // Optional blocks: omit contact/bank elements that have no configured
+    // value rather than emitting empty XML tags on a legal document.
+    let phone_xml_block = {
+        let phone = billing_company_phone();
+        if phone.is_empty() {
+            String::new()
+        } else {
+            format!("<PhoneNumber>{}</PhoneNumber>\n          ", escape_xml(&phone))
+        }
+    };
+    let account_info = {
+        let iban = billing_company_iban();
+        let bic = billing_company_bic();
+        if iban.is_empty() && bic.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "        <AccountInfo>\n          <AccountNumber>{}</AccountNumber>\n{}\n          <BankName>{}</BankName>\n        </AccountInfo>\n",
+                escape_xml(&iban),
+                if bic.is_empty() {
+                    String::new()
+                } else {
+                    format!("          <BIC>{}</BIC>", escape_xml(&bic))
+                },
+                escape_xml(&billing_company_bank_name()),
+            )
+        }
+    };
+    let payto_block = {
+        let iban = billing_company_iban();
+        let bic = billing_company_bic();
+        let mut block = String::new();
+        if !iban.is_empty() {
+            block.push_str(&format!(
+                "      <PayToAccount>{}</PayToAccount>\n",
+                escape_xml(&iban)
+            ));
+        }
+        if !bic.is_empty() {
+            block.push_str(&format!(
+                "      <PayToBIC>{}</PayToBIC>\n",
+                escape_xml(&bic)
+            ));
+        }
+        block
+    };
+
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<E_Invoice xmlns=\"http://www.pangaliit.ee/e-arve/e-arve\">\n  <Header>\n    <Date>{issued_at}</Date>\n    <FileId>{file_id}</FileId>\n    <Version>1.2</Version>\n  </Header>\n  <Invoice>\n    <InvoiceParties>\n      <SellerParty>\n        <Name>{company_name}</Name>\n        <RegNumber>{registry_code}</RegNumber>\n        <VATRegNumber>{company_vat}</VATRegNumber>\n        <ContactData>\n          <LegalAddress>\n            <PostalAddress1>{company_street}</PostalAddress1>\n            <City>{company_city}</City>\n            <PostalCode>{company_postal_code}</PostalCode>\n            <Country>EE</Country>\n          </LegalAddress>\n          <PhoneNumber>{company_phone}</PhoneNumber>\n          <E-mailAddress>{billing_email}</E-mailAddress>\n        </ContactData>\n        <AccountInfo>\n          <AccountNumber>{company_iban}</AccountNumber>\n          <BIC>{company_bic}</BIC>\n          <BankName>{company_bank_name}</BankName>\n        </AccountInfo>\n      </SellerParty>\n      <BuyerParty>\n        <Name>{buyer_name}</Name>\n{buyer_vat_number}        <ContactData>\n          <LegalAddress>\n            <PostalAddress1>{buyer_line1}</PostalAddress1>\n{buyer_address_line_2}            <City>{buyer_city}</City>\n            <PostalCode>{buyer_postal_code}</PostalCode>\n            <Country>{buyer_country}</Country>\n          </LegalAddress>\n          <E-mailAddress>{buyer_email}</E-mailAddress>\n        </ContactData>\n      </BuyerParty>\n    </InvoiceParties>\n    <InvoiceInformation>\n      <Type Type=\"DEB\"/>\n      <InvoiceNumber>{invoice_number}</InvoiceNumber>\n      <InvoiceDate>{issued_at}</InvoiceDate>\n      <DueDate>{due_at}</DueDate>\n      <InvoiceContentCode>SERVICES</InvoiceContentCode>\n      <Currency>EUR</Currency>\n{reference_number}    </InvoiceInformation>\n    <InvoiceSumGroup>\n      <InvoiceSum>{total}</InvoiceSum>\n      <PaidAmount>0.00</PaidAmount>\n      <PayableAmount>{total}</PayableAmount>\n      <Currency>EUR</Currency>\n    </InvoiceSumGroup>\n    <InvoiceItem>\n{item_entries}    </InvoiceItem>\n    <PaymentInfo>\n      <Currency>EUR</Currency>\n      <PaymentDescription>Invoice {invoice_number}</PaymentDescription>\n      <Payable>YES</Payable>\n      <DueDate>{due_at}</DueDate>\n      <PaymentId>{invoice_number}</PaymentId>\n      <PaymentTotalSum>{total}</PaymentTotalSum>\n      <PayerName>{buyer_name}</PayerName>\n      <PayToAccount>{company_iban}</PayToAccount>\n      <PayToBIC>{company_bic}</PayToBIC>\n      <PayToName>{company_name}</PayToName>\n    </PaymentInfo>\n  </Invoice>\n</E_Invoice>",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<E_Invoice xmlns=\"http://www.pangaliit.ee/e-arve/e-arve\">\n  <Header>\n    <Date>{issued_at}</Date>\n    <FileId>{file_id}</FileId>\n    <Version>1.2</Version>\n  </Header>\n  <Invoice>\n    <InvoiceParties>\n      <SellerParty>\n        <Name>{company_name}</Name>\n        <RegNumber>{registry_code}</RegNumber>\n        <VATRegNumber>{company_vat}</VATRegNumber>\n        <ContactData>\n          <LegalAddress>\n            <PostalAddress1>{company_street}</PostalAddress1>\n            <City>{company_city}</City>\n            <PostalCode>{company_postal_code}</PostalCode>\n            <Country>EE</Country>\n          </LegalAddress>\n          {phone_xml_block}<E-mailAddress>{billing_email}</E-mailAddress>\n        </ContactData>\n{account_info}      </SellerParty>\n      <BuyerParty>\n        <Name>{buyer_name}</Name>\n{buyer_vat_number}        <ContactData>\n          <LegalAddress>\n            <PostalAddress1>{buyer_line1}</PostalAddress1>\n{buyer_address_line_2}            <City>{buyer_city}</City>\n            <PostalCode>{buyer_postal_code}</PostalCode>\n            <Country>{buyer_country}</Country>\n          </LegalAddress>\n          <E-mailAddress>{buyer_email}</E-mailAddress>\n        </ContactData>\n      </BuyerParty>\n    </InvoiceParties>\n    <InvoiceInformation>\n      <Type Type=\"DEB\"/>\n      <InvoiceNumber>{invoice_number}</InvoiceNumber>\n      <InvoiceDate>{issued_at}</InvoiceDate>\n      <DueDate>{due_at}</DueDate>\n      <InvoiceContentCode>SERVICES</InvoiceContentCode>\n      <Currency>{currency}</Currency>\n{reference_number}    </InvoiceInformation>\n    <InvoiceSumGroup>\n      <InvoiceSum>{total}</InvoiceSum>\n      <PaidAmount>0.00</PaidAmount>\n      <PayableAmount>{total}</PayableAmount>\n      <Currency>{currency}</Currency>\n    </InvoiceSumGroup>\n    <InvoiceItem>\n{item_entries}    </InvoiceItem>\n    <PaymentInfo>\n      <Currency>{currency}</Currency>\n      <PaymentDescription>Invoice {invoice_number}</PaymentDescription>\n      <Payable>YES</Payable>\n      <DueDate>{due_at}</DueDate>\n      <PaymentId>{invoice_number}</PaymentId>\n      <PaymentTotalSum>{total}</PaymentTotalSum>\n      <PayerName>{buyer_name}</PayerName>\n{payto_block}      <PayToName>{company_name}</PayToName>\n    </PaymentInfo>\n  </Invoice>\n</E_Invoice>",
         issued_at = format_invoice_date(invoice.issued_at),
         file_id = escape_xml(&invoice.id),
         company_name = escape_xml(BILLING_COMPANY_NAME),
@@ -1899,11 +1981,11 @@ fn render_invoice_xml(invoice: &LegacyInvoiceDto) -> String {
         company_street = escape_xml(BILLING_COMPANY_STREET),
         company_city = escape_xml(BILLING_COMPANY_CITY),
         company_postal_code = BILLING_COMPANY_POSTAL_CODE,
-        company_phone = escape_xml(&billing_company_phone()),
+        phone_xml_block = phone_xml_block,
         billing_email = escape_xml(BILLING_COMPANY_BILLING_EMAIL),
-        company_iban = escape_xml(&billing_company_iban()),
-        company_bic = BILLING_COMPANY_BANK_BIC,
-        company_bank_name = escape_xml(BILLING_COMPANY_BANK_NAME),
+        account_info = account_info,
+        payto_block = payto_block,
+        currency = escape_xml(&currency),
         buyer_name = escape_xml(&invoice.billing_address.company_name),
         buyer_vat_number = buyer_vat_number,
         buyer_line1 = escape_xml(&invoice.billing_address.address_line1),
@@ -1915,7 +1997,7 @@ fn render_invoice_xml(invoice: &LegacyInvoiceDto) -> String {
         invoice_number = escape_xml(&invoice.invoice_number),
         due_at = format_invoice_date(invoice.due_at),
         reference_number = reference_number,
-        total = format!("{:.2}", invoice.total as f64 / 100.0),
+        total = cents_to_decimal_string(invoice.total),
         item_entries = item_entries,
     )
 }
@@ -2155,7 +2237,10 @@ fn preview_plan_proration(
         return Err("Invalid period: daysInPeriod must be greater than 0".into());
     }
 
-    let days_elapsed = proration::ceil_day_count(
+    // Elapsed time must be floored: ceil-ing BOTH elapsed and period length
+    // discards up to a full day of remaining time and systematically
+    // overcharges (see billing_common::proration, which pins this in tests).
+    let days_elapsed = proration::floor_day_count(
         now.signed_duration_since(subscription.current_period_start)
             .num_milliseconds(),
     );
@@ -2171,40 +2256,43 @@ fn preview_plan_proration(
     } else {
         new_plan.price_monthly
     };
-    // Daily rate = price / days_in_period. For yearly plans price_yearly is
-    // the TOTAL yearly price (not per-month), so the daily rate is simply
-    // price_yearly / days_in_period(365). The previous code multiplied the
-    // divisor by 12 for yearly, understating proration credits by 12×.
-    let period_divisor = days_in_period as f64;
     // Display-only: the monthly-equivalent rate for the explanation strings.
-    let price_divisor = if is_yearly { 12.0 } else { 1.0 };
+    let price_divisor = if is_yearly { 12 } else { 1 };
 
-    let credit_amount =
-        ((current_price_numerator as f64 * days_remaining as f64) / period_divisor).round() as i64;
-    let charge_amount =
-        ((new_price_numerator as f64 * days_remaining as f64) / period_divisor).round() as i64;
+    // Money math goes through proration::prorated_amount (i128, half-up,
+    // overflow-checked) — never f64.
+    let credit_amount = proration::prorated_amount(
+        current_price_numerator,
+        days_remaining,
+        days_in_period,
+    )?;
+    let charge_amount = proration::prorated_amount(
+        new_price_numerator,
+        days_remaining,
+        days_in_period,
+    )?;
     let net_amount = charge_amount - credit_amount;
 
     if net_amount > config.max_proration_charge_cents {
         return Err(format!(
-            "Proration charge exceeds maximum allowed: ${:.2} > ${:.2}. Please contact support for assistance with this plan change.",
-            net_amount as f64 / 100.0,
-            config.max_proration_charge_cents as f64 / 100.0,
+            "Proration charge exceeds maximum allowed: €{} > €{}. Please contact support for assistance with this plan change.",
+            cents_to_decimal_string(net_amount),
+            cents_to_decimal_string(config.max_proration_charge_cents),
         ));
     }
 
     if net_amount < 0 && net_amount.abs() > config.max_proration_credit_cents {
         return Err(format!(
-            "Proration credit exceeds maximum allowed: ${:.2} > ${:.2}. Please contact support for assistance with this plan change.",
-            net_amount.abs() as f64 / 100.0,
-            config.max_proration_credit_cents as f64 / 100.0,
+            "Proration credit exceeds maximum allowed: €{} > €{}. Please contact support for assistance with this plan change.",
+            cents_to_decimal_string(net_amount.abs()),
+            cents_to_decimal_string(config.max_proration_credit_cents),
         ));
     }
 
     let warnings = if net_amount > config.warn_proration_charge_cents {
         Some(vec![format!(
-            "This plan change will result in a charge of ${:.2}. Please confirm this is intended.",
-            net_amount as f64 / 100.0,
+            "This plan change will result in a charge of €{}. Please confirm this is intended.",
+            cents_to_decimal_string(net_amount),
         )])
     } else {
         None
@@ -2220,8 +2308,8 @@ fn preview_plan_proration(
         explanation: proration::build_proration_explanation(
             &current_plan.display_name,
             &new_plan.display_name,
-            (current_price_numerator as f64 / price_divisor).round() as i64,
-            (new_price_numerator as f64 / price_divisor).round() as i64,
+            current_price_numerator / price_divisor,
+            new_price_numerator / price_divisor,
             days_remaining,
             days_in_period,
             credit_amount,
@@ -2275,7 +2363,30 @@ async fn get_route_subscription(
     pool: &sqlx::PgPool,
     tenant_id: &str,
 ) -> Result<Option<RouteSubscription>, ApiError> {
+    // The legacy `subscriptions` table is never populated in production; the
+    // live record is `stripe_subscriptions`. Read the live table first and
+    // fall back to the legacy one only for old deployments.
     let row: Option<RouteSubscriptionRow> = sqlx::query_as(
+        r#"
+        SELECT plan AS plan_name, billing_interval,
+               billing_cycle_start AS current_period_start,
+               billing_cycle_end AS current_period_end
+        FROM stripe_subscriptions
+        WHERE tenant_id = $1
+          AND status IN ('active', 'trialing', 'past_due')
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(row) = row {
+        return Ok(Some(row.into_subscription()));
+    }
+
+    let legacy: Option<RouteSubscriptionRow> = sqlx::query_as(
         r#"
         SELECT plan_name, billing_interval, current_period_start, current_period_end
         FROM subscriptions
@@ -2289,11 +2400,14 @@ async fn get_route_subscription(
     .fetch_optional(pool)
     .await?;
 
-    Ok(row.map(RouteSubscriptionRow::into_subscription))
+    Ok(legacy.map(RouteSubscriptionRow::into_subscription))
 }
 
+/// The platform bills exclusively in EUR; the legacy `*CostUsd` JSON field
+/// names are kept for API compatibility but the value is a euro amount,
+/// matching billing-service's PAYG payload (tests there assert "€..." values).
 fn cents_to_usd_string(cents: i64) -> String {
-    format!("${:.2}", cents as f64 / 100.0)
+    format!("€{}", cents_to_decimal_string(cents))
 }
 
 fn validate_non_negative(value: i64, field_name: &str) -> Result<u64, ApiError> {
@@ -2623,7 +2737,8 @@ async fn estimate_overage_cost(
         ]));
     }
 
-    let overage_cost_cents = plans::calculate_overage_cost(emails_sent, body.email_limit);
+    let overage_cost_cents =
+        plans::calculate_overage_cost_with_rate(emails_sent, body.email_limit, 40);
 
     Ok(billing_success(serde_json::json!({
         "usage": {
@@ -2785,7 +2900,12 @@ async fn create_checkout_session(
                 ("billing_address_collection", "required".into()),
                 ("tax_id_collection[enabled]", "true".into()),
             ],
-            None,
+            // Deterministic idempotency key so a retried checkout request
+            // (client timeout, network blip) cannot mint duplicate sessions.
+            Some(&format!(
+                "checkout_{}_{}_{}",
+                auth.tenant_id, plan_name, price_id
+            )),
         )
         .await
     {
@@ -2873,10 +2993,16 @@ async fn create_portal_session(
         .form_post::<StripePortalSessionResponse>(
             "/v1/billing_portal/sessions",
             &[
-                ("customer", stripe_customer_id),
+                ("customer", stripe_customer_id.clone()),
                 ("return_url", body.return_url),
             ],
-            None,
+            // Retry-safe without serving a stale expired portal URL for a
+            // full day: the key dedupes within the current hour only.
+            Some(&format!(
+                "portal_{}_{}",
+                auth.tenant_id,
+                chrono::Utc::now().timestamp() / 3600
+            )),
         )
         .await
     {
@@ -3829,7 +3955,12 @@ async fn admin_create_invoice(
         email: address.email,
     };
 
-    let invoice_number = generate_admin_invoice_number(&tenant_id);
+    // EU/Estonian VAT requires unique, sequential invoice numbers; the admin
+    // path shares the platform sequence (YYYY-NNNNNN) instead of minting
+    // random, gapped numbers that interleave with the sequence-based ones.
+    let invoice_number = billing_service::invoices::generate_invoice_number(&state.db)
+        .await
+        .map_err(|error| ApiError::BadRequest(format!("invoice numbering failed: {error}")))?;
     let base_line_items: Vec<(String, i64, i64, i64)> = body
         .line_items
         .iter()
@@ -3852,30 +3983,22 @@ async fn admin_create_invoice(
         billing_address.vat_number.as_deref(),
     );
 
-    let mut allocated_vat = 0;
+    // Single platform VAT allocator (round half-up per line, reconcile the
+    // final line to the rounded total) — must not diverge from
+    // billing-service's invoice writer.
+    let amounts: Vec<i64> = base_line_items.iter().map(|(_, _, _, amount)| *amount).collect();
+    let vat_per_line = billing_service::invoices::allocate_vat_across_lines(&amounts, vat_rate);
     let line_items: Vec<LegacyInvoiceLineItemDto> = base_line_items
         .iter()
-        .enumerate()
-        .map(|(index, (description, quantity, unit_price, amount))| {
-            let vat_amount = if vat_total > 0 && subtotal > 0 {
-                if index == base_line_items.len() - 1 {
-                    vat_total - allocated_vat
-                } else {
-                    let value = (vat_total * *amount) / subtotal;
-                    allocated_vat += value;
-                    value
-                }
-            } else {
-                0
-            };
-
+        .zip(vat_per_line.iter())
+        .map(|((description, quantity, unit_price, amount), vat_amount)| {
             LegacyInvoiceLineItemDto {
                 description: description.clone(),
                 quantity: *quantity,
                 unit_price: *unit_price,
                 amount: *amount,
                 vat_rate,
-                vat_amount,
+                vat_amount: *vat_amount,
             }
         })
         .collect();
@@ -4665,7 +4788,7 @@ mod tests {
                 quantity: 2,
                 unit_price: 5_000,
                 amount: 10_000,
-                vat_rate: 22,
+                vat_rate: 22.0,
                 vat_amount: 2_200,
             }],
             billing_address: LegacyBillingAddressDto {
@@ -4694,7 +4817,7 @@ mod tests {
     }
 
     #[test]
-    fn billing_routes_invoice_html_renderer_escapes_values_and_keeps_reverse_charge_note() {
+    fn billing_routes_invoice_html_renderer_escapes_values_and_no_reverse_charge_when_vat_charged() {
         initialize_billing_test_env();
 
         let html = render_invoice_html(&sample_invoice(), "testnonce0123456789");
@@ -4704,13 +4827,48 @@ mod tests {
         assert!(html.contains("Acme &lt;Billing&gt;"));
         assert!(html.contains("PO: PO-&lt;123&gt;"));
         assert!(html.contains("Handle &lt;carefully&gt; &amp; confirm"));
-        assert!(html.contains("Reverse charge: VAT to be paid by the recipient"));
+        // The sample charges 22 % VAT, so the reverse-charge note must NOT
+        // appear — printing it on a VAT-charged invoice contradicts the
+        // document itself.
+        assert!(!html.contains("Reverse charge"));
         assert!(html.contains("€122.00"));
         assert!(html.contains("IBAN: EE381010220123456789"));
         assert!(
             html.contains("<style nonce=\"testnonce0123456789\">"),
             "the style nonce must be stamped on the single <style> element"
         );
+    }
+
+    #[test]
+    fn billing_routes_invoice_reverse_charge_note_only_when_actually_applied() {
+        initialize_billing_test_env();
+
+        // Reverse charge genuinely applied: valid FI VAT number, zero VAT.
+        let mut invoice = sample_invoice();
+        invoice.billing_address.country = "FI".into();
+        invoice.billing_address.vat_number = Some("FI12345678".into());
+        invoice.vat_total = 0;
+        invoice.total = invoice.subtotal;
+        let html = render_invoice_html(&invoice, "testnonce0123456789");
+        assert!(html.contains("Reverse charge: VAT to be paid by the recipient"));
+
+        // Invalid VAT number → destination VAT charged → no note, even at 0.
+        let mut invoice = sample_invoice();
+        invoice.billing_address.country = "FI".into();
+        invoice.billing_address.vat_number = Some("1".into());
+        invoice.vat_total = 0;
+        invoice.total = invoice.subtotal;
+        let html = render_invoice_html(&invoice, "testnonce0123456789");
+        assert!(!html.contains("Reverse charge"));
+
+        // Estonian buyers are never reverse-charged.
+        let mut invoice = sample_invoice();
+        invoice.billing_address.country = "EE".into();
+        invoice.billing_address.vat_number = Some("EE100591102".into());
+        invoice.vat_total = 0;
+        invoice.total = invoice.subtotal;
+        let html = render_invoice_html(&invoice, "testnonce0123456789");
+        assert!(!html.contains("Reverse charge"));
     }
 
     // ── H-6: document-scoped CSP for the print-to-PDF invoice ─────
@@ -4789,7 +4947,7 @@ mod tests {
         );
         let source = include_str!("billing.rs");
         assert!(
-            source.contains("company_iban = escape_html(&billing_company_iban())"),
+            source.contains("bank_details = {"),
             "the IBAN interpolation must stay escaped"
         );
         for field in [

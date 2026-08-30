@@ -37,10 +37,10 @@ The supplied configuration targets EEA regions for core email-service data and t
 
 | Data Category | Primary Location | Backup / Replica | Processing |
 |---|---|---|---|
-| Core email infrastructure (messages, delivery metadata, account data) | Hetzner, Germany (Falkenstein/Nuremberg) | Hetzner, Finland (Tuusula) | EEA default; confirm active deployment |
+| Core email infrastructure (messages, delivery metadata, account data) | EU data centre — Germany | EU data centre — Finland | EEA — no third-country transfer |
 | OAuth authentication tokens | Google LLC / GitHub, Inc. (US entities, SCCs) | Provider-managed | US (SCCs) |
 | Payment and billing records | Stripe, Inc. (US, SCCs) | Provider-managed (India for support) | US/India (SCCs) |
-| Support tickets | Hetzner, Germany | Hetzner, Finland | EEA default; confirm active deployment |
+| Support tickets | EU data centre — Germany | EU data centre — Finland | EEA — no third-country transfer |
 
 We do not transfer personal data outside the EEA without adequate safeguards (Standard Contractual Clauses or an adequacy decision under Article 45).
 
@@ -52,8 +52,8 @@ We retain personal data only as long as necessary for the purposes for which it 
 |---------------|-----------------|
 | Account data | Duration of contract + 30 days |
 | Billing records | 7 years (Estonian accounting law) |
-| Email content (body, subject, headers, attachments) | 7 days by default; plan-dependent maximum (from 1 day on the Free plan up to 365 days on Enterprise) |
-| Event logs (delivery, open, and click events) | 30 days by default; plan-dependent maximum (up to 365 days on Enterprise) |
+| Email content (body, subject, headers, attachments) | 7 days by default; plan-dependent maximum (from 1 day on the Free plan up to 730 days on Enterprise) |
+| Event logs (delivery, open, and click events) | 30 days by default; plan-dependent maximum (up to 730 days on Enterprise) |
 | Support tickets | 2 years after resolution |
 
 See our [Data Retention Policy](/compliance/#data-retention) for full details.

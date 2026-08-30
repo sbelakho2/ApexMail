@@ -1,5 +1,8 @@
 # template-renderer
 
+> **STATUS — READ BEFORE RELYING ON THIS CRATE**
+> NOT ON THE PRODUCTION SEND PATH: production rendering happens inside worker-processors and api-server; this crate is depended on only by test crates.
+
 Email template rendering with sandboxed execution.
 
 ## Overview

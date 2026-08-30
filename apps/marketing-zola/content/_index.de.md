@@ -4,5 +4,5 @@ description = "Enterprise-E-Mail-API mit Compliance-Workflows, Zustellungsverfol
 template = "home.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

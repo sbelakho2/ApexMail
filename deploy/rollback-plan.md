@@ -50,9 +50,12 @@ Make `:latest` BE the known-good SHA locally, then recreate — no network:
 cd /opt/apexmail
 SHA=<known-good-sha>   # must exist: docker images | grep ":${SHA}"
 
+# NOTE: this list must match ci/stages/verify.sh + deploy.sh (they also
+# include compliance, analytics-worker and the backup schedulers).
 for svc in api-server mta imap-server mailstore worker enterprise \
            tracking-service observability marketing status-server \
-           billing-service sales-autopilot migrator; do
+           billing-service sales-autopilot compliance analytics-worker \
+           postgres-backup clickhouse-backup migrator; do
   docker image inspect "ghcr.io/sbelakho2/apexmail/${svc}:${SHA}" >/dev/null \
     || { echo "missing ${svc}:${SHA}"; exit 1; }
   docker tag "ghcr.io/sbelakho2/apexmail/${svc}:${SHA}" \

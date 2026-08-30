@@ -4,5 +4,5 @@ template = "features.html"
 description = "Funciones documentadas de la API de email según su plan: API REST, relay SMTP, envío por lotes, webhooks, IP dedicada, SSO, SCIM. Infraestructura de email transaccional alojada en la UE."
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

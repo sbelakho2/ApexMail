@@ -26,7 +26,7 @@ set -eu
 . "${CI_ROOT:-$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd -P)}/lib.sh"
 
 CANONICAL_SERVICES="api-server mta imap-server mailstore worker enterprise observability
-                    status-server billing-service sales-autopilot compliance migrator"
+                    status-server billing-service sales-autopilot compliance analytics-worker pdf-renderer migrator"
 EXTRA_IMAGES="marketing tracking-service"
 
 stage_main() {

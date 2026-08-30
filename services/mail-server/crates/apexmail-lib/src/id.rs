@@ -29,16 +29,26 @@ pub fn generate_id(prefix: &str, length: usize) -> String {
 pub fn generate_api_key(is_test: bool) -> String {
     let prefix = if is_test { "am_test" } else { "am_live" };
 
-    // Generate 32 alphanumeric characters using OsRng (cryptographically secure)
-    let mut key_bytes = [0u8; 32];
-    OsRng
-        .try_fill_bytes(&mut key_bytes)
-        .expect("OsRng should not fail");
+    // Generate 32 alphanumeric characters using OsRng (cryptographically
+    // secure, rejection-sampled to avoid modulo bias).
 
-    let random_part: String = key_bytes
-        .iter()
-        .map(|&b| API_KEY_ALPHABET[(b as usize) % API_KEY_ALPHABET.len()] as char)
-        .collect();
+    // Rejection sampling: `% alphabet.len()` biases 8 of 62 characters
+    // ~25% (256 % 62 != 0). Entropy loss is tiny but the fix is free —
+    // draw bytes until one falls in the largest unbiased range.
+    let alphabet_len = API_KEY_ALPHABET.len();
+    let limit = 256 - (256 % alphabet_len); // bytes below this are unbiased
+    let mut random_part = String::with_capacity(32);
+    let mut filled = 0;
+    while filled < 32 {
+        let mut b = [0u8; 1];
+        OsRng
+            .try_fill_bytes(&mut b)
+            .expect("OsRng should not fail");
+        if (b[0] as usize) < limit {
+            random_part.push(API_KEY_ALPHABET[(b[0] as usize) % alphabet_len] as char);
+            filled += 1;
+        }
+    }
 
     format!("{}_{}", prefix, random_part)
 }

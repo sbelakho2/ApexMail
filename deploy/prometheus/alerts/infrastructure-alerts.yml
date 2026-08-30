@@ -171,6 +171,9 @@ groups:
       # with no exporter on this host. Real coverage for the removed concerns:
       #   * container restarts/OOM → compose healthchecks + verify stage probes
       #   * email queue depth     → EmailQueueBacklog (alerting-rules.yml,
-      #                              apexmail_email_queue_depth, job=apexmail-worker)
+      #                              apexmail_email_queue_depth, emitted by the
+      #                              deployed worker's poll loop — the original
+      #                              emitter lived in the undeployed outbound-
+      #                              queue crate, so the rule used to be dead)
       #   * synthetic probes      → SyntheticTransactionFailure /
       #     SyntheticSmtpFailure (alerting-rules.yml, apexmail_synthetic_*)

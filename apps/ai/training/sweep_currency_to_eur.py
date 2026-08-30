@@ -53,9 +53,33 @@ SWEEP_FILES = [
     DATA_DIR / "system_prompts.json",
 ]
 
+# Every training-corpus generator/fixture script: the corpus is what the
+# model trains on, so scripts that still emit USD prices reintroduce the
+# drift on every regeneration.
 SCRIPT_FILES = [
     TRAINING_DIR / "prompts_v2.py",
     TRAINING_DIR / "generate_gap_training.py",
+    TRAINING_DIR / "new_customer_profiles.py",
+    TRAINING_DIR / "extract_full_recovered.py",
+    TRAINING_DIR / "extract_all_recovered.py",
+    TRAINING_DIR / "generate_dataset.py",
+    TRAINING_DIR / "generate_recovered_training.py",
+    TRAINING_DIR / "integrate_recovered.py",
+    TRAINING_DIR / "training_data.py",
+    TRAINING_DIR / "augment_training_data.py",
+    TRAINING_DIR / "merge_and_export.py",
+    TRAINING_DIR / "validate_pricing.py",
+    TRAINING_DIR / "run_test_agent.py",
+    TRAINING_DIR / "test_agent.py",
+    TRAINING_DIR / "test_fixes.py",
+    TRAINING_DIR / "test_aggressively.py",
+    TRAINING_DIR / "test_1000_adversarial.py",
+    TRAINING_DIR / "stress_test_agent.py",
+    TRAINING_DIR / "stress_test_recovered.py",
+    TRAINING_DIR / "stress_test.py",
+    TRAINING_DIR / "verify_all_angles.py",
+    TRAINING_DIR / "evaluate.py",
+    TRAINING_DIR / "evaluate_granular.py",
 ]
 
 # ── Rule 1: targeted golden_qa rewrites ───────────────────────────────────

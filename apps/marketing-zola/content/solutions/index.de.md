@@ -4,7 +4,7 @@ description = "ApexMail-Lösungen für SaaS-Transaktions-E-Mails, E-Commerce-Bes
 template = "section.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++
 
 # Lösungen

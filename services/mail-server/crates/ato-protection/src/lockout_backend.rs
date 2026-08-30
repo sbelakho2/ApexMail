@@ -144,6 +144,9 @@ const REDIS_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 pub enum LockoutBackendError {
     /// The configured Redis URL could not be parsed.
     InvalidUrl(String),
+    /// The `redis-lockout` feature was disabled at compile time, so the
+    /// backend is a logged no-op that always reports zero lockouts.
+    FeatureDisabled,
 }
 
 impl std::fmt::Display for LockoutBackendError {
@@ -151,6 +154,12 @@ impl std::fmt::Display for LockoutBackendError {
         match self {
             LockoutBackendError::InvalidUrl(url) => {
                 write!(f, "invalid Redis URL for RedisLockoutBackend: {url}")
+            }
+            LockoutBackendError::FeatureDisabled => {
+                write!(
+                    f,
+                    "RedisLockoutBackend built without the redis-lockout feature: it reports zero lockouts forever"
+                )
             }
         }
     }
@@ -231,6 +240,14 @@ impl RedisLockoutBackend {
     #[cfg(feature = "redis-lockout")]
     pub fn construction_error(&self) -> Option<&LockoutBackendError> {
         self.init_error.as_ref()
+    }
+
+    /// Without the feature the backend is a fail-open no-op; surface that
+    /// as a construction error so callers can refuse to start.
+    #[cfg(not(feature = "redis-lockout"))]
+    pub fn construction_error(&self) -> Option<&LockoutBackendError> {
+        static FEATURE_DISABLED: LockoutBackendError = LockoutBackendError::FeatureDisabled;
+        Some(&FEATURE_DISABLED)
     }
 
     #[cfg(feature = "redis-lockout")]

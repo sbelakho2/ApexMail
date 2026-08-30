@@ -1,7 +1,7 @@
 # Compliance Documentation
 
 > **Legal Entity:** Bel Consulting OÜ, Registry Code 16588745, Tallinn, Estonia
-> **Data Protection Officer:** dpo@apexmail.ee
+> **Data Protection Lead:** privacy@apexmail.ee (a formal DPO is not required under Article 37)
 
 ---
 

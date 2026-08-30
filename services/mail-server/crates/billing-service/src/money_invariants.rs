@@ -151,10 +151,10 @@ fn payg_millicents_to_cents_is_half_up() {
 fn vat_round_vat_is_half_up() {
     // Exhaustive small sweep + random large amounts.
     for amount in 0..2_000 {
-        for rate in [0, 5, 19, 21, 24, 27] {
+        for rate in [0.0, 5.0, 19.0, 21.0, 24.0, 25.5, 27.0] {
             assert_eq!(
                 round_vat(amount, rate),
-                i64::try_from(half_up(i128::from(amount) * i128::from(rate), 100)).unwrap(),
+                i64::try_from(half_up(i128::from(amount) * i128::from((rate * 10.0) as i64), 1_000)).unwrap(),
                 "round_vat({amount}, {rate}) must be half-up"
             );
         }
@@ -162,10 +162,10 @@ fn vat_round_vat_is_half_up() {
     let mut rng = Rng::new(0x5EED);
     for _ in 0..1_000 {
         let amount = (rng.next_u64() % 10_000_000_000) as i64;
-        let rate = 24;
+        let rate = 24.0;
         assert_eq!(
             round_vat(amount, rate),
-            i64::try_from(half_up(i128::from(amount) * 24, 100)).unwrap()
+            i64::try_from(half_up(i128::from(amount) * 240, 1_000)).unwrap()
         );
     }
 }
@@ -248,7 +248,7 @@ fn vat_line_allocation_reconciles_with_headline_for_random_invoices() {
         let amounts: Vec<i64> = (0..line_count)
             .map(|_| (rng.below(5_000_000)) as i64)
             .collect();
-        let rate = [0, 5, 10, 19, 20, 21, 22, 23, 24, 25, 27][rng.below(11) as usize];
+        let rate = [0.0, 5.0, 10.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.5, 27.0][rng.below(11) as usize];
 
         let allocated = allocate_vat_across_lines(&amounts, rate);
         assert_eq!(allocated.len(), amounts.len());
@@ -270,8 +270,8 @@ fn vat_line_allocation_reconciles_with_headline_for_random_invoices() {
         // compute for the same subtotal via the shared billing-common rate
         // logic (country irrelevant at rate level).
         let (rate_out, vat_out) = calculate_vat(subtotal, "EE", None);
-        assert_eq!(rate_out, 24);
-        if rate == 24 {
+        assert_eq!(rate_out, 24.0);
+        if rate == 24.0 {
             assert_eq!(headline, vat_out);
         }
     }
@@ -280,8 +280,8 @@ fn vat_line_allocation_reconciles_with_headline_for_random_invoices() {
 #[test]
 fn vat_allocation_handles_zero_valued_lines() {
     let amounts = [0, 0, 5_00];
-    let allocated = allocate_vat_across_lines(&amounts, 24);
-    assert_eq!(allocated.iter().sum::<i64>(), round_vat(5_00, 24));
+    let allocated = allocate_vat_across_lines(&amounts, 24.0);
+    assert_eq!(allocated.iter().sum::<i64>(), round_vat(5_00, 24.0));
 }
 
 // ---------------------------------------------------------------------------
@@ -434,8 +434,10 @@ fn wallet_capture_cannot_overdraw_reservation() {
 // ---------------------------------------------------------------------------
 
 /// (crate-relative file, allowlist) pairs. The allowlist enumerates the
-/// ONLY lines allowed to mention floats: display formatting (`format!`)
-/// and this module itself.
+/// ONLY lines allowed to mention floats: display formatting (`format!`),
+/// VAT *rates* (statutory rates like Finland's 25.5 % are legitimately
+/// fractional; every monetary amount stays in integer cents), and this
+/// module itself.
 const MONEY_PATH_FILES: &[(&str, &str)] = &[
     ("src/config.rs", "src/config.rs"),
     ("src/plans.rs", "src/plans.rs"),
@@ -450,7 +452,38 @@ const MONEY_PATH_FILES: &[(&str, &str)] = &[
         "../billing-common/src/vat_rates.rs",
         "billing-common/vat_rates.rs",
     ),
+    (
+        // The api-server billing route contains the legacy invoice
+        // renderers and admin invoice writer; it must obey the same
+        // integer-money rule (f64 proration there was a live defect).
+        "../api-server/src/routes/billing.rs",
+        "api-server/routes/billing.rs",
+    ),
 ];
+
+/// A float mention is a VAT-rate context, not money math. Rates in percent
+/// may be fractional (25.5); amounts never are.
+fn is_vat_rate_context(line: &str) -> bool {
+    line.contains("vat_rate")
+        || line.contains("rate_percent")
+        || line.contains("VAT_RATE")
+        || line.contains("VatRate")
+        || line.contains("get_eu_vat_rate")
+        || line.contains("vat_amount_half_up(")
+        || line.contains("DEFAULT_VAT_RATES")
+        || line.contains("EU_VAT_RATES")
+        || line.contains("fallback_rate")
+        // JSON truthiness on a parsed number, not money math.
+        || line.contains("as_f64()")
+        // Rate-returning signatures: (f64, i64) = (rate, cents).
+        || line.contains("f64, i64")
+        || line.contains("Result<f64")
+        // Rate-typed function signatures and test fixture tables.
+        || line.contains("rate: f64")
+        || line.contains("(&str, f64)")
+        || line.contains("as f64")
+        || line.contains("parse::<f64>")
+}
 
 #[test]
 fn no_floating_point_in_money_computation_paths() {
@@ -469,10 +502,11 @@ fn no_floating_point_in_money_computation_paths() {
                 continue; // comments
             }
             if trimmed.contains("f64") || trimmed.contains("f32") {
-                // Floats are tolerated ONLY inside display formatting.
+                // Floats are tolerated ONLY inside display formatting or
+                // VAT-rate contexts — never monetary computation.
                 let is_display =
                     trimmed.contains("format!(") || trimmed.contains("format_currency");
-                if !is_display {
+                if !is_display && !is_vat_rate_context(trimmed) {
                     violations.push(format!("{label}:{}: {}", index + 1, trimmed));
                 }
             }
@@ -626,7 +660,11 @@ fn no_float_to_int_conversions_outside_display() {
                 || line.contains(".trunc()");
             if (mentions_float || rounds) && converts_to_int {
                 let trimmed = line.trim();
-                if ALLOWED_FLOAT_TO_INT_LINES.contains(&trimmed) {
+                if ALLOWED_FLOAT_TO_INT_LINES.contains(&trimmed)
+                    || is_vat_rate_context(trimmed)
+                {
+                    // VAT rates legitimately convert (rate_percent × 10) →
+                    // integer tenths; monetary amounts never do.
                     continue;
                 }
                 violations.push(format!("{label}:{}: {}", index + 1, trimmed));

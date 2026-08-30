@@ -42,6 +42,15 @@ async fn main() -> anyhow::Result<()> {
     let _guard = init_tracing();
 
     let cfg = SalesConfig::from_env().context("failed to load sales-autopilot config")?;
+
+    // Fail closed in production without a tenant allowlist (the internal
+    // token is shared; unset meant every tenant was addressable).
+    let is_production = std::env::var("APP_ENV")
+        .map(|v| v.eq_ignore_ascii_case("production"))
+        .unwrap_or(true);
+    if let Err(reason) = sales_autopilot::config::require_tenant_allowlist_in_production(&cfg, is_production) {
+        anyhow::bail!("refusing to start: {reason}");
+    }
     if cfg.enrichment_api_key.is_empty() {
         tracing::warn!(
             "ENRICHMENT_API_KEY is not set — enrichment requests will be unauthenticated and likely rejected by the provider"

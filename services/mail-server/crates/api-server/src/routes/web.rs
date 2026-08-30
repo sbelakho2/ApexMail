@@ -2161,6 +2161,10 @@ async fn form_signup(
     };
     let _ = plan; // onboarding preference only; provisioning starts on Free
 
+    // Anti-enumeration: mirror the JSON register flow, which deliberately
+    // returns the same "check your email" response for existing addresses.
+    // Telling an anonymous visitor "an account with this email already
+    // exists" defeated that posture for the SSR form.
     let existing =
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE LOWER(email) = LOWER($1)")
             .bind(&email)
@@ -2168,9 +2172,9 @@ async fn form_signup(
             .await
             .unwrap_or(0);
     if existing > 0 {
-        return redirect_error(
-            "An account with this email already exists. Try signing in instead.",
-            "/signup",
+        return redirect_success(
+            "Check your email to finish creating your account.",
+            "/login",
             &state.config,
         );
     }
@@ -2657,6 +2661,17 @@ async fn form_change_password(
             )
         }
     };
+    // Revoke every live session (other tabs, stolen cookies) so a session
+    // hijacked before the change cannot survive it — same contract as the
+    // password-reset path. The current session is re-established by the
+    // redirect target's login flow.
+    revoke_user_sessions(
+        &state,
+        &user.tenant_id,
+        user.user_id.as_deref().unwrap_or_default(),
+    )
+    .await;
+
     // users.id is UUID (canonical migration 052): cast the String bind.
     let result =
         sqlx::query("UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2::uuid")
@@ -2665,7 +2680,11 @@ async fn form_change_password(
             .execute(&state.db)
             .await;
     match result {
-        Ok(_) => redirect_success("Password updated.", "/settings/profile", &state.config),
+        Ok(_) => redirect_success(
+            "Password updated. Please sign in again with your new password.",
+            "/login",
+            &state.config,
+        ),
         Err(_) => redirect_error(
             "Could not update the password. Try again.",
             "/settings/profile",
@@ -2832,11 +2851,16 @@ async fn form_mfa_confirm(
     // Privilege change ⇒ revoke every live session (AR-005 twin).
     revoke_user_sessions(&state, &user.tenant_id, &user_id).await;
 
-    let mut response = redirect_success(
-        &format!(
-            "MFA enabled. Recovery codes (shown once, store them safely): {}",
-            recovery_codes.join(" ")
-        ),
+    // Recovery codes travel as STRUCTURED secrets (mono-chip reveal-once
+    // rendering, one code per chip) instead of one space-joined string in
+    // the prose banner.
+    let mut fields = FormFieldMap::new("mfa-recovery-codes");
+    for (index, code) in recovery_codes.iter().enumerate() {
+        fields.secret(&format!("Recovery code {}", index + 1), code);
+    }
+    let mut response = redirect_with_secret(
+        &fields,
+        "MFA enabled. Recovery codes shown below — store them now, they will not be shown again.",
         &back,
         &state.config,
     );
@@ -2992,24 +3016,26 @@ async fn form_api_key_create(
         }
         _ => {}
     }
-    let id = apexmail_lib::id::generate_id("", 26);
-    let secret = format!("amk_{}", Uuid::new_v4().simple());
-    let prefix: String = secret.chars().take(10).collect();
-    // The API keys table has NO user_id column (052/056 schema) — drop it.
-    // The secret is stored as its SHA-256 hex digest exactly like the JSON
-    // API path, and the plaintext is shown to the operator exactly ONCE,
-    // in the post-create flash.
-    let key_hash = {
-        use sha2::Digest;
-        hex::encode(sha2::Sha256::digest(secret.as_bytes()))
-    };
+    // Mirror the JSON path (routes/auth.rs create_api_key) exactly:
+    // - api_keys.id is UUID (052/056 schema)
+    // - the table has NO user_id column
+    // - key_prefix fits VARCHAR(8)
+    // - the secret is stored as keyed HMAC-SHA256 (apexmail_lib), NOT plain
+    //   SHA-256 — unsalted digests permanently parked keys in the legacy
+    //   bucket of authenticate_api_key, costing an extra DB round-trip and
+    //   a background rehash on every use.
+    let id = Uuid::new_v4();
+    let secret = apexmail_lib::id::generate_api_key(false);
+    let prefix_len = secret.len().min(8);
+    let prefix = secret[..prefix_len].to_string();
+    let key_hash =
+        apexmail_lib::hash_api_key_with_secret(&secret, &state.config.api_key_hash_secret);
     let result = sqlx::query(
-        "INSERT INTO api_keys (id, tenant_id, user_id, name, prefix, key_hash, scopes, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())",
+        "INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, scopes, created_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
     )
-    .bind(&id)
+    .bind(id)
     .bind(user.tenant_id.as_str())
-    .bind(user.user_id.as_deref())
     .bind(&name)
     .bind(&prefix)
     .bind(&key_hash)
@@ -3774,7 +3800,9 @@ async fn form_dedicated_ip_request(
         "INSERT INTO dedicated_ips (id, tenant_id, region, status, ip_address, created_at, updated_at)
          VALUES ($1, $2, $3, 'pending', NULL, NOW(), NOW())",
     )
-    .bind(apexmail_lib::id::generate_id("", 26))
+    // dedicated_ips.id is UUID — a 26-char text id failed the INSERT and
+    // the request form always errored.
+    .bind(Uuid::new_v4())
     .bind(user.tenant_id.as_str())
     .bind(if region.is_empty() { "eu-central" } else { &region })
     .execute(&state.db)

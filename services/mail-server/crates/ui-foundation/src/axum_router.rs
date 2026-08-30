@@ -2660,7 +2660,8 @@ mod tests {
         // Bulk action + signed delete confirms + pagination with filters.
         assert!(html.contains("action=\"/web/campaigns/delete-bulk\""));
         assert!(html.contains("name=\"ids\" value=\"c_0\""));
-        assert!(html.contains("/confirm?intent=delete-campaign&amp;id=c_1"));
+        assert!(html.contains("name=\"intent\" value=\"delete-campaign\""));
+        assert!(html.contains("name=\"id\" value=\"c_1\""));
         assert!(html.contains("/campaigns?page=3&query=spring&status=draft"));
         // GET filter form serializes the search + filter params.
         assert!(html.contains("method=\"get\" action=\"/campaigns\""));
@@ -3076,8 +3077,8 @@ mod tests {
             ],
         );
         assert!(tenants.contains("/web/admin/tenants/99999999-8888-7777-6666-555555555555/suspend"));
-        assert!(tenants
-            .contains("/confirm?intent=delete-tenant&amp;id=99999999-8888-7777-6666-555555555555"));
+        assert!(tenants.contains("<form method=\"get\" action=\"/confirm\""));
+        assert!(tenants.contains("name=\"intent\" value=\"delete-tenant\""));
     }
 
     /// CP item 16 (domain transfer): the typed-confirmation form carries

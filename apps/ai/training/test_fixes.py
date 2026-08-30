@@ -53,7 +53,7 @@ def test_canonical_table_matches_plans_rs():
 
 def test_wrong_plan_prices_are_rejected():
     findings = validate_pricing.validate_pricing_in_text(
-        "The Starter plan costs €15/month and Pro is $79/month."
+        "The Starter plan costs €25/month and Pro is €65/month."
     )
     messages = " | ".join(f["message"] for f in findings)
     assert "€25" in messages, f"Starter wrong price not flagged: {messages}"
@@ -61,7 +61,7 @@ def test_wrong_plan_prices_are_rejected():
 
 
 def test_dollar_symbol_is_reported_even_with_right_number():
-    findings = validate_pricing.validate_pricing_in_text("Growth $150/month")
+    findings = validate_pricing.validate_pricing_in_text("Growth €150/month")
     assert len(findings) == 1
     assert "EUR" in findings[0]["message"]
 
@@ -76,27 +76,27 @@ def test_correct_euro_prices_pass():
 
 def test_sweep_fixes_wrong_prices_and_tier3_rate():
     counters: dict[str, int] = {}
-    out = sweep_text("**Pro ($79/month)** and **Starter ($15/month)** tier $0.40/1K", counters)
-    assert "€65" in out and "$79" not in out
-    assert "€25" in out and "$15" not in out
+    out = sweep_text("**Pro (€65/month)** and **Starter (€25/month)** tier €0.50/1K", counters)
+    assert "€65" in out and "€65" not in out
+    assert "€25" in out and "€25" not in out
     assert "€0.50/1K" in out, "PAYG tier-3 per-1K rate must be 0.50, not 0.40"
 
 
 def test_sweep_preserves_payg_api_fifteen_euro_total():
     counters: dict[str, int] = {}
-    out = sweep_text("API overage: 150K extra at $0.10/1K = $15", counters)
+    out = sweep_text("API overage: 150K extra at €0.10/1K = €15", counters)
     assert "€15" in out, "the PAYG API €15 total must keep its number"
 
 
 def test_sweep_rewords_third_party_usd_facts():
     counters: dict[str, int] = {}
-    out = sweep_text("Penalties: up to **$51,744 per email**; Critical: $500–$5,000", counters)
-    assert "USD 51,744" in out and "$51,744" not in out
+    out = sweep_text("Penalties: up to **USD 51,744 per email**; Critical: USD 500–5,000", counters)
+    assert "USD 51,744" in out and "€51,744" not in out
     assert "USD 500–5,000" in out
 
 
 def test_sweep_is_idempotent():
-    sample = "Starter ($15) Pro ($79) $0.40/1K Beyond 100K: $0.40 per 1,000"
+    sample = "Starter (€25) Pro (€65) €0.50/1K Beyond 100K: €0.50 per 1,000"
     once = sweep_text(sample, {})
     twice = sweep_text(once, {})
     assert once == twice
@@ -239,15 +239,15 @@ def test_split_fractions_hold_at_scale():
 def test_pricing_table_is_canonical_euro():
     for price in ("€0", "€25", "€65", "€150", "€350", "€3,000"):
         assert price in PRICING_TABLE, f"{price} missing from PRICING_TABLE"
-    assert "$" not in PRICING_TABLE
-    assert "$" not in PAYG_INFO
+    assert "€" not in PRICING_TABLE
+    assert "€" not in PAYG_INFO
     for rate in ("€0.001", "€0.0008", "€0.0005", "€0.0003", "€0.40", "€0.10"):
         assert rate in PAYG_INFO, f"{rate} missing from PAYG_INFO"
 
 
 def test_system_prompt_uses_apexmail_ee():
     prompt = build_system_prompt("starter_healthy")
-    assert "apexmail.com" not in prompt
+    assert "apexmail.ee" not in prompt
     assert "support@apexmail.ee" in prompt
 
 
@@ -255,10 +255,10 @@ def test_system_prompt_uses_apexmail_ee():
 
 def test_validator_catches_adversarial_corpus(tmp_path: Path) -> None:
     bad_rows = [
-        {"messages": [{"role": "assistant", "content": "Starter costs €15/month"}]},
+        {"messages": [{"role": "assistant", "content": "Starter costs €25/month"}]},
         {"messages": [{"role": "assistant", "content": "PAYG is €0.007 per email"}]},
         {"messages": [{"role": "assistant", "content": "| Tier | -5,000 |"}]},
-        {"messages": [{"role": "assistant", "content": "Pro $65/month"}]},
+        {"messages": [{"role": "assistant", "content": "Pro €65/month"}]},
     ]
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "bad.jsonl"
@@ -270,7 +270,7 @@ def test_validator_catches_adversarial_corpus(tmp_path: Path) -> None:
         assert "starter" in joined.lower()
         assert "per-email rate" in joined
         assert "negative volume" in joined
-        assert "'$' price remains" in joined
+        assert "'€' price remains" in joined
 
 
 def test_validator_passes_canonical_corpus(tmp_path: Path) -> None:

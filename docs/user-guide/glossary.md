@@ -8,7 +8,7 @@ A comprehensive reference of email industry terms, security standards, and ApexM
 
 ### SPF (Sender Policy Framework)
 
-A DNS-based email authentication method that specifies which mail servers are authorized to send email on behalf of a domain. Published as a TXT record (e.g., `v=spf1 include:_spf.apexmail.ee ~all`). Receiving servers check the sending IP against the SPF record to detect spoofing.
+A DNS-based email authentication method that specifies which mail servers are authorized to send email on behalf of a domain. Published as a TXT record (for a domain sending through ApexMail's default transport: `v=spf1 include:amazonses.com ~all`; the dashboard generates the exact record for your domain). Receiving servers check the sending IP against the SPF record to detect spoofing.
 
 ### DKIM (DomainKeys Identified Mail)
 

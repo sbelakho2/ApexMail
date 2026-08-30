@@ -4,7 +4,7 @@ template = "prose.html"
 description = "ApexMail interroge Google Postmaster Tools et Microsoft SNDS toutes les six heures, note la réputation de vos domaines d'envoi et bride automatiquement les envois sortants quand les données disent de ralentir."
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++
 
 ## Un placement en boîte de réception adossé aux fournisseurs de messagerie eux-mêmes
@@ -54,7 +54,7 @@ Toutes les six heures, le planificateur de réputation d'ApexMail :
 
 Quand votre réputation remonte, le bridage se relâche sans intervention humaine.
 
-## Pourquoi cela compte pour vos $100k de MRR
+## Pourquoi cela compte pour vos revenus
 
 Un seul mauvais envoi massif peut placer un domaine émetteur sur la liste BAD de Gmail pendant 30 jours ou plus.
 La plupart des ESP vous annoncent la mauvaise nouvelle au prochain bilan trimestriel.

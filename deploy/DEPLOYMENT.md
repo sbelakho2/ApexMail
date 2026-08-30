@@ -31,38 +31,43 @@ no SSH hop anymore.
 
 `make verify` (from anywhere) checks the live production endpoints, and
 `make verify-env ENV_FILE=.env.production` validates an env file against the
-compose `${VAR:?}` contract — the same gate `deploy-hetzner.yml` runs against
-`APEXMAIL_PROD_ENV` before touching the host.
+compose `${VAR:?}` contract — the same gate the pipeline's deploy stage runs
+before bringing up the stack.
 
 ## Fresh-host bootstrap (one-time)
 
-1. **Install the deploy key on the host** — `ssh-copy-id -i ~/.ssh/hetzner-deploy.pub "${HETZNER_SSH_USER:-root}@${HETZNER_HOST}"`, then verify with `ssh … 'echo OK && uname -a'`.
-2. **Bootstrap the host** — `scp deploy/scripts/hetzner-bootstrap.sh "${HETZNER_SSH_USER:-root}@${HETZNER_HOST}:/root/"` then `ssh … 'bash /root/hetzner-bootstrap.sh'` (installs Docker + compose plugin, configures UFW, hardens sshd, creates `/opt/apexmail`).
-3. **Capture the host key** — `ssh-keyscan -H "${HETZNER_HOST}"` → the `HETZNER_KNOWN_HOSTS` GitHub secret.
-4. **Render the production `.env`** from `.env.production.example` (generate values with `openssl rand -base64 32`); validate it locally with `make verify-env`. It becomes the `APEXMAIL_PROD_ENV` GitHub secret. The full 24-secret table is in § "Rendered production secrets" below.
-5. **Set the GitHub secrets** (repository or org level):
+The deploy pipeline runs ON the host (systemd timer → `ci/pipeline.sh`).
+There is no GitHub Actions runner and no registry; bootstrap is done over
+SSH once:
 
-| Secret | Value |
-|---|---|
-| `HETZNER_SSH_HOST` (**required**) | production host IP/hostname |
-| `HETZNER_SSH_USER` (**required**) | SSH user (e.g. `root` or `deploy`) |
-| `HETZNER_SSH_PRIVATE_KEY` | `cat ~/.ssh/hetzner-deploy` (full PEM) |
-| `HETZNER_KNOWN_HOSTS` | output of `ssh-keyscan -H <host>` |
-| `APEXMAIL_PROD_ENV` | full rendered `.env` from step 4 |
-| `GHCR_DEPLOY_TOKEN` | PAT with `read:packages` for the GHCR images |
-| `HETZNER_DEPLOY_DIR` (optional) | override remote dir (defaults to `/opt/apexmail`) |
+1. **Bootstrap the host** — `scp deploy/scripts/hetzner-bootstrap.sh "root@<host>:/root/"` then `ssh root@<host> 'bash /root/hetzner-bootstrap.sh'` (installs Docker + compose plugin, configures UFW, hardens sshd, creates `/opt/apexmail`).
+2. **Clone the repository on the host** — `ssh root@<host> 'git clone <repo-url> /opt/apexmail/src'` (or grant the deploy key read access and let the pipeline fetch; the fetch stage refuses to deploy unpushed commits).
+3. **Render the production `.env`** at `/opt/apexmail/.env` from `.env.production.example` (generate values with `openssl rand -base64 32`); validate locally with `make verify-env ENV_FILE=.env.production`.
+4. **Write the secret files** — for every `PROD_*_FILE` path in the `.env`
+   (30 today; see § "Rendered production secrets"), create the file with the
+   corresponding value and `chmod 600` it, e.g.:
 
-6. **Trigger the first deploy** — merge to `main` (or `gh workflow run "Deploy — Docker Build & Push"`). The Hetzner deploy auto-follows: it syncs compose files + `deploy/`, renders `.env` and all 24 secret files, logs into GHCR, runs database migrations, brings up the full stack with a self-signed TLS fallback, and verifies the rollout.
-7. **Issue a real certificate** — `ssh … "cd /opt/apexmail && bash deploy/scripts/issue-letsencrypt.sh"`. Later deploys warn if the cert is still self-signed.
+   ```bash
+   install -m 600 <(printf %s "$POSTGRES_PASSWORD") /opt/apexmail/secrets/postgres_password.txt
+   ```
 
-## Rendered production secrets (the real 24)
+   Nothing in the live pipeline renders these files — the archived
+   `deploy-hetzner.yml` workflow used to; missing files fail the compose
+   `${VAR:?}` gate at deploy time, so verify all of them exist before the first
+   pipeline run (`ls /opt/apexmail/secrets | wc -l` — 31 files including
+   `redis_password_map.json`, generated per the comment in
+   `.env.production.example`).
+5. **Install the CI pipeline** — `ssh root@<host> 'cd /opt/apexmail/src && ci/install.sh'` (installs the 5-minute systemd timer, pinned tools, and the fail-closed tool policy).
+6. **Run the first deploy** — `ssh root@<host> 'cd /opt/apexmail/src && ci/pipeline.sh run'`. A red stage stops before `docker compose up`; the verify stage probes health, HTTP, and the SMTP banner.
+7. **Issue a real certificate** — `ssh root@<host> "cd /opt/apexmail/src && bash deploy/scripts/issue-letsencrypt.sh"`. Later deploys warn if the cert is still self-signed.
 
-`docker-compose.prod.yml` guards **24 `PROD_*_FILE` variables** (`${VAR:?}`).
-The `deploy-hetzner.yml` step "Render docker secret files from .env" renders
-every one of them on the host from the plain value in `APEXMAIL_PROD_ENV`;
-`tools/validate-prod-env.sh` (wired into the workflow as an early gate and
-available as `make verify-env`) derives this set from the compose file, so it
-can never drift. AWS/SMTP pairs are *optional-valued* — the files are still
+## Rendered production secrets (the real 31)
+
+`docker-compose.prod.yml` guards **30 `PROD_*_FILE` variables** (`${VAR:?}`) plus the redis-exporter JSON-map secret (`redis_password_map`).
+Each guard must have a matching file under `/opt/apexmail/secrets/` (see
+Fresh-host bootstrap step 4 — nothing in the live pipeline renders them).
+`tools/validate-prod-env.sh` (available as `make verify-env`) derives this
+set from the compose file, so it can never drift. AWS/SMTP pairs are *optional-valued* — the files are still
 rendered (empty) so the guards stay satisfied when running the SES transport.
 
 | Secret value var in `.env` | `PROD_*_FILE` var |
@@ -94,12 +99,13 @@ rendered (empty) so the guards stay satisfied when running the SES transport.
 
 Non-file variables also validated by the compose overlay (`${VAR:?}`):
 `BASE_URL`, `OAUTH_REDIRECT_BASE_URL`, `APEXMAIL_API_KEY`, `JWT_SECRET`,
-`PLACEMENT_ENCRYPTION_SECRET`, `BILLING_COMPANY_IBAN`,
-`BILLING_COMPANY_PHONE`, `SALES_CAMPAIGN_FROM_EMAIL`.
+`PLACEMENT_ENCRYPTION_SECRET`, `SALES_CAMPAIGN_FROM_EMAIL`. Bank details
+(`BILLING_COMPANY_IBAN`/`_BIC`/`_PHONE`) are OPTIONAL — invoice renderers
+omit the fields when unset; `BILLING_COMPANY_BANK` defaults to Wise.
 
 ## Database migrations (deploy-time gate)
 
-Schema migrations (`services/mail-server/migrations`, sequential 001-108+)
+Schema migrations (`services/mail-server/migrations`, sequential 001-122+)
 are applied by the **`migrator`** — a one-shot compose job (profile
 `migrate`, `restart: no`) whose image embeds the sqlx migration chain at
 build time (`services/mail-server/crates/migrator`). Both deploy paths run it
@@ -111,10 +117,10 @@ docker compose -f docker-compose.yml -f docker-compose.prod.yml \
   --env-file .env --profile migrate run --rm migrator
 ```
 
-- `deploy-hetzner.yml` runs it in the "Run database migrations (gate before
-  up)" step; `deploy.sh` runs the same command in its Step 5.
-- `deploy.yml` builds and publishes `…/migrator:<sha>+latest` in lockstep
-  with the service images, and the image-name drift guard includes it.
+- The pipeline's `ci/stages/migrate.sh` runs the same command as its own
+  stage (gate before `up`); `deploy.sh` runs the same command in its Step 5.
+- The migrator image is built in lockstep with the service images by
+  `ci/stages/images.sh`, and the image-name drift guard includes it.
 - The job is idempotent — re-running against an up-to-date database is a
   no-op that exits 0.
 - Manual fallback for operators with direct DB access:
@@ -152,10 +158,9 @@ Notes:
   compose service key). The binary inside that image is still `mta-server`;
   only the image *name* is unified. There is no `mta-server` image tag.
 - `imap-server` and `mailstore` are first-class members of the canonical set:
-  they appear in `docker-compose.prod.yml` (ports 993 and gRPC 50051), are
-  built by `deploy.yml` from the `imap-server` / `mailstore` Dockerfile
-  targets, and are pulled + started by `deploy-hetzner.yml` alongside the
-  other services. Do not remove them from any of the three places.
+  they appear in `docker-compose.prod.yml` (ports 993 and gRPC 50051) and are
+  built from the `imap-server` / `mailstore` Dockerfile targets by the
+  pipeline's images stage. Do not remove them from either place.
 - `status-server` (the public status page + status API behind
   `status.apexmail.ee` and `apexmail.ee/api/status-data`) is built from the
   Dockerfile's **`auth-server`** stage — the image is published as
@@ -318,16 +323,19 @@ Verification after setup: send one message through the platform, then check
 (flips to `delivered`), and the SNS topic's *NumberOfMessagesPublished*
 CloudWatch metric.
 
-## Tag strategy
+## Image identity (no registry)
 
-- CI (`deploy.yml`) publishes **`:<short-sha>`** and **`:latest`** for every
-  image on each push to `main`.
-- `docker-compose.prod.yml` pins every service to **`:latest`** so
-  `docker compose pull` always resolves to a CI-built image.
-- Immutable per-commit tracking is preserved via the `:<short-sha>` tags.
-- **Never** pin to a `vX.Y.Z` tag unless CI is also taught to produce that tag.
-  (Earlier `v1.0.0`/`v1.0.1` pins referred to tags CI never published, which
-  broke `docker compose pull`.)
+There is no registry: the pipeline builds images on the host and tags them
+with `ghcr.io/...` NAMES for compatibility, but nothing is pushed or pulled.
+
+- `ci/stages/images.sh` records a SHA256 **digest manifest** for every built
+  image; `ci/stages/deploy.sh` refuses to bring up the stack if any image's
+  live digest differs from the manifest (tamper/drift guard between build
+  and `up`).
+- Rollback pins use the recorded digests, not mutable tags — see
+  `deploy/rollback-plan.md` (`:<short-sha>`-style tag pins do NOT exist;
+  `docker compose pull` cannot work in this model and must not be used).
+- **Never** pin services to external `vX.Y.Z` tags.
 
 ## Drift guard
 

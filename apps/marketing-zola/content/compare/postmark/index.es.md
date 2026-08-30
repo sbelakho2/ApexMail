@@ -10,7 +10,7 @@ competitor_name = "Postmark"
 competitor_description = "Postmark de ActiveCampaign se centra en la entrega de email transaccional rápida y fiable."
 pricing_as_of = "2026-08-19"
 currency_note = "Los precios se muestran en EUR. Cuando un proveedor solo publica precios en USD, la cifra en EUR se convierte a 1 USD = €0.92 (tipo de referencia, 2026-08-19) y se muestra entre paréntesis el precio en USD publicado por el proveedor. Impuestos no incluidos."
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 apexmail_wins = 0
 competitor_wins = 0
 

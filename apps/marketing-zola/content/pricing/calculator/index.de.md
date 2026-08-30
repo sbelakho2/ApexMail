@@ -4,5 +4,5 @@ description = "Berechnen Sie Ihre E-Mail-Versandkosten und vergleichen Sie die A
 template = "calculator.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

@@ -1,5 +1,8 @@
 # waf-engine
 
+> **STATUS — READ BEFORE RELYING ON THIS CRATE**
+> NOT WIRED INTO PRODUCTION: no service in this workspace (api-server, mta, worker, …) depends on this crate. It is a library and test target only — it inspects zero live traffic. Do not represent it as an active control.
+
 Pure-Rust Web Application Firewall: AST-based SQLi/XSS prevention, OWASP CRS-compatible rule engine, zero-copy payload inspection.
 
 ## Overview

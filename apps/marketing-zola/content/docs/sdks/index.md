@@ -12,19 +12,19 @@ last_updated = "2026-07-30"
 
 ApexMail ships first-party client libraries for five server-side languages. **The SDKs are under active development and are not yet published to public package registries** (npm, PyPI, pkg.go.dev, Packagist, RubyGems, Maven Central). Until the first stable release, integrate against the [HTTP API](/docs/api/) directly or build from source in the monorepo.
 
-> Sign up to be notified when each SDK is published, or track progress in the [ApexMail monorepo](https://github.com/Bel-Consulting-OU/ApexMail/tree/main/packages).
+> Sign up to be notified when each SDK is published, or track progress in the [ApexMail monorepo](packages).
 
 ## Language Coverage
 
-Each SDK lives in the `packages/` directory of the [ApexMail monorepo](https://github.com/Bel-Consulting-OU/ApexMail/tree/main/packages). Source links below point to the current development location, not a published package.
+Each SDK lives in the `packages/` directory of the [ApexMail monorepo](packages). Source links below point to the current development location, not a published package.
 
 | Language   | Module / package name        | Source                                                                                | Min runtime   | Planned install (once published)                              |
 |------------|------------------------------|---------------------------------------------------------------------------------------|---------------|---------------------------------------------------------------|
-| Python     | `apexmail`                   | [packages/sdk-python](https://github.com/Bel-Consulting-OU/ApexMail/tree/main/packages/sdk-python) | Python 3.9+   | `pip install apexmail`                                        |
-| Go         | `github.com/apexmail/apexmail-go` | [packages/sdk-go](https://github.com/Bel-Consulting-OU/ApexMail/tree/main/packages/sdk-go)         | Go 1.21+      | `go get github.com/apexmail/apexmail-go`                      |
-| PHP        | `apexmail/apexmail-php`      | [packages/sdk-php](https://github.com/Bel-Consulting-OU/ApexMail/tree/main/packages/sdk-php)       | PHP 8.1+      | `composer require apexmail/apexmail-php`                      |
-| Ruby       | `apexmail` (gem)             | [packages/sdk-ruby](https://github.com/Bel-Consulting-OU/ApexMail/tree/main/packages/sdk-ruby)     | Ruby 3.0+     | `gem install apexmail`                                        |
-| Java       | `ee.apexmail:apexmail-java`  | [packages/sdk-java](https://github.com/Bel-Consulting-OU/ApexMail/tree/main/packages/sdk-java)     | Java 17+      | Maven: `ee.apexmail:apexmail-java` (version TBD on release)   |
+| Python     | `apexmail`                   | [packages/sdk-python](packages/sdk-python) | Python 3.9+   | `pip install apexmail`                                        |
+| Go         | `github.com/apexmail/apexmail-go` | [packages/sdk-go](packages/sdk-go)         | Go 1.21+      | `go get github.com/apexmail/apexmail-go`                      |
+| PHP        | `apexmail/apexmail-php`      | [packages/sdk-php](packages/sdk-php)       | PHP 8.1+      | `composer require apexmail/apexmail-php`                      |
+| Ruby       | `apexmail` (gem)             | [packages/sdk-ruby](packages/sdk-ruby)     | Ruby 3.0+     | `gem install apexmail`                                        |
+| Java       | `ee.apexmail:apexmail-java`  | [packages/sdk-java](packages/sdk-java)     | Java 17+      | Maven: `ee.apexmail:apexmail-java` (version TBD on release)   |
 
 All SDKs are MIT-licensed and require TLS 1.2+ for API connections. API keys are passed in the `X-API-Key` header. There is no Node.js/JavaScript SDK at this time; Node developers should use the HTTP API or `fetch` directly (see the [API reference](/docs/api/)).
 
@@ -32,10 +32,10 @@ All SDKs are MIT-licensed and require TLS 1.2+ for API connections. API keys are
 
 Until the packages are published, you can vendor or build the SDK directly from the monorepo:
 
-```bash
-git clone https://github.com/Bel-Consulting-OU/ApexMail.git
-cd ApexMail/packages/sdk-python   # or sdk-go, sdk-php, sdk-ruby, sdk-java
-```
+The SDK source is distributed on request (support@apexmail.ee) until the
+first registry release; the drop you receive contains the same
+`packages/sdk-<language>` directory layout with per-language build
+instructions. Pin to the supplied commit if you vendor.
 
 Each SDK directory contains language-specific build and test instructions in its own README. The SDK API surface is still changing ahead of the first release — pin to a specific commit if you vendor.
 

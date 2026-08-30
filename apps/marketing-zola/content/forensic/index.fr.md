@@ -4,5 +4,5 @@ description = "Diagnostiquez les problèmes de livraison d'emails avec le suivi 
 template = "forensic.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

@@ -4,7 +4,7 @@ template = "prose.html"
 description = "ApexMail fragt alle sechs Stunden Google Postmaster Tools und Microsoft SNDS ab, bewertet Ihre Absenderreputation und drosselt ausgehende Versände automatisch, wenn die Daten es nahelegen."
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++
 
 ## Inbox-Platzierung, belegt durch die Postfachanbieter selbst
@@ -54,7 +54,7 @@ Alle sechs Stunden durchläuft der Reputations-Scheduler von ApexMail:
 
 Erholt sich Ihre Reputation, wird die Drosselung ohne manuellen Eingriff aufgehoben.
 
-## Warum das für Ihre $100k MRR zählt
+## Warum das für Ihren Umsatz zählt
 
 Eine einzige fehlerhafte Sendung kann eine Absender-Domain für 30+ Tage auf Gmails BAD-Liste
 bringen. Die meisten ESPs überbringen die schlechte Nachricht im nächsten Quartals-Review.

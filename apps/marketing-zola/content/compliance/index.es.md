@@ -4,5 +4,5 @@ description = "Soporte de flujos de cumplimiento para correo electrónico: conse
 template = "compliance.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

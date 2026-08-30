@@ -37,10 +37,10 @@ Die bereitgestellte Konfiguration zielt für Kern-E-Mail-Daten und Telemetriespe
 
 | Datenkategorie | Primärer Standort | Backup / Replikat | Verarbeitung |
 |---|---|---|---|
-| Kern-E-Mail-Infrastruktur (Nachrichten, Zustellmetadaten, Kontodaten) | Hetzner, Deutschland (Falkenstein/Nürnberg) | Hetzner, Finnland (Tuusula) | EWR-Standard; aktive Bereitstellung bestätigen |
+| Kern-E-Mail-Infrastruktur (Nachrichten, Zustellmetadaten, Kontodaten) | EU-Rechenzentrum — Deutschland | EU-Rechenzentrum — Finnland | EWR — keine Drittlandübermittlung |
 | OAuth-Authentifizierungstoken | Google LLC / GitHub, Inc. (US-Unternehmen, SCCs) | Anbieter-verwaltet | US (SCCs) |
 | Zahlungs- und Abrechnungsdaten | Stripe, Inc. (US, SCCs) | Anbieter-verwaltet (Indien für Support) | US/Indien (SCCs) |
-| Support-Tickets | Hetzner, Deutschland | Hetzner, Finnland | EWR-Standard; aktive Bereitstellung bestätigen |
+| Support-Tickets | EU-Rechenzentrum — Deutschland | EU-Rechenzentrum — Finnland | EWR — keine Drittlandübermittlung |
 
 Wir übermitteln keine personenbezogenen Daten außerhalb des EWR ohne angemessene Garantien (Standardvertragsklauseln oder einen Angemessenheitsbeschluss gemäß Artikel 45).
 
@@ -52,8 +52,8 @@ Wir bewahren personenbezogene Daten nur so lange auf, wie es für die Zwecke, f�
 |---|---|
 | Kontodaten | Vertragsdauer + 30 Tage |
 | Abrechnungsunterlagen | 7 Jahre (estnisches Rechnungslegungsrecht) |
-| E-Mail-Inhalte (Text, Betreff, Header, Anhänge) | Standardmäßig 7 Tage; planabhängiges Maximum (von 1 Tag im Free-Plan bis 365 Tage bei Enterprise) |
-| Ereignisprotokolle (Zustell-, Öffnungs- und Klick-Ereignisse) | Standardmäßig 30 Tage; planabhängiges Maximum (bis 365 Tage bei Enterprise) |
+| E-Mail-Inhalte (Text, Betreff, Header, Anhänge) | Standardmäßig 7 Tage; planabhängiges Maximum (von 1 Tag im Free-Plan bis 730 Tage bei Enterprise) |
+| Ereignisprotokolle (Zustell-, Öffnungs- und Klick-Ereignisse) | Standardmäßig 30 Tage; planabhängiges Maximum (bis 730 Tage bei Enterprise) |
 | Support-Tickets | 2 Jahre nach Lösung |
 
 Vollständige Details finden Sie in unserer [Datenaufbewahrungsrichtlinie](/compliance/#data-retention).

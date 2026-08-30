@@ -285,7 +285,7 @@ Notification template:
 [STEPS DATA SUBJECTS SHOULD TAKE]
 
 ### Contact Information
-Data Protection Officer: dpo@apexmail.ee
+Data Protection Officer: privacy@apexmail.ee
 ```
 
 ---

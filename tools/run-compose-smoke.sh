@@ -242,6 +242,9 @@ export_smoke_env() {
 seed_prod_secret_files() {
   seed_prod_secret_file POSTGRES_PASSWORD        postgres_password.txt      "$(resolved_postgres_password)"
   seed_prod_secret_file REDIS_PASSWORD           redis_password.txt         "$REDIS_PASSWORD"
+  # redis-exporter prod auth: the exporter only accepts a JSON MAP file
+  # ({"redis://addr":"password"}); same password as redis_password.txt.
+  seed_prod_secret_file REDIS_PASSWORD_MAP        redis_password_map.json     "{\"redis://redis:6379\":\"$REDIS_PASSWORD\"}"
   seed_prod_secret_file CLICKHOUSE_PASSWORD      clickhouse_password.txt    "$CLICKHOUSE_PASSWORD"
   seed_prod_secret_file CLICKHOUSE_ADMIN_PASSWORD clickhouse_admin_password.txt "$(resolve_env_or_generate_secret CLICKHOUSE_ADMIN_PASSWORD 32)"
   seed_prod_secret_file API_KEY_HASH_SECRET      api_key_hash_secret.txt    "$API_KEY_HASH_SECRET"
@@ -362,11 +365,15 @@ bring_up_stack() {
   compose up -d --force-recreate observability prometheus alertmanager
 
   log "Starting prod smoke subset"
-  # billing-service carries the dev/full-stack profiles in the base compose
-  # file; naming it explicitly on the command line activates it WITHOUT
-  # enabling those profiles (pdf-renderer/mailpit stay out of the smoke).
+  # billing-service/pdf-renderer carry the dev/full-stack profiles in the
+  # base compose file; naming them explicitly on the command line activates
+  # them WITHOUT enabling those profiles (mailpit stays out of the smoke).
+  # pdf-renderer: billing-service renders every invoice through it.
+  # analytics-worker: events compaction/retention (no healthcheck — a
+  # running state is its healthy state).
   compose up -d --build --force-recreate \
     nginx api-server enterprise tracking sales-autopilot billing-service \
+    pdf-renderer analytics-worker \
     postgres redis clickhouse
 }
 
@@ -383,6 +390,21 @@ verify_stack() {
   wait_for_service_health tracking 120
   wait_for_service_health sales-autopilot 120
   wait_for_service_health billing-service 120
+  wait_for_service_health pdf-renderer 120
+  # analytics-worker has no healthcheck (cron loop): running == healthy.
+  _aw_cid="$(service_container analytics-worker)"
+  _aw_deadline=$((SECONDS + 90))
+  while (( SECONDS < _aw_deadline )); do
+    if [[ "$(docker inspect "$_aw_cid" --format '{{.State.Status}}' 2>/dev/null || true)" == "running" ]]; then
+      log "analytics-worker is running"
+      break
+    fi
+    sleep 3
+  done
+  if [[ "$(docker inspect "$_aw_cid" --format '{{.State.Status}}' 2>/dev/null || true)" != "running" ]]; then
+    docker logs "$_aw_cid" --tail 80 >&2 || true
+    error "analytics-worker failed to reach running state"
+  fi
   wait_for_service_health nginx 120
 
   wait_for_curl_contains "nginx health" 'OK' 30 -fsS http://127.0.0.1/nginx-health >/dev/null

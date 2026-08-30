@@ -24,6 +24,38 @@ use worker_processors::{
     AnalyticsProcessor, EmailProcessor, ReplyHandler, WebhookProcessor,
 };
 
+
+/// Supervise a processor: restart it with capped exponential backoff whenever
+/// `start()` returns an error. A transient failure at startup (transport
+/// down, DB/Redis hiccup) previously disabled the processor — and with it,
+/// email delivery — until the container was manually restarted. `Ok(())` is
+/// a clean shutdown (Ctrl+C path) and ends supervision.
+async fn supervise<F, Fut>(name: &'static str, mut start: F)
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = worker_processors::ProcessorResult<()>>,
+{
+    let mut backoff_secs: u64 = 5;
+    loop {
+        match start().await {
+            Ok(()) => {
+                info!(processor = name, "processor shut down cleanly");
+                return;
+            }
+            Err(e) => {
+                error!(
+                    processor = name,
+                    error = %e,
+                    backoff_secs,
+                    "processor failed; restarting under supervision"
+                );
+                tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                backoff_secs = (backoff_secs * 2).min(60);
+            }
+        }
+    }
+}
+
 fn init_tracing() -> Option<TracingGuard> {
     if is_otlp_enabled() {
         let config = OtlpConfig {
@@ -149,9 +181,11 @@ async fn main() -> Result<()> {
         let processor = Arc::new(AnalyticsProcessor::new(db.clone(), redis.clone(), config));
         let p = Arc::clone(&processor);
         handles.push(tokio::spawn(async move {
-            if let Err(e) = p.start().await {
-                error!(error = %e, "Analytics processor failed");
-            }
+            supervise("analytics", move || {
+                let p = Arc::clone(&p);
+                async move { p.start().await }
+            })
+            .await;
         }));
         analytics_processor = Some(processor);
         info!("Analytics processor started");
@@ -246,9 +280,11 @@ async fn main() -> Result<()> {
                 let processor = Arc::new(processor);
                 let p = Arc::clone(&processor);
                 handles.push(tokio::spawn(async move {
-                    if let Err(e) = p.start().await {
-                        error!(error = %e, "Email processor failed");
-                    }
+                    supervise("email", move || {
+                        let p = Arc::clone(&p);
+                        async move { p.start().await }
+                    })
+                    .await;
                 }));
                 email_processor = Some(processor);
                 info!("Email processor started");
@@ -274,9 +310,11 @@ async fn main() -> Result<()> {
         let processor = Arc::new(ReplyHandler::new(db.clone(), config));
         let p = Arc::clone(&processor);
         handles.push(tokio::spawn(async move {
-            if let Err(e) = p.start().await {
-                error!(error = %e, "Reply handler failed");
-            }
+            supervise("reply-handler", move || {
+                let p = Arc::clone(&p);
+                async move { p.start().await }
+            })
+            .await;
         }));
         reply_processor = Some(processor);
         info!("Reply handler started");
@@ -299,9 +337,11 @@ async fn main() -> Result<()> {
                 let processor = Arc::new(processor);
                 let p = Arc::clone(&processor);
                 handles.push(tokio::spawn(async move {
-                    if let Err(e) = p.start().await {
-                        error!(error = %e, "Webhook processor failed");
-                    }
+                    supervise("webhook", move || {
+                        let p = Arc::clone(&p);
+                        async move { p.start().await }
+                    })
+                    .await;
                 }));
                 webhook_processor = Some(processor);
                 info!("Webhook processor started");

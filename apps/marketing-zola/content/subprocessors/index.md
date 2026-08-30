@@ -17,9 +17,9 @@ The following third-party entities process customer personal data on behalf of A
 
 | Legal Entity | Brand | Service | Purpose | Data Categories | Processing Country | Storage Country | Corporate Country | Transfer Mechanism | Required |
 |---|---|---|---|---|---|---|---|---|---|---|
-| Hetzner Online GmbH | Hetzner | Cloud hosting | Compute, storage, networking | Core service data in the default shared deployment | Configured EU/EEA region | Configured EU/EEA region | Germany | Confirm the active deployment and applicable transfer safeguard | Yes |
-| Amazon Web Services, Inc. | AWS S3 | Telemetry object storage when enabled | Loki logs and Tempo traces may contain operational metadata | Configured S3 region (default: `eu-central-1`) | Configured S3 region (default: `eu-central-1`) | USA | Confirm the active deployment and applicable transfer safeguard | No — only when the active deployment uses S3 storage |
-| Amazon Web Services, Inc. | AWS SES | Email-delivery transport when enabled | Email content and recipient addresses | Configured SES region | Configured SES region | USA | Confirm the active deployment and applicable transfer safeguard | No — only when the active deployment uses SES |
+| Hetzner Online GmbH | Hetzner | Cloud hosting | Compute, storage, networking | Core service data in the default shared deployment | Configured EU/EEA region | Configured EU/EEA region | Germany | Intra-EEA processing; GDPR Chapter V transfer rules do not apply | Yes |
+| Amazon Web Services, Inc. | AWS S3 | Telemetry object storage when enabled | Loki logs and Tempo traces may contain operational metadata | Configured S3 region (default: `eu-central-1`) | Configured S3 region (default: `eu-central-1`) | USA | EU Standard Contractual Clauses (AWS DPA) | No — only when the active deployment uses S3 storage |
+| Amazon Web Services, Inc. | AWS SES | Email-delivery transport when enabled | Email content and recipient addresses | Configured SES region | Configured SES region | USA | EU Standard Contractual Clauses (AWS DPA) | No — only when the active deployment uses SES |
 | Google LLC | Google | OAuth authentication | User sign-in via Google OAuth | OAuth tokens, email address, name | Global (EU data) | EU/EEA-based users: EEA | USA | Standard Contractual Clauses (SCCs) | No — only if customer enables Google OAuth |
 | GitHub, Inc. | GitHub | OAuth authentication | User sign-in via GitHub OAuth | OAuth tokens, username, email address | Global (EU data) | EU/EEA-based users: EEA | USA | Standard Contractual Clauses (SCCs) | No — only if customer enables GitHub OAuth |
 | Stripe, Inc. | Stripe | Payment processing | Subscription billing, invoicing, payment method storage | Payment method tokens, transaction metadata, invoice data | USA (primary); India (support) | USA | USA | Standard Contractual Clauses (SCCs) per Stripe Data Processing Agreement | Yes — required for paid plans |
@@ -45,5 +45,4 @@ If you object to a new subprocessor on reasonable data protection grounds, conta
 
 | Date | Change | Description |
 |---|---|---|---|
-| 2026-07-29 | Initial publication | Subprocessor register published |
-| 2026-07-29 | Added subprocessors | Google (OAuth), GitHub (OAuth), Stripe (payments), ClickHouse (analytics) added |
+| 2026-07-29 | Initial publication | Subprocessor register published with Hetzner (infrastructure), AWS (S3/SES, when enabled), Google (OAuth), GitHub (OAuth) and Stripe (payments). ClickHouse and Redis are self-hosted software, not subprocessors (see above). |

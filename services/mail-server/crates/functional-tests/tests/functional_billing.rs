@@ -81,45 +81,45 @@ fn overage_above_limit() {
 #[test]
 fn vat_estonian_customer_24_percent() {
     let (rate, amt) = calculate_vat(10_000, "EE", None);
-    assert_eq!(rate, 24);
+    assert_eq!(rate, 24.0);
     assert_eq!(amt, 2400);
 }
 
 #[test]
 fn vat_eu_b2b_with_vat_number_reverse_charge() {
     let (rate, amt) = calculate_vat(10_000, "DE", Some("DE123456789"));
-    assert_eq!(rate, 0);
+    assert_eq!(rate, 0.0);
     assert_eq!(amt, 0);
 }
 
 #[test]
 fn vat_eu_b2c_without_vat_number() {
     let (rate, amt) = calculate_vat(10_000, "FR", None);
-    assert_eq!(rate, 20, "EU B2C uses destination-country rate");
+    assert_eq!(rate, 20.0, "EU B2C uses destination-country rate");
     assert_eq!(amt, 2000);
 }
 
 #[test]
 fn vat_non_eu_is_zero() {
     let (rate, amt) = calculate_vat(10_000, "US", None);
-    assert_eq!(rate, 0);
+    assert_eq!(rate, 0.0);
     assert_eq!(amt, 0);
     let (rate2, amt2) = calculate_vat(10_000, "JP", None);
-    assert_eq!(rate2, 0);
+    assert_eq!(rate2, 0.0);
     assert_eq!(amt2, 0);
 }
 
 #[test]
 fn vat_negative_amount_returns_zero() {
     let (rate, amt) = calculate_vat(-1_000, "EE", None);
-    assert_eq!(rate, 0, "VAT rate should be 0 for negative amounts");
+    assert_eq!(rate, 0.0, "VAT rate should be 0 for negative amounts");
     assert_eq!(amt, 0, "VAT amount should be 0 for negative amounts");
 }
 
 #[test]
 fn vat_zero_amount_returns_zero() {
     let (rate, amt) = calculate_vat(0, "DE", None);
-    assert_eq!(rate, 0, "VAT rate should be 0 for zero amount");
+    assert_eq!(rate, 0.0, "VAT rate should be 0 for zero amount");
     assert_eq!(amt, 0, "VAT amount should be 0 for zero amount");
 }
 
@@ -128,7 +128,7 @@ fn vat_overflow_safe_maximum() {
     // Test with a very large amount that could overflow when computing 24 %
     let large = 10_000_000_000i64;
     let (rate, amt) = calculate_vat(large, "EE", None);
-    assert_eq!(rate, 24);
+    assert_eq!(rate, 24.0);
     // The calculated amount should be strictly positive and less than `large`
     assert!(
         amt > 0,

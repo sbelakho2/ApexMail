@@ -4,7 +4,7 @@ description = "Enterprise transactional email: a €30,000 annual contract with 
 template = "prose.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++
 
 ## ApexMail Enterprise
@@ -19,7 +19,7 @@ Enterprise is a contractual email-delivery offering for organizations that need 
 | Included email volume | 5,000,000 emails/month |
 | API calls | Unlimited |
 | Domains and team members | Unlimited |
-| Event retention | 365 days |
+| Event retention | 730 days |
 | Dedicated IPs | 10 included |
 | Access controls | SAML SSO and audit logs |
 | Support level | Dedicated |

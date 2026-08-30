@@ -28,10 +28,7 @@ pub struct BillingConfig {
     /// Internal API base URL used for dedicated IP provisioning.
     #[serde(default = "default_api_base_url")]
     pub api_base_url: String,
-    /// Estonia VAT rate (percent, 24 % effective since 1 July 2025).
-    #[serde(default = "default_vat_rate")]
-    pub estonia_vat_rate: u32,
-    /// Overage rate per email in cents ($0.40 / 1 000 = 0.04 cents).
+    /// Overage rate per email in millicents (€0.40 / 1 000 = 0.4 millicents).
     #[serde(default = "default_overage_rate_cents")]
     pub overage_rate_per_email_millicents: i64,
     /// Maximum allowed proration charge in cents.
@@ -57,9 +54,6 @@ fn default_metering_flush_interval_ms() -> u64 {
 fn default_api_base_url() -> String {
     std::env::var("API_BASE_URL").unwrap_or_else(|_| "http://localhost:3001".into())
 }
-fn default_vat_rate() -> u32 {
-    24
-}
 fn default_overage_rate_cents() -> i64 {
     40
 }
@@ -84,7 +78,6 @@ impl Default for BillingConfig {
             service_auth_token: String::new(),
             stripe_webhook_secret: String::new(),
             api_base_url: default_api_base_url(),
-            estonia_vat_rate: default_vat_rate(),
             overage_rate_per_email_millicents: default_overage_rate_cents(),
             max_proration_charge_cents: default_max_proration_charge_cents(),
             max_proration_credit_cents: default_max_proration_credit_cents(),
@@ -211,7 +204,6 @@ mod tests {
         let cfg = BillingConfig::default();
         assert_eq!(cfg.listen_addr, "0.0.0.0:4100");
         assert_eq!(cfg.metering_batch_size, 100);
-        assert_eq!(cfg.estonia_vat_rate, 24);
         assert_eq!(cfg.max_proration_charge_cents, 100_000);
         assert_eq!(cfg.max_proration_credit_cents, 50_000);
         assert_eq!(cfg.warn_proration_charge_cents, 25_000);

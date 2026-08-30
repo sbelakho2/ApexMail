@@ -17,6 +17,10 @@
 #     for api.apexmail.ee, track.apexmail.ee and app.apexmail.ee
 #   * job="blackbox-http-api-health" (fail_if_not_ssl) → same metric for the
 #     /health endpoints
+#   * job="blackbox-smtp" (smtp_starttls module) → same metric for the MTA
+#     ports 25/587/465 and IMAPS 993 — the mail certificate is loaded once
+#     at MTA startup and renewal requires a manual container restart, so
+#     expiry alerting on these ports matters MORE than on nginx.
 # Every remaining rule references one of those real series.
 # ==============================================================================
 
@@ -27,7 +31,7 @@ groups:
 
       - alert: EndpointCertificateExpiring
         expr: |
-          probe_ssl_earliest_cert_expiry{job=~"blackbox-https|blackbox-http-api-health"}
+          probe_ssl_earliest_cert_expiry{job=~"blackbox-https|blackbox-http-api-health|blackbox-smtp"}
           - time() < 604800  # 7 days
         for: 10m
         labels:
@@ -45,7 +49,7 @@ groups:
 
       - alert: EndpointCertificateExpiringCritical
         expr: |
-          probe_ssl_earliest_cert_expiry{job=~"blackbox-https|blackbox-http-api-health"}
+          probe_ssl_earliest_cert_expiry{job=~"blackbox-https|blackbox-http-api-health|blackbox-smtp"}
           - time() < 172800  # 48 hours
         for: 30m
         labels:
@@ -62,7 +66,7 @@ groups:
 
       - alert: EndpointCertificateExpired
         expr: |
-          probe_ssl_earliest_cert_expiry{job=~"blackbox-https|blackbox-http-api-health"}
+          probe_ssl_earliest_cert_expiry{job=~"blackbox-https|blackbox-http-api-health|blackbox-smtp"}
           - time() < 0
         for: 1m
         labels:

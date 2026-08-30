@@ -125,7 +125,7 @@ fn test_parallel_billing_threads() {
                     assert!(overage >= 0);
 
                     let (vat_rate, vat_amt) = calculate_vat(10_000, "EE", None);
-                    assert_eq!(vat_rate, 24);
+                    assert_eq!(vat_rate, 24.0);
                     assert!(vat_amt > 0);
                 }
             })

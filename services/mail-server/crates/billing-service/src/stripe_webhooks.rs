@@ -621,11 +621,15 @@ fn derive_invoice_totals(
 }
 
 /// Effective VAT rate (percent) implied by a subtotal + VAT amount pair.
-fn derive_invoice_vat_rate(subtotal: i64, vat_amount: i64) -> i32 {
+/// Returns one decimal of precision so fractional statutory rates (e.g.
+/// Finland's 25.5 %) survive; display code trims trailing zeros.
+fn derive_invoice_vat_rate(subtotal: i64, vat_amount: i64) -> f64 {
     if subtotal <= 0 || vat_amount <= 0 {
-        return 0;
+        return 0.0;
     }
-    i32::try_from((vat_amount * 100 + subtotal / 2) / subtotal).unwrap_or(0)
+    // rate × 10, rounded half-up, then scaled back to percent
+    let tenths = (vat_amount * 1000 + subtotal / 2) / subtotal;
+    tenths as f64 / 10.0
 }
 
 /// Normalize a Stripe currency code for the local `invoices.currency`
@@ -1299,6 +1303,48 @@ async fn insert_paid_invoice_from_stripe(
     let vat_rate = derive_invoice_vat_rate(subtotal, vat_total);
     let currency = normalize_stripe_currency(invoice.currency.as_deref());
 
+    // Mandatory invoice content: when Stripe's event carries line items,
+    // store them. Fall back to a single summary line so the stored invoice
+    // (and its PDF) never renders an empty items table.
+    let line_items_json = match &invoice.lines {
+        Some(lines) if !lines.data.is_empty() => {
+            let items: Vec<serde_json::Value> = lines
+                .data
+                .iter()
+                .map(|line| {
+                    let amount = line.amount.unwrap_or(subtotal);
+                    let vat_amount = billing_common::vat_rates::vat_amount_half_up(
+                        amount,
+                        if vat_rate > 0.0 { vat_rate } else { 0.0 },
+                    );
+                    let net = amount - vat_amount;
+                    let quantity = line.quantity.unwrap_or(1).max(1);
+                    serde_json::json!({
+                        "description": line.description.clone().unwrap_or_else(|| "Subscription".to_string()),
+                        "quantity": quantity,
+                        "unit_price": net / quantity,
+                        "amount": net,
+                        "vat_rate": vat_rate,
+                        "vat_amount": vat_amount,
+                    })
+                })
+                .collect();
+            serde_json::Value::Array(items)
+        }
+        _ => {
+            let vat_amount = vat_total;
+            let net = total - vat_amount;
+            serde_json::json!([{
+                "description": "Subscription",
+                "quantity": 1,
+                "unit_price": net,
+                "amount": net,
+                "vat_rate": vat_rate,
+                "vat_amount": vat_amount,
+            }])
+        }
+    };
+
     let issued_at = invoice
         .created
         .and_then(|secs| DateTime::<Utc>::from_timestamp(secs, 0))
@@ -1328,14 +1374,14 @@ async fn insert_paid_invoice_from_stripe(
         r#"
         INSERT INTO invoices (
             id, tenant_id, stripe_invoice_id, invoice_number, status,
-            currency, amount, subtotal, vat_total, total,
+            currency, amount, subtotal, vat_total, total, line_items,
             issued_at, due_at, paid_at, period_start, period_end,
             billing_country, vat_rate,
             created_at, updated_at
         ) VALUES (
             gen_random_uuid(), $1, $2,
             COALESCE($3, to_char(NOW(), 'YYYY') || '-' || LPAD(nextval('invoice_number_seq')::text, 6, '0')),
-            'paid', $4, $7, $5, $6, $7,
+            'paid', $4, $7, $5, $6, $7, $13,
             to_timestamp($8), to_timestamp($8), NOW(), to_timestamp($9), to_timestamp($10),
             $11, $12,
             NOW(), NOW()
@@ -1365,6 +1411,7 @@ async fn insert_paid_invoice_from_stripe(
     .bind(period_end.timestamp())
     .bind(billing_country)
     .bind(vat_rate)
+    .bind(line_items_json)
     .execute(&state.db)
     .await
     .map_err(|error| format!("Failed to insert paid Stripe invoice {}: {error}", invoice.id))?;
@@ -2217,6 +2264,31 @@ struct InvoiceEvent {
     subscription_details: Option<InvoiceSubscriptionDetails>,
     #[serde(default)]
     subscription: Option<ExpandableId>,
+    /// Line items from the invoice object. Present on invoice.paid events;
+    /// used so locally stored invoices (and their PDFs) carry mandatory
+    /// line-level detail instead of an empty items table.
+    #[serde(default)]
+    lines: Option<StripeInvoiceLines>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StripeInvoiceLines {
+    #[serde(default)]
+    data: Vec<StripeInvoiceLine>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StripeInvoiceLine {
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    quantity: Option<i64>,
+    /// Line amount including VAT, in cents.
+    #[serde(default)]
+    amount: Option<i64>,
+    /// Unit amount excluding VAT, in cents.
+    #[serde(default)]
+    unit_amount_excluding_tax: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -3016,10 +3088,10 @@ mod tests {
 
     #[test]
     fn derive_invoice_vat_rate_computes_effective_rate() {
-        assert_eq!(derive_invoice_vat_rate(10_000, 2_400), 24);
-        assert_eq!(derive_invoice_vat_rate(10_000, 1_900), 19);
-        assert_eq!(derive_invoice_vat_rate(10_000, 0), 0);
-        assert_eq!(derive_invoice_vat_rate(0, 500), 0);
+        assert_eq!(derive_invoice_vat_rate(10_000, 2_400), 24.0);
+        assert_eq!(derive_invoice_vat_rate(10_000, 1_900), 19.0);
+        assert_eq!(derive_invoice_vat_rate(10_000, 0), 0.0);
+        assert_eq!(derive_invoice_vat_rate(0, 500), 0.0);
     }
 
     #[test]

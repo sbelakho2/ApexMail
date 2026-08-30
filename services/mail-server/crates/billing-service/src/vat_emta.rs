@@ -449,10 +449,10 @@ impl EmtaClient {
         };
 
         // Extract rate buckets
-        let rate_24_taxable = Self::rate_sum(&kmd.rates, 24, None);
-        let rate_24_vat = Self::rate_vat_sum(&kmd.rates, 24, None);
-        let rate_0_reverse_charge = Self::rate_sum(&kmd.rates, 0, Some("reverse_charge"));
-        let rate_0_non_eu = Self::rate_sum(&kmd.rates, 0, Some("non_eu"));
+        let rate_24_taxable = Self::rate_sum(&kmd.rates, 24.0, None);
+        let rate_24_vat = Self::rate_vat_sum(&kmd.rates, 24.0, None);
+        let rate_0_reverse_charge = Self::rate_sum(&kmd.rates, 0.0, Some("reverse_charge"));
+        let rate_0_non_eu = Self::rate_sum(&kmd.rates, 0.0, Some("non_eu"));
 
         let total_taxable = kmd.total_taxable_cents;
         let total_vat = kmd.total_vat_cents;
@@ -624,7 +624,7 @@ impl EmtaClient {
     }
 
     /// Sum `taxable_amount_cents` for buckets matching a rate and optional reason.
-    fn rate_sum(rates: &[VatRateBucket], rate: i32, reason: Option<&str>) -> i64 {
+    fn rate_sum(rates: &[VatRateBucket], rate: f64, reason: Option<&str>) -> i64 {
         rates
             .iter()
             .filter(|b| {
@@ -639,7 +639,7 @@ impl EmtaClient {
     }
 
     /// Sum `vat_amount_cents` for buckets matching a rate and optional reason.
-    fn rate_vat_sum(rates: &[VatRateBucket], rate: i32, reason: Option<&str>) -> i64 {
+    fn rate_vat_sum(rates: &[VatRateBucket], rate: f64, reason: Option<&str>) -> i64 {
         rates
             .iter()
             .filter(|b| {
@@ -672,21 +672,21 @@ mod tests {
             total_vat_cents: 360_000,
             rates: vec![
                 VatRateBucket {
-                    rate: 24,
+                    rate: 24.0,
                     taxable_amount_cents: 1_200_000,
                     vat_amount_cents: 288_000,
                     reason: None,
                     invoice_count: 30,
                 },
                 VatRateBucket {
-                    rate: 0,
+                    rate: 0.0,
                     taxable_amount_cents: 200_000,
                     vat_amount_cents: 0,
                     reason: Some("reverse_charge".into()),
                     invoice_count: 8,
                 },
                 VatRateBucket {
-                    rate: 0,
+                    rate: 0.0,
                     taxable_amount_cents: 100_000,
                     vat_amount_cents: 0,
                     reason: Some("non_eu".into()),
@@ -990,25 +990,25 @@ mod tests {
     #[test]
     fn test_rate_sum_filters_correctly() {
         let rates = sample_kmd_result().rates;
-        assert_eq!(EmtaClient::rate_sum(&rates, 24, None), 1_200_000);
+        assert_eq!(EmtaClient::rate_sum(&rates, 24.0, None), 1_200_000);
         assert_eq!(
-            EmtaClient::rate_sum(&rates, 0, Some("reverse_charge")),
+            EmtaClient::rate_sum(&rates, 0.0, Some("reverse_charge")),
             200_000
         );
-        assert_eq!(EmtaClient::rate_sum(&rates, 0, Some("non_eu")), 100_000);
-        assert_eq!(EmtaClient::rate_sum(&rates, 0, None), 0); // no generic 0% bucket
-        assert_eq!(EmtaClient::rate_sum(&rates, 99, None), 0);
+        assert_eq!(EmtaClient::rate_sum(&rates, 0.0, Some("non_eu")), 100_000);
+        assert_eq!(EmtaClient::rate_sum(&rates, 0.0, None), 0); // no generic 0% bucket
+        assert_eq!(EmtaClient::rate_sum(&rates, 99.0, None), 0);
     }
 
     #[test]
     fn test_rate_vat_sum_filters_correctly() {
         let rates = sample_kmd_result().rates;
-        assert_eq!(EmtaClient::rate_vat_sum(&rates, 24, None), 288_000);
+        assert_eq!(EmtaClient::rate_vat_sum(&rates, 24.0, None), 288_000);
         assert_eq!(
-            EmtaClient::rate_vat_sum(&rates, 0, Some("reverse_charge")),
+            EmtaClient::rate_vat_sum(&rates, 0.0, Some("reverse_charge")),
             0
         );
-        assert_eq!(EmtaClient::rate_vat_sum(&rates, 0, Some("non_eu")), 0);
+        assert_eq!(EmtaClient::rate_vat_sum(&rates, 0.0, Some("non_eu")), 0);
     }
 
     #[test]

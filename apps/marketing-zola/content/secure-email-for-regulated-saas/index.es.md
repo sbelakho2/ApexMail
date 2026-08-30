@@ -4,7 +4,7 @@ template = "prose.html"
 description = "Email transaccional con flujos de trabajo orientados al RGPD, controles de acceso, capacidades de auditoría y un proceso de revisión de seguridad objetivo para equipos de SaaS regulado."
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++
 
 ## Entrega de email para una revisión de seguridad

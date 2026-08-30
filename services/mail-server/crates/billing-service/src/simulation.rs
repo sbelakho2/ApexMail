@@ -138,13 +138,13 @@ mod simulation {
 
     #[test]
     fn sim_vat_rates_all_eu_countries_have_rates() {
-        let expected: Vec<(&str, i32)> = vec![
-            ("AT", 20), ("BE", 21), ("BG", 20), ("HR", 25), ("CY", 19),
-            ("CZ", 21), ("DK", 25), ("EE", 24), ("FI", 26), ("FR", 20),
-            ("DE", 19), ("GR", 24), ("HU", 27), ("IE", 23), ("IT", 22),
-            ("LV", 21), ("LT", 21), ("LU", 17), ("MT", 18), ("NL", 21),
-            ("PL", 23), ("PT", 23), ("RO", 19), ("SK", 23), ("SI", 22),
-            ("ES", 21), ("SE", 25),
+        let expected: Vec<(&str, f64)> = vec![
+            ("AT", 20.0), ("BE", 21.0), ("BG", 20.0), ("HR", 25.0), ("CY", 19.0),
+            ("CZ", 21.0), ("DK", 25.0), ("EE", 24.0), ("FI", 25.5), ("FR", 20.0),
+            ("DE", 19.0), ("GR", 24.0), ("HU", 27.0), ("IE", 23.0), ("IT", 22.0),
+            ("LV", 21.0), ("LT", 21.0), ("LU", 17.0), ("MT", 18.0), ("NL", 21.0),
+            ("PL", 23.0), ("PT", 23.0), ("RO", 19.0), ("SK", 23.0), ("SI", 22.0),
+            ("ES", 21.0), ("SE", 25.0),
         ];
         for (code, rate) in expected {
             assert_eq!(vat_rates::get_eu_vat_rate(code), Some(rate), "VAT rate mismatch for {code}");

@@ -4,7 +4,7 @@ template = "prose.html"
 description = "Transactional email with GDPR-oriented workflows, access controls, audit capabilities, and a factual security-review process for regulated SaaS teams."
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++
 
 ## Email Delivery for a Security Review

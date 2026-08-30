@@ -27,7 +27,7 @@ verdict_points = ["Managed email infrastructure with API, events, and support in
 # "none" (the winner_badge macro renders them as a spanned em-dash).
 comparison_sections = [
   { title = "EEA DATA PROCESSING", rows = [
-    { feature = "Primary hosting region", apex = 'EU/EEA-oriented default configuration; confirm active deployment', comp = 'Multiple regions including EU (Ireland eu-west-1, Frankfurt eu-central-1, etc.)<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
+    { feature = "Primary hosting region", apex = 'EU data centres (Germany primary, Finland backup) — no US processing for core data', comp = 'Multiple regions including EU (Ireland eu-west-1, Frankfurt eu-central-1, etc.)<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
     { feature = "EEA data processing default", apex = 'EU/EEA-oriented default configuration; active locations are agreement-specific', comp = 'Available — must be explicitly configured; region selection required per sending domain<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
     { feature = "DPA availability", apex = 'Available under the applicable ApexMail agreement', comp = 'Available — AWS DPA (Artifact) with SCCs<sup><a href="#src-ses2">2</a></sup>', winner = "none" }
   ]},
@@ -39,7 +39,7 @@ comparison_sections = [
     { feature = "Inbound email", apex = 'Scale and Enterprise plans', comp = 'Yes — SES receipt rules with S3, Lambda, SNS, SQS actions<sup><a href="#src-ses5">5</a></sup>', winner = "none" }
   ]},
   { title = "DEPLOYMENT MODELS", rows = [
-    { feature = "Shared cloud", apex = 'Yes (all plans) — managed multi-tenant on Hetzner', comp = 'Yes (all accounts) — shared IP pool by default<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "Shared cloud", apex = 'Yes (all plans) — managed multi-tenant, EU-hosted', comp = 'Yes (all accounts) — shared IP pool by default<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "Dedicated IP", apex = 'Approved add-on on Pro; 1 included on Growth, 3 on Scale', comp = 'Yes — €22.95 (US$24.95)/mo per dedicated IP; IP pool management available<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "Dedicated tenancy", apex = 'Subject to architecture and contract review', comp = 'Self-managed — customer architects dedicated tenancy on AWS using SES as a service component<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "BYOC / private deployment", apex = 'Subject to architecture and contract review', comp = 'Inherent — customer runs on own AWS account; SES is an AWS service<sup><a href="#src-ses6">6</a></sup>', winner = "none" }

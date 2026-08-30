@@ -308,7 +308,7 @@ ApexMail OU hereby notifies the following personal data breach:
    {numbers}
 
 4. Contact for further information:
-   dpo@apexmail.ee
+   privacy@apexmail.ee
 
 5. Likely consequences:
    {description}

@@ -4,5 +4,5 @@ description = "Découvrez des cas d'usage ApexMail documentés par l'implémenta
 template = "case-studies.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

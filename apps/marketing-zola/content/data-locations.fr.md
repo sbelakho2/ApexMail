@@ -15,26 +15,26 @@ Les entrées Dedicated Tenant et BYOC ci-dessous décrivent un modèle uniquemen
 
 | # | Catégorie de données | Emplacement principal par défaut | Sauvegarde / Réplica par défaut | Région de traitement par défaut | Garantie de transfert |
 |---|---|---|---|---|---|
-| 1 | Données de compte (nom, email, entreprise, adresse) | Hetzner, Allemagne (Falkenstein/Nuremberg) | Hetzner, Finlande (Tuusula) | EEE par défaut | Confirmer le déploiement actif |
-| 2 | Clés API (hachées) | Hetzner, Allemagne (Falkenstein/Nuremberg) | Hetzner, Finlande (Tuusula) | EEE par défaut | Confirmer le déploiement actif |
-| 3 | Adresses d'expéditeur et de destinataire | Hetzner, Allemagne (Falkenstein/Nuremberg) | Hetzner, Finlande (Tuusula) | EEE par défaut | Confirmer le déploiement actif |
-| 4 | Contenu des messages (objet, corps, en-têtes) | Hetzner, Allemagne (Falkenstein/Nuremberg) | Hetzner, Finlande (Tuusula) | EEE par défaut | Confirmer le déploiement actif |
-| 5 | Pièces jointes | Hetzner, Allemagne (Falkenstein/Nuremberg) | Hetzner, Finlande (Tuusula) | EEE par défaut | Confirmer le déploiement actif |
-| 6 | Événements et journaux (livraison, ouverture, clic, rebond) | Hetzner, Allemagne (Falkenstein/Nuremberg) | Hetzner, Finlande (Tuusula) | EEE par défaut | Confirmer le déploiement actif |
-| 7 | Authentification (jetons OAuth, secrets MFA) | Hetzner, Allemagne (Falkenstein/Nuremberg) ; Google LLC / GitHub, Inc. (OAuth) | Géré par le fournisseur | EEE (principal) ; États-Unis pour les fournisseurs OAuth | CCT (fournisseurs OAuth) |
-| 8 | Facturation (factures, transactions, jetons de paiement) | Hetzner, Allemagne ; Stripe, Inc. (États-Unis) | Géré par le fournisseur (Inde pour le support Stripe) | EEE (ApexMail) ; États-Unis/Inde (Stripe) | CCT (Stripe) |
-| 9 | Tickets de support | Hetzner, Allemagne (Falkenstein/Nuremberg) | Hetzner, Finlande (Tuusula) | EEE par défaut | Confirmer le déploiement actif |
-| 10 | Analytique (métriques de livraison agrégées, engagement) | Hetzner, Allemagne (Falkenstein/Nuremberg) | Hetzner, Finlande (Tuusula) | EEE par défaut | Confirmer le déploiement actif |
-| 11 | Journaux de sécurité (pistes d'audit, journaux d'accès) | Hetzner, Allemagne (Falkenstein/Nuremberg) | Hetzner, Finlande (Tuusula) | EEE par défaut | Confirmer le déploiement actif |
-| 12 | Sauvegardes (base de données, instantanés de stockage de fichiers) | Hetzner, Finlande (Tuusula) | Hetzner, Allemagne (Nuremberg, stockage froid) | EEE par défaut | Confirmer le déploiement actif |
+| 1 | Données de compte (nom, email, entreprise, adresse) | Centre de données UE — Allemagne | Centre de données UE — Finlande | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| 2 | Clés API (hachées) | Centre de données UE — Allemagne | Centre de données UE — Finlande | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| 3 | Adresses d'expéditeur et de destinataire | Centre de données UE — Allemagne | Centre de données UE — Finlande | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| 4 | Contenu des messages (objet, corps, en-têtes) | Centre de données UE — Allemagne | Centre de données UE — Finlande | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| 5 | Pièces jointes | Centre de données UE — Allemagne | Centre de données UE — Finlande | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| 6 | Événements et journaux (livraison, ouverture, clic, rebond) | Centre de données UE — Allemagne | Centre de données UE — Finlande | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| 7 | Authentification (jetons OAuth, secrets MFA) | Centre de données UE — Allemagne ; Google LLC / GitHub, Inc. (OAuth) | Géré par le fournisseur | EEE (principal) ; États-Unis pour les fournisseurs OAuth | CCT (fournisseurs OAuth) |
+| 8 | Facturation (factures, transactions, jetons de paiement) | Centre de données UE — Allemagne ; Stripe, Inc. (États-Unis) | Géré par le fournisseur (Inde pour le support Stripe) | EEE (ApexMail) ; États-Unis/Inde (Stripe) | CCT (Stripe) |
+| 9 | Tickets de support | Centre de données UE — Allemagne | Centre de données UE — Finlande | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| 10 | Analytique (métriques de livraison agrégées, engagement) | Centre de données UE — Allemagne | Centre de données UE — Finlande | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| 11 | Journaux de sécurité (pistes d'audit, journaux d'accès) | Centre de données UE — Allemagne | Centre de données UE — Finlande | EEE (aucun transfert vers un pays tiers) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| 12 | Sauvegardes (base de données, instantanés de stockage de fichiers) | Centre de données UE — Finlande | Centre de données UE — Allemagne (Nuremberg, stockage froid) | EEE par défaut | Traitement intra-EEE |
 
 ## Emplacements des sous-traitants
 
 | Sous-traitant | Finalité | Emplacement | Garantie de transfert |
 |---|---|---|---|
-| Hetzner Online GmbH | Infrastructure principale (calcul, stockage, réseau) | Région EEE configurée | Confirmer le déploiement actif et la garantie de transfert |
-| Amazon Web Services, Inc. (AWS S3) | Stockage d'objets de télémétrie lorsqu'il est activé | Région S3 configurée (par défaut : `eu-central-1`) | Confirmer le déploiement actif et la garantie de transfert applicable |
-| Amazon Web Services, Inc. (AWS SES) | Transport de livraison d'email lorsqu'il est activé | Région SES configurée | Confirmer le déploiement actif et la garantie de transfert applicable |
+| Hetzner Online GmbH | Infrastructure principale (calcul, stockage, réseau) | Allemagne et Finlande (UE) | Traitement intra-EEE ; les règles de transfert du chapitre V du RGPD ne s'appliquent pas |
+| Amazon Web Services, Inc. (AWS S3) | Stockage d'objets de télémétrie lorsqu'il est activé | Région S3 configurée (par défaut : `eu-central-1`) | Traitement intra-EEE et la garantie de transfert applicable |
+| Amazon Web Services, Inc. (AWS SES) | Transport de livraison d'email lorsqu'il est activé | Région SES configurée | Traitement intra-EEE et la garantie de transfert applicable |
 | Stripe, Inc. | Traitement des paiements | États-Unis (principal), Inde (support) | Clauses contractuelles types de l'UE |
 | Google LLC | Authentification OAuth optionnelle | États-Unis | Clauses contractuelles types de l'UE |
 | GitHub, Inc. | Authentification OAuth optionnelle | États-Unis | Clauses contractuelles types de l'UE |

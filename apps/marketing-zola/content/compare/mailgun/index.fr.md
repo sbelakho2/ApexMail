@@ -26,7 +26,7 @@ verdict_points = ["Configuration de déploiement orientée UE/EEE", "Catalogue p
 # of: apexmail | competitor | tie | none.
 comparison_sections = [
   { title = "TRAITEMENT DES DONNÉES DANS L’EEE", rows = [
-    { feature = "Région d’hébergement principale", apex = 'Configuration par défaut orientée UE/EEE ; confirmer le déploiement actif', comp = 'États-Unis (région UE disponible sur les forfaits Foundation 50K+ et supérieurs)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
+    { feature = "Région d’hébergement principale", apex = 'Centres de données UE (Allemagne en primaire, Finlande en sauvegarde) — aucun traitement aux États-Unis pour les données principales', comp = 'États-Unis (région UE disponible sur les forfaits Foundation 50K+ et supérieurs)<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
     { feature = "Traitement des données dans l’EEE par défaut", apex = 'Configuration par défaut orientée UE/EEE ; les lieux actifs sont propres à chaque accord', comp = 'Non — basé aux États-Unis par défaut ; région UE configurée par domaine d’envoi<sup><a href="#src-mg1">1</a></sup>', winner = "none" },
     { feature = "Disponibilité de la DPA", apex = 'Disponible dans le cadre de l’accord ApexMail applicable', comp = 'Disponible — la DPA de Sinch couvre les services Mailgun<sup><a href="#src-mg2">2</a></sup>', winner = "none" }
   ]},
@@ -39,7 +39,7 @@ comparison_sections = [
     { feature = "Email entrant", apex = 'Forfaits Scale et Enterprise', comp = 'Oui — routes entrantes avec transfert, stockage et actions webhook<sup><a href="#src-mg4">4</a></sup>', winner = "none" }
   ]},
   { title = "MODÈLES DE DÉPLOIEMENT", rows = [
-    { feature = "Cloud mutualisé", apex = 'Oui (tous les forfaits) — multi-tenant sur Hetzner', comp = 'Oui (tous les forfaits)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
+    { feature = "Cloud mutualisé", apex = 'Oui (tous les forfaits) — multi-tenant, hébergé dans l’UE', comp = 'Oui (tous les forfaits)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "IP dédiée", apex = 'Option additionnelle approuvée sur Pro ; 1 incluse sur Growth, 3 sur Scale', comp = 'Disponible en option additionnelle sur le forfait Foundation et au-delà<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "Tenance dédiée", apex = 'Soumis à revue d’architecture et de contrat', comp = 'Voir la documentation du fournisseur<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
     { feature = "BYOC / déploiement privé", apex = 'Soumis à revue d’architecture et de contrat', comp = 'Voir la documentation du fournisseur<sup><a href="#src-mg5">5</a></sup>', winner = "none" }

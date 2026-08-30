@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use mail_parser::{ContentType, HeaderName, HeaderValue};
 use dashmap::DashMap;
 use sqlx::PgPool;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufStream};
@@ -381,15 +382,30 @@ impl SubmissionServer {
             let verb = verb_owned.as_str();
 
             if verb == "EHLO" || verb == "HELO" {
-                helo_seen = true;
                 // E-3:validate the EHLO argument before echoing it back —
                 // an unvalidated argument used to be reflected verbatim into
-                // the greeting (CRLF/control payloads included).
-                let host = trimmed
+                // the greeting (CRLF/control payloads included). An invalid
+                // or missing argument is rejected with 501 5.5.4, matching
+                // the inbound server (RFC 5321 §4.1.1.1) instead of being
+                // silently accepted as "unknown".
+                let host = match trimmed
                     .split_whitespace()
                     .nth(1)
                     .filter(|host| super::inbound::is_valid_helo_hostname(host))
-                    .unwrap_or("unknown");
+                {
+                    Some(host) => host,
+                    None => {
+                        log_smtp_reject(
+                            "submission",
+                            ip,
+                            &session_id,
+                            "501 5.5.4 Invalid HELO/EHLO hostname",
+                        );
+                        reply!("501 5.5.4 Invalid HELO/EHLO hostname\r\n");
+                        continue;
+                    }
+                };
+                helo_seen = true;
                 helo_hostname = host.to_string();
                 // F-04: EHLO/HELO resets any transaction in progress
                 // (RFC 5321 §4.1.4).
@@ -1225,9 +1241,10 @@ impl SubmissionServer {
         sqlx::query(
             r#"INSERT INTO email_queue (
                 id, from_address, to_addresses, subject, raw_headers, text_body,
-                "from", "to", html, text, status, priority, tenant_id, message_id,
+                "from", "to", html, text, headers, attachments,
+                status, priority, tenant_id, message_id,
                 domain_id, metadata, created_at, updated_at
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending', 5,
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $15, $16, 'pending', 5,
                       $11, $12, $13, $14, NOW(), NOW())"#,
         )
         .bind(message_uuid)
@@ -1244,6 +1261,8 @@ impl SubmissionServer {
         .bind(message_uuid)
         .bind(domain_id)
         .bind(Option::<serde_json::Value>::None)
+        .bind(&payload.custom_headers)
+        .bind(&payload.attachments)
         .execute(&mut *tx)
         .await
         .map_err(|_| ())?;
@@ -1364,6 +1383,128 @@ struct PreparedQueuePayload {
     subject: String,
     text_body: String,
     html_body: Option<String>,
+    /// Customer-supplied headers (Reply-To, List-Unsubscribe, X-*) for the
+    /// `headers` JSONB column. The delivery worker re-applies these when it
+    /// rebuilds the outgoing MIME; protected transport headers are excluded
+    /// (the worker filters them again on read).
+    custom_headers: serde_json::Value,
+    /// Attachments for the `attachments` JSONB column, in the worker's
+    /// contract shape: `[{filename, content: base64, contentType}]`.
+    /// Without this, submitted mail with attachments is delivered with the
+    /// attachments silently deleted.
+    attachments: serde_json::Value,
+}
+
+/// Headers the queue must never carry as "custom": they are either rebuilt
+/// by the delivery worker or belong to the transport layer. Mirrors the
+/// worker's PROTECTED_HEADERS list (worker-processors/email/processor.rs).
+const QUEUE_PROTECTED_HEADERS: &[&str] = &[
+    "from",
+    "to",
+    "cc",
+    "bcc",
+    "subject",
+    "date",
+    "message-id",
+    "dkim-signature",
+    "arc-seal",
+    "arc-message-signature",
+    "arc-authentication-results",
+    "return-path",
+    "received",
+    "received-spf",
+    "authentication-results",
+    "x-apexmail-message-id",
+    "x-apexmail-tenant-id",
+    "x-apexmail-campaign-id",
+    "x-originating-ip",
+    "x-mailer",
+    "mime-version",
+    "content-type",
+    "content-transfer-encoding",
+];
+
+/// Fold RFC 5322 continuation lines and collect non-protected headers as a
+/// JSON object keyed by lowercased name. Operates on the decoded header
+/// block text so folded values (long List-Unsubscribe URLs) survive intact.
+fn extract_custom_headers(headers: &str) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    let mut current: Option<(String, String)> = None;
+
+    fn flush(
+        current: &mut Option<(String, String)>,
+        map: &mut serde_json::Map<String, serde_json::Value>,
+    ) {
+        if let Some((name, value)) = current.take() {
+            let key = name.trim().to_ascii_lowercase();
+            if !key.is_empty() && !QUEUE_PROTECTED_HEADERS.contains(&key.as_str()) {
+                map.insert(key, serde_json::Value::String(value.trim().to_string()));
+            }
+        }
+    }
+
+    for line in headers.lines() {
+        if line.starts_with(' ') || line.starts_with('\t') {
+            if let Some((_, value)) = current.as_mut() {
+                value.push(' ');
+                value.push_str(line.trim());
+            }
+            continue;
+        }
+        flush(&mut current, &mut map);
+        if let Some((name, value)) = line.split_once(':') {
+            current = Some((name.trim().to_string(), value.trim().to_string()));
+        }
+    }
+    flush(&mut current, &mut map);
+
+    serde_json::Value::Object(map)
+}
+
+/// Extract attachments from the parsed MIME in the worker's JSONB contract
+/// shape (`filename`, base64 `content`, `contentType`).
+fn extract_attachments(message: &mail_parser::Message<'_>) -> serde_json::Value {
+    use base64::Engine as _;
+
+    let mut items = Vec::new();
+    for (index, part) in message.attachments().enumerate() {
+        let contents = part.contents();
+        if contents.is_empty() {
+            continue;
+        }
+        let part_headers = part.headers();
+        let header_ct = |name: &HeaderName<'_>| -> Option<&ContentType<'_>> {
+            part_headers
+                .iter()
+                .rev()
+                .find(|h| &h.name == name)
+                .and_then(|h| match &h.value {
+                    HeaderValue::ContentType(ct) => Some(ct),
+                    _ => None,
+                })
+        };
+        // Filename: Content-Disposition filename attribute, else the
+        // Content-Type name attribute (mirrors GetHeader::attachment_name).
+        let filename = header_ct(&HeaderName::ContentDisposition)
+            .and_then(|cd| cd.attribute("filename"))
+            .or_else(|| header_ct(&HeaderName::ContentType).and_then(|ct| ct.attribute("name")))
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| format!("attachment-{}", index + 1));
+
+        let content_type = header_ct(&HeaderName::ContentType)
+            .map(|ct| match &ct.c_subtype {
+                Some(subtype) => format!("{}/{}", ct.c_type, subtype),
+                None => ct.c_type.to_string(),
+            })
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+
+        items.push(serde_json::json!({
+            "filename": filename,
+            "content": base64::engine::general_purpose::STANDARD.encode(contents),
+            "contentType": content_type,
+        }));
+    }
+    serde_json::Value::Array(items)
 }
 
 /// Split and MIME-parse the RAW message bytes.
@@ -1408,11 +1549,19 @@ fn prepare_queue_payload(data: &[u8]) -> PreparedQueuePayload {
         truncate_subject_chars(&subject, MAX_SUBJECT_CHARS)
     };
 
+    let custom_headers = extract_custom_headers(&headers);
+    let attachments = parsed
+        .as_ref()
+        .map(extract_attachments)
+        .unwrap_or(serde_json::Value::Array(Vec::new()));
+
     PreparedQueuePayload {
         headers,
         subject,
         text_body,
         html_body,
+        custom_headers,
+        attachments,
     }
 }
 
@@ -2217,8 +2366,8 @@ mod tests {
         client_buf.flush().await.unwrap();
         let resp = read_smtp_response(&mut client_buf).await;
         assert!(
-            resp.contains("unknown") && !resp.contains("bad\x01host"),
-            "invalid EHLO arg must be replaced with 'unknown': {resp:?}"
+            resp.starts_with("501 5.5.4") && !resp.contains("bad\x01host"),
+            "invalid EHLO arg must be rejected with 501 5.5.4, not echoed: {resp:?}"
         );
         // A valid hostname is still echoed.
         client_buf
@@ -2557,6 +2706,62 @@ mod tests {
         );
         assert!(payload.text_body.contains("caf\u{e9} na\u{ef}ve"));
         assert!(payload.subject.contains("caf\u{e9}"));
+    }
+
+    #[test]
+    fn prepare_queue_payload_extracts_attachments_and_custom_headers() {
+        // Attachments and custom headers (List-Unsubscribe, X-Custom, folded
+        // values) must reach the queue row — the worker rebuilds the outgoing
+        // MIME exclusively from `headers`/`attachments`; losing them silently
+        // deleted customer attachments on delivery.
+        use base64::Engine as _;
+        let png = base64::engine::general_purpose::STANDARD
+            .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==")
+            .unwrap();
+        let mut msg = Vec::new();
+        msg.extend_from_slice(b"From: a@b.com\r\n");
+        msg.extend_from_slice(b"To: c@d.com\r\n");
+        msg.extend_from_slice(b"Subject: with attachment\r\n");
+        msg.extend_from_slice(b"Message-ID: <m1@b.com>\r\n");
+        msg.extend_from_slice(b"List-Unsubscribe: <https://apexmail.ee/u/1>,\r\n\t<mailto:un@b.com>\r\n");
+        msg.extend_from_slice(b"X-Campaign: spring-launch\r\n");
+        msg.extend_from_slice(b"MIME-Version: 1.0\r\n");
+        msg.extend_from_slice(b"Content-Type: multipart/mixed; boundary=\"mix\"\r\n\r\n");
+        msg.extend_from_slice(b"--mix\r\n");
+        msg.extend_from_slice(b"Content-Type: text/plain; charset=utf-8\r\n\r\n");
+        msg.extend_from_slice(b"hello\r\n");
+        msg.extend_from_slice(b"--mix\r\n");
+        msg.extend_from_slice(b"Content-Type: image/png; name=\"pixel.png\"\r\n");
+        msg.extend_from_slice(b"Content-Disposition: attachment; filename=\"pixel.png\"\r\n");
+        msg.extend_from_slice(b"Content-Transfer-Encoding: base64\r\n\r\n");
+        msg.extend_from_slice(b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==\r\n");
+        msg.extend_from_slice(b"--mix--\r\n");
+
+        let payload = prepare_queue_payload(&msg);
+
+        let headers = payload.custom_headers.as_object().expect("object");
+        assert_eq!(
+            headers.get("list-unsubscribe").and_then(|v| v.as_str()),
+            Some("<https://apexmail.ee/u/1>, <mailto:un@b.com>"),
+            "folded header must be unfolded and preserved"
+        );
+        assert_eq!(
+            headers.get("x-campaign").and_then(|v| v.as_str()),
+            Some("spring-launch")
+        );
+        for protected in ["from", "to", "subject", "message-id", "mime-version", "content-type"] {
+            assert!(!headers.contains_key(protected), "{protected} must not be a custom header");
+        }
+
+        let attachments = payload.attachments.as_array().expect("array");
+        assert_eq!(attachments.len(), 1, "one attachment: {attachments:?}");
+        let att = &attachments[0];
+        assert_eq!(att["filename"], "pixel.png");
+        assert_eq!(att["contentType"], "image/png");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(att["content"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(decoded, png, "attachment bytes must round-trip exactly");
     }
 
     // ── queue-insert durability (item h) ───────────────────────────────────

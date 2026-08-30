@@ -28,7 +28,7 @@ This SLA applies to Customers on the following plans:
 | REST API | 99.9% |
 | SMTP Relay | 99.9% |
 | Dashboard | 99.9% |
-| Webhook Delivery | 99.9% |
+| Webhook Delivery | Best-effort (excluded from SLA credits; retried for up to 72 hours) |
 
 ### 2.2 Enterprise Plan
 
@@ -37,7 +37,7 @@ This SLA applies to Customers on the following plans:
 | REST API | 99.9% |
 | SMTP Relay | 99.9% |
 | Dashboard | 99.9% |
-| Webhook Delivery | 99.9% |
+| Webhook Delivery | Best-effort (excluded from SLA credits; retried for up to 72 hours) |
 | Inbound Processing | 99.9% |
 | Event Streaming | 99.9% |
 | Enhanced support response | Per Enterprise agreement |

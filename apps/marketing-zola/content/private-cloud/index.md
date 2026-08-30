@@ -4,5 +4,5 @@ description = "Review single-tenant and dedicated ApexMail deployment options fo
 template = "private-cloud.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

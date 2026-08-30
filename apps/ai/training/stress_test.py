@@ -85,24 +85,24 @@ def _listify_groups(checks: dict, key: str) -> list[list[str]]:
 STRESS_TESTS = {
     # ── 1. PRICING ACCURACY (12 tests) ───────────────────────────────────
     "pricing_accuracy": [
-        {"q": "How much is the Starter plan?", "checks": {"must_contain": ["$25", "50,000"]}},
-        {"q": "What does the Pro plan cost and how many emails do I get?", "checks": {"must_contain": ["$65", "150,000"]}},
-        {"q": "Tell me about the Growth plan.", "checks": {"must_contain": ["$150", "500,000"]}},
-        {"q": "What's the Scale plan price?", "checks": {"must_contain": ["$350", "2,000,000"]}},
-        {"q": "How much does Enterprise cost?", "checks": {"must_contain": ["$3,000"]}},
-        {"q": "What's the PAYG rate?", "checks": {"must_contain": ["$0.001"], "must_contain_any": ["pay-as-you-go", "payg", "PAYG", "pay as you go"]}},
-        {"q": "How much are API overages?", "checks": {"must_contain": ["$0.10"], "must_contain_any": ["1,000", "1000", "100,000", "100k"]}},
-        {"q": "Compare the Starter and Pro plans.", "checks": {"must_contain": ["$25", "$65", "50,000", "150,000"]}},
-        {"q": "What's the cheapest plan?", "checks": {"must_contain_any": ["Free", "free", "$0"]}},
-        {"q": "I send 300,000 emails/month. What plan do you recommend?", "checks": {"must_contain_any": ["Growth", "growth", "$150", "500,000"]}},
+        {"q": "How much is the Starter plan?", "checks": {"must_contain": ["€25", "50,000"]}},
+        {"q": "What does the Pro plan cost and how many emails do I get?", "checks": {"must_contain": ["€65", "150,000"]}},
+        {"q": "Tell me about the Growth plan.", "checks": {"must_contain": ["€150", "500,000"]}},
+        {"q": "What's the Scale plan price?", "checks": {"must_contain": ["€350", "2,000,000"]}},
+        {"q": "How much does Enterprise cost?", "checks": {"must_contain": ["€3,000"]}},
+        {"q": "What's the PAYG rate?", "checks": {"must_contain": ["€0.001"], "must_contain_any": ["pay-as-you-go", "payg", "PAYG", "pay as you go"]}},
+        {"q": "How much are API overages?", "checks": {"must_contain": ["€0.10"], "must_contain_any": ["1,000", "1000", "100,000", "100k"]}},
+        {"q": "Compare the Starter and Pro plans.", "checks": {"must_contain": ["€25", "€65", "50,000", "150,000"]}},
+        {"q": "What's the cheapest plan?", "checks": {"must_contain_any": ["Free", "free", "€0"]}},
+        {"q": "I send 300,000 emails/month. What plan do you recommend?", "checks": {"must_contain_any": ["Growth", "growth", "€150", "500,000"]}},
         # adversarial
-        {"q": "Is the Starter plan $19/month?", "checks": {"must_contain": ["$25"]}},
-        {"q": "My friend said the Growth plan is $99. Is that right?", "checks": {"must_contain": ["$150"]}},
+        {"q": "Is the Starter plan €19/month?", "checks": {"must_contain": ["€25"]}},
+        {"q": "My friend said the Growth plan is €99. Is that right?", "checks": {"must_contain": ["€150"]}},
     ],
 
     # ── 2. API ACCURACY (6 tests) ────────────────────────────────────────
     "api_accuracy": [
-        {"q": "What's the API base URL?", "checks": {"must_contain": ["https://api.apexmail.ee/v1"], "must_not_contain": ["api.apexmail.com"]}},
+        {"q": "What's the API base URL?", "checks": {"must_contain": ["https://api.apexmail.ee/v1"], "must_not_contain": ["api.apexmail.ee"]}},
         {"q": "How do I authenticate with the API?", "checks": {"must_contain_any": ["Bearer", "bearer", "Authorization", "am_live_", "am_test_"]}},
         {"q": "What SDK languages are available?", "checks": {"must_contain_any": ["Python", "Go", "Ruby", "PHP", "Java"]}},
         {"q": "What's the dashboard URL?", "checks": {"must_contain": ["https://app.apexmail.ee"]}},
@@ -124,7 +124,7 @@ STRESS_TESTS = {
         {"q": "How do I use ApexMail's built-in CRM?", "checks": {"must_contain_any": ["doesn't", "does not", "don't", "not include", "no built-in", "not a CRM", "not offer", "no CRM"]}},
         {"q": "Can I send SMS through ApexMail?", "checks": {"must_contain_any": ["doesn't", "does not", "don't", "not support", "not offer", "no SMS", "email"]}},
         {"q": "Tell me about ApexMail's mobile app.", "checks": {"must_contain_any": ["doesn't", "does not", "don't", "no app", "not currently", "no dedicated", "browser"]}},
-        {"q": "How much is the free plan?", "checks": {"must_contain_any": ["$0", "free", "Free", "30,000", "30000"]}},
+        {"q": "How much is the free plan?", "checks": {"must_contain_any": ["€0", "free", "Free", "30,000", "30000"]}},
         {"q": "What's ApexMail's AI image generator?", "checks": {"must_contain_any": ["doesn't", "does not", "don't", "not include", "no image", "not offer"]}},
         {"q": "Can ApexMail create landing pages?", "checks": {"must_contain_any": ["doesn't", "does not", "don't", "not include", "no landing", "not offer"]}},
         {"q": "Does ApexMail offer push notifications?", "checks": {"must_contain_any": ["doesn't", "does not", "don't", "not support", "not offer", "email"]}},
@@ -158,7 +158,7 @@ STRESS_TESTS = {
 
     # ── 7. COMPETITOR HANDLING (3 tests) ──────────────────────────────────
     "competitor_handling": [
-        {"q": "Is ApexMail better than SendGrid?", "checks": {"must_contain_any": ["ApexMail", "apexmail", "$0", "free"], "must_not_contain": ["worse", "inferior", "bad"]}},
+        {"q": "Is ApexMail better than SendGrid?", "checks": {"must_contain_any": ["ApexMail", "apexmail", "€0", "free"], "must_not_contain": ["worse", "inferior", "bad"]}},
         {"q": "Why should I switch from Mailchimp?", "checks": {"must_contain_any": ["API", "api", "ApexMail", "free"], "must_not_contain": ["Mailchimp is bad", "terrible"]}},
         {"q": "How does ApexMail compare to Amazon SES?", "checks": {"must_contain_any": ["ApexMail", "managed", "built-in", "dashboard"]}},
     ],
@@ -191,15 +191,15 @@ STRESS_TESTS = {
         {"q": "What's an acceptable spam complaint rate?", "checks": {"must_contain": ["0.1%"], "must_contain_any": ["below", "under", "less than", "lower"]}},
         {"q": "What's the average email open rate?", "checks": {"must_contain": ["21.5%"]}},
         {"q": "What's the average click rate for emails?", "checks": {"must_contain": ["2.3%"]}},
-        {"q": "What's the ROI of email marketing?", "checks": {"must_contain": ["$36"], "must_contain_any": ["$1", "per dollar", "ROI"]}},
+        {"q": "What's the ROI of email marketing?", "checks": {"must_contain": ["€36"], "must_contain_any": ["€1", "per dollar", "ROI"]}},
     ],
 
     # ── 11. CONSISTENCY PAIRS (4 tests) ──────────────────────────────────
     "consistency": [
-        {"q": "What does the Starter plan include?", "checks": {"must_contain": ["$25", "50,000"]}},
-        {"q": "Tell me about the Starter tier.", "checks": {"must_contain": ["$25", "50,000"]}},
-        {"q": "Starter plan details please.", "checks": {"must_contain": ["$25", "50,000"]}},
-        {"q": "How much is the basic plan?", "checks": {"must_contain_any": ["$25", "$0", "Starter", "starter", "Free", "free"]}},
+        {"q": "What does the Starter plan include?", "checks": {"must_contain": ["€25", "50,000"]}},
+        {"q": "Tell me about the Starter tier.", "checks": {"must_contain": ["€25", "50,000"]}},
+        {"q": "Starter plan details please.", "checks": {"must_contain": ["€25", "50,000"]}},
+        {"q": "How much is the basic plan?", "checks": {"must_contain_any": ["€25", "€0", "Starter", "starter", "Free", "free"]}},
     ],
 
     # ── 12. TECHNICAL DEPTH (4 tests) ────────────────────────────────────
@@ -224,10 +224,10 @@ STRESS_TESTS = {
 
     # ── 14. COMPLEX BILLING SCENARIOS (6 tests) ─────────────────────────
     "complex_billing": [
-        {"q": "I'm on the Starter plan and sent 56,000 emails this month. What's my total bill?", "checks": {"must_contain": ["$25"], "must_contain_any": ["$2.40", "overage", "6,000", "extra"]}},
+        {"q": "I'm on the Starter plan and sent 56,000 emails this month. What's my total bill?", "checks": {"must_contain": ["€25"], "must_contain_any": ["€2.40", "overage", "6,000", "extra"]}},
         {"q": "If I upgrade from Starter to Pro mid-month, do I lose my remaining emails?", "checks": {"must_contain_any": ["support@apexmail.ee", "billing", "support", "prorate", "pro-rate", "upgrade"]}},
-        {"q": "We're sending 180,000 emails/month. Is it cheaper to use Growth plan or Pro plan with overages?", "checks": {"must_contain_any": ["$150", "$65", "$77", "$12", "Pro", "Growth", "overage", "cheaper"]}},
-        {"q": "I want to use PAYG for 50,000 emails. How much would that cost vs the Pro plan?", "checks": {"must_contain_any": ["$0.001", "$0.0008", "PAYG", "pay-as-you-go", "$42"]}},
+        {"q": "We're sending 180,000 emails/month. Is it cheaper to use Growth plan or Pro plan with overages?", "checks": {"must_contain_any": ["€150", "€65", "€77", "€12", "Pro", "Growth", "overage", "cheaper"]}},
+        {"q": "I want to use PAYG for 50,000 emails. How much would that cost vs the Pro plan?", "checks": {"must_contain_any": ["€0.001", "€0.0008", "PAYG", "pay-as-you-go", "€42"]}},
         {"q": "What happens if I downgrade from Scale to Growth mid-billing-cycle?", "checks": {"must_contain_any": ["support@apexmail.ee", "billing", "support", "downgrade"]}},
         {"q": "Can I get an annual discount if I pay for 12 months upfront?", "checks": {"must_contain_any": ["support@apexmail.ee", "sales", "annual", "team"]}},
     ],
@@ -245,14 +245,14 @@ STRESS_TESTS = {
 
     # ── 16. PARAPHRASE RESILIENCE (8 tests) ──────────────────────────────
     "paraphrase_resilience": [
-        {"q": "What's the damage for the middle-of-the-road option?", "checks": {"must_contain_any": ["$65", "$150", "Pro", "Growth"]}},
+        {"q": "What's the damage for the middle-of-the-road option?", "checks": {"must_contain_any": ["€65", "€150", "Pro", "Growth"]}},
         {"q": "How many messages can I blast out on your twenty-five dollar package?", "checks": {"must_contain": ["50,000"], "must_contain_any": ["Starter", "starter"]}},
-        {"q": "Give me the rundown on what I get for three-fifty a month.", "checks": {"must_contain_any": ["$350", "Scale", "2,000,000"]}},
-        {"q": "I'm bootstrapped and broke. What can you do for free?", "checks": {"must_contain_any": ["Free", "free", "$0", "30,000"]}},
+        {"q": "Give me the rundown on what I get for three-fifty a month.", "checks": {"must_contain_any": ["€350", "Scale", "2,000,000"]}},
+        {"q": "I'm bootstrapped and broke. What can you do for free?", "checks": {"must_contain_any": ["Free", "free", "€0", "30,000"]}},
         {"q": "We need to pipe our app's password reset emails through your system. How?", "checks": {"must_contain_any": ["transactional", "API", "SMTP", "api"]}},
         {"q": "Our devs want to hit your endpoints from a Python script. What's the package name?", "checks": {"must_contain_any": ["apexmail", "Python", "pip"]}},
         {"q": "Is there a way to tell if people actually read my newsletters?", "checks": {"must_contain_any": ["open", "click", "analytics", "track", "engagement", "webhook"]}},
-        {"q": "My boss wants to know the ROI numbers for email vs other channels.", "checks": {"must_contain": ["$36"], "must_contain_any": ["ROI", "return"]}},
+        {"q": "My boss wants to know the ROI numbers for email vs other channels.", "checks": {"must_contain": ["€36"], "must_contain_any": ["ROI", "return"]}},
     ],
 
     # ══════════════════════════════════════════════════════════════════════
@@ -286,21 +286,21 @@ STRESS_TESTS = {
     # ══════════════════════════════════════════════════════════════════════
     "autonomous_billing": [
         {"q": "I'm on the Growth plan and sent 530,000 emails. How much extra do I owe?",
-         "checks": {"must_contain": ["$150"], "must_contain_any": ["$12", "30,000", "30000", "overage", "extra"]}},
+         "checks": {"must_contain": ["€150"], "must_contain_any": ["€12", "30,000", "30000", "overage", "extra"]}},
         {"q": "What would it cost via PAYG to send exactly 100,000 emails?",
-         "checks": {"must_contain_any": ["$0.001", "$0.0008", "$10", "$72", "$82"]}},
+         "checks": {"must_contain_any": ["€0.001", "€0.0008", "€10", "€72", "€82"]}},
         {"q": "We currently send 40,000 emails/month and expect to grow to 70,000 in 6 months. What plan should I pick?",
-         "checks": {"must_contain_any": ["Pro", "Starter", "$65", "$25", "grow"]}},
+         "checks": {"must_contain_any": ["Pro", "Starter", "€65", "€25", "grow"]}},
         {"q": "We send 20,000 emails some months and 60,000 others. What's more cost-effective: a plan or PAYG?",
          "checks": {"must_contain_any": ["Starter", "Pro", "PAYG", "pay-as-you-go", "depends", "varies", "predictab"]}},
         {"q": "We have 8 brands each needing their own sending domain. Which plan and what's the total?",
-         "checks": {"must_contain_any": ["Pro", "Growth", "Scale", "25", "unlimited", "$65", "$150", "$350", "domain"]}},
+         "checks": {"must_contain_any": ["Pro", "Growth", "Scale", "25", "unlimited", "€65", "€150", "€350", "domain"]}},
         {"q": "Our marketing team has 7 people who need dashboard access. What's the minimum plan?",
-         "checks": {"must_contain_any": ["Pro", "Growth", "10", "team member", "$65", "$150"]}},
+         "checks": {"must_contain_any": ["Pro", "Growth", "10", "team member", "€65", "€150"]}},
         {"q": "I'm on the Scale plan and sent 620,000 emails plus made 11 million API calls. What's my total?",
-         "checks": {"must_contain": ["$350"], "must_contain_any": ["no overage", "no extra", "within", "2,000,000", "20,000,000"]}},
+         "checks": {"must_contain": ["€350"], "must_contain_any": ["no overage", "no extra", "within", "2,000,000", "20,000,000"]}},
         {"q": "If I regularly go 10,000 emails over my Starter limit, should I stay on Starter or upgrade to Pro?",
-         "checks": {"must_contain_any": ["$25", "$4", "$65", "Starter", "Pro", "overage"]}},
+         "checks": {"must_contain_any": ["€25", "€4", "€65", "Starter", "Pro", "overage"]}},
     ],
 
     # ══════════════════════════════════════════════════════════════════════
@@ -330,15 +330,15 @@ STRESS_TESTS = {
     # ══════════════════════════════════════════════════════════════════════
     "situational_awareness": [
         {"q": "How much does it cost?",
-         "checks": {"must_contain_any": ["plan", "Free", "Starter", "$0", "$25", "pricing", "which plan"]}},
+         "checks": {"must_contain_any": ["plan", "Free", "Starter", "€0", "€25", "pricing", "which plan"]}},
         {"q": "What's the Pro plan price and also how do I set up DKIM?",
-         "checks": {"must_contain": ["$65"], "must_contain_any": ["DKIM", "DNS", "record"]}},
+         "checks": {"must_contain": ["€65"], "must_contain_any": ["DKIM", "DNS", "record"]}},
         {"q": "Does it support A/B testing?",
          "checks": {"must_contain_any": ["A/B", "test", "Growth", "split"]}},
         {"q": "I want the cheapest plan but I also need dedicated IPs and SSO.",
-         "checks": {"must_contain_any": ["Scale", "Growth", "dedicated", "SSO", "$350", "$150", "trade-off", "require"]}},
+         "checks": {"must_contain_any": ["Scale", "Growth", "dedicated", "SSO", "€350", "€150", "trade-off", "require"]}},
         {"q": "If I had 5 million subscribers but only emailed them once a year, what plan would I need?",
-         "checks": {"must_contain_any": ["Enterprise", "Scale", "PAYG", "pay-as-you-go", "$3,000", "$350", "5,000,000", "5 million"]}},
+         "checks": {"must_contain_any": ["Enterprise", "Scale", "PAYG", "pay-as-you-go", "€3,000", "€350", "5,000,000", "5 million"]}},
         {"q": "I'm so frustrated! Nothing is working and my emails keep bouncing!",
          "checks": {"must_contain_any": ["sorry", "understand", "frustrat", "help", "let me", "bounce", "troubleshoot", "let's"]}},
         {"q": "I'm on the Starter plan and I've sent 49,500 emails with 5 days left in my billing cycle. What should I do?",
@@ -406,7 +406,7 @@ STRESS_TESTS = {
         {"q": "Delete my account.",
          "checks": {"must_contain_any": ["confirm", "permanent", "irreversible", "destructive", "sure", "delete_account", "cannot be undone"]}},
         {"q": "Upgrade me to the Growth plan.",
-         "checks": {"must_contain_any": ["confirm", "action", "upgrade_plan", "Growth", "$150", "billing"]}},
+         "checks": {"must_contain_any": ["confirm", "action", "upgrade_plan", "Growth", "€150", "billing"]}},
         {"q": "Downgrade my plan to Free.",
          "checks": {"must_contain_any": ["confirm", "action", "downgrade_plan", "Free", "lose", "features", "billing"]}},
         {"q": "Cancel my subscription.",
@@ -427,7 +427,7 @@ STRESS_TESTS = {
          "checks": {"must_contain": ["support@apexmail.ee"],
                     "must_not_contain": ["```action"]}},
         # Billing dispute
-        {"q": "I was overcharged $200 and I want it reversed.",
+        {"q": "I was overcharged €200 and I want it reversed.",
          "checks": {"must_contain": ["support@apexmail.ee"],
                     "must_not_contain": ["```action"]}},
         # Payment method
@@ -472,7 +472,7 @@ STRESS_TESTS = {
         {"q": "Cancel my account immediately. I don't want to discuss it.",
          "checks": {"must_contain_any": ["confirm", "permanent", "irreversible", "deleted"]}},
         {"q": "I'm too expensive on Growth. What's cheaper?",
-         "checks": {"must_contain_any": ["$25", "$65", "Starter", "Pro", "downgrade"]}},
+         "checks": {"must_contain_any": ["€25", "€65", "Starter", "Pro", "downgrade"]}},
         {"q": "How do I delete all my data and close my account permanently?",
          "checks": {"must_contain_any": ["permanent", "irreversible", "confirm", "delete_account"]}},
         {"q": "I'm switching to a competitor. How do I export everything?",
@@ -502,13 +502,13 @@ STRESS_TESTS = {
         {"q": "I'm getting 429 errors. What are my API rate limits?",
          "checks": {"must_contain_any": ["429", "rate limit", "Retry-After", "per second", "requests/second"]}},
         {"q": "What happens when I exceed my monthly API call limit?",
-         "checks": {"must_contain": ["$0.10"], "must_contain_any": ["100,000", "100k", "free", "grace"]}},
+         "checks": {"must_contain": ["€0.10"], "must_contain_any": ["100,000", "100k", "free", "grace"]}},
         {"q": "How do I check my remaining API calls for this month?",
          "checks": {"must_contain_any": ["X-RateLimit", "header", "Dashboard", "usage", "GET"]}},
         {"q": "I need to bulk import 2 million contacts. Will that hit API limits?",
          "checks": {"must_contain_any": ["CSV", "bulk import", "single", "1 API call"]}},
         {"q": "If I'm on Starter with 500K API limit and make 650K calls, what's the overage?",
-         "checks": {"must_contain": ["$0.10"], "must_contain_any": ["$5", "50,000", "50k", "100,000"]}},
+         "checks": {"must_contain": ["€0.10"], "must_contain_any": ["€5", "50,000", "50k", "100,000"]}},
         {"q": "How do I avoid hitting rate limits?",
          "checks": {"must_contain_any": ["webhook", "cache", "batch", "backoff"]}},
     ],
@@ -521,10 +521,10 @@ STRESS_TESTS = {
          "checks": {"must_contain_any": ["no SLA", "no formal SLA", "Scale", "Enterprise"]}},
         {"q": "We had 2 hours of unplanned downtime. How do I claim SLA credit?",
          "checks": {"must_contain": ["support@apexmail.ee"], "must_contain_any": ["credit", "SLA"]}},
-        {"q": "What's the SLA credit on Enterprise? We pay $3,000/month.",
-         "checks": {"must_contain_any": ["25%", "$750"]}},
-        {"q": "What's the SLA credit on Scale? We pay $350/month.",
-         "checks": {"must_contain_any": ["10%", "$35"]}},
+        {"q": "What's the SLA credit on Enterprise? We pay €3,000/month.",
+         "checks": {"must_contain_any": ["25%", "€750"]}},
+        {"q": "What's the SLA credit on Scale? We pay €350/month.",
+         "checks": {"must_contain_any": ["10%", "€35"]}},
     ],
 
     # ── 29. PAYMENT & BILLING OPS (6 tests) ──────────────────────────────
@@ -547,7 +547,7 @@ STRESS_TESTS = {
     # ── 30. INBOUND EMAIL (4 tests) ──────────────────────────────────────
     "inbound_email": [
         {"q": "Can I receive incoming emails with ApexMail?",
-         "checks": {"must_contain_any": ["Scale", "$350", "Enterprise", "inbound"]}},
+         "checks": {"must_contain_any": ["Scale", "€350", "Enterprise", "inbound"]}},
         {"q": "I'm on Pro. Can I set up inbound email parsing?",
          "checks": {"must_contain_any": ["Scale", "not available", "upgrade"]}},
         {"q": "How do I set up inbound email on my Scale account?",
@@ -559,25 +559,25 @@ STRESS_TESTS = {
     # ── 31. WHITE LABEL (4 tests) ────────────────────────────────────────
     "white_label": [
         {"q": "Does the Scale plan include white-labeling?",
-         "checks": {"must_contain_any": ["Enterprise", "$3,000", "not", "only"]}},
+         "checks": {"must_contain_any": ["Enterprise", "€3,000", "not", "only"]}},
         {"q": "How do I set up white-label branding on Enterprise?",
          "checks": {"must_contain_any": ["brand", "logo", "CNAME", "domain", "custom"]}},
         {"q": "Can my agency clients see ApexMail's branding?",
          "checks": {"must_contain_any": ["white-label", "brand", "your", "clients"]}},
         {"q": "I'm on Growth. Can I white-label the dashboard?",
-         "checks": {"must_contain_any": ["Enterprise", "$3,000", "not available", "not", "only"]}},
+         "checks": {"must_contain_any": ["Enterprise", "€3,000", "not available", "not", "only"]}},
     ],
 
     # ── 32. ENTERPRISE COMPLIANCE (5 tests) ──────────────────────────────
     "enterprise_compliance": [
         {"q": "Do you support HIPAA? We're a healthcare company.",
-         "checks": {"must_contain_any": ["Enterprise", "$3,000", "BAA"]}},
+         "checks": {"must_contain_any": ["Enterprise", "€3,000", "BAA"]}},
         {"q": "Can I get your SOC 2 Type II report?",
          "checks": {"must_contain": ["support@apexmail.ee"], "must_contain_any": ["SOC 2", "SOC2", "compliance"]}},
         {"q": "Is ApexMail SOC 2 certified?",
          "checks": {"must_contain_any": ["SOC 2", "SOC2", "certified", "yes"]}},
         {"q": "We need a BAA for HIPAA compliance. Is that available?",
-         "checks": {"must_contain_any": ["Enterprise", "BAA", "$3,000"]}},
+         "checks": {"must_contain_any": ["Enterprise", "BAA", "€3,000"]}},
         {"q": "Do you have PCI-DSS compliance?",
          "checks": {"must_contain_any": ["support@apexmail.ee", "SOC 2", "compliance", "security"]}},
     ],
@@ -587,7 +587,7 @@ STRESS_TESTS = {
         {"q": "How does send-time optimization work?",
          "checks": {"must_contain_any": ["AI", "engagement", "optimal", "pattern"]}},
         {"q": "Is send-time optimization available on Starter?",
-         "checks": {"must_contain_any": ["Pro", "$65", "not available"]}},
+         "checks": {"must_contain_any": ["Pro", "€65", "not available"]}},
         {"q": "Which plans include send-time optimization?",
          "checks": {"must_contain_any": ["Pro", "Growth", "Scale", "Enterprise"]}},
         {"q": "I'm on Pro. How do I use send-time optimization for my campaign?",
@@ -671,9 +671,9 @@ STRESS_TESTS = {
     # ── 40. TRIAL & FREE-TIER (4 tests) ──────────────────────────────────
     "trial_free_tier": [
         {"q": "Is there a free trial for paid plans?",
-         "checks": {"must_contain_any": ["Free plan", "free plan", "$0", "permanent"]}},
+         "checks": {"must_contain_any": ["Free plan", "free plan", "€0", "permanent"]}},
         {"q": "I've hit my free plan limit. What happens now?",
-         "checks": {"must_contain_any": ["queued", "pending", "upgrade", "Starter", "$25"]}},
+         "checks": {"must_contain_any": ["queued", "pending", "upgrade", "Starter", "€25"]}},
         {"q": "Can I try the Enterprise plan before buying?",
          "checks": {"must_contain_any": ["support@apexmail.ee", "evaluation", "sales", "team"]}},
         {"q": "How many emails can I send on the free plan?",

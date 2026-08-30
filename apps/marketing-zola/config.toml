@@ -58,7 +58,10 @@ og_image = "/images/og-image.png"
 twitter_handle = "@apexmail"
 twitter_url = "https://twitter.com/apexmail"
 linkedin_url = "https://linkedin.com/company/apexmail"
-github_url = "https://github.com/Bel-Consulting-OU/ApexMail"
+# No public repository yet — the org repo is empty and the private repo must
+# not be linked. Footer/social links fall back to support email until the
+# first public release.
+github_url = ""
 docs_url = "https://apexmail.ee/docs"
 app_url = "https://app.apexmail.ee"
 api_url = "https://api.apexmail.ee"
@@ -68,7 +71,9 @@ status_url = "https://status.apexmail.ee"
 # route it through config.extra.* instead of hardcoding (audit 2.4).
 status_api_url = "https://apexmail.ee/api/status-data"
 pricing_as_of = "2026-07-30"
-build_id = "2026-07-29-prod-1"
+# Internal build identifier — no longer rendered on the site (it leaked an
+# internal deployment marker into the public footer).
+build_id = "internal"
 asset_cdn_base_url = "https://cdn.apexmail.ee"
 
 # ── Analytics (Plausible-compatible) ─────────────────────────

@@ -20,5 +20,9 @@ mail-common = { path = "../mail-common", optional = true }
 redis = { workspace = true, optional = true, features = ["tokio-comp"] }
 
 [features]
+default = ["redis-lockout"]
 events = ["mail-common"]
+# Enabled by default: without it, RedisLockoutBackend degrades to a logged
+# no-op that reports zero historical lockouts — a fail-open trap for any
+# caller that constructs it without reading the feature matrix.
 redis-lockout = ["redis"]

@@ -4,5 +4,5 @@ description = "Published plan limits, overage math, and enterprise pricing. SLA 
 template = "pricing.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

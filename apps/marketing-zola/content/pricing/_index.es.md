@@ -4,5 +4,5 @@ description = "Límites publicados de los planes, cálculo de excesos y precios 
 template = "pricing.html"
 
 [extra]
-og_image = "/images/og-image.svg"
+og_image = "/images/og-image.png"
 +++

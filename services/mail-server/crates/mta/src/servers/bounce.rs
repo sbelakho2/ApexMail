@@ -683,10 +683,15 @@ impl BounceServer {
         message_id: &str,
     ) -> anyhow::Result<Option<(String, String)>> {
         let row: Option<(String, String)> = sqlx::query_as(
+            // Typed comparisons keep the PK (id) and message_id index usable.
+            // The previous `id::text = $1 OR message_id::text = $1` cast both
+            // sides to text, forcing a sequential scan of the partitioned
+            // high-volume table on every inbound VERP reply — an
+            // attacker-influenceable path.
             r#"SELECT COALESCE(tenant_id, '') AS tenant_id,
                       COALESCE(to_addresses[1], "to", '') AS recipient
                FROM email_queue
-               WHERE id::text = $1 OR message_id::text = $1
+               WHERE id = $1::uuid OR message_id = $1::uuid
                LIMIT 1"#,
         )
         .bind(message_id)

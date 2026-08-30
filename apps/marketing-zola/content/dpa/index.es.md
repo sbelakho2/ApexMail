@@ -45,9 +45,9 @@ La lista actual de subencargados autorizados se mantiene en el [Registro de sube
 
 | Subencargado | Finalidad | Ubicación | Garantía de transferencia |
 |---|---|---|---|
-| Hetzner Online GmbH | Infraestructura principal (computación, almacenamiento) | Región UE/EEE configurada | Confirmar la implementación activa y la garantía de transferencia aplicable |
-| Amazon Web Services, Inc. | Almacenamiento de objetos de telemetría cuando está habilitado | Región S3 configurada (predeterminada: `eu-central-1`) | Confirmar la implementación activa y la garantía de transferencia aplicable |
-| Amazon Web Services, Inc. | Transporte de entrega de correo cuando está habilitado | Región SES configurada | Confirmar la implementación activa y la garantía de transferencia aplicable |
+| Hetzner Online GmbH | Infraestructura principal (computación, almacenamiento) | Región UE/EEE configurada | Tratamiento intra-EEE; no se aplican las reglas de transferencia del capítulo V del RGPD |
+| Amazon Web Services, Inc. | Almacenamiento de objetos de telemetría cuando está habilitado | Región S3 configurada (predeterminada: `eu-central-1`) | Cláusulas contractuales tipo de la UE (DPA de AWS) |
+| Amazon Web Services, Inc. | Transporte de entrega de correo cuando está habilitado | Región SES configurada | Cláusulas contractuales tipo de la UE (DPA de AWS) |
 | Google LLC | Autenticación OAuth opcional | Global (entidad estadounidense, datos tratados según configuración OAuth) | Cláusulas Contractuales Tipo |
 | GitHub, Inc. | Autenticación OAuth opcional | Global (entidad estadounidense) | Cláusulas Contractuales Tipo |
 | Stripe, Inc. | Procesamiento de pagos | EE. UU. (principal), India (soporte) | Cláusulas Contractuales Tipo |

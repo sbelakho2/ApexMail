@@ -19,13 +19,13 @@ We do offer scheduled async-first support with hard tier boundaries.
 | **First-response SLA** | 24–48h business hours | 8h business hours | 4h business hours, contractual |
 | **Live calls** | None | Scheduled, monthly cap | Scheduled, weekly cap |
 | **Hours** | Business hours (Europe/Tallinn) | Business hours | Business hours + on-call for P0 incidents |
-| **Dedicated CSM** | ❌ | ❌ | ✅ |
-| **Technical Account Manager** | ❌ | ❌ | ✅ (optional) |
-| **Shared Slack hub** | ❌ | ✅ (one shared channel for all Scale tenants) | n/a (dedicated channel) |
-| **Dedicated channel** | ❌ | ❌ | ✅ |
-| **Priority Escalation** | ❌ | ✅ | ✅ |
-| **Quarterly Business Reviews** | ❌ | ❌ | ✅ |
-| **Architecture Review** | ❌ | Annually | Quarterly |
+| **Dedicated CSM** | | | |
+| **Technical Account Manager** | | | (optional) |
+| **Shared Slack hub** | | (one shared channel for all Scale tenants) | n/a (dedicated channel) |
+| **Dedicated channel** | | | |
+| **Priority Escalation** | | | |
+| **Quarterly Business Reviews** | | | |
+| **Architecture Review** | | Annually | Quarterly |
 | **Training Sessions** | Self-serve only | 2/year async | Unlimited async + 4 live/year |
 
 > **Why hard boundaries?** Real-time everything does not scale. We invest the saved hours in better docs, in-app diagnostics, and an AI support assistant trained on the system — so you usually do not need to contact us at all.
@@ -33,7 +33,7 @@ We do offer scheduled async-first support with hard tier boundaries.
 ### Before opening a ticket
 
 1. **Run self-debug.** Most domain/deliverability/auth issues are solved by `auth-status` + `dns-records` in under a minute.
-2. **Search the [community forum](https://github.com/sbelakho2/ApexMail/discussions).** Public, searchable, single hub.
+2. **Email the support team** (support@apexmail.ee) — responses follow the tier SLAs below.
 3. **Ask the in-app AI assistant.** It is trained on this exact system and answers most setup, API, billing-readonly, and troubleshooting questions instantly.
 4. **Then open a ticket** if and only if the above three did not resolve it.
 

@@ -1853,13 +1853,25 @@ async fn login(
 
     decrypt_mfa_secret_in_place(&mut user)?;
 
+    let valid = verify_password_or_log(&body.password, &user.password_hash, &user.email)?;
+
+    if !valid {
+        record_login_failure(&state.redis, &login_identifier, Some(&client_ip)).await?;
+        return Err(ApiError::Unauthorized("invalid credentials".into()));
+    }
+
+    // Status and SSO policy are revealed only AFTER the password verified:
+    // these branches previously ran pre-verification, letting an anonymous
+    // caller confirm an email is registered (and whether its org enforces
+    // SSO) without any credential knowledge.
     if user.status != "active" {
         return Err(ApiError::Forbidden("account is not active".into()));
     }
 
-    // F8: SSO-enforced tenants reject password login outright — before any
-    // credential verification, so no password hash work is even performed
-    // and no password side channel exists for these tenants.
+    // F8: SSO-enforced tenants reject password login. The password check
+    // above still runs first so password-guessing against SSO-only
+    // accounts is rate-limited identically to normal accounts; only the
+    // policy disclosure moves after verification.
     if tenant_sso_enforced(&state.db, &user.tenant_id).await? {
         tracing::info!(
             tenant_id = %user.tenant_id,
@@ -1869,13 +1881,6 @@ async fn login(
             "SSO_REQUIRED: this organization requires single sign-on; password login is disabled"
                 .into(),
         ));
-    }
-
-    let valid = verify_password_or_log(&body.password, &user.password_hash, &user.email)?;
-
-    if !valid {
-        record_login_failure(&state.redis, &login_identifier, Some(&client_ip)).await?;
-        return Err(ApiError::Unauthorized("invalid credentials".into()));
     }
 
     clear_login_failures(&state.redis, &login_identifier).await?;

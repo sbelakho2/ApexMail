@@ -37,10 +37,10 @@ La configuration fournie cible des régions de l'EEE pour les données de messag
 
 | Catégorie de données | Emplacement principal | Sauvegarde / Réplica | Traitement |
 |---|---|---|---|
-| Infrastructure de messagerie principale (messages, métadonnées de livraison, données de compte) | Hetzner, Allemagne (Falkenstein/Nuremberg) | Hetzner, Finlande (Tuusula) | EEE par défaut ; confirmer le déploiement actif |
+| Infrastructure de messagerie principale (messages, métadonnées de livraison, données de compte) | Centre de données UE — Allemagne | Centre de données UE — Finlande | EEE — aucun transfert vers un pays tiers |
 | Jetons d'authentification OAuth | Google LLC / GitHub, Inc. (entités américaines, CCT) | Géré par le fournisseur | États-Unis (CCT) |
 | Données de paiement et de facturation | Stripe, Inc. (États-Unis, CCT) | Géré par le fournisseur (Inde pour le support) | États-Unis/Inde (CCT) |
-| Tickets de support | Hetzner, Allemagne | Hetzner, Finlande | EEE par défaut ; confirmer le déploiement actif |
+| Tickets de support | Centre de données UE — Allemagne | Centre de données UE — Finlande | EEE — aucun transfert vers un pays tiers |
 
 Nous ne transférons pas de données personnelles en dehors de l'EEE sans garanties appropriées (Clauses contractuelles types ou décision d'adéquation en vertu de l'Article 45).
 
@@ -52,8 +52,8 @@ Nous conservons les données personnelles uniquement aussi longtemps que nécess
 |---|---|
 | Données de compte | Durée du contrat + 30 jours |
 | Documents de facturation | 7 ans (droit comptable estonien) |
-| Contenu des emails (corps, objet, en-têtes, pièces jointes) | 7 jours par défaut ; maximum dépendant du plan (de 1 jour en plan gratuit jusqu'à 365 jours en Enterprise) |
-| Journaux d'événements (événements de livraison, d'ouverture et de clic) | 30 jours par défaut ; maximum dépendant du plan (jusqu'à 365 jours en Enterprise) |
+| Contenu des emails (corps, objet, en-têtes, pièces jointes) | 7 jours par défaut ; maximum dépendant du plan (de 1 jour en plan gratuit jusqu'à 730 jours en Enterprise) |
+| Journaux d'événements (événements de livraison, d'ouverture et de clic) | 30 jours par défaut ; maximum dépendant du plan (jusqu'à 730 jours en Enterprise) |
 | Tickets de support | 2 ans après résolution |
 
 Consultez notre [Politique de conservation des données](/compliance/#data-retention) pour plus de détails.

@@ -21,7 +21,7 @@ Generate API keys from **Dashboard → Settings → API Keys**.
 ## Send Email
 
 ```
-POST /v1/emails
+POST /v1/messages
 ```
 
 ### Request
@@ -70,7 +70,7 @@ POST /v1/emails
 ## Retrieve Email
 
 ```
-GET /v1/emails/:id
+GET /v1/messages/:id
 ```
 
 ```json
@@ -91,13 +91,13 @@ GET /v1/emails/:id
 ## Cancel Scheduled Email
 
 ```
-DELETE /v1/emails/:id/schedule
+DELETE /v1/messages/:id/schedule
 ```
 
 ## Batch Send
 
 ```
-POST /v1/emails/batch
+POST /v1/messages/batch
 ```
 
 See [Batch Sending](batch.md) for details.
@@ -107,7 +107,7 @@ See [Batch Sending](batch.md) for details.
 List endpoints use cursor-based pagination:
 
 ```
-GET /v1/emails?limit=50&after=msg_01JABCDEFGHIJKLM
+GET /v1/messages?limit=50&after=msg_01JABCDEFGHIJKLM
 ```
 
 ## Rate Limits

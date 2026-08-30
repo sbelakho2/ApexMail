@@ -27,7 +27,7 @@ verdict_points = ["Infrastructure email gérée avec API, événements et suppor
 # "none" (the winner_badge macro renders them as a spanned em-dash).
 comparison_sections = [
   { title = "TRAITEMENT DES DONNÉES DANS L’EEE", rows = [
-    { feature = "Région d’hébergement principale", apex = 'Configuration par défaut orientée UE/EEE ; confirmer le déploiement actif', comp = 'Plusieurs régions dont l’UE (Irlande eu-west-1, Francfort eu-central-1, etc.)<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
+    { feature = "Région d’hébergement principale", apex = 'Centres de données UE (Allemagne en primaire, Finlande en sauvegarde) — aucun traitement aux États-Unis pour les données principales', comp = 'Plusieurs régions dont l’UE (Irlande eu-west-1, Francfort eu-central-1, etc.)<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
     { feature = "Traitement des données dans l’EEE par défaut", apex = 'Configuration par défaut orientée UE/EEE ; les lieux actifs sont propres à chaque accord', comp = 'Disponible — doit être explicitement configuré ; sélection de région requise par domaine d’envoi<sup><a href="#src-ses1">1</a></sup>', winner = "none" },
     { feature = "Disponibilité de la DPA", apex = 'Disponible dans le cadre de l’accord ApexMail applicable', comp = 'Disponible — DPA AWS (Artifact) avec CCS<sup><a href="#src-ses2">2</a></sup>', winner = "none" }
   ]},
@@ -39,7 +39,7 @@ comparison_sections = [
     { feature = "Email entrant", apex = 'Forfaits Scale et Enterprise', comp = 'Oui — règles de réception SES avec actions S3, Lambda, SNS, SQS<sup><a href="#src-ses5">5</a></sup>', winner = "none" }
   ]},
   { title = "MODÈLES DE DÉPLOIEMENT", rows = [
-    { feature = "Cloud mutualisé", apex = 'Oui (tous les forfaits) — multi-tenant géré sur Hetzner', comp = 'Oui (tous les comptes) — pool d’IP partagé par défaut<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
+    { feature = "Cloud mutualisé", apex = 'Oui (tous les forfaits) — multi-tenant géré, hébergé dans l’UE', comp = 'Oui (tous les comptes) — pool d’IP partagé par défaut<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "IP dédiée", apex = 'Option additionnelle approuvée sur Pro ; 1 incluse sur Growth, 3 sur Scale', comp = 'Oui — €22.95 (US$24.95)/mois par IP dédiée ; gestion de pools d’IP disponible<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "Tenance dédiée", apex = 'Soumis à revue d’architecture et de contrat', comp = 'Gestion autonome — le client conçoit sa tenance dédiée sur AWS en utilisant SES comme composant de service<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
     { feature = "BYOC / déploiement privé", apex = 'Soumis à revue d’architecture et de contrat', comp = 'Inhérent — le client opère sur son propre compte AWS ; SES est un service AWS<sup><a href="#src-ses6">6</a></sup>', winner = "none" }

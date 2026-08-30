@@ -128,9 +128,9 @@
     "legalName": "{{ config.extra.company.legal_name | safe }}",
     "vatID": "{{ config.extra.company.vat_number | default(value='EE102951727') | safe }}",
     "sameAs": [
-      "{{ config.extra.github_url | safe }}",
-      "{{ config.extra.linkedin_url | safe }}",
-      "{{ config.extra.twitter_url | safe }}"
+      {%- if config.extra.github_url %}"{{ config.extra.github_url | safe }}",{%- endif %}
+      {%- if config.extra.linkedin_url %}"{{ config.extra.linkedin_url | safe }}",{%- endif %}
+      {%- if config.extra.twitter_url %}"{{ config.extra.twitter_url | safe }}"{%- endif %}
     ]
   }
   </script>
