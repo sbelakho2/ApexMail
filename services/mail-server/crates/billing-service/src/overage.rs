@@ -179,13 +179,12 @@ pub async fn sweep_period_overage(state: &AppState) -> Result<OverageSweepResult
         // invoice cannot be issued correctly — surface loudly and retry next
         // sweep (the idempotency check above means nothing is double-billed
         // once the address is backfilled).
-        let has_address: Option<i64> = sqlx::query_scalar(
-            "SELECT 1 FROM billing_addresses WHERE tenant_id = $1 LIMIT 1",
-        )
-        .bind(&period.tenant_id)
-        .fetch_optional(&state.db)
-        .await
-        .map_err(|e| format!("overage sweep: address query failed: {e}"))?;
+        let has_address: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM billing_addresses WHERE tenant_id = $1 LIMIT 1")
+                .bind(&period.tenant_id)
+                .fetch_optional(&state.db)
+                .await
+                .map_err(|e| format!("overage sweep: address query failed: {e}"))?;
         if has_address.is_none() {
             result.skipped_no_address += 1;
             warn!(

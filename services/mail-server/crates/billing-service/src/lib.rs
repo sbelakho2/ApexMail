@@ -19,12 +19,12 @@ pub mod maintenance;
 /// metrics (counters, gauges, histograms), consecutive-error alert thresholds,
 /// and stale-event detection.
 pub mod metering_monitor;
-pub mod overage;
 /// Money-invariant test gate (audit item 4): integer-cents round-trips,
 /// half-up rounding everywhere, VAT line reconciliation, wallet
 /// conservation, and a source-scan ban on f32/f64 in money paths.
 #[cfg(test)]
 mod money_invariants;
+pub mod overage;
 pub mod plans;
 pub mod routes;
 pub mod stripe_webhooks;

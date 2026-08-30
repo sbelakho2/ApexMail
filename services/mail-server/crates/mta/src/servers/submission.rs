@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use mail_parser::{ContentType, HeaderName, HeaderValue};
 use dashmap::DashMap;
+use mail_parser::{ContentType, HeaderName, HeaderValue};
 use sqlx::PgPool;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufStream};
 use tokio::net::{TcpListener, TcpStream};
@@ -2723,7 +2723,9 @@ mod tests {
         msg.extend_from_slice(b"To: c@d.com\r\n");
         msg.extend_from_slice(b"Subject: with attachment\r\n");
         msg.extend_from_slice(b"Message-ID: <m1@b.com>\r\n");
-        msg.extend_from_slice(b"List-Unsubscribe: <https://apexmail.ee/u/1>,\r\n\t<mailto:un@b.com>\r\n");
+        msg.extend_from_slice(
+            b"List-Unsubscribe: <https://apexmail.ee/u/1>,\r\n\t<mailto:un@b.com>\r\n",
+        );
         msg.extend_from_slice(b"X-Campaign: spring-launch\r\n");
         msg.extend_from_slice(b"MIME-Version: 1.0\r\n");
         msg.extend_from_slice(b"Content-Type: multipart/mixed; boundary=\"mix\"\r\n\r\n");
@@ -2749,8 +2751,18 @@ mod tests {
             headers.get("x-campaign").and_then(|v| v.as_str()),
             Some("spring-launch")
         );
-        for protected in ["from", "to", "subject", "message-id", "mime-version", "content-type"] {
-            assert!(!headers.contains_key(protected), "{protected} must not be a custom header");
+        for protected in [
+            "from",
+            "to",
+            "subject",
+            "message-id",
+            "mime-version",
+            "content-type",
+        ] {
+            assert!(
+                !headers.contains_key(protected),
+                "{protected} must not be a custom header"
+            );
         }
 
         let attachments = payload.attachments.as_array().expect("array");

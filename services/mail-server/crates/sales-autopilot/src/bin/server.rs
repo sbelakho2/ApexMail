@@ -48,7 +48,9 @@ async fn main() -> anyhow::Result<()> {
     let is_production = std::env::var("APP_ENV")
         .map(|v| v.eq_ignore_ascii_case("production"))
         .unwrap_or(true);
-    if let Err(reason) = sales_autopilot::config::require_tenant_allowlist_in_production(&cfg, is_production) {
+    if let Err(reason) =
+        sales_autopilot::config::require_tenant_allowlist_in_production(&cfg, is_production)
+    {
         anyhow::bail!("refusing to start: {reason}");
     }
     if cfg.enrichment_api_key.is_empty() {

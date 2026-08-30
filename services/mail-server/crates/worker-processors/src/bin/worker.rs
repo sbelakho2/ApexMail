@@ -24,7 +24,6 @@ use worker_processors::{
     AnalyticsProcessor, EmailProcessor, ReplyHandler, WebhookProcessor,
 };
 
-
 /// Supervise a processor: restart it with capped exponential backoff whenever
 /// `start()` returns an error. A transient failure at startup (transport
 /// down, DB/Redis hiccup) previously disabled the processor — and with it,

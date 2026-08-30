@@ -196,8 +196,16 @@ impl Default for SalesConfig {
 /// Fail closed: an unset SALES_ALLOWED_TENANTS previously allowed the shared
 /// service token to address EVERY tenant. In production the allowlist is
 /// mandatory; only explicitly-declared non-production modes may opt out.
-pub fn require_tenant_allowlist_in_production(config: &SalesConfig, is_production: bool) -> Result<(), String> {
-    if is_production && config.allowed_tenants.as_ref().map_or(true, |t| t.is_empty()) {
+pub fn require_tenant_allowlist_in_production(
+    config: &SalesConfig,
+    is_production: bool,
+) -> Result<(), String> {
+    if is_production
+        && config
+            .allowed_tenants
+            .as_ref()
+            .map_or(true, |t| t.is_empty())
+    {
         return Err(
             "SALES_ALLOWED_TENANTS must list the tenants this service may address              (comma-separated). The internal token is shared; without an allowlist              any token holder can act on every tenant."
                 .to_string(),

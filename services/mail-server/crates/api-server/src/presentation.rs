@@ -20,13 +20,10 @@ pub mod leads {
         fn source_icon_maps_known_lead_sources() {
             assert_eq!(source_icon("LinkedIn"), "linkedin");
             assert_eq!(source_icon("cold outreach"), "outreach");
-            
         }
 
         #[test]
-        fn source_icon_uses_default_for_unknown_sources() {
-            
-        }
+        fn source_icon_uses_default_for_unknown_sources() {}
     }
 }
 

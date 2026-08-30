@@ -320,7 +320,17 @@ pub async fn generate_invoice_pdf(
     // Buyer identification is mandatory on a VAT invoice; pull the tenant's
     // billing address so the PDF carries it (previously rendered
     // "Customer details not available" on every stored invoice).
-    let bill_to: Option<serde_json::Value> = sqlx::query_as::<_, (Option<String>, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)>(
+    let bill_to: Option<serde_json::Value> = sqlx::query_as::<
+        _,
+        (
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        ),
+    >(
         "SELECT company_name, vat_number, address_line1, city, postal_code, country \
          FROM billing_addresses WHERE tenant_id = $1",
     )
@@ -351,7 +361,10 @@ pub async fn generate_invoice_pdf(
             v.insert("city".into(), escape_html(&city_line).into());
         }
         if let Some(country) = country.filter(|s| !s.is_empty()) {
-            v.insert("country".into(), escape_html(&country).to_uppercase().into());
+            v.insert(
+                "country".into(),
+                escape_html(&country).to_uppercase().into(),
+            );
         }
         serde_json::Value::Object(v)
     });

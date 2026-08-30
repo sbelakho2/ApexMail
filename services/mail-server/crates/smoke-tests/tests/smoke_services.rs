@@ -212,7 +212,7 @@ mod billing_tests {
     #[test]
     fn test_billing_config() {
         let cfg = billing_service::config::BillingConfig::default();
-        
+
         assert_eq!(cfg.listen_addr, "0.0.0.0:4100");
 
         let payg = billing_service::config::PaygPricing::default();

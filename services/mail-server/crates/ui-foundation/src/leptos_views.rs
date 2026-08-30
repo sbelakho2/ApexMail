@@ -1843,7 +1843,6 @@ pub fn control_plane_sales_page() -> String {
         .to_string()
 }
 
-
 // ─── Marketing pages ────────────────────────────────────────
 
 /// Marketing shell wrapper that matches the Zola marketing site structure.

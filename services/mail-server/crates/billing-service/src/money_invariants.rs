@@ -154,7 +154,11 @@ fn vat_round_vat_is_half_up() {
         for rate in [0.0, 5.0, 19.0, 21.0, 24.0, 25.5, 27.0] {
             assert_eq!(
                 round_vat(amount, rate),
-                i64::try_from(half_up(i128::from(amount) * i128::from((rate * 10.0) as i64), 1_000)).unwrap(),
+                i64::try_from(half_up(
+                    i128::from(amount) * i128::from((rate * 10.0) as i64),
+                    1_000
+                ))
+                .unwrap(),
                 "round_vat({amount}, {rate}) must be half-up"
             );
         }
@@ -248,7 +252,9 @@ fn vat_line_allocation_reconciles_with_headline_for_random_invoices() {
         let amounts: Vec<i64> = (0..line_count)
             .map(|_| (rng.below(5_000_000)) as i64)
             .collect();
-        let rate = [0.0, 5.0, 10.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.5, 27.0][rng.below(11) as usize];
+        let rate = [
+            0.0, 5.0, 10.0, 19.0, 20.0, 21.0, 22.0, 23.0, 24.0, 25.5, 27.0,
+        ][rng.below(11) as usize];
 
         let allocated = allocate_vat_across_lines(&amounts, rate);
         assert_eq!(allocated.len(), amounts.len());
@@ -660,9 +666,7 @@ fn no_float_to_int_conversions_outside_display() {
                 || line.contains(".trunc()");
             if (mentions_float || rounds) && converts_to_int {
                 let trimmed = line.trim();
-                if ALLOWED_FLOAT_TO_INT_LINES.contains(&trimmed)
-                    || is_vat_rate_context(trimmed)
-                {
+                if ALLOWED_FLOAT_TO_INT_LINES.contains(&trimmed) || is_vat_rate_context(trimmed) {
                     // VAT rates legitimately convert (rate_percent × 10) →
                     // integer tenths; monetary amounts never do.
                     continue;

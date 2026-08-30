@@ -405,10 +405,9 @@ pub async fn require_cp_auth(
     // value on the response — including the signed flash cookie every CP
     // form handler sets — so "Tenant suspended / Operator invited" feedback
     // never reached the browser.
-    response.headers_mut().append(
-        "Set-Cookie",
-        cookie.parse().expect("valid cookie header"),
-    );
+    response
+        .headers_mut()
+        .append("Set-Cookie", cookie.parse().expect("valid cookie header"));
 
     Ok(response)
 }

@@ -41,9 +41,7 @@ pub fn generate_api_key(is_test: bool) -> String {
     let mut filled = 0;
     while filled < 32 {
         let mut b = [0u8; 1];
-        OsRng
-            .try_fill_bytes(&mut b)
-            .expect("OsRng should not fail");
+        OsRng.try_fill_bytes(&mut b).expect("OsRng should not fail");
         if (b[0] as usize) < limit {
             random_part.push(API_KEY_ALPHABET[(b[0] as usize) % alphabet_len] as char);
             filled += 1;

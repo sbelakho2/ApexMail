@@ -1606,7 +1606,10 @@ fn invoice_vat_label(invoice: &LegacyInvoiceDto) -> String {
 
     let fmt = |rate: &f64| format!("{}%", billing_common::vat_rates::format_vat_rate(*rate));
     if vat_rates.len() <= 1 {
-        format!("VAT ({})", vat_rates.first().map(fmt).unwrap_or_else(|| fmt(&0.0)))
+        format!(
+            "VAT ({})",
+            vat_rates.first().map(fmt).unwrap_or_else(|| fmt(&0.0))
+        )
     } else {
         format!(
             "VAT (Mixed: {})",
@@ -1705,7 +1708,10 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto, style_nonce: &str) -> String 
             .vat_number
             .as_deref()
             .map(|vat| {
-                billing_common::vat_rates::is_valid_vat_number(vat, Some(&invoice.billing_address.country))
+                billing_common::vat_rates::is_valid_vat_number(
+                    vat,
+                    Some(&invoice.billing_address.country),
+                )
             })
             .unwrap_or(false);
     let reverse_charge_note = if reverse_charge_applied {
@@ -1931,7 +1937,10 @@ fn render_invoice_xml(invoice: &LegacyInvoiceDto) -> String {
         if phone.is_empty() {
             String::new()
         } else {
-            format!("<PhoneNumber>{}</PhoneNumber>\n          ", escape_xml(&phone))
+            format!(
+                "<PhoneNumber>{}</PhoneNumber>\n          ",
+                escape_xml(&phone)
+            )
         }
     };
     let account_info = {
@@ -2261,16 +2270,10 @@ fn preview_plan_proration(
 
     // Money math goes through proration::prorated_amount (i128, half-up,
     // overflow-checked) — never f64.
-    let credit_amount = proration::prorated_amount(
-        current_price_numerator,
-        days_remaining,
-        days_in_period,
-    )?;
-    let charge_amount = proration::prorated_amount(
-        new_price_numerator,
-        days_remaining,
-        days_in_period,
-    )?;
+    let credit_amount =
+        proration::prorated_amount(current_price_numerator, days_remaining, days_in_period)?;
+    let charge_amount =
+        proration::prorated_amount(new_price_numerator, days_remaining, days_in_period)?;
     let net_amount = charge_amount - credit_amount;
 
     if net_amount > config.max_proration_charge_cents {
@@ -3986,21 +3989,24 @@ async fn admin_create_invoice(
     // Single platform VAT allocator (round half-up per line, reconcile the
     // final line to the rounded total) — must not diverge from
     // billing-service's invoice writer.
-    let amounts: Vec<i64> = base_line_items.iter().map(|(_, _, _, amount)| *amount).collect();
+    let amounts: Vec<i64> = base_line_items
+        .iter()
+        .map(|(_, _, _, amount)| *amount)
+        .collect();
     let vat_per_line = billing_service::invoices::allocate_vat_across_lines(&amounts, vat_rate);
     let line_items: Vec<LegacyInvoiceLineItemDto> = base_line_items
         .iter()
         .zip(vat_per_line.iter())
-        .map(|((description, quantity, unit_price, amount), vat_amount)| {
-            LegacyInvoiceLineItemDto {
+        .map(
+            |((description, quantity, unit_price, amount), vat_amount)| LegacyInvoiceLineItemDto {
                 description: description.clone(),
                 quantity: *quantity,
                 unit_price: *unit_price,
                 amount: *amount,
                 vat_rate,
                 vat_amount: *vat_amount,
-            }
-        })
+            },
+        )
         .collect();
 
     let total = subtotal + vat_total;
@@ -4817,7 +4823,8 @@ mod tests {
     }
 
     #[test]
-    fn billing_routes_invoice_html_renderer_escapes_values_and_no_reverse_charge_when_vat_charged() {
+    fn billing_routes_invoice_html_renderer_escapes_values_and_no_reverse_charge_when_vat_charged()
+    {
         initialize_billing_test_env();
 
         let html = render_invoice_html(&sample_invoice(), "testnonce0123456789");

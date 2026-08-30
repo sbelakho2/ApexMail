@@ -774,7 +774,9 @@ fn classify_send_failure(err: &ProcessorError) -> SendFailureClass {
 /// classified at the source from typed SDK errors and stay authoritative.
 fn is_recipient_invalid(error: &ProcessorError) -> bool {
     match error {
-        ProcessorError::Smtp { enhanced, message, .. } => {
+        ProcessorError::Smtp {
+            enhanced, message, ..
+        } => {
             if let Some(enhanced) = enhanced {
                 if enhanced.starts_with("5.1.") {
                     return true;
@@ -796,7 +798,9 @@ fn is_recipient_invalid(error: &ProcessorError) -> bool {
             .iter()
             .any(|phrase| m.contains(phrase))
         }
-        ProcessorError::Ses { permanent: true, .. } => true,
+        ProcessorError::Ses {
+            permanent: true, ..
+        } => true,
         _ => false,
     }
 }
@@ -1137,11 +1141,10 @@ impl EmailProcessor {
             return;
         }
 
-        let rows: Result<Vec<(String, i64)>, sqlx::Error> = sqlx::query_as(
-            "SELECT status, COUNT(*) FROM email_queue GROUP BY status",
-        )
-        .fetch_all(&self.db)
-        .await;
+        let rows: Result<Vec<(String, i64)>, sqlx::Error> =
+            sqlx::query_as("SELECT status, COUNT(*) FROM email_queue GROUP BY status")
+                .fetch_all(&self.db)
+                .await;
 
         match rows {
             Ok(counts) => {
