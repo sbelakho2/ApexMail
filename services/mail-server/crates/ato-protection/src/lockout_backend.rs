@@ -278,7 +278,7 @@ impl RedisLockoutBackend {
         if guard.is_none() {
             // Bounded connect (audit F8).
             match client.get_connection_with_timeout(REDIS_CONNECT_TIMEOUT) {
-                Ok(mut c) => {
+                Ok(c) => {
                     // Bound each subsequent query on this socket as well.
                     if c.set_read_timeout(Some(REDIS_IO_TIMEOUT)).is_err()
                         || c.set_write_timeout(Some(REDIS_IO_TIMEOUT)).is_err()
