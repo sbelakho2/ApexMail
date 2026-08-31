@@ -542,8 +542,9 @@ services:
   pdf-renderer:
     profiles: ["dev", "full-stack"]
     build:
-      context: services/mail-server
-      dockerfile: crates/pdf-renderer/Dockerfile
+      context: .
+      dockerfile: services/mail-server/Dockerfile
+      target: pdf-renderer
     restart: unless-stopped
     environment:
       PDF_HOST: 0.0.0.0

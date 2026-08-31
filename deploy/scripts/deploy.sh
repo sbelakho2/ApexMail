@@ -224,9 +224,6 @@ if ! $NO_BUILD; then
     step "Step 3: Build service images"
 
     for svc in "${BUILD_LIST[@]}"; do
-        # pdf-renderer builds from its own Dockerfile/context in Step 3b —
-        # it has no stage in the mail-server Dockerfile.
-        [[ "$svc" == "pdf-renderer" ]] && continue
         image="${GHCR_NS}/${svc}:latest"
         target="${BUILD_TARGETS[${svc}]:-$svc}"
         log "Building: $image (Dockerfile target: $target)"
@@ -238,9 +235,8 @@ if ! $NO_BUILD; then
     done
 
     # Build services with separate Dockerfiles (marketing, tracking,
-    # backup sidecars, pdf-renderer — its Dockerfile builds from the
-    # mail-server directory context, not the repo root).
-    for separate_svc in marketing tracking-service postgres-backup clickhouse-backup pdf-renderer; do
+    # backup sidecars).
+    for separate_svc in marketing tracking-service postgres-backup clickhouse-backup; do
         should_build=false
         if [[ -z "$SERVICES_TO_BUILD" ]] || echo "$SERVICES_TO_BUILD" | grep -q "$separate_svc"; then
             should_build=true
@@ -252,12 +248,6 @@ if ! $NO_BUILD; then
                     log "Building: ${GHCR_NS}/marketing:latest"
                     docker build --tag "${GHCR_NS}/marketing:latest" \
                         "${DEPLOY_DIR}/apps/marketing-zola" 2>&1 | tail -2
-                    ;;
-                pdf-renderer)
-                    log "Building: ${GHCR_NS}/pdf-renderer:latest"
-                    docker build --tag "${GHCR_NS}/pdf-renderer:latest" \
-                        -f "${MAIL_SERVER_DIR}/crates/pdf-renderer/Dockerfile" \
-                        "${MAIL_SERVER_DIR}" 2>&1 | tail -2
                     ;;
                 tracking-service)
                     if [[ -f "${DEPLOY_DIR}/deploy/Dockerfile.tracking" ]]; then

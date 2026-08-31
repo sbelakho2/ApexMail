@@ -321,6 +321,28 @@ USER apexmail
 ENTRYPOINT ["/usr/bin/tini", "--", "analytics-worker"]
 
 # =============================================================================
+# PDF Renderer (invoice PDFs; billing-service renders every invoice through it)
+# =============================================================================
+# Built from the cargo-chef workspace like every other service — the crate's
+# own Dockerfile (stub-then-copy) hit the cargo mtime trap and miscompiled.
+# Fonts are include_bytes!-embedded at compile time — no runtime assets.
+FROM runtime-base AS pdf-renderer
+
+RUN apt-get update && apt-get install -y --no-install-recommends wget \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /app/target/release/pdf-renderer /usr/local/bin/pdf-renderer
+
+USER apexmail
+EXPOSE 3004
+
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+    CMD ["wget", "-qO-", "http://localhost:3004/health"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "pdf-renderer"]
+CMD ["--host", "0.0.0.0", "--port", "3004"]
+
+# =============================================================================
 # Migrator (one-shot database migration job — runs BEFORE `compose up`)
 # =============================================================================
 # Applies services/mail-server/migrations via sqlx::migrate!. Run as

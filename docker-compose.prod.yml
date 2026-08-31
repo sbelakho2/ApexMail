@@ -558,7 +558,7 @@ services:
     profiles: !override []
     image: ghcr.io/sbelakho2/apexmail/pdf-renderer:latest
     restart: unless-stopped
-    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "pdf-renderer-server"]
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "pdf-renderer"]
     volumes:
       - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
     environment:
