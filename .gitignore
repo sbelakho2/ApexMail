@@ -137,3 +137,4 @@ deploy/tests/.seo-validation-report.json
 
 # content voice-check report artifact (generated)
 deploy/tests/.content-voice-report.json
+deploy/tests/.signup-test-report.json
