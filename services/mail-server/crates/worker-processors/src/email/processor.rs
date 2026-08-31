@@ -886,6 +886,25 @@ impl EmailProcessor {
             "Starting email processor"
         );
 
+        // Queue-depth metrics must NOT depend on transport health: while the
+        // transport is down (e.g. missing credentials), the poll loop below
+        // never starts — and that is exactly when the EmailQueueBacklog
+        // alerts need their metric. The task runs for the processor's
+        // lifetime and stops with the shutdown notification.
+        {
+            let metrics_self = Arc::clone(&self);
+            let shutdown = Arc::clone(&self.shutdown_notify);
+            tokio::spawn(async move {
+                loop {
+                    metrics_self.record_queue_depth_metrics().await;
+                    tokio::select! {
+                        _ = sleep(Duration::from_secs(15)) => {}
+                        _ = shutdown.notified() => break,
+                    }
+                }
+            });
+        }
+
         // Verify transport
         self.transport.verify().await?;
         info!("Email transport verified");
@@ -935,7 +954,6 @@ impl EmailProcessor {
     /// provides an additional hard cap and a load-shedding cooldown.
     async fn poll_loop(&self) {
         while self.is_running.load(Ordering::SeqCst) {
-            self.record_queue_depth_metrics().await;
             // ── Error rate cooldown ────────────────────────────
             let cooldown_until = self.error_cooldown_until.load(Ordering::SeqCst);
             let now = Utc::now().timestamp_millis();
@@ -1137,7 +1155,7 @@ impl EmailProcessor {
         let last = self
             .queue_metrics_last_emit_ms
             .swap(now_ms, Ordering::SeqCst);
-        if now_ms.saturating_sub(last) < 15_000 {
+        if now_ms.saturating_sub(last) < 10_000 {
             return;
         }
 
