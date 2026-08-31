@@ -122,7 +122,8 @@ the subprocessor register are published on apexmail.ee.";
 
 /// Truthful security posture — only controls wired into the deployed stack.
 pub const SECURITY_FACTS: &str = "Security: TLS 1.2+ everywhere, AES-256 at \
-rest, hashed API keys (keyed HMAC), MFA/TOTP support, per-tenant rate limits \
+rest, hashed API keys (keyed HMAC), MFA/TOTP support, KiwiCaptcha proof-of-work \
+protection on login routes (web and control plane), per-tenant rate limits \
 and quotas, signed audit logs, EU/EEA hosting, encrypted daily backups with \
 verified restores.";
 
@@ -212,6 +213,17 @@ mod tests {
         // Byte-stable across calls: required for KV-prefix cache hits.
         assert_eq!(shared_knowledge_markdown(), shared_knowledge_markdown());
         assert!(shared_knowledge_markdown().contains("€0.40 per 1,000"));
+    }
+
+    #[test]
+    fn security_facts_name_the_deployed_controls() {
+        // KiwiCaptcha is a REAL deployed control (login PoW CAPTCHA) and the
+        // assistant must be able to answer questions about it truthfully;
+        // it must never reappear alongside the fake engine list.
+        assert!(SECURITY_FACTS.contains("KiwiCaptcha"));
+        assert!(SECURITY_FACTS.contains("proof-of-work"));
+        assert!(!SECURITY_FACTS.contains("WAF"));
+        assert!(!SECURITY_FACTS.contains("IDS"));
     }
 
     #[test]
