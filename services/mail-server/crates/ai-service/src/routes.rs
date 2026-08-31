@@ -38,6 +38,12 @@ pub struct AppState {
     pub content: ContentOptimizer,
     pub sto: SendTimeOptimizer,
     pub llm: LlmClient,
+    /// Grounded chat (docs retrieval + verifier + escalation). Built from
+    /// the same inference config as `llm`.
+    pub chat: crate::chat::ChatService,
+    /// Docs corpus pool (None when AI_DATABASE_URL/DATABASE_URL unset —
+    /// chat then fails closed to escalation).
+    pub docs_pool: Option<sqlx::PgPool>,
     pub training: TrainingManager,
     pub domain_dns: Option<DomainDnsStore>,
     pub model_name: String,
@@ -51,7 +57,7 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn from_config(config: AiConfig, service_token: String) -> Result<Self, String> {
+    pub async fn from_config(config: AiConfig, service_token: String) -> Result<Self, String> {
         let inference = InferenceConfig::from_ai_config(&config);
         let model_name = inference.model.clone();
         let model_enabled = inference.enabled;
@@ -67,10 +73,32 @@ impl AppState {
             )?)
         };
 
+        // Docs corpus pool for grounded chat + the indexer. Reuses the same
+        // DATABASE_URL as DomainDnsStore; small pool (indexing + point reads).
+        let docs_pool = if config.database_url.trim().is_empty() {
+            None
+        } else {
+            match sqlx::postgres::PgPoolOptions::new()
+                .max_connections(4)
+                .acquire_timeout(std::time::Duration::from_secs(8))
+                .connect(&config.database_url)
+                .await
+            {
+                Ok(pool) => Some(pool),
+                Err(e) => {
+                    tracing::warn!(error = %e, "ai-service: docs pool unavailable; grounded chat will fail closed");
+                    None
+                }
+            }
+        };
+        let chat = crate::chat::ChatService::new(&config, docs_pool.clone());
+
         Ok(Self {
             assistant: AiAssistant::new(),
             content: ContentOptimizer::new(),
             sto: SendTimeOptimizer::new(),
+            chat,
+            docs_pool,
             llm: LlmClient::new(inference),
             training: TrainingManager::new(&config),
             domain_dns,
@@ -86,12 +114,13 @@ impl AppState {
         })
     }
 
-    pub fn from_environment() -> Result<Self, String> {
+    pub async fn from_environment() -> Result<Self, String> {
         let config = AiConfig::from_env()?;
         Self::from_config(
             config,
             std::env::var("INTERNAL_SERVICE_TOKEN").unwrap_or_default(),
         )
+        .await
     }
 }
 
@@ -208,11 +237,14 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
             "subject_scoring",
             "configured_remote_model_inference",
             "governed_offline_training",
+            "grounded_chat",
+            "docs_reindex",
         ],
         "model_runtime_enabled": state.model_enabled,
         "configured_model": state.model_enabled.then_some(&state.model_name),
         "training_runner_configured": state.training_enabled,
         "authoritative_domain_dns_available": state.domain_dns.is_some(),
+        "grounded_chat_docs_available": state.docs_pool.is_some(),
         "note": "Model provider reachability is checked by a real inference request; disabled or unreachable runtimes fail closed.",
     }))
 }
@@ -491,6 +523,121 @@ async fn domain_dns_handler(
 }
 
 /// Build the Axum [`Router`] with shared state.
+// ── Grounded chat ─────────────────────────────────────────────────────────
+
+/// POST /chat — called by the authenticated control plane (api-server) with
+/// the END USER's tenant/user identity. This service never authenticates the
+/// end user itself; the token-authenticated caller asserts identity, and the
+/// caller assembles the account context from its own tenant-scoped queries.
+async fn chat_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<crate::chat::ChatRequest>,
+) -> Response {
+    // Per-tenant rate limit, mirroring /predict. The caller forwards the
+    // end user's tenant via the header; a malformed header is rejected.
+    let tenant = match tenant_rate_key_from_headers(&headers) {
+        Ok(key) => key,
+        Err(reason) => {
+            return error_response_json(
+                StatusCode::BAD_REQUEST,
+                &format!("invalid x-apexmail-tenant-id: {reason}"),
+            )
+        }
+    };
+    if !state.rate_governor.allow(&tenant) {
+        return error_response_json(StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded");
+    }
+    if req.message.trim().is_empty() {
+        return error_response_json(StatusCode::BAD_REQUEST, "message must not be empty");
+    }
+    if req.tenant_id.trim().is_empty() || req.user_id.trim().is_empty() {
+        return error_response_json(
+            StatusCode::BAD_REQUEST,
+            "tenant_id and user_id are required",
+        );
+    }
+
+    match state.chat.chat(&req).await {
+        Ok((resp, audit)) => {
+            state.chat.persist_audit(&audit).await;
+            Json(resp).into_response()
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "chat handler failed");
+            error_response_json(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "assistant unavailable; escalate to support@apexmail.ee",
+            )
+        }
+    }
+}
+
+/// POST /admin/reindex — rebuild the docs index from AI_DOCS_DIR. Safe to
+/// call repeatedly (idempotent upsert; prunes superseded versions).
+async fn reindex_handler(State(state): State<Arc<AppState>>) -> Response {
+    let Some(pool) = &state.docs_pool else {
+        return error_response_json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "docs database not configured (AI_DATABASE_URL)",
+        );
+    };
+    let dir = crate::retrieval::docs_dir();
+    match crate::retrieval::reindex(pool, &dir).await {
+        Ok(count) => Json(serde_json::json!({
+            "indexed_chunks": count,
+            "docs_version": crate::retrieval::docs_version(&dir),
+            "docs_dir": dir.display().to_string(),
+        }))
+        .into_response(),
+        Err(e) => error_response_json(StatusCode::INTERNAL_SERVER_ERROR, &e),
+    }
+}
+
+/// POST /admin/chat/history — a tenant's chat audit rows (newest first),
+/// tenant-scoped by REQUIREMENT (never defaults to the control-plane bucket).
+async fn chat_history_handler(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Response {
+    let Some(pool) = &state.docs_pool else {
+        return error_response_json(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "docs database not configured",
+        );
+    };
+    let Some(tenant) = body.get("tenant_id").and_then(|v| v.as_str()) else {
+        return error_response_json(StatusCode::BAD_REQUEST, "tenant_id is required");
+    };
+    let limit = body
+        .get("limit")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(50)
+        .clamp(1, 200);
+    match sqlx::query_as::<_, (String, String, String, String, bool, chrono::DateTime<chrono::Utc>)>(
+        "SELECT role, content, docs_version, user_id, escalated, created_at          FROM ai_chat_messages WHERE tenant_id = $1          ORDER BY created_at DESC LIMIT $2",
+    )
+    .bind(tenant)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) => Json(serde_json::json!({
+            "tenant_id": tenant,
+            "messages": rows.iter().map(|(role, content, dv, user, esc, ts)| serde_json::json!({
+                "role": role, "content": content, "user_id": user,
+                "escalated": esc, "docs_version": dv, "created_at": ts.to_rfc3339(),
+            })).collect::<Vec<_>>(),
+        }))
+        .into_response(),
+        Err(e) => error_response_json(StatusCode::INTERNAL_SERVER_ERROR, &format!("history query failed: {e}")),
+    }
+}
+
+fn error_response_json(status: StatusCode, message: &str) -> Response {
+    (status, Json(serde_json::json!({ "error": message }))).into_response()
+}
+
 pub fn build_router(state: Arc<AppState>) -> Router {
     let timeout = state.request_timeout;
     Router::new()
@@ -504,6 +651,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/training/jobs/:job_id", get(training_job_handler))
         .route("/evaluate", post(evaluation_handler))
         .route("/domains/dns-records", post(domain_dns_handler))
+        .route("/chat", post(chat_handler))
+        .route("/admin/reindex", post(reindex_handler))
+        .route("/admin/chat/history", post(chat_history_handler))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_service_token,
@@ -548,8 +698,8 @@ async fn require_service_token(
 }
 
 /// Build application state from deployment configuration.
-pub fn default_app_state() -> Result<Arc<AppState>, String> {
-    Ok(Arc::new(AppState::from_environment()?))
+pub async fn default_app_state() -> Result<Arc<AppState>, String> {
+    Ok(Arc::new(AppState::from_environment().await?))
 }
 
 #[cfg(test)]
@@ -559,9 +709,10 @@ mod tests {
     use axum::http::{Request, StatusCode};
     use tower::ServiceExt;
 
-    fn app() -> Router {
+    async fn app() -> Router {
         let state = Arc::new(
             AppState::from_config(AiConfig::default(), "test-key".into())
+                .await
                 .expect("valid default configuration"),
         );
         build_router(state)
@@ -582,6 +733,7 @@ mod tests {
     #[tokio::test]
     async fn health_is_public_and_reports_runtime_readiness() {
         let response = app()
+            .await
             .oneshot(
                 Request::builder()
                     .uri("/health")
@@ -596,6 +748,7 @@ mod tests {
     #[tokio::test]
     async fn helpers_and_model_control_plane_require_service_authentication() {
         let response = app()
+            .await
             .oneshot(
                 Request::builder()
                     .uri("/models")
@@ -610,6 +763,7 @@ mod tests {
     #[tokio::test]
     async fn subject_suggestions_remain_available_as_heuristics() {
         let response = app()
+            .await
             .oneshot(authenticated_json_request(
                 "/suggest",
                 serde_json::json!({"topic":"email marketing", "tone":"urgent", "count":2}),
@@ -622,6 +776,7 @@ mod tests {
     #[tokio::test]
     async fn restored_model_routes_fail_closed_when_not_configured() {
         let response = app()
+            .await
             .oneshot(authenticated_json_request(
                 "/predict",
                 serde_json::json!({"model_id":"apexmail-assistant", "input":{"prompt":"Hello"}}),
@@ -631,6 +786,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 
         let response = app()
+            .await
             .oneshot(authenticated_json_request(
                 "/train",
                 serde_json::json!({"model_id":"apexmail-assistant", "epochs":1}),
@@ -643,6 +799,7 @@ mod tests {
     #[tokio::test]
     async fn evaluation_uses_real_metrics() {
         let response = app()
+            .await
             .oneshot(authenticated_json_request(
                 "/evaluate",
                 serde_json::json!({"predictions":[true, false], "labels":[true, false]}),
@@ -657,7 +814,7 @@ mod tests {
         // Default config: 60 requests / 60s window. Requests 1..=60 hit the
         // (disabled) runtime and fail closed with 503; request 61 is the
         // N+1 rapid call and must be rejected with 429 before inference.
-        let app = app();
+        let app = app().await;
         for _ in 0..60 {
             let response = app
                 .clone()
@@ -689,7 +846,7 @@ mod tests {
             "x-apexmail-tenant-id",
             "00000000-0000-0000-0000-000000000001".parse().unwrap(),
         );
-        let response = app().oneshot(request).await.unwrap();
+        let response = app().await.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
@@ -738,7 +895,7 @@ mod tests {
     /// identities — they are rejected with 400 before the governor sees them.
     #[tokio::test]
     async fn predict_rejects_malformed_tenant_rate_key_headers() {
-        let app = app();
+        let app = app().await;
         let bad_headers: [String; 4] = [
             "bad tenant!".into(),                    // illegal characters
             "tenant/../../etc".into(),               // path-ish junk
@@ -768,7 +925,7 @@ mod tests {
     /// header still falls back to the shared `_control-plane` bucket.
     #[tokio::test]
     async fn predict_rate_limit_buckets_by_validated_tenant_key() {
-        let app = app();
+        let app = app().await;
         let body = serde_json::json!({"model_id":"apexmail-assistant", "input":{"prompt":"Hello"}});
 
         // Exhaust tenant-b's bucket (limit 60/window 60s): every allowed

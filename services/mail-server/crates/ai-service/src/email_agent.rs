@@ -100,22 +100,27 @@ pub(crate) const TENANT_DRAFT_COUNT_SQL: &str = r#"SELECT COUNT(*) FROM inbound_
 /// `received_at > NOW() - INTERVAL '5 minutes'` filter permanently stranded
 /// every message whose processing had been interrupted (processing reset to
 /// false, processed_at still NULL) once five minutes had passed.
+// The AI agent claims rows via its OWN marker (`ai_claimed_at`, migration
+// 123). The reply-handler's `processing` column previously served both
+// consumers with the same eligibility predicate and different claim
+// semantics — a race. The MTA only populates raw_message (the mirror
+// columns are NULL), so from/subject/body are parsed from the raw MIME.
 const CLAIM_UNPROCESSED_SQL: &str = r#"
                         WITH candidates AS (
                                 SELECT id
                                 FROM inbound_messages
                                 WHERE processed_at IS NULL
-                                    AND processing = false
+                                    AND ai_claimed_at IS NULL
+                                    AND raw_message IS NOT NULL
                                 ORDER BY received_at ASC
                                 LIMIT 10
                                 FOR UPDATE SKIP LOCKED
                         )
                         UPDATE inbound_messages AS inbound
-                        SET processing = true
+                        SET ai_claimed_at = NOW()
                         FROM candidates
                         WHERE inbound.id = candidates.id
-                        RETURNING inbound.id, inbound.tenant_id, inbound.from_email, inbound.to_email, inbound.subject,
-                                  inbound.body_text, inbound.body_html
+                        RETURNING inbound.id, inbound.tenant_id, inbound.raw_message
             "#;
 
 /// What to do with a message whose processing just failed for the
@@ -207,6 +212,64 @@ struct InboundRow {
     /// Owning tenant (migration 088). Used for per-tenant rate/cost caps;
     /// NULL rows fall back to a shared `_unknown` budget.
     tenant_id: Option<String>,
+    /// Full raw MIME — the only column the MTA reliably populates.
+    raw_message: Vec<u8>,
+}
+
+impl InboundRow {
+    /// Parse from/to/subject/body from the raw MIME (NULL-safe by
+    /// construction — never reads the legacy mirror columns).
+    fn parsed(&self) -> ParsedInbound {
+        let parsed = mail_parser::MessageParser::default().parse(&self.raw_message);
+        let from = parsed
+            .as_ref()
+            .and_then(|m| m.from())
+            .and_then(|a| a.first())
+            .map(|a| a.address().unwrap_or_default().to_string())
+            .unwrap_or_default();
+        let to = parsed
+            .as_ref()
+            .and_then(|m| m.to())
+            .and_then(|a| a.first())
+            .map(|a| a.address().unwrap_or_default().to_string())
+            .unwrap_or_default();
+        let subject = parsed
+            .as_ref()
+            .and_then(|m| m.subject())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        let body_text = parsed
+            .as_ref()
+            .and_then(|m| m.body_text(0))
+            .map(|b| b.into_owned());
+        let body_html = parsed
+            .as_ref()
+            .and_then(|m| m.body_html(0))
+            .map(|b| b.into_owned());
+        ParsedInbound {
+            from_email: from,
+            to_email: to,
+            subject,
+            body_text,
+            body_html,
+        }
+    }
+}
+
+/// Field-compatible view used by process_message so downstream logic is
+/// unchanged whether fields came from columns (legacy) or parsed MIME.
+pub struct ParsedView {
+    pub id: String,
+    pub tenant_id: Option<String>,
+    pub from_email: String,
+    pub to_email: String,
+    pub subject: String,
+    pub body_text: Option<String>,
+    pub body_html: Option<String>,
+}
+
+/// NULL-safe mirror of the parsed fields the agent needs.
+struct ParsedInbound {
     from_email: String,
     to_email: String,
     subject: String,
@@ -617,6 +680,18 @@ impl EmailAnswerer {
     /// Process a single inbound message into a human-approval draft. This method
     /// deliberately has no SMTP or raw-message fallback.
     async fn process_message(&self, row: &InboundRow) -> anyhow::Result<()> {
+        let parsed = row.parsed();
+        let row = ParsedView {
+            id: row.id.clone(),
+            tenant_id: row.tenant_id.clone(),
+            from_email: parsed.from_email.clone(),
+            to_email: parsed.to_email.clone(),
+            subject: parsed.subject.clone(),
+            body_text: parsed.body_text.clone(),
+            body_html: parsed.body_html.clone(),
+        };
+        let row = &row;
+
         // ── Loop guard 1: sender-based ────────────────────────────────────
         if is_loop_sender(&row.from_email, &self.config.reply_from) {
             tracing::info!(
@@ -829,7 +904,7 @@ pub(crate) fn truncate_response(response: &str) -> String {
 }
 
 /// Extract the best available text body from the inbound message.
-fn extract_body(row: &InboundRow, max_body_chars: usize) -> String {
+fn extract_body(row: &ParsedView, max_body_chars: usize) -> String {
     if let Some(ref text) = row.body_text {
         if !text.trim().is_empty() {
             return limit_body(text, max_body_chars);
@@ -1078,7 +1153,7 @@ mod tests {
 
     #[test]
     fn test_extract_body_prefers_text() {
-        let row = InboundRow {
+        let row = ParsedView {
             id: "test".into(),
             tenant_id: None,
             from_email: "a@b.com".into(),
@@ -1092,7 +1167,7 @@ mod tests {
 
     #[test]
     fn test_extract_body_falls_back_to_html() {
-        let row = InboundRow {
+        let row = ParsedView {
             id: "test".into(),
             tenant_id: None,
             from_email: "a@b.com".into(),
@@ -1117,7 +1192,11 @@ mod tests {
         // Regression: the "received_at > NOW() - INTERVAL '5 minutes'" filter
         // stranded interrupted messages forever.
         assert!(CLAIM_UNPROCESSED_SQL.contains("processed_at IS NULL"));
-        assert!(CLAIM_UNPROCESSED_SQL.contains("processing = false"));
+        // The AI agent claims via its own marker (migration 123): the worker
+        // reply-handler owns the 'processing' column — sharing it raced both
+        // consumers on the same eligibility predicate.
+        assert!(CLAIM_UNPROCESSED_SQL.contains("ai_claimed_at IS NULL"));
+        assert!(!CLAIM_UNPROCESSED_SQL.contains("processing = false"));
         assert!(
             !CLAIM_UNPROCESSED_SQL.contains("INTERVAL '5 minutes'"),
             "candidate query must not filter by message age"

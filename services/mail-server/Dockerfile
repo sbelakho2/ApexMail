@@ -343,6 +343,43 @@ ENTRYPOINT ["/usr/bin/tini", "--", "pdf-renderer"]
 CMD ["--host", "0.0.0.0", "--port", "3004"]
 
 # =============================================================================
+# AI Service (grounded assistant: chat, docs index, deterministic tools)
+# =============================================================================
+# Internal-only (port 3012, single shared service token). Requires Postgres
+# for the docs index + chat audit (DATABASE_URL). Model runtime is
+# config-driven and FAILS CLOSED: AI_MODEL_ENABLED=false until an inference
+# endpoint (vLLM/llama-server/Bedrock-compat) is configured.
+FROM runtime-base AS ai-service
+
+COPY --from=builder /app/target/release/ai-service /usr/local/bin/
+
+USER apexmail
+EXPOSE 3012
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 3012"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "ai-service"]
+
+# =============================================================================
+# AI Embeddings (inference sidecar; optional — chat works without it today)
+# =============================================================================
+# Internal-only (port 9090, same service token). Proxies an OpenAI-compatible
+# /v1/embeddings endpoint; INFERENCE_URL must be https unless
+# SIDECAR_TLS_ENABLED=false.
+FROM runtime-base AS ai-embeddings
+
+COPY --from=builder /app/target/release/ai-embeddings /usr/local/bin/
+
+USER apexmail
+EXPOSE 9090
+
+HEALTHCHECK --interval=15s --timeout=3s --start-period=10s --retries=3 \
+    CMD ["sh", "-c", "nc -z 127.0.0.1 9090"]
+
+ENTRYPOINT ["/usr/bin/tini", "--", "ai-embeddings"]
+
+# =============================================================================
 # Migrator (one-shot database migration job — runs BEFORE `compose up`)
 # =============================================================================
 # Applies services/mail-server/migrations via sqlx::migrate!. Run as

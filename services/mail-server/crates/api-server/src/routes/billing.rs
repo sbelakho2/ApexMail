@@ -4474,6 +4474,7 @@ mod tests {
     fn test_config() -> Config {
         Config {
             public_rate_limit_enabled: false,
+            ai_service_base_url: String::new(),
             port: 3000,
             host: "0.0.0.0".into(),
             base_url: "http://localhost:3000".into(),

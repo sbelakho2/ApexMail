@@ -1,5 +1,14 @@
 # ai-service
 
+> **STATUS**
+> Deployed as the internal `ai-service` container (port 3012, service-token
+> auth). The chat pipeline is grounded (docs retrieval + canonical facts) and
+> FAILS CLOSED while `AI_MODEL_ENABLED=false`: no model runtime, no
+> generation — the chat endpoint returns an honest human-escalation.
+> Routes registered: /health /suggest /optimize-time /content/score /models
+> /predict /train /training/jobs/:id /evaluate /domains/dns-records /chat
+> /admin/reindex /admin/chat/history.
+
 > **STATUS — READ BEFORE RELYING ON THIS CRATE**
 > NOT DEPLOYED: this crate's server binary is not in the deployment Dockerfile or compose files, and no production service depends on it. Compile/test target only.
 

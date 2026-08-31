@@ -138,3 +138,11 @@ deploy/tests/.seo-validation-report.json
 # content voice-check report artifact (generated)
 deploy/tests/.content-voice-report.json
 deploy/tests/.signup-test-report.json
+
+# AI training artifacts — never commit model weights or environments
+apps/ai/training/.venv/
+apps/ai/training/output_*/
+apps/ai/training/merged_*/
+apps/ai/training/__pycache__/
+apps/ai/training/*.safetensors
+apps/ai/training/**/*.pt

@@ -547,6 +547,7 @@ pub fn build_app(state: AppState) -> Router {
             routes::admin::leads_discovery::router(),
         )
         .nest("/v1/admin/support", routes::admin::support::router())
+        .nest("/v1/admin/ai/drafts", routes::admin::ai_drafts::router())
         .nest(
             "/v1/admin/support/analytics",
             routes::admin::support_analytics::router(),
@@ -618,7 +619,10 @@ pub fn build_app(state: AppState) -> Router {
         .nest("/v1/dashboard", routes::dashboard::router())
         .nest("/v1/client-errors", routes::client_errors::router())
         .nest("/v1/automations", routes::automations::router())
-        .nest("/v1/ai", routes::ai_insights::router())
+        .nest(
+            "/v1/ai",
+            routes::ai_insights::router().merge(routes::ai_chat::router()),
+        )
         .nest("/v1/dedicated-ips", routes::dedicated_ips::router())
         .nest("/v1/account", routes::account::router())
         .nest("/v1/stream", routes::stream_tokens::router())
@@ -1780,6 +1784,7 @@ mod tests {
     pub(crate) fn test_config_impl() -> Config {
         Config {
             port: 3000,
+            ai_service_base_url: String::new(),
             host: "0.0.0.0".into(),
             base_url: "http://localhost:3000".into(),
             environment: crate::config::Environment::Development,

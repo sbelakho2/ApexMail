@@ -116,6 +116,9 @@ pub struct Config {
     pub control_plane_api_key: Option<String>,
     pub sales_autopilot_base_url: String,
     pub internal_service_token: Option<String>,
+    /// ai-service base URL for the grounded assistant (empty = assistant
+    /// disabled; /v1/ai/chat then returns 503 with the support escalation).
+    pub ai_service_base_url: String,
     /// Control-plane session hardening (`middleware::cp_auth`).
     pub cp_auth: CpAuthConfig,
 
@@ -962,6 +965,7 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty()),
             sales_autopilot_base_url: env_or("SALES_AUTOPILOT_BASE_URL", "http://0.0.0.0:3010"),
+            ai_service_base_url: env_or("AI_SERVICE_BASE_URL", "http://ai-service:3012"),
             internal_service_token: env::var("INTERNAL_SERVICE_TOKEN")
                 .ok()
                 .filter(|s| !s.is_empty()),
@@ -1425,6 +1429,7 @@ pub(crate) mod tests {
             csrf_secret: "test-csrf-secret-1234567890abcdef".into(),
             control_plane_api_key: Some("test-control-plane-api-key-1234567890".into()),
             sales_autopilot_base_url: "http://localhost:3010".into(),
+            ai_service_base_url: "http://localhost:3012".into(),
             internal_service_token: None,
             cp_auth: Default::default(),
             tracking_secret_key: "test-tracking-secret-123456789012abcd".into(),
@@ -1571,6 +1576,7 @@ pub(crate) mod tests {
             csrf_secret: "test-csrf-secret-1234567890abcd".into(),
             control_plane_api_key: None,
             sales_autopilot_base_url: "http://localhost:3010".into(),
+            ai_service_base_url: "http://localhost:3012".into(),
             internal_service_token: None,
             cp_auth: Default::default(),
             tracking_secret_key: "test-tracking-secret-123456789012".into(),

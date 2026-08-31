@@ -79,7 +79,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 # All services that can be built from the mail-server Dockerfile
-ALL_SERVICES=(api-server mta imap-server mailstore worker enterprise observability status-server billing-service sales-autopilot compliance analytics-worker pdf-renderer migrator)
+ALL_SERVICES=(api-server mta imap-server mailstore worker enterprise observability status-server billing-service sales-autopilot compliance analytics-worker pdf-renderer ai-service migrator)
 # Dockerfile targets that differ from the canonical image/service name.
 # status-server is built from the `auth-server` stage (the binary inside the
 # image is auth-server); the IMAGE name follows the compose service key.

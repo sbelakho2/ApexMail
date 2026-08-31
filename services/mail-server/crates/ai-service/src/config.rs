@@ -291,3 +291,12 @@ mod tests {
         }
     }
 }
+
+/// Two-stage planner mode. Default OFF: single-pass generation (the model
+/// classifies intent and calls tools natively); "on" restores the separate
+/// planner round-trip.
+pub fn planner_enabled() -> bool {
+    std::env::var("AI_PIPELINE_PLANNER")
+        .map(|v| v == "on" || v == "true" || v == "1")
+        .unwrap_or(false)
+}

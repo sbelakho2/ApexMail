@@ -373,7 +373,7 @@ bring_up_stack() {
   # running state is its healthy state).
   compose up -d --build --force-recreate \
     nginx api-server enterprise tracking sales-autopilot billing-service \
-    pdf-renderer analytics-worker \
+    pdf-renderer analytics-worker ai-service \
     postgres redis clickhouse
 }
 
@@ -391,6 +391,7 @@ verify_stack() {
   wait_for_service_health sales-autopilot 120
   wait_for_service_health billing-service 120
   wait_for_service_health pdf-renderer 120
+  wait_for_service_health ai-service 120
   # analytics-worker has no healthcheck (cron loop): running == healthy.
   _aw_cid="$(service_container analytics-worker)"
   _aw_deadline=$((SECONDS + 90))

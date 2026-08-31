@@ -625,6 +625,7 @@ mod tests {
 
         let config = Config {
             port: 3000,
+            ai_service_base_url: String::new(),
             host: "0.0.0.0".into(),
             base_url: "http://localhost:3000".into(),
             environment: Environment::Development,

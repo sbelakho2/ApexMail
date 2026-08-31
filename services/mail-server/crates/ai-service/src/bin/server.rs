@@ -34,7 +34,7 @@ async fn main() {
 
     tracing::info!("starting AI intelligence service");
 
-    let state = match routes::default_app_state() {
+    let state = match routes::default_app_state().await {
         Ok(state) => state,
         Err(error) => {
             tracing::error!(%error, "invalid AI service configuration");

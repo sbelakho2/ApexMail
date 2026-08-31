@@ -330,6 +330,7 @@ services:
     volumes:
       - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
     environment:
+      AI_SERVICE_BASE_URL: http://ai-service:3012
       RUST_LOG: info
       ENVIRONMENT: ${ENVIRONMENT:-production}
       HOST: 0.0.0.0
@@ -644,6 +645,61 @@ services:
       REDIS_PASSWORD: ""
     secrets:
       - redis_password_map
+
+  # Grounded AI assistant (see base compose). Internal-only, fail-closed
+  # model runtime until AI_MODEL_ENDPOINT is configured; secrets via files.
+  ai-service:
+    image: ghcr.io/sbelakho2/apexmail/ai-service:latest
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RUST_LOG: info
+      AI_BIND: 0.0.0.0:3012
+      AI_DOCS_DIR: /opt/apexmail/docs
+      AI_MODEL_ENABLED: ${AI_MODEL_ENABLED:-false}
+      AI_MODEL_ENDPOINT: ${AI_MODEL_ENDPOINT:-}
+      AI_MODEL_NAME: ${AI_MODEL_NAME:-apexmail-assistant}
+      AI_MODEL_API_KEY: ""
+      AI_MODEL_API_KEY_FILE: /run/secrets/ai_model_api_key
+      AI_CHAT_RETENTION_DAYS: ${AI_CHAT_RETENTION_DAYS:-90}
+      DATABASE_URL: ""
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      AWS_REGION: ${AWS_REGION:-eu-west-1}
+      INTERNAL_SERVICE_TOKEN: ""
+      INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
+    volumes:
+      - ./docs:/opt/apexmail/docs:ro
+    secrets:
+      - postgres_password
+      - internal_service_token
+      - ai_model_api_key
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 3012"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - apexmail_backend
+    logging: *default-logging
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 128M
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 5
 
   compliance:
     image: ghcr.io/sbelakho2/apexmail/compliance:latest
@@ -1464,6 +1520,8 @@ networks:
     driver: bridge
 
 secrets:
+  ai_model_api_key:
+    file: ${PROD_AI_MODEL_API_KEY_FILE:-/opt/apexmail/secrets/ai_model_api_key.txt}
   redis_password_map:
     file: ${PROD_REDIS_PASSWORD_MAP_FILE:-/opt/apexmail/secrets/redis_password_map.json}
   postgres_password:

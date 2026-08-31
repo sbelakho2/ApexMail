@@ -183,6 +183,7 @@ fn bounded_id(prefix: &str) -> String {
 #[allow(dead_code)]
 fn test_config() -> Config {
     Config {
+        ai_service_base_url: String::new(),
         cp_auth: Default::default(),
         public_rate_limit_enabled: false,
         port: 3000,

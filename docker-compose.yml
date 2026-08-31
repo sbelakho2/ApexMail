@@ -326,6 +326,7 @@ services:
       redis:
         condition: service_healthy
     environment:
+      AI_SERVICE_BASE_URL: http://ai-service:3012
       # ── Required ──────────────────────────────────────────────────────────
       APEXMAIL_API_KEY: ${APEXMAIL_API_KEY:-dev-api-key-change-me}
       # Comma-separated CIDRs of reverse proxies whose X-Forwarded-For may be
@@ -703,6 +704,68 @@ services:
     secrets:
       - postgres_password
       - redis_password
+    logging: *default-logging
+
+  # ===========================================================================
+  # AI SERVICE (grounded assistant: chat with docs retrieval, email drafts)
+  # ===========================================================================
+  # Internal-only: port 3012 is NOT published. api-server calls it with the
+  # shared INTERNAL_SERVICE_TOKEN and forwards the end user's tenant header.
+  # Model runtime FAILS CLOSED: with AI_MODEL_ENABLED=false the chat endpoint
+  # returns an honest escalation and everything else stays healthy.
+  ai-service:
+    build:
+      context: .
+      dockerfile: services/mail-server/Dockerfile
+      target: ai-service
+    restart: unless-stopped
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "ai-service"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
+      # The docs corpus for grounding — same tree the pipeline deploys.
+      - ./docs:/opt/apexmail/docs:ro
+    environment:
+      RUST_LOG: ${RUST_LOG:-info,ai_service=info}
+      AI_BIND: 0.0.0.0:3012
+      AI_DOCS_DIR: /opt/apexmail/docs
+      AI_MODEL_ENABLED: ${AI_MODEL_ENABLED:-false}
+      AI_MODEL_ENDPOINT: ${AI_MODEL_ENDPOINT:-http://127.0.0.1:8081/v1}
+      AI_MODEL_NAME: ${AI_MODEL_NAME:-apexmail-assistant}
+      AI_MODEL_API_KEY: ${AI_MODEL_API_KEY:-}
+      AI_CHAT_RETENTION_DAYS: ${AI_CHAT_RETENTION_DAYS:-90}
+      # URLs assembled by the entrypoint wrapper from the DB_* parts.
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      AWS_REGION: ${AWS_REGION:-eu-west-1}
+      INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 3012"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - apexmail_backend
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 64M
+    security_opt:
+      - no-new-privileges:true
+      - apparmor:docker-default
+    read_only: true
+    tmpfs:
+      - /tmp
+    secrets:
+      - postgres_password
     logging: *default-logging
 
   # ===========================================================================

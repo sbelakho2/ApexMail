@@ -837,6 +837,37 @@ impl GdprAutomation {
             .execute(&self.db)
             .await
             .map(|r| r.rows_affected()),
+            AiChatByUserEmail => {
+                // ai_chat_messages.user_id is the callers' user identifier;
+                // resolve via the users row (pre-tombstone, same as sessions).
+                let res = sqlx::query(
+                    "DELETE FROM ai_chat_messages WHERE user_id IN \
+                     (SELECT id::text FROM users WHERE LOWER(email) = LOWER($1))",
+                )
+                .bind(email)
+                .execute(&self.db)
+                .await;
+                return match res {
+                    Ok(r) => StoreErasureResult {
+                        store: store.name(),
+                        status: StoreErasureStatus::Deleted,
+                        rows_affected: r.rows_affected(),
+                        error: None,
+                    },
+                    Err(e) if is_missing_table(&e) => StoreErasureResult {
+                        store: store.name(),
+                        status: StoreErasureStatus::SkippedMissingTable,
+                        rows_affected: 0,
+                        error: None,
+                    },
+                    Err(e) => StoreErasureResult {
+                        store: store.name(),
+                        status: StoreErasureStatus::BestEffortFailed,
+                        rows_affected: 0,
+                        error: Some(e.to_string()),
+                    },
+                };
+            }
             SessionsByUserEmail => {
                 // users.id is UUID while sessions.user_id is TEXT — cast to
                 // text or Postgres rejects the IN-subquery (uuid = text has
@@ -1944,6 +1975,9 @@ pub enum ErasureStore {
     /// while the row (a statutory sending record) survives. Deleting the row
     /// would destroy other recipients' records of the same send.
     AnonymizeMessageContent,
+    /// AI assistant chat audit rows for the subject's user account
+    /// (migration 123). Conversations are not statutory records — deleted.
+    AiChatByUserEmail,
     /// F1/F9: the subject's platform account. Art. 17 hygiene keeps a
     /// tombstone row (id + tenant linkage + `erased` status) with every
     /// PII field redacted, so audit/history references don't dangle.
@@ -1964,6 +1998,7 @@ impl ErasureStore {
         match self {
             Self::TableBySubjectEmail { name, .. } => name,
             Self::SessionsByUserEmail => "sessions",
+            Self::AiChatByUserEmail => "ai_chat_messages",
             Self::AnonymizeSubjectEmail { name, .. } => name,
             Self::AnonymizeMessageContent => "messages",
             Self::AnonymizeUserTombstone => "users",
@@ -2007,6 +2042,9 @@ pub fn erasure_stores() -> Vec<ErasureStore> {
         // Canonical message content (073) — anonymize, never delete.
         AnonymizeMessageContent,
         SessionsByUserEmail,
+        // AI assistant conversations (migration 123) — user-scoped chat
+        // history; no statutory retention, deleted with the account.
+        AiChatByUserEmail,
         // The subject's account, anonymized to a tombstone. AFTER sessions:
         // the session purge resolves the users row by email, and the
         // tombstone rewrites that email.
@@ -2877,6 +2915,7 @@ mod tests {
                     );
                 }
                 ErasureStore::SessionsByUserEmail => { /* scoped via users.email lookup */ }
+                ErasureStore::AiChatByUserEmail => { /* scoped via users.email lookup */ }
                 ErasureStore::AnonymizeSubjectEmail { name, columns, .. } => {
                     assert!(
                         !columns.is_empty(),
@@ -2897,6 +2936,7 @@ mod tests {
             .map(|s| match s {
                 ErasureStore::TableBySubjectEmail { name, .. } => *name,
                 ErasureStore::SessionsByUserEmail => "sessions",
+                ErasureStore::AiChatByUserEmail => "ai_chat_messages",
                 ErasureStore::AnonymizeSubjectEmail { name, .. } => *name,
                 ErasureStore::AnonymizeMessageContent => "messages",
                 ErasureStore::AnonymizeUserTombstone => "users",
@@ -2976,6 +3016,7 @@ mod tests {
             "double_opt_in_tokens",
             "gdpr_exports",
             "sessions",
+            "ai_chat_messages",
             "suppression_list",
             "contact_list_members",
             "invoices",

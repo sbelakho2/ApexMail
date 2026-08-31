@@ -9,6 +9,7 @@
 pub mod analytics;
 pub mod assistant;
 pub mod bandits;
+pub mod chat;
 pub mod config;
 pub mod content;
 pub mod defense;
@@ -16,7 +17,10 @@ pub mod domain_dns;
 pub mod email_agent;
 pub mod governor;
 pub mod inference;
+pub mod knowledge;
+pub mod pentest;
 pub mod pipeline;
+pub mod retrieval;
 pub mod routes;
 pub mod sto;
 pub mod tools;

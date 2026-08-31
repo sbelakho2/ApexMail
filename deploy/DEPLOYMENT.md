@@ -54,16 +54,16 @@ SSH once:
    Nothing in the live pipeline renders these files — the archived
    `deploy-hetzner.yml` workflow used to; missing files fail the compose
    `${VAR:?}` gate at deploy time, so verify all of them exist before the first
-   pipeline run (`ls /opt/apexmail/secrets | wc -l` — 31 files including
-   `redis_password_map.json`, generated per the comment in
+   pipeline run (`ls /opt/apexmail/secrets | wc -l` — 32 files including
+   `redis_password_map.json` and an empty `ai_model_api_key.txt`, generated per the comment in
    `.env.production.example`).
 5. **Install the CI pipeline** — `ssh root@<host> 'cd /opt/apexmail/src && ci/install.sh'` (installs the 5-minute systemd timer, pinned tools, and the fail-closed tool policy).
 6. **Run the first deploy** — `ssh root@<host> 'cd /opt/apexmail/src && ci/pipeline.sh run'`. A red stage stops before `docker compose up`; the verify stage probes health, HTTP, and the SMTP banner.
 7. **Issue a real certificate** — `ssh root@<host> "cd /opt/apexmail/src && bash deploy/scripts/issue-letsencrypt.sh"`. Later deploys warn if the cert is still self-signed.
 
-## Rendered production secrets (the real 31)
+## Rendered production secrets (the real 32)
 
-`docker-compose.prod.yml` guards **30 `PROD_*_FILE` variables** (`${VAR:?}`) plus the redis-exporter JSON-map secret (`redis_password_map`).
+`docker-compose.prod.yml` guards **30 `PROD_*_FILE` variables** (`${VAR:?}`) plus the redis-exporter JSON-map secret (`redis_password_map`) and the optional-valued `ai_model_api_key` (empty file is fine while no model provider needs a key).
 Each guard must have a matching file under `/opt/apexmail/secrets/` (see
 Fresh-host bootstrap step 4 — nothing in the live pipeline renders them).
 `tools/validate-prod-env.sh` (available as `make verify-env`) derives this

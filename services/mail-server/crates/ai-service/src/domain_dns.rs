@@ -14,7 +14,7 @@ use crate::types::AiError;
 const RETURN_PATH_LABEL: &str = "bounce";
 const SES_RETURN_PATH_MX_PRIORITY: u16 = 10;
 const SES_SPF_RECORD: &str = "v=spf1 include:amazonses.com ~all";
-const DMARC_RECORD: &str = "v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.io";
+const DMARC_RECORD: &str = "v=DMARC1; p=quarantine; rua=mailto:dmarc@apexmail.ee";
 
 #[derive(Clone)]
 pub struct DomainDnsStore {

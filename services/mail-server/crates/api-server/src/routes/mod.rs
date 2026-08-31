@@ -1,4 +1,5 @@
 pub mod account;
+pub mod ai_chat;
 pub mod ai_insights;
 pub mod analytics;
 pub mod auth;

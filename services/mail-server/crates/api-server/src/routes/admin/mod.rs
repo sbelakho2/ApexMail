@@ -17,6 +17,7 @@
 //!   `admin_report_scheduler` module; report export is served live by
 //!   `analytics_export`.
 
+pub mod ai_drafts;
 pub mod analytics;
 pub mod analytics_export;
 pub mod audit;

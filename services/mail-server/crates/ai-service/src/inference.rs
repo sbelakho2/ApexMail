@@ -19,6 +19,10 @@ pub struct InferenceConfig {
     pub model: String,
     pub api_key: Option<String>,
     pub timeout: Duration,
+    /// Default generation budget (AI_MAX_TOKENS) and sampling temperature
+    /// (AI_TEMPERATURE) — previously parsed by config and never consumed.
+    pub max_tokens: u32,
+    pub temperature: f64,
 }
 
 impl InferenceConfig {
@@ -34,6 +38,8 @@ impl InferenceConfig {
             api_key: (!config.model_api_key.trim().is_empty())
                 .then(|| config.model_api_key.clone()),
             timeout: Duration::from_secs(config.model_timeout_secs),
+            max_tokens: config.max_tokens.clamp(1, 8192) as u32,
+            temperature: config.temperature.clamp(0.0, 2.0),
         }
     }
 
@@ -171,8 +177,14 @@ impl LlmClient {
     }
 
     pub async fn plan(&self, system_prompt: &str, user_prompt: &str) -> Result<String, AiError> {
-        self.generate_for_model(&self.config.model, system_prompt, user_prompt, 768, 0.0)
-            .await
+        self.generate_for_model(
+            &self.config.model,
+            system_prompt,
+            user_prompt,
+            self.config.max_tokens,
+            self.config.temperature,
+        )
+        .await
     }
 
     /// Generate a response and invoke the supplied callback with bounded text
@@ -188,7 +200,9 @@ impl LlmClient {
     where
         F: FnMut(&str),
     {
-        let response = self.generate(system_prompt, user_prompt, 768).await?;
+        let response = self
+            .generate(system_prompt, user_prompt, self.config.max_tokens)
+            .await?;
         let mut start = 0;
         while start < response.len() {
             let mut end = (start + 512).min(response.len());
@@ -223,7 +237,13 @@ impl LlmClient {
         // instructions by pretty-printing itself into the prompt.
         let user_prompt = build_predict_user_prompt(&input)?;
         let text = self
-            .generate_for_model(model_id, PREDICT_SYSTEM_PROMPT, &user_prompt, 768, 0.0)
+            .generate_for_model(
+                model_id,
+                PREDICT_SYSTEM_PROMPT,
+                &user_prompt,
+                self.config.max_tokens,
+                self.config.temperature,
+            )
             .await?;
 
         Ok(Prediction::new(
@@ -417,6 +437,8 @@ mod tests {
             model: "apexmail-assistant".into(),
             api_key: None,
             timeout: Duration::from_secs(10),
+            max_tokens: 768,
+            temperature: 0.0,
         });
 
         let input = serde_json::json!({

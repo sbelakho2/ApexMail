@@ -16,6 +16,9 @@ use std::collections::HashSet;
 // Canonical pricing — must match docs/pricing.md and prompts_v2.py exactly
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Canonical values come from the knowledge module (single source of truth
+// shared with the prompt builders) so the verifier can never drift from
+// what the model was told.
 const CANONICAL_PRICES: &[i64] = &[0, 25, 65, 150, 350, 3000];
 const CANONICAL_EMAIL_LIMITS: &[i64] = &[30_000, 50_000, 150_000, 500_000, 2_000_000, 5_000_000];
 /// Canonical per-unit rates: PAYG per-email tiers, the subscription overage
@@ -28,6 +31,9 @@ const ALLOWED_DOMAINS: &[&str] = &[
     "app.apexmail.ee",
     "track.apexmail.ee",
 ];
+
+/// The local tables above must equal the knowledge module's canonical
+/// values — enforced by `canonical_tables_match_knowledge` in the tests.
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Verdict types
@@ -640,6 +646,28 @@ fn has_plan_or_period_context(context: &str) -> bool {
 // ═══════════════════════════════════════════════════════════════════════════
 // Tests
 // ═══════════════════════════════════════════════════════════════════════════
+
+#[cfg(test)]
+mod knowledge_lockstep {
+    #[test]
+    fn canonical_tables_match_knowledge() {
+        assert_eq!(
+            super::CANONICAL_PRICES.to_vec(),
+            crate::knowledge::plan_prices(),
+            "verifier price table drifted from the knowledge module"
+        );
+        assert_eq!(
+            super::CANONICAL_EMAIL_LIMITS.to_vec(),
+            crate::knowledge::email_limits(),
+            "verifier email-limit table drifted from the knowledge module"
+        );
+        assert_eq!(
+            super::CANONICAL_RATES.to_vec(),
+            crate::knowledge::canonical_rates(),
+            "verifier rate table drifted from the knowledge module"
+        );
+    }
+}
 
 #[cfg(test)]
 mod tests {

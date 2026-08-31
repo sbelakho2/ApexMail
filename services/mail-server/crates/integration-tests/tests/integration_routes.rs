@@ -396,8 +396,8 @@ mod ai {
     use super::*;
     use ai_service::routes::{build_router, default_app_state};
 
-    fn app() -> axum::Router {
-        let mut state = default_app_state().expect("default app state");
+    async fn app() -> axum::Router {
+        let mut state = default_app_state().await.expect("default app state");
         Arc::get_mut(&mut state)
             .expect("exclusive app state")
             .service_token = "test-key".into();
@@ -407,6 +407,7 @@ mod ai {
     #[tokio::test]
     async fn health_returns_200() {
         let resp = app()
+            .await
             .oneshot(Request::get("/health").body(Body::empty()).unwrap())
             .await
             .unwrap();
@@ -419,6 +420,7 @@ mod ai {
     async fn content_score_returns_score() {
         let body = serde_json::json!({ "subject": "🔥 Limited time offer today!" });
         let resp = app()
+            .await
             .oneshot(
                 Request::post("/content/score")
                     .header("x-api-key", "test-key")
@@ -436,6 +438,7 @@ mod ai {
     #[tokio::test]
     async fn models_route_returns_runtime_status() {
         let resp = app()
+            .await
             .oneshot(
                 Request::get("/models")
                     .header("x-api-key", "test-key")
@@ -457,6 +460,7 @@ mod ai {
         // client error (400/422) instead of reaching the LLM provider or
         // returning 404.
         let resp = app()
+            .await
             .oneshot(
                 Request::post("/predict")
                     .header("x-api-key", "test-key")
