@@ -88,7 +88,7 @@ fn chunk_text(text: &str) -> Vec<String> {
             .filter(|&i| i > CHUNK_CHARS / 2)
             .unwrap_or(slice.len());
         chunks.push(slice[..cut].trim().to_string());
-        start = start + cut.max(CHUNK_CHARS - CHUNK_OVERLAP);
+        start += cut.max(CHUNK_CHARS - CHUNK_OVERLAP);
         if start >= bytes {
             break;
         }
@@ -188,7 +188,8 @@ pub async fn search(pool: &PgPool, query: &str, docs_version: &str) -> Vec<Retri
     if q.is_empty() {
         return Vec::new();
     }
-    let rows: Result<Vec<(String, String, String, f32, f32)>, _> = sqlx::query_as(
+    type SearchRow = (String, String, String, f32, f32);
+    let rows: Result<Vec<SearchRow>, _> = sqlx::query_as(
         r#"
         WITH fts AS (
             SELECT id, ts_rank(content_tsv, plainto_tsquery('english', $1)) AS s

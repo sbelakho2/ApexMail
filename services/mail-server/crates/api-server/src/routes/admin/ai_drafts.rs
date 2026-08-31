@@ -154,7 +154,7 @@ async fn approve_draft(
     )
     .bind(message_uuid)
     .bind("support@apexmail.ee")
-    .bind(&[from_email.clone()])
+    .bind(&[from_email.as_str()])
     .bind(&subject)
     .bind(&reply)
     .bind(&tenant_id)

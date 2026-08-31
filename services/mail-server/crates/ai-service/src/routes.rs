@@ -522,7 +522,6 @@ async fn domain_dns_handler(
     }
 }
 
-/// Build the Axum [`Router`] with shared state.
 // ── Grounded chat ─────────────────────────────────────────────────────────
 
 /// POST /chat — called by the authenticated control plane (api-server) with
@@ -638,6 +637,7 @@ fn error_response_json(status: StatusCode, message: &str) -> Response {
     (status, Json(serde_json::json!({ "error": message }))).into_response()
 }
 
+/// Build the Axum [`Router`] with shared state.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let timeout = state.request_timeout;
     Router::new()

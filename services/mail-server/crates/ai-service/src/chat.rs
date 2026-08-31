@@ -89,7 +89,7 @@ impl ChatService {
             client: Arc::new(LlmClient::new(
                 crate::inference::InferenceConfig::from_ai_config(config),
             )),
-            verifier: ResponseVerifier::default(),
+            verifier: ResponseVerifier::new(),
             pool,
             model_enabled: config.model_enabled,
         }
