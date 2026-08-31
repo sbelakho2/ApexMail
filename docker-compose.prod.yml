@@ -687,6 +687,7 @@ services:
       start_period: 15s
     networks:
       - apexmail_backend
+      - apexmail_data_internal
     logging: *default-logging
     deploy:
       replicas: 1

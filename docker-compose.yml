@@ -752,6 +752,7 @@ services:
       start_period: 15s
     networks:
       - apexmail_backend
+      - apexmail_data_internal
     deploy:
       resources:
         limits:
