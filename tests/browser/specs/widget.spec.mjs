@@ -34,10 +34,13 @@ test.describe('KiwiCaptcha browser solver', () => {
   });
 
   test('external same-origin worker is used (data-kiwi-worker-src)', async ({ page }) => {
-    // The standalone worker path (CSP-friendly: no blob:) must load its WASM
-    // glue via importScripts("kiwicaptcha-wasm.js") — a typo in that name
-    // silently loses off-main-thread Argon. This test pins the flag the
-    // driver sets when the external worker is actually used.
+    // The standalone worker path (CSP-friendly: no blob:) never imports a
+    // runtime itself: the driver derives the runtime URL from the worker's
+    // own URL and supplies it through the { type: "glue" } handshake — a
+    // missing or wrong derivation silently loses off-main-thread Argon.
+    // This test pins the flag the driver sets when the external worker is
+    // actually used and verifies the end-to-end solve through the
+    // driver-directed runtime.
     await page.goto('/?worker=1&algorithm=argon2id');
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
     const workerUsed = await page.evaluate(() => window.__kiwiWorkerUsed === true);
@@ -46,6 +49,30 @@ test.describe('KiwiCaptcha browser solver', () => {
     expect(token.length).toBeGreaterThan(0);
     const resp = await page.request.post('http://127.0.0.1:8085/verify', { data: { token } });
     expect((await resp.json()).ok).toBe(true);
+  });
+
+  test('the legacy static worker receives the driver-derived runtime URL (never a relative probe)', async ({ page }) => {
+    // The legacy data-kiwi-worker-src path (no integrity digest) must be
+    // driven through the same protocol as files mode: the driver derives
+    // the runtime URL from the worker's own URL ("kiwicaptcha-wasm.js"
+    // next to the worker) and posts it via the glue handshake before the
+    // solve. The worker's runtime load is the importScripts of exactly
+    // that derived URL — the fixture serves it at /kiwicaptcha-wasm.js —
+    // and no relative/unversioned probe is ever made.
+    const runtimeRequests = [];
+    page.on('request', (req) => {
+      if (req.url().includes('/kiwicaptcha-wasm.js')) runtimeRequests.push(req.url());
+    });
+    await page.goto('/?worker=1&algorithm=argon2id');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length).toBeGreaterThan(0);
+    const resp = await page.request.post('http://127.0.0.1:8085/verify', { data: { token } });
+    expect((await resp.json()).ok).toBe(true);
+    // The worker's importScripts of the derived runtime URL is captured in
+    // the page request stream; the legacy path must load exactly that
+    // same-directory runtime.
+    expect(runtimeRequests).toContain('http://127.0.0.1:8085/kiwicaptcha-wasm.js');
   });
 
   test('Privacy Strict: zero external requests and empty telemetry', async ({ page }) => {
@@ -62,12 +89,19 @@ test.describe('KiwiCaptcha browser solver', () => {
     expect(external).toEqual([]);
   });
 
-  test('a solve that exhausts its bounded search notifies the server once for the abandoned nonce', async ({ page }) => {
-    // The exhaustion path (the bounded search cap) abandons the challenge:
-    // the driver must inform the server (fire-and-forget, rate-limited) for
-    // the abandoned nonce only. The retry flow re-acquires fresh challenges
-    // and the per-widget cooldown keeps the notification bounded — never a
+  test('a solve that abandons at its deadline notifies the server once for the abandoned nonce', async ({ page }) => {
+    // The abandonment path (the bounded search exhaustion or the solve
+    // deadline) abandons the challenge: the driver must inform the
+    // server (fire-and-forget, rate-limited) for the abandoned nonce
+    // only. The retry flow re-acquires fresh challenges and the
+    // per-widget cooldown keeps the notification bounded — never a
     // spam, and never a cancel for a nonce this widget did not abandon.
+    // The abandonment is driven deterministically by the solve deadline:
+    // a schema-valid argon2id challenge at the maximum in-contract
+    // memory (mKib 65536 = 64 MiB, t 6) expires 500 ms into the solve —
+    // a single memory-hard hash cannot complete inside the deadline
+    // window on any current hardware, so every attempt abandons instead
+    // of ever solving.
     const cancelBodies = [];
     await page.route('**/challenge/cancel', async (route) => {
       cancelBodies.push(route.request().postDataJSON() ?? {});
@@ -76,9 +110,6 @@ test.describe('KiwiCaptcha browser solver', () => {
     let calls = 0;
     await page.route('**/challenge', async (route) => {
       calls++;
-      // An unsolvable challenge (targetBits 255: the 5M-hash bounded search
-      // can never find a match) — the solver exhausts and the widget fails
-      // after the bounded retry flow.
       await route.fulfill({
         status: 200,
         contentType: 'application/json',
@@ -86,12 +117,12 @@ test.describe('KiwiCaptcha browser solver', () => {
           nonce: 'exhaust-nonce-' + calls,
           salt: btoa(String(calls).padStart(16, '0')),
           prefix: 'x',
-          targetBits: 255,
-          algorithm: 'sha256',
-          mKib: 0,
-          t: 1,
+          algorithm: 'argon2id',
+          targetBits: 10,
+          mKib: 65536,
+          t: 6,
           p: 1,
-          ttlSecs: 120,
+          ttlSecs: 1,
           minDurationMs: 0,
         }),
       });
@@ -119,5 +150,21 @@ test.describe('KiwiCaptcha browser solver', () => {
     const resp = await page.request.post('http://127.0.0.1:8085/verify', { data: { token } });
     expect((await resp.json()).ok).toBe(true);
     expect(cancelHits).toBe(0); // a successful solve never abandons a challenge
+  });
+
+  test('a fresh render stays under a bounded number of DOM nodes (< 40)', async ({ page }) => {
+    // The widget markup is deliberately small: the container, the hidden
+    // token input, the visible widget with its icon, track, timer and
+    // status announcer, plus at most the retry button and the decoy
+    // input the driver creates. A hard ceiling of 40 elements keeps the
+    // widget cheap to render and bounds the DOM a page must carry per
+    // captcha.
+    await page.goto('/');
+    await page.waitForSelector('#kiwicaptcha-root [data-kiwi-started="1"]');
+    const idleCount = await page.evaluate(() => document.querySelector('#kiwicaptcha-root').querySelectorAll('*').length);
+    expect(idleCount, `the freshly rendered widget must stay under 40 elements, got ${idleCount}`).toBeLessThan(40);
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 60_000 });
+    const doneCount = await page.evaluate(() => document.querySelector('#kiwicaptcha-root').querySelectorAll('*').length);
+    expect(doneCount, `the solved widget must stay under 40 elements, got ${doneCount}`).toBeLessThan(40);
   });
 });

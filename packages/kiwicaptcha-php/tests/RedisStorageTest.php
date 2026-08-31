@@ -535,7 +535,7 @@ final class RedisStorageTest extends TestCase
     public function testConsumeDecodesTheEnvelopeExactlyOnce(): void
     {
         // The record AND the recorded operation identity must come from
-        // ONE json_decode of the same stored bytes (the old path paid a
+        // ONE json_decode of the same stored bytes (the earlier path paid a
         // second full parse in decodeIdentity()).
         $client = $this->requirePredis();
         $storage = new RedisStorage($client);
@@ -1169,7 +1169,7 @@ final class RedisStorageTest extends TestCase
 
         $verifier = new Verifier($storage);
         $identity = 'op-'.hash('sha256', 'backend|uuid|response');
-        // The round-96 exact-binding default would refuse the bound
+        // The exact-binding default would refuse the bound
         // record; the test pins the stored-binding exposure, so the
         // expectation is named unenforced (the binding is merely
         // returned on the valid outcome).
@@ -1659,7 +1659,7 @@ final class RedisStorageTest extends TestCase
         self::assertSame('WAIT', $clientB->commands[1][0], 'the SECOND command is the WAIT on the SAME connection');
         self::assertStringContainsString('replication-fence', (string) $clientB->commands[0][1][0], 'the fence write targets the dedicated fence key');
 
-        // A bare GET + WAIT (the old read-only implementation) must never
+        // A bare GET + WAIT (a read-only implementation) must never
         // appear: the fence always precedes the WAIT with a write.
         foreach ($clientB->commands as $cmd) {
             self::assertNotSame('GET', $cmd[0], 'no bare GET is part of the fence sequence');

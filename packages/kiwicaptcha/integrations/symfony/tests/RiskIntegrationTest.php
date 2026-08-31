@@ -224,7 +224,7 @@ final class RiskIntegrationTest extends TestCase
 
     public function testSolveOutcomeCarriesTheMeasuredDurationWithoutChangingTheEvent(): void
     {
-        // Round-97 solve-duration consumption: the server-measured
+        // Solve-duration consumption: the server-measured
         // duration rides on the feedback call. The risk-v1/v2 surface is
         // categorical (fixed RiskEventKind contract; the v2 signals are
         // engine-derived), so the duration is consumed as bounded
@@ -254,7 +254,7 @@ final class RiskIntegrationTest extends TestCase
 
     public function testSolveDurationExtractionBridgesTheCoreAdditiveSurface(): void
     {
-        // The core (round-97, concurrent) adds a nullable solve-duration
+        // The core adds a nullable solve-duration
         // field to VerifyOutcome computed from the unforgeable issuedAtNs.
         // The gateway's bridge is feature-checked (method first, then
         // public property; a microsecond variant converts), so the

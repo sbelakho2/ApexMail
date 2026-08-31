@@ -181,7 +181,7 @@ final class RiskWiringTest extends TestCase
 
         $gateway = $container->getDefinition(RiskGateway::class);
         self::assertSame('request_stack', (string) $gateway->getArgument('$requestStack'), 'the gateway resolves the request principal via the request stack');
-        self::assertSame('fake_redis', (string) $gateway->getArgument('$decisionRedis'), 'the nonce->decision handles live in the risk Redis');
+        self::assertSame('kiwi_captcha.redis.checked.risk', (string) $gateway->getArgument('$decisionRedis'), 'the nonce->decision handles live in the checked risk Redis');
         self::assertSame('{kiwi:wiring-test}:decision:', $gateway->getArgument('$decisionKeyPrefix'), 'the handle key prefix is hash-tagged with the risk namespace');
         self::assertSame(300, $gateway->getArgument('$decisionTtlSecs'), 'the handle TTL follows risk.nonce_to_decision_ttl_secs (default 300)');
         self::assertArrayNotHasKey('$principalResolver', $gateway->getArguments(), 'no principal resolver wired by default');
@@ -455,7 +455,7 @@ final class RiskWiringTest extends TestCase
 
         $monitor = $container->getDefinition(\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::class);
         self::assertSame('kiwi_captcha.verifier', (string) $monitor->getArgument(0), 'the monitor rotates the SHARED verifier');
-        self::assertSame('fake_redis', (string) $monitor->getArgument(1), 'the monitor reads the central policy state from the security Redis');
+        self::assertSame('kiwi_captcha.redis.checked', (string) $monitor->getArgument(1), 'the monitor reads the central policy state from the checked security Redis');
         self::assertSame('wiring-test', $monitor->getArgument(2), 'the monitor uses the risk namespace ({kiwi:<ns>}:security-policy)');
         self::assertSame(2, $monitor->getArgument(3), 'the monitor floors at risk.policy_version');
         self::assertSame(3, $monitor->getArgument(4), 'the monitor uses risk.security_epoch_cache_secs');
@@ -519,7 +519,7 @@ final class RiskWiringTest extends TestCase
         $risk['max_challenges_per_scope_per_minute'] = 50;
         $container = $this->load($risk);
         $cap = $container->getDefinition('kiwi_captcha.risk.scope_issuance_cap');
-        self::assertSame('fake_redis', (string) $cap->getArgument(0), 'the cap uses the risk Redis client');
+        self::assertSame('kiwi_captcha.redis.checked.risk', (string) $cap->getArgument(0), 'the cap uses the checked risk Redis client');
         self::assertSame('{kiwi:wiring-test}:issuance:', $cap->getArgument(1), 'the cap keys live in the risk hash-tag family');
         self::assertSame(50, $cap->getArgument(2), 'the cap reaches the service');
         $controllerArgs = $container->getDefinition(ChallengeController::class)->getArguments();
@@ -564,7 +564,7 @@ final class RiskWiringTest extends TestCase
 
         $health = $container->getDefinition(\BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController::class);
         self::assertSame(self::SECRET, $health->getArgument(0), 'the health controller receives the signing secret (key-configured leg)');
-        self::assertSame('fake_redis', (string) $health->getArgument(1), 'the health controller probes the bundle\'s security Redis');
+        self::assertSame('kiwi_captcha.redis.checked', (string) $health->getArgument(1), 'the health controller probes the bundle\'s checked security Redis');
         self::assertSame('wiring-test', $health->getArgument(2), 'the health controller uses the risk namespace for the central policy key');
         self::assertSame(2, $health->getArgument(3), 'the health controller compares min_policy_epoch against risk.policy_version');
 

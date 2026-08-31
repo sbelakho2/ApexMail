@@ -8,6 +8,8 @@ use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Risk\ContinuityCookie;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
+use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
+use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakeRiskStateStore;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest;
 use KiwiCaptcha\Config;
@@ -21,6 +23,7 @@ use KiwiCaptcha\Risk\RiskKeys;
 use KiwiCaptcha\Risk\RiskPolicy;
 use KiwiCaptcha\Risk\RiskScorer;
 use KiwiCaptcha\Storage\ArrayStorage;
+use KiwiCaptcha\Verifier;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -53,7 +56,16 @@ final class RiskV2IntegrationTest extends TestCase
         $store = new FakeRiskStateStore();
         $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
         $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], policy: $policy);
-        $controller = new ChallengeController($issuer, null, true, $gateway, new ContinuityCookie());
+        // Protocol-v3 emission is gated by the two-phase rollout
+        // invariant: risk.decoy_v3_enabled true AND the central
+        // security-policy floor min_protocol_version >= 3. The fake
+        // security Redis below reports floor 3, so this stack exercises
+        // the armed-issuance surface (protocol v3 + authenticated decoy).
+        $redis = new FakePredisClient();
+        $redis->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_PROTOCOL_VERSION_FIELD, '3');
+        $redis->hset('{kiwi:test-ns}:security-policy', SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '1');
+        $monitor = new SecurityEpochMonitor(new Verifier(new ArrayStorage()), $redis, 'test-ns', 1, 1);
+        $controller = new ChallengeController($issuer, null, true, $gateway, new ContinuityCookie(), epochMonitor: $monitor, decoyV3Enabled: true);
 
         return ['controller' => $controller, 'gateway' => $gateway, 'store' => $store];
     }
@@ -83,8 +95,16 @@ final class RiskV2IntegrationTest extends TestCase
         $data = json_decode((string) $response->getContent(), true);
         self::assertSame('sha256', $data['algorithm']);
 
-        // The server-issued decoy field name rides the issuance response.
-        self::assertMatchesRegularExpression('/^decoy_[0-9a-f]{8}$/D', (string) $data['decoy_field']);
+        // The authenticated decoy field name rides the issuance response:
+        // the issuer's per-issuance pool pick (armed issuance, protocol
+        // v3) — never a decoy_<hash> nonce-hash reconstruction.
+        self::assertIsString($data['decoy_field'] ?? null);
+        self::assertTrue(Issuer::isGrammarDecoyName((string) $data['decoy_field']), 'the issuance response carries the issuer\'s combinatorial grammar name');
+        self::assertNotSame(
+            'decoy_'.substr(hash('sha256', (string) $data['nonce']), 0, 8),
+            $data['decoy_field'],
+            'the decoy name must not be a nonce-hash reconstruction (the audit\'s "no second nonce-hash scheme")',
+        );
 
         // The decoy marker fed the risk gateway as the DecoyFieldSubmitted
         // event (evidence), alongside the pre-issue assessment.

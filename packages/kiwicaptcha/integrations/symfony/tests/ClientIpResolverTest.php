@@ -311,7 +311,7 @@ final class ClientIpResolverTest extends TestCase
         foreach ($cases as $header => $values) {
             foreach ($values as $value) {
                 $ip = $resolver->resolve($this->request('10.1.2.3', [$header => $value]));
-                self::assertSame('10.1.2.3', $ip, 'the invalid nearest hop "'.$value.'" must terminate the walk: the socket peer wins, never the older attacker address');
+                self::assertSame('10.1.2.3', $ip, 'the invalid nearest hop "'.$value.'" must terminate the walk: the socket peer wins, never the earlier attacker address');
             }
         }
         // A valid chain still resolves normally.

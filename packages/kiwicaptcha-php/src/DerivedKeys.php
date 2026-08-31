@@ -64,10 +64,22 @@ final class DerivedKeys
 
     /**
      * Per-process memo of derived key sets, keyed by a collision-free
-     * composite of the tenant id ("" when absent) and the master secret.
-     * The master secret is immutable for a deployment's lifetime, so a
-     * memoized entry can never go stale within a process. The derivation
-     * is three `HKDF` steps that the issuance and verification statics,
+     * composite of the tenant id and the master secret. The key is a
+     * deliberately unambiguous binary encoding: a presence-tag byte
+     * (`\x00` = no tenant, `\x01` = tenant present), the tenant id's
+     * 32-bit big-endian byte length, then the tenant id bytes. The
+     * master secret's 32-bit big-endian byte length and bytes follow.
+     * The composite is hashed with SHA-256 to the PHP array key. The
+     * length prefixes and the presence tag make the encoding
+     * structurally unambiguous: `(null, M)` and `("", M)` differ in the
+     * presence tag (a null tenant derives the global root, an
+     * empty-string tenant the "kiwi/v2/tenant/" root). The inputs
+     * `("a", "b\0c")` and `("a\0b", "c")` differ in the length
+     * boundaries. No two distinct `(tenant, master)` inputs can ever
+     * collide on one memo entry. The master secret is immutable for a
+     * deployment's lifetime, so a memoized entry can never go stale
+     * within a process. The derivation is three `HKDF` steps that the
+     * issuance and verification statics,
      * {@see \KiwiCaptcha\Issuer::signPayloadV2()} and
      * {@see \KiwiCaptcha\Issuer::bindingTag()}, otherwise repeat for
      * every single operation. The memoized values are exactly as
@@ -115,7 +127,19 @@ final class DerivedKeys
      */
     public static function fromMaster(string $master, ?string $tenantId = null): self
     {
-        $cacheKey = ($tenantId ?? '')."\0".$master;
+        // The structurally unambiguous encoding (see the $cache docblock):
+        // the presence tag distinguishes a null tenant from an empty-string
+        // tenant (different derivations — global root vs the
+        // "kiwi/v2/tenant/" root), and the 32-bit length prefixes make
+        // `("a", "b\0c")` and `("a\0b", "c")` distinct. The composite is
+        // hashed so the PHP array key is a fixed-size string.
+        $cacheKey = hash('sha256', (
+            ($tenantId !== null ? "\x01" : "\x00")
+            .pack('N', \strlen((string) $tenantId))
+            .(string) $tenantId
+            .pack('N', \strlen($master))
+            .$master
+        ));
         if (isset(self::$cache[$cacheKey])) {
             return self::$cache[$cacheKey];
         }

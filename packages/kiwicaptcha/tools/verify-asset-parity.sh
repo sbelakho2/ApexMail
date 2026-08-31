@@ -17,7 +17,7 @@ cd "$(git rev-parse --show-toplevel)"
 CANON="packages/kiwicaptcha-wasm/assets"
 FAILED=0
 for mirror in packages/kiwicaptcha/resources packages/kiwicaptcha/integrations/symfony/Resources/public; do
-  for f in widget-driver.js widget.css kiwicaptcha-wasm.js; do
+  for f in widget-driver.js widget.css kiwicaptcha-wasm.js kiwi-worker.js; do
     if ! cmp -s "$CANON/$f" "$mirror/$f"; then
       echo "ASSET PARITY FAILED: $mirror/$f differs from $CANON/$f" >&2
       FAILED=1

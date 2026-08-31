@@ -18,6 +18,22 @@ namespace KiwiCaptcha;
  * together, matching serde's duplicate-field rejection. Legacy records
  * carrying only `ip_hash` decode as `protocol_version` 1.
  *
+ * Protocol v3 is the decoy-capable canonical: the v2 18-field base plus
+ * the `|decoy_field` segment appended after `kid`. The decoy is
+ * mandatory on v3, so an armed issuance writes protocol v3 with the
+ * segment and an unarmed issuance stays protocol v2, byte-identical to
+ * the pre-decoy format. The protocol-vs-decoy grammar is total and
+ * enforced on both acceptance surfaces. A protocol-v2 record that
+ * carries `decoy_field` is rejected explicitly, since the v2 canonical
+ * never includes the segment. A protocol-v3 record without one is
+ * rejected too: a signed v2 record with its stored version flipped to 3
+ * can never verify, so the protocol capability is fully inferable from
+ * the authenticated canonical shape. An old verifier rejects version 3
+ * as unknown.
+ * `fromArray()` accepts protocol versions 1, 2 and 3 and rejects both
+ * forbidden combinations (v2-plus-decoy and decoyless-v3); the
+ * verifier's malformed-record path enforces the same split.
+ *
  * `attempts_used` is emitted by {@see self::toArray()} as 0 for schema
  * symmetry with the Rust record, which has `#[serde(default)]` and
  * accepts an absent field. PHP's one-shot model never increments it;
@@ -79,15 +95,19 @@ namespace KiwiCaptcha;
  * client.
  *
  * `decoyField` is the server-issued decoy (honeypot) form-field name
- * armed for this challenge (see {@see Issuer::DECOY_FIELD_POOL}). Null =
+ * armed for this challenge, drawn from the combinatorial grammar (see
+ * {@see Issuer::composeDecoyName()}). Null =
  * no decoy armed (the default, and the shape every pre-decoy record
- * carries). The name is an authenticated v2 canonical field: the final
+ * carries). The name is an authenticated canonical field: the final
  * segment `|<decoy_field>`, appended after the `kid` (see
  * {@see Issuer::canonicalPayload()}), so a stored/tampered record cannot
- * change or drop it without breaking the signature. Wire-compatible both
- * directions: the JSON key is absent when null (`skip_serializing_if`),
- * so pre-decoy writers and readers keep their exact byte format, and a
- * decoy-armed record simply carries one extra string key. Absent in
+ * change or drop it without breaking the signature. Wire compatibility:
+ * unarmed records are byte-identical to the pre-decoy format. The JSON
+ * key is absent when null (`skip_serializing_if`), so pre-decoy writers
+ * and readers keep their exact byte format. A decoy-armed record is
+ * protocol v3 and requires a v3-capable verifier: an old verifier
+ * rejects version 3 as unknown, so the capability becomes inferable
+ * from protocol_version, which is the point. Absent in
  * legacy stored records; a present value must match the decoy alphabet
  * `[A-Za-z0-9_-]{1,64}`, see {@see Config::isValidDecoyFieldName()},
  * and is enforced on read and by the verifier's malformed-record path.
@@ -160,8 +180,9 @@ final class ChallengeRecord
         // was issued for (Siteverify `hostname`); never signed, never sent.
         public readonly ?string $hostname = null,
         // The server-issued decoy (honeypot) form-field name armed for
-        // this challenge (see Issuer::DECOY_FIELD_POOL); null = no decoy
-        // (the legacy shape). Signed as the final v2 canonical segment,
+        // this challenge, drawn from the combinatorial grammar (see
+        // Issuer::composeDecoyName()); null = no decoy
+        // (the legacy shape). Signed as the final v3 canonical segment,
         // appended after the kid; the JSON key is omitted when null.
         public readonly ?string $decoyField = null,
     ) {
@@ -282,6 +303,12 @@ final class ChallengeRecord
      *   (`issued_at_ns` 0, `attempts_used` 0, `protocol_version` 1,
      *   `region` null, `policy_version` 1, `request_binding` null,
      *   `issuer` null, `kid` 1).
+     * - Protocol versions 1, 2 and 3 are accepted. The protocol-vs-decoy
+     *   grammar is total: a protocol-v2 record that carries `decoy_field`
+     *   is rejected explicitly, and a protocol-v3 record without one
+     *   (absent key or explicit JSON null) is rejected too. The decoy
+     *   segment is a protocol v3 canonical extension that v3 requires;
+     *   see the class docblock for the wire-compatibility statement.
      * - Integers must be real JSON integers within the Rust type ranges
      *   (u8 for protocol_version, u32 for m_kib/t/p/target_bits/
      *   attempts_used/policy_version/kid, u64 for the timestamps).
@@ -412,6 +439,27 @@ final class ChallengeRecord
             if (!Config::isValidDecoyFieldName($data['decoy_field'])) {
                 throw MalformedRecordException::invalidDecoyField();
             }
+        }
+
+        // The protocol-vs-decoy grammar: the decoy segment is a protocol
+        // v3 canonical extension, and the grammar is total: v2 => no
+        // decoy, v3 => decoy present. A v2 record that carries
+        // decoy_field is rejected explicitly (the v2 canonical never
+        // includes the segment, so such a record cannot have come from a
+        // conforming issuer — an armed issuance writes protocol v3); a
+        // v3 record without one (absent key or explicit JSON null) is
+        // rejected too: the decoy is mandatory on v3, so a signed v2
+        // record with its stored version flipped to 3 keeps the plain
+        // 18-field canonical bytes and is refused here. v1 (legacy,
+        // migration window) and v2 (unarmed) accept a null decoy; the
+        // verifier's malformed-record path enforces the same split.
+        $protocolVersion = (int) ($data['protocol_version'] ?? 1);
+        $decoyField = \array_key_exists('decoy_field', $data) ? $data['decoy_field'] : null;
+        if ($protocolVersion === 2 && $decoyField !== null) {
+            throw MalformedRecordException::decoyOnV2Record();
+        }
+        if ($protocolVersion === 3 && $decoyField === null) {
+            throw MalformedRecordException::decoylessV3Record();
         }
 
         return new self(

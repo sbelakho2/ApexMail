@@ -86,7 +86,7 @@ final class CountingStorage implements AtomicStorageInterface, ConsumedStateRead
 
 /**
  * The fake authoritative transaction-binding resolver of the mandatory
- * P0 regression: every invocation increments a public counter and resolves
+ * regression: every invocation increments a public counter and resolves
  * the txn-A transaction.
  */
 final class AuthorityStub implements RequestBindingAuthorityInterface
@@ -102,7 +102,7 @@ final class AuthorityStub implements RequestBindingAuthorityInterface
 }
 
 /**
- * The mandatory P0 regression kernel: risk.request_binding_authority +
+ * The mandatory regression kernel: risk.request_binding_authority +
  * risk.siteverify_secrets wired through the real container, so the test
  * proves the SiteVerifyController receives the authority via DI (a
  * unit-constructed controller can never catch a wiring hole).

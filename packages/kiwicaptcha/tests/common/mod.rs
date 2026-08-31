@@ -12,8 +12,8 @@
 //! declares `mod common;` — it must stay dependency-free (std only plus
 //! the crate and serde_json for the record seeding).
 
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -43,6 +43,27 @@ pub fn parse_resp_command(buf: &[u8]) -> Option<(Vec<String>, usize)> {
     Some((args, consumed))
 }
 
+/// How a faulted command is answered by the fault-injection knob.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum FaultReply {
+    /// Drop the TCP connection without a reply, so the client observes
+    /// an I/O error on that command.
+    Close,
+    /// Answer a generic Redis error reply, so the client observes a
+    /// server-side command error.
+    Error,
+}
+
+/// A predicate over the parsed command arguments of one command.
+pub type FaultPredicate = Arc<dyn Fn(&[String]) -> bool + Send + Sync>;
+
+/// One armed fault: commands matching the predicate are answered with
+/// the faulted reply instead of being served.
+struct Fault {
+    predicate: FaultPredicate,
+    reply: FaultReply,
+}
+
 /// The shared state of the miniature Redis-protocol endpoint: a tiny
 /// string store (the runtime-envelope JSON of stored records), a full
 /// command log tagged with the id of the TCP connection each command
@@ -55,6 +76,13 @@ pub struct FakeEndpoint {
     commands: Mutex<Vec<(usize, Vec<String>)>>,
     connections: AtomicUsize,
     script_loaded: AtomicUsize,
+    /// The armed fault, if any; cleared with [`FakeEndpoint::clear_fault`].
+    fault: Mutex<Option<Fault>>,
+    /// The WAIT acknowledgement count (0 = the replica-less server).
+    wait_ack: AtomicI64,
+    /// Per-barrier acknowledgement overrides; the first value serves
+    /// the next WAIT, and `wait_ack` applies once the queue is empty.
+    wait_ack_queue: Mutex<VecDeque<i64>>,
 }
 
 impl FakeEndpoint {
@@ -68,6 +96,9 @@ impl FakeEndpoint {
             commands: Mutex::new(Vec::new()),
             connections: AtomicUsize::new(0),
             script_loaded: AtomicUsize::new(0),
+            fault: Mutex::new(None),
+            wait_ack: AtomicI64::new(0),
+            wait_ack_queue: Mutex::new(VecDeque::new()),
         });
         let server = Arc::clone(&endpoint);
         thread::spawn(move || {
@@ -86,6 +117,29 @@ impl FakeEndpoint {
                                 buf.extend_from_slice(&tmp[..n]);
                                 while let Some((args, consumed)) = parse_resp_command(&buf) {
                                     buf.drain(..consumed);
+                                    // The fault-injection knob: a matching
+                                    // command is answered with the faulted
+                                    // reply and never served. A `Close`
+                                    // fault returns from the connection
+                                    // loop, which drops the stream.
+                                    let faulted = {
+                                        let f = server.fault.lock().unwrap();
+                                        f.as_ref().filter(|f| (f.predicate)(&args)).map(|f| f.reply)
+                                    };
+                                    if let Some(reply) = faulted {
+                                        match reply {
+                                            FaultReply::Close => return,
+                                            FaultReply::Error => {
+                                                if stream
+                                                    .write_all(b"-ERR injected fault\r\n")
+                                                    .is_err()
+                                                {
+                                                    return;
+                                                }
+                                            }
+                                        }
+                                        continue;
+                                    }
                                     if let Some(reply) = server.handle(conn_id, &args) {
                                         if stream.write_all(reply.as_bytes()).is_err() {
                                             return;
@@ -133,6 +187,39 @@ impl FakeEndpoint {
         self.records.lock().unwrap().contains_key(key)
     }
 
+    /// Removes the stored record under the key: the observable contract
+    /// of a record that vanished from the primary after a consumed
+    /// state.
+    pub fn remove(&self, key: &str) {
+        self.records.lock().unwrap().remove(key);
+    }
+
+    /// Arms a fault: commands matching the predicate are answered with
+    /// the faulted reply instead of being served. Only one fault can be
+    /// armed at a time; arming again replaces it.
+    pub fn arm_fault(&self, predicate: FaultPredicate, reply: FaultReply) {
+        *self.fault.lock().unwrap() = Some(Fault { predicate, reply });
+    }
+
+    /// Clears the armed fault; every command is served again.
+    pub fn clear_fault(&self) {
+        *self.fault.lock().unwrap() = None;
+    }
+
+    /// Sets the acknowledged-replica count of every WAIT (0 = the
+    /// replica-less server, so a configured barrier fails closed).
+    pub fn set_wait_ack(&self, ack: i64) {
+        self.wait_ack.store(ack, Ordering::SeqCst);
+    }
+
+    /// Queues one acknowledged-replica count for the next WAIT only.
+    /// The per-barrier queue serves the next WAITs in order, and the
+    /// default acknowledgement from [`FakeEndpoint::set_wait_ack`]
+    /// applies once the queue is empty.
+    pub fn queue_wait_ack(&self, ack: i64) {
+        self.wait_ack_queue.lock().unwrap().push_back(ack);
+    }
+
     /// Handles one parsed command (tagged with its connection id); `None`
     /// closes nothing (every reply is written). Scripts are classified
     /// by their ARGV shape, not their sha: `EVALSHA sha 1 key` is the
@@ -168,11 +255,19 @@ impl FakeEndpoint {
                         _ => "*1\r\n$7\r\nmissing\r\n".to_string(),
                     }),
                     // consume ([`EVALSHA`, sha, numkeys, key, identity] —
-                    // the empty identity of the no-identity call).
+                    // the empty identity of the no-identity call). The
+                    // identity ARGV is the JSON-escaped string the real
+                    // Lua splices into the marker in the same write.
                     5 => Some(match stored {
                         Some(v) if v.contains("\"state\":\"pending\"") => {
-                            let consumed =
+                            let mut consumed =
                                 v.replace("\"state\":\"pending\"", "\"state\":\"consumed\"");
+                            if !args[4].is_empty() {
+                                consumed = consumed.replace(
+                                    "\"operation_identity\":null",
+                                    &format!("\"operation_identity\":{}", args[4]),
+                                );
+                            }
                             self.records.lock().unwrap().insert(key, consumed.clone());
                             format!("*2\r\n${}\r\n{}\r\n:1\r\n", consumed.len(), consumed)
                         }
@@ -182,7 +277,35 @@ impl FakeEndpoint {
                         _ => "$-1\r\n".to_string(),
                     }),
                     // commit ([`EVALSHA`, sha, numkeys, key, valid, binding]).
-                    6 if args[4] == "0" || args[4] == "1" => Some(":1\r\n".to_string()),
+                    // The result is spliced into the stored envelope the
+                    // way the real Lua splice does, so a later
+                    // runtime-state read resolves the committed outcome.
+                    6 if args[4] == "0" || args[4] == "1" => {
+                        let key = args[3].clone();
+                        let mut records = self.records.lock().unwrap();
+                        match records.get_mut(&key) {
+                            Some(v)
+                                if v.contains("\"state\":\"consumed\"")
+                                    && v.contains("\"consumed_result\":null") =>
+                            {
+                                let encoded = match args.get(5).filter(|b| !b.is_empty()) {
+                                    Some(binding) => format!(
+                                        r#"{{"valid":{},"binding":"{binding}"}}"#,
+                                        args[4] == "1"
+                                    ),
+                                    None => {
+                                        format!(r#"{{"valid":{},"binding":null}}"#, args[4] == "1")
+                                    }
+                                };
+                                *v = v.replace(
+                                    "\"consumed_result\":null",
+                                    &format!("\"consumed_result\":{encoded}"),
+                                );
+                                Some(":1\r\n".to_string())
+                            }
+                            _ => Some(":0\r\n".to_string()),
+                        }
+                    }
                     _ => Some("-ERR unknown script shape\r\n".to_string()),
                 }
             }
@@ -192,6 +315,15 @@ impl FakeEndpoint {
                 // by the client's invoke path).
                 self.script_loaded.store(1, Ordering::SeqCst);
                 Some(bulk(&"f".repeat(40)))
+            }
+            // The replica-wait reply: the queue serves the next WAITs in
+            // order, then the default acknowledgement applies.
+            "WAIT" => {
+                let ack = match self.wait_ack_queue.lock().unwrap().pop_front() {
+                    Some(ack) => ack,
+                    None => self.wait_ack.load(Ordering::SeqCst),
+                };
+                Some(format!(":{ack}\r\n"))
             }
             _ => Some("+OK\r\n".to_string()),
         }

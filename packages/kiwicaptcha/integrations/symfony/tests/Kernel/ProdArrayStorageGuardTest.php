@@ -344,7 +344,7 @@ final class ProdArrayStorageGuardTest extends TestCase
 
     public function testProductionArrayAdapterRateLimitCacheCompilesWithBothTemporalLimitsDisabled(): void
     {
-        // Round-96: the in-memory-adapter refusal fires only when the
+        // The in-memory-adapter refusal fires only when the
         // pool is the effective limiter backend. With both temporal
         // limits disabled the limiter is not wired at all, so an
         // in-memory pool is harmless and the config compiles.
@@ -371,7 +371,7 @@ final class ProdArrayStorageGuardTest extends TestCase
 
     public function testProductionArrayAdapterRateLimitCacheCompilesWhenRedisIsWired(): void
     {
-        // Round-96: the in-memory-adapter refusal fires only when the
+        // The in-memory-adapter refusal fires only when the
         // pool is the effective limiter backend. With a Redis client
         // wired, the atomic distributed limiter wins and the pool is
         // never selected, so an in-memory pool is harmless and the
@@ -593,7 +593,7 @@ final class ProdArrayStorageGuardTest extends TestCase
         );
     }
 
-// ── round-97: parameter-indirected ids, alias chains, parameterized classes ──
+// ── parameter-indirected ids, alias chains, parameterized classes ─────
 
     public function testProductionParameterIndirectedIdResolvingToArrayAdapterIsRefused(): void
     {
@@ -843,7 +843,7 @@ final class ProdArrayStorageGuardTest extends TestCase
      */
     public function testLegacyFallbackFlagNameStillEnablesTheFallbackWithDeprecation(): void
     {
-        // The old name is a documented deprecated alias: it still
+        // The legacy name is a documented deprecated alias: it still
         // enables the non-Redis rate limiter in production (the
         // extension resolves both names), and the config tree raises
         // the Symfony deprecation pointing at the new name.

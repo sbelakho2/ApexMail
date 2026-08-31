@@ -22,12 +22,13 @@ use Symfony\Component\HttpKernel\Exception\NotFoundHttpException;
  * changes on every upgrade, so it uses ETag + no-cache revalidation.
  * Only versioned or content-addressed URLs (e.g.
  * /kiwicaptcha/v1.6.20/api.js) or the release SHA256SUMS/SRI pins are
- * immutable. CSP guidance: the path is served same-origin; Argon2id
- * requires a Blob worker built by this same-origin script, so a
- * conventional deployment must allow blob: workers, `script-src 'self'` +
- * `worker-src 'self' blob:`. SHA-256 mode needs no worker and no WASM
- * capability thanks to the pure-JS solver; Argon2id adds the WASM
- * permission via the worker's own CSP-less context.
+ * immutable. CSP guidance: the path is served same-origin; the compat
+ * loader builds its Argon worker from a Blob URL (the inline
+ * compatibility tier's worker model), so a conventional migration
+ * deployment must allow `script-src 'self'` + `worker-src 'self' blob:`.
+ * SHA-256 mode needs no worker and no WASM capability thanks to the
+ * pure-JS solver; Argon2id adds the WASM permission via the worker's own
+ * CSP-less context.
  */
 final class ApiJsController
 {

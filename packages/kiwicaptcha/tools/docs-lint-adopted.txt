@@ -17,3 +17,10 @@
 # fresh adoption the path's implicit baseline row is zero. Nothing is
 # added here to absorb an increase of an already-tracked path; that
 # requires a rewrite.
+#
+# Adoption (one-shot): the new scanned paths below are brought under
+# the ratchet with 0-violation rows in docs-lint-baseline.txt (the
+# runtime authority guard kernels, the versioned asset controller and
+# its tests, the HA doctor kernels, and the browser asset-mode spec).
+# The baseline-integrity step consumes these entries once the rows
+# land; a later writable run removes them.

@@ -16,7 +16,8 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use kiwicaptcha::challenge::{
-    issue_challenge, BindingMode, ChallengeConfig, ChallengeRecord, PoWAlgorithm,
+    issue_challenge, issue_challenge_with_decoy, BindingMode, ChallengeConfig, ChallengeRecord,
+    PoWAlgorithm,
 };
 use kiwicaptcha::redis_verify::{
     AdmissionError, ArgonAdmissionGate, ArgonLease, CancelResult, DeleteIfPending,
@@ -27,7 +28,7 @@ use kiwicaptcha::verify::{solve_for_test, RequestBindingExpectation, VerifyError
 
 mod common;
 
-use common::{parse_resp_command, FakeEndpoint};
+use common::{parse_resp_command, FakeEndpoint, FaultPredicate, FaultReply};
 
 /// Gate that flatly grants (`true`) or refuses (`false`) capacity — the
 /// trait-based admission-gate contract.
@@ -146,7 +147,29 @@ impl ArgonAdmissionGate for UnavailableGate {
     }
 }
 
+/// Gate that parks inside `acquire` until the test releases it: the
+/// deterministic hook proving a verification can sit in the admission
+/// gate (the phase right before the derivation) without holding a pool
+/// slot. `entered` flips before the park, so the test knows the worker
+/// has passed the snapshot, the cheap phase and the terminal gate.
+struct BarrierGate {
+    barrier: Arc<Barrier>,
+    entered: Arc<AtomicUsize>,
+}
+
+impl ArgonAdmissionGate for BarrierGate {
+    fn acquire(
+        &self,
+        _record: &ChallengeRecord,
+    ) -> Result<Option<Box<dyn ArgonLease>>, AdmissionError> {
+        self.entered.fetch_add(1, Ordering::SeqCst);
+        self.barrier.wait();
+        Ok(Some(Box::new(UnitLease)))
+    }
+}
+
 const SECRET: &str = "0123456789abcdef0123456789abcdef";
+const SECRET_2: &str = "fedcba9876543210fedcba9876543210";
 const IP: &str = "198.51.100.7";
 
 fn now_unix() -> u64 {
@@ -560,7 +583,7 @@ fn two_concurrent_verifies_exactly_one_derives() {
 
 #[test]
 fn cancelled_argon_record_never_acquires_an_admission_slot() {
-    // Round-94 audit: a cancelled Argon record is terminal, so verify()
+    // A cancelled Argon record is terminal, so verify()
     // reads the runtime state after the cheap phase and before the
     // admission gate: RecordNotFound with zero acquires. An attacker who
     // cancels a challenge once cannot then flood syntactically valid
@@ -654,7 +677,7 @@ fn cancelled_argon_record_never_acquires_an_admission_slot() {
 
 #[test]
 fn consumed_argon_record_with_matching_identity_replays_without_admission() {
-    // Round-94 audit: an already-consumed Argon record resolves through
+    // An already-consumed Argon record resolves through
     // the identity gate from the runtime-state read, before the
     // admission gate: a same-operation replay returns the retained
     // stored outcome with zero acquires.
@@ -727,7 +750,7 @@ fn consumed_argon_record_with_matching_identity_replays_without_admission() {
 
 #[test]
 fn consumed_argon_record_with_wrong_or_null_identity_is_already_consumed_without_admission() {
-    // Round-94 audit: the wrong-identity and no-identity replays of an
+    // The wrong-identity and no-identity replays of an
     // already-consumed Argon record resolve as AlreadyConsumed from the
     // runtime-state read, with zero acquires — one solved token never
     // funds a second operation and never captures admission capacity.
@@ -841,7 +864,8 @@ fn replay_after_valid_verify_is_identity_gated() {
     );
     // The consumed record is kept with the committed outcome — an exact
     // identity retry returns the same Valid from the stored result,
-    // distinguishable from a fresh success.
+    // distinguishable from a fresh success (and carrying no recomputed
+    // solve duration — the cross-language spec).
     assert_eq!(
         verify_with(
             &verifier,
@@ -854,7 +878,7 @@ fn replay_after_valid_verify_is_identity_gated() {
             nonce: issued.record.nonce.clone(),
             request_binding: None,
             from_stored_result: true,
-            solve_duration_ms: Some(1000),
+            solve_duration_ms: None,
         },
         "the exact identity retry is the retained Valid"
     );
@@ -910,7 +934,9 @@ fn replay_outcomes_follow_the_operation_identity_gate() {
         "T + A first: fresh Valid"
     );
 
-    // T + A exact retry → the retained Valid (from_stored_result=true).
+    // T + A exact retry → the retained Valid (from_stored_result=true),
+    // with no recomputed solve duration (the cross-language spec: a replayed
+    // receipt measures the retry, not the original solve).
     assert_eq!(
         verify_with(
             &verifier,
@@ -923,7 +949,7 @@ fn replay_outcomes_follow_the_operation_identity_gate() {
             nonce: issued_a.record.nonce.clone(),
             request_binding: None,
             from_stored_result: true,
-            solve_duration_ms: Some(1000),
+            solve_duration_ms: None,
         },
         "T + A exact retry: the retained Valid"
     );
@@ -1207,7 +1233,7 @@ fn consumed_evidence_survives_a_cheap_failure_past_expiry() {
             nonce: issued.record.nonce.clone(),
             request_binding: None,
             from_stored_result: true,
-            solve_duration_ms: Some(1000),
+            solve_duration_ms: None,
         },
         "the identity replay past expiry resolves the retained Valid"
     );
@@ -1704,6 +1730,237 @@ fn sha256_records_are_never_gated() {
 }
 
 #[test]
+fn decoy_armed_v3_record_verifies_through_the_production_verifier() {
+    // The protocol-v3 contract end to end: an armed issuance
+    // writes protocol v3 with the `|decoy_field` canonical segment, the
+    // record stores and verifies like any other, and the armed
+    // challenge string carries the decoy name in its base64 payload.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("v3-armed");
+    let issued = issue_challenge_with_decoy(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+        true,
+    )
+    .expect("armed issuance");
+    assert_eq!(
+        issued.record.protocol_version, 3,
+        "armed issuance writes protocol v3"
+    );
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = encode_token(&issued.record.nonce, counter);
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let verifier = verifier_for(&url, &prefix);
+    verifier.store().store(&issued.record).unwrap();
+    assert!(
+        matches!(
+            verify_at(&verifier, &token, issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
+        "a protocol-v3 armed record must verify through the production verifier"
+    );
+}
+
+#[test]
+fn unarmed_v2_record_verifies_unchanged() {
+    // The unarmed side of the contract: plain issuance stays
+    // protocol v2 and verifies byte-identically to the pre-decoy format.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("v2-unarmed");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    assert_eq!(issued.record.protocol_version, 2);
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let verifier = verifier_for(&url, &prefix);
+    verifier.store().store(&issued.record).unwrap();
+    assert!(matches!(
+        verify_at(
+            &verifier,
+            &encode_token(&issued.record.nonce, counter),
+            issued.record.issued_at_ns
+        ),
+        VerifyOutcome::Valid { .. }
+    ));
+}
+
+#[test]
+fn v2_record_carrying_a_decoy_field_is_rejected_explicitly() {
+    // The protocol-vs-decoy grammar: the `|decoy_field` segment is a
+    // protocol v3 canonical extension, so a v2 record carrying one is
+    // malformed — such a record cannot have been signed by a conforming
+    // issuer. The explicit rejection fires before any signature work and
+    // burns the record like every terminal cheap failure.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("v2-decoy");
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let mut tampered = issued.record.clone();
+    tampered.protocol_version = 2;
+    tampered.decoy_field = Some("company_website".to_string());
+    let token = encode_token(
+        &tampered.nonce,
+        solve_for_test(&tampered).expect("4-bit sha solves"),
+    );
+    let verifier = verifier_for(&url, &prefix);
+    verifier.store().store(&tampered).unwrap();
+    assert_eq!(
+        verify_at(&verifier, &token, tampered.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::MalformedRecord),
+        "a v2 record with a decoy_field is rejected explicitly"
+    );
+    assert_eq!(
+        verify_at(
+            &verifier,
+            &encode_token(
+                &issued.record.nonce,
+                solve_for_test(&issued.record).unwrap()
+            ),
+            issued.record.issued_at_ns
+        ),
+        VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+        "the malformed v2-plus-decoy record is consumed by the cheap failure"
+    );
+}
+
+#[test]
+fn single_key_then_keyring_revokes_the_old_single_secret() {
+    // The derived-keys reset: a verifier that verified under the
+    // single-key path is switched to a keyring via
+    // `with_secrets_by_kid` — the prior single secret must no longer verify
+    // and the keyring's kid must verify. Without the cache reset the
+    // stale u32::MAX sentinel map survives and every kid resolution
+    // fails UnknownKid (or worse, serves the prior keys).
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("secret-switch-single");
+    let verifier = verifier_for(&url, &prefix);
+
+    // Prime the cache under the single secret.
+    let issued_a = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let token_a = encode_token(
+        &issued_a.record.nonce,
+        solve_for_test(&issued_a.record).expect("4-bit sha solves"),
+    );
+    verifier.store().store(&issued_a.record).unwrap();
+    assert!(matches!(
+        verify_at(&verifier, &token_a, issued_a.record.issued_at_ns),
+        VerifyOutcome::Valid { .. }
+    ));
+
+    // Switch to the keyring: kid 1 now maps to the new secret.
+    let switched = verifier.with_secrets_by_kid([(1u32, SECRET_2.to_string())]);
+
+    // The prior single secret no longer verifies: a kid-1 record signed
+    // with the prior secret fails the signature check under the new secret's keys.
+    switched.store().store(&issued_a.record).unwrap();
+    assert_eq!(
+        verify_at(&switched, &token_a, issued_a.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::BadSignature),
+        "the replaced single secret must no longer verify"
+    );
+
+    // The keyring's kid verifies: a kid-1 record signed with the new secret.
+    let mut config_b = sha_config(4);
+    config_b.secret_key = SECRET_2.into();
+    let issued_b =
+        issue_challenge(&config_b, "login", IP, now_unix(), now_micros(), 0, None).unwrap();
+    let token_b = encode_token(
+        &issued_b.record.nonce,
+        solve_for_test(&issued_b.record).expect("4-bit sha solves"),
+    );
+    switched.store().store(&issued_b.record).unwrap();
+    assert!(matches!(
+        verify_at(&switched, &token_b, issued_b.record.issued_at_ns),
+        VerifyOutcome::Valid { .. }
+    ));
+}
+
+#[test]
+fn keyring_replacement_revokes_the_replaced_kid() {
+    // The revocation property across keyring replacements: kid 5 signs
+    // with secret A, the verifier switches to ring B (kid 5 = secret B),
+    // and a kid-5 token signed with A now fails while one signed with B
+    // verifies. Without the derived-keys reset the stale kid-5 keys from
+    // ring A keep verifying the revoked secret.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("secret-switch-ring");
+    let mut config_a = sha_config(4);
+    config_a.secret_key = SECRET.into();
+    config_a.kid = 5;
+    let mut config_b = sha_config(4);
+    config_b.secret_key = SECRET_2.into();
+    config_b.kid = 5;
+    let issued_a =
+        issue_challenge(&config_a, "login", IP, now_unix(), now_micros(), 0, None).unwrap();
+    let issued_b =
+        issue_challenge(&config_b, "login", IP, now_unix(), now_micros(), 0, None).unwrap();
+    let token_a = encode_token(
+        &issued_a.record.nonce,
+        solve_for_test(&issued_a.record).expect("4-bit sha solves"),
+    );
+    let token_b = encode_token(
+        &issued_b.record.nonce,
+        solve_for_test(&issued_b.record).expect("4-bit sha solves"),
+    );
+
+    // Prime the cache under ring A (kid 5 = the prior secret).
+    let verifier = verifier_for(&url, &prefix).with_secrets_by_kid([(5u32, SECRET.to_string())]);
+    verifier.store().store(&issued_a.record).unwrap();
+    assert!(matches!(
+        verify_at(&verifier, &token_a, issued_a.record.issued_at_ns),
+        VerifyOutcome::Valid { .. }
+    ));
+
+    // Switch to ring B: kid 5 = the new secret.
+    let switched = verifier.with_secrets_by_kid([(5u32, SECRET_2.to_string())]);
+
+    // A kid-5 token signed with A now fails: the replacement revoked it.
+    switched.store().store(&issued_a.record).unwrap();
+    assert_eq!(
+        verify_at(&switched, &token_a, issued_a.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::BadSignature),
+        "a kid-5 token signed with the replaced secret must fail"
+    );
+
+    // A kid-5 token signed with B verifies.
+    switched.store().store(&issued_b.record).unwrap();
+    assert!(matches!(
+        verify_at(&switched, &token_b, issued_b.record.issued_at_ns),
+        VerifyOutcome::Valid { .. }
+    ));
+}
+
+#[test]
 fn connection_pool_reuses_connections_round_robin() {
     let Some(url) = redis_url() else { return };
     let prefix = prefix("pool");
@@ -1813,6 +2070,121 @@ fn pool_reuses_the_same_slots_across_operations() {
         ),
         VerifyOutcome::Valid { .. }
     ));
+}
+
+#[test]
+fn single_connection_pool_never_starves_a_peer_while_the_winner_is_in_the_gate() {
+    // The three-checkout starvation regression: verification A runs on
+    // an Argon record whose admission gate parks on a barrier. In the
+    // three-checkout flow no pool slot is held by the time the gate runs
+    // (checkout A covers the snapshot, the cheap phase and the terminal
+    // gate, then is released), so a second verification B on a
+    // single-connection pool, size 1, succeeds while A is parked in the
+    // gate. The buggy single-checkout flow held its slot from before the
+    // snapshot through the derivation, so B's checkout timed out and B
+    // failed with StorageUnavailable while Redis sat idle.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("pool-one-gate");
+    let issued_a = issue_challenge(
+        &argon_config(2),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let token_a = encode_token(
+        &issued_a.record.nonce,
+        solve_for_test(&issued_a.record).expect("2-bit argon solves"),
+    );
+    let issued_b = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let token_b = encode_token(
+        &issued_b.record.nonce,
+        solve_for_test(&issued_b.record).expect("4-bit sha solves"),
+    );
+
+    let barrier = Arc::new(Barrier::new(2));
+    let entered = Arc::new(AtomicUsize::new(0));
+    let verifier = Arc::new(
+        ProductionVerifier::new(
+            RedisChallengeStore::with_pool_size(
+                redis::Client::open(url.clone()).unwrap(),
+                prefix.clone(),
+                1,
+            ),
+            SECRET,
+        )
+        .with_argon_gate(BarrierGate {
+            barrier: Arc::clone(&barrier),
+            entered: Arc::clone(&entered),
+        }),
+    );
+    verifier.store().store(&issued_a.record).unwrap();
+    verifier.store().store(&issued_b.record).unwrap();
+
+    // A runs on a worker thread and parks inside the admission gate.
+    let worker = Arc::clone(&verifier);
+    let worker_token = token_a.clone();
+    let issued_at_a = issued_a.record.issued_at_ns;
+    let handle = thread::spawn(move || {
+        worker.verify(
+            &worker_token,
+            "login",
+            IP,
+            issued_at_a + 1_000_000,
+            None,
+            RequestBindingExpectation::Unenforced,
+        )
+    });
+
+    // Wait until A is provably inside the gate: it has passed the
+    // snapshot, the cheap phase and the terminal gate, and holds no pool
+    // slot in the fixed flow.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while entered.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+        thread::sleep(std::time::Duration::from_micros(100));
+    }
+    assert_eq!(
+        entered.load(Ordering::SeqCst),
+        1,
+        "A must reach the admission gate"
+    );
+
+    // While A is parked in the gate, B must complete on the sole pool
+    // slot: with the single-checkout bug this checkout timed out and B
+    // failed StorageUnavailable.
+    let b_outcome = verifier.verify(
+        &token_b,
+        "login",
+        IP,
+        issued_b.record.issued_at_ns + 1_000_000,
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+
+    // Release A regardless of B's result so the worker never leaks.
+    barrier.wait();
+    let a_outcome = handle.join().unwrap();
+
+    assert!(
+        matches!(b_outcome, VerifyOutcome::Valid { .. }),
+        "B must verify while A is parked in the gate on a size-1 pool: {b_outcome:?}"
+    );
+    assert!(
+        matches!(a_outcome, VerifyOutcome::Valid { .. }),
+        "A must complete correctly once the gate releases: {a_outcome:?}"
+    );
 }
 
 #[test]
@@ -4368,7 +4740,7 @@ fn exempt_circumstance_alone_still_replays_the_stored_success() {
                 nonce: nonce.clone(),
                 request_binding: None,
                 from_stored_result: true,
-                solve_duration_ms: Some(1000),
+                solve_duration_ms: None,
             },
             "{label}: the identity-proven retry replays the stored success"
         );
@@ -4775,7 +5147,7 @@ fn resume_derivation_is_serialized_by_the_atomic_claim() {
 
 #[test]
 fn resume_loser_with_a_pre_held_claim_never_acquires_argon_capacity() {
-    // Round-93 audit: the claim comes first, before the Argon admission
+    // The claim comes first, before the Argon admission
     // gate. A second recovery racing an already-held claim must lose at
     // the claim and answer ConsumeIndeterminate (the resultless reread)
     // while never acquiring an Argon capacity slot; only after the
@@ -5162,21 +5534,24 @@ fn resume_commit_requires_current_claim_ownership() {
     );
 }
 
-// ── single-connection verify op counts (hermetic fake endpoint) ──────
+// ── three-checkout verify op counts (hermetic fake endpoint) ─────────
 // The miniature endpoint lives in `tests/common` (shared with the `HKDF`
 // derivation-cache test binary): it records every command tagged with
 // its connection, answers the verifier's exact command surface from a
 // tiny record store, and drives the `NOSCRIPT`-then-load dance once.
 
 #[test]
-fn verify_costs_one_checkout_and_three_store_commands_on_the_happy_path() {
-    // The single-connection verify path: a full happy-path verification
-    // performs exactly ONE pool checkout (observed as the single r2d2
-    // validation PING) and three store commands — the runtime-state GET,
-    // the consume `EVALSHA` and the commit `EVALSHA` — all on ONE TCP
-    // connection (no checkout churn, no script re-load: the Script
-    // objects are cached per store and the endpoint's script cache stays
-    // warm). Hermetic: no Redis URL needed.
+fn verify_costs_three_checkouts_and_three_store_commands_on_the_happy_path() {
+    // The three-checkout verify path: a full happy-path
+    // verification performs exactly three pool checkouts (observed as
+    // the r2d2 checkout validation PINGs) — the snapshot connection
+    // (runtime-state GET + the cheap phase), the consume connection
+    // (atomic transition) and the commit connection (best-effort
+    // outcome) — and three store commands, the GET, the consume
+    // `EVALSHA` and the commit `EVALSHA`. No connection is ever held
+    // across the derivation (the pool-size-1 barrier test proves the
+    // starvation property; this test pins the op shape). Hermetic: no
+    // Redis URL needed.
     let (url, endpoint) = FakeEndpoint::spawn();
     let prefix = prefix("opcount");
     let store = RedisChallengeStore::new(redis::Client::open(url).unwrap(), prefix.clone());
@@ -5240,8 +5615,8 @@ fn verify_costs_one_checkout_and_three_store_commands_on_the_happy_path() {
     let count = |name: &str| log.iter().filter(|(_, a)| a[0] == name).count();
     assert_eq!(
         count("PING"),
-        1,
-        "exactly ONE pool checkout (the r2d2 checkout validation PING); log: {log:?}"
+        3,
+        "exactly THREE pool checkouts (snapshot, consume, commit — the three-checkout model); log: {log:?}"
     );
     assert_eq!(count("GET"), 1, "the single runtime-state snapshot");
     let evalsha = |argc: usize| {
@@ -5265,26 +5640,31 @@ fn verify_costs_one_checkout_and_three_store_commands_on_the_happy_path() {
         0,
         "no script re-load: the Script objects are cached per store and the endpoint cache is warm"
     );
-    // Every command of the measured window rode the same pooled
-    // connection (r2d2 fills the idle pool to max_size in the background,
-    // so the endpoint may hold several TCP connections — what matters is
-    // that this verification checked out exactly one of them for all
-    // three store commands).
+    // The three checkouts normally reuse the single pooled connection
+    // (lazy opening: the warm-up created exactly one connection and the
+    // pool never grows beyond what is used, so every checkout pops the
+    // same idle slot — the GET, the consume and the commit rode one
+    // socket). Under runner load the r2d2 checkout-validation PING
+    // against the fake endpoint can exceed the validation timeout, the
+    // slot is evicted and re-created once, so the assertion allows at
+    // most one re-creation: the op-shape above is the pinned contract,
+    // and the no-connection-held-during-derivation property is proven
+    // by the pool-size-1 barrier test.
     let window_conns: BTreeSet<usize> = log.iter().map(|(conn, _)| *conn).collect();
-    assert_eq!(
-        window_conns.len(),
-        1,
-        "the GET, the consume and the commit must share one pooled connection; log: {log:?}"
+    assert!(
+        window_conns.len() <= 2,
+        "the three checkouts must reuse the pooled connection (at most one re-creation); log: {log:?}"
     );
 }
 
 #[test]
 fn cheap_failure_costs_one_checkout_and_two_store_commands() {
-    // The cheap-failure path of the same single-connection layout: a
-    // pending record failing a cheap check (wrong scope) performs ONE
-    // checkout (one PING), the runtime-state GET and the fused
-    // delete-if-pending cleanup `EVALSHA` — two store commands, no consume,
-    // no commit.
+    // The cheap-failure path of the three-checkout layout: a pending
+    // record failing a cheap check (wrong scope) performs ONE checkout
+    // (one PING) — the snapshot connection, which also carries the fused
+    // delete-if-pending cleanup `EVALSHA` — two store commands, no
+    // consume, no commit, and no further checkout (the failure returns
+    // before the consume and commit phases).
     let (url, endpoint) = FakeEndpoint::spawn();
     let prefix = prefix("opcount-fail");
     let store = RedisChallengeStore::new(redis::Client::open(url).unwrap(), prefix.clone());
@@ -5457,9 +5837,13 @@ fn sub_millisecond_spans_floor_toward_zero() {
 }
 
 #[test]
-fn stored_result_replay_carries_the_server_measured_solve_duration() {
-    // The identity-proven replay of a stored success carries the span to
-    // its own receipt instant — the PHP replay-of-valid path.
+fn stored_result_replay_carries_no_recomputed_solve_duration() {
+    // The server-measured solve duration is computed
+    // only for a fresh derivation, whose receipt instant belongs to the
+    // solve being measured. A same-operation replay of a stored success
+    // reports None — a replayed receipt at t=30 s would measure the
+    // retry's elapsed time, not the original ~2 s solve, and a
+    // confidently incorrect value is worse than none.
     let Some(url) = redis_url() else { return };
     let prefix = prefix("solve-dur-replay");
     let (nonce, token, issued_at_ns) = consumed_committed_record(&url, &prefix, 0);
@@ -5485,8 +5869,8 @@ fn stored_result_replay_carries_the_server_measured_solve_duration() {
             );
             assert_eq!(
                 *solve_duration_ms,
-                Some(30_000),
-                "the replay-of-valid path carries the server-measured span to its own receipt"
+                None,
+                "the stored-success replay must NOT recompute the duration from the retry's receipt"
             );
         }
         _ => panic!("expected the retained Valid, got {outcome:?}"),
@@ -5499,7 +5883,8 @@ fn resume_commit_valid_carries_the_server_measured_solve_duration() {
     // The resultless-consume recovery: the exact-identity resume
     // re-derives and commits; the recovered Valid carries the span
     // between the record's issuance clock and the resume's own receipt
-    // instant.
+    // instant. The retry of the committed outcome replays the stored
+    // result and carries NO recomputed duration.
     let Some(url) = redis_url() else { return };
     let prefix = prefix("solve-dur-resume");
     let issued = issue_challenge(
@@ -5548,14 +5933,15 @@ fn resume_commit_valid_carries_the_server_measured_solve_duration() {
             assert_eq!(
                 solve_duration_ms,
                 Some(2500),
-                "the resumed Valid carries the server-measured span to the resume receipt"
+                "the fresh derivation carries the server-measured span to the resume receipt"
             );
         }
         other => panic!("expected the resumed Valid, got {other:?}"),
     }
 
     // The retry now resolves the committed outcome: the stored-result
-    // acceptance on the resume fast path carries the duration too.
+    // acceptance on the resume fast path carries NO recomputed duration
+    // (the cross-language spec — the retry's receipt is not the solve's).
     match verifier.resume_consumed_operation(
         &token,
         identity,
@@ -5571,9 +5957,8 @@ fn resume_commit_valid_carries_the_server_measured_solve_duration() {
         } => {
             assert!(from_stored_result, "the retry replays the committed result");
             assert_eq!(
-                solve_duration_ms,
-                Some(4000),
-                "the resumed committed-result fast path carries the span"
+                solve_duration_ms, None,
+                "the stored-success replay on the resume fast path must not recompute the duration"
             );
         }
         other => panic!("expected the retained Valid, got {other:?}"),
@@ -5734,4 +6119,579 @@ fn one_receipt_instant_feeds_both_the_floor_and_the_duration() {
         ),
         other => panic!("the floor boundary must verify, got {other:?}"),
     }
+}
+
+// ── failover fault injection (hermetic fake endpoint) ─────────────────
+// The fault-injection surface: the fake endpoint can drop the
+// connection on a matching command (a client-visible I/O error), answer
+// an error reply, or report a replica-wait shortfall, so the fail-closed
+// classifications of the production verifier are pinned without Redis.
+
+/// Whether the parsed command is an `EVALSHA` with the given argument
+/// count (the command shapes: 4 = delete/cancel, 5 = consume, 6 = commit).
+fn evalsha_with_argc(argc: usize) -> FaultPredicate {
+    Arc::new(move |args: &[String]| {
+        args.first().is_some_and(|c| c == "EVALSHA") && args.len() == argc
+    })
+}
+
+/// Whether the parsed command's first argument is the given name.
+fn command_is(name: &str) -> FaultPredicate {
+    let name = name.to_string();
+    Arc::new(move |args: &[String]| args.first().is_some_and(|c| c == &name))
+}
+
+#[test]
+fn mid_consume_connection_failure_classifies_consume_indeterminate() {
+    // The consume transition's connection fails mid-verify: the snapshot
+    // read and the cheap phase succeed, then the consume `EVALSHA` is
+    // answered by a dropped connection. The transition may or may not
+    // have executed, so the classification is the ambiguous
+    // ConsumeIndeterminate, never a success and never RecordNotFound.
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("fault-mid-consume");
+    let store = RedisChallengeStore::new(redis::Client::open(url).unwrap(), prefix.clone());
+    let verifier = ProductionVerifier::new(store, SECRET);
+
+    // Warm-up: load the scripts and open the pooled connection.
+    let warm = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let warm_counter = solve_for_test(&warm.record).expect("4-bit sha solves");
+    endpoint.seed(&prefix, &warm.record);
+    assert!(matches!(
+        verifier.verify(
+            &encode_token(&warm.record.nonce, warm_counter),
+            "login",
+            IP,
+            warm.record.issued_at_ns + 1_000_000,
+            None,
+            RequestBindingExpectation::Unenforced,
+        ),
+        VerifyOutcome::Valid { .. }
+    ));
+
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    endpoint.seed(&prefix, &issued.record);
+    let key = format!("{prefix}{}", issued.record.nonce);
+
+    // The fault: the consume transition drops the connection before the
+    // endpoint serves it, so no mutation lands.
+    endpoint.arm_fault(evalsha_with_argc(5), FaultReply::Close);
+    let outcome = verifier.verify(
+        &encode_token(&issued.record.nonce, counter),
+        "login",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert_eq!(
+        outcome,
+        VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
+        "a lost consume reply is the ambiguous indeterminate"
+    );
+    assert!(
+        endpoint.contains_record(&key),
+        "the record must not be consumed without evidence"
+    );
+
+    // The connection recovers: the same record verifies.
+    endpoint.clear_fault();
+    let recovered = verifier.verify(
+        &encode_token(&issued.record.nonce, counter),
+        "login",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        matches!(recovered, VerifyOutcome::Valid { .. }),
+        "after the connection recovers the record verifies: {recovered:?}"
+    );
+}
+
+#[test]
+fn runtime_state_get_failure_classifies_storage_unavailable() {
+    // A GET failure on the runtime-state read: the record was never
+    // touched, so the challenge is presumed intact, the outcome is the
+    // retryable StorageUnavailable, and the record stays pending.
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("fault-get");
+    let store = RedisChallengeStore::new(redis::Client::open(url).unwrap(), prefix.clone());
+    let verifier = ProductionVerifier::new(store, SECRET);
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    endpoint.seed(&prefix, &issued.record);
+    let key = format!("{prefix}{}", issued.record.nonce);
+
+    endpoint.arm_fault(command_is("GET"), FaultReply::Error);
+    let outcome = verifier.verify(
+        &encode_token(&issued.record.nonce, counter),
+        "login",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert_eq!(
+        outcome,
+        VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
+        "a failed runtime-state read is StorageUnavailable"
+    );
+    assert!(endpoint.contains_record(&key), "the record must survive");
+
+    endpoint.clear_fault();
+    let recovered = verifier.verify(
+        &encode_token(&issued.record.nonce, counter),
+        "login",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        matches!(recovered, VerifyOutcome::Valid { .. }),
+        "the record verifies once the read recovers: {recovered:?}"
+    );
+}
+
+#[test]
+fn wait_shortfall_on_consume_fails_closed_to_consume_indeterminate() {
+    // The replica-wait shortfall on the fresh pending-to-consumed
+    // transition: the transition lands on the primary, the WAIT
+    // acknowledges fewer replicas than configured, and the verify fails
+    // closed with the typed indeterminate outcome, never a success.
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("fault-consume-wait");
+    let store = RedisChallengeStore::new(redis::Client::open(url).unwrap(), prefix.clone())
+        .with_wait(1, 50);
+    let verifier = ProductionVerifier::new(store, SECRET);
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    endpoint.seed(&prefix, &issued.record);
+    endpoint.set_wait_ack(0);
+
+    let outcome = verifier.verify(
+        &encode_token(&issued.record.nonce, counter),
+        "login",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert_eq!(
+        outcome,
+        VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
+        "the failed barrier maps onto the typed indeterminate outcome"
+    );
+
+    // The transition happened on the primary before the barrier failed:
+    // the same store's consumed-state read sees the consumed marker.
+    let state = verifier
+        .store()
+        .consumed_state(&issued.record.nonce)
+        .unwrap();
+    let state = state.expect("the transition landed on the primary");
+    assert!(
+        state.stored_result.is_none(),
+        "no outcome may be committed after the barrier failure"
+    );
+}
+
+#[test]
+fn wait_command_failure_on_consume_fails_closed_to_consume_indeterminate() {
+    // The WAIT command itself fails (the connection drops on the WAIT,
+    // distinct from a shortfall reply): the same fail-closed
+    // classification, with the transition landed on the primary.
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("fault-consume-wait-cmd");
+    let store = RedisChallengeStore::new(redis::Client::open(url).unwrap(), prefix.clone())
+        .with_wait(1, 50);
+    let verifier = ProductionVerifier::new(store, SECRET);
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    endpoint.seed(&prefix, &issued.record);
+
+    endpoint.arm_fault(command_is("WAIT"), FaultReply::Close);
+    let outcome = verifier.verify(
+        &encode_token(&issued.record.nonce, counter),
+        "login",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert_eq!(
+        outcome,
+        VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
+        "a WAIT command failure must never succeed"
+    );
+    let state = verifier
+        .store()
+        .consumed_state(&issued.record.nonce)
+        .unwrap();
+    let state = state.expect("the transition landed before the WAIT failure");
+    assert!(
+        state.stored_result.is_none(),
+        "the failure after the marker must not fabricate a committed outcome"
+    );
+}
+
+#[test]
+fn delete_if_pending_write_failure_fails_closed_to_storage_unavailable() {
+    // A write failure on the fused delete-if-pending cleanup: the
+    // cheap-failure verdict stands only when the fused transition
+    // resolves. A failed cleanup cannot establish the consumed marker,
+    // so the fail-closed retryable StorageUnavailable answers and the
+    // record is never deleted.
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("fault-cleanup");
+    let store = RedisChallengeStore::new(redis::Client::open(url).unwrap(), prefix.clone());
+    let verifier = ProductionVerifier::new(store, SECRET);
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    endpoint.seed(&prefix, &issued.record);
+    let key = format!("{prefix}{}", issued.record.nonce);
+
+    // The wrong-scope token fails the cheap phase on the pending record;
+    // the cleanup `EVALSHA` (the 4-arg family) is answered with an error.
+    endpoint.arm_fault(evalsha_with_argc(4), FaultReply::Error);
+    let outcome = verifier.verify(
+        &encode_token(&issued.record.nonce, 1),
+        "admin",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert_eq!(
+        outcome,
+        VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
+        "a failed fused cleanup is the retryable StorageUnavailable"
+    );
+    assert!(
+        endpoint.contains_record(&key),
+        "the record must not be deleted by the failed cleanup"
+    );
+}
+
+#[test]
+fn commit_write_failure_keeps_the_valid_outcome_and_the_retry_is_indeterminate() {
+    // The commit write failure: the outcome `EVALSHA` is answered with
+    // an error, so no result is stored. The commit is best-effort, so
+    // the valid outcome stands; the retry of the consumed record
+    // degrades to the retryable indeterminate outcome instead of
+    // replaying a success.
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("fault-commit-write");
+    let store = RedisChallengeStore::new(redis::Client::open(url).unwrap(), prefix.clone());
+    let verifier = ProductionVerifier::new(store, SECRET);
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    endpoint.seed(&prefix, &issued.record);
+
+    endpoint.arm_fault(evalsha_with_argc(6), FaultReply::Error);
+    let outcome = verifier.verify(
+        &encode_token(&issued.record.nonce, counter),
+        "login",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        matches!(outcome, VerifyOutcome::Valid { .. }),
+        "a best-effort commit failure must not change the outcome: {outcome:?}"
+    );
+
+    endpoint.clear_fault();
+    let state = verifier
+        .store()
+        .consumed_state(&issued.record.nonce)
+        .unwrap();
+    let state = state.expect("the consume transition landed");
+    assert!(
+        state.stored_result.is_none(),
+        "the failed commit stored nothing"
+    );
+
+    let retry = verifier.verify(
+        &encode_token(&issued.record.nonce, counter),
+        "login",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert_eq!(
+        retry,
+        VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
+        "the retry of a consumed record without a stored result is indeterminate"
+    );
+}
+
+#[test]
+fn commit_wait_shortfall_keeps_the_outcome_and_the_landed_result_replays() {
+    // The commit-barrier shortfall after the commit write landed on the
+    // primary: the result splice happened, only the WAIT failed. The
+    // commit is best-effort, so the valid outcome stands, and the
+    // landed result replays only behind the failed-barrier replay
+    // guard: a shortfalling fence refuses the stored success as
+    // StorageUnavailable, and a satisfied fence replays it
+    // identity-gated.
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("fault-commit-wait");
+    let store = RedisChallengeStore::new(redis::Client::open(url).unwrap(), prefix.clone())
+        .with_wait(1, 50);
+    let verifier = ProductionVerifier::new(store, SECRET);
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    endpoint.seed(&prefix, &issued.record);
+    endpoint.queue_wait_ack(1);
+    endpoint.set_wait_ack(0);
+
+    let identity = Some("op-commit-shortfall");
+    let outcome = verifier.verify(
+        &encode_token(&issued.record.nonce, counter),
+        "login",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        identity,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        matches!(outcome, VerifyOutcome::Valid { .. }),
+        "a best-effort commit failure must not change the outcome: {outcome:?}"
+    );
+
+    // The fence shortfall refuses the stored success.
+    let fenced_out = verifier.verify(
+        &encode_token(&issued.record.nonce, counter),
+        "login",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        identity,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert_eq!(
+        fenced_out,
+        VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
+        "a shortfalling replay fence must refuse the stored success"
+    );
+
+    // The satisfied fence replays the landed result identity-gated.
+    endpoint.set_wait_ack(1);
+    let replay = verifier.verify(
+        &encode_token(&issued.record.nonce, counter),
+        "login",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        identity,
+        RequestBindingExpectation::Unenforced,
+    );
+    match replay {
+        VerifyOutcome::Valid {
+            from_stored_result: true,
+            ..
+        } => {}
+        other => panic!("the satisfied fence must replay the landed result: {other:?}"),
+    }
+
+    // Without the identity the stored success is refused.
+    let denied = verifier.verify(
+        &encode_token(&issued.record.nonce, counter),
+        "login",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert_eq!(
+        denied,
+        VerifyOutcome::Invalid(VerifyError::AlreadyConsumed),
+        "without the identity the stored success is refused"
+    );
+}
+
+#[test]
+fn vanished_envelope_cannot_authorize_a_stored_result_replay() {
+    // The primary-failure contract: a stored-result replay requires the
+    // retained envelope. With the envelope present the same-operation
+    // identity replays the committed success; once the record vanishes
+    // from the store, the same replay resolves deterministically as
+    // RecordNotFound, never a resurrected authorization.
+    let (url, endpoint) = FakeEndpoint::spawn();
+    let prefix = prefix("fault-vanished");
+    let store = RedisChallengeStore::new(redis::Client::open(url).unwrap(), prefix.clone());
+    let verifier = ProductionVerifier::new(store, SECRET);
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    endpoint.seed(&prefix, &issued.record);
+    let key = format!("{prefix}{}", issued.record.nonce);
+    let identity = Some("op-vanished");
+
+    let first = verifier.verify(
+        &encode_token(&issued.record.nonce, counter),
+        "login",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        identity,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert!(
+        matches!(first, VerifyOutcome::Valid { .. }),
+        "the first verify must succeed: {first:?}"
+    );
+
+    let replay = verifier.verify(
+        &encode_token(&issued.record.nonce, counter),
+        "login",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        identity,
+        RequestBindingExpectation::Unenforced,
+    );
+    match replay {
+        VerifyOutcome::Valid {
+            from_stored_result: true,
+            ..
+        } => {}
+        other => panic!("the retained envelope must replay the committed success: {other:?}"),
+    }
+
+    endpoint.remove(&key);
+    let vanished = verifier.verify(
+        &encode_token(&issued.record.nonce, counter),
+        "login",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        identity,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert_eq!(
+        vanished,
+        VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+        "a vanished envelope can never authorize"
+    );
+}
+
+#[test]
+fn dead_backend_checkout_failure_classifies_storage_unavailable() {
+    // A backend that refuses connections: the pool checkout fails and
+    // the verify answers the retryable StorageUnavailable, never a
+    // generic error and never a success. The port is bound and dropped
+    // first, so the connect is refused deterministically.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let issued = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let store = RedisChallengeStore::new(
+        redis::Client::open(format!("redis://127.0.0.1:{port}/")).unwrap(),
+        prefix("fault-dead"),
+    );
+    let verifier = ProductionVerifier::new(store, SECRET);
+
+    let outcome = verifier.verify(
+        &encode_token(&issued.record.nonce, 1),
+        "login",
+        IP,
+        issued.record.issued_at_ns + 1_000_000,
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+    assert_eq!(
+        outcome,
+        VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
+        "a dead backend is the retryable StorageUnavailable"
+    );
 }

@@ -373,7 +373,7 @@ public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
 
     public function testPsr6NamespacedLimitersOverOneSharedPoolKeepIndependentBudgets(): void
     {
-        // Round-97: the PSR-6 fallback keys ignored the constructor
+        // The PSR-6 fallback keys ignored the constructor
         // namespace, so two deployments sharing one pool contended on the
         // one literal `kr_global` item (and on identical per-client items
         // when the peppers matched). The namespace now keys both PSR-6

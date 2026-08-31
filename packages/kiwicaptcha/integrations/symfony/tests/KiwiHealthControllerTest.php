@@ -13,9 +13,11 @@ use PHPUnit\Framework\TestCase;
  * process runs (never tied to saturation). /health/ready is 200 only
  * when the signing keys are configured, the security Redis answers a
  * (cached, debounced) ping, and the central security-policy state
- * ({kiwi:<ns>}:security-policy) is compatible — min_protocol_version
- * <= 2 and min_policy_epoch <= the configured risk.policy_version. An
- * absent key leaves the binary's own configuration authoritative.
+ * ({kiwi:<ns>}:security-policy) is compatible. Compatible means
+ * min_protocol_version <= 3 (this binary's max protocol: the
+ * decoy-capable v3 canonical) and min_policy_epoch <= the configured
+ * risk.policy_version. An absent key leaves the binary's own
+ * configuration authoritative.
  */
 final class KiwiHealthControllerTest extends TestCase
 {
@@ -74,10 +76,10 @@ final class KiwiHealthControllerTest extends TestCase
     public function testReadyOkWithCompatibleCentralPolicy(): void
     {
         $client = $this->requirePredis();
-        $this->setPolicy($client, 2, 1);
+        $this->setPolicy($client, 3, 1);
         $controller = $this->controller($client, policyVersion: 1);
 
-        self::assertSame(200, $controller->ready()->getStatusCode(), 'min_protocol_version 2 <= the binary max (2) and min_policy_epoch 1 <= the configured epoch 1');
+        self::assertSame(200, $controller->ready()->getStatusCode(), 'min_protocol_version 3 <= the binary max (3, the decoy-capable v3 canonical) and min_policy_epoch 1 <= the configured epoch 1');
     }
 
     public function testReadyOkWithEpochExactlyAtTheConfiguredVersion(): void
@@ -89,14 +91,14 @@ final class KiwiHealthControllerTest extends TestCase
         self::assertSame(200, $controller->ready()->getStatusCode(), 'min_policy_epoch equal to the configured policy_version is compatible');
     }
 
-    public function testNotReadyWhenCentralPolicyDemandsProtocol3(): void
+    public function testNotReadyWhenCentralPolicyDemandsProtocol4(): void
     {
         $client = $this->requirePredis();
-        $this->setPolicy($client, 3, 1);
+        $this->setPolicy($client, 4, 1);
         $controller = $this->controller($client);
 
         $response = $controller->ready();
-        self::assertSame(503, $response->getStatusCode(), 'a central min_protocol_version of 3 exceeds this binary\'s max (2) — it must leave the pool (mixed-version rolling deployment)');
+        self::assertSame(503, $response->getStatusCode(), 'a central min_protocol_version of 4 exceeds this binary\'s max (3) — it must leave the pool (mixed-version rolling deployment)');
         self::assertStringContainsString('min_protocol_version', (string) $response->getContent());
     }
 
@@ -125,10 +127,10 @@ final class KiwiHealthControllerTest extends TestCase
     public function testLiveStaysOkWhileReadyFails(): void
     {
         $client = $this->requirePredis();
-        $this->setPolicy($client, 3, 1);
+        $this->setPolicy($client, 4, 1);
         $controller = $this->controller($client);
 
-        self::assertSame(503, $controller->ready()->getStatusCode(), 'ready fails: central protocol 3');
+        self::assertSame(503, $controller->ready()->getStatusCode(), 'ready fails: central protocol 4');
         self::assertSame(200, $controller->live()->getStatusCode(), 'live must stay 200 while ready fails (the process is up, the pool just must not route to it)');
     }
 

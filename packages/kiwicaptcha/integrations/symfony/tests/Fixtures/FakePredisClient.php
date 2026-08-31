@@ -55,6 +55,23 @@ final class FakePredisClient extends \Predis\Client
     /** @var array<string, string> plain strings (SET / getdel decision handles) */
     public array $strings = [];
 
+    /**
+     * The emulated `INFO` replication identity: role + run_id (the
+     * pinned-primary authority guard reads exactly these fields). The
+     * run_id defaults to a 40-hex string, the Redis shape.
+     *
+     * @var array{role: string, run_id: string}
+     */
+    public array $infoReplication = [
+        'role' => 'master',
+        'run_id' => '0123456789abcdef0123456789abcdef01234567',
+    ];
+
+    /** @var array{run_id: string} the emulated `INFO` server section (the run_id fallback) */
+    public array $infoServer = [
+        'run_id' => '0123456789abcdef0123456789abcdef01234567',
+    ];
+
     /** @var array<string, array<string, float|string>> hashes (hincrbyfloat calibration buckets + hset policy fields) */
     public array $hashes = [];
 
@@ -63,9 +80,26 @@ final class FakePredisClient extends \Predis\Client
 
     private float $clockMs = 0.0;
 
+    /**
+     * The standalone connection object the authority-safety classifier
+     * inspects. Defaults to a real direct StreamConnection (retries
+     * disabled), so the pinned-primary authority guard and the
+     * fail_closed runtime classifier see a provably-safe single-node
+     * client. Set to null to model an uninspectable client.
+     *
+     * @var \Predis\Connection\NodeConnectionInterface|null
+     */
+    public ?\Predis\Connection\NodeConnectionInterface $connectionOverride = null;
+
     public function __construct()
     {
         // Deliberately skip the parent constructor: no connection setup.
+        $this->connectionOverride = new \Predis\Connection\StreamConnection(new \Predis\Connection\Parameters());
+    }
+
+    public function getConnection(): mixed
+    {
+        return $this->connectionOverride;
     }
 
     /** @internal test hook: advance the fake Redis server clock (ms). */
@@ -159,9 +193,24 @@ final class FakePredisClient extends \Predis\Client
             'HGETALL' => $this->fakeHgetall($arguments),
             'HSET' => $this->fakeHset($arguments),
             'HGET' => $this->fakeHget($arguments),
+            'INFO' => $this->fakeInfo($arguments),
             'PING' => $this->pingOk() ? 'PONG' : throw new \RuntimeException('connection refused (fake)'),
             default => null,
         };
+    }
+
+    /**
+     * `INFO` emulation: the replication section (role + run_id, the
+     * pinned-primary identity) and the server section (the run_id
+     * fallback). Mirrors the shape Predis parses from a real server.
+     *
+     * @param list<mixed> $arguments [section]
+     */
+    private function fakeInfo(array $arguments): array
+    {
+        $section = strtolower((string) ($arguments[0] ?? ''));
+
+        return $section === 'replication' ? $this->infoReplication : $this->infoServer;
     }
 
     /** @internal test hook: make ping fail (health probe tests). */

@@ -23,8 +23,10 @@ use PHPUnit\Framework\TestCase;
  * create-or-get, the owner-scoped short reservation lease (redis time +
  * min(lease, remaining TTL)), the idempotent issued transition, the
  * terminal verified transition with the atomic obligation deletion, the
- * nonce-pinned rearm and the owner-gated release. This is the production
- * concurrency path of the chained-challenge state machine.
+ * nonce-pinned rearm and the owner-gated release. The fake mirrors the
+ * key-lifetime and signed-expiry guards of the Lua scripts and the live
+ * read, so the fail-closed corners hold at the unit level too. This is
+ * the production concurrency path of the chained-challenge state machine.
  */
 final class RedisChainedChallengeStateStoreTest extends TestCase
 {
@@ -691,6 +693,9 @@ final class ChainRedisFake extends \Predis\Client
         if (str_contains($script, 'Chain completion')) {
             return $this->luaComplete($keys[0], $args);
         }
+        if (str_contains($script, 'Chain live read')) {
+            return $this->luaRead($keys[0]);
+        }
         if (str_contains($script, 'Chain obligation compare-delete')) {
             return $this->luaDeleteObligation($keys[0], $args);
         }
@@ -718,7 +723,9 @@ final class ChainRedisFake extends \Predis\Client
             $chained = $this->strings[$pointedKey] ?? null;
             if ($chained !== null) {
                 $rec = json_decode($chained, true, 8, JSON_THROW_ON_ERROR);
-                if (isset($rec['requiredRank']) && \is_int($rec['requiredRank'])) {
+                // The live-check mirrors the Lua: a past-expiry pointed-at
+                // record is stale and the mapping heals with a fresh chain.
+                if (isset($rec['requiredRank']) && \is_int($rec['requiredRank']) && (int) $rec['expiresAt'] > (int) floor($this->clockMs / 1000)) {
                     $newRank = (int) $args[5];
                     if ($newRank > $rec['requiredRank']) {
                         $rec['requiredRank'] = $newRank;
@@ -771,6 +778,10 @@ final class ChainRedisFake extends \Predis\Client
             return 'missing';
         }
         $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        $nowSecs = (int) floor($this->clockMs / 1000);
+        if ($this->fakeRecordExpired($rec, $nowSecs)) {
+            return 'missing';
+        }
         if ($rec['state'] === 'issued') {
             return 'issued';
         }
@@ -780,7 +791,6 @@ final class ChainRedisFake extends \Predis\Client
         if ($rec['state'] === 'completed') {
             return 'completed';
         }
-        $nowSecs = (int) floor($this->clockMs / 1000);
         if ($rec['state'] === 'reserved') {
             if ($rec['owner'] === $args[0]) {
                 return 'retry';
@@ -811,7 +821,13 @@ final class ChainRedisFake extends \Predis\Client
         if ($existing === null) {
             return 'missing';
         }
+        if ($this->fakeTtl($key) <= 0) {
+            return 'missing';
+        }
         $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        if ($this->fakeRecordExpired($rec, (int) floor($this->clockMs / 1000))) {
+            return 'missing';
+        }
         if ($rec['state'] === 'reserved') {
             if ($rec['owner'] !== $args[0]) {
                 return 'not_owner';
@@ -842,7 +858,13 @@ final class ChainRedisFake extends \Predis\Client
         if ($existing === null) {
             return 'missing';
         }
+        if ($this->fakeTtl($key) <= 0) {
+            return 'missing';
+        }
         $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        if ($this->fakeRecordExpired($rec, (int) floor($this->clockMs / 1000))) {
+            return 'missing';
+        }
         if ($rec['state'] === 'verified') {
             return $rec['stage2Nonce'] === $args[0] ? 'verified_same' : 'conflict';
         }
@@ -864,7 +886,13 @@ final class ChainRedisFake extends \Predis\Client
         if ($existing === null) {
             return 'missing';
         }
+        if ($this->fakeTtl($key) <= 0) {
+            return 'missing';
+        }
         $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        if ($this->fakeRecordExpired($rec, (int) floor($this->clockMs / 1000))) {
+            return 'missing';
+        }
         if ($rec['state'] === 'step_up_required') {
             return $rec['stage2Nonce'] === $args[0] ? 'step_up_required_same' : 'conflict';
         }
@@ -883,7 +911,13 @@ final class ChainRedisFake extends \Predis\Client
         if ($existing === null) {
             return 'missing';
         }
+        if ($this->fakeTtl($key) <= 0) {
+            return 'missing';
+        }
         $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        if ($this->fakeRecordExpired($rec, (int) floor($this->clockMs / 1000))) {
+            return 'missing';
+        }
         if ($rec['state'] === 'denied') {
             return $rec['stage2Nonce'] === $args[0] ? 'denied_same' : 'conflict';
         }
@@ -904,9 +938,15 @@ final class ChainRedisFake extends \Predis\Client
         if ($existing === null) {
             return 'missing';
         }
+        if ($this->fakeTtl($key) <= 0) {
+            return 'missing';
+        }
         $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
         if (($rec['obligationId'] ?? null) !== $args[1]) {
             return 'obligation_moved';
+        }
+        if ($this->fakeRecordExpired($rec, (int) floor($this->clockMs / 1000))) {
+            return 'missing';
         }
         $mapped = $this->strings[$obligationKey] ?? null;
         if ($mapped === null) {
@@ -943,9 +983,15 @@ final class ChainRedisFake extends \Predis\Client
         if ($existing === null) {
             return 'missing';
         }
+        if ($this->fakeTtl($key) <= 0) {
+            return 'missing';
+        }
         $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
         if (($rec['obligationId'] ?? null) !== $args[1]) {
             return 'obligation_moved';
+        }
+        if ($this->fakeRecordExpired($rec, (int) floor($this->clockMs / 1000))) {
+            return 'missing';
         }
         $mapped = $this->strings[$obligationKey] ?? null;
         if ($mapped === null) {
@@ -980,7 +1026,13 @@ final class ChainRedisFake extends \Predis\Client
         if ($existing === null) {
             return false;
         }
+        if ($this->fakeTtl($key) <= 0) {
+            return false;
+        }
         $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        if ($this->fakeRecordExpired($rec, (int) floor($this->clockMs / 1000))) {
+            return false;
+        }
         if ($rec['state'] !== 'issued' || $rec['stage2Nonce'] !== $args[0]) {
             return false;
         }
@@ -999,7 +1051,13 @@ final class ChainRedisFake extends \Predis\Client
         if ($existing === null) {
             return false;
         }
+        if ($this->fakeTtl($key) <= 0) {
+            return false;
+        }
         $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        if ($this->fakeRecordExpired($rec, (int) floor($this->clockMs / 1000))) {
+            return false;
+        }
         if ($rec['state'] !== 'reserved' || $rec['owner'] !== $args[0]) {
             return false;
         }
@@ -1017,7 +1075,13 @@ final class ChainRedisFake extends \Predis\Client
         if ($existing === null) {
             return false;
         }
+        if ($this->fakeTtl($key) <= 0) {
+            return false;
+        }
         $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        if ($this->fakeRecordExpired($rec, (int) floor($this->clockMs / 1000))) {
+            return false;
+        }
         if ($rec['state'] !== 'reserved' || $rec['owner'] !== $args[0]) {
             return false;
         }
@@ -1026,6 +1090,42 @@ final class ChainRedisFake extends \Predis\Client
         $this->strings[$key] = (string) json_encode($rec, JSON_THROW_ON_ERROR);
 
         return (string) json_encode($rec, JSON_THROW_ON_ERROR);
+    }
+
+    /**
+     * The live-read emulation of the read script: missing or
+     * lifetime-less or past-expiry -> null (false), undecodable ->
+     * 'corrupt', live -> the raw JSON (the PHP strict decode still runs
+     * as the second gate).
+     */
+    private function luaRead(string $key): mixed
+    {
+        $existing = $this->strings[$key] ?? null;
+        if ($existing === null || $existing === '') {
+            return null;
+        }
+        if ($this->fakeTtl($key) <= 0) {
+            return null;
+        }
+        try {
+            $rec = json_decode($existing, true, 8, JSON_THROW_ON_ERROR);
+        } catch (\JsonException) {
+            return 'corrupt';
+        }
+        if (!\is_array($rec)) {
+            return 'corrupt';
+        }
+        if ($this->fakeRecordExpired($rec, (int) floor($this->clockMs / 1000))) {
+            return null;
+        }
+
+        return $existing;
+    }
+
+    /** The signed-expiry guard of the Lua chainRecordExpired(). */
+    private function fakeRecordExpired(array $rec, int $nowSecs): bool
+    {
+        return (int) ($rec['expiresAt'] ?? 0) <= $nowSecs;
     }
 
     private function luaDeleteObligation(string $key, array $args): mixed

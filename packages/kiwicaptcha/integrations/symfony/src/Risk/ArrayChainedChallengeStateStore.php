@@ -46,6 +46,16 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
     private array $obligations = [];
 
     /**
+     * The canonical v2 wire keys, the only keys a chain record may
+     * carry. The strict decode denies every other key (a renamed or
+     * extra field fails closed), mirroring the Redis store.
+     */
+    private const WIRE_KEYS = [
+        'v', 'stage1Nonce', 'scope', 'obligationId', 'requiredAction', 'requiredRank', 'policyVersion',
+        'chainDepth', 'state', 'owner', 'leaseUntil', 'stage2Nonce', 'requestBinding', 'expiresAt',
+    ];
+
+    /**
      * @param \Closure|null $now test seam: returns the current unix
      *                           seconds, defaulting to microtime(true).
      */
@@ -123,10 +133,34 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         $existing = $this->obligations[$obligationId] ?? null;
         if ($existing !== null) {
             $record = $this->records[$existing] ?? null;
-            if ($record !== null && $record['expiresAt'] > $this->clock()) {
-                // The obligation exists: return the existing chain id,
-                // raising the required rank/action when the new
-                // reassessment is stronger (never lower).
+            $live = false;
+            if ($record !== null) {
+                try {
+                    // The strict v2 decode, mirroring the Redis Lua
+                    // predicate's isValidChainRecord(): a corrupt
+                    // pointed-at record is never returned as the existing
+                    // chain (the Redis heal), and the record's own expiry
+                    // is the TTL equivalent (a Redis key is gone when its
+                    // TTL lapses; here the expiresAt field is checked).
+                    self::validateState($record);
+                    $live = $record['expiresAt'] > $this->clock();
+                } catch (MalformedChainedChallengeStateException $e) {
+                    // Corrupt record: the strict v2 decode fails, exactly
+                    // like the Redis Lua predicate's rejection — healed
+                    // below with the compare-delete + fresh create.
+                }
+                if (!$live) {
+                    // Unlike Redis there is no TTL sweep reaping the stale
+                    // record: it is removed with the mapping so the
+                    // corrupt/expired record never lingers unreferenced.
+                    unset($this->records[$existing]);
+                }
+            }
+            if ($live) {
+                // The obligation exists and its pointed-at record is valid:
+                // return the existing chain id, raising the required
+                // rank/action when the new reassessment is stronger (never
+                // lower).
                 if ($requiredRank > $record['requiredRank']) {
                     $this->records[$existing]['requiredRank'] = $requiredRank;
                     $this->records[$existing]['requiredAction'] = $requiredAction;
@@ -249,6 +283,14 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         $record = $this->liveRecord($chainId);
         if ($record === null) {
             return 'missing';
+        }
+        // The stage-2 nonce write boundary validates the canonical Kiwi
+        // base64 shape (the same pattern the strict decode enforces on
+        // stored records): a malformed nonce is refused deterministically
+        // instead of being pinned into the record and bricking it, the
+        // lockstep mirror of the Redis store.
+        if (preg_match(self::NONCE_PATTERN, $stage2Nonce) !== 1) {
+            throw new \InvalidArgumentException('stage2Nonce must be a Kiwi base64 nonce');
         }
         if ($record['state'] === 'reserved') {
             if ($record['owner'] !== $ownerToken) {
@@ -486,6 +528,12 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
         if ($record['state'] !== 'reserved' || $record['owner'] !== $ownerToken) {
             return null;
         }
+        // The stage-2 nonce write boundary validates the canonical Kiwi
+        // base64 shape like markIssued(): a malformed nonce is refused
+        // deterministically instead of being pinned into the record.
+        if (preg_match(self::NONCE_PATTERN, $stage2Nonce) !== 1) {
+            throw new \InvalidArgumentException('stage2Nonce must be a Kiwi base64 nonce');
+        }
         $this->records[$chainId]['state'] = 'completed';
         $this->records[$chainId]['stage2Nonce'] = $stage2Nonce;
         $this->records[$chainId]['owner'] = null;
@@ -554,6 +602,15 @@ final class ArrayChainedChallengeStateStore implements TransactionalChainedChall
     {
         if (($rec['v'] ?? null) !== 2) {
             throw new MalformedChainedChallengeStateException('chain record schema version must be 2');
+        }
+        // Deny unknown fields, mirroring the Redis store's strict decode
+        // (and the core ChallengeRecord::fromArray strictness): a renamed
+        // or extra key fails closed instead of being silently dropped by
+        // the wire shape. Array and Redis observe one machine.
+        foreach (array_keys($rec) as $key) {
+            if (!\in_array($key, self::WIRE_KEYS, true)) {
+                throw new MalformedChainedChallengeStateException(sprintf('chain record carries the unknown key "%s"', $key));
+            }
         }
         $stage1Nonce = $rec['stage1Nonce'] ?? null;
         if (!\is_string($stage1Nonce) || preg_match(self::NONCE_PATTERN, $stage1Nonce) !== 1) {

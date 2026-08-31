@@ -21,12 +21,15 @@ namespace KiwiCaptcha;
   *                request_binding and issuer render as the empty segment
   *                when unset; policy_version as the configured
   *                security-policy epoch; kid as the configured signing
-  *                key id, the final canonical field. When a decoy
-  *                (honeypot) field is armed, see
-  *                {@see self::issueWithDecoyField()}, exactly one more
-  *                segment is appended after the kid:
-  *                ...|{issuer}|{kid}|{decoy_field} — see
-  *                {@see self::canonicalPayload()}.
+  *                key id, the final canonical field. Protocol v3 is the
+  *                decoy-capable canonical: when a decoy (honeypot) field
+  *                is armed, see {@see self::issueWithDecoyField()},
+  *                exactly one more segment is appended after the kid,
+  *                ...|{issuer}|{kid}|{decoy_field}, and the stored
+  *                record's protocol_version is 3 — see
+  *                {@see self::canonicalPayload()}. Unarmed issuance
+  *                stays protocol v2, byte-identical to the pre-decoy
+  *                format.
  *   signature  = hex(H), where H = hmac_sha256(K_challenge, canonical),
  *                an `HKDF`-derived purpose key, see {@see DerivedKeys}.
  *                The master secret is never used directly as the signing
@@ -58,36 +61,70 @@ namespace KiwiCaptcha;
 final class Issuer
 {
     /**
-     * The server-side pool of decoy (honeypot) form-field names. When a
-     * deployment arms the decoy surface, see
-     * {@see self::issueWithDecoyField()}, the issuer picks one name
-     * uniformly at random (`CSPRNG`) per issuance. The names look like
-     * ordinary optional form fields a generic bot filler would populate,
-     * while a human never sees them: the widget driver renders the chosen
-     * name as a hidden, never-auto-filled text input.
+     * The combinatorial decoy-name grammar, the server-side naming space
+     * for decoy (honeypot) form fields. When a deployment arms the decoy
+     * surface, see {@see self::issueWithDecoyField()}, the issuer draws
+     * one lowercase word per slot with `random_int` (`CSPRNG`) and joins
+     * them with '_' to form the grammar prefix {slot1}_{slot2}_{slot3},
+     * e.g. `secondary_contact_phone` or `billing_company_url`. The three
+     * position-specific vocabularies below are shared verbatim with the
+     * Rust `DECOY_GRAMMAR_SLOT1_QUALIFIER` / `_SLOT2_CATEGORY` /
+     * `_SLOT3_FORM` (same words, same order). The pick itself is never
+     * coordinated between the languages: the issuing core signs whatever
+     * it picked, and verification validates alphabet plus canonical,
+     * never the name.
      *
-     * The pool alphabet is deliberately `[a-z_]`, a subset of the
-     * `[A-Za-z0-9_-]{1,64}` shape the widget driver accepts and of the
-     * validation alphabet, see {@see Config::isValidDecoyFieldName()}.
-     * No pool name can ever smuggle the `|` canonical-payload separator
-     * or any other structurally meaningful character. PHP maintains the
-     * identical pool (same names, same order) as the Rust
-     * `DECOY_FIELD_POOL`. The picked name is authenticated by the v2
-     * signature, so the two cores never need to agree on the pick, only
-     * on the pool's alphabet and the canonical-format extension
-     * documented on {@see self::canonicalPayload()}.
+     * The armed name is the prefix plus a per-issuance random suffix:
+     * {slot1}_{slot2}_{slot3}_{suffix} with a 16-lowercase-hex suffix
+     * drawn from 8 `CSPRNG` bytes, e.g.
+     * `billing_address_line_a3f9c21d8e5b7401`, see
+     * {@see self::composeDecoyName()} and {@see self::decoyNameSuffix()}.
+     * The suffix is the collision disambiguator: an application field
+     * whose name equals a grammar prefix (a plausible real field name,
+     * e.g. `billing_address_line`) can still collide with an armed name
+     * only when it also equals the per-issuance 64-bit suffix. The
+     * accidental-match probability for a given issued name is 2^-64, so
+     * a forced collision is a deliberate act, never an accident.
+     *
+     * Prefix space size: len(`SLOT1`) * len(`SLOT2`) * len(`SLOT3`) =
+     * 32 * 29 * 30 = 27,840 distinct prefixes. Each triple joins to a
+     * unique string, because '_' cannot occur inside a word. The prefix
+     * is `[a-z_]+` of at most 30 bytes (the longest word is 10 bytes);
+     * the armed name adds 1 + 16 bytes for the '_' + suffix, at most 47
+     * bytes. Every armed name is a subset of the
+     * `[A-Za-z0-9_-]{1,64}` shape the widget driver and the validation
+     * accept, see {@see Config::isValidDecoyFieldName()}. No name can
+     * ever smuggle the `|` canonical-payload separator. The legacy
+     * 10-name pool words (company_website, fax_number, ...) all remain
+     * present as vocabulary entries. The prefix selection is
+     * combinatorial: a fixed 10-name pool is log2(10) ~ 3.32 bits of
+     * enumerable space, the grammar prefix space is log2(27,840) ~ 14.8
+     * bits. The armed name space is 27,840 * 2^64, so two consecutive
+     * challenges share a full name with probability ~2^-64.
      */
-    public const DECOY_FIELD_POOL = [
-        'company_website',
-        'fax_number',
-        'secondary_phone',
-        'office_extension',
-        'alternate_email',
-        'home_address_line',
-        'middle_name',
-        'assistant_name',
-        'department_code',
-        'backup_phone',
+    public const DECOY_GRAMMAR_SLOT1_QUALIFIER = [
+        'secondary', 'alternate', 'billing', 'office', 'personal', 'company',
+        'home', 'backup', 'department', 'business', 'primary', 'work',
+        'emergency', 'mobile', 'regional', 'corporate', 'team', 'project',
+        'default', 'temporary', 'external', 'internal', 'private', 'shared',
+        'general', 'local', 'main', 'national', 'seasonal', 'guest',
+        'middle', 'assistant',
+    ];
+
+    public const DECOY_GRAMMAR_SLOT2_CATEGORY = [
+        'contact', 'address', 'phone', 'email', 'website', 'fax', 'company',
+        'account', 'profile', 'order', 'invoice', 'support', 'service',
+        'sales', 'location', 'region', 'branch', 'division', 'directory',
+        'registry', 'record', 'file', 'entry', 'channel', 'portal',
+        'platform', 'list', 'archive', 'history',
+    ];
+
+    public const DECOY_GRAMMAR_SLOT3_FORM = [
+        'phone', 'url', 'number', 'line', 'code', 'name', 'extension',
+        'email', 'address', 'link', 'id', 'key', 'value', 'info', 'details',
+        'notes', 'lookup', 'search', 'query', 'reference', 'alias', 'handle',
+        'username', 'label', 'tag', 'entry', 'record', 'index', 'field',
+        'form',
     ];
 
     public function __construct(
@@ -165,19 +202,33 @@ final class Issuer
      * (`DecoyFieldSubmitted`, `honeypot_hit`). Identical to
      * {@see self::issue()} in every other respect: same wire format,
      * same signing, same storage. When `$armDecoyField` is true the
-     * issuer picks a random field name from the server-side
-     * {@see self::DECOY_FIELD_POOL}, `CSPRNG`, a fresh independent pick
-     * per issuance so two challenges never share a predictable decoy.
+     * issuer picks a fresh armed name, a grammar prefix plus a fresh
+     * 16-hex `CSPRNG` suffix, see {@see self::composeDecoyName()}. The
+     * suffix gives every issuance its own 64 random bits, so the
+     * probability that two consecutive challenges share a full name is
+     * ~2^-64 — accidental collision with any other name, application
+     * fields included, is cryptographically impossible.
      * The name is set on the client-facing
      * {@see Challenge::$decoyField}, the key the widget driver renders
      * the hidden input from, and on the stored record's authenticated
-     * {@see ChallengeRecord::$decoyField}. It is signed into the v2
-     * canonical input as the final `|<decoy_field>` segment. A client
+     * {@see ChallengeRecord::$decoyField}. It is signed into the
+     * canonical input as the final `|<decoy_field>` segment, and the
+     * stored record's protocol_version is 3 (the decoy-capable
+     * canonical): an old verifier rejects version 3 as unknown, so the
+     * capability becomes inferable from protocol_version. A client
      * cannot strip or swap the decoy without breaking the signature the
      * verifier re-checks. `false` (or
      * the plain {@see self::issue()}) behaves exactly like the legacy
-     * path: no decoy, byte-identical canonical string, and neither JSON
-     * surface carries the key.
+     * path: protocol v2, no decoy, byte-identical canonical string, and
+     * neither JSON surface carries the key.
+     *
+     * `$decoyNameOverride` is a fixture/test seam: when non-null the
+     * armed name is exactly this value (validated against the same
+     * `[A-Za-z0-9_-]{1,64}` alphabet) instead of a fresh random pick.
+     * Production callers omit it.
+     *
+     * @throws \InvalidArgumentException when `$decoyNameOverride` is set
+     *                                   but not a valid decoy field name
      */
     public function issueWithDecoyField(
         string $scope,
@@ -185,26 +236,139 @@ final class Issuer
         bool $armDecoyField = true,
         ?string $requestBinding = null,
         ?string $hostname = null,
+        ?string $decoyNameOverride = null,
     ): Challenge {
+        if ($decoyNameOverride !== null && !Config::isValidDecoyFieldName($decoyNameOverride)) {
+            throw new \InvalidArgumentException('decoy name override must be 1-64 characters of [A-Za-z0-9_-]');
+        }
+
         return $this->issueChallenge(
             $scope,
             $clientIp,
             $requestBinding,
             $hostname,
-            $armDecoyField ? self::pickDecoyField() : null,
+            $armDecoyField ? ($decoyNameOverride ?? self::pickDecoyField()) : null,
         );
     }
 
     /**
-     * Pick a random decoy field name from {@see self::DECOY_FIELD_POOL}
-     * with the `CSPRNG`, `random_int`, never a weak or insecure
-     * fallback. An RNG failure propagates to the caller as a
-     * Random\RandomException, exactly like the nonce/salt draws.
-     * Mirrors the Rust `pick_decoy_field`.
+     * Pick a random armed decoy field name: a grammar prefix plus the
+     * fresh 16-hex `CSPRNG` suffix, see {@see self::composeDecoyName()},
+     * never a weak or insecure fallback. An
+     * RNG failure propagates to the caller as a Random\RandomException,
+     * exactly like the nonce/salt draws. Mirrors the Rust
+     * `pick_decoy_field`.
      */
     private static function pickDecoyField(): string
     {
-        return self::DECOY_FIELD_POOL[random_int(0, \count(self::DECOY_FIELD_POOL) - 1)];
+        return self::composeDecoyName(
+            random_int(0, \count(self::DECOY_GRAMMAR_SLOT1_QUALIFIER) - 1),
+            random_int(0, \count(self::DECOY_GRAMMAR_SLOT2_CATEGORY) - 1),
+            random_int(0, \count(self::DECOY_GRAMMAR_SLOT3_FORM) - 1),
+        );
+    }
+
+    /**
+     * The per-issuance random suffix of an armed decoy name: 16
+     * lowercase hex characters drawn from 8 bytes of the `CSPRNG`
+     * (`random_bytes`), 64 random bits. The suffix is the collision
+     * disambiguator of the armed name space: a grammar prefix alone is
+     * a plausible real field name, so only the suffix makes an armed
+     * name unguessable and accidental collision impossible. Mirrors the
+     * Rust `decoy_name_suffix`.
+     */
+    public static function decoyNameSuffix(): string
+    {
+        return bin2hex(random_bytes(8));
+    }
+
+    /**
+     * The deterministic grammar prefix for the given slot indices,
+     * {slot1}_{slot2}_{slot3}. Pure and public so tests can enumerate
+     * the prefix space, pin the vocabularies, and run fixed-seed
+     * collision statistics without touching the `CSPRNG`.
+     *
+     * @throws \OutOfBoundsException when any index is outside its
+     *                               vocabulary
+     */
+    public static function composeDecoyPrefix(int $slot1, int $slot2, int $slot3): string
+    {
+        $s1 = self::DECOY_GRAMMAR_SLOT1_QUALIFIER[$slot1] ?? null;
+        $s2 = self::DECOY_GRAMMAR_SLOT2_CATEGORY[$slot2] ?? null;
+        $s3 = self::DECOY_GRAMMAR_SLOT3_FORM[$slot3] ?? null;
+        if ($s1 === null || $s2 === null || $s3 === null) {
+            throw new \OutOfBoundsException('decoy grammar slot index out of range');
+        }
+
+        return $s1.'_'.$s2.'_'.$s3;
+    }
+
+    /**
+     * The armed decoy name for the given slot indices:
+     * {slot1}_{slot2}_{slot3}_{suffix}, the grammar prefix composed by
+     * {@see self::composeDecoyPrefix()} plus the per-issuance 16-hex
+     * `CSPRNG` suffix, e.g. `billing_address_line_a3f9c21d8e5b7401`.
+     * At most 47 bytes, a subset of the `[A-Za-z0-9_-]{1,64}` shape.
+     *
+     * @throws \OutOfBoundsException when any index is outside its
+     *                               vocabulary
+     */
+    public static function composeDecoyName(int $slot1, int $slot2, int $slot3): string
+    {
+        return self::composeDecoyPrefix($slot1, $slot2, $slot3).'_'.self::decoyNameSuffix();
+    }
+
+    /**
+     * The combinatorial prefix space size, len(SLOT1) * len(SLOT2) *
+     * len(SLOT3).
+     */
+    public static function decoyGrammarSpaceSize(): int
+    {
+        return \count(self::DECOY_GRAMMAR_SLOT1_QUALIFIER)
+            * \count(self::DECOY_GRAMMAR_SLOT2_CATEGORY)
+            * \count(self::DECOY_GRAMMAR_SLOT3_FORM);
+    }
+
+    /**
+     * Whether $name is a grammar prefix: three underscore-joined
+     * vocabulary words, each from its position-specific list, within the
+     * `[A-Za-z0-9_-]{1,64}` validation shape.
+     */
+    public static function isGrammarDecoyPrefix(string $name): bool
+    {
+        if (!Config::isValidDecoyFieldName($name)) {
+            return false;
+        }
+        $parts = explode('_', $name);
+        if (\count($parts) !== 3) {
+            return false;
+        }
+
+        return \in_array($parts[0], self::DECOY_GRAMMAR_SLOT1_QUALIFIER, true)
+            && \in_array($parts[1], self::DECOY_GRAMMAR_SLOT2_CATEGORY, true)
+            && \in_array($parts[2], self::DECOY_GRAMMAR_SLOT3_FORM, true);
+    }
+
+    /**
+     * Whether $name is an armed decoy name: a grammar prefix, see
+     * {@see self::isGrammarDecoyPrefix()}, plus '_' plus the 16
+     * lowercase hex suffix characters, within the
+     * `[A-Za-z0-9_-]{1,64}` validation shape.
+     */
+    public static function isGrammarDecoyName(string $name): bool
+    {
+        if (!Config::isValidDecoyFieldName($name)) {
+            return false;
+        }
+        $parts = explode('_', $name);
+        if (\count($parts) !== 4) {
+            return false;
+        }
+
+        return \in_array($parts[0], self::DECOY_GRAMMAR_SLOT1_QUALIFIER, true)
+            && \in_array($parts[1], self::DECOY_GRAMMAR_SLOT2_CATEGORY, true)
+            && \in_array($parts[2], self::DECOY_GRAMMAR_SLOT3_FORM, true)
+            && preg_match('/^[0-9a-f]{16}$/D', $parts[3]) === 1;
     }
 
     /**
@@ -300,7 +464,11 @@ final class Issuer
             // persisted to shared storage). The name/JSON key stay
             // issuedAtNs for ChallengeRecord serialization stability.
             issuedAtNs: (int) (microtime(true) * 1_000_000),
-            protocolVersion: 2,
+            // Protocol version by decoy arm: an armed record carries the
+            // decoy-capable canonical (the `|decoy_field` segment after
+            // the kid), so it is protocol v3; an unarmed record keeps
+            // protocol v2 with the byte-identical 18-field canonical.
+            protocolVersion: $decoyField !== null ? 3 : 2,
             region: $this->region,
             policyVersion: $this->config->policyVersion,
             requestBinding: $requestBinding,
@@ -341,7 +509,10 @@ final class Issuer
      *
      * Delegates to the normal {@see self::issue()} path, so the wire
      * format, signing, and storage are identical to a regular issue; only
-     * the parameters differ.
+     * the parameters differ. When `$armDecoyField` is true the issuance
+     * is the armed variant, {@see self::issueWithDecoyField()}: a
+     * random pool name is picked per issuance, the record is protocol v3
+     * and the authenticated name rides the challenge response.
      *
      * @throws \InvalidArgumentException when the profile is invalid (or the
      *                                   scope is invalid, per issue())
@@ -353,6 +524,7 @@ final class Issuer
         ?int $now = null,
         ?string $requestBinding = null,
         ?string $hostname = null,
+        bool $armDecoyField = false,
     ): Challenge {
         $profile->validate();
 
@@ -408,7 +580,8 @@ final class Issuer
 
         // The hostname (server-owned issuance metadata) must
         // survive the profile path.
-        return (new self($config, $this->storage, $nowFn, $this->region))->issue($scope, $clientIp, $requestBinding, $hostname);
+        return (new self($config, $this->storage, $nowFn, $this->region))
+            ->issueWithDecoyField($scope, $clientIp, $armDecoyField, $requestBinding, $hostname);
     }
 
     /**
@@ -486,11 +659,13 @@ final class Issuer
      * field, appended after `issuer`; it is always present (the
      * configured signing key id, default 1).
      *
-     * # The decoy-field extension
+     * # The decoy-field extension (protocol v3)
      *
      * When the issuer arms a decoy (honeypot) form field, the field
      * name is appended as one extra final segment after the `kid`; see
-     * {@see self::issueWithDecoyField()}.
+     * {@see self::issueWithDecoyField()}. Armed records are protocol
+     * v3; unarmed records stay protocol v2, byte-identical to the
+     * pre-decoy format.
      *
      * ```text
      * v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
@@ -498,22 +673,36 @@ final class Issuer
      *   issuer|kid|decoy_field
      * ```
      *
-     * - `decoy_field` is the literal decoy name (e.g. `company_website`),
-     * drawn from {@see self::DECOY_FIELD_POOL}, so it can never contain
-     * the `|` separator (the pool alphabet is `[a-z_]`; validation
+     * - `decoy_field` is the literal armed decoy name: a grammar prefix
+     * plus the 16-hex `CSPRNG` suffix (e.g.
+     * `billing_address_line_a3f9c21d8e5b7401`), see
+     * {@see self::composeDecoyName()}, so it can never contain
+     * the `|` separator (the alphabet is `[a-z_0-9]`; validation
      * accepts `[A-Za-z0-9_-]` only, 1..=64 bytes).
-     * - The segment is appended only when a decoy is armed. `null` renders
+     * - The segment is appended only when a decoy is armed, and the
+     * protocol-vs-decoy grammar is total: v2 => no decoy, v3 => decoy
+     * present. `null` renders
      * nothing extra, so the canonical string is byte-identical to the
-     * pre-extension format. Outstanding challenges and cross-language
-     * records keep verifying unchanged across the upgrade, and the
-     * extension is invisible until a deployment opts in. The exact
-     * recipe: build the same 18-field base string, then append
-     * `'|' . $decoyField` if and only if the record carries a non-null
-     * `decoy_field`; sign/HMAC-verify the result with the `HKDF`-derived
-     * challenge key (`K_challenge`) exactly as before. The stored record
-     * JSON carries the optional string key `decoy_field` (absent when
-     * null — not a JSON `null` key); the client-facing challenge response
-     * carries the optional key `decoy_field` with the same value.
+     * pre-extension format. Outstanding unarmed challenges and
+     * cross-language records keep verifying unchanged across the
+     * upgrade, and the extension is invisible until a deployment opts
+     * in. The exact recipe: build the same 18-field base string, then
+     * append `'|' . $decoyField` if and only if the record carries a
+     * non-null `decoy_field`; sign/HMAC-verify the result with the
+     * `HKDF`-derived challenge key (`K_challenge`) exactly as before.
+     * The stored record JSON carries the optional string key
+     * `decoy_field` (absent when null — not a JSON `null` key); the
+     * client-facing challenge response carries the optional key
+     * `decoy_field` with the same value.
+     * - Wire compatibility: unarmed records are byte-identical in both
+     * directions; armed records are protocol v3 and require a
+     * v3-capable verifier (an old verifier rejects version 3 as
+     * unknown — the capability becomes inferable from
+     * protocol_version, which is the point). The grammar is enforced on
+     * both acceptance surfaces: a v2 record carrying `decoy_field` is
+     * malformed, and a v3 record without one is malformed too. The
+     * decoy is mandatory on v3, so a stored version flip can never
+     * change the effective protocol.
      */
     public static function canonicalPayload(
         string $nonce,

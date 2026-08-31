@@ -11,9 +11,16 @@ use KiwiCaptcha\Risk\RiskWeights;
 use Symfony\Component\Config\Definition\Builder\TreeBuilder;
 use Symfony\Component\Config\Definition\ConfigurationInterface;
 
+/**
+ * SECURITY-MAINTAINER material: the cross-field invariants enforced in
+ * this tree are deep design rationale, intentionally not published at
+ * the integration layer. See docs/operations.md for the maintainer
+ * view and docs/security-hardening.md for the integration actions.
+ */
 final class Configuration implements ConfigurationInterface
 {
     private const RISK_ACTIONS = ['allow', 'sha16', 'sha18', 'sha20', 'argon16', 'argon32', 'argon64', 'step_up', 'deny'];
+
     public function getConfigTreeBuilder(): TreeBuilder
     {
         $treeBuilder = new TreeBuilder('kiwi_captcha');
@@ -21,6 +28,14 @@ final class Configuration implements ConfigurationInterface
 
         $root
             ->children()
+                ->scalarNode('protection_profile')
+                    ->info('Policy-level posture preset (default null = every knob at its individual default; current behavior preserved byte-identically). The profile is the LOWEST-precedence configuration layer: it fills SAFE DERIVED DEFAULTS for the safety-relevant knobs, and an explicit value in ANY config file always wins (the profile defaults are merged first, so later layers — including a prod overlay that only sets protection_profile — can never override an explicit setting). Profiles: "balanced" = the current defaults, explicitly documented as such; "privacy_strict" = strongest first-party privacy (no IP-derived binding tag, every behavioral evidence surface off, timing heuristic off); "high_abuse" = stronger abuse posture (risk enabled with raised abuse-evidence weights, stricter per-source limits, wider aggregate issuance bounds, decoy surface on, chained step-up engages when a request-binding authority is wired in any layer — requires a Predis client); "compatibility" = maximal integration compatibility (sha256, conservative 300 s TTL, binding off, risk off, protocol v2 emission); "ha_safe" = the replay-safe HA posture (replay_durability operator_managed + ha_authority pinned_primary, the other defaults mirror balanced) — the mechanical pinned-primary authority guard makes the operator contract a real guarantee; the guard refuses on any authority change and the doctor reports its state. See docs/configuration.md "Protection profiles" for the full matrix and the layering semantics.')
+                    ->defaultNull()
+                    ->validate()
+                        ->ifTrue(static fn ($v): bool => $v !== null && !\in_array($v, ['balanced', 'privacy_strict', 'high_abuse', 'compatibility', 'ha_safe'], true))
+                        ->thenInvalid('must be one of "balanced", "privacy_strict", "high_abuse", "compatibility", "ha_safe" (or null = no profile)')
+                    ->end()
+                ->end()
                 ->scalarNode('secret_key')
                     ->info('HMAC secret key for signing/verifying challenges (min 16 bytes).')
                     ->isRequired()
@@ -165,7 +180,7 @@ final class Configuration implements ConfigurationInterface
                     ->max(300000)
                 ->end()
                 ->integerNode('argon2_max_verification_runtime_ms')
-                    ->info('Maximum wall-clock a single Argon2 verification derivation may take in this deployment, in ms (default 30000, min 1000, max 300000). The Argon admission lease (argon2_lease_ms) must outlive any verification, so the deployment bounds the verification runtime and the semaphore lease must exceed it by the safety margin (5000 ms): the extension refuses the container compile unless argon2_lease_ms > argon2_max_verification_runtime_ms + 5000, making the lease-expiry-before-hash-termination invariant mechanical instead of an operator promise. The runtime cap is a deployment bound enforced at compile time only — it is never enforced per-request inside the blocking hash; it is the bound that guarantees the lease outlives any permitted verification.')
+                    ->info('The deployment SLO for the wall-clock a single Argon2 verification derivation may take in this deployment, in ms (default 30000, min 1000, max 300000). The Argon admission lease (argon2_lease_ms) must outlive any verification, so the deployment declares the verification runtime and the semaphore lease must exceed it by the safety margin (5000 ms): the extension refuses the container compile unless argon2_lease_ms > argon2_max_verification_runtime_ms + 5000, making the lease-expiry-before-hash-termination invariant a deliberate deployment SLO instead of an operator promise. The declared runtime is not an enforced wall-clock timeout around the blocking Argon hash: on a pathological host a hash can still outlive the lease (fencing keeps correctness, resource concurrency may still be exceeded in that expiry window).')
                     ->defaultValue(30000)
                     ->min(1000)
                     ->max(300000)
@@ -245,7 +260,7 @@ final class Configuration implements ConfigurationInterface
                     ->defaultFalse()
                 ->end()
                 ->booleanNode('allow_local_global_limit_fallback')
-                    ->info('DEPRECATED alias for allow_nonredis_rate_limit_fallback: the old name still enables the non-Redis issuance rate limiter in production, but the new name covers ANY non-Redis temporal issuance limit (the per-client rate_limit included), not just the global cap. Production temporal limiting requires Redis (redis_service) or a genuinely persistent or shared PSR-6 pool (rate_limit_cache); the object-memory fallback is long-lived-runtime-only (RoadRunner/Swoole/amphp or a single CLI process) and gives no cross-request protection under conventional PHP-FPM. Default false: production refuses the combination.')
+                    ->info('DEPRECATED alias for allow_nonredis_rate_limit_fallback: the legacy name still enables the non-Redis issuance rate limiter in production, but the new name covers ANY non-Redis temporal issuance limit (the per-client rate_limit included), not just the global cap. Production temporal limiting requires Redis (redis_service) or a genuinely persistent or shared PSR-6 pool (rate_limit_cache); the object-memory fallback is long-lived-runtime-only (RoadRunner/Swoole/amphp or a single CLI process) and gives no cross-request protection under conventional PHP-FPM. Default false: production refuses the combination.')
                     ->setDeprecated('bel-consulting/kiwicaptcha-symfony', '1.x', 'The "%node%" option is deprecated; use "allow_nonredis_rate_limit_fallback" instead.')
                     ->defaultFalse()
                 ->end()
@@ -257,12 +272,21 @@ final class Configuration implements ConfigurationInterface
                     ->info('Optional service id of a Redis client (\Redis or Predis\Client) used for the Redis-backed Argon2id admission semaphore AND the atomic global rate limiter. When set (and algorithm=argon2id with a positive argon2_max_concurrent_verifications), the concurrency cap is enforced ACROSS PHP-FPM workers, not just per process. When null, the extension falls back to the storage service itself if it is KiwiCaptcha\Storage\RedisStorage (its client is reused), and otherwise to the in-process semaphore (per-process only — see README).')
                     ->defaultNull()
                 ->end()
+                ->scalarNode('redis_dsn')
+                    ->info('HIGH-LEVEL REDIS CONNECTION SETTING (default null): a single connection DSN. When set, the bundle builds the Redis-backed services automatically from this DSN: the challenge storage (KiwiCaptcha\Storage\RedisStorage), the distributed issuance rate limiter, the Argon2id admission semaphore and (when risk is enabled) the risk state store. The connection is built as a Predis\Client, so predis/predis must be installed. An explicit service id wins over the DSN for its knob: `storage` (a custom StorageInterface service), `redis_service` (a custom client for the limiter/semaphore) and `risk.redis_service` (a custom Predis client for the risk state). The DSN shape is redis://host:port/0?prefix=...&password=...; when redis_dsn is null (default) every existing wiring is byte-identical.')
+                    ->defaultNull()
+                ->end()
                 ->scalarNode('route_prefix')
                     ->info('Prefix for the challenge endpoint route.')
                     ->defaultValue('/kiwi-captcha')
                 ->end()
+                ->enumNode('asset_mode')
+                    ->info('Widget asset delivery tier. "files" (default) is the recommended production tier: the theme emits versioned immutable first-party asset URLs ({prefix}/assets/widget.<sha256-12>.css, runtime.<sha256-12>.js, driver.<sha256-12>.js, worker.<sha256-12>.js) with long cache lifetimes and SRI integrity attributes, deduplicated once per page across widgets, and the driver fetches the WASM runtime and the Argon worker asset only when a memory-hard challenge arrives, so a plain SHA-256 page pays nothing for the Argon machinery. The worker runs as a same-origin Worker (no Blob), so files mode needs worker-src \'self\'. "inline" is the documented compatibility / zero-request tier: it embeds the CSS, the WASM runtime and the driver into the page at render time (the historical behavior) and builds its worker from a Blob URL, so inline needs worker-src blob:.')
+                    ->values(['inline', 'files'])
+                    ->defaultValue('files')
+                ->end()
                 ->scalarNode('rate_limit_cache')
-                    ->info('Optional service id of a PSR-6 pool (Psr\\Cache\\CacheItemPoolInterface) used as SHARED, multi-process rate-limit state, e.g. a Redis-backed Symfony Cache pool. Only used when no Redis client is available for the atomic limiter. The pool must be genuinely cross-worker: a known in-memory adapter (Symfony Cache ArrayAdapter or a subclass) is refused in production, since its items live per process and provide no cross-worker limiting under PHP-FPM. The class check resolves parameter-indirected service ids (%param% placeholders), follows alias chains to the end, follows parent-declared pools (a framework.cache.pools entry with `parent: cache.adapter.array` is refused the same way) and resolves %param% classes; a pool id still unresolvable to a class at compile time FAILS CLOSED in production (reference a concrete pool service id). In dev/test the guard does not apply. When omitted, a per-process in-memory sliding window is used (single-worker only — PHP-FPM workers share no memory).')
+                    ->info('Optional service id of a PSR-6 pool (Psr\\Cache\\CacheItemPoolInterface) used as SHARED, multi-process rate-limit state, e.g. a Redis-backed Symfony Cache pool. Only used when no Redis client is available for the atomic limiter. The pool must be genuinely cross-worker: a known in-memory adapter (Symfony Cache ArrayAdapter or a subclass) is refused in production, since its items live per process and provide no cross-worker limiting under PHP-FPM. The class check resolves parameter-indirected service ids (%param% placeholders), follows alias chains to the end, follows parent-declared pools (a framework.cache.pools entry with `parent: cache.adapter.array` is refused the same way) and resolves %param% classes; a pool id still unresolvable at compile time FAILS CLOSED in production (reference a concrete pool service id). In dev/test the guard does not apply. When omitted, a per-process in-memory sliding window is used (single-worker only — PHP-FPM workers share no memory).')
                     ->defaultNull()
                 ->end()
                 ->scalarNode('rate_limit_pepper')
@@ -280,13 +304,13 @@ final class Configuration implements ConfigurationInterface
                     ->min(1)
                 ->end()
                 ->integerNode('argon2_max_waiters')
-                    ->info('DEPRECATED alias for argon2_saturation_pressure_cap: the old name described a bounded waiters guard, but the value is a bounded saturation-pressure counter — the semaphore never queues, waits or blocks; admission is immediate and non-blocking, and once the counter exceeds the value the acquire fast-fails with the distinguishable capacity sentinel (no slot held). The old name still wires the same value.')
+                    ->info('DEPRECATED alias for argon2_saturation_pressure_cap: the legacy name described a bounded waiters guard, but the value is a bounded saturation-pressure counter — the semaphore never queues, waits or blocks; admission is immediate and non-blocking, and once the counter exceeds the value the acquire fast-fails with the distinguishable capacity sentinel (no slot held). The legacy name still wires the same value.')
                     ->setDeprecated('bel-consulting/kiwicaptcha-symfony', '1.x', 'The "%node%" option is deprecated; use "argon2_saturation_pressure_cap" instead.')
                     ->defaultValue(64)
                     ->min(1)
                 ->end()
                 ->scalarNode('public_base_url')
-                    ->info("The deployment's public origin (e.g. https://captcha.example.com), taken from server config and never from the Host header. When set, the challenge endpoint's same-origin check compares the request Origin against this canonical origin instead of the request's own scheme and host. A forged Host header can therefore never make a cross-origin request look same-origin, and the expected origin stays stable behind load balancers. When null (default), the same-origin check derives the expected origin from the request itself; this is allowed in test/dev only. In production with same-origin enforcement (the default) or Siteverify active, the value is required: the extension fails at container compile time otherwise.")
+                    ->info("The deployment's public origin (e.g. https://captcha.example.com), taken from server config and never from the Host header. When set, the challenge endpoint's same-origin check compares the request Origin against this canonical origin instead of the request's own scheme and host. A forged Host header can therefore never make a cross-origin request look same-origin, and the expected origin stays stable behind load balancers. The value must be a canonical https origin (a host, no credentials, no path, no query, no fragment): a literal is validated at container build time, an env-resolved %env()% value when the challenge controller is constructed. When null (default), the same-origin check derives the expected origin from the request itself; this is allowed in test/dev only. In production with same-origin enforcement (the default) or Siteverify active, the value is required: the extension fails at container compile time otherwise.")
                     ->defaultNull()
                 ->end()
                 ->integerNode('argon2_max_per_tenant')
@@ -318,7 +342,7 @@ final class Configuration implements ConfigurationInterface
                             ->defaultValue('%kernel.project_dir%')
                         ->end()
                         ->scalarNode('master_secret')
-                            ->info('HKDF master key for the risk identity keys (source/subnet/session/principal). MUST be a high-entropy secret (%env(KIWI_RISK_SECRET)% recommended). When null, the bundle derives the keys from the captcha secret_key (documented fallback). Configure a dedicated, stable master secret: the derived identities anchor the adaptive risk memory, and a routine signing-key rotation must not silently reset that memory. A fresh master derives fresh pseudonyms, so every source/subnet/session counter restarts at zero and a previously-flagged source loses its memory. A compromise of one secret never leaks the other. An emergency root compromise may intentionally rotate everything; a routine rotation should leave the risk identities untouched.')
+                            ->info('HKDF master key for the risk identity keys (source/subnet/session/principal). MUST be a high-entropy secret (%env(KIWI_RISK_SECRET)% recommended). When null, the bundle derives the keys from the captcha secret_key (documented fallback). Configure a dedicated, stable master secret: the derived identities anchor the adaptive risk memory, and a routine signing-key rotation must not silently reset that memory. A fresh master derives fresh pseudonyms, so every source/subnet/session counter restarts at zero and a source flagged earlier loses its memory. A compromise of one secret never leaks the other. An emergency root compromise may intentionally rotate everything; a routine rotation should leave the risk identities untouched.')
                             ->defaultNull()
                         ->end()
                         ->integerNode('source_epoch_secs')
@@ -515,6 +539,10 @@ final class Configuration implements ConfigurationInterface
                             ->info('MAX-STALE FAIL-CLOSED window of the SecurityEpochMonitor : after the last SUCCESSFUL central policy read, once now > last_success + max_stale the monitor reports stale — the cached epoch may be outdated (an emergency revocation could have landed while the node could not read). While stale, the validator fails verification closed (temporary_unavailable — the token is not burned, the server refuses to trust its own cache) and the challenge controller refuses issuance with 503 SERVICE_UNAVAILABLE. Within the window the cached max keeps serving (bounded outage tolerance). The availability trade-off is deliberate: a node that cannot confirm the central policy for max_stale seconds stops issuing and stops verifying, rather than serving potentially-revoked challenges forever.')
                             ->defaultValue(60)
                             ->min(10)
+                        ->end()
+                        ->booleanNode('decoy_v3_enabled')
+                            ->info('PROTOCOL-V3 WRITER SWITCH (default false): when false (the default), challenge issuance NEVER arms the authenticated decoy and always emits protocol v2 — even when the adaptive risk engine is wired — so the deployment is byte-compatible with binaries whose verifiers reject protocol 3 as unknown. When true, issuance MAY arm the decoy (protocol v3), but ONLY when the central security-policy floor ({kiwi:<ns>}:security-policy min_protocol_version) is confirmed >= 3 — the two-phase rollout gate: the floor establishes that every serving binary accepts v3 before any node emits it. A floor below 3, an absent/unreadable central policy or a null security Redis falls back to protocol v2 with a once-per-process warning (fail-safe: v3 is never emitted on uncertainty). See operations.md "Protocol v3 two-phase rollout".')
+                            ->defaultValue(false)
                         ->end()
                         ->scalarNode('result_receipt_signing_key')
                             ->info('OPTIONAL base64 32-byte Ed25519 seed : when configured, the validator signs every valid verification result into an asymmetric receipt ({jti, tenant, action, request_binding, issued_at, expires_at, issuer} — the full replay-critical set) with sodium_crypto_sign_detached, exposed via KiwiCaptchaValidator::verifiedReceiptPayload() / ::verifiedReceiptSignature(). The result verification itself stays CENTRAL-ONLY (the HMAC secret never leaves the server); this key only enables EXPORTED result receipts that third parties verify with the PUBLIC key derived from this seed (never the private key). Signature verification alone is NOT sufficient for single-use actions: the integrator must atomically record the jti (INSERT IF NOT EXISTS / SET NX) and treat a pre-existing jti as a replay (verify_and_consume — README).')
@@ -813,7 +841,7 @@ final class Configuration implements ConfigurationInterface
                             ->defaultNull()
                         ->end()
                         ->arrayNode('health')
-                            ->info('Rollback-resistant readiness : /health/live is always 200 while the process runs; /health/ready returns 200 only when the signing keys are configured, the security Redis answers a PING (probe cached ~1 s; transient probe timeouts are absorbed by the cache — a single blip never flips a healthy deployment, Argon queue fullness is NEVER consulted), and the CENTRAL security-policy state ({kiwi:<ns>}:security-policy hash: min_protocol_version, min_policy_epoch) is compatible — when the key is present, ready requires min_protocol_version <= 2 (this binary\'s max protocol) AND min_policy_epoch <= risk.policy_version; when absent, the binary\'s own configuration is authoritative. Operators set the hash to protect mixed-version rolling deployments and rollbacks (see README).')
+                            ->info('Rollback-resistant readiness : /health/live is always 200 while the process runs; /health/ready returns 200 only when the signing keys are configured, the security Redis answers a PING (probe cached ~1 s; transient probe timeouts are absorbed by the cache — a single blip never flips a healthy deployment, Argon queue fullness is NEVER consulted), and the CENTRAL security-policy state ({kiwi:<ns>}:security-policy hash: min_protocol_version, min_policy_epoch) is compatible — when the key is present, ready requires min_protocol_version <= 3 (this binary\'s max protocol: the decoy-capable v3 canonical) AND min_policy_epoch <= risk.policy_version; when absent, the binary\'s own configuration is authoritative. Operators set the hash to protect mixed-version rolling deployments and rollbacks (see README).')
                             ->addDefaultsIfNotSet()
                             ->children()
                                 ->booleanNode('enabled')->defaultTrue()->end()
@@ -824,6 +852,85 @@ final class Configuration implements ConfigurationInterface
                         ->ifTrue(static fn (array $v): bool => ($v['chaining']['enabled'] ?? false)
                             && (!($v['enabled'] ?? false) || ($v['request_binding_authority'] ?? null) === null))
                         ->thenInvalid('risk.chaining.enabled requires risk.enabled=true AND a non-null risk.request_binding_authority — the chain is a server-side transaction obligation anchored on the AUTHORITATIVE binding, never on an unexamined client string')
+                    ->end()
+                ->end()
+                ->scalarNode('replay_durability')
+                    ->info('THE AUTHORITY-CHANGE REPLAY POSTURE SWITCH (default best_effort): how the deployment treats the boundary between per-authority atomic replay safety and promotion of a stale replica. best_effort = the current boundary: single-authority atomicity with the documented stale-promotion window accepted as the deployment boundary (the doctor keeps the "Replication topology" WARN). operator_managed = the operator owns promotion eligibility (replication gating, catch-up rules, a promotion-eligibility gate on the failover manager) and acknowledges the invariant; the doctor reports PASS with the operator contract noted. fail_closed = the deployment refuses to rely on automatic failover: the bundle MUST NOT run with a Predis Sentinel/Cluster aggregate client under this posture, nor with a client it cannot prove safe. A literal value is validated here at build time; a %env()% placeholder is accepted and the RESOLVED posture is enforced by the runtime authority-transition guard when the Redis-backed services are constructed, because an env-resolved posture is invisible to every build-time lane (see docs/ha-authority.md). Single-node direct clients are fine under every posture.')
+                    ->defaultValue('best_effort')
+                    ->validate()
+                        ->ifTrue(static function (mixed $v): bool {
+                            // The empty string is the synthetic fixture
+                            // Symfony's ValidateEnvPlaceholdersPass
+                            // substitutes for an env-managed value when
+                            // it re-processes this tree (string type
+                            // fixture), so it must be tolerated here:
+                            // the runtime guard receives the resolved
+                            // posture at service construction.
+                            if ($v === '') {
+                                return false;
+                            }
+                            if (!\is_string($v)) {
+                                return true;
+                            }
+                            if (preg_match('/^%env\([^%]+\)%$/D', $v) === 1
+                                || preg_match('/^env_[a-f0-9]{16}_\w+_[a-f0-9]{32}$/iD', $v) === 1
+                            ) {
+                                return false;
+                            }
+
+                            return !\in_array($v, ['fail_closed', 'operator_managed', 'best_effort'], true);
+                        })
+                        ->thenInvalid('must be one of "fail_closed", "operator_managed", "best_effort" (a %%env()%% placeholder is accepted; the resolved posture is enforced by the runtime authority-transition guard)')
+                    ->end()
+                ->end()
+                ->enumNode('ha_authority')
+                    ->info('THE MECHANICAL AUTHORITY GUARD (default none): whether the bundle enforces a pinned serving authority for the storage/limiter/risk Redis client. none = the current boundary: no guard is wired and the authority is governed by the replay_durability posture alone. pinned_primary = the PinnedPrimaryAuthorityGuard is wired around the storage/limiter/risk client: on first use it pins the connected server identity (INFO role + run_id) to the `{kiwi:<ns>}:authority:pin` key (write-once, in the same Redis namespace) and REFUSES every subsequent use when the authority changed (a promotion to a stale replica, a restarted primary with a new run_id) with a typed LogicException naming the pinned vs observed identity and the re-pin remediation. This is the mechanical enforcement that makes replay_durability "operator_managed" a real contract instead of an operator promise. Refused at container build time when the storage/limiter/risk client is a Predis Sentinel/Cluster aggregate or a phpredis client (only a Predis single-node direct client can be mechanically guarded), and when no Redis client is wired. See docs/ha-authority.md.')
+                    ->values(['none', 'pinned_primary'])
+                    ->defaultValue('none')
+                ->end()
+                ->integerNode('ha_authority_reverify_secs')
+                    ->info('The pinned-primary guard verification cache window in seconds (default 5, min 1): the guard re-reads the serving authority (INFO + pin-key compare) at most every N seconds per process per connection object; within the window every non-security-final check passes without a round trip. A mutating security-final transition (consume, commit, chain or idempotency finalize) bypasses the window and re-verifies before every write (zero stale), and a reconnect that replaces the connection object invalidates the cache. A smaller window detects an authority change sooner, a larger window costs less INFO traffic.')
+                    ->defaultValue(5)
+                    ->min(1)
+                ->end()
+                ->variableNode('ha_authority_expected')
+                    ->info('THE OPERATOR-PROVISIONED EXPECTED AUTHORITY IDENTITY (default null): the "role|run_id" identity the pinned-primary guard must observe, the same shape as the pin value (e.g. "master|5f8d..."). Two forms are accepted. The scalar string form applies the ONE identity to EVERY authority (storage and, when distinct, risk). The per-authority map form {"storage": "master|...", "risk": "master|..."} applies a DIFFERENT expected identity to each authority — a deployment whose storage Redis and risk Redis are different servers cannot share one run_id, and the map is the contract that says so; when only one Redis is used the storage entry covers the shared authority, and an authority without an entry falls back to the pin key (it must be initialized). When set, the guard compares the serving authority against this value INSTEAD of the `{kiwi:<ns>}:authority:pin:<suffix>` key — the configuration is the pin, so an immutable-identity deployment can skip the Redis pin entirely. The guard refuses when the serving identity differs, and kiwicaptcha:ha-initialize refuses when the configured identity disagrees with the connected server. Production never auto-pins: without this option the deployment must run kiwicaptcha:ha-initialize to record the pin before the guard serves. See docs/ha-authority.md.')
+                    ->defaultNull()
+                    ->validate()
+                        ->ifTrue(static function (mixed $v): bool {
+                            if ($v === null || $v === '') {
+                                return false;
+                            }
+                            if (\is_string($v)) {
+                                return preg_match('/^[^|]+\|[^|]+$/D', $v) !== 1;
+                            }
+                            if (\is_array($v)) {
+                                foreach ($v as $authority => $identity) {
+                                    if (!\in_array($authority, ['storage', 'risk'], true)
+                                        || !\is_string($identity)
+                                        || $identity === ''
+                                        || preg_match('/^[^|]+\|[^|]+$/D', $identity) !== 1
+                                    ) {
+                                        return true;
+                                    }
+                                }
+
+                                return false;
+                            }
+
+                            return true;
+                        })
+                        ->thenInvalid('must be either the identity shape "role|run_id" (the shorthand applying to EVERY authority) or a map {"storage": "role|run_id", "risk": "role|run_id"} naming only the storage/risk authorities, each value in the identity shape (the same shape as the pin value, e.g. "master|<run_id>")')
+                    ->end()
+                ->end()
+                ->arrayNode('protocol_rollout')
+                    ->info('THE EXPLICIT PROTOCOL-V3 ROLLOUT STATE (default mode "normal"): the deployment declares whether it is deliberately in the two-phase protocol-v3 migration. mode "normal" = no deliberate exception: under the high_abuse protection profile with risk.decoy_v3_enabled false, the doctor FAILS the protocol-v3 writer check (a forgotten override must not silently persist — the false switch alone does not prove the deployment is intentionally deferring v3 emission). mode "migration" = the deployment is deliberately in the two-phase protocol-v3 rollout (v3 emission deferred until the fleet floor is confirmed); the doctor records the same high_abuse deferral as a WARN (exit 0) while the profile stays active. Non-high_abuse paths are unaffected: protocol v2 emission passes regardless of the declared mode. See operations.md "Protocol v3 two-phase rollout".')
+                    ->addDefaultsIfNotSet()
+                    ->children()
+                        ->enumNode('mode')
+                            ->values(['normal', 'migration'])
+                            ->defaultValue('normal')
+                        ->end()
                     ->end()
                 ->end()
             ->end()

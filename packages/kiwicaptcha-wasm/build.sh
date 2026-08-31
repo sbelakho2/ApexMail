@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Regenerates the browser assets: assets/kiwicaptcha-wasm.js (the widget's
-# embedded WASM + glue) and the KIWI_WORKER_SRC literal inside
-# assets/widget-driver.js (generated from assets/kiwi-worker.js by the
-# kiwicaptcha-embed-worker tool).
+# embedded WASM + glue, which also carries the embedded worker source as
+# window.__kiwiCaptchaWasm.workerSource, generated from assets/kiwi-worker.js
+# by the kiwicaptcha-embed-worker tool) and the standalone assets/kiwi-worker.js.
+# The widget driver no longer embeds the worker bytes: inline mode reads them
+# off the glue, files mode fetches the versioned worker asset.
 # Requires: cargo, the wasm32-unknown-unknown target, and wasm-bindgen-cli
 # (a Rust binary; installed via `cargo install` if missing).
 # Pure Rust pipeline — no Node.js, no wasm-pack.
@@ -33,11 +35,6 @@ if [ "$BINDGEN_VERSION_READ" != "$WASM_BINDGEN_VERSION" ]; then
   exit 1
 fi
 echo "wasm-bindgen ${WASM_BINDGEN_VERSION} verified"
-
-# The embedded worker literal is regenerated from
-# assets/kiwi-worker.js on every build (the standalone file is the source
-# of truth; CI's --check step fails on any manual drift).
-cargo run --release --locked --manifest-path tools/embed-worker/Cargo.toml --
 
 cargo build --release --locked --target wasm32-unknown-unknown
 
@@ -216,14 +213,19 @@ fi
 
 "$WASM_BINDGEN_BIN" --target web --out-dir pkg target/wasm32-unknown-unknown/release/kiwicaptcha_wasm.wasm
 cargo run --release --locked --manifest-path tools/embed/Cargo.toml -- pkg assets/kiwicaptcha-wasm.js
+# The embedded worker source is regenerated into the glue on every build
+# (assets/kiwi-worker.js is the source of truth; the driver reads the
+# glue's copy in inline mode and fetches the versioned worker asset in
+# files mode; CI's --check step fails on any manual drift).
+cargo run --release --locked --manifest-path tools/embed-worker/Cargo.toml --
 echo "assets/kiwicaptcha-wasm.js regenerated"
 
 # The core crate embeds the assets from ITS OWN
 # resources/ directory (cargo package verification builds the tarball in
 # isolation and cannot reach outside the crate) — keep the copies
 # byte-identical; CI enforces it (widget-assets parity job).
-cp assets/widget-driver.js assets/widget.css assets/kiwicaptcha-wasm.js ../kiwicaptcha/resources/
-cp assets/widget-driver.js assets/widget.css assets/kiwicaptcha-wasm.js ../kiwicaptcha/integrations/symfony/Resources/public/
+cp assets/widget-driver.js assets/widget.css assets/kiwicaptcha-wasm.js assets/kiwi-worker.js ../kiwicaptcha/resources/
+cp assets/widget-driver.js assets/widget.css assets/kiwicaptcha-wasm.js assets/kiwi-worker.js ../kiwicaptcha/integrations/symfony/Resources/public/
 echo "kiwicaptcha core + symfony public resources synced"
 
 # Byte-parity enforcement: every mirrored destination must be byte-identical
@@ -231,7 +233,7 @@ echo "kiwicaptcha core + symfony public resources synced"
 # released bytes on every installation path. CI enforces the same parity.
 MIRROR_FAILED=0
 for mirror in ../kiwicaptcha/resources ../kiwicaptcha/integrations/symfony/Resources/public; do
-  for f in widget-driver.js widget.css kiwicaptcha-wasm.js; do
+  for f in widget-driver.js widget.css kiwicaptcha-wasm.js kiwi-worker.js; do
     if ! cmp -s "assets/$f" "$mirror/$f"; then
       echo "ASSET PARITY FAILED: $mirror/$f differs from assets/$f" >&2
       MIRROR_FAILED=1

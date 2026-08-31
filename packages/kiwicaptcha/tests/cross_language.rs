@@ -18,6 +18,22 @@ use kiwicaptcha::verify::{
     VerifyOutcome,
 };
 
+/// The shared cross-language signing secret (kid 1) both language
+/// harnesses configure. Held here so the v3 interop cases never repeat
+/// the literal.
+#[cfg(feature = "redis")]
+const SECRET: &str = "0123456789abcdef0123456789abcdef";
+
+#[cfg(feature = "redis")]
+fn into_pending(
+    state: kiwicaptcha::redis_verify::RuntimeState,
+) -> Option<Box<kiwicaptcha::ChallengeRecord>> {
+    match state {
+        kiwicaptcha::redis_verify::RuntimeState::Pending(record) => Some(record),
+        _ => None,
+    }
+}
+
 #[test]
 fn rust_verifies_php_issued_record() {
     let Ok(path) = std::env::var("KC_PHP_RECORD") else {
@@ -533,6 +549,403 @@ echo 'ok';
         !raw.contains("resume_owner"),
         "the PHP commit cleared the claim fields from the raw envelope"
     );
+}
+
+/// The decoy grammar vocabularies must be byte-identical across the two
+/// cores: the PHP `Issuer::DECOY_GRAMMAR_SLOT*` constants and the Rust
+/// `DECOY_GRAMMAR_SLOT*` constants (same words, same order), so a name
+/// issued by one language has exactly the same plausible-name surface
+/// when the other core picks it. Skips when the PHP core's autoloader is
+/// unreachable from this crate.
+#[test]
+fn decoy_grammar_vocabularies_match_php() {
+    let php_autoload = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../kiwicaptcha-php/vendor/autoload.php"
+    );
+    if !std::path::Path::new(php_autoload).exists() {
+        eprintln!("PHP core autoloader not found — decoy grammar parity test skipped");
+        return;
+    }
+    let php_bin = std::env::var("KC_PHP_BIN").unwrap_or_else(|_| "php".to_string());
+    let code = format!(
+        "require '{}'; echo json_encode([\\KiwiCaptcha\\Issuer::DECOY_GRAMMAR_SLOT1_QUALIFIER, \\KiwiCaptcha\\Issuer::DECOY_GRAMMAR_SLOT2_CATEGORY, \\KiwiCaptcha\\Issuer::DECOY_GRAMMAR_SLOT3_FORM]);",
+        php_autoload
+    );
+    let out = std::process::Command::new(&php_bin)
+        .args(["-r", &code])
+        .output();
+    let Ok(out) = out else {
+        eprintln!("php spawn failed — decoy grammar parity test skipped");
+        return;
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+    if !out.status.success() {
+        eprintln!("php failed — decoy grammar parity test skipped: {stdout}");
+        return;
+    }
+    let php_vocabs: Vec<Vec<String>> = serde_json::from_str(stdout.trim())
+        .expect("PHP must emit the three vocabulary arrays as JSON");
+    assert_eq!(
+        php_vocabs.len(),
+        3,
+        "PHP must expose exactly three grammar vocabularies"
+    );
+    let rust_vocabs = [
+        kiwicaptcha::DECOY_GRAMMAR_SLOT1_QUALIFIER,
+        kiwicaptcha::DECOY_GRAMMAR_SLOT2_CATEGORY,
+        kiwicaptcha::DECOY_GRAMMAR_SLOT3_FORM,
+    ];
+    for (i, php_vocab) in php_vocabs.iter().enumerate() {
+        let rust_vocab = rust_vocabs[i];
+        assert_eq!(
+            php_vocab.len(),
+            rust_vocab.len(),
+            "grammar slot {} must hold the same number of words in both languages",
+            i + 1
+        );
+        for (w, rust_w) in php_vocab.iter().zip(rust_vocab.iter()) {
+            assert_eq!(
+                w,
+                rust_w,
+                "grammar slot {} must be identical across PHP and Rust (same words, same order)",
+                i + 1
+            );
+        }
+    }
+    assert_eq!(
+        kiwicaptcha::decoy_grammar_space_size(),
+        27_840,
+        "the shared grammar space is 32 * 29 * 30"
+    );
+    println!("DECOY_GRAMMAR_PHP_PARITY: OK (3 vocabularies identical)");
+}
+
+/// Real-Redis protocol-v3 decoy interop: the decoy-armed issuance
+/// canonical (protocol v3, the `|decoy_field` segment appended after the
+/// kid) must verify across languages, and the v2-plus-decoy combination
+/// must be rejected on both sides. Runs only when a Redis URL is
+/// provided and the PHP core's autoloader is reachable from this crate.
+///
+/// Directions covered:
+///  - PHP armed issuance (protocol v3 + decoy) -> Rust production
+///    verifier verifies fresh (stored record rides protocol_version 3
+///    and the exact armed decoy name)
+///  - Rust armed issuance (protocol v3 + decoy) -> PHP verifier
+///    verifies fresh and exposes the same authenticated decoy name
+///  - PHP writes a v2 record carrying decoy_field -> Rust rejects with
+///    MalformedRecord (the structural gate, before any signature work)
+///  - Rust writes a v2 record carrying decoy_field -> PHP rejects
+///    (the parser gate fails the envelope decode closed)
+#[test]
+#[cfg(feature = "redis")]
+fn redis_v3_decoy_interop_with_php() {
+    let Ok(url) = std::env::var("KC_REDIS_URL") else {
+        eprintln!("KC_REDIS_URL unset — v3 decoy interop test skipped");
+        return;
+    };
+    let php_autoload = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../kiwicaptcha-php/vendor/autoload.php"
+    );
+    if !std::path::Path::new(php_autoload).exists() {
+        eprintln!("PHP core autoloader not found — v3 decoy interop test skipped");
+        return;
+    }
+    let php_bin = std::env::var("KC_PHP_BIN").unwrap_or_else(|_| "php".to_string());
+    let prefix = format!("kiwicaptcha:v3interop{}:", std::process::id());
+    let client = match redis::Client::open(url.clone()) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("redis URL invalid: {e} — v3 decoy interop test skipped");
+            return;
+        }
+    };
+    {
+        let mut conn = match client.get_connection() {
+            Ok(c) => c,
+            Err(_) => {
+                eprintln!("Redis unreachable — v3 decoy interop test skipped");
+                return;
+            }
+        };
+        let _: () = redis::cmd("PING").query(&mut conn).unwrap_or_default();
+    }
+
+    let php_script = |body: &str| -> Result<String, String> {
+        let code = format!("require '{}'; {}", php_autoload, body);
+        let out = std::process::Command::new(&php_bin)
+            .args(["-r", &code])
+            .env("KC_INTEROP_REDIS", &url)
+            .env("KC_INTEROP_PREFIX", &prefix)
+            .output()
+            .map_err(|e| format!("php spawn failed: {e}"))?;
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        if !out.status.success() {
+            return Err(format!(
+                "php failed ({}): {} {}",
+                out.status,
+                stdout,
+                String::from_utf8_lossy(&out.stderr)
+            ));
+        }
+        Ok(stdout)
+    };
+
+    let store = kiwicaptcha::redis_verify::RedisChallengeStore::new(client.clone(), prefix.clone());
+    let verifier = kiwicaptcha::redis_verify::ProductionVerifier::new(
+        kiwicaptcha::redis_verify::RedisChallengeStore::new(client.clone(), prefix.clone()),
+        SECRET,
+    );
+
+    // 1. PHP armed issuance (protocol v3) -> Rust production verifier.
+    //    The PHP script asserts the stored envelope carries
+    //    protocol_version 3 and the armed decoy name, then hands the
+    //    nonce and the name to Rust.
+    let php_issue_armed = r#"
+$client = new \Predis\Client(getenv('KC_INTEROP_REDIS'), ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
+$storage = new KiwiCaptcha\Storage\RedisStorage($client, getenv('KC_INTEROP_PREFIX'));
+$issuer = new KiwiCaptcha\Issuer(new KiwiCaptcha\Config(secretKey: '0123456789abcdef0123456789abcdef', targetBits: 8, ttlSecs: 120, minDurationMs: 0), $storage);
+$ch = $issuer->issueWithDecoyField('login', '127.0.0.1', true);
+if ($ch->decoyField === null) { fwrite(STDERR, 'armed issuance must expose a decoy field'); exit(2); }
+$raw = $client->get(getenv('KC_INTEROP_PREFIX') . $ch->nonce);
+if (!str_contains($raw, '"protocol_version":3')) { fwrite(STDERR, 'the stored armed record must be protocol v3'); exit(3); }
+if (!str_contains($raw, '"decoy_field":"' . $ch->decoyField . '"')) { fwrite(STDERR, 'the stored armed record must carry the decoy name'); exit(4); }
+echo $ch->nonce . "\n" . $ch->decoyField;
+"#;
+    let issued = php_script(php_issue_armed).expect("PHP must issue the armed v3 record");
+    let mut issued_lines = issued.lines();
+    let nonce = issued_lines.next().expect("the armed nonce");
+    let decoy = issued_lines.next().expect("the armed decoy name");
+    let state = into_pending(
+        store
+            .runtime_state(nonce)
+            .expect("Rust must read the PHP-armed record"),
+    )
+    .expect("the PHP-armed record is pending");
+    assert_eq!(
+        state.protocol_version, 3,
+        "a PHP armed issuance stores protocol v3"
+    );
+    assert_eq!(
+        state.decoy_field.as_deref(),
+        Some(decoy),
+        "the PHP armed record carries the exact armed decoy name"
+    );
+    let counter = solve_for_test(&state).expect("Rust solver finds a counter");
+    let token = encode_token(nonce, counter);
+    let outcome = verifier.verify(
+        &token,
+        "login",
+        "127.0.0.1",
+        state.issued_at_ns + 1_000_000,
+        None,
+        RequestBindingExpectation::Unenforced,
+    );
+    match outcome {
+        VerifyOutcome::Valid {
+            from_stored_result,
+            solve_duration_ms,
+            ..
+        } => {
+            assert!(
+                !from_stored_result,
+                "the PHP-armed record verifies as a fresh derivation"
+            );
+            assert!(
+                solve_duration_ms.is_some(),
+                "a fresh derivation carries the server-measured duration"
+            );
+        }
+        other => panic!("Rust must verify a PHP-issued armed v3 challenge, got {other:?}"),
+    }
+    println!("RUST_VERIFIES_PHP_ARMED_V3: OK (decoy={decoy}, counter={counter})");
+
+    // 2. Rust armed issuance (protocol v3) -> PHP verifier.
+    let rust_armed = issue_armed_for_interop();
+    assert_eq!(
+        rust_armed.record.protocol_version, 3,
+        "a Rust armed issuance stores protocol v3"
+    );
+    let rust_decoy = rust_armed
+        .record
+        .decoy_field
+        .clone()
+        .expect("the Rust armed issuance carries a decoy");
+    let rust_nonce = rust_armed.record.nonce.clone();
+    store
+        .store(&rust_armed.record)
+        .expect("Rust must store the armed record");
+    let rust_counter = solve_for_test(&rust_armed.record).expect("Rust solver for its own record");
+    let php_verify_armed = r#"
+$client = new \Predis\Client(getenv('KC_INTEROP_REDIS'), ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
+$storage = new KiwiCaptcha\Storage\RedisStorage($client, getenv('KC_INTEROP_PREFIX'));
+$nonce = trim(fgets(STDIN));
+$counter = (int) trim(fgets(STDIN));
+$token = KiwiCaptcha\SolutionToken::create($nonce, $counter, 5000, [])->encode();
+$outcome = (new KiwiCaptcha\Verifier($storage))->verify($token, '0123456789abcdef0123456789abcdef', 'login', '127.0.0.1');
+echo json_encode(['ok' => $outcome->isOk(), 'code' => $outcome->code(), 'decoy' => $outcome->decoyField()]);
+"#;
+    let php_armed_result = php_script_with_input(
+        &php_bin,
+        php_autoload,
+        &url,
+        &prefix,
+        php_verify_armed,
+        format!("{rust_nonce}\n{rust_counter}\n").as_bytes(),
+    )
+    .expect("PHP must verify the Rust-armed record");
+    let php_armed: serde_json::Value =
+        serde_json::from_str(&php_armed_result).expect("the PHP verifier result is JSON");
+    assert_eq!(
+        php_armed["ok"], true,
+        "PHP must verify a Rust-issued armed v3 challenge: {php_armed_result}"
+    );
+    assert_eq!(
+        php_armed["decoy"].as_str(),
+        Some(rust_decoy.as_str()),
+        "the PHP outcome exposes the exact authenticated decoy name"
+    );
+    println!("PHP_VERIFIES_RUST_ARMED_V3: OK (decoy={rust_decoy})");
+
+    // 3. PHP writes a v2 record carrying decoy_field -> Rust rejects.
+    //    The PHP script patches the stored armed envelope back to
+    //    protocol v2 (keeping the decoy key) and rewrites it raw, the
+    //    only way a conforming storage can ever present the
+    //    combination.
+    let php_write_v2_decoy = r#"
+$client = new \Predis\Client(getenv('KC_INTEROP_REDIS'), ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
+$storage = new KiwiCaptcha\Storage\RedisStorage($client, getenv('KC_INTEROP_PREFIX'));
+$issuer = new KiwiCaptcha\Issuer(new KiwiCaptcha\Config(secretKey: '0123456789abcdef0123456789abcdef', targetBits: 8, ttlSecs: 120, minDurationMs: 0), $storage);
+$ch = $issuer->issueWithDecoyField('login', '127.0.0.1', true);
+$raw = $client->get(getenv('KC_INTEROP_PREFIX') . $ch->nonce);
+$data = json_decode($raw, true);
+if (!isset($data['decoy_field'])) { fwrite(STDERR, 'the armed record must carry decoy_field'); exit(5); }
+$data['protocol_version'] = 2;
+$client->set(getenv('KC_INTEROP_PREFIX') . $ch->nonce, json_encode($data));
+echo $ch->nonce;
+"#;
+    let v2_decoy_nonce =
+        php_script(php_write_v2_decoy).expect("PHP must write the v2-plus-decoy record");
+    let v2_decoy_state = into_pending(
+        store
+            .runtime_state(&v2_decoy_nonce)
+            .expect("Rust must read the v2-plus-decoy record"),
+    )
+    .expect("the v2-plus-decoy record is pending");
+    assert_eq!(
+        v2_decoy_state.protocol_version, 2,
+        "the patched record is protocol v2"
+    );
+    assert!(
+        v2_decoy_state.decoy_field.is_some(),
+        "the patched record still carries the decoy"
+    );
+    let v2_counter =
+        solve_for_test(&v2_decoy_state).expect("Rust solver for the v2-plus-decoy record");
+    let v2_token = encode_token(&v2_decoy_nonce, v2_counter);
+    assert_eq!(
+        verifier.verify(
+            &v2_token,
+            "login",
+            "127.0.0.1",
+            v2_decoy_state.issued_at_ns + 1_000_000,
+            None,
+            RequestBindingExpectation::Unenforced,
+        ),
+        VerifyOutcome::Invalid(VerifyError::MalformedRecord),
+        "Rust must reject a PHP-written v2 record carrying decoy_field"
+    );
+    println!("RUST_REJECTS_PHP_V2_PLUS_DECOY: OK");
+
+    // 4. Rust writes a v2 record carrying decoy_field -> PHP rejects.
+    //    The record is armed, then re-versioned to 2 before storage, so
+    //    the JSON a conforming verifier reads is exactly the rejected
+    //    combination.
+    let mut v2_decoy_rust = issue_armed_for_interop().record;
+    v2_decoy_rust.protocol_version = 2;
+    store
+        .store(&v2_decoy_rust)
+        .expect("Rust must store the v2-plus-decoy record");
+    let rust_v2_counter =
+        solve_for_test(&v2_decoy_rust).expect("Rust solver for the stored v2 record");
+    let php_reject_v2 = r#"
+$client = new \Predis\Client(getenv('KC_INTEROP_REDIS'), ['timeout' => 5.0, 'read_write_timeout' => 5.0]);
+$storage = new KiwiCaptcha\Storage\RedisStorage($client, getenv('KC_INTEROP_PREFIX'));
+$nonce = trim(fgets(STDIN));
+$counter = (int) trim(fgets(STDIN));
+$token = KiwiCaptcha\SolutionToken::create($nonce, $counter, 5000, [])->encode();
+$outcome = (new KiwiCaptcha\Verifier($storage))->verify($token, '0123456789abcdef0123456789abcdef', 'login', '127.0.0.1');
+echo json_encode(['ok' => $outcome->isOk(), 'code' => $outcome->code()]);
+"#;
+    let php_reject_result = php_script_with_input(
+        &php_bin,
+        php_autoload,
+        &url,
+        &prefix,
+        php_reject_v2,
+        format!("{}\n{rust_v2_counter}\n", v2_decoy_rust.nonce).as_bytes(),
+    )
+    .expect("PHP must reject the Rust-written v2-plus-decoy record");
+    let php_reject: serde_json::Value =
+        serde_json::from_str(&php_reject_result).expect("the PHP rejection result is JSON");
+    assert_eq!(
+        php_reject["ok"], false,
+        "PHP must reject a Rust-written v2 record carrying decoy_field: {php_reject_result}"
+    );
+    let code = php_reject["code"].as_str().unwrap_or_default();
+    assert!(
+        code == "malformed_record" || code == "record_not_found",
+        "the PHP rejection is the parser gate (record_not_found) or the verifier gate (malformed_record), got {code}"
+    );
+    println!("PHP_REJECTS_RUST_V2_PLUS_DECOY: OK (code={code})");
+}
+
+#[cfg(feature = "redis")]
+fn encode_token(nonce: &str, counter: u64) -> String {
+    kiwicaptcha::token::SolutionToken {
+        nonce: nonce.into(),
+        counter,
+        duration_ms: 5000,
+        telemetry: serde_json::json!({}),
+    }
+    .encode()
+}
+
+#[cfg(feature = "redis")]
+fn issue_armed_for_interop() -> kiwicaptcha::challenge::Issued {
+    use kiwicaptcha::challenge::{
+        issue_challenge_with_decoy, BindingMode, ChallengeConfig, PoWAlgorithm,
+    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let now_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_micros() as u64;
+    let config = ChallengeConfig {
+        secret_key: "0123456789abcdef0123456789abcdef".into(),
+        kid: 1,
+        algorithm: PoWAlgorithm::Sha256,
+        m_kib: 0,
+        t: 1,
+        p: 1,
+        target_bits: 8,
+        argon2_target_bits: 8,
+        ttl_secs: 120,
+        min_duration_ms: Some(0),
+        auto_tune: false,
+        auto_tune_min_bits: 8,
+        auto_tune_max_bits: 20,
+        binding_mode: BindingMode::Bound,
+        region: None,
+        issuer: None,
+        policy_version: 1,
+    };
+    issue_challenge_with_decoy(&config, "login", "127.0.0.1", now, now_ns, 0, None, true)
+        .expect("armed issue")
 }
 
 #[cfg(feature = "redis")]

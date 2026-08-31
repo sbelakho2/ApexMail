@@ -108,12 +108,26 @@ test.describe('KiwiCaptcha postMessage boundary', () => {
     expect(src).toMatch(/msg\.v !== 1/);
     expect(src).toMatch(/typeof msg\.counter !== "number"/);
     expect(src).toMatch(/typeof msg\.reason !== "string"/);
-    // Worker side (embedded kiwi_worker_src + standalone asset): the solve
-    // request must be a v1 object with the full numeric/string field set.
-    expect(src).toMatch(/m\.v !== 1 \|\| m\.type !== "solve"/);
-    expect(worker).toMatch(/m\.v !== 1 \|\| m\.type !== "solve"/);
+    // Worker side (the standalone asset; the driver no longer embeds the
+    // worker bytes — the glue carries them for inline mode): the solve
+    // request must be a v1 object with the full numeric/string field set,
+    // and the glue message must carry a same-origin runtime URL.
+    expect(worker).toMatch(/m\.v !== 1/);
+    expect(worker).toMatch(/m\.type !== "solve"\) return;/);
+    expect(worker).toMatch(/m\.type === "glue"/);
+    // The worker never eagerly imports a runtime: it boots with no loader
+    // and the driver always supplies the runtime URL through the glue
+    // handshake (files mode: the SRI-verified versioned runtime; legacy
+    // static-worker path: the URL derived from the worker's own URL), so
+    // no unversioned relative URL is ever probed and a stale app-served
+    // runtime can never race the verified one.
+    expect(worker, 'the worker must never eagerly import the runtime').not.toMatch(/importScripts\(\s*["']kiwicaptcha-wasm\.js["']\s*\)/);
     // The solve request the driver sends carries the version field.
     expect(src).toMatch(/v: 1,\n\s*type: "solve"/);
+    // The glue handshake the driver posts carries the version field and
+    // the runtime asset URL (SRI-verified in files mode, derived from the
+    // worker's own URL on the legacy static-worker path).
+    expect(src).toMatch(/v: 1, type: "glue", runtimeSrc: glueRuntimeSrc/);
   });
 
   test('the worker ignores versionless or unknown messages (runtime)', async ({ page }) => {
@@ -148,15 +162,32 @@ test.describe('KiwiCaptcha postMessage boundary', () => {
       worker.postMessage({ v: 1, type: 'solve', prefix: 'p' });
       await sleep(150);
 
-      const repliesAtGuard = replies.filter((r) => r.type !== 'ready').length;
+      // `ready` requires the wasm glue's protocol id to
+      // match — in this harness the standalone worker cannot load the
+      // glue, so its legitimate startup outcome is the controlled
+      // protocol-mismatch failure (a handshake message, never a reply to
+      // a posted rogue message).
+      const repliesAtGuard = replies.filter(
+        (r) => r.type !== 'ready' && !(r.type === 'failed' && r.reason === 'protocol-mismatch')
+      ).length;
       const handshakeSeen = replies.some(
         (r) => r.type === 'ready' && typeof r.buildId === 'string'
       );
+      const failClosedSeen = replies.some(
+        (r) => r.type === 'failed' && r.reason === 'protocol-mismatch'
+      );
       worker.terminate();
-      return { repliesAtGuard, handshakeSeen };
+      return { repliesAtGuard, handshakeSeen, failClosedSeen };
     }, workerSource());
     expect(guardResult.repliesAtGuard, 'no rogue message may produce a worker reply').toBe(0);
-    expect(guardResult.handshakeSeen, 'the worker must announce its build id on startup').toBe(true);
+    // In a wasm-less harness the worker must fail closed (protocol
+    // mismatch); in a real embedding it announces ready with the protocol
+    // id. Either startup outcome is correct — a rogue
+    // message reply is not.
+    expect(
+      guardResult.handshakeSeen || guardResult.failClosedSeen,
+      'the worker must announce ready (with the protocol id) or fail closed on startup'
+    ).toBe(true);
   });
 });
 
@@ -179,10 +210,10 @@ test.describe('KiwiCaptcha origin validation', () => {
       });
     });
     await page.goto('/');
-    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
+    await expect(page.locator('[data-kiwi-info]')).toContainText('press the Retry button to try again', {
       timeout: 30_000,
     });
-    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'idle');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed');
     await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
     expect(challenged.length).toBeGreaterThanOrEqual(1);
   });
@@ -199,7 +230,7 @@ test.describe('KiwiCaptcha origin validation', () => {
       });
     });
     await page.goto('/');
-    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
+    await expect(page.locator('[data-kiwi-info]')).toContainText('press the Retry button to try again', {
       timeout: 30_000,
     });
     await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
@@ -215,10 +246,10 @@ test.describe('KiwiCaptcha origin validation', () => {
       'data-kiwi-endpoint': 'http://127.0.0.1:9999/challenge',
       'data-kiwi-scope': 'login',
     });
-    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
+    await expect(page.locator('[data-kiwi-info]')).toContainText('press the Retry button to try again', {
       timeout: 30_000,
     });
-    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'idle');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed');
     await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
     expect(foreign, 'the cross-origin endpoint must be refused before any request').toEqual([]);
   });
@@ -249,6 +280,10 @@ test.describe('KiwiCaptcha calibration floor', () => {
     });
     expect(bodies).toHaveLength(1);
     const body = bodies[0];
+    // Without the data-kiwi-risk-context="coarse" opt-in the coarse
+    // risk-v2 client_context descriptor is never sent (telemetry and
+    // client context are off by default); the request never carries
+    // difficulty-suggesting parameters.
     expect(Object.keys(body).sort()).toEqual(['scope']);
     for (const field of FORBIDDEN) {
       expect(body, `the challenge request must not suggest ${field}`).not.toHaveProperty(field);
@@ -328,10 +363,10 @@ test.describe('KiwiCaptcha failure recovery', () => {
       });
     });
     await page.goto('/');
-    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
+    await expect(page.locator('[data-kiwi-info]')).toContainText('press the Retry button to try again', {
       timeout: 30_000,
     });
-    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'idle');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed');
     await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
     expect(calls, 'bounded retries must have been attempted before settling').toBeGreaterThanOrEqual(1);
   });
@@ -359,7 +394,7 @@ test.describe('KiwiCaptcha failure recovery', () => {
     expect(token.length).toBeGreaterThan(0);
   });
 
-  test('after settling idle the widget reacquires on the next interaction (click-to-retry)', async ({ page }) => {
+  test('after settling idle the widget reacquires via the Retry button (click activation)', async ({ page }) => {
     let failing = true;
     await page.route('**/challenge', async (route) => {
       if (failing) {
@@ -373,11 +408,13 @@ test.describe('KiwiCaptcha failure recovery', () => {
       }
     });
     await page.goto('/');
-    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
+    await expect(page.locator('[data-kiwi-info]')).toContainText('press the Retry button to try again', {
       timeout: 30_000,
     });
     failing = false;
-    await page.locator('[data-kiwi-widget]').click();
+    // (WCAG 2.5.2): the Retry button is the reacquire control
+    // (click activation); the passive widget is not a pointer target.
+    await page.locator('[data-kiwi-retry]').click();
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', {
       timeout: 60_000,
     });
@@ -426,26 +463,31 @@ test.describe('KiwiCaptcha solver version coupling', () => {
     const src = driverSource();
     const worker = workerSource();
 
-    // The build id constant must exist in the driver and the worker, and
-    // both must agree.
-    const driverBuildId = src.match(/KIWI_SOLVER_BUILD_ID\s*=\s*"([^"]+)"/)?.[1];
-    const workerBuildId = worker.match(/KIWI_SOLVER_BUILD_ID\s*=\s*"([^"]+)"/)?.[1];
-    expect(driverBuildId).toBeTruthy();
-    expect(workerBuildId).toBe(driverBuildId);
+    // The protocol id constant must exist in the driver and the worker,
+    // and both must agree (renamed from 'build id' — it
+    // proves protocol compatibility; exact identity is the release
+    // SHA256SUMS/SRI/attestation chain).
+    const driverProtocolId = src.match(/KIWI_SOLVER_PROTOCOL_ID\s*=\s*"([^"]+)"/)?.[1];
+    const workerProtocolId = worker.match(/KIWI_SOLVER_PROTOCOL_ID\s*=\s*"([^"]+)"/)?.[1];
+    expect(driverProtocolId).toBeTruthy();
+    expect(workerProtocolId).toBe(driverProtocolId);
 
-    // The worker reports the id on startup (ready) and on success (done);
-    // the embedded copy in the driver matches the standalone asset.
-    const handshake = /post\(\{ type: "ready", buildId: KIWI_SOLVER_BUILD_ID \}\)/;
-    expect(worker).toMatch(handshake);
-    expect(src).toMatch(handshake);
-    expect(worker).toMatch(/type: "done", counter: res, buildId: KIWI_SOLVER_BUILD_ID/);
-    expect(src).toMatch(/type: "done", counter: res, buildId: KIWI_SOLVER_BUILD_ID/);
-    expect(src).toMatch(/type: "done", counter: counter, buildId: KIWI_SOLVER_BUILD_ID/);
+    // The worker verifies the wasm glue's exported solver_protocol_version()
+    // (an integer — clean at the raw ABI) before ready (driver+worker+wasm
+    // must agree), then reports the protocol id on startup (ready) and on
+    // success (done). The worker source lives in the standalone asset (the
+    // driver no longer embeds it — the glue carries it for inline mode, and
+    // files mode fetches the versioned worker asset); the glue's embedded
+    // copy must match the standalone asset.
+    expect(worker).toMatch(/solver_protocol_version/);
+    expect(worker).toMatch(/post\(\{ type: "ready", buildId: KIWI_SOLVER_PROTOCOL_ID \}\)/);
+    expect(worker).toMatch(/type: "done", counter: res, buildId: KIWI_SOLVER_PROTOCOL_ID/);
+    expect(worker).toMatch(/type: "done", counter: counter, buildId: KIWI_SOLVER_PROTOCOL_ID/);
 
     // The driver validates against its own constant and enters a controlled
     // mismatch state — a mismatched worker must never yield a solution.
     expect(src).toMatch(/msg\.type === "ready"/);
-    expect(src).toMatch(/msg\.buildId !== KIWI_SOLVER_BUILD_ID/);
+    expect(src).toMatch(/msg\.buildId !== KIWI_SOLVER_PROTOCOL_ID/);
     expect(src).toMatch(/mismatch: true/);
     expect(src).toMatch(/kiwi:solver-mismatch/);
   });
@@ -468,15 +510,32 @@ test.describe('KiwiCaptcha solver version coupling', () => {
 test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
   test('solver failures cannot change the requested algorithm — one fetch, attribute-only algorithm (static source assertion)', () => {
     const src = driverSource();
-    // Exactly ONE fetch exists in the whole driver: there can be no
-    // "retry with a weaker challenge" code path to fetch a second time.
-    expect(src.match(/fetch\(/g) ?? []).toHaveLength(1);
-    // The algorithm variable is declared exactly twice in the file: once in
-    // the driver (from the container/widget attributes only) and once in the
-    // embedded worker source (from the solve request). No other declaration.
-    expect(src.match(/var algorithm\s*=/g) ?? []).toHaveLength(2);
+    // Exactly five fetch calls exist in the whole driver: the
+    // loader-glue fetch (the external /api.js path fetches its own
+    // source to hand the wasm glue to the Blob worker), the challenge
+    // fetch, the bounded cancellation fetch ({endpoint}/cancel) and the
+    // two files-mode lazy fetches — the WASM runtime glue
+    // (kiwiFetchRuntimeGlue) and the Argon worker asset
+    // (kiwiFetchWorkerAsset, worker.<hash>.js) — downloaded only when a
+    // memory-hard challenge arrives; a SHA-256 solve pays no runtime or
+    // worker request at all. Both lazy fetches are SRI-verified (fail
+    // closed when the digest cannot be computed), deduplicated per URL
+    // across the page and bounded to two retries; their failure enters
+    // the controlled worker-unavailable state, never a main-thread Argon
+    // hash. There can be no "retry with a weaker challenge" code path to
+    // fetch a second challenge: exactly ONE fetch targets the challenge
+    // endpoint itself.
+    expect(src.match(/fetch\(/g) ?? []).toHaveLength(5);
+    expect(src.match(/fetch\(endpoint,/g) ?? []).toHaveLength(1);
+    expect(src.match(/fetch\(url, \{ cache: "force-cache"/g) ?? []).toHaveLength(2);
+    expect(src.match(/fetch\(compatScriptUrl\.split\("\?"\)\[0\]/g) ?? []).toHaveLength(1);
+    expect(src.match(/fetch\(cancelUrl,/g) ?? []).toHaveLength(1);
+    // The algorithm variable is declared exactly once in the driver (from
+    // the container/widget attributes only); the worker's own declaration
+    // lives in the standalone asset, which the driver no longer embeds.
+    expect(src.match(/var algorithm\s*=/g) ?? []).toHaveLength(1);
     // The only hard-coded algorithm assignment in the entire file is the
-    // profile normalization itself (pinned by both assertions
+    // audit-#62 profile normalization itself (pinned by both assertions
     // below) — no failure path may assign a different, weaker algorithm.
     expect(src.match(/algorithm\s*=\s*["']/g) ?? []).toHaveLength(1);
     expect(src).toMatch(/if \(algorithm !== "sha256" && algorithm !== "argon2id"\) algorithm = "sha256";/);
@@ -515,26 +574,32 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
     expect(bodies[0].algorithm).toBe('argon2id');
   });
 
-  test('WASM unavailable: bounded retries keep requesting argon2id and settle in the controlled error state (runtime)', async ({ page }) => {
+  test('WASM unavailable: argon2id settles in the controlled worker-unavailable state, never downgraded (runtime)', async ({ page }) => {
     // ?csp=strict blocks wasm compilation AND blob workers (script-src
     // without blob:/wasm-unsafe-eval), so the argon2id challenge cannot be
-    // solved at all — there is no pure-JS argon2id fallback. The driver must
-    // fail (bounded retries, then idle), and every challenge request must
-    // still ask for argon2id: never a downgrade to sha256.
+    // solved at all — there is no pure-JS argon2id fallback and NO
+    // main-thread Argon2 (invariant: the memory-hard solver
+    // never runs in the page). The driver must enter the controlled
+    // kiwi:worker-unavailable state — a single challenge request, because
+    // retrying a permanent worker condition would only spam the endpoint —
+    // and the request must still ask for argon2id: never a downgrade to
+    // sha256.
     const bodies = [];
     await page.route('**/challenge', async (route) => {
       bodies.push(route.request().postDataJSON() ?? {});
       await route.continue();
     });
     await page.goto('/?csp=strict&algorithm=argon2id');
-    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'kiwi:worker-unavailable', {
       timeout: 60_000,
     });
-    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'idle');
+    await expect(page.locator('[data-kiwi-info]')).toContainText('Worker unavailable', {
+      timeout: 60_000,
+    });
     await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
-    expect(bodies.length, 'bounded retries must re-attempt the challenge').toBeGreaterThanOrEqual(3);
+    expect(bodies.length, 'exactly one challenge request — no retry storm on a permanent worker condition').toBe(1);
     for (const body of bodies) {
-      expect(body.algorithm, 'every challenge request must stay argon2id — no wasm-downgrade fallback').toBe('argon2id');
+      expect(body.algorithm, 'the challenge request must stay argon2id — no wasm-downgrade fallback').toBe('argon2id');
     }
   });
 });
@@ -542,6 +607,7 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
 test.describe('KiwiCaptcha challenge fetch timeout', () => {
   test('the fetch is abortable: AbortController, 15 s default, data-kiwi-fetch-timeout-ms override, bounded worker solve (static source assertion)', () => {
     const src = driverSource();
+    const worker = workerSource();
     expect(src).toMatch(/AbortController/);
     expect(src).toMatch(/signal\s*:\s*abortController\.signal/);
     expect(src).toMatch(/KIWI_FETCH_TIMEOUT_MS\s*=\s*15000/);
@@ -552,7 +618,7 @@ test.describe('KiwiCaptcha challenge fetch timeout', () => {
     // own search range (argMax), and every worker path terminates in a
     // done/failed terminal message.
     expect(src).toMatch(/maxHashes: MAX_SHA_HASHES/);
-    expect(src).toMatch(/argMax = Math\.min\(MAX_SHA_HASHES/);
+    expect(worker).toMatch(/argMax = Math\.min\(maxHashes, Math\.max\(1024, expected \* 8\)\)/);
   });
 
   test('a stalled challenge endpoint is aborted and the widget settles in the controlled idle error state (runtime)', async ({ page }) => {
@@ -568,11 +634,11 @@ test.describe('KiwiCaptcha challenge fetch timeout', () => {
       'data-kiwi-scope': 'login',
       'data-kiwi-fetch-timeout-ms': '1500',
     });
-    await expect(page.locator('[data-kiwi-info]')).toContainText('click the widget to retry', {
+    await expect(page.locator('[data-kiwi-info]')).toContainText('press the Retry button to try again', {
       timeout: 40_000,
     });
     const elapsed = Date.now() - start;
-    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'idle');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'failed');
     await expect(page.locator('[data-kiwi-token]')).toHaveValue('');
     // Bounded retries re-attempt (3 fetches), each aborted by its own
     // timeout — the widget must never be left stuck on a hung server.
@@ -602,19 +668,29 @@ test.describe('KiwiCaptcha host-header independence', () => {
 });
 
 test.describe('KiwiCaptcha narrow request shape', () => {
-  test('the challenge POST body is built from exactly {scope, algorithm, request_binding} (static source assertion)', () => {
+  test('the challenge POST body is built from exactly the documented fields (static source assertion)', () => {
     const src = driverSource();
-    // scope enters via the object literal; algorithm and request_binding via
-    // the only two reqBody assignments that exist in the file. A fourth
-    // field would have to appear here.
+    // scope enters via the object literal; algorithm/request_binding via
+    // assignments; the risk-v2 evidence fields (chain_ticket /
+    // client_context / decoy_field / honeypot) and the optional
+    // provider-metadata fields (action/cdata/sitekey) — a field outside
+    // this closed set would have to appear here. client_context is sent
+    // only under the explicit data-kiwi-risk-context="coarse" opt-in.
     expect(src).toMatch(/var reqBody = \{ scope: scope \};/);
     expect(src.match(/reqBody\.\w+/g) ?? []).toEqual([
       'reqBody.algorithm',
       'reqBody.request_binding',
+      'reqBody.chain_ticket',
+      'reqBody.client_context',
+      'reqBody.decoy_field',
+      'reqBody.honeypot',
+      'reqBody.action',
+      'reqBody.cdata',
+      'reqBody.sitekey',
     ]);
   });
 
-  test('with a binding and argon2id the wire body contains exactly {scope, algorithm, request_binding} (runtime)', async ({ page }) => {
+  test('with a binding and argon2id the wire body contains exactly {scope, algorithm, request_binding} — no client_context without the opt-in (runtime)', async ({ page }) => {
     const bodies = [];
     await page.route('**/challenge', async (route) => {
       bodies.push(route.request().postDataJSON() ?? {});
@@ -633,7 +709,7 @@ test.describe('KiwiCaptcha narrow request shape', () => {
     expect(Object.keys(bodies[0]).sort()).toEqual(['algorithm', 'request_binding', 'scope']);
   });
 
-  test('without an algorithm the wire body is exactly {scope, request_binding} — no algorithm field, no extras (runtime)', async ({ page }) => {
+  test('without an algorithm the wire body is exactly {scope, request_binding} — no client_context without the opt-in, no algorithm field, no extras (runtime)', async ({ page }) => {
     const bodies = [];
     await page.route('**/challenge', async (route) => {
       bodies.push(route.request().postDataJSON() ?? {});

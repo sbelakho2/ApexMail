@@ -266,7 +266,7 @@ final class SiteVerifyTest extends TestCase
 
     public function testFreshSuccessReleasesTheOutstandingSlot(): void
     {
-        // P1/P2 regression: the ordinary FRESH-success Siteverify path
+        // Regression: the ordinary FRESH-success Siteverify path
         // must run the same idempotent solved(nonce) lifecycle release
         // as every other successful outcome — the release used to live
         // only in outcomeToCanonical(), which the fresh path bypasses, so
@@ -314,7 +314,7 @@ final class SiteVerifyTest extends TestCase
 
     public function testCompleteSameRetryRepairsTheOutstandingRelease(): void
     {
-        // P2: a same-operation retry that observes the stored success
+        // A same-operation retry that observes the stored success
         // (CompleteSame) re-releases through the single success-return
         // helper, repairing a transient failure of the original
         // verification's release.
@@ -372,7 +372,7 @@ final class SiteVerifyTest extends TestCase
 
     public function testSiteVerifyEnforcesTheAuthoritativeTransactionBinding(): void
     {
-        // P1: the transaction-binding security boundary must hold on the
+        // The transaction-binding security boundary must hold on the
         // provider-compatible endpoint too — a proof cryptographically
         // anchored to transaction A must never succeed for transaction B,
         // and the mismatch must fail before the consume.
@@ -410,7 +410,7 @@ final class SiteVerifyTest extends TestCase
 
     public function testIdempotencyEntryCannotBeReusedAcrossTransactionBindings(): void
     {
-        // P1: the canonical binding is part of the idempotency identity —
+        // The canonical binding is part of the idempotency identity —
         // the same UUID under a different authoritative transaction
         // context is a conflict, never a cached success.
         $storage = new ArrayStorage();
@@ -619,7 +619,7 @@ final class SiteVerifyTest extends TestCase
 
     public function testSiteVerifyStampsTheScopeForTheArgonPerScopeBudget(): void
     {
-        // P2: the Siteverify endpoint must attribute every redemption to
+        // The Siteverify endpoint must attribute every redemption to
         // the expected scope for the Argon per-scope admission budget —
         // without the stamped scope attribute, all Siteverify Argon work
         // would fall into the unscoped global-only path and one busy
@@ -778,7 +778,7 @@ final class SiteVerifyTest extends TestCase
     }
 
     /**
-     * The round-96 no-remoteip matrix: with risk enabled, an omitted
+     * The no-remoteip matrix: with risk enabled, an omitted
      * `remoteip` must never reach the risk gateway's feedback with a
      * null source address.
      * `solveOutcome()` skips the feedback instead of throwing under
@@ -797,8 +797,8 @@ final class SiteVerifyTest extends TestCase
         $controller = new SiteVerifyController(new Verifier($storage), self::SECRET, [self::SITEVERIFY_SECRET => 'login'], $storage, riskGateway: $gateway);
 
         // binding_mode: none means a valid token needs no remoteip: the
-        // verification succeeds and the token is consumed. Before the
-        // round-96 fix the post-verify feedback TypeError turned this
+        // verification succeeds and the token is consumed. The
+        // post-verify feedback TypeError used to turn this
         // committed redemption into a 503 internal-error, losing the
         // redemption for a caller without an idempotency key.
         $first = $controller->siteverify($this->siteverifyRequest(['response' => $solution, 'secret' => self::SITEVERIFY_SECRET]));

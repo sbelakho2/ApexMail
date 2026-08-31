@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Risk;
 
-use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisEval;
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor;
 use KiwiCaptcha\Storage\ReplicaWaitException;
 
 /**
@@ -87,8 +87,8 @@ use KiwiCaptcha\Storage\ReplicaWaitException;
  * takeover would let a second owner win the same nonce. The
  * single-writer invariant needs the barrier too. The non-mutating
  * paths (a busy claim, a refused finalize) perform no write and never
- * WAIT. A complete claim is an acceptance of a previously-mutated
- * terminal disposition: it establishes the causal replication fence
+ * WAIT. A complete claim is an acceptance of a terminal disposition
+ * mutated before the fence: it establishes the causal replication fence
  * before returning the terminal record. The finalize may have
  * landed with its WAIT failing, and a promotion could otherwise
  * silently reverse the accepted decision. An idempotent retry can
@@ -101,6 +101,8 @@ use KiwiCaptcha\Storage\ReplicaWaitException;
  */
 final class RedisPostSolveDispositionStore implements PostSolveDispositionStore
 {
+    private readonly RedisSecurityCommandExecutor $lua;
+
     private const PREFIX = 'postsolve:';
 
     /** The short fixed computation lease — a contention bound, never the record TTL. */
@@ -426,6 +428,7 @@ LUA;
         private readonly int $waitTimeoutMs = 100,
     ) {
         $this->refuseVerifiedWaitOnUnsupportedPredisClients();
+        $this->lua = new RedisSecurityCommandExecutor($redis);
     }
 
     public function claim(string $nonce, string $owner, int $ttlSeconds, ?string $decisionKey = null, ?string $obligationId = null, ?string $snapshotChainId = null, ?string $expectedStage2Nonce = null): array
@@ -469,7 +472,7 @@ LUA;
         // A real same-slot placeholder, never an empty string: when there
         // is no decision mapping the record key itself is declared in
         // KEYS[2] and the ARGV[4] flag keeps the script from touching it.
-        $payload = $this->evalScript(self::CLAIM_LUA, [
+        $payload = $this->lua->executeSecurityFinal(self::CLAIM_LUA, [
             $recordKey,
             $decisionKey ?? $recordKey,
             $obligationKey,
@@ -548,23 +551,6 @@ LUA;
         }
 
         return [$data['status'], $record, $guard];
-    }
-
-    /**
-     * Run a Lua script against whichever client implementation is in use.
-     *
-     * @param list<string> $keys
-     * @param list<string> $args
-     */
-    private function evalScript(string $script, array $keys, array $args): mixed
-    {
-        if ($this->redis instanceof \Redis) {
-            // phpredis signature: eval($script, $args, $numKeys)
-            return $this->redis->eval($script, [...$keys, ...$args], \count($keys));
-        }
-
-        // Predis signature: eval($script, $numkeys, ...$keysAndArgs)
-        return $this->redis->eval($script, \count($keys), ...$keys, ...$args);
     }
 
     /**
@@ -677,7 +663,7 @@ LUA;
 
     public function finalize(string $nonce, string $owner, PostSolveDisposition $disposition): bool
     {
-        $ok = RedisEval::eval($this->redis, self::FINALIZE_LUA, $this->key($nonce), [
+        $ok = $this->lua->executeSecurityFinal(self::FINALIZE_LUA, $this->key($nonce), [
             $owner,
             (string) json_encode(self::wire($disposition), JSON_THROW_ON_ERROR),
         ]);
@@ -716,7 +702,7 @@ LUA;
         }
         $chainId = $snapshotChainId ?? $resolvedChainId;
         $chainKey = $guardEnabled && $chainId !== '' ? sprintf('{kiwi:%s}:chain:%s', $this->namespace, $chainId) : $recordKey;
-        $outcome = RedisEval::eval($this->redis, self::FINALIZE_GUARDED_LUA, [$recordKey, $obligationKey, $chainKey], [
+        $outcome = $this->lua->executeSecurityFinal(self::FINALIZE_GUARDED_LUA, [$recordKey, $obligationKey, $chainKey], [
             $owner,
             (string) json_encode(self::wire($disposition), JSON_THROW_ON_ERROR),
             $disposition->kind->value,

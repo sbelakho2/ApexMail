@@ -17,15 +17,19 @@ namespace KiwiCaptcha;
  * `[A-Za-z0-9_-]{1,64}`). The widget driver renders a hidden text input
  * with exactly this name next to the token input and never auto-fills
  * it. A submission that carries a value in it is bot evidence. The name
- * is authenticated: it is signed into the v2 canonical payload as the
+ * is authenticated: it is signed into the canonical payload as the
  * final `|<decoy_field>` segment, see {@see Issuer::canonicalPayload()},
  * so a client cannot strip or swap it without breaking the signature the
  * verifier re-checks.
  *
- * Wire-compatible both ways: the `decoy_field` key is absent from
- * `toArray()` (and therefore the JSON) when no decoy is armed. That is
- * the old behavior, never a JSON `null`, and old payloads (no key)
- * deserialize with null.
+ * Wire compatibility: unarmed records are byte-identical to the
+ * pre-decoy format — the `decoy_field` key is absent from `toArray()`
+ * (and therefore the JSON) when no decoy is armed, never a JSON `null`,
+ * and old payloads (no key) deserialize with null. An armed record is
+ * protocol v3 (the decoy-capable canonical) and requires a v3-capable
+ * verifier: an old verifier rejects version 3 as unknown. The grammar
+ * is total: v2 => no decoy, v3 => decoy present. A stored version flip
+ * can never change the effective protocol.
  */
 final class Challenge
 {

@@ -4,9 +4,9 @@ This package ships four browser assets (`assets/`):
 
 | Asset | Purpose |
 |---|---|
-| `kiwicaptcha-wasm.js` | wasm-bindgen glue with the Argon2id/SHA-256 solver wasm inlined as base64. |
-| `kiwi-worker.js` | standalone same-origin worker solver (`data-kiwi-worker-src`). |
-| `widget-driver.js` | the widget driver; embeds the worker source and the solver protocol id. |
+| `kiwicaptcha-wasm.js` | wasm-bindgen glue with the Argon2id/SHA-256 solver wasm inlined as base64; also carries the embedded worker source as `window.__kiwiCaptchaWasm.workerSource` (generated from `kiwi-worker.js`). |
+| `kiwi-worker.js` | standalone same-origin worker solver; served as the versioned `worker.<hash>.js` asset in files mode. |
+| `widget-driver.js` | the widget driver and the solver protocol id; reads the worker source off the glue (inline mode) or fetches the worker asset (files mode) — it no longer embeds the worker bytes. |
 | `widget.css` | the widget stylesheet (first-class release asset; SRI-capable via `<link>`). |
 
 Everything below is guidance for integrators who serve these assets (self-hosted or via a CDN).
@@ -49,13 +49,11 @@ Notes:
   An SRI-protected cross-origin script without `crossorigin` will be blocked.
 - Re-run the tool after every rebuild and update the tags.
   A hash mismatch means the bytes on the wire are not the bytes you pinned.
-- **Workers cannot use `integrity=`:** `new Worker(url)` has no SRI parameter, so the standalone `kiwi-worker.js` served via `data-kiwi-worker-src` must be protected differently:
-  - serve it from an **immutable, versioned, same-origin URL** (e.g. `/kiwicaptcha/v1.6.20/kiwi-worker.js`), never a mutable `latest.js` alias.
-  - Publish the content-addressed release hash (`argon-solver.<sha256>`-style naming, or the §4 release-hash list) and verify it in the release pipeline.
+- **Workers cannot use `integrity=`:** `new Worker(url)` has no SRI parameter, so the worker source must be protected differently.
+  - files mode: the driver fetches the versioned `worker.<hash>.js` asset itself and verifies the page-issued SRI digest against the fetched bytes. Only then does it construct a same-origin Worker from the content-addressed URL. The constructor serves exactly the verified bytes (immutable cache, hash in the URL), so unverified worker code never runs. A worker URL without the SRI digest keeps the legacy direct-construction path.
+  - the bundled driver's inline tier builds a Blob worker from the glue's embedded worker source (local code, no network fetch at all).
   - The worker's own protocol-id handshake (`ready`/`done` messages, plus the wasm glue's exported `solver_protocol_version()` verified before `ready`) makes the driver refuse a stale/mismatched worker.
     A cached old worker can never contribute a solution.
-  If runtime integrity checking of the worker is required, the driver would have to fetch the worker source with `integrity` checking itself and instantiate a Blob worker from the verified bytes.
-  The bundled driver's default Blob-worker path already constructs the worker from locally embedded source (no network fetch at all).
 
 ## Immutable versioned URLs — never a mutable `latest.js`
 
@@ -123,7 +121,7 @@ var KIWI_SOLVER_PROTOCOL_VERSION = 2;           // integer, checked against
 
 Exact byte identity is guaranteed by the release tag + `SHA256SUMS` + `SRI.txt` + SLSA attestation, never by this label.
 
-The worker (both the standalone `kiwi-worker.js` and the copy embedded in the driver) declares the same constant and reports it in its handshake messages:
+The worker (the standalone `kiwi-worker.js`, its copy embedded in the glue, and the fetched files-mode asset) declares the same constant and reports it in its handshake messages:
 
 - on startup: `{ type: "ready", v: 1, buildId: "2026-08-r2" }`
 - on success: `{ type: "done", v: 1, counter: <n>, buildId: "2026-08-r2" }`
@@ -134,7 +132,7 @@ No invalid tokens are produced, and there is no fallback to a stale worker.
 
 Expectation for integrators: the driver, the worker, and the wasm glue served to a page must come from the **same build id**.
 Mixed versions (e.g. a cached `kiwi-worker.js` from an older release next to a new driver) produce the controlled mismatch state until the serving layer is corrected.
-When the solver protocol changes, bump `KIWI_SOLVER_PROTOCOL_ID` + `KIWI_SOLVER_PROTOCOL_VERSION` in `kiwi-worker.js` (the generator embeds it into the driver) and the Rust `SOLVER_PROTOCOL_VERSION` constant (they must stay identical), rebuild, and re-run the SRI tool.
+When the solver protocol changes, bump `KIWI_SOLVER_PROTOCOL_ID` + `KIWI_SOLVER_PROTOCOL_VERSION` in `kiwi-worker.js` (the generator embeds it into the glue) and the Rust `SOLVER_PROTOCOL_VERSION` constant (they must stay identical), rebuild, and re-run the SRI tool.
 
 ## Widget runtime guarantees (recap)
 

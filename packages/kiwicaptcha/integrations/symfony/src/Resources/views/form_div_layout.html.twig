@@ -5,10 +5,16 @@
 {%- set telemetry = telemetry|default('off') -%}
 {%- set riskClientContext = risk_client_context|default(false) -%}
 {%- set requestBinding = request_binding|default('') -%}
+{%- set algorithm = algorithm|default('') -%}
+{%- if asset_tags is defined and asset_tags is not empty -%}
+{{ asset_tags|raw }}
+{%- endif -%}
+{%- if asset_mode is not defined or asset_mode == 'inline' -%}
 <style{% if nonce %} nonce="{{ nonce }}"{% endif %}>
 {{ kiwi_css|raw }}
 </style>
-<div class="kiwi-container" data-kiwi-endpoint="{{ endpoint }}" data-kiwi-scope="{{ scope }}" data-kiwi-telemetry="{{ telemetry }}"{% if riskClientContext %} data-kiwi-risk-context="coarse"{% endif %}{% if requestBinding %} data-kiwi-request-binding="{{ requestBinding }}"{% endif %}>
+{%- endif -%}
+<div class="kiwi-container" data-kiwi-endpoint="{{ endpoint }}" data-kiwi-scope="{{ scope }}" data-kiwi-telemetry="{{ telemetry }}"{% if riskClientContext %} data-kiwi-risk-context="coarse"{% endif %}{% if requestBinding %} data-kiwi-request-binding="{{ requestBinding }}"{% endif %}{% if algorithm %} data-kiwi-algorithm="{{ algorithm }}"{% endif %}{% if runtime_src is defined and runtime_src is not empty %} data-kiwi-runtime-src="{{ runtime_src }}"{% if runtime_integrity is defined and runtime_integrity is not empty %} data-kiwi-runtime-integrity="{{ runtime_integrity }}"{% endif %}{% endif %}{% if worker_src is defined and worker_src is not empty %} data-kiwi-worker-src="{{ worker_src }}"{% if worker_integrity is defined and worker_integrity is not empty %} data-kiwi-worker-integrity="{{ worker_integrity }}"{% endif %}{% endif %}>
     <input type="hidden" name="{{ full_name }}" value="" data-kiwi-token />
     <div class="kiwi-widget" data-kiwi-widget data-state="idle"
          role="group" aria-label="KiwiCaptcha security check">
@@ -49,10 +55,17 @@
         <span class="kiwi-sr-only" data-kiwi-status role="status" aria-live="polite"></span>
     </div>
 </div>
+{%- if asset_mode is defined and asset_mode == 'files' -%}
+{# files mode: the stylesheet and the driver are emitted as versioned
+   asset tags by the asset_tags block; the runtime and the worker stay
+   lazy, the container carries data-kiwi-runtime-src / data-kiwi-worker-src
+   and the driver fetches them only when a memory-hard challenge arrives #}
+{%- else -%}
 <script{% if nonce %} nonce="{{ nonce }}"{% endif %}>
 {{ kiwi_wasm|raw }}
 </script>
 <script{% if nonce %} nonce="{{ nonce }}"{% endif %}>
 {{ kiwi_driver|raw }}
 </script>
+{%- endif -%}
 {% endblock %}

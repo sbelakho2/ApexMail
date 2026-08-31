@@ -15,7 +15,11 @@ namespace KiwiCaptcha\Tests\Fixtures;
  *  - consume-transition script: marks the stored record consumed (keeps
  *    it) and returns {json, consumed_now, consumed_before, result_json};
  *    the one-shot transition, not a delete. A cancelled record is never
- *    consumable: the script reports it as missing (nil).
+ *    consumable: the script reports it as missing (nil), and the
+ *    pending-envelope guard refuses a pending record that already
+ *    carries a terminal or claim field (consumed_result,
+ *    operation_identity, resume_owner / resume_until), mirroring the
+ *    real Lua's raw-marker check.
  *  - cancel-transition script: flips a pending record to the terminal
  *    cancelled marker (kept until its TTL) and returns
  *    {state: cancelled-now | cancelled | consumed}; missing is nil.
@@ -64,6 +68,55 @@ final class FakePredisClient extends \Predis\Client
     /** Number of replicas the WAIT command reports as acknowledging. */
     public int $waitAck = 0;
 
+    /**
+     * A queue of acknowledged-replica counts for the next WAITs; each
+     * WAIT pops the front value, and the queue falls back to $waitAck
+     * once empty. The failover tests drive a shortfall on the Nth
+     * barrier (e.g. the commit after a satisfied consume) with this
+     * queue.
+     *
+     * @var list<int>
+     */
+    public array $waitAckQueue = [];
+
+    /**
+     * When true, every GET throws. This is the wire failure of the
+     * runtime-state read: the verifier must answer StorageUnavailable
+     * and leave the record untouched.
+     */
+    public bool $throwOnGet = false;
+
+    /**
+     * When true, every `EVAL` and `EVALSHA` throws. This is the lost or
+     * refused Lua transition: the consume and the fused cleanup both
+     * fail closed, and the record is never treated as consumed without
+     * evidence (the throw happens before any mutation).
+     */
+    public bool $throwOnEval = false;
+
+    /**
+     * When > 0, every `EVAL` and `EVALSHA` from this 1-based invocation
+     * onwards throws. The commit-write-failure scenario arms it after
+     * the consume transition, so only the outcome commit fails.
+     */
+    public int $throwOnEvalFrom = \PHP_INT_MAX;
+
+    /** Number of `EVAL`/`EVALSHA` invocations so far, for the threshold. */
+    public int $evalCount = 0;
+
+    /**
+     * When true, every WAIT throws. This is a WAIT that never returns
+     * an acknowledgement count, distinct from a shortfall reply: the
+     * durability barrier fails closed either way.
+     */
+    public bool $throwOnWait = false;
+
+    /**
+     * When true, every SET throws. This is a refused write, e.g. the
+     * replication-fence write of the stored-result replay guard.
+     */
+    public bool $throwOnSet = false;
+
     /** @var array<string, int> */
     public array $calls = [];
 
@@ -95,16 +148,46 @@ final class FakePredisClient extends \Predis\Client
         $this->calls[] = [strtoupper((string) $commandID), $arguments];
 
         return match (strtoupper((string) $commandID)) {
-            'GET' => $this->fakeGet($arguments),
-            'SET' => $this->fakeSet($arguments),
+            'GET' => $this->throwOnGet ? $this->throwConnection() : $this->fakeGet($arguments),
+            'SET' => $this->throwOnSet ? $this->throwConnection() : $this->fakeSet($arguments),
+            'SETEX' => $this->throwOnSet ? $this->throwConnection() : $this->fakeSetex($arguments),
             'DEL' => $this->fakeDel($arguments),
             'EXISTS' => isset($this->store[(string) $arguments[0]]) ? 1 : 0,
-            'EVAL' => $this->fakeEval($arguments),
-            'EVALSHA' => $this->fakeEvalSha($arguments),
+            'EVAL' => $this->evalShouldThrow() ? $this->throwConnection() : $this->fakeEval($arguments),
+            'EVALSHA' => $this->evalShouldThrow() ? $this->throwConnection() : $this->fakeEvalSha($arguments),
             'SCRIPT' => $this->fakeScript($arguments),
-            'WAIT' => $this->waitAck,
+            'WAIT' => $this->nextWaitAck(),
             default => null,
         };
+    }
+
+    /**
+     * The simulated wire failure of the fault-injection knobs: a generic
+     * connection failure that propagates through the storage layer the
+     * way a dead socket would. The storage never catches it, so the
+     * verifier's typed mapping decides the outcome.
+     */
+    private function throwConnection(): never
+    {
+        throw new \RuntimeException('simulated Redis connection failure');
+    }
+
+    /** Whether the next Lua invocation must throw. */
+    private function evalShouldThrow(): bool
+    {
+        $this->evalCount++;
+
+        return $this->throwOnEval || $this->evalCount >= $this->throwOnEvalFrom;
+    }
+
+    /** The acknowledged-replica count of the next WAIT, queue first. */
+    private function nextWaitAck(): int
+    {
+        if ($this->waitAckQueue !== []) {
+            return (int) array_shift($this->waitAckQueue);
+        }
+
+        return $this->waitAck;
     }
 
     /** @param list<mixed> $arguments */
@@ -129,7 +212,15 @@ final class FakePredisClient extends \Predis\Client
         $id = strtoupper((string) ($arguments[0] ?? ''));
         $this->calls[] = [$id, \array_slice($arguments, 1)];
 
-        return $id === 'WAIT' ? $this->waitAck : null;
+        if ($id === 'WAIT') {
+            if ($this->throwOnWait) {
+                $this->throwConnection();
+            }
+
+            return $this->nextWaitAck();
+        }
+
+        return null;
     }
 
     /** @param list<mixed> $arguments */
@@ -140,6 +231,21 @@ final class FakePredisClient extends \Predis\Client
         if (($arguments[2] ?? null) === 'EX') {
             $this->expirations[$key] = (int) $arguments[3];
         }
+
+        return true;
+    }
+
+    /** @param list<mixed> $arguments */
+    private function fakeSetex(array $arguments): bool
+    {
+        // `SETEX` key ttl value: the TTL argument sits at index 1,
+        // unlike the phpredis-style `SET` ... `EX` ttl at index 2. The
+        // replication fence write of
+        // RedisStorage::establishReplicationFence() uses `SETEX` on the
+        // Predis branch.
+        $key = (string) $arguments[0];
+        $this->store[$key] = (string) ($arguments[2] ?? '');
+        $this->expirations[$key] = (int) ($arguments[1] ?? 0);
 
         return true;
     }
@@ -222,7 +328,7 @@ final class FakePredisClient extends \Predis\Client
 
     /**
      * The shared Lua emulation, dispatched on the script body's header
-     * comment (the same dispatch the old EVAL-only fake used).
+     * comment (the same dispatch the legacy EVAL-only fake used).
      *
      * @param list<string> $keys
      * @param list<mixed>  $args
@@ -255,6 +361,23 @@ final class FakePredisClient extends \Predis\Client
                 $res = $obj['consumed_result'] ?? null;
 
                 return [$raw, 0, 1, $res !== null ? json_encode($res, JSON_UNESCAPED_SLASHES) : ''];
+            }
+            if (($obj['state'] ?? 'pending') !== 'pending') {
+                // Any other state marker is never consumable, mirroring
+                // the real Lua's failed pending-marker splice.
+                return null;
+            }
+            // The pending-envelope guard, mirroring the real Lua's
+            // raw-marker check: a pending envelope that already carries a
+            // terminal or claim field (a non-null consumed_result, a
+            // non-null operation_identity, or any resume_owner /
+            // resume_until marker) is refused with the missing
+            // semantics.
+            if (($obj['consumed_result'] ?? null) !== null
+                || ($obj['operation_identity'] ?? null) !== null
+                || isset($obj['resume_owner'])
+                || isset($obj['resume_until'])) {
+                return null;
             }
             $obj['state'] = 'consumed';
             if (($args[0] ?? '') !== '') {

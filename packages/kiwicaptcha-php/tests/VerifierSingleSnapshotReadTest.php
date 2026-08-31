@@ -16,11 +16,11 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Round-95 single-read audit fix: a verification against a
+ * A verification against a
  * runtime-state capable storage (RedisStorage over the counting
  * Predis fake) performs exactly one GET of the record key. The
  * runtimeState() snapshot doubles as the peek, the terminal-state
- * gate and the consumed-envelope source. The old flow read the same
+ * gate and the consumed-envelope source. The earlier flow read the same
  * key twice with find() plus runtimeState(), and a third time with
  * consumedState() on the consumed branch.
  */
@@ -108,7 +108,7 @@ final class VerifierSingleSnapshotReadTest extends TestCase
     {
         // (b) A consumed-record replay of the exact logical operation
         // resolves the stored success from the envelope that rode on the
-        // snapshot GET: exactly one GET and no Lua at all (the old flow issued a
+        // snapshot GET: exactly one GET and no Lua at all (the earlier flow issued a
         // second GET via consumedState()).
         if (!\class_exists(\Predis\Client::class)) {
             self::markTestSkipped('predis/predis is not installed');
@@ -146,7 +146,7 @@ final class VerifierSingleSnapshotReadTest extends TestCase
         // alone: exactly one GET, no second retained-state read through
         // consumedState(), and no Lua at all. The fused cleanup is
         // deliberately skipped for this failure, so the retained-state
-        // tri-state must come from the snapshot (the round-95 pattern).
+        // tri-state must come from the snapshot (the snapshot-read pattern).
         if (!\class_exists(\Predis\Client::class)) {
             self::markTestSkipped('predis/predis is not installed');
         }

@@ -438,7 +438,7 @@ final class ValidatorTest extends TestCase
         self::assertNull($validator->verifiedJti());
     }
 
-// ── failure-path risk feedback (round-95) ─────────────────────────────────
+// ── failure-path risk feedback ─────────────────────────────────────────
 
     public function testFailedSolveWithRiskEnabledRecordsFailureFeedbackAndViolates(): void
     {
@@ -512,7 +512,7 @@ final class ValidatorTest extends TestCase
         self::assertSame(KiwiCaptcha::INVALID_OR_EXPIRED_ERROR, $violations[0]->getCode(), 'the risk-gateway-absent path stays a plain violation (the optional call is a no-op)');
     }
 
-// ── success-path risk feedback (round-95) ────────────────────────────────
+// ── success-path risk feedback ─────────────────────────────────────────
 
     public function testValidSolveWithoutReassessmentRecordsSolveSuccessFeedbackWithClientIp(): void
     {
@@ -546,7 +546,7 @@ final class ValidatorTest extends TestCase
         self::assertSame([], $store->observations, 'no client IP means no per-IP evidence, never an empty-string pseudonym');
     }
 
-// ── replay-branch risk feedback (round-97) ────────────────────────────────
+// ── replay-branch risk feedback ────────────────────────────────────────
 
     public function testStoredValidSameIdentityReplayEmitsReplayRiskFeedbackAndViolates(): void
     {
@@ -630,7 +630,7 @@ final class ValidatorTest extends TestCase
         self::assertSame([], $risk['store']->observations, 'no client IP means no replay feedback, never an empty-string pseudonym');
     }
 
-// ── ambiguous-forwarding risk feedback (round-97) ─────────────────────────
+// ── ambiguous-forwarding risk feedback ─────────────────────────────────
 
     public function testAmbiguousForwardingFeedsMalformedEvidenceOnTheSocketPeerAndViolates(): void
     {
@@ -891,7 +891,7 @@ final class ValidatorTest extends TestCase
 
     public function testBindingMismatchFailsBeforeTheConsume(): void
     {
-        // P2/P3 regression: the request-binding enforcement moved into the
+        // Regression: the request-binding enforcement moved into the
         // core's pre-consume phase. A wrong-transaction proof must fail
         // without consuming the challenge (no deterministic result is
         // committed and nothing is released), so the valid proof is not
@@ -917,7 +917,7 @@ final class ValidatorTest extends TestCase
 
     public function testStoredResultRetryRepairsTheOutstandingRelease(): void
     {
-        // P2 regression: the release used to be skipped for stored-result
+        // Regression: the release used to be skipped for stored-result
         // retries, so a transient release failure during the original
         // verification could never be repaired by the same logical
         // operation's retry. solved() is idempotent and ZREM-gated, so
@@ -967,7 +967,7 @@ final class ValidatorTest extends TestCase
 
     public function testReleaseSidecarReadFailureIsBestEffort(): void
     {
-        // P2: the entire release — the plain sidecar GET included — sits
+        // The entire release — the plain sidecar GET included — sits
         // inside the exception boundary, so a Redis failure on the read
         // can never fail a valid solve (the memberships decay by their
         // deadlines and the same logical operation's retry re-releases).
@@ -998,7 +998,7 @@ final class ValidatorTest extends TestCase
 
     public function testOutstandingCountsTheCompleteVerifierValidityEnvelopeUnderIssuerSkew(): void
     {
-        // P1/P2: the accounting lifetime is the nominal TTL plus the core
+        // The accounting lifetime is the nominal TTL plus the core
         // verifier's permitted future-issuance skew (MAX_CLOCK_SKEW), so a
         // distributed issuer clock ahead of the Redis clock can never make
         // the anti-stockpiling caps undercount a still-verifier-valid
@@ -2796,11 +2796,14 @@ final class ValidatorTest extends TestCase
         $risk['store']->setVector(SignalVector::fromArray(['source_fast' => 900, 'subnet_fast' => 1000, 'issue_debt' => 1000, 'replay' => 699, 'network_risk' => 890]));
         [$store] = $this->clockedDispositionStore();
 
-        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        // Armed issuance: the authenticated decoy name comes from the
+        // verified outcome, never a nonce-hash reconstruction.
+        $challenge = $this->issuer->issueWithDecoyField('login', '198.51.100.7');
+        self::assertNotNull($challenge->decoyField, 'the armed issuance must carry the authenticated decoy name');
         usleep(($challenge->minDurationMs + 10) * 1000);
         $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
         $nonce = \KiwiCaptcha\SolutionToken::decode($token)->nonce;
-        $decoy = 'decoy_'.substr(hash('sha256', $nonce), 0, 8);
+        $decoy = $challenge->decoyField;
         $dto = new class {
             public ?string $captcha = null;
         };
@@ -2851,24 +2854,27 @@ final class ValidatorTest extends TestCase
 
         // mismatched decoy name: NOT this challenge's decoy — ignored, no
         // reassessment, plain pass.
-        $other = $this->issuer->issue('login', '198.51.100.7');
+        $other = $this->issuer->issueWithDecoyField('login', '198.51.100.7');
+        self::assertNotNull($other->decoyField);
         usleep(($other->minDurationMs + 10) * 1000);
         $otherToken = $this->solveToken($other->prefix, $other->salt, $other->targetBits, $other->nonce);
         $dto2 = new class {
             public ?string $captcha = null;
         };
         $dto2->captcha = $otherToken;
-        [$engine3] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, ['decoy_00000000' => 'filled'], operationId: 'op-retry');
+        $wrongName = $other->decoyField === 'secondary_contact_phone' ? 'billing_company_url' : 'secondary_contact_phone';
+        [$engine3] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, [$wrongName => 'filled'], operationId: 'op-retry');
         $meta3 = $engine3->getMetadataFor($dto2::class);
         $meta3->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         self::assertCount(0, $engine3->validate($dto2), 'a mismatched decoy name is not this challenge\'s decoy — no reassessment');
         self::assertSame(PostSolveDispositionKind::Pass, $store->read($other->nonce)?->disposition?->kind);
 
         // empty exact decoy: no evidence, no reassessment, plain pass.
-        $third = $this->issuer->issue('login', '198.51.100.7');
+        $third = $this->issuer->issueWithDecoyField('login', '198.51.100.7');
+        self::assertNotNull($third->decoyField);
         usleep(($third->minDurationMs + 10) * 1000);
         $thirdToken = $this->solveToken($third->prefix, $third->salt, $third->targetBits, $third->nonce);
-        $thirdDecoy = 'decoy_'.substr(hash('sha256', $third->nonce), 0, 8);
+        $thirdDecoy = $third->decoyField;
         $dto3 = new class {
             public ?string $captcha = null;
         };
@@ -2877,6 +2883,132 @@ final class ValidatorTest extends TestCase
         $meta4 = $engine4->getMetadataFor($dto3::class);
         $meta4->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
         self::assertCount(0, $engine4->validate($dto3), 'an EMPTY exact decoy is no honeypot evidence — no reassessment');
+
+        // no decoy armed (the surface disabled): no decoy check at all —
+        // a filled unknown field can never trip honeypot evidence.
+        $plain = $this->issuer->issue('login', '198.51.100.7');
+        self::assertNull($plain->decoyField);
+        usleep(($plain->minDurationMs + 10) * 1000);
+        $plainToken = $this->solveToken($plain->prefix, $plain->salt, $plain->targetBits, $plain->nonce);
+        $dto4 = new class {
+            public ?string $captcha = null;
+        };
+        $dto4->captcha = $plainToken;
+        [$engine5] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, [$wrongName => 'filled'], operationId: 'op-retry');
+        $meta5 = $engine5->getMetadataFor($dto4::class);
+        $meta5->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        self::assertCount(0, $engine5->validate($dto4), 'an unarmed challenge carries no decoy — no decoy check, plain pass');
+        self::assertSame(PostSolveDispositionKind::Pass, $store->read($plain->nonce)?->disposition?->kind);
+        $decoyEvidenceCount = \count(array_values(array_filter(
+            $risk['store']->observations,
+            static fn ($o): bool => $o->event === RiskEventKind::DecoyFieldSubmitted,
+        )));
+        self::assertSame(1, $decoyEvidenceCount, 'neither mismatched nor unarmed challenges record honeypot evidence');
+    }
+
+    public function testArrayShapedParameterUnderTheDecoyNameIsDeterministicNeverThrows(): void
+    {
+        // An array-shaped parameter with the exact authenticated decoy
+        // name (billing_address_line[]=x): InputBag::get() throws
+        // BadRequestException on non-scalar values, so the decoy-evidence
+        // read must treat it as no usable decoy value — a deterministic
+        // plain pass, never a 500.
+        $risk = $this->riskStack(1, 'allow', 'allow', false, new RiskV2Weights(honeypot: 10));
+        [$store] = $this->clockedDispositionStore();
+
+        $challenge = $this->issuer->issueWithDecoyField('login', '198.51.100.7');
+        self::assertNotNull($challenge->decoyField);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, [$challenge->decoyField => ['x', 'y']], operationId: 'op-retry');
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        self::assertCount(0, $engine->validate($dto), 'an array-shaped decoy parameter is no decoy evidence — plain pass, never an exception');
+        self::assertSame(PostSolveDispositionKind::Pass, $store->read($challenge->nonce)?->disposition?->kind);
+        $decoyEvents = array_values(array_filter(
+            $risk['store']->observations,
+            static fn ($o): bool => $o->event === RiskEventKind::DecoyFieldSubmitted,
+        ));
+        self::assertCount(0, $decoyEvents, 'an array-shaped decoy parameter must not record honeypot evidence');
+    }
+
+    public function testArrayShapedRequestBindingParameterIsDeterministicNeverThrows(): void
+    {
+        // The same input-bag hazard on the request-binding fallback read:
+        // an array-shaped kiwi_request_binding parameter resolves to no
+        // binding, never a BadRequestException.
+        $risk = $this->riskStack(1, 'allow', 'allow', false);
+        [$store] = $this->clockedDispositionStore();
+
+        $challenge = $this->issuer->issue('login', '198.51.100.7');
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, ['kiwi_request_binding' => ['x']], operationId: 'op-retry');
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        self::assertCount(0, $engine->validate($dto), 'an array-shaped request binding must not throw — the unbound challenge passes');
+        self::assertSame(PostSolveDispositionKind::Pass, $store->read($challenge->nonce)?->disposition?->kind);
+    }
+
+    public function testForcedNameCollisionWithAnApplicationFieldIsHandledDeterministically(): void
+    {
+        // A real application field deliberately given the exact
+        // authenticated decoy name (a forced collision — the 64-bit
+        // suffix makes an accidental one cryptographically impossible).
+        // The parsed single value reads as a honeypot hit and the
+        // assessment is deterministic; the application keeps its value
+        // (the widget never removes a same-named app field — proven in
+        // the browser lane) and the response is never a 500.
+        $risk = $this->riskStack(1, 'allow', 'allow', false, new RiskV2Weights(honeypot: 10));
+        $risk['store']->setVector(SignalVector::fromArray(['source_fast' => 900, 'subnet_fast' => 1000, 'issue_debt' => 1000, 'replay' => 699, 'network_risk' => 890]));
+        [$store] = $this->clockedDispositionStore();
+
+        $challenge = $this->issuer->issueWithDecoyField('login', '198.51.100.7');
+        self::assertNotNull($challenge->decoyField);
+        usleep(($challenge->minDurationMs + 10) * 1000);
+        $token = $this->solveToken($challenge->prefix, $challenge->salt, $challenge->targetBits, $challenge->nonce);
+        $dto = new class {
+            public ?string $captcha = null;
+        };
+        $dto->captcha = $token;
+
+        // The app field carries a legitimate value under the exact decoy
+        // name: the honeypot evidence fires (the parsed single value IS
+        // the decoy value on a forced collision) and the stronger-PoW
+        // reassessment is terminal StepUp — deterministic, never a 500.
+        [$engine] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, [$challenge->decoyField => 'legit app value'], operationId: 'op-retry');
+        $meta = $engine->getMetadataFor($dto::class);
+        $meta->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        $violations = $engine->validate($dto);
+        self::assertCount(1, $violations);
+        self::assertSame(KiwiCaptcha::POST_SOLVE_STEP_UP_REQUIRED, $violations[0]->getCode(), 'a forced same-name collision reads as honeypot evidence — the graceful, deterministic handling');
+        self::assertSame(PostSolveDispositionKind::StepUp, $store->read($challenge->nonce)?->disposition?->kind);
+
+        // An empty app field under the exact decoy name is no evidence:
+        // the empty scalar is not a filled decoy.
+        $second = $this->issuer->issueWithDecoyField('login', '198.51.100.7');
+        self::assertNotNull($second->decoyField);
+        usleep(($second->minDurationMs + 10) * 1000);
+        $secondToken = $this->solveToken($second->prefix, $second->salt, $second->targetBits, $second->nonce);
+        $dto2 = new class {
+            public ?string $captcha = null;
+        };
+        $dto2->captcha = $secondToken;
+        [$engine2] = $this->dispositionEngine($this->verifier, $risk['gateway'], $store, [$second->decoyField => ''], operationId: 'op-retry');
+        $meta2 = $engine2->getMetadataFor($dto2::class);
+        $meta2->addPropertyConstraint('captcha', new KiwiCaptcha(['scope' => 'login']));
+        self::assertCount(0, $engine2->validate($dto2), 'an empty same-named app field is no decoy evidence — plain pass');
+        self::assertSame(PostSolveDispositionKind::Pass, $store->read($second->nonce)?->disposition?->kind);
     }
 
     public function testChainRequiredDispositionReplaysWithTheSameChainId(): void

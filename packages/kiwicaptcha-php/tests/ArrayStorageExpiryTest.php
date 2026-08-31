@@ -120,8 +120,8 @@ final class ArrayStorageExpiryTest extends TestCase
         $storage->store($this->makeRecord('c', $this->clock + 200));
         self::assertSame(3, $this->retainedCount($storage));
 
-        // At the cap, the next insert drops the oldest-expiring entry
-        // ('b'), never the oldest-inserted ('a').
+        // At the cap, the next insert drops the earliest-expiring entry
+        // ('b'), never the earliest-inserted ('a').
         $storage->store($this->makeRecord('d', $this->clock + 400));
 
         self::assertSame(3, $this->retainedCount($storage), 'the map stays at the hard cap');

@@ -1,18 +1,30 @@
 # Getting started
 
-This page walks through installing the bundle, registering it, issuing your
-first challenge, and using the verified result. The full configuration
-reference is [configuration.md](configuration.md).
+This page walks through installing the bundle, configuring it with a
+protection profile, issuing your first challenge, and using the verified
+result. The full configuration reference is [configuration.md](configuration.md).
+
+> Status: this guide is the current manual-equivalent walkthrough. The
+> bundle has not yet been published on Packagist, and the recipe PR
+> #2038 is not yet merged, so the one-command install below stays the
+> target rather than today's path. Until both land, install the bundle
+> from this repository and follow the manual steps in this guide. A
+> recipe-first rewrite is planned once both land; see
+> [flex-recipe.md](flex-recipe.md) for the exact external steps.
 
 ## Installation
 
-1. Require the bundle (from this repository, or once published to Packagist):
+### 1. Require the bundle
 
 ```bash
 composer require bel-consulting/kiwicaptcha-symfony
 ```
 
-2. Register the bundle in `config/bundles.php`:
+Symfony Flex registers the bundle in `config/bundles.php`: it detects
+`BelConsulting\KiwiCaptchaBundle\KiwiCaptchaBundle` from the package's
+PSR-4 layout, and a published recipe (see
+[flex-recipe.md](flex-recipe.md)) registers it explicitly. Without Flex
+(or with recipes disabled) add it manually:
 
 ```php
 return [
@@ -21,43 +33,112 @@ return [
 ];
 ```
 
-3. Configure in `config/packages/kiwi_captcha.yaml`:
+### 2. Add the environment placeholders
 
-```yaml
-kiwi_captcha:
-    secret_key: '%env(KIWI_SECRET_KEY)%'   # required, min 16 bytes
-    algorithm: sha256                       # sha256 | argon2id
-    difficulty_bits: 20                     # SHA-256 leading zero bits
-    argon_m_kib: 0                          # Argon2id memory (KiB); 0 = sha256 only
-    argon_t: 3                              # Argon2id requires t >= 3 and p == 1
-    argon_p: 1
-    challenge_ttl_secs: 120
-    route_prefix: /kiwi-captcha             # challenge endpoint prefix; the form
-                                            # widget and standalone widget both
-                                            # derive their endpoint from it
+Add the placeholder values to `.env` and replace them with real secrets:
+
+```
+KIWI_SECRET_KEY=change-me-to-a-random-32-byte-value
+KIWI_PUBLIC_URL=https://captcha.example.com
+KIWI_REDIS_DSN=redis://127.0.0.1:6379/0
 ```
 
-Every other option, with defaults and validation, is documented in
-[configuration.md](configuration.md).
+Generate the secret with `openssl rand -hex 32`. `KIWI_PUBLIC_URL` is
+the deployment's canonical https origin (the same-origin check compares
+against it, never the Host header). `KIWI_REDIS_DSN` is the high-level
+Redis connection setting (see below); the recipe installs a localhost
+placeholder you change for production.
+
+### 3. Choose a protection profile and configure
+
+Ordinary deployments configure at the policy level: one
+`protection_profile`, the secret, the public URL, and the Redis DSN.
+
+```yaml
+# config/packages/kiwi_captcha.yaml
+kiwi_captcha:
+    protection_profile: balanced   # balanced | privacy_strict | high_abuse | compatibility
+    secret_key: '%env(KIWI_SECRET_KEY)%'
+    public_base_url: '%env(KIWI_PUBLIC_URL)%'
+    redis_dsn: '%env(KIWI_REDIS_DSN)%'
+```
+
+The profile fills safe derived defaults for the safety-relevant knobs
+you do not set; an explicit value in any config file always wins (the
+profile is the lowest-precedence configuration layer). Profiles:
+
+- `balanced` equals the current defaults (byte-identical to no profile).
+- `privacy_strict` is the strongest first-party privacy: no IP-derived
+  binding tag, behavioral evidence off, timing heuristic off.
+- `high_abuse` is the stronger abuse posture: risk enabled with raised
+  abuse-evidence weights, stricter per-source limits, decoy surface on.
+  It requires a Predis client.
+- `compatibility` maximizes integration compatibility: sha256, 300 s
+  TTL, binding off, protocol-v2 emission.
+
+The full matrix is in [configuration.md](configuration.md#protection-profiles).
+
+**`redis_dsn` builds the Redis-backed services automatically.** When the
+DSN is set, the bundle constructs the challenge storage
+(`KiwiCaptcha\Storage\RedisStorage` — the atomic backend production
+requires), the distributed issuance rate limiter, the Argon2id admission
+semaphore and (when risk is enabled) the risk state store. All of them
+run over one `Predis\Client` built from the DSN, which the bundle
+requires directly; the DSN path works out of the box with no extra
+install step.
+
+Without `redis_dsn` the bundle fails fast with a `LogicException` if
+`ArrayStorage` is configured outside the test/dev environment
+(`kernel.environment` or `APP_ENV`), since it cannot enforce single-use
+across workers.
+
+**Advanced escape hatch:** an explicit service id always wins over the
+DSN for its knob. Wire your own services when you need to:
+
+```yaml
+# config/services.yaml (example)
+services:
+    kiwicaptcha.storage.redis:
+        class: KiwiCaptcha\Storage\RedisStorage
+        arguments: ['@snc_redis.default']   # any \Redis or Predis\Client
+```
+
+```yaml
+# config/packages/kiwi_captcha.yaml
+kiwi_captcha:
+    protection_profile: balanced
+    secret_key: '%env(KIWI_SECRET_KEY)%'
+    public_base_url: '%env(KIWI_PUBLIC_URL)%'
+    redis_dsn: '%env(KIWI_REDIS_DSN)%'
+    storage: kiwicaptcha.storage.redis   # your storage wins over the DSN-built one
+    # redis_service: my.redis.client     # your client wins for the limiter/semaphore
+    # risk.redis_service: my.predis.client   # your Predis client wins for the risk state
+```
+
+`RedisStorage` uses an atomic pending→consumed Lua transition that
+retains the consumed record and its deterministic result through TTL. A
+later caller observes the consumed state instead of re-verifying (Redis
+6.2+). PSR-6 pools work but cannot express atomic get-and-delete, so
+single-use under concurrency is best-effort (read-then-delete).
+
+See [operations.md](operations.md) for the deployment requirements
+(rate limiting, trusted proxies, security Redis contract).
 
 > `KIWI_SECRET_KEY` is the same key used by the Rust implementation, so a
 > Symfony app and a Rust service can verify each other's challenges.
 
-**Production requires a shared storage (Redis).** The bundle fails fast with
-a `LogicException` if `ArrayStorage` is configured outside the test/dev
-environment (`kernel.environment` or `APP_ENV`), since it cannot enforce
-single-use across workers. Use `RedisStorage`, whose atomic pending→consumed
-Lua transition retains the consumed record and its deterministic result
-through TTL. A later caller observes the consumed state instead of
-re-verifying (Redis 6.2+). PSR-6 pools work but cannot express atomic
-get-and-delete, so single-use under concurrency is best-effort
-(read-then-delete). See [operations.md](operations.md) for the deployment
-requirements.
+> **Verified minimal configuration.** The quick start in
+> [configuration.md](configuration.md#quick-start-verified-flow) is the
+> verified flow (smoke-tested end to end): `secret_key`,
+> `public_base_url` and `redis_dsn` all accept Symfony `%env()%`
+> placeholders. A literal value is shape-validated at container build
+> time; an env-resolved value is validated when the client is
+> constructed, and a malformed resolved DSN fails closed with a typed
+> error naming the option.
 
-## First usage
+### 4. Include the widget
 
-### In a Form Type
-
+#### In a Form Type
 ```php
 use BelConsulting\KiwiCaptchaBundle\Form\Type\KiwiCaptchaType;
 
@@ -90,7 +171,7 @@ invalid values are rejected by the options resolver. With a
 driver writes the hidden `kiwi_request_binding` input into the form. See
 [Transaction binding](configuration.md#transaction-binding).
 
-### In a Template
+#### In a Template
 
 Add the form theme to `config/packages/twig.yaml`:
 
@@ -115,23 +196,40 @@ With a nonce, the emitted `<style>` and `<script>` tags carry `nonce="..."`;
 without one the widget still works under CSP that allows `'unsafe-inline'`,
 or where the application post-processes the HTML.
 
+### 5. Verify with the doctor
+
+```bash
+bin/console kiwicaptcha:doctor
+```
+
+The doctor validates the production environment against the wiring the
+extension actually built. It covers storage atomicity, Redis
+reachability, secret and keyring state, the canonical public origin,
+the client-IP policy, the central protocol floor and the protocol-v3
+writer consistency, the Argon envelope and concurrency invariants,
+SiteVerify and chained-challenge wiring, and the installed versions.
+Each check reports pass, warn or fail; a failed check exits non-zero.
+Resolve every failed check before going live. The check list is in
+[security-hardening.md](security-hardening.md#run-kiwicaptchadoctor-before-going-live).
+
 ## Content-Security-Policy
 
 WebAssembly requires `'wasm-unsafe-eval'` in `script-src` (`CSP3`). The
 embedded WASM solver is compiled at runtime, which strict policies must
 explicitly allow. SHA-256 mode falls back to pure JS when WASM is blocked.
 Argon2id mode requires WASM; no JS fallback exists for the memory-hard
-solver. The memory-hard solver runs in a Web Worker built from a Blob URL.
-See [SECURITY.md](../../../../../SECURITY.md#csp--worker-requirements) for
-the authoritative worker/CSP requirements.
+solver. The memory-hard solver always runs off the main thread in a Web
+Worker. See [SECURITY.md](../../../../../SECURITY.md#csp--worker-requirements)
+for the authoritative worker/CSP requirements.
 
-Recommended CSP profile:
+Recommended CSP profile (files mode, the default `asset_mode`):
 
 ```
 default-src 'self';
 script-src 'self' 'nonce-{NONCE}' 'wasm-unsafe-eval';
 style-src 'self' 'nonce-{NONCE}';
 connect-src 'self';
+worker-src 'self';
 object-src 'none';
 frame-src 'none';
 frame-ancestors 'none';
@@ -141,6 +239,21 @@ form-action 'self'
 
 `connect-src 'self'` means even a future JS regression cannot exfiltrate.
 At runtime the driver refuses cross-origin challenge endpoints.
+
+Worker directive per asset mode:
+
+- `files` (default): the worker is a same-origin Worker constructed from
+  the versioned `worker.<hash>.js` asset the driver fetched and
+  SRI-verified. `worker-src 'self'` is required; `blob:` is never
+  allowed. The stylesheet link, the driver script and the lazy runtime
+  and worker fetches are covered by `style-src 'self'`,
+  `script-src 'self'` and `connect-src 'self'`.
+- `inline` (compatibility / zero-request tier): the driver builds the
+  worker from a Blob URL of local code, so this tier needs
+  `worker-src blob:` instead.
+
+See [configuration.md](configuration.md#asset-delivery-asset_mode) for the
+delivery tiers and the bootstrap-size target.
 
 ## Challenge endpoint
 
@@ -228,7 +341,12 @@ across challenges, so it is safe to expose in application tables and logs.
 
 ## Next steps
 
-- [configuration.md](configuration.md): every configuration key.
+- [configuration.md](configuration.md): protection profiles and every
+  configuration key.
+- [flex-recipe.md](flex-recipe.md): the Flex recipe template and the
+  manual install equivalent.
+- [security-hardening.md](security-hardening.md): the integration layer
+  (what application teams must do) and the doctor check list.
 - [privacy.md](privacy.md): the privacy contract (privacy modes, telemetry,
   pseudonymous identities).
 - [risk-engine.md](risk-engine.md): the optional adaptive risk engine.

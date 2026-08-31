@@ -11,22 +11,24 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Definition;
 
 /**
- * The Argon admission lease/verification-runtime invariant: the Redis
+ * The Argon admission lease/verification-runtime SLO: the Redis
  * semaphore stores leases in a ZSET with `ZREMRANGEBYSCORE` pruning and
  * no renewal, so a lease that can expire while the Argon hash still
  * runs admits more derivations than the configured concurrency cap.
  * Renewal during the blocking native hash is impractical in PHP, so the
- * invariant is made mechanical.
- * The deployment bounds the maximum verification runtime
+ * deployment declares its SLO: the maximum verification runtime
  * (`argon2_max_verification_runtime_ms`) and the lease must exceed it
- * by the safety margin (5000 ms), refused at container compile time in
- * every environment with the exact message.
+ * by the safety margin (5000 ms).
+ * A misconfiguration is refused at container compile time in every
+ * environment with the exact message.
+ * The declared runtime is a deployment bound, never an enforced
+ * wall-clock timeout around the blocking hash.
  */
 final class ArgonLeaseInvariantConfigTest extends TestCase
 {
     private const SAFETY_MARGIN_MS = 5000;
 
-    private const MESSAGE = 'kiwi_captcha.argon2_lease_ms %d must exceed argon2_max_verification_runtime_ms %d by the safety margin of %d ms (%d <= %d + %d = %d): a Redis admission lease that can expire while an Argon2 verification is still running admits more derivations than the configured concurrency cap (ZREMRANGEBYSCORE pruning, no lease renewal), and the positive-feedback cycle (more contention -> longer hashes -> more expiries) amplifies it. Raise argon2_lease_ms or lower argon2_max_verification_runtime_ms; the runtime cap is the mechanical bound that guarantees the lease outlives any permitted verification.';
+    private const MESSAGE = 'kiwi_captcha.argon2_lease_ms %d must exceed argon2_max_verification_runtime_ms %d by the safety margin of %d ms (%d <= %d + %d = %d): a Redis admission lease that can expire while an Argon2 verification is still running admits more derivations than the configured concurrency cap (ZREMRANGEBYSCORE pruning, no lease renewal), and the positive-feedback cycle (more contention -> longer hashes -> more expiries) amplifies it. Raise argon2_lease_ms or lower argon2_max_verification_runtime_ms; the declared runtime is the deployment SLO that the lease must outlive by the margin (not an enforced wall-clock bound around the blocking hash).';
 
     private function load(array $options): void
     {

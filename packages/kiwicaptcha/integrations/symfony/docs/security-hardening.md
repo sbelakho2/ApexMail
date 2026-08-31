@@ -1,208 +1,205 @@
-# Security hardening
+# Security hardening (integration layer)
 
-The security properties of the bundle's endpoint and verification surface.
-The authoritative security document is [`SECURITY.md`](../../../../../SECURITY.md).
-Supported versions, vulnerability reporting, governance, asset/protocol-id coupling, CSP/worker requirements, proxy/IP-binding assumptions, Redis requirements, and the non-guarantees all live there.
-This page documents the bundle-level mechanisms.
-Where a property overlaps the security document, this page links there instead of re-explaining.
+This page is the integration layer: the actions an application team
+must take to run the bundle safely. It explains what to configure and
+what to preserve, not how every internal mechanism works. The deep
+rationale (rate-limit internals, admission math, failover replay
+safety, protocol rollouts, transport guidance) is SECURITY-MAINTAINER
+material in [operations.md](operations.md) and in the in-source
+invariants of the bundle. The authoritative security document is
+[`SECURITY.md`](../../../../../SECURITY.md): supported versions,
+vulnerability reporting, governance, CSP/worker requirements,
+proxy/IP-binding assumptions, Redis requirements and the
+non-guarantees all live there.
 
-## HTTP framing
+## Choose a protection profile
 
-The challenge endpoint rejects request-smuggling ambiguity before any body is read.
-A request carrying both `Content-Length` and `Transfer-Encoding`, or a duplicate `Content-Length` (two values), is refused with HTTP 400 `{"error":{"code":"FRAMING_REJECTED"}}`.
-Symfony's `HeaderBag` keeps every raw header value, so a crafted duplicate survives into the controller.
-At the wire level the proxy stack must reject the ambiguity first:
+Start from a policy, not from individual knobs. Set
+`kiwi_captcha.protection_profile` to one of `balanced`,
+`privacy_strict`, `high_abuse` or `compatibility` and let the profile
+fill safe derived defaults for the safety-relevant knobs you do not
+set. An explicitly configured knob always wins. The full matrix and
+rationale are in [configuration.md](configuration.md#protection-profiles).
 
-- **nginx**: reject requests carrying both framing families, a duplicate `Content-Length`, or `Transfer-Encoding` plus `Content-Length` (the classic CL.TE / TE.CL smuggling combos).
-  Reject `Transfer-Encoding` with anything but `chunked`.
-  Disallow request `Trailer` headers unless you actually process chunked trailers.
-  On any framing ambiguity respond 400 and close the connection (`Connection: close`).
-  Never reuse a connection whose framing was ambiguous:
+- `balanced` equals the current defaults; behavior is byte-identical
+  to no profile.
+- `privacy_strict` drops even the nonce-bound IP binding tag and every
+  behavioral evidence surface; the timing heuristic is off.
+- `high_abuse` enables the risk engine, so it requires a Predis
+  client; the extension fails fast without one.
+- `compatibility` maximizes integration compatibility: sha256, a
+  300 s TTL, binding off, protocol-v2 emission.
 
-  ```nginx
-  # Reject CL+TE / duplicate CL / trailers before the app sees them
-  server {
-      # exact-match rejections first
-      if ($http_transfer_encoding) {
-          if ($http_content_length) { return 400; }        # CL + TE
-          if ($http_transfer_encoding != "chunked") { return 400; }
-      }
-      if ($http_trailer) { return 400; }                    # trailers
-      # Duplicate Content-Length is normalized away by nginx itself
-      # (it keeps the first and logs a warning) — upgrade to a recent
-      # nginx that REJECTS duplicates outright, or check via a Lua
-      # module / WAF.
-      ...
-  }
-  ```
+## Configure the deployment basics
 
-(Prefer `nginx`'s native duplicate-CL rejection. Modern nginx refuses requests whose duplicate `Content-Length` headers disagree; test your version. A WAF rule that matches a raw duplicate `Content-Length` is the portable fallback.)
+The production checklist is short:
 
-- **Body ceiling at the edge**: the controller refuses challenge bodies over 8 KiB (413 `BODY_TOO_LARGE`).
-  Declared Content-Length is rejected before any body is read, and the read length is capped for chunked uploads.
-  Mirror the same cap in the proxy so the bytes never reach PHP at all:
+1. Shared atomic storage. Production refuses the in-memory storage.
+   Use `KiwiCaptcha\Storage\RedisStorage` (atomic pending-to-consumed
+   Lua transition, Redis 6.2+). The extension refuses non-atomic
+   backends in production unless the explicitly-named
+   `allow_best_effort_storage: true` escape hatch is set, which
+   deliberately accepts weaker concurrency semantics.
+2. Canonical public origin. Set `public_base_url` to the deployment's
+   https origin. The same-origin check compares against server config,
+   never the request Host header, so a forged Host can never widen the
+   origin check. Production with same-origin enforcement requires it
+   at compile time.
+3. Trusted proxies. In `symfony_trusted_proxies` mode (the default)
+   list the reverse proxies in `risk.trusted_proxies`. An empty list
+   trusts nobody: behind a load balancer every client then shares the
+   proxy IP, collapsing per-source rate limits and risk attribution.
+4. Redis for the distributed controls. Wire `redis_service` (or the
+   RedisStorage client) so the rate limiter and the Argon admission
+   semaphore enforce their caps across all workers. `risk.redis_service`
+   with a `Predis\Client` drives the risk state store when the engine
+   is enabled.
+5. Dedicated abuse-identity secrets. Configure stable `rate_limit_pepper`
+   and `risk.master_secret` values. They derive the keyed pseudonyms
+   behind the rate-limit and risk memory; a routine signing-key
+   rotation must not silently reset that memory.
+6. Size the security Redis correctly. The security Redis carries the
+   challenge state, the risk counters and the central policy hash.
+   `maxmemory-policy noeviction` is mandatory there: eviction is a
+   security incident, and `maxmemory` is sized for the worst case. The
+   contract is authoritative in
+   [`SECURITY.md`](../../../../../SECURITY.md#redis-requirements).
+7. For async-replication failover replay safety, set
+   `risk.redis.wait_replicas` on every durability-critical write and
+   align the promotion policy with the acknowledged replicas. The deep
+   failover analysis is maintainer material in
+   [operations.md](operations.md#replay-safety-redis-hardening).
 
-  ```nginx
-  location /kiwi-captcha/challenge {
-      client_max_body_size 8k;   # challenge bodies are tens of bytes
-      limit_except POST { deny all; }
-      ...
-  }
-  ```
+## Run kiwicaptcha:doctor before going live
 
-For Apache: `LimitRequestBody 8192` on the location.
-For Envoy: `max_request_bytes: 8192` in the HTTP connection manager.
-For CloudFront/ALB: the request size limits / WAF `Body` size rule.
+`bin/console kiwicaptcha:doctor` validates the production environment
+against the same wiring the extension built. It reports one status per
+check and exits non-zero when any check fails, so a deploy gate can
+refuse a broken environment. The checks:
 
-- **AWS ALB / NLG**: ALB rejects requests with both `Content-Length` and `Transfer-Encoding` (400) and requests with conflicting duplicate `Content-Length` values.
-  Identical duplicates are tolerated by some versions.
-  Add a WAF rule (`AWSManagedRulesCommonRuleSet` / `CrossSiteScripting` / a custom regex on the raw header) if you need strict rejection.
-- **General rule**: on any framing ambiguity, respond 400, close the connection, and log the peer.
-  Never let a downstream layer (php-fpm, proxy) pick one interpretation and continue.
+- storage atomicity, and Redis reachability for the storage/limiter
+  Redis and for the risk Redis when the engine is enabled.
+- secret validity (16+ bytes, no placeholder shape) and keyring state
+  (current kid, historical kids, revoked kids consistency).
+- the canonical public origin, and the client-IP policy (mode plus
+  trusted-proxy sanity).
+- the central `min_protocol_version` floor versus the protocols this
+  binary supports, and the protocol-v3 writer consistency.
+- the Argon memory envelope against the core ceilings, the
+  per-scope/global concurrency relation, and the lease-versus-runtime
+  SLO margin.
+- SiteVerify secrets and idempotency-store wiring.
+- chained-challenge prerequisites (chain store wired, Redis-backed
+  when required).
+- the bundle and core versions from the installed vendor.
 
-## Canonical request targets
+A check that cannot be evaluated reports warn, never a made-up pass:
+for example the application's CSP header cannot be inspected from the
+CLI, so the CSP check states the documented requirements and warns
+that they stay unverified. The page CSP must allow the widget:
+`script-src` with the nonce (or `unsafe-inline`) plus
+`wasm-unsafe-eval`, `style-src` for the styles, and `connect-src` for
+the challenge API. The worker directive depends on the asset mode.
+Files mode (the default) constructs a same-origin Worker from the
+fetched `worker.<hash>.js` asset, so `worker-src 'self'` applies and
+`blob:` is never required. The inline compatibility tier builds its
+worker from a Blob URL, so it needs `worker-src blob:`. With
+`asset_mode: files` the same directives cover the widget: the asset
+URLs are same-origin and the lazy runtime and worker fetches use
+`connect-src 'self'`. The recommended profile is in
+[getting-started.md](getting-started.md#content-security-policy).
 
-The challenge endpoint serves one canonical path (`{route_prefix}/challenge`, a fixed ASCII target).
-The controller rejects any noncanonical request target, measured on the raw `REQUEST_URI` rather than a normalized route, with HTTP 404 `{"error":{"code":"CANONICAL_PATH_REQUIRED"}}` before any handling:
+## Preserve the widget lifecycle
 
-- empty segments: `/kiwi-captcha//challenge`, `/challenge/` (trailing slash);
-- dot segments: `/./challenge`, `/foo/../challenge`;
-- percent-encoded bytes: `/%76hallenge` (encoding of the first path byte), `%2F`/`%5C` (encoded separators), double encodings.
-  The canonical path is pure ASCII, so any `%` in the path is a probe;
-- backslashes (Windows path separators on some stacks).
+The widget lifecycle is issue, solve, submit. Preserve it end to end:
 
-The bundle never redirects, rewrites, or normalizes a noncanonical target.
-The typed target does not exist on this server.
-The proxy stack must reach the same decision at the edge, preferably by rejecting there too, so the noncanonical bytes are dropped before they consume application resources:
+- Do not strip, reorder or rename the hidden inputs the widget driver
+  renders, including the authenticated decoy field. The issued decoy
+  is a signed part of the challenge record; mutating it after issuance
+  breaks the authenticated evidence and the solve can no longer
+  verify. Never copy a decoy name across challenges and never reuse a
+  submitted token for another transaction.
+- Keep the widget's POST uncompressed JSON and let the driver's
+  endpoint be the configured `route_prefix`. The endpoint rejects
+  noncanonical request targets, query parameters, compressed bodies
+  and unknown fields with documented error codes (see
+  [troubleshooting.md](troubleshooting.md)).
+- The challenge surface is public by design. No client-visible
+  identifier confers any privileged capability: the secret key, the
+  risk master secret and the rate-limit pepper live only in server
+  configuration. A payload carrying a `site_key`/`api_key`/`secret`-
+  style field is refused as an unknown-field probe.
 
-```nginx
-# nginx: reject noncanonical request targets before routing
-if ($request_uri ~ "(//|/\./|/\.\./|%[0-9a-fA-F]{2}|\\\\)") { return 404; }
-# (an even stricter posture: 404 any path containing '%' at all)
-```
+### Decoys are probabilistic evidence
 
-AWS ALB / CloudFront: add a WAF rule matching the same patterns on the request URI.
-Consider rejecting any `%` in the path, since the challenge path is fixed ASCII.
-The controller-level check is the second layer for direct invocations and for proxies that normalize.
-The edge rejection is the first.
+The bundle can arm an authenticated, challenge-bound decoy field
+(protocol v3) that a generic automation pipeline may fill. The decoy
+is signed into the challenge record and verified with it. Three
+properties are deliberate:
 
-## Duplicate security-singular headers
+- The decoy is probabilistic automation evidence, never a sole
+  security boundary. The security property of the product is the
+  proof-of-work cost; the decoy is one more signal among many.
+- The system remains secure even if an attacker knows the entire
+  architecture. Nothing about the decoy surface relies on secrecy of
+  design; adaptation-sensitive parameters are intentionally not
+  published.
+- The decoy is challenge-bound: a name issued for one challenge is
+  never meaningful for another, and a submitted decoy is verified
+  against the record it was issued with.
 
-Origin, Forwarded, X-Forwarded-For and X-Real-IP are security-singular headers.
-Each carries identity or forwarding trust and MUST appear at most once.
-A duplicate occurrence is parser ambiguity.
-One intermediary trusts the first value, another the last, so the same-origin check and the client-IP resolution would disagree.
-The challenge endpoint refuses it with HTTP 400 `{"error":{"code":"DUPLICATE_HEADER"}}` before any header-derived identity is trusted.
-The client-IP resolver treats a duplicate as ambiguous.
-The controller rejects it earlier, so the resolver is never consulted with one.
-The count is value-agnostic.
-Two identical values are still a duplicate.
-Symfony's `HeaderBag` keeps every raw value, so HTTP/1.1-style multi-line duplicates survive into the controller.
-At the wire level the proxy should also refuse them.
-Most servers collapse duplicates, so verify with a raw-socket test.
-A WAF rule on the raw headers is the portable fallback.
+### Protocol-v3 rollout is two-phase
 
-## Narrow HTTP + no decompression bombs
+Decoy-armed issuance emits protocol v3, which older binaries reject
+as unknown. The rollout gate makes that safe:
 
-The challenge endpoint accepts only `POST` with an uncompressed `application/json` body:
+1. Deploy the new binaries everywhere (still emitting v2).
+2. Raise the central floor: `HSET {kiwi:<ns>}:security-policy
+   min_protocol_version 3` (the readiness probe keeps any binary
+   whose max protocol is below the floor out of the pool).
+3. Enable the writer switch (`risk.decoy_v3_enabled: true`) on every
+   node.
+4. Only after the maximum challenge TTL may v2 compatibility be
+   retired.
 
-- the raw request target must be the canonical path, with no `//`, no `/./` or `/../`, no percent-encoded bytes, and no trailing slash.
-  A noncanonical target is 404 `CANONICAL_PATH_REQUIRED` before any handling.
-  See [Canonical request targets](#canonical-request-targets) above.
-- non-`POST` methods (including `OPTIONS` preflights) stay HTTP 405 with `Allow: POST`.
-  A preflight alone never authorizes anything.
-- HTTP framing ambiguity, meaning `Content-Length` plus `Transfer-Encoding` together or a duplicate `Content-Length`, is rejected with 400 `FRAMING_REJECTED` before the body is read.
-  See [HTTP framing](#http-framing) above.
-- duplicate security-singular headers, meaning `Origin`, `Forwarded`, `X-Forwarded-For`, or `X-Real-IP` appearing more than once, are rejected with 400 `DUPLICATE_HEADER` before any header-derived identity is trusted.
-  See [Duplicate security-singular headers](#duplicate-security-singular-headers) above.
-- `Content-Encoding` other than `identity` (gzip/br/deflate) is rejected with 415 `UNSUPPORTED_CONTENT_ENCODING` before the body is read.
-  There is no transparent decompression into unbounded memory.
-- a present `Content-Type` other than `application/json` (form-encoded, multipart, text/plain...) is rejected with 415 `UNSUPPORTED_MEDIA_TYPE`.
-- query parameters (`?debug=1`, `?skip_pow=1`, `?algorithm=...`) are rejected with 422 `QUERY_PARAMETERS_NOT_ALLOWED`.
-- a stale security-policy state (the epoch monitor's central read is past `risk.security_epoch_max_stale_secs`) refuses issuance with 503 `SERVICE_UNAVAILABLE`.
-  See [Bounded-revocation-latency security epoch](#bounded-revocation-latency-security-epoch) below.
-- duplicate JSON object keys in the raw body, like `{"scope":"login","scope":"signup"}`, are rejected with 422 `DUPLICATE_FIELD` (nested objects included) before decoding.
-- the JSON body must be an object with only the documented fields `scope`, `algorithm` (accepted for forward-compatibility; the issued algorithm always comes from the server), and `request_binding`.
-  Unknown fields are debug/override probes and get 422 `UNKNOWN_FIELDS`.
-  A non-object document gets 422 `INVALID_JSON`.
-
-The widget's own POSTs are plain uncompressed JSON and pass unchanged.
-
-## Challenge-issuance sequence
-
-The scoped syntactic rejection runs first and locally.
-An invalid scope/request-binding identifier (charset or > 128 bytes) is refused at 422 with zero Redis operations.
-A malformed identifier never touches shared infrastructure.
-Then, in order, every quota check runs before the challenge state is created: the process-local emergency cap (no Redis), the issuance rate limiter (per-client + global), the pre-issue risk assessment, the per-scope issuance cap, and the anti-stockpiling outstanding admission.
-With the configured TTL wired, the outstanding counters are admitted before the mint.
-A refused admission never creates challenge state.
-Only then the challenge is minted and stored.
-A Redis failure in any quota check propagates, so the system fails closed.
-No challenge is minted without a checked bound.
+The writer emits v3 only when the central floor confirms; on
+uncertainty it falls back to v2, the safe direction. The full
+procedure and its failure modes are maintainer material in
+[operations.md](operations.md#protocol-v3-two-phase-rollout).
 
 ## Same-origin enforcement
 
-When `same_origin_only` is true (default, and forced under strict), requests whose `Origin` header is not the application's own origin (scheme + host, constant-time compare) are rejected with HTTP 403 `{"error":{"code":"CROSS_ORIGIN_DENIED"}}` before any state is written.
-Cross-site abuse and CSRF-style challenge minting are stopped.
-Rejected requests consume no rate-limit budget.
-Requests without an `Origin` header (same-origin navigation, curl, non-browser clients) are allowed.
-The check happens before rate limiting, so an attacker's cross-origin traffic never pollutes the per-client window.
-
-### Host-context hardening
-
-The expected same-origin comes from server config, never from the `Host` header.
-Set `public_base_url` (for example `https://captcha.example.com`) and the check compares the request Origin against that canonical origin (structured normalization, with the same rules as the allowlist).
-A forged `Host: evil.example` header can never make `Origin: https://evil.example` look same-origin.
-The expected origin stays stable behind load balancers and shared hosting.
-Without `public_base_url` (null, the default, fine for localhost/dev) the expected origin is derived from the request's own scheme+host.
-Production deployments behind shared infrastructure should set it.
-The issuer itself never derives anything from `Host`.
-A forged Host cannot alter the issued challenge.
-Scope and the socket peer's binding tag are the only context.
-
-## Origin laundering defense (structured normalization)
-
-- `risk.challenge_origin_allowlist` (default `[]`): when non-empty, the challenge POST must carry an `Origin` header (or a `Referer`-origin fallback when `enforce_origin` is false) whose normalized scheme+host+effective-port matches one allowlisted origin.
-  Otherwise HTTP 403 `{"error":{"code":"origin_rejected"}}` before any captcha is issued.
-  No state is written and no rate-limit budget is consumed.
-  Requests with neither header cannot be matched and are rejected.
-  A launderer framing a victim browser cannot control the Origin of a cross-site request.
-  Raw HTTP bots without the header are rejected too.
-  Structured normalization: both sides of the comparison are canonicalized component-wise.
-  The scheme is lowercased.
-  The host is lowercased with the trailing dot stripped, and IDN is converted to punycode when ext-intl is available.
-  The effective port defaults per scheme (https 443, http 80).
-  IPv6 literals stay bracketed.
-  So `https://example.com` matches `https://example.com:443`, `https://EXAMPLE.COM`, `https://example.com.` and the `https://bücher.example` / `https://xn--bcher-kva.example` spellings.
-  It never matches `https://example.com:444`, `http://example.com`, `https://evil-example.com` or `https://example.com.evil.com`.
-- `risk.enforce_origin` (default `false`): when true, a request without an `Origin` header, or carrying the literal `"null"` Origin (opaque/sandboxed origins), is rejected with 403 `origin_rejected` even when the allowlist is empty.
-  With an allowlist the required Origin must additionally be allowlisted.
-  Server-to-server integrations (raw HTTP, no Origin) MUST keep `enforce_origin: false`.
-  That is the explicitly trusted mode (the Referer-origin fallback or no check at all).
-- `risk.enforce_fetch_metadata` (default `false`): when true, challenge requests whose `Sec-Fetch-Site` header is present and equals `cross-site` are rejected with HTTP 403 `{"error":{"code":"CROSS_SITE_REJECTED"}}`.
-  This is a browser-laundering signal.
-  Raw HTTP bots lack the header and are unaffected, so this is defense-in-depth only, never the security boundary.
+Keep `same_origin_only` on (the default, forced under strict privacy
+mode). Requests whose Origin is not the application origin are
+rejected with 403 `CROSS_ORIGIN_DENIED` before any state is written,
+so cross-site abuse and CSRF-style challenge minting are stopped.
+Rejected requests consume no rate-limit budget. Requests without an
+Origin header (same-origin navigation, curl, non-browser clients) are
+allowed. The expected origin comes from `public_base_url`, never from
+the Host header.
 
 ## CORS is not authorization
 
-The bundle emits no CORS headers, neither `Access-Control-Allow-Origin` nor `Access-Control-Allow-Methods`, on any response, success or error.
-Cross-origin access control for the application's own endpoints is the application / reverse-proxy's business.
-KiwiCaptcha's origin enforcement (same-origin + allowlist, above) is authorization and runs on every security response regardless of any CORS configuration.
-Because no CORS header is ever emitted, no `Vary: Origin` is needed either.
-If your reverse proxy adds CORS headers, it must add `Vary: Origin` itself on any response it decorates with `Access-Control-Allow-Origin`.
+The bundle emits no CORS headers on any response. Cross-origin access
+control for the application's own endpoints is the application or
+reverse proxy's business; KiwiCaptcha's origin enforcement is
+authorization and runs on every security response regardless of CORS.
+If your reverse proxy adds `Access-Control-Allow-Origin`, it must also
+add `Vary: Origin` on the decorated responses.
 
 ## Frame-ancestors CSP
 
-When `risk.challenge_origin_allowlist` is non-empty, every challenge response carries an explicit `Content-Security-Policy: frame-ancestors <allowlisted origins, space-separated>` header.
-The directive is always the full one, never inherited from `default-src`, so the allowlist is exactly the framing contract of the endpoint.
-An empty allowlist emits no CSP header.
-For the widget page (the application's own form page, whose response headers the bundle does not own) the Twig function `kiwi_captcha_csp_frame_ancestors()` returns the same directive (null when the allowlist is empty).
-Append it to the page's `Content-Security-Policy` header in your own listener/controller.
-`frame-ancestors` is ignored inside `<meta>` tags, so the header is the only effective delivery.
+When `risk.challenge_origin_allowlist` is non-empty, every challenge
+response carries `Content-Security-Policy: frame-ancestors
+<allowlisted origins>` and the Twig function
+`kiwi_captcha_csp_frame_ancestors()` returns the same directive for
+the application's own page header. Append it to the page's CSP in
+your own listener or controller. `frame-ancestors` is ignored inside
+`<meta>` tags, so the header is the only effective delivery.
 
 ## Private JSON responses
 
-Every response, success, error, 422, 429, or 403, is a private JSON document:
+Every response is a private JSON document:
 
 ```
 Cache-Control: no-store, private, max-age=0
@@ -211,87 +208,55 @@ Referrer-Policy: no-referrer
 X-Content-Type-Options: nosniff
 ```
 
-Challenge bytes and rate-limit signals are never cached or mirrored.
-No referrer leaks from the widget context.
-The JSON can never be re-sniffed as HTML.
-The health responses (`/health/live`, `/health/ready`) carry the same `Cache-Control: no-store` + `Pragma: no-cache` contract.
+Challenge bytes and rate-limit signals are never cached or mirrored;
+no referrer leaks from the widget context; the JSON can never be
+re-sniffed as HTML. Do not let an intermediary cache these responses.
 
 ## Sitekey publicity
-No client-visible identifier confers any privileged capability.
-The bundle defines three strictly separated credential classes:
 
-- Public site identifier: the challenge/verify surface is fully public by design.
-  `POST {prefix}/challenge` succeeds with no identifier at all.
-  The bundle's route surface is exactly challenge + health, so there is no admin route that could be keyed off a client-supplied value.
-  A payload carrying a `site_key`/`api_key`/`secret`-style field is refused as an unknown-field probe (422 `UNKNOWN_FIELDS`).
-  Client-supplied identifiers are never accepted, so none can be abused.
-- Server API credential: `kiwi_captcha.secret_key` (and `risk.master_secret`, `rate_limit_pepper`) signs/verifies challenges and derives every keyed pseudonym.
-  It must live only in server configuration/environment; the widget never receives it.
-  Dedicated, stable `risk.master_secret` and `rate_limit_pepper` keys are the normal deployment model: K_abuse-identity stays stable while K_signing rotates, see [configuration.md](configuration.md#signing-key-rotation-and-abuse-identity-secrets).
-  The identities they derive anchor the adaptive risk and rate-limit memory, so a routine signing-key rotation must not silently reset that memory.
-  The secret_key derivation defaults are a compatibility fallback, and the extension logs an advisory at container build time when rotation is configured without dedicated root keys.
+The challenge and verify surfaces are public by design. There is no
+admin route keyed off a client-supplied value. Keep the credential
+classes separate: the server API credential (`secret_key`,
+`risk.master_secret`, `rate_limit_pepper`) never reaches the widget;
+dedicated, stable abuse-identity secrets are the normal deployment
+model (see
+[configuration.md](configuration.md#signing-key-rotation-and-abuse-identity-secrets)).
 
 ## Strict current-kid verification
 
-With an empty `secrets_by_kid` map the core's legacy single-secret mode accepts ANY record kid under the current secret.
-That is the compatible default (`strict_kid_verification: false`), and it stays available.
-The hardening option is `strict_kid_verification: true`: strict keyring resolution is enabled even before the first rotation, so the verifier strictly resolves `record.kid == currentKid` from the very first deployment.
-With a non-empty historical map strict mode returns historical + current (rotation grace preserved), never the current key alone.
-Any other kid fails with `UnknownKid` before signature work, so an issuer holding the same HMAC secret under a different kid cannot verify unless issuer/region isolation is configured.
-Strict mode changes nothing once a historical ring exists, because the rotation ring is already exact per kid.
-The Siteverify security-context digest reflects the strict ring automatically, so a cached provider result cannot outlive a mode switch.
-See [configuration.md](configuration.md#production-hardening).
-- Admin + control-plane: the security Redis (policy hash, calibration state) and the deployment secrets are control-plane material with independent privileges: read vs write roles, scoped machine credentials, and audit logging.
-  See the control-plane threat model in [operations.md](operations.md#control-plane-threat-model).
-  No component of the client-facing protocol can reach this plane.
+`strict_kid_verification: true` makes the verifier resolve
+`record.kid == currentKid` exactly from the very first deployment,
+instead of the legacy any-kid single-secret mode. Enable it on a fresh
+deployment for an exact keyring; with a historical ring it changes
+nothing, because the rotation ring is already exact per kid. Any other
+kid then fails with `UnknownKid` before signature work.
 
 ## Identifier validation
 
-Scope/tenant identifiers and request bindings are validated against `[A-Za-z0-9._:-]+` with the 128-char ceiling before they reach the issuer.
-Separator, control and out-of-charset bytes can never be signed into a challenge record (scope: 422 `INVALID_SCOPE`; binding: 422 `INVALID_REQUEST_BINDING`).
-The static `risk.request_binding` is compile-time checked against the same charset.
-The verification side enforces exact equality between the signed record values and what the final POST carries, so a challenge minted under a valid identifier is never redeemable under a different one.
+Scope/tenant identifiers and request bindings are validated against
+`[A-Za-z0-9._:-]+` with the 128-char ceiling before they reach the
+issuer, so separator, control and out-of-charset bytes can never be
+signed into a challenge record (scope: 422 `INVALID_SCOPE`; binding:
+422 `INVALID_REQUEST_BINDING`). The verification side enforces exact
+equality between the signed record values and what the final POST
+carries, so a challenge minted under a valid identifier is never
+redeemable under a different one.
 
 ## Security-policy epoch (emergency revocation)
 
-`risk.policy_version` (default **1**, min 1) is the challenge security-policy epoch.
-The core Issuer signs it into every issued challenge record.
-The core Verifier, constructed with `expectedPolicyVersion = risk.policy_version`, rejects any record whose epoch differs (`WrongPolicyVersion`, collapsed to `invalid_or_expired` by the validator).
-Bumping it immediately invalidates all outstanding challenges.
-It is the emergency-revocation knob for origin/action-policy changes, a compromised tenant, or a protocol incident.
-Cosmetic configuration changes must NOT bump it, since every bump forces every live visitor to re-solve.
-It is independent of the risk-v1 contract version (which stays internal to the risk package) and of the readiness `min_policy_epoch`.
-See "Health endpoints" in [operations.md](operations.md#health-endpoints-rollback-resistant-readiness).
+`risk.policy_version` is the challenge security-policy epoch, signed
+into every issued record and enforced at verification. Bumping it
+immediately invalidates all outstanding challenges: it is the
+emergency-revocation knob for origin/action-policy changes, a
+compromised tenant, or a protocol incident. Cosmetic configuration
+changes must NOT bump it, since every bump forces every live visitor
+to re-solve.
 
-## Bounded-revocation-latency security epoch
-
-A redeploy is not required to revoke.
-The bundle's `SecurityEpochMonitor` reads the central policy hash `{kiwi:<ns>}:security-policy`'s `min_policy_epoch` field, the same key the readiness probe consults, with a short cache (`risk.security_epoch_cache_secs`, default 1 s, 1..30).
-It feeds the verifier's expected epoch per verification, so a central bump revokes outstanding challenges within one cache window on every running node.
-Three hardening properties:
-
-- **Monotonic max**: once a node observes epoch N it never accepts a lower epoch, even if the central value regresses.
-  A misconfigured rollback of the policy hash must not silently re-validate revoked challenges.
-  The observed max lives in-process on each node.
-- Fail-safe on Redis failure: when the central read fails (Redis down, timeout), the monitor serves the last observed max.
-  The newest epoch ever seen stays enforced, never a weaker one.
-- Bounded latency: the central value is re-read at most once per cache window.
-  Revocation latency is one TTL, never unbounded.
-- Max-stale fail-closed: `risk.security_epoch_max_stale_secs` (default **60** s, min 10 s) bounds how long a node may serve from a cached read.
-  Once `now > last_successful_read + max_stale`, the monitor reports stale, because the cached epoch may be outdated (an emergency revocation could have landed while the node could not read).
-  A stale monitor fails closed on both sides.
-  The validator returns the distinct `temporary_unavailable` violation (the token is not burned, retryable, never `invalid_or_expired`).
-  The challenge controller refuses issuance with HTTP 503 `{"error":{"code":"SERVICE_UNAVAILABLE"}}`.
-  The availability trade-off is deliberate and documented.
-  Within the window a bounded Redis outage keeps serving the cached max.
-  Past it the node stops issuing and stops verifying rather than trusting a potentially-revoked cache forever.
-  A deployment without a security Redis client (no central state by design) is never stale.
-  The configured epoch is authoritative.
-
-The effective epoch is `max(risk.policy_version, observedCentral)`.
-The local configuration is the floor (a node's own challenges must verify), and the central value only ever raises it.
-The readiness gate keeps a binary whose configured epoch is behind the central value out of the pool, so a serving node's floor is always >= the central value.
-Operation:
+Revocation without a redeploy: the central policy hash
+`{kiwi:<ns>}:security-policy` is re-read within
+`risk.security_epoch_cache_secs` on every node, and a bumped
+`min_policy_epoch` revokes outstanding challenges within one cache
+window:
 
 ```bash
 # Emergency revocation WITHOUT a redeploy: bump the central epoch (the
@@ -301,50 +266,23 @@ redis-cli HSET "{kiwi:<namespace>}:security-policy" \
     min_protocol_version 2 min_policy_epoch 2
 ```
 
-The issuance side must then also bump `risk.policy_version` before new challenges are minted.
-The monitor revokes old challenges.
-The issuer stamps the new epoch.
-
-## Replay-safety Redis hardening (WAIT replicas + TTL margin)
-
-`risk.redis` hardens the challenge storage when it is a `KiwiCaptcha\Storage\RedisStorage` definition.
-The knobs are applied to the storage service automatically:
-
-- `wait_replicas` (default 0 = disabled): a Redis `WAIT` follows every durability-critical write, including challenge issuance (`store()`), the pending→consumed transition (`consume()`), and the deterministic-result commit (`commitResult()`).
-  The acknowledgement count is verified.
-  Fewer than the requested replicas acked raises `KiwiCaptcha\Storage\ReplicaWaitException` and the operation fails closed (`ConsumeIndeterminate` in the verifier, issuance refused).
-  The challenge endpoint maps it to a private 503 `SERVICE_UNAVAILABLE`.
-  A configured barrier on a replica-less server fails closed by design.
-  The promise is unconditional.
-  Without it, an async-replication failover can lose the primary's un-replicated records.
-  After failback, a captured token replays against a "fresh" record the new primary never knew was consumed.
-  `wait_timeout_ms` (default 100) bounds the `WAIT`.
-  Promotion invariant: `WAIT N` proves that at least N replicas acknowledged the write.
-  It does not constrain which replicas your failover manager may promote.
-  For replay-safe promotion, set the threshold to cover every eligible failover target during the challenge lifetime, or configure the failover policy/topology so a lagging replica can never be promoted.
-  If that deployment invariant is absent, a promotion can resurrect a consumed record from a stale replica.
-- `ttl_margin_secs` (default 0): extra retention on challenge/replay-security state beyond the token validity window.
-  The consumed-state guards (the consumed-state single-use gate, the replayed-token checks) and the challenge records themselves must outlive token validity + max clock skew + failover margin.
-  Otherwise a replayed/expired token can land on state that already expired and re-accepted it.
-
-The operational contract for the security Redis, where `maxmemory-policy noeviction` is mandatory, eviction is a security incident, and `maxmemory` is sized for the worst case, is authoritative in [`SECURITY.md`](../../../../../SECURITY.md#redis-requirements).
+The issuance side must then also bump `risk.policy_version` before new
+challenges are minted. The monitor revokes old challenges; the issuer
+stamps the new epoch. The max-stale fail-closed window
+(`risk.security_epoch_max_stale_secs`) bounds how long a node serves
+from a cached read: past it, the node stops issuing and verifying
+rather than trusting a potentially-revoked cache.
 
 ## Asymmetric result receipts
 
-The result verification itself is central-only by design.
-The HMAC secret never leaves the server, so no third party can ever re-derive a verification result on its own.
-For exported results the bundle adds an optional Ed25519 receipt signer.
-Configure `risk.result_receipt_signing_key` (base64 32-byte Ed25519 seed, generated with `sodium_crypto_sign_seed_keypair()` and exported).
-On every valid verification the validator then signs the canonical receipt from the consumed record's own fields, the full replay-critical set:
-
-```json
-{"jti":"<challenge nonce>","tenant":"<scope>","action":"sha256|argon2id","request_binding":"<signed binding|null>","issued_at":<epoch seconds>,"expires_at":<epoch seconds>,"issuer":"<deployment issuer|null>"}
-```
-
-with `sodium_crypto_sign_detached` and exposes it via `KiwiCaptchaValidator::verifiedReceiptPayload()` (the exact signed JSON) and `KiwiCaptchaValidator::verifiedReceiptSignature()` (base64 64-byte detached signature).
-The payload is public by construction: jti, tenant (the flow scope), action (the PoW algorithm the challenge required), request_binding, issued_at/expires_at (epoch seconds, the record wire unit) and issuer.
-It holds no secret material.
-Customers verify with the public key, never the private seed:
+The result verification stays central-only: the HMAC secret never
+leaves the server. For exported results, configure
+`risk.result_receipt_signing_key` (base64 32-byte Ed25519 seed) and
+every valid verification yields an Ed25519 receipt over the canonical
+replay-critical payload, exposed via
+`KiwiCaptchaValidator::verifiedReceiptPayload()` and
+`::verifiedReceiptSignature()`. Customers verify with the public key
+derived from the seed, never the private seed:
 
 ```php
 // Hand the customer ONLY the public key:
@@ -357,12 +295,11 @@ sodium_crypto_sign_verify_detached(
 );
 ```
 
-**Single-use semantics**: signature verification alone is not sufficient for single-use actions.
-A valid signature proves the payload was signed by the server.
-It does not prove the jti has not already been consumed elsewhere.
-The receipt is an export; the consumption happened at the verifying server.
-An integrator accepting a receipt for a one-time action MUST additionally record the jti atomically and treat a pre-existing jti as a replay.
-The recommended primitive:
+The signature proves the payload was signed by the server; it does not
+prove the jti has not already been consumed elsewhere. The receipt is
+an export; the consumption happened at the verifying server. An
+integrator accepting a receipt for a one-time action MUST additionally
+record the jti atomically and treat a pre-existing jti as a replay:
 
 ```sql
 -- verify_and_consume: FIRST verify the signature + freshness (now <=
@@ -374,75 +311,58 @@ ON CONFLICT (jti) DO NOTHING
 RETURNING jti;          -- NULL row = the jti was already consumed
 ```
 
-The Redis equivalent is `SET captcha:receipt:<jti> 1 NX EX <ttl>`, where a nil reply means already consumed.
-Verify the signature first, then attempt the atomic insert.
-Execute the protected action only when the insert succeeded.
-This is `verify_and_consume`.
-Key the idempotency table on the jti alone (it is high-entropy, 256-bit random, never reused).
-`tenant`/`action`/`request_binding`/`expires_at` are the additional binding and freshness checks the payload now carries.
-Without the key, both accessors stay `null`.
-A failed verification never produces a receipt.
+The Redis equivalent is `SET captcha:receipt:<jti> 1 NX EX <ttl>`,
+where a nil reply means already consumed. Verify the signature first,
+then attempt the atomic insert; execute the protected action only when
+the insert succeeded. Key the idempotency table on the jti alone (it
+is high-entropy, 256-bit random, never reused).
 
 ## Ambiguous-consume deterministic retry
 
-The storage's `consume()` is a consumed-state transition.
-Records persist until their TTL with a `state` / `consumed_result`, and the verifier commits the derivation outcome (`commitResult(nonce, valid, binding)`).
-A re-verify of a consumed record with a stored result returns the same outcome without re-deriving.
-Without a stored result it returns `ConsumeIndeterminate`.
-The validator resolves both cases deterministically:
+The storage consume is a consumed-state transition. A re-verify of a
+consumed record with a stored result returns the same outcome without
+re-deriving; the validator resolves every retry deterministically:
 
-- Stored-result retry (a lost response, same binding): a re-submission of the same token with the same request binding returns the same success.
-  The canonical jti (`verifiedJti()`) and the stored signed binding (`verifiedRequestBinding()`) are exposed.
-  No second derivation happens (assertable via the storage counters: no second consume/commit).
-  No side effects repeat (risk feedback, post-solve assessment, outstanding decrement all ran exactly once on the original verification).
+- Stored-result retry, same binding: the same success, same jti and
+  signed binding; no second derivation, no repeated side effects.
 - Stored-result retry, different binding: `invalid_or_expired`.
-  A challenge bound to one transaction is never redeemable for another, retries included (the binding rule applied to the retry).
-- Stored invalid result: `invalid_or_expired`.
-  The original derivation failed; its outcome is authoritative.
-- Consumed without a committed result (the original attempt died mid-proof), or a still-pending record (the consume never landed), or no storage wired: the outcome stays indeterminate and collapses to the distinct public code `temporary_unavailable`.
-  It is retryable, never a guessed success, never `invalid_or_expired`.
-  The client must not be told its token is burned when it may still redeem.
-  A retry after recovery consumes and derives exactly once.
+- Stored invalid result: `invalid_or_expired` (the original derivation
+  failed; its outcome is authoritative).
+- Consumed without a committed result, or a still-pending record: the
+  distinct public code `temporary_unavailable`. It is retryable, never
+  a guessed success; the client must not be told its token is burned
+  when it may still redeem. A retry after recovery consumes and
+  derives exactly once.
 
-The validator's resolution reads the consumed state from the stored record (`ChallengeRecord::$consumed` / `$consumedResult` / `$consumedBinding`, the consumed-state core fields).
-The bundle probes them defensively, so cores predating the transition keep the legacy behavior.
-An ambiguous consume stays `temporary_unavailable` and a retry burns nothing.
+The application should treat `temporary_unavailable` as retryable and
+never as a hard captcha failure.
 
 ## Deterministic final disposition
 
-The verification result and the application-level outcome are two deterministic replay layers, both keyed by the challenge nonce:
+The verification result and the application-level outcome are two
+deterministic replay layers, both keyed by the challenge nonce. The
+durable post-solve disposition (`PASS`, `DENY`, `STEP_UP`,
+`CHAIN_REQUIRED`) is stored nonce-keyed, so a replayed valid proof
+reproduces the same application-level result: `DENY`, `STEP_UP` and
+`CHAIN_REQUIRED` can never be replayed into a `PASS`. Chained
+challenges extend this to the stage-2 transition; see
+[chained-challenges.md](chained-challenges.md).
 
-- Core `consumed_result`: the deterministic result of the cryptographic proof, committed to the consumed record by the verifier and replayed as-is on a re-submission.
-- `PostSolveDispositionStore`: the deterministic final result of the risk/application policy (`PASS` | `DENY` | `STEP_UP` | `CHAIN_REQUIRED`), stored nonce-keyed, so a replayed valid proof reproduces the same application-level result.
-  `DENY`, `STEP_UP` and `CHAIN_REQUIRED` can never be replayed into a `PASS`.
-  The store's lifetime covers the retained core result horizon.
+## Argon admission saturation-pressure bound
 
-Stage-2 issuance transitions the chain to issued.
-Only successful verification of that exact stage-2 nonce transitions it to the terminal verified state.
-See [chained-challenges.md](chained-challenges.md).
-
-## Argon2 admission saturation-pressure bound
-
-`argon2_saturation_pressure_cap` (default 64; the deprecated `argon2_max_waiters` name still works) bounds the Redis semaphore's saturation-pressure counter (`{..}:sem:waiters`, hash-tagged with the lease set).
-When a cap is saturated, each refused contender is counted with the lease lifetime's TTL.
-Once the counter exceeds the cap, with the boundary value equal to the cap not tripping, the acquire script returns its distinguishable capacity sentinel (`-1`) after removing the contender's own entry. `acquire()` maps it to the explicit fast-fail: null immediately, CapacityExceeded → the captcha violation / 429, no lease slot held, no counter residue. `RedisAdmissionSemaphore::lastAcquireFastFailed()` exposes the distinction so telemetry can tell a saturation storm from ordinary cap contention.
-Nothing queues, blocks or waits: admission is immediate and non-blocking, and the counter is a gauge of saturation pressure, never a queue.
-During an Argon2id saturation storm the gauge stays pinned at the cap: each over-cap contender's entry is removed in the same script, so the counter can never grow unboundedly.
-
-## Per-scope Argon2 concentration cap
-
-`argon2_max_per_tenant` (unset by default; the extension derives `max(1, global cap - 1)`, so with the default global cap of 2 the effective cap is 1; min 1 when explicit) gives every scope string its own Argon2id admission cap.
-The semaphore checks a per-scope lease set (`{kiwicaptcha:argon2:leases:<ns>}:<scope>`) in addition to the global `argon2_max_concurrent_verifications` cap.
-It is a concentration cap, not a guaranteed share and not a weighted-fair scheduler: with per-tenant below global it prevents one busy scope from monopolizing the shared capacity, but it never reserves a specific share for any tenant.
-Anti-monopoly across scopes requires a global concurrency of at least 2: with a global cap of exactly 1 there is only one shared slot, so no implementation can reserve capacity for another scope.
-Explicit values must be strictly below the global cap when the global cap is positive (a cap at or above the global cap can never bind, so the config tree refuses it).
-The global cap stays the deployment-wide memory invariant.
-The validator passes the constraint scope into `acquire()` (via the request-scope-aware gate wrapper).
-The saturation-pressure counter stays global.
-The in-process fallback gate has no per-scope cap (per-process, single-worker best-effort).
+`argon2_saturation_pressure_cap` bounds the Redis semaphore's
+saturation-pressure counter. When the counter exceeds the cap,
+admission fast-fails immediately with the distinguishable capacity
+sentinel: no slot held, nothing queued, no unbounded counter growth.
+`RedisAdmissionSemaphore::lastAcquireFastFailed()` exposes the
+distinction so telemetry can tell a saturation storm from ordinary cap
+contention. The per-scope concentration cap (`argon2_max_per_tenant`)
+gives every scope its own admission cap strictly below the global cap;
+the deep scheduling math is maintainer material in
+[operations.md](operations.md#argon2id-verification-concurrency-cap).
 
 ## Related documents
 
 - [`SECURITY.md`](../../../../../SECURITY.md), the authoritative security document.
-- [operations.md](operations.md): ingress limits, health endpoints, and the control-plane threat model.
+- [operations.md](operations.md): the SECURITY-MAINTAINER layer (rate-limit internals, admission math, failover replay safety, protocol rollouts, transport guidance).
 - [claims-registry.md](claims-registry.md): the tests that pin these properties.

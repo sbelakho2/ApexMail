@@ -59,16 +59,20 @@ pub struct IssuedChallenge {
     /// auto-fills it — a submission that carries a value in it is bot
     /// evidence (the risk engine's `DecoyFieldSubmitted` event /
     /// `honeypot_hit` signal). The name is authenticated: it is signed
-    /// into the v2 canonical payload as the final `|<decoy_field>` segment
-    /// (see [`crate::challenge::canonical_signing_input_v2`]), so a
-    /// client cannot strip or swap it without breaking the signature the
-    /// verifier re-checks (the final `|<decoy_field>` segment of the v2
-    /// canonical signing input, see the `challenge` module docs).
+    /// into the protocol v3 canonical payload as the final
+    /// `|<decoy_field>` segment (see
+    /// [`crate::challenge::canonical_signing_input_v2`]), so a client
+    /// cannot strip or swap it without breaking the signature the
+    /// verifier re-checks. An armed challenge is issued as
+    /// `protocol_version == 3`.
     ///
-    /// Wire-compatible both ways: the key is absent from the JSON when no
-    /// decoy is armed (`skip_serializing_if = "Option::is_none"`), which
-    /// is the old behavior, and old payloads (no key) deserialize with
-    /// `None`.
+    /// Wire compatibility: unarmed challenges are byte-identical to the
+    /// pre-decoy format — the key is absent from the JSON when no decoy
+    /// is armed (`skip_serializing_if = "Option::is_none"`), which is the
+    /// old behavior, and old payloads (no key) deserialize with `None`. A
+    /// decoy-armed challenge is protocol v3 and requires a v3-capable
+    /// verifier (an old verifier rejects version 3 as unknown — the
+    /// capability is inferable from `protocol_version`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decoy_field: Option<String>,
 }

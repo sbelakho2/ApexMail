@@ -207,7 +207,7 @@ final class KidRotationWiringTest extends TestCase
     {
         // The recovery-claim TTL is wired by name ($resumeClaimTtlSecs)
         // only when the installed core's Verifier declares the parameter
-        // (added in the round-94 core; Symfony's ResolveNamedArgumentsPass
+        // (a core addition; Symfony's ResolveNamedArgumentsPass
         // refuses a named argument the class does not declare). This
         // assertion flips to the strict branch automatically once the
         // parameter lands in kiwicaptcha-php.

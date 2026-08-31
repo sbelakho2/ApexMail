@@ -711,23 +711,42 @@ function recoverIssuedResponse(string $stage2Nonce): ?array
 /**
  * Mint a challenge (sha256-8 stage-1 or the stronger argon stage-2) and
  * persist its record file, mirroring the bundle's /challenge issuance.
+ * With $armDecoy the issuance goes through the real authenticated
+ * decoy path (issueWithDecoyField: protocol-v3 record, the decoy name
+ * signed into the canonical payload), the mirror of the bundle's
+ * risk.decoy_v3_enabled issuance. $pinnedDecoy (fixture-only) pins the
+ * armed name so a spec can force a deliberate collision with an
+ * application field; the pinned name is signed into the record exactly
+ * like any other armed name.
+ *
+ * $shaBits / $argonBits / $argonMKib are opt-in difficulty
+ * overrides (the client-performance lab's ?bits= / ?argon_bits= /
+ * ?m_kib= knobs). The defaults reproduce the historical fixture
+ * byte-for-byte, and every value is clamped to the same ceilings the
+ * core enforces, so a malformed override falls back to the default
+ * instead of crashing the fixture.
  */
-function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm): ?array
+function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm, bool $armDecoy = false, ?int $ttlOverride = null, ?string $pinnedDecoy = null, int $shaBits = 8, int $argonBits = 4, int $argonMKib = 64): ?array
 {
+    $shaBits = min(max($shaBits, 1), Config::MAX_SHA_TARGET_BITS);
+    $argonBits = min(max($argonBits, 1), Config::MAX_ARGON2_TARGET_BITS);
+    $argonMKib = min(max($argonMKib, 8), 65536);
     $config = new Config(
         secretKey: $GLOBALS['kiwi_secret'],
         algorithm: $algorithm,
-        ttlSecs: 120,
-        mKib: $algorithm === PoWAlgorithm::Argon2id ? 64 : 0,
+        ttlSecs: $ttlOverride ?? 120,
+        mKib: $algorithm === PoWAlgorithm::Argon2id ? $argonMKib : 0,
         t: $algorithm === PoWAlgorithm::Argon2id ? 3 : 1,
         p: 1,
-        targetBits: 8,
-        argon2TargetBits: 4,
+        targetBits: $shaBits,
+        argon2TargetBits: $argonBits,
         minDurationMs: 0,
     );
     $storage = new ArrayStorage();
     $issuer = new Issuer($config, $storage, now: static fn (): int => time());
-    $challenge = $issuer->issue($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), $binding);
+    $challenge = $armDecoy
+        ? $issuer->issueWithDecoyField($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), true, $binding, null, $pinnedDecoy)
+        : $issuer->issue($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), $binding);
     $record = $storage->find($challenge->nonce);
     if ($record === null) {
         return null;
@@ -919,21 +938,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
         writeCapture($_GET['capture'], $rawBody);
     }
     $body = json_decode($rawBody, true);
-    $algorithm = ($body['algorithm'] ?? 'sha256') === 'argon2id' ? PoWAlgorithm::Argon2id : PoWAlgorithm::Sha256;
+    // ?escalate=argon mirrors the adaptive risk escalation: the server
+    // issues a memory-hard challenge even though the widget asked for the
+    // SHA-256 profile (the driver accepts the stronger algorithm and
+    // lazily fetches the WASM runtime in files mode).
+    $escalated = ($_GET['escalate'] ?? '') === 'argon';
+    $requestedArgon = ($body['algorithm'] ?? 'sha256') === 'argon2id';
+    $algorithm = $escalated || $requestedArgon ? PoWAlgorithm::Argon2id : PoWAlgorithm::Sha256;
     $ttlOverride = isset($_GET['ttl']) ? max(1, (int) $_GET['ttl']) : null;
-    $config = new Config(
-        secretKey: $secret,
-        algorithm: $algorithm,
-        ttlSecs: $ttlOverride ?? 120,
-        mKib: $algorithm === PoWAlgorithm::Argon2id ? 64 : 0,
-        t: $algorithm === PoWAlgorithm::Argon2id ? 3 : 1,
-        p: 1,
-        targetBits: 8,
-        argon2TargetBits: 4,
-        minDurationMs: 0,
-    );
-    $issueStorage = new ArrayStorage();
-    $issuer = new Issuer($config, $issueStorage, now: static fn (): int => time());
     // The bundle maps incumbent sitekeys -> policy scopes server-side
     // (sitekey_allowlist); the fixture mirrors that mapping so compat
     // challenges are issued under the intended scope.
@@ -994,17 +1006,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     // when redeemed under txn-B — the stored proof really carries the
     // binding, exactly like the bundle's issuance.
     $presentedBinding = isset($body['request_binding']) && is_string($body['request_binding']) ? $body['request_binding'] : null;
-    $challenge = $issuer->issue($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), $presentedBinding);
-    $record = $issueStorage->find($challenge->nonce);
-    if ($record === null) {
+    // ?decoy=pool&decoyname=<name> pins the authenticated armed name (the
+    // fixture-only issuer seam signs the pinned name into the record), so
+    // a spec can force a deliberate collision with an application field.
+    $pinnedDecoy = (string) ($_GET['decoyname'] ?? '');
+    $pinnedDecoy = $pinnedDecoy !== '' && preg_match('/^[A-Za-z0-9_-]{1,64}$/D', $pinnedDecoy) === 1 ? $pinnedDecoy : null;
+    // Client-performance-lab difficulty knobs (opt-in; the defaults
+    // reproduce the historical fixture): ?bits=<1..20> overrides the
+    // SHA-256 target bits, ?argon_bits=<1..10> and ?m_kib=<8..65536>
+    // override the Argon2id target bits and memory envelope. Malformed
+    // values fall back to the defaults inside mintChallenge.
+    $shaBits = ctype_digit((string) ($_GET['bits'] ?? '')) ? (int) $_GET['bits'] : 8;
+    $argonBits = ctype_digit((string) ($_GET['argon_bits'] ?? '')) ? (int) $_GET['argon_bits'] : 4;
+    $argonMKib = ctype_digit((string) ($_GET['m_kib'] ?? '')) ? (int) $_GET['m_kib'] : 64;
+    $challenge = mintChallenge($scope, $presentedBinding, $algorithm, ($_GET['decoy'] ?? '') === 'pool', $ttlOverride, $pinnedDecoy, $shaBits, $argonBits, $argonMKib);
+    if ($challenge === null) {
         http_response_code(500);
         echo '{"error":"record missing"}';
 
         return true;
     }
-    $tmp = tempnam(sys_get_temp_dir(), 'kiw'); 
-    file_put_contents($tmp, json_encode($record->toArray()));
-    rename($tmp, recordFile($challenge->nonce));
     // Provider-compatible metadata bound at issuance —
     // action/cData from the widget's challenge request are stored against
     // the nonce (server-owned; validated provider shapes).
@@ -1025,16 +1046,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
         }
         $metaTmp = tempnam(sys_get_temp_dir(), 'kiwm');
         file_put_contents($metaTmp, json_encode(['action' => $action, 'cdata' => $cdata]));
-        rename($metaTmp, metadataFile($challenge->nonce));
+        rename($metaTmp, metadataFile($challenge['nonce']));
     }
     header('Content-Type: application/json');
     header('Cache-Control: no-store, private, max-age=0');
-    $out = $challenge->toArray();
+    $out = $challenge;
     // Risk-v2 fixture: ?decoy=1 makes the fixture emit the server-issued
     // decoy (honeypot) field name, mirroring the bundle's risk-enabled
-    // issuance response.
+    // issuance response. The name is a grammar prefix (deterministic per
+    // nonce) plus a fresh random suffix — the response-only surface, the
+    // record itself is unarmed; ?decoyname=... overrides the emitted name
+    // with a fixed one, so specs can pin the exact name (for ?decoy=pool
+    // it pins the authenticated armed name too, see mintChallenge).
     if (($_GET['decoy'] ?? '') === '1') {
-        $out['decoy_field'] = 'decoy_'.substr(hash('sha256', $challenge->nonce), 0, 8);
+        $override = (string) ($_GET['decoyname'] ?? '');
+        if ($override !== '' && preg_match('/^[A-Za-z0-9_-]{1,64}$/D', $override) === 1) {
+            $out['decoy_field'] = $override;
+        } else {
+            $h = hash('sha256', $challenge['nonce']);
+            $out['decoy_field'] = Issuer::composeDecoyName(
+                hexdec(substr($h, 0, 2)) % \count(Issuer::DECOY_GRAMMAR_SLOT1_QUALIFIER),
+                hexdec(substr($h, 2, 2)) % \count(Issuer::DECOY_GRAMMAR_SLOT2_CATEGORY),
+                hexdec(substr($h, 4, 2)) % \count(Issuer::DECOY_GRAMMAR_SLOT3_FORM),
+            );
+        }
+    }
+    // ?strategy=N emits the non-authenticated rendering-strategy hint
+    // (0-5) the widget driver honors when present, so the three-engine
+    // lane can force every polymorphic variant deterministically.
+    // Production responses omit it.
+    if (($_GET['strategy'] ?? '') !== '' && ctype_digit((string) $_GET['strategy'])) {
+        $strategy = (int) $_GET['strategy'];
+        if ($strategy >= 0 && $strategy <= 5) {
+            $out['strategy'] = $strategy;
+        }
     }
     echo json_encode($out);
 
@@ -1297,6 +1342,64 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/siteverify' || $path =
     return true;
 }
 
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/honeypot-check') {
+    // The form-submission honeypot fixture: the mirror of the bundle
+    // validator's formDecoyEvidence. After a valid verification the
+    // submitted form is checked for a non-empty value under the exact
+    // authenticated decoy name of the verified outcome (the protocol-v3
+    // record's decoyField, the same name the challenge response
+    // carried). Any other field name is ignored: a decoy name is
+    // server-issued and a mismatched name is not this challenge's
+    // decoy. Evidence only, never a gate: the proof outcome decides.
+    $rawBody = (string) file_get_contents('php://input');
+    $body = json_decode($rawBody, true);
+    $fields = [];
+    if (is_array($body) && isset($body['form']) && is_array($body['form'])) {
+        $fields = $body['form'];
+    } else {
+        parse_str($rawBody, $fields);
+    }
+    header('Content-Type: application/json');
+    $token = (isset($fields['kiwi__token']) && is_string($fields['kiwi__token'])) ? $fields['kiwi__token'] : '';
+    if ($token === '' && is_array($body) && isset($body['token']) && is_string($body['token'])) {
+        $token = $body['token'];
+    }
+    $nonce = (string) (explode('.', (string) base64_decode($token, true))[0] ?? '');
+    if ($nonce === '' || !is_file(recordFile($nonce))) {
+        echo json_encode(['ok' => false, 'code' => 'record_not_found']);
+
+        return true;
+    }
+    $storage = new ArrayStorage();
+    $record = \KiwiCaptcha\ChallengeRecord::fromArray(json_decode((string) file_get_contents(recordFile($nonce)), true));
+    $storage->store($record);
+    $scope = (isset($body['scope']) && is_string($body['scope'])) ? $body['scope'] : 'login';
+    $outcome = (new Verifier($storage))->verify($token, $secret, $scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), expectedRequestBinding: $record->requestBinding);
+    if ($outcome->isOk()) {
+        @unlink(recordFile($nonce));
+    } else {
+        echo json_encode(['ok' => false, 'code' => $outcome->code()]);
+
+        return true;
+    }
+    $decoyField = \method_exists($outcome, 'decoyField') ? $outcome->decoyField() : null;
+    $honeypotHit = false;
+    if (\is_string($decoyField) && $decoyField !== '') {
+        // Array-shaped parameters under the decoy name (e.g.
+        // billing_address_line[]=x) are not a scalar decoy value: the
+        // deterministic answer is no hit, never an error. A forced
+        // same-name collision with an application field parses to a
+        // single value that may read as a hit; the guarantee is that an
+        // accidental collision is impossible (the 64-bit suffix), and
+        // the response is always deterministic — never a 500.
+        $value = $fields[$decoyField] ?? null;
+        $honeypotHit = \is_string($value) && $value !== '';
+    }
+    echo json_encode(['ok' => true, 'honeypot_hit' => $honeypotHit, 'decoy_field' => $decoyField]);
+
+    return true;
+}
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/verify') {
     $body = json_decode((string) file_get_contents('php://input'), true);
     header('Content-Type: application/json');
@@ -1347,6 +1450,60 @@ if ($path === '/kiwi-worker.js' || $path === '/kiwicaptcha-wasm.js' || $path ===
         $body = str_replace('2026-08-r2', '2026-08-r0', (string) $body);
     }
     echo $body;
+
+    return true;
+}
+
+// ── Files-mode versioned asset route (asset_mode "files") ──────────────
+// GET /kiwi-captcha/assets/{name}.{sha256-12}.{js|css} serves the exact
+// bytes the inline page embeds, with the content hash in the URL, a long
+// immutable cache lifetime, the Content-Length and the content-hash
+// ETag. An unknown hash is a 404, exactly like the bundle's
+// AssetController (the fixture mirrors the bundle route; the spec asserts
+// the headers, the 404 and the 304 revalidation).
+$assetSpecs = [
+    'widget' => ['file' => 'widget.css', 'type' => 'text/css; charset=UTF-8'],
+    'runtime' => ['file' => 'kiwicaptcha-wasm.js', 'type' => 'application/javascript; charset=UTF-8'],
+    'driver' => ['file' => 'widget-driver.js', 'type' => 'application/javascript; charset=UTF-8'],
+    'worker' => ['file' => 'kiwi-worker.js', 'type' => 'application/javascript; charset=UTF-8'],
+];
+if (preg_match('~^/kiwi-captcha/assets/(widget|runtime|driver|worker)\.([0-9a-f]{12})\.(js|css)$~', $path, $m) === 1) {
+    [, $assetName, $assetHash, $assetExt] = $m;
+    $spec = $assetSpecs[$assetName];
+    if (($assetName === 'widget' ? 'css' : 'js') !== $assetExt) {
+        http_response_code(404);
+        echo 'not found';
+
+        return true;
+    }
+    $assetBody = @file_get_contents($repo.'/packages/kiwicaptcha-wasm/assets/'.$spec['file']);
+    if ($assetBody === false || $assetBody === '') {
+        http_response_code(404);
+        echo 'not found';
+
+        return true;
+    }
+    $assetFull = hash('sha256', $assetBody);
+    if (!hash_equals(substr($assetFull, 0, 12), $assetHash)) {
+        http_response_code(404);
+        echo 'not found';
+
+        return true;
+    }
+    $assetEtag = '"'.$assetFull.'"';
+    if (($_SERVER['HTTP_IF_NONE_MATCH'] ?? '') === $assetEtag) {
+        header('ETag: '.$assetEtag);
+        header('Cache-Control: public, max-age=31536000, immutable');
+        http_response_code(304);
+
+        return true;
+    }
+    header('Content-Type: '.$spec['type']);
+    header('Cache-Control: public, max-age=31536000, immutable');
+    header('ETag: '.$assetEtag);
+    header('Content-Length: '.\strlen($assetBody));
+    header('X-Content-Type-Options: nosniff');
+    echo $assetBody;
 
     return true;
 }
@@ -1425,16 +1582,73 @@ if ($path === '/' || $path === '/index.html') {
     // with the explicit data-kiwi-risk-context="coarse" opt-in attribute
     // (without it the driver never sends client_context).
     $endpointQuery = [];
-    if (($_GET['decoy'] ?? '') === '1') $endpointQuery[] = 'decoy=1';
+    $decoyParam = (string) ($_GET['decoy'] ?? '');
+    if ($decoyParam === '1' || $decoyParam === 'pool') $endpointQuery[] = 'decoy='.$decoyParam;
+    if (($_GET['decoyname'] ?? '') !== '') $endpointQuery[] = 'decoyname='.rawurlencode((string) $_GET['decoyname']);
+    if (($_GET['strategy'] ?? '') !== '' && ctype_digit((string) $_GET['strategy'])) $endpointQuery[] = 'strategy='.rawurlencode((string) $_GET['strategy']);
     if (($_GET['chaining'] ?? '') === '1') $endpointQuery[] = 'chaining=1';
     if (($_GET['ttl'] ?? '') !== '') $endpointQuery[] = 'ttl='.rawurlencode((string) $_GET['ttl']);
     if (($_GET['capture'] ?? '') !== '') $endpointQuery[] = 'capture='.rawurlencode((string) $_GET['capture']);
+    if (($_GET['escalate'] ?? '') === 'argon') $endpointQuery[] = 'escalate=argon';
+    // Client-performance-lab difficulty knobs, propagated to the
+    // challenge endpoint (opt-in; absent = the historical fixture):
+    // ?bits=<1..20> (SHA-256 target bits), ?argon_bits=<1..10> and
+    // ?m_kib=<8..65536> (Argon2id target bits and memory envelope).
+    foreach (['bits', 'argon_bits', 'm_kib'] as $labKnob) {
+        if (($_GET[$labKnob] ?? '') !== '' && ctype_digit((string) $_GET[$labKnob])) {
+            $endpointQuery[] = $labKnob.'='.rawurlencode((string) $_GET[$labKnob]);
+        }
+    }
+    // Multi-widget page (opt-in): ?widgets=N renders N widget
+    // containers, all auto-initialized by the driver (the
+    // client-performance lab's multiple-widget scenario). The default
+    // N=1 keeps the historical single-container markup byte-identical.
+    $widgets = (int) ($_GET['widgets'] ?? 1);
+    if ($widgets < 1 || $widgets > 4) $widgets = 1;
     $endpoint = '/challenge'.($endpointQuery !== [] ? '?'.implode('&', $endpointQuery) : '');
     $chainAttr = ($_GET['chain'] ?? '') !== '' ? ' data-kiwi-chain-ticket="'.htmlspecialchars((string) $_GET['chain'], ENT_QUOTES).'"' : '';
     $riskContextAttr = ($_GET['risk-context'] ?? '') === 'coarse' ? ' data-kiwi-risk-context="coarse"' : '';
+    // Files-mode variant (?assets=files): mirrors the bundle theme's
+    // files tier — the stylesheet link and the driver script are emitted
+    // once (the page-level dedup registry), the runtime and the worker
+    // stay lazy (data-kiwi-runtime-src + data-kiwi-worker-src with their
+    // SRI digests on each container; the driver fetches them only when a
+    // memory-hard challenge arrives), and the inline style/script blocks
+    // are omitted.
+    $filesMode = ($_GET['assets'] ?? '') === 'files';
+    $assetTags = '';
+    $runtimeAttr = '';
+    $workerAttrFiles = '';
+    if ($filesMode) {
+        $assetFiles = [
+            'widget' => 'widget.css',
+            'runtime' => 'kiwicaptcha-wasm.js',
+            'driver' => 'widget-driver.js',
+            'worker' => 'kiwi-worker.js',
+        ];
+        $assetLink = static function (string $name, string $ext) use ($repo, $assetFiles): array {
+            $body = (string) file_get_contents($repo.'/packages/kiwicaptcha-wasm/assets/'.$assetFiles[$name]);
+            $full = hash('sha256', $body);
+
+            return [
+                'url' => '/kiwi-captcha/assets/'.$name.'.'.substr($full, 0, 12).'.'.$ext,
+                'sri' => 'sha256-'.base64_encode(hash('sha256', $body, true)),
+            ];
+        };
+        $widgetAsset = $assetLink('widget', 'css');
+        $driverAsset = $assetLink('driver', 'js');
+        $runtimeAsset = $assetLink('runtime', 'js');
+        $workerAsset = $assetLink('worker', 'js');
+        $assetTags = '<link rel="stylesheet" href="'.$widgetAsset['url'].'" integrity="'.$widgetAsset['sri'].'">'."\n"
+            .'<script src="'.$driverAsset['url'].'" integrity="'.$driverAsset['sri'].'"></script>'."\n";
+        $runtimeAttr = ' data-kiwi-runtime-src="'.$runtimeAsset['url'].'" data-kiwi-runtime-integrity="'.$runtimeAsset['sri'].'"';
+        $workerAttrFiles = ' data-kiwi-worker-src="'.$workerAsset['url'].'" data-kiwi-worker-integrity="'.$workerAsset['sri'].'"';
+    }
     header('Content-Type: text/html');
-    echo "<!DOCTYPE html><html lang=\"en\"><head><title>KiwiCaptcha widget test page</title><style>{$css}</style>{$csp}</head><body>
-<div class=\"kiwi-container\" id=\"kiwicaptcha-root\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}>
+    $containers = '';
+    for ($i = 1; $i <= $widgets; ++$i) {
+        $containerId = $widgets === 1 ? 'kiwicaptcha-root' : 'kiwicaptcha-root-'.$i;
+        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$runtimeAttr}{$workerAttrFiles}>
   <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />
   <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\">
     <div class=\"kiwi-icon-wrapper\"><svg></svg><div class=\"kiwi-glow\"></div></div>
@@ -1445,7 +1659,11 @@ if ($path === '/' || $path === '/index.html') {
     </div>
   </div>
 </div>
-<script>{$wasm}</script><script>{$driver}</script></body></html>";
+";
+    }
+    $inlineScripts = $filesMode ? '' : '<script>'.$wasm.'</script><script>'.$driver.'</script>';
+    echo "<!DOCTYPE html><html lang=\"en\"><head><title>KiwiCaptcha widget test page</title><style>{$css}</style>{$csp}{$assetTags}</head><body>
+{$containers}{$inlineScripts}</body></html>";
 
     return true;
 }

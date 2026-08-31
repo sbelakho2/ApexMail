@@ -501,7 +501,7 @@ final class RiskGateway
 
     /**
      * Null-safe extraction of the core VerifyOutcome's additive
-     * solve-duration surface, a round-97 core addition computed from the
+     * solve-duration surface, a core addition computed from the
      * unforgeable issuedAtNs. Returns the measured duration in
      * milliseconds when the installed core exposes it, method or public
      * property, ms first with a microsecond variant converted. Returns

@@ -61,12 +61,16 @@ final class RiskProfileResolver
      * expected Argon2id evaluations at the fixed 16 MiB envelope) must
      * be calibrated against physical low-end mobile hardware: cheap and
      * mid-range Android, older and recent iPhone, battery-saver and
-     * thermal-throttled states. Measure p50/p90/p99 solve time and
-     * failure rate; desktop estimates do not transfer. The rung must
-     * never be weakened based on client-reported device capabilities,
-     * since bots lie. If it proves too expensive for legitimate mobile
-     * users, adjust the server-selected ladder globally or transition
-     * earlier to StepUp.
+     * thermal-throttled states. Measure p50/p95/p99 solve time and
+     * failure rate; desktop estimates do not transfer. The lab is
+     * tools/client-perf (the client-performance harness): the emulation
+     * tiers are runnable now and are the regression signal. The
+     * physical-device tiers are the release boundary; see
+     * tools/client-perf/README.md "Release qualification" for the
+     * procedure. The rung must never be weakened based on
+     * client-reported device capabilities, since bots lie. If it proves
+     * too expensive for legitimate mobile users, adjust the
+     * server-selected ladder globally or transition earlier to StepUp.
      *
      * @param int   $argonEnvelopeMemoryKib the fixed Argon2id memory envelope
      *                                      (risk.argon_verification_memory_kib)

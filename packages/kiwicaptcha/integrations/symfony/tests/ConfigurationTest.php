@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\Configuration;
+use BelConsulting\KiwiCaptchaBundle\DependencyInjection\ProtectionProfileDefaults;
 use KiwiCaptcha\Config;
 use PHPUnit\Framework\TestCase;
 use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
@@ -24,7 +25,19 @@ final class ConfigurationTest extends TestCase
             'secret_key' => str_repeat('a', 32),
         ], $overrides);
 
-        return (new Processor())->processConfiguration(new Configuration(), [$config]);
+        // The profile expansion is the extension's job (the profile is
+        // the LOWEST-precedence configuration layer, prepended as the
+        // first array of the processing stack), so the single-array
+        // helper applies the same stack + chaining postcondition the
+        // extension applies. This keeps the processed outcome of a
+        // single-array config byte-identical to the historical
+        // beforeNormalization expansion.
+        $processed = (new Processor())->processConfiguration(
+            new Configuration(),
+            ProtectionProfileDefaults::stack([$config]),
+        );
+
+        return ProtectionProfileDefaults::finalize($processed, [$config]);
     }
 
     public function testDifficultyBits21IsRejectedByTheTree(): void
@@ -67,6 +80,15 @@ final class ConfigurationTest extends TestCase
         self::assertNull($processed['redis_service']);
         self::assertNull($processed['rate_limit_pepper']);
         self::assertNull($processed['rate_limit_cache']);
+    }
+
+    public function testRedisDsnDefaultsToNullAndPassesThrough(): void
+    {
+        $processed = $this->process();
+
+        self::assertNull($processed['redis_dsn'], 'redis_dsn defaults to null = every Redis-backed service keeps its existing wiring');
+        self::assertSame('redis://127.0.0.1:6399/0', $this->process(['redis_dsn' => 'redis://127.0.0.1:6399/0'])['redis_dsn'], 'the tree accepts a plain redis:// DSN as a scalar');
+        self::assertSame('rediss://user:pass@captcha.example.com:6380/2?prefix=kiwi', $this->process(['redis_dsn' => 'rediss://user:pass@captcha.example.com:6380/2?prefix=kiwi'])['redis_dsn'], 'a rediss:// DSN with credentials, database and query parameters passes through untouched');
     }
 
     public function testNonRedisRateLimitFallbackFlagsDefaultToFalse(): void
@@ -880,5 +902,333 @@ final class ConfigurationTest extends TestCase
     {
         $this->expectException(InvalidConfigurationException::class);
         $this->process(['risk' => ['security_epoch_max_stale_secs' => 9]]);
+    }
+
+    public function testDecoyV3EnabledDefaultsToFalse(): void
+    {
+        // The protocol-v3 writer switch: the default is
+        // OFF, so a new deployment never emits v3 challenges (the
+        // parent-revision verifiers reject them) until the operator
+        // completes the two-phase rollout — deploy everywhere, raise the
+        // central min_protocol_version floor to 3, then enable.
+        self::assertFalse($this->process()['risk']['decoy_v3_enabled'], 'decoy_v3_enabled defaults to false (v2 emission)');
+        self::assertTrue($this->process(['risk' => ['decoy_v3_enabled' => true]])['risk']['decoy_v3_enabled']);
+        self::assertFalse($this->process(['risk' => ['decoy_v3_enabled' => false]])['risk']['decoy_v3_enabled']);
+    }
+
+// ── protection profiles ───────────────────────────────────────────────────
+
+    public function testProtectionProfileDefaultsToNull(): void
+    {
+        $processed = $this->process();
+
+        self::assertNull($processed['protection_profile'], 'protection_profile defaults to null = every knob at its individual default');
+    }
+
+    public function testProtectionProfileRejectsUnknownValues(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+        $this->process(['protection_profile' => 'bogus']);
+    }
+
+    public function testNullProfileIsByteIdenticalToNoProfile(): void
+    {
+        $plain = $this->process();
+        $nullProfile = $this->process(['protection_profile' => null]);
+        unset($plain['protection_profile'], $nullProfile['protection_profile']);
+
+        // Key order follows the raw config order (the profile pass
+        // injects absent keys), which is not semantically meaningful, so
+        // the comparison is canonicalized recursively.
+        self::assertSame(self::canonicalize($plain), self::canonicalize($nullProfile), 'a null protection_profile must leave every knob byte-identical to the profile-less config');
+    }
+
+    public function testBalancedProfileEqualsTheCurrentDefaults(): void
+    {
+        $plain = $this->process();
+        $balanced = $this->process(['protection_profile' => 'balanced']);
+        unset($plain['protection_profile'], $balanced['protection_profile']);
+
+        self::assertSame(self::canonicalize($plain), self::canonicalize($balanced), 'balanced = the current defaults, explicitly documented as such: the derived values equal the tree defaults, so behavior is byte-identical to no profile');
+    }
+
+    /**
+     * Recursively sort an array by key so two arrays with identical
+     * values but different insertion order compare equal.
+     *
+     * @return array<mixed>
+     */
+    private static function canonicalize(array $array): array
+    {
+        foreach ($array as $key => $value) {
+            if (\is_array($value)) {
+                $array[$key] = self::canonicalize($value);
+            }
+        }
+        \ksort($array);
+
+        return $array;
+    }
+
+    public function testHighAbuseProfileFillsItsDerivedDefaults(): void
+    {
+        $processed = $this->process(['protection_profile' => 'high_abuse']);
+
+        // Stricter per-source issuance limits.
+        self::assertSame(5, $processed['rate_limit']);
+        self::assertSame(10, $processed['risk']['max_outstanding_challenges']);
+        // Wider aggregate issuance bounds, raised together (the hard
+        // limiter and the resource-capacity denominator must scale in
+        // lockstep, per the configuration docs).
+        self::assertSame(2000, $processed['rate_limit_global']);
+        self::assertSame(2000, $processed['resource_capacity']['issuance_per_second']);
+        self::assertSame(250000, $processed['risk']['max_outstanding_challenges_global']);
+        // Risk enabled with raised abuse-evidence weights + decoy surface.
+        self::assertTrue($processed['risk']['enabled']);
+        self::assertTrue($processed['risk']['decoy_v3_enabled']);
+        self::assertSame(320, $processed['risk']['weights']['bad_proof']);
+        self::assertSame(340, $processed['risk']['weights']['malformed']);
+        self::assertSame(380, $processed['risk']['weights']['replay']);
+        self::assertSame(160, $processed['risk']['weights']['action_failure']);
+        // The remaining weights stay at the contract defaults.
+        self::assertSame(\KiwiCaptcha\Risk\RiskWeights::DEFAULT_SOURCE_FAST, $processed['risk']['weights']['source_fast']);
+        // Cheaper per-process emergency shield.
+        self::assertSame(5000, $processed['risk']['hard_limits']['process_per_second']);
+        // Chaining stays off without a binding authority (the tree would
+        // refuse it anyway).
+        self::assertFalse($processed['risk']['chaining']['enabled']);
+    }
+
+    public function testHighAbuseEngagesChainingWhenAnAuthorityIsWired(): void
+    {
+        $processed = $this->process([
+            'protection_profile' => 'high_abuse',
+            'risk' => ['request_binding_authority' => 'app.binding_authority'],
+        ]);
+
+        self::assertTrue($processed['risk']['chaining']['enabled'], 'high_abuse engages chained step-up when the authoritative binding resolver is wired in the same config');
+    }
+
+    public function testHighAbuseKeepsAnExplicitlyDisabledRiskLayerOff(): void
+    {
+        $processed = $this->process([
+            'protection_profile' => 'high_abuse',
+            'risk' => ['enabled' => false],
+        ]);
+
+        self::assertFalse($processed['risk']['enabled'], 'an explicitly configured risk.enabled=false wins over the profile');
+        // The profile still fills the other risk defaults.
+        self::assertTrue($processed['risk']['decoy_v3_enabled']);
+    }
+
+    public function testPrivacyStrictProfileFillsItsDerivedDefaults(): void
+    {
+        $processed = $this->process(['protection_profile' => 'privacy_strict']);
+
+        self::assertSame('strict', $processed['privacy_mode']);
+        self::assertSame('off', $processed['telemetry']);
+        self::assertFalse($processed['enforce_telemetry']);
+        self::assertFalse($processed['risk']['client_context']);
+        self::assertSame(0, $processed['min_duration_ms'], 'the server-side solve-timing heuristic is off');
+        self::assertSame('none', $processed['binding_mode'], 'no IP-derived binding tag at all — the strongest first-party posture');
+        self::assertFalse($processed['risk']['enabled']);
+        self::assertFalse($processed['risk']['decoy_v3_enabled']);
+    }
+
+    public function testCompatibilityProfileFillsItsDerivedDefaults(): void
+    {
+        $processed = $this->process(['protection_profile' => 'compatibility']);
+
+        self::assertSame('sha256', $processed['algorithm']);
+        self::assertSame(300, $processed['challenge_ttl_secs'], 'conservative TTL, Turnstile token-lifetime parity');
+        self::assertSame('none', $processed['binding_mode'], 'binding off for IP churn behind NAT/mobile');
+        self::assertFalse($processed['risk']['enabled']);
+        self::assertFalse($processed['risk']['decoy_v3_enabled'], 'protocol v2 emission');
+        self::assertFalse($processed['risk']['client_context']);
+    }
+
+    public function testProfileNeverOverridesAnExplicitlyConfiguredKnob(): void
+    {
+        // One explicit knob per profile: the explicit value must win.
+        $highAbuse = $this->process([
+            'protection_profile' => 'high_abuse',
+            'challenge_ttl_secs' => 30,
+            'rate_limit' => 100,
+        ]);
+        self::assertSame(30, $highAbuse['challenge_ttl_secs']);
+        self::assertSame(100, $highAbuse['rate_limit']);
+
+        $privacyStrict = $this->process([
+            'protection_profile' => 'privacy_strict',
+            'binding_mode' => 'nonce_ip_hmac',
+            'min_duration_ms' => 500,
+        ]);
+        self::assertSame('nonce_ip_hmac', $privacyStrict['binding_mode']);
+        self::assertSame(500, $privacyStrict['min_duration_ms']);
+
+        $compatibility = $this->process([
+            'protection_profile' => 'compatibility',
+            'challenge_ttl_secs' => 60,
+        ]);
+        self::assertSame(60, $compatibility['challenge_ttl_secs']);
+    }
+
+    public function testProfileFillsRiskDefaultsButNeverAnExplicitRiskSubtreeKey(): void
+    {
+        $processed = $this->process([
+            'protection_profile' => 'high_abuse',
+            'risk' => [
+                'decoy_v3_enabled' => false,
+                'weights' => ['replay' => 900],
+            ],
+        ]);
+
+        self::assertFalse($processed['risk']['decoy_v3_enabled'], 'an explicitly configured decoy_v3_enabled=false wins over the profile');
+        self::assertSame(900, $processed['risk']['weights']['replay'], 'an explicitly configured weight wins');
+        self::assertSame(320, $processed['risk']['weights']['bad_proof'], 'the profile still fills the weights the operator did not set');
+        self::assertTrue($processed['risk']['enabled'], 'the profile still fills the absent risk.enabled');
+    }
+
+    public function testBalancedProfileFillsArgonDefaults(): void
+    {
+        $processed = $this->process(['protection_profile' => 'balanced']);
+
+        self::assertSame('sha256', $processed['algorithm']);
+        self::assertSame(18, $processed['difficulty_bits']);
+        self::assertSame(8, $processed['argon2_difficulty_bits']);
+        self::assertSame(0, $processed['argon_m_kib']);
+        self::assertSame(3, $processed['argon_t']);
+        self::assertSame(1, $processed['argon_p']);
+        self::assertSame(120, $processed['challenge_ttl_secs']);
+        self::assertSame('nonce_ip_hmac', $processed['binding_mode']);
+    }
+
+    public function testReplayDurabilityDefaultsToBestEffort(): void
+    {
+        $processed = $this->process();
+
+        self::assertSame('best_effort', $processed['replay_durability'], 'the default posture is best_effort: the current single-authority boundary with the stale-promotion window accepted as the documented deployment boundary');
+    }
+
+    public function testReplayDurabilityAcceptsEveryPostureValue(): void
+    {
+        self::assertSame('best_effort', $this->process(['replay_durability' => 'best_effort'])['replay_durability']);
+        self::assertSame('operator_managed', $this->process(['replay_durability' => 'operator_managed'])['replay_durability']);
+        self::assertSame('fail_closed', $this->process(['replay_durability' => 'fail_closed'])['replay_durability']);
+    }
+
+    public function testReplayDurabilityRejectsUnknownValues(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+
+        $this->process(['replay_durability' => 'automatic']);
+    }
+
+    public function testHaAuthorityDefaultsToNoneAndAcceptsPinnedPrimary(): void
+    {
+        self::assertSame('none', $this->process()['ha_authority'], 'ha_authority defaults to none: the current boundary stays byte-identical');
+        self::assertSame('none', $this->process(['ha_authority' => 'none'])['ha_authority']);
+        self::assertSame('pinned_primary', $this->process(['ha_authority' => 'pinned_primary'])['ha_authority']);
+    }
+
+    public function testHaAuthorityRejectsUnknownValues(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+
+        $this->process(['ha_authority' => 'quorum']);
+    }
+
+    public function testHaAuthorityReverifySecsDefaultsAndBounds(): void
+    {
+        self::assertSame(5, $this->process()['ha_authority_reverify_secs'], 'the default verification cache window is 5 seconds');
+        self::assertSame(1, $this->process(['ha_authority_reverify_secs' => 1])['ha_authority_reverify_secs']);
+        $this->expectException(InvalidConfigurationException::class);
+        $this->process(['ha_authority_reverify_secs' => 0]);
+    }
+
+    public function testHaAuthorityExpectedDefaultsNullAndValidatesTheIdentityShape(): void
+    {
+        self::assertNull($this->process()['ha_authority_expected'], 'no operator-provisioned expected identity by default');
+        $expected = 'master|'.str_repeat('a', 40);
+        self::assertSame($expected, $this->process(['ha_authority_expected' => $expected])['ha_authority_expected']);
+
+        try {
+            $this->process(['ha_authority_expected' => 'not-an-identity']);
+            self::fail('an expected identity without the role|run_id shape must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('role|run_id', $e->getMessage());
+        }
+    }
+
+    public function testHaAuthorityExpectedPerAuthorityMapForm(): void
+    {
+        $storage = 'master|'.str_repeat('a', 40);
+        $risk = 'master|'.str_repeat('b', 40);
+        $map = ['storage' => $storage, 'risk' => $risk];
+        self::assertSame($map, $this->process(['ha_authority_expected' => $map])['ha_authority_expected'], 'the per-authority map form passes through unchanged');
+
+        // A partial map (one authority) is legal: the authority without
+        // an entry falls back to the pin key.
+        self::assertSame(
+            ['storage' => $storage],
+            $this->process(['ha_authority_expected' => ['storage' => $storage]])['ha_authority_expected'],
+        );
+
+        // The map form is validated like the scalar form: an unknown
+        // authority name is refused.
+        try {
+            $this->process(['ha_authority_expected' => ['limiter' => $storage]]);
+            self::fail('a map naming an unknown authority must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('storage/risk', $e->getMessage());
+        }
+
+        // A map entry without the identity shape is refused too.
+        try {
+            $this->process(['ha_authority_expected' => ['storage' => 'not-an-identity']]);
+            self::fail('a map entry without the role|run_id shape must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('role|run_id', $e->getMessage());
+        }
+    }
+
+    public function testProtocolRolloutDefaultsToNormal(): void
+    {
+        $processed = $this->process();
+
+        self::assertSame('normal', $processed['protocol_rollout']['mode'], 'the default rollout mode is normal: no deliberate protocol-v3 migration exception is declared');
+    }
+
+    public function testProtocolRolloutAcceptsBothModes(): void
+    {
+        self::assertSame('normal', $this->process(['protocol_rollout' => ['mode' => 'normal']])['protocol_rollout']['mode']);
+        self::assertSame('migration', $this->process(['protocol_rollout' => ['mode' => 'migration']])['protocol_rollout']['mode']);
+    }
+
+    public function testProtocolRolloutRejectsUnknownModes(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+
+        $this->process(['protocol_rollout' => ['mode' => 'experimental']]);
+    }
+
+    // ── Asset delivery tier (asset_mode) ──────────────────────────────────
+
+    public function testAssetModeDefaultsToFiles(): void
+    {
+        self::assertSame('files', $this->process()['asset_mode'], 'the default is the recommended files tier: versioned immutable assets with SRI, lazy runtime + worker');
+    }
+
+    public function testAssetModeAcceptsBothTiers(): void
+    {
+        self::assertSame('files', $this->process(['asset_mode' => 'files'])['asset_mode']);
+        self::assertSame('inline', $this->process(['asset_mode' => 'inline'])['asset_mode']);
+    }
+
+    public function testAssetModeRejectsUnknownTiers(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+
+        $this->process(['asset_mode' => 'cdn']);
     }
 }

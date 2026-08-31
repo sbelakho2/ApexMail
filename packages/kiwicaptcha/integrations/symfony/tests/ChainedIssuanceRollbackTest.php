@@ -249,7 +249,7 @@ final class ChainedIssuanceRollbackTest extends TestCase
 
     public function testPostStage2CommitFailureNeverRollsBackTheIssuedState(): void
     {
-        // P0: once markStage2Issued() confirms issued(N), NO later failure
+        // Once markStage2Issued() confirms issued(N), NO later failure
         // (here the risk feedback) may roll back the challenge record, the
         // outstanding memberships or the chain — a rolled-back membership
         // would resurrect a valid-but-unaccounted challenge.

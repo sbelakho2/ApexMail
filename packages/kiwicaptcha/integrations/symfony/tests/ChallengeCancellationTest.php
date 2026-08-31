@@ -649,7 +649,7 @@ final class ChallengeCancellationTest extends TestCase
 
     public function testOutstandingAdmissionFailureIsARolledBackPrivate503(): void
     {
-        // P2: a Redis failure during the post-mint admission (or a
+        // A Redis failure during the post-mint admission (or a
         // violated verified-WAIT barrier) is resolved by rolling the
         // entire issuance attempt back — the private structured 503,
         // the minted record discarded, the admission aborted
@@ -680,7 +680,7 @@ final class ChallengeCancellationTest extends TestCase
 
     public function testGlobalCancellationWindowBoundsTheDeployment(): void
     {
-        // P2: the cancellation admission enforces a deployment-global
+        // The cancellation admission enforces a deployment-global
         // window in addition to the per-source window — an IP-rotating
         // attacker cannot force unlimited random-nonce cancellation
         // lookups or source-limiter key churn.
@@ -701,7 +701,7 @@ final class ChallengeCancellationTest extends TestCase
 
     public function testHeterogeneousChallengeTtlsNeverResetThePerSourceBound(): void
     {
-        // P1 regression: the old scalar per-source counter reset its
+        // Regression: the legacy scalar per-source counter reset its
         // whole EXPIRE to the newest challenge's TTL, so a 1-second
         // sitekey challenge could wipe the source bound for 300-second
         // challenges and admit unbounded issuance from that source. The

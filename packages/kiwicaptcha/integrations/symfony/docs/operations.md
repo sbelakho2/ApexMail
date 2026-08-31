@@ -1,5 +1,16 @@
 # Operations
 
+> **SECURITY-MAINTAINER material.** This page is the deep deployment and
+> hardening rationale (rate-limit internals, admission math, failover
+> replay safety, protocol rollouts, transport guidance). It is written
+> for security maintainers of this product, not for application
+> integrators. The integration layer lives in
+> [security-hardening.md](security-hardening.md) and
+> [getting-started.md](getting-started.md). Strategic silence on the
+> adaptive parameters is deliberate: the deep rationale exists here, and
+> publication of every heuristic detail would buy attackers adaptation
+> time. Silence is not a security guarantee.
+
 Deployment guidance for running the bundle in production: rate limiting, admission gates, health endpoints, client-IP policy, scaling, shutdown, and the security Redis operational contract.
 
 ## Rate limiting
@@ -23,7 +34,7 @@ Three backends, in priority order:
   Under conventional PHP-FPM each request rebuilds the bundle services, so the object windows are per-request and provide no temporal limiting across requests.
   Production temporal limiting (per-client or global) without Redis therefore requires a genuinely persistent or shared PSR-6 pool; see [configuration.md](configuration.md#production-hardening).
 The bundle refuses any temporal issuance limit without Redis or a shared PSR-6 pool in production unless `allow_nonredis_rate_limit_fallback: true` is set, since the object-memory window is long-lived-runtime-only and request-local under conventional PHP-FPM.
-The old `allow_local_global_limit_fallback` option still works as a deprecated alias.
+The legacy `allow_local_global_limit_fallback` option still works as a deprecated alias.
 
 All backends use a true sliding window.
 The state is a set of hit timestamps pruned on every check, so a burst straddling a window boundary can never double the rate.
@@ -68,11 +79,13 @@ Two gate backends:
   The acquire script additionally carries the bounded saturation-pressure counter (`argon2_saturation_pressure_cap`, default 64; the deprecated `argon2_max_waiters` name still works) and the per-scope concentration cap (`argon2_max_per_tenant`, unset by default and derived as `max(1, global cap - 1)`).
   Nothing queues or waits: admission is immediate and non-blocking, and the counter is a gauge of saturation pressure, never a queue.
   The per-scope cap is a concentration cap, not a guaranteed share: it prevents one busy scope from monopolizing the shared capacity, and explicit values must be strictly below the global cap.
-  See [security-hardening.md](security-hardening.md#argon2-admission-wait-queue-bound).
+  See the integration-layer view in [security-hardening.md](security-hardening.md#argon-admission-saturation-pressure-bound).
   For the cap to be an absolute operational invariant, the maximum verification request runtime must stay below the lease lifetime (`argon2_lease_ms`, default 45000 ms).
-  The lease-expiry-before-hash-termination invariant is mechanical, enforced at container compile time: `argon2_max_verification_runtime_ms` (default 30000) bounds the wall-clock a single verification derivation may take in this deployment.
-  The container refuses to compile unless `argon2_lease_ms` exceeds the runtime cap by the 5000 ms safety margin, so the defaults give 45000 > 30000 + 5000 = 35000 and compile.
-  The runtime cap is a deployment bound enforced at compile time only: it is never enforced per-request inside the blocking hash, and it is the bound that guarantees the lease outlives any permitted verification.
+  The lease-expiry-before-hash-termination invariant is an SLO, enforced at container compile time: `argon2_max_verification_runtime_ms` (default 30000) declares the wall-clock a single verification derivation may take in this deployment.
+  The container refuses to compile unless `argon2_lease_ms` exceeds the declared runtime by the 5000 ms safety margin, so the defaults give 45000 > 30000 + 5000 = 35000 and compile.
+  The declared runtime is a deployment bound only: it is never enforced per-request inside the blocking hash, so the lease can still expire while a hash runs on a pathological host (severe CPU starvation, throttling).
+  Fencing keeps correctness on expiry: a dead lease can never be misused by its former owner.
+  The concurrency cap itself can still be exceeded during the expiry window on such hosts, so size the bound and the margin accordingly and monitor hash times.
   Example: PHP `request_terminate_timeout = 30s` with the default 45 s lease (plus a safety margin).
   Key: `kiwicaptcha:argon2:leases:<namespace>` (namespace defaults to `kernel.project_dir`; sanitized to `[A-Za-z0-9_.-]`).
 - **In-process gate (per-process).** Without a Redis client the cap is enforced per PHP process (`src/Security/InProcessArgonGate.php`, token-set based).
@@ -117,6 +130,36 @@ Redis-backed storage is recommended.
 The bundle fails fast with a `LogicException` if `ArrayStorage` is configured outside the test/dev environment, since it cannot enforce single-use across workers.
 PSR-6 pools work but cannot express an atomic get-and-delete. Single-use under concurrency is then best-effort (read-then-delete).
 
+### Single use across an authority change
+
+The one-shot contract is authority-scoped, and the operator must hold the boundary explicitly:
+
+> One-shot verification is atomic on the current Redis authority but is not guaranteed across stale-replica promotion.
+
+The atomic pending→consumed transition is atomic per Redis authority on every topology (standalone, Sentinel, Cluster).
+A failover that promotes a stale replica can move the authority to a node that never received the consume, the deterministic result commit, or the terminal delete-if-pending deletion.
+That stale view can re-enable replay of a consumed or burned challenge.
+Replay-safe promotion is therefore a deployment invariant, never an automatic property of the failover.
+The deployment chooses and documents one of the three postures from [redis-topologies.md](../../../../../docs/redis-topologies.md#authority-change-replay-durability-the-deployment-posture).
+The postures:
+- `fail_closed`: the verified `WAIT` barrier on a standalone authority with the threshold covering every eligible failover target, or a consensus-capable store (`ReplicaWaitException` on a shortfall).
+- `operator_managed`: promotion eligibility gated so a lagging replica can never be elected.
+- `best_effort`: the boundary accepted and documented.
+`kiwicaptcha:doctor` warns with the exact contract wording above whenever the deployment has no cross-authority replay guarantee: a Predis Sentinel, master-slave or Cluster aggregate client, or Redis-backed storage with `waitReplicas` 0.
+The verified `WAIT` barrier itself is refused on Predis aggregates at construction (`VerifiedWaitGuard`), so an aggregate deployment always needs one of the documented postures; on a standalone authority the `risk.redis.wait_replicas` knob is the `fail_closed` lever.
+
+### The mechanical pinned-primary posture
+
+Under `ha_authority: pinned_primary` (derived by the `ha_safe` protection profile) the bundle enforces the authority contract mechanically instead of trusting the operator's failover policy alone. The details live in [ha-authority.md](../../../../../docs/ha-authority.md); the operational contract is:
+
+- The bundle wires one guard and one pin per distinct Redis authority: the storage/limiter authority pins `{kiwi:<ns>}:authority:pin:storage`, and a distinct `risk.redis_service` pins `{kiwi:<ns>}:authority:pin:risk`. When the risk client IS the storage client, the storage pin covers both. Each pin holds `role|run_id`, write-once (`SET NX`).
+- Auto-pinning is gone: the runtime never records a pin on its own. A pinned_primary deployment with no pin and no `ha_authority_expected` identity refuses every durability-critical transition with the `kiwicaptcha:ha-initialize` message. An operator records the initial authority pin through the explicit bootstrap command:
+  `php bin/console kiwicaptcha:ha-initialize`.
+- The drain procedure for a deliberate authority change: quiesce the deployment, perform the change, then re-pin. `php bin/console kiwicaptcha:ha-initialize --force` overwrites the pin after the quiesce; without `--force` an existing pin is refused. Run `kiwicaptcha:doctor` and confirm the "HA authority" check passes armed before resuming traffic.
+- `ha_authority_expected` replaces the pin: the optional operator-provisioned identity (`role|run_id`) makes the guard compare the serving authority against the configuration instead of the pin key. An immutable-identity deployment can skip the Redis pin entirely.
+- Zero-stale security-final writes: the guarded client re-verifies the authority before every mutating security-final `EVALSHA` (consume, commit, chain, idempotency finalize), never inside the verification window. Ordinary reads use the per-connection window, and a reconnect that replaces the connection object re-verifies.
+- Retry-enabled direct clients are refused under `pinned_primary` (and under `fail_closed`): the retry wrapper can re-execute a durability-critical write on a replacement connection. Wire a direct single-node Predis client with retries disabled.
+
 ## Health endpoints (rollback-resistant readiness)
 
 `risk.health.enabled` (default true) registers two GET endpoints under the route prefix:
@@ -130,7 +173,7 @@ PSR-6 pools work but cannot express an atomic get-and-delete. Single-use under c
     Transient probe timeouts never fail readiness on their own.
     The first failure is debounced for one cache window; two consecutive failures flip readiness;
   - the central security-policy state is compatible.
-    The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch`), when present, requires `min_protocol_version <= 2` (this binary's max protocol) and `min_policy_epoch <= risk.policy_version`.
+    The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch`), when present, requires `min_protocol_version <= 3` (this binary's max protocol: the decoy-capable v3 canonical) and `min_policy_epoch <= risk.policy_version`.
     When absent, the binary's own configuration is authoritative;
   - the memory-budget invariant holds (only when `risk.container_memory_mib` is configured):
     `argon2_max_concurrent_verifications × the fixed Argon verification envelope (risk.argon_verification_memory_kib, the risk ladder's worst-case per-verification memory; default 16384 KiB) + 256 MiB headroom <= container_memory_mib`.
@@ -141,7 +184,8 @@ PSR-6 pools work but cannot express an atomic get-and-delete. Single-use under c
     Document this in your deployment.
     With a concurrency cap of 0 (= unlimited) the invariant uses 1 hash, so only the headroom is guaranteed.
     Set a finite cap for a meaningful check.
-    The calculation is protective because the live-hash bound holds by construction: the mechanical lease/runtime invariant (see "Argon2id verification concurrency cap") guarantees live hashes never exceed the configured concurrency, so the worst case is exactly the configured concurrency, never more.
+    The calculation is protective because the live-hash bound is the deployment's declared SLO: the lease/runtime invariant (see "Argon2id verification concurrency cap") makes the configured concurrency the planning case.
+    Under a compliant hash the worst case is the configured concurrency, never more.
 
 Argon queue fullness and transient timeouts never fail readiness.
 All responses carry `Cache-Control: no-store` + `Pragma: no-cache`.
@@ -158,6 +202,74 @@ redis-cli HSET "{kiwi:<namespace>}:security-policy" \
 A binary whose max protocol or configured `risk.policy_version` is below the hash exits readiness (503) and is drained by the load balancer before it can issue or verify challenges it cannot honor.
 Remove the key (or lower the fields) only after every node runs a compatible binary.
 When the key is absent, every binary's own configuration is authoritative (the default behavior).
+
+## Protocol v3 two-phase rollout
+
+Protocol v3 is the decoy-armed canonical: a v3 record carries the authenticated `|decoy_field` segment, and a parent-revision verifier rejects protocol 3 as malformed.
+The rollout must therefore be two-phase: reader capability first, writer emission second.
+The central `min_protocol_version` is a reader-capability floor: readiness keeps every binary whose max protocol is below it out of the pool.
+It is never a writer switch, so a new binary must not emit v3 while any serving verifier rejects it.
+
+This release keeps the writer switch off by default: `risk.decoy_v3_enabled` is false, so issuance never arms the decoy and always emits protocol v2, even with the adaptive risk engine wired.
+Enabling the switch alone is not enough: the challenge controller arms the decoy (emits v3) only when the confirmed central floor is `min_protocol_version >= 3`, read from the same `{kiwi:<ns>}:security-policy` hash through the SecurityEpochMonitor's cached central read.
+A floor below 3, an absent or corrupt floor, an unreadable central policy, or no security Redis at all fails safe to v2 emission with a once-per-process warning.
+v3 is never emitted on uncertainty, and availability is preserved.
+
+The procedure:
+
+```bash
+# 1. Deploy the new binaries EVERYWHERE (accept v2 + v3, still emitting v2).
+#    Confirm no old binary remains; the readiness probe keeps any binary
+#    whose max protocol is below the floor out of the pool.
+# 2. Raise the central floor to 3 — only now may v3 be emitted.
+redis-cli HSET "{kiwi:<namespace>}:security-policy" \
+    min_protocol_version 3 min_policy_epoch 2
+# 3. Enable the writer switch on every node.
+#    risk.decoy_v3_enabled: true
+# 4. After >= the maximum challenge TTL (300 s), v2 compatibility may be
+#    retired; until then v2 emission stays safe for any still-serving
+#    unarmed flow.
+```
+
+A node with `risk.decoy_v3_enabled: true` whose central floor is below 3 logs a warning naming the floor and keeps emitting v2.
+A rollback is the reverse: lower the floor (or delete the key) before any older binary can be re-admitted, and the next re-read (one cache window) stops v3 emission automatically.
+
+### The explicit migration state (`protocol_rollout.mode`)
+
+Deferring v3 emission while a security profile promises the decoy surface is a deliberate operational state, and the deployment must declare it: `protocol_rollout.mode` (default `normal`) is the explicit protocol-rollout migration state. `normal` = no deliberate exception; `migration` = the deployment is deliberately in the two-phase protocol-v3 rollout (v3 emission deferred until the fleet floor is confirmed).
+
+The doctor's protocol-v3 writer check keys on it:
+
+| high_abuse | `risk.decoy_v3_enabled` | `protocol_rollout.mode` | Doctor status |
+|---|---|---|---|
+| yes | false | normal (or absent) | **FAIL** — a forgotten override must not silently persist: "high_abuse requires authenticated decoy emission, but risk.decoy_v3_enabled is false and no protocol rollout migration mode is declared. Either enable the decoy, or declare protocol_rollout.mode: migration while the fleet floor is being established." |
+| yes | false | migration | **WARN** (exit 0) — the deliberate two-phase deferral |
+| yes | true | any | PASS once the central floor confirms v3; FAIL while the floor is absent or below 3 |
+| no | any | any | unchanged (protocol v2 emission passes; the armed-but-unconfirmed floor keeps its warn) |
+
+A deployment in the migration phase declares it explicitly:
+
+```yaml
+kiwi_captcha:
+    protection_profile: high_abuse
+    protocol_rollout:
+        mode: migration
+    risk:
+        decoy_v3_enabled: false
+```
+
+The two-phase procedure above is preserved unchanged: raise the floor to 3, then flip `risk.decoy_v3_enabled: true`, then remove the migration declaration once v3 emission is armed. An empty `protocol_rollout` block or an absent key is `normal`; any value outside the two names is refused at compile time.
+
+Residual bounds and failure behavior:
+- Raising the floor does not drain old binaries atomically: a v2-only binary still processing in-flight requests rejects any v3 record it receives as malformed, and the solve is burned (fail closed, the client re-requests).
+  The operator drains through the readiness gate; the drain window is deployment-specific and must be confirmed before step 2.
+- Outstanding v3 records issued before a rollback stay valid in storage for up to their TTL (default 120 s, maximum 300 s).
+  New binaries keep verifying them; a re-admitted v2-only binary rejects them as malformed for the remainder of that TTL.
+  Wait at least the maximum challenge TTL after the floor drops before re-admitting old binaries, or accept the fail-closed rejection of the residual records.
+- After the floor is lowered, a node can keep emitting v3 for at most one cache window (`risk.security_epoch_cache_secs`, default 1 s), because the floor is re-read only when the window elapses.
+  A failed re-read clears the floor immediately (fail safe to v2), so the window only matters when the operator re-admits old binaries faster than one cache window.
+- Verification never consults the floor: a v3 record verifies on any v3-capable binary regardless of the current floor.
+  That is deliberate, since the floor is a writer coordination signal and readers accept what they support.
 
 The post-solve disposition record schema migrates in two phases.
 This release writes schema version 1 (chain_required records carry their chain_expires_at bound, a shape an earlier release already accepts) and reads both versions 1 and 2.
@@ -258,6 +370,9 @@ CPU-only scaling amplifies the attack's cost instead of containing it.
 
 The deployment's public origin is `public_base_url`.
 See [security-hardening.md](security-hardening.md#same-origin-enforcement).
+The value is a canonical https origin in both configuration forms.
+A literal is validated at container build time; an env-managed `%env()%` value is validated with the same contract when the challenge controller is constructed at runtime.
+An invalid resolved value fails closed with an error naming `kiwi_captcha.public_base_url`.
 The issued records carry no Host-derived material.
 If your infrastructure terminates TLS and rewrites Host headers (shared hosting, multiple vhosts on one pool), set `public_base_url` explicitly.
 The same-origin check then ignores whatever Host the request carries.

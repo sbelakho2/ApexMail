@@ -67,11 +67,13 @@ reason, never an IP, cookie value, decision id or nonce; see
 
 **Argon2id solves never complete in the browser.** Argon2id mode requires
 WASM; the memory-hard solver has no JS fallback. Check CSP: the worker
-needs `worker-src blob:` (the driver builds it from a Blob URL of locally
-embedded code) and `script-src` needs `'wasm-unsafe-eval'`. The
-authoritative requirements are in
-[`SECURITY.md`](../../../../../SECURITY.md#csp--worker-requirements); the
-recommended profile is in [getting-started.md](getting-started.md).
+directive depends on the asset mode. Files mode (the default) constructs
+a same-origin Worker from the fetched `worker.<hash>.js` asset, so it
+needs `worker-src 'self'`. The inline compatibility tier builds its
+worker from a Blob URL, which is why it needs `worker-src blob:`. And
+`script-src` needs `'wasm-unsafe-eval'`. The authoritative requirements
+are in [`SECURITY.md`](../../../../../SECURITY.md#csp--worker-requirements);
+the recommended profile is in [getting-started.md](getting-started.md).
 
 **Challenges are rejected as `rate_limited` under load.** the Argon2id
 admission budget is saturated. The challenge is not burned; the client may

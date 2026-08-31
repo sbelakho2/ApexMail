@@ -108,12 +108,26 @@ test.describe('KiwiCaptcha postMessage boundary', () => {
     expect(src).toMatch(/msg\.v !== 1/);
     expect(src).toMatch(/typeof msg\.counter !== "number"/);
     expect(src).toMatch(/typeof msg\.reason !== "string"/);
-    // Worker side (embedded kiwi_worker_src + standalone asset): the solve
-    // request must be a v1 object with the full numeric/string field set.
-    expect(src).toMatch(/m\.v !== 1 \|\| m\.type !== "solve"/);
-    expect(worker).toMatch(/m\.v !== 1 \|\| m\.type !== "solve"/);
+    // Worker side (the standalone asset; the driver no longer embeds the
+    // worker bytes — the glue carries them for inline mode): the solve
+    // request must be a v1 object with the full numeric/string field set,
+    // and the glue message must carry a same-origin runtime URL.
+    expect(worker).toMatch(/m\.v !== 1/);
+    expect(worker).toMatch(/m\.type !== "solve"\) return;/);
+    expect(worker).toMatch(/m\.type === "glue"/);
+    // The worker never eagerly imports a runtime: it boots with no loader
+    // and the driver always supplies the runtime URL through the glue
+    // handshake (files mode: the SRI-verified versioned runtime; legacy
+    // static-worker path: the URL derived from the worker's own URL), so
+    // no unversioned relative URL is ever probed and a stale app-served
+    // runtime can never race the verified one.
+    expect(worker, 'the worker must never eagerly import the runtime').not.toMatch(/importScripts\(\s*["']kiwicaptcha-wasm\.js["']\s*\)/);
     // The solve request the driver sends carries the version field.
     expect(src).toMatch(/v: 1,\n\s*type: "solve"/);
+    // The glue handshake the driver posts carries the version field and
+    // the runtime asset URL (SRI-verified in files mode, derived from the
+    // worker's own URL on the legacy static-worker path).
+    expect(src).toMatch(/v: 1, type: "glue", runtimeSrc: glueRuntimeSrc/);
   });
 
   test('the worker ignores versionless or unknown messages (runtime)', async ({ page }) => {
@@ -461,14 +475,14 @@ test.describe('KiwiCaptcha solver version coupling', () => {
     // The worker verifies the wasm glue's exported solver_protocol_version()
     // (an integer — clean at the raw ABI) before ready (driver+worker+wasm
     // must agree), then reports the protocol id on startup (ready) and on
-    // success (done); the embedded copy in the driver matches the
-    // standalone asset.
+    // success (done). The worker source lives in the standalone asset (the
+    // driver no longer embeds it — the glue carries it for inline mode, and
+    // files mode fetches the versioned worker asset); the glue's embedded
+    // copy must match the standalone asset.
     expect(worker).toMatch(/solver_protocol_version/);
     expect(worker).toMatch(/post\(\{ type: "ready", buildId: KIWI_SOLVER_PROTOCOL_ID \}\)/);
-    expect(src).toMatch(/post\(\{ type: "ready", buildId: KIWI_SOLVER_PROTOCOL_ID \}\)/);
     expect(worker).toMatch(/type: "done", counter: res, buildId: KIWI_SOLVER_PROTOCOL_ID/);
-    expect(src).toMatch(/type: "done", counter: res, buildId: KIWI_SOLVER_PROTOCOL_ID/);
-    expect(src).toMatch(/type: "done", counter: counter, buildId: KIWI_SOLVER_PROTOCOL_ID/);
+    expect(worker).toMatch(/type: "done", counter: counter, buildId: KIWI_SOLVER_PROTOCOL_ID/);
 
     // The driver validates against its own constant and enters a controlled
     // mismatch state — a mismatched worker must never yield a solution.
@@ -496,19 +510,30 @@ test.describe('KiwiCaptcha solver version coupling', () => {
 test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
   test('solver failures cannot change the requested algorithm — one fetch, attribute-only algorithm (static source assertion)', () => {
     const src = driverSource();
-    // Exactly three fetch calls exist in the whole driver: the
+    // Exactly five fetch calls exist in the whole driver: the
     // loader-glue fetch (the external /api.js path fetches its own
     // source to hand the wasm glue to the Blob worker), the challenge
-    // fetch and the bounded cancellation fetch ({endpoint}/cancel).
-    // There can be no "retry with a weaker challenge" code path to fetch
-    // a second challenge: exactly ONE fetch targets the challenge
+    // fetch, the bounded cancellation fetch ({endpoint}/cancel) and the
+    // two files-mode lazy fetches — the WASM runtime glue
+    // (kiwiFetchRuntimeGlue) and the Argon worker asset
+    // (kiwiFetchWorkerAsset, worker.<hash>.js) — downloaded only when a
+    // memory-hard challenge arrives; a SHA-256 solve pays no runtime or
+    // worker request at all. Both lazy fetches are SRI-verified (fail
+    // closed when the digest cannot be computed), deduplicated per URL
+    // across the page and bounded to two retries; their failure enters
+    // the controlled worker-unavailable state, never a main-thread Argon
+    // hash. There can be no "retry with a weaker challenge" code path to
+    // fetch a second challenge: exactly ONE fetch targets the challenge
     // endpoint itself.
-    expect(src.match(/fetch\(/g) ?? []).toHaveLength(3);
+    expect(src.match(/fetch\(/g) ?? []).toHaveLength(5);
     expect(src.match(/fetch\(endpoint,/g) ?? []).toHaveLength(1);
-    // The algorithm variable is declared exactly twice in the file: once in
-    // the driver (from the container/widget attributes only) and once in the
-    // embedded worker source (from the solve request). No other declaration.
-    expect(src.match(/var algorithm\s*=/g) ?? []).toHaveLength(2);
+    expect(src.match(/fetch\(url, \{ cache: "force-cache"/g) ?? []).toHaveLength(2);
+    expect(src.match(/fetch\(compatScriptUrl\.split\("\?"\)\[0\]/g) ?? []).toHaveLength(1);
+    expect(src.match(/fetch\(cancelUrl,/g) ?? []).toHaveLength(1);
+    // The algorithm variable is declared exactly once in the driver (from
+    // the container/widget attributes only); the worker's own declaration
+    // lives in the standalone asset, which the driver no longer embeds.
+    expect(src.match(/var algorithm\s*=/g) ?? []).toHaveLength(1);
     // The only hard-coded algorithm assignment in the entire file is the
     // audit-#62 profile normalization itself (pinned by both assertions
     // below) — no failure path may assign a different, weaker algorithm.
@@ -582,6 +607,7 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
 test.describe('KiwiCaptcha challenge fetch timeout', () => {
   test('the fetch is abortable: AbortController, 15 s default, data-kiwi-fetch-timeout-ms override, bounded worker solve (static source assertion)', () => {
     const src = driverSource();
+    const worker = workerSource();
     expect(src).toMatch(/AbortController/);
     expect(src).toMatch(/signal\s*:\s*abortController\.signal/);
     expect(src).toMatch(/KIWI_FETCH_TIMEOUT_MS\s*=\s*15000/);
@@ -592,7 +618,7 @@ test.describe('KiwiCaptcha challenge fetch timeout', () => {
     // own search range (argMax), and every worker path terminates in a
     // done/failed terminal message.
     expect(src).toMatch(/maxHashes: MAX_SHA_HASHES/);
-    expect(src).toMatch(/argMax = Math\.min\(maxHashes, Math\.max\(1024, expected \* 8\)\)/);
+    expect(worker).toMatch(/argMax = Math\.min\(maxHashes, Math\.max\(1024, expected \* 8\)\)/);
   });
 
   test('a stalled challenge endpoint is aborted and the widget settles in the controlled idle error state (runtime)', async ({ page }) => {

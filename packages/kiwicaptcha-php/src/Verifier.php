@@ -64,20 +64,20 @@ namespace KiwiCaptcha;
  * without burning the record). A runtime-state capable storage (the
  * {@see ChallengeRuntimeStateReadableInterface} seam, implemented by
  * the Redis and array backends) reads the record and the terminal
- * state in a single snapshot GET that doubles as the peek (round-95
- * audit fix). The runtime-state snapshot is the single record source
+ * state in a single snapshot GET that doubles as the peek. The
+ * runtime-state snapshot is the single record source
  * on the verification and replay paths. Cheap-failure cleanup and
  * exotic-storage fallbacks may add further storage transitions, which
  * never weaken the one-shot consume authority. A
  * cancelled or missing record answers RecordNotFound directly. An
  * already-consumed record resolves through the shared identity-gated
  * resolution of the consume-returned envelope, decoded from the same
- * snapshot bytes. Neither ever burns a scarce Argon admission slot
- * (round-94 audit fix). The consume-and-re-derive proof phase
+ * snapshot bytes. Neither ever burns a scarce Argon admission slot.
+ * The consume-and-re-derive proof phase
  * follows, and a post-derive final revalidation against the current
  * server clock and the current expectations precedes the commit of
  * the deterministic result, for both valid and invalid derivations
- * (round-95 audit fix, Rust parity).
+ * (Rust parity).
  *
  * The cheap-phase checks are shared with the narrowly authorized
  * consumed-operation resume path. See {@see self::resumeConsumedOperation()}.
@@ -109,20 +109,24 @@ namespace KiwiCaptcha;
  * cancelled record is never redeemable and can never produce a
  * successful outcome.
  *
- * Server-measured solve duration: every valid outcome, the fresh
- * consumed/valid path, the identity-proven replay of a stored success,
- * and the resumed-operation recoveries, carries
- * {@see VerifyOutcome::solveDurationMs()}, the span between the
- * record's issued_at_ns and the verification receipt clock. It is
- * computed only from server-written timestamps, the client-reported
- * token duration is forgeable and never consulted, so the risk layer
- * can consume it as unforgeable graded behavioral evidence. The field
- * is nullable and additive: null on every non-valid outcome, for a
- * record whose issuance clock is unknown, and for a receipt preceding
- * issuance within the clock-skew tolerance. That is exactly the skew
- * semantics of the minimum-duration floor, where the elapsed time
- * cannot be measured reliably, see
- * {@see self::measurableSolveDurationMs()}.
+ * Server-measured solve duration: every fresh derivation's valid
+ * outcome carries {@see VerifyOutcome::solveDurationMs()}, the span
+ * between the record's issued_at_ns and the verification receipt
+ * clock. The fresh paths are the consumed/valid path and the
+ * resumed-operation recoveries. It is computed only from
+ * server-written timestamps, the client-reported token duration is
+ * forgeable and never consulted, so the risk layer can consume it as
+ * unforgeable graded behavioral evidence. An identity-proven replay of
+ * a stored success carries null instead: the retry's receipt is not
+ * the solve's endpoint, so re-computing the span for the replay would
+ * report a confidently incorrect value. The shared PHP/Rust spec is
+ * that solveDurationMs exists only for a fresh derivation, see
+ * {@see VerifyOutcome::fromStoredResult()}. The field is nullable and
+ * additive: null on every non-valid outcome, for a record whose
+ * issuance clock is unknown, and for a receipt preceding issuance
+ * within the clock-skew tolerance. That is exactly the skew semantics
+ * of the minimum-duration floor, where the elapsed time cannot be
+ * measured reliably, see {@see self::measurableSolveDurationMs()}.
  */
 final class Verifier
 {
@@ -463,10 +467,10 @@ final class Verifier
         $receiptNs = $nowNs ?? (int) (microtime(true) * 1_000_000);
 
         // The record source is a single snapshot for storages with the
-        // {@see ChallengeRuntimeStateReadableInterface} capability
-        // (round-95 audit fix): runtimeState() decodes the full
+        // {@see ChallengeRuntimeStateReadableInterface} capability:
+        // runtimeState() decodes the full
         // envelope — the record for every non-Missing kind, plus the
-        // retained consumed envelope — from one GET. The old flow read
+        // retained consumed envelope — from one GET. The earlier flow read
         // the same key three times: find() here, runtimeState() at
         // step 7b, consumedState() on the consumed branch. The cheap
         // phase below and the terminal-state gate at step 7b consume
@@ -603,7 +607,7 @@ final class Verifier
             } else {
                 // The retained-state tri-state. When the runtime-state
                 // snapshot already resolved the terminal state (the
-                // round-95 pattern), it is served from the snapshot:
+                // snapshot-read pattern), it is served from the snapshot:
                 // never a second GET through retainedConsumedState()
                 // -> consumedState(). This is the MissingClientIp
                 // retry path on an atomic storage (whose fused cleanup
@@ -677,7 +681,7 @@ final class Verifier
             } else {
                 // The retained-state tri-state. When the runtime-state
                 // snapshot already resolved the terminal state (the
-                // round-95 pattern), it is served from the snapshot:
+                // snapshot-read pattern), it is served from the snapshot:
                 // never a second GET through retainedConsumedState()
                 // -> consumedState(). This is the MissingClientIp
                 // retry path on an atomic storage (whose fused cleanup
@@ -702,9 +706,8 @@ final class Verifier
             }
         }
 
-        // 7b. Terminal-state resolution before the Argon admission gate
-        //     (round-94 audit fix, single-snapshot on the main path
-        //     since round-95): a
+        // 7b. Terminal-state resolution before the Argon admission gate:
+        //     a
         //     cancelled or already-consumed record must never acquire a
         //     scarce admission slot, and a terminal record's outcome is
         //     fully determined. The gate now decides on the same
@@ -719,7 +722,7 @@ final class Verifier
         //     resolution the consume-returned envelope uses via
         //     {@see self::resolveConsumedRecord()}, again with no slot
         //     burned, from the envelope that rode on the snapshot (the
-        //     round-95 fix deleted the old second GET). A backend failure
+        //     single-snapshot fix removed the earlier second GET). A backend failure
         //     on the retained read maps exactly like the find() failure:
         //     the retryable StorageUnavailable, never a new error class.
         //     A pending record falls through to the legacy admission ->
@@ -728,7 +731,7 @@ final class Verifier
         //     first-race window. A record that vanishes after the
         //     snapshot (a pending read, then a concurrent delete) is
         //     answered by the consume transition's null as RecordNotFound,
-        //     exactly the pre-round-95 interleaving.
+        //     exactly the earlier interleaving.
         if ($runtime !== null) {
             if ($runtime->kind === ChallengeRuntimeStateKind::Cancelled) {
                 // Cancelled: the terminal marker of the cancellation
@@ -747,7 +750,7 @@ final class Verifier
                 }
                 // Safety net kept only for an exotic storage that
                 // reported Consumed without the envelope: re-read via
-                // consumedState(), the old second GET. The shipped
+                // consumedState(), the earlier second GET. The shipped
                 // backends decode the record and the envelope from the
                 // same bytes, so this branch never runs for them.
                 if ($this->storage instanceof ConsumedStateReadableInterface) {
@@ -885,8 +888,8 @@ final class Verifier
             // 10. Post-derive final revalidation: re-check against the
             //     current server clock and the current expectations
             //     before the leading-zero verdict, matching the Rust
-            //     mirror's unconditional final_revalidate (round-95
-            //     audit fix). The check runs for both a valid and an
+            //     mirror's unconditional final_revalidate. The check
+            //     runs for both a valid and an
             //     invalid derivation, so a record that expired during
             //     the derivation commits Expired even when the proof
             //     was insufficient — never a stale InsufficientWork.
@@ -928,6 +931,7 @@ final class Verifier
                 $record->nonce,
                 $record->requestBinding,
                 solveDurationMs: $this->measurableSolveDurationMs($record, $receiptNs),
+                decoyField: $record->decoyField,
             );
         } finally {
             if ($lease !== null) {
@@ -957,12 +961,16 @@ final class Verifier
      * (crash between consume and commit) is ambiguous and reported as
      * ConsumeIndeterminate.
      *
-     * The identity-proven replay of a stored success carries the
+     * The identity-proven replay of a stored success carries NO
      * server-measured solve duration, see
-     * {@see self::measurableSolveDurationMs()}, computed from the
-     * replayed record's issuance clock and this verification's receipt
-     * — unforgeable behavioral evidence for the risk layer, never the
-     * client-reported duration.
+     * {@see self::measurableSolveDurationMs()}: the retry's receipt is
+     * not the solve's endpoint, so {@see VerifyOutcome::solveDurationMs()}
+     * is null on the stored-result acceptance. The shared PHP/Rust spec
+     * is that the duration exists only for a fresh derivation. The
+     * authenticated decoy (honeypot) field name of the replayed record
+     * is exposed on the outcome instead: the ConsumedRecord carries the
+     * record, so the stored path populates it exactly like the fresh
+     * path.
      *
      * The failed-barrier replay guard runs before a stored success is
      * accepted: the consume and commit mutations that produced it may
@@ -1006,7 +1014,12 @@ final class Verifier
                 $consumed->record->nonce,
                 $consumed->consumedResult->binding,
                 true,
-                $this->measurableSolveDurationMs($consumed->record, $receiptNs),
+                // The stored-result acceptance reports no solve
+                // duration: the retry's receipt is not the solve's
+                // endpoint, so the measured span is null (the shared
+                // PHP/Rust spec, see the method docblock).
+                null,
+                $consumed->record->decoyField,
             );
         }
 
@@ -1052,8 +1065,8 @@ final class Verifier
      * are re-checked like the ordinary post-derive final revalidation:
      * the expiry re-read, then the policy epoch, region and issuer. A
      * deadline crossing or a rotation landing mid-derivation refuses the
-     * resume, for both a valid and an invalid derivation (round-95 audit
-     * fix, Rust parity): an insufficient proof on an expired record
+     * resume, for both a valid and an invalid derivation (Rust parity):
+     * an insufficient proof on an expired record
      * commits Expired, never InsufficientWork. The minimum-duration
      * floor is exempt (it was passed before
      * the consume; it is not a security deadline). The signed expiry is
@@ -1226,7 +1239,12 @@ final class Verifier
                     $consumed->record->nonce,
                     $consumed->consumedResult->binding,
                     true,
-                    $this->measurableSolveDurationMs($consumed->record, $receiptNs),
+                    // The committed-result acceptance is a stored-result
+                    // replay: no solve duration (the retry's receipt is
+                    // not the solve's endpoint), the authenticated decoy
+                    // name comes from the replayed record.
+                    null,
+                    $consumed->record->decoyField,
                 )
                 : VerifyOutcome::invalid(VerifyError::InsufficientWork);
         }
@@ -1283,7 +1301,7 @@ final class Verifier
         // only the short lease, never a poison marker. The claim sits
         // after the cheap-phase revalidation and before the admission
         // gate: a claim loser never acquires an Argon capacity slot
-        // (audit fix: the old order leaked a slot for the whole lease
+        // (the earlier order leaked a slot for the whole lease
         // TTL), and a refused or unavailable capacity lease releases
         // the claim it held in the finally below, so a CapacityExceeded
         // loser never leaves a poison claim behind for later retries. A
@@ -1361,8 +1379,8 @@ final class Verifier
             // Post-derive final revalidation: the same current-clock and
             // current-expectation re-check the ordinary verify() runs
             // after its derivation, step 10 of {@see self::verify()}. It
-            // runs for both a valid and an invalid derivation (round-95
-            // audit fix): the Rust mirror re-reads the clock after the
+            // runs for both a valid and an invalid derivation (Rust
+            // parity): the Rust mirror re-reads the clock after the
             // derivation before the leading-zero verdict, so an invalid
             // derivation on a record that expired mid-derive commits
             // Expired, never a stale InsufficientWork. First the expiry
@@ -1441,7 +1459,7 @@ final class Verifier
             $claimOwner = null;
 
             return $valid
-                ? VerifyOutcome::valid($record->nonce, $binding, solveDurationMs: $this->measurableSolveDurationMs($record, $receiptNs))
+                ? VerifyOutcome::valid($record->nonce, $binding, solveDurationMs: $this->measurableSolveDurationMs($record, $receiptNs), decoyField: $record->decoyField)
                 : VerifyOutcome::invalid(VerifyError::InsufficientWork);
         } finally {
             if ($claimOwner !== null) {
@@ -1481,7 +1499,10 @@ final class Verifier
      * acceptance, and a barrier or shortfall failure maps to the
      * retryable StorageUnavailable (never a generic exception escaping
      * the verifier). A stored invalid outcome is deterministic and
-     * replays to any caller.
+     * replays to any caller. The accepted stored success carries no
+     * solve duration (the retry's receipt is not the solve's endpoint,
+     * the shared PHP/Rust spec) and the authenticated decoy name from
+     * the replayed record.
      */
     private function acceptStoredResumeResult(ConsumedRecord $after, string $fenceReason, ?int $receiptNs): VerifyOutcome
     {
@@ -1498,7 +1519,8 @@ final class Verifier
                 $after->record->nonce,
                 $after->consumedResult->binding,
                 true,
-                $this->measurableSolveDurationMs($after->record, $receiptNs),
+                null,
+                $after->record->decoyField,
             )
             : VerifyOutcome::invalid(VerifyError::InsufficientWork);
     }
@@ -1520,13 +1542,17 @@ final class Verifier
      * `[A-Za-z0-9._:-]+`, 1..128 bytes; the alphabet itself makes the
      * legacy '|' separator rejection unnecessary.
      *
-     * The decoy (honeypot) field name is an authenticated v2 canonical
+     * The decoy (honeypot) field name is an authenticated canonical
      * field: when present it must match the exact shape the issuer mints
      * and the widget driver renders, 1..=64 bytes of `[A-Za-z0-9_-]`.
      * No `.`, `:` or `|` is allowed, so the canonical segment structure
      * can never be altered by a stored value. A non-conforming name is
      * a corrupt or foreign record: MalformedRecord, the Rust
-     * `validate_record` decoy check.
+     * `validate_record` decoy check. The protocol-vs-decoy grammar is
+     * total: the segment rides a protocol v3 record (an armed issuance
+     * writes version 3), so a v2 record carrying a decoy is rejected by
+     * the protocol gate above. A v3 record without one (absent or null)
+     * is rejected too, because the decoy is mandatory on v3.
      *
      * Argon2id memory/time/parallelism are not bounded here: the
      * absolute process ceilings apply to the signed parameters after
@@ -1537,10 +1563,26 @@ final class Verifier
      */
     private function validateRecord(ChallengeRecord $record): bool
     {
-        // Protocol version is part of the wire contract: only 1 (legacy,
-        // migration window) and 2 (current) exist. Anything else is a
-        // corrupt or foreign record.
-        if ($record->protocolVersion !== 1 && $record->protocolVersion !== 2) {
+        // Protocol version is part of the wire contract: 1 (legacy,
+        // migration window), 2 (current, unarmed) and 3 (the
+        // decoy-capable canonical) exist. Anything else is a corrupt or
+        // foreign record. The protocol-vs-decoy grammar is total: a
+        // protocol-v2 record that carries a decoy is rejected explicitly
+        // (the v2 canonical never includes the `|decoy_field` segment,
+        // so the combination cannot come from a conforming issuer — an
+        // armed issuance writes protocol v3), and a protocol-v3 record
+        // without one is rejected too. The decoy is mandatory on v3, so
+        // a signed v2 record with its stored version flipped to 3 keeps
+        // the plain 18-field canonical bytes and is refused here. The
+        // capability is fully inferable from the authenticated canonical
+        // shape, which is the point.
+        if ($record->protocolVersion !== 1 && $record->protocolVersion !== 2 && $record->protocolVersion !== 3) {
+            return false;
+        }
+        if ($record->protocolVersion === 2 && $record->decoyField !== null) {
+            return false;
+        }
+        if ($record->protocolVersion === 3 && $record->decoyField === null) {
             return false;
         }
         $scopeLen = \strlen($record->scope);
@@ -1551,7 +1593,7 @@ final class Verifier
         ) {
             return false;
         }
-        // The decoy (honeypot) field name is an authenticated v2 canonical
+        // The decoy (honeypot) field name is an authenticated v3 canonical
         // field: when present it must match the exact shape the issuer
         // mints and the widget driver renders — 1..=64 bytes of
         // [A-Za-z0-9_-] (no `.`, `:` or `|`, so the canonical segment
@@ -1777,9 +1819,11 @@ final class Verifier
 
         // 1b. Protocol version gate: v1 (legacy, less comprehensively
         //     signed) is only accepted during an explicit migration window;
-        //     v2 has been the issuance format longer than the maximum
-        //     challenge lifetime, so any surviving v1 record is stale or
-        //     foreign.
+        //     v2 has been the unarmed issuance format longer than the
+        //     maximum challenge lifetime, so any surviving v1 record is
+        //     stale or foreign. Protocol v3 (the decoy-capable canonical)
+        //     is accepted; the structural gate of validateRecord already
+        //     rejected the v2-plus-decoy combination and unknown versions.
         if ($record->protocolVersion === 1 && !$this->acceptLegacyV1) {
             return VerifyError::MalformedRecord;
         }
@@ -2006,10 +2050,12 @@ final class Verifier
      * milliseconds: the span between the record's high-resolution
      * issuance timestamp (issued_at_ns, wall-clock epoch microseconds
      * written by the issuing host) and this verification's receipt
-     * clock. Exposed on the valid outcomes of the consumed/valid and
-     * replay-of-valid paths as unforgeable behavioral evidence for the
-     * risk layer — the client-reported token duration is forgeable and
-     * is never consulted.
+     * clock. Exposed only on the valid outcome of a fresh derivation,
+     * the consumed/valid path and the resultless-resume path. A
+     * stored-success replay carries null instead: the retry's receipt
+     * is not the solve's endpoint, so the value remains unforgeable
+     * behavioral evidence for the risk layer. The client-reported
+     * token duration is forgeable and never consulted.
      *
      * The skew-tolerance semantics mirror {@see self::checkMinDuration()}
      * exactly: a receipt that precedes issuance is unmeasurable.
@@ -2207,12 +2253,15 @@ final class Verifier
      * immutable parameter (kid included), so a valid signature proves the
      * whole record is authentic; used in the cheap phase and re-applied to
      * the consumed instance (the proof-phase re-check). When the record
-     * carries an armed decoy (honeypot) field, the name is covered too —
+     * carries an armed decoy (honeypot) field, the name is covered too:
      * it is the final `|<decoy_field>` segment appended after the kid
      * see {@see Issuer::canonicalPayload()}, so stripping, renaming or
-     * splicing it breaks the signature. An unarmed record renders the
-     * legacy 18-field canonical bytes, byte-identical to the
-     * pre-extension format.
+     * splicing it breaks the signature. The decoy segment rides a
+     * protocol v3 record: armed issuance writes version 3, and the
+     * v2-plus-decoy combination is rejected by the structural gate. An
+     * unarmed record — a v2 — renders the legacy 18-field canonical
+     * bytes, byte-identical to the pre-extension format; a v3 record
+     * always carries the decoy segment (the decoy is mandatory on v3).
      */
     private function verifyRecordSignature(ChallengeRecord $record, string $secretKey): bool
     {

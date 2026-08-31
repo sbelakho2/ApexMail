@@ -308,14 +308,14 @@ final class VerifierGateTest extends TestCase
         self::assertSame(1, $gate->releases, 'the lease must be released exactly once after a successful acquire');
     }
 
-    // ── Terminal-state admission pre-check (round-94 audit fix) ─────────
+    // ── Terminal-state admission pre-check ─────────────────────────────
 
     public function testCancelledArgonRecordReturnsRecordNotFoundWithoutAcquiringAdmission(): void
     {
         // A well-formed solved token for a cancelled Argon record
         // resolves to the pinned RecordNotFound through the
         // pre-admission terminal-state check, without acquiring an
-        // Argon admission slot (previously the admission happened first
+        // Argon admission slot (the admission used to happen first
         // and the consume transition then revealed the terminal state
         // as missing).
         $record = $this->argon2Record();
@@ -603,7 +603,7 @@ final class VerifierGateTest extends TestCase
     public function testNoCapabilityStorageKeepsTheLegacyAdmissionThenRecordNotFoundBehavior(): void
     {
         // A storage without the runtime-state capability (and without
-        // the consumed-state capability) keeps the OLD behavior: a
+        // the consumed-state capability) keeps the prior behavior: a
         // well-formed token for a cancelled record still acquires an
         // Argon admission slot, and the consume transition then reveals
         // the terminal state as RecordNotFound.
@@ -1198,11 +1198,12 @@ final class VerifierGateTest extends TestCase
         self::assertTrue($o2->isOk(), sprintf('unbound record must verify without an IP, got %s', $o2->code()));
     }
 
-    public function testProtocolVersion3IsMalformed(): void
+    public function testUnknownProtocolVersionIsMalformed(): void
     {
-        // Only protocol versions 1 (legacy migration) and 2 (current)
-        // exist in the wire contract; anything else is a corrupt or
-        // foreign record.
+        // Protocol versions 1 (legacy migration window), 2 (unarmed) and
+        // 3 (the decoy-capable canonical) exist in the wire contract;
+        // anything else is a corrupt or foreign record. Version 4 stands
+        // in for the unknown-version class.
         $storage = new ArrayStorage(now: static fn (): int => self::ISSUED_AT);
         $issuer = new Issuer(new \KiwiCaptcha\Config(secretKey: '0123456789abcdef0123456789abcdef', targetBits: 8), $storage);
         $challenge = $issuer->issue('login', '198.51.100.7');
@@ -1224,7 +1225,7 @@ final class VerifierGateTest extends TestCase
             challenge: $record->challenge,
             minDurationMs: $record->minDurationMs,
             issuedAtNs: $record->issuedAtNs,
-            protocolVersion: 3,
+            protocolVersion: 4,
         ));
         $counter = 0;
         do {

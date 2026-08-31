@@ -246,7 +246,7 @@ final class FinalRevalidationTest extends TestCase
 
     public function testFinalRecheckRejectsExpiredEvenForAnInsufficientDerivation(): void
     {
-        // Round-95 audit fix, Rust parity: the post-derive final
+        // Rust parity: the post-derive final
         // revalidation runs before the leading-zero verdict for both
         // outcomes, so an insufficient proof on a record that expired
         // during the derivation commits Expired, never a stale

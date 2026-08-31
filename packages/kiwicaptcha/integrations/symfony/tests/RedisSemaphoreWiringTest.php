@@ -59,7 +59,7 @@ final class RedisSemaphoreWiringTest extends TestCase
         self::assertTrue($container->hasDefinition('kiwi_captcha.argon2_redis_semaphore'));
         $semaphore = $container->getDefinition('kiwi_captcha.argon2_redis_semaphore');
         self::assertSame(RedisAdmissionSemaphore::class, $semaphore->getClass());
-        self::assertEquals(new Reference('my.redis.client'), $semaphore->getArgument(0));
+        self::assertEquals(new Reference('kiwi_captcha.redis.checked'), $semaphore->getArgument(0), 'the semaphore receives the checked client (the runtime authority guard runs at construction)');
         self::assertSame('deployment-a', $semaphore->getArgument(2), 'the configured namespace must reach the semaphore');
         self::assertSame(64, $semaphore->getArgument(4), 'argon2_saturation_pressure_cap (default 64) must reach the semaphore\'s bounded saturation-pressure counter');
 
@@ -92,7 +92,7 @@ final class RedisSemaphoreWiringTest extends TestCase
      */
     public function testLegacyArgon2MaxWaitersAliasStillWiresTheSemaphoreWithDeprecation(): void
     {
-        // The old name described a waiters guard, but the value is a
+        // The legacy name described a waiters guard, but the value is a
         // bounded saturation-pressure counter (admission is immediate and
         // non-blocking; nothing queues). The alias still wires the same
         // value, and the config tree raises the Symfony deprecation
@@ -184,7 +184,7 @@ final class RedisSemaphoreWiringTest extends TestCase
 
         self::assertTrue($container->hasDefinition('kiwi_captcha.argon2_redis_semaphore'));
         $semaphore = $container->getDefinition('kiwi_captcha.argon2_redis_semaphore');
-        self::assertEquals(new Reference('my.redis.client'), $semaphore->getArgument(0));
+        self::assertEquals(new Reference('kiwi_captcha.redis.checked'), $semaphore->getArgument(0));
 
         $verifier = $container->getDefinition('kiwi_captcha.verifier');
         self::assertEquals(new Reference('kiwi_captcha.argon2_scope_gate'), $verifier->getArgument(1));
@@ -273,7 +273,7 @@ final class RedisSemaphoreWiringTest extends TestCase
         self::assertSame(IssuanceRateLimiter::class, $limiter->getClass());
         self::assertSame(10, $limiter->getArgument(0));
         self::assertSame(60, $limiter->getArgument(1));
-        self::assertEquals(new Reference('my.redis.client'), $limiter->getArgument(5), 'the Redis client must reach the limiter');
+        self::assertEquals(new Reference('kiwi_captcha.redis.checked'), $limiter->getArgument(5), 'the Redis client must reach the limiter, through the checked seam');
         self::assertSame(500, $limiter->getArgument(6), 'the global cap must reach the limiter');
         self::assertSame('deployment-a', $limiter->getArgument(7), 'the deployment namespace must reach the limiter');
 

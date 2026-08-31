@@ -6,7 +6,7 @@ namespace KiwiCaptcha;
 
 /**
  * The explicit request-binding enforcement policy, replacing the ambiguous
- * nullable "expected request binding" (null previously meant both "the
+ * nullable "expected request binding" (null used to mean both "the
  * transaction is explicitly unbound" AND "do not enforce", which let a
  * bound record escape comparison whenever the authoritative transaction
  * resolved to null).

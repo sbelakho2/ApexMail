@@ -53,12 +53,25 @@ class KiwiCaptchaType extends AbstractType
         $view->vars['nonce'] = $options['nonce'];
         $view->vars['telemetry'] = $options['telemetry'];
         $view->vars['request_binding'] = $options['request_binding'];
+        $view->vars['algorithm'] = $options['algorithm'];
 
         // The form theme inlines the shared widget assets; provide them from
         // the bundle runtime so the rendered form markup is self-contained.
         $view->vars['kiwi_css'] = $this->runtime?->css() ?? '';
         $view->vars['kiwi_wasm'] = $this->runtime?->wasm() ?? '';
         $view->vars['kiwi_driver'] = $this->runtime?->driver() ?? '';
+
+        // Files-mode delivery state: the asset_mode tier, the once-per-
+        // page asset tags (the request-scoped emission registry lives on
+        // the runtime) and the driver's lazy runtime + worker URLs and
+        // SRI digests. The 'inline' fallback when no runtime is wired
+        // keeps the theme self-contained (it can emit no asset tags).
+        $view->vars['asset_mode'] = $this->runtime?->assetMode() ?? 'inline';
+        $view->vars['asset_tags'] = $this->runtime?->assetTags($options['nonce']) ?? '';
+        $view->vars['runtime_src'] = $this->runtime?->runtimeSrc() ?? '';
+        $view->vars['runtime_integrity'] = $this->runtime?->runtimeIntegrity() ?? '';
+        $view->vars['worker_src'] = $this->runtime?->workerSrc() ?? '';
+        $view->vars['worker_integrity'] = $this->runtime?->workerIntegrity() ?? '';
     }
 
     public function configureOptions(OptionsResolver $resolver): void
@@ -79,6 +92,10 @@ class KiwiCaptchaType extends AbstractType
             // static risk.request_binding; the application may supply a
             // dynamic per-transaction binding per form.
             'request_binding' => $this->requestBinding,
+            // The requested solver profile rendered into
+            // data-kiwi-algorithm when set (the server response stays
+            // authoritative).
+            'algorithm' => null,
             // The constraint's expected scope follows the form's scope option.
             'constraints' => static fn (Options $options): array => [
                 new KiwiCaptcha(['scope' => $options['scope']]),
@@ -91,6 +108,8 @@ class KiwiCaptchaType extends AbstractType
         $resolver->setAllowedTypes('scope', 'string');
         $resolver->setAllowedTypes('nonce', ['string', 'null']);
         $resolver->setAllowedTypes('request_binding', ['string', 'null']);
+        $resolver->setAllowedTypes('algorithm', ['string', 'null']);
+        $resolver->setAllowedValues('algorithm', [null, 'sha256', 'argon2id']);
         $resolver->setAllowedValues('telemetry', ['off', 'minimal', 'full']);
     }
 

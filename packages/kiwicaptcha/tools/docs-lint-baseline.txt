@@ -192,6 +192,7 @@
 0 packages/kiwicaptcha/integrations/symfony/docs/siteverify.md
 0 packages/kiwicaptcha/integrations/symfony/docs/troubleshooting.md
 0 packages/kiwicaptcha/integrations/symfony/src/Controller/ApiJsController.php
+0 packages/kiwicaptcha/integrations/symfony/src/Controller/AssetController.php
 0 packages/kiwicaptcha/integrations/symfony/src/Controller/ChallengeController.php
 0 packages/kiwicaptcha/integrations/symfony/src/Controller/KiwiHealthController.php
 0 packages/kiwicaptcha/integrations/symfony/src/Controller/SiteVerifyController.php
@@ -232,6 +233,12 @@
 0 packages/kiwicaptcha/integrations/symfony/src/Risk/TransactionalChainedChallengeStateStore.php
 0 packages/kiwicaptcha/integrations/symfony/src/Risk/UnknownScopeException.php
 0 packages/kiwicaptcha/integrations/symfony/src/Routing/KiwiCaptchaRouteLoader.php
+0 packages/kiwicaptcha/integrations/symfony/src/Security/Authority/AuthorityClassification.php
+0 packages/kiwicaptcha/integrations/symfony/src/Security/Authority/AuthorityGuardedPredisClient.php
+0 packages/kiwicaptcha/integrations/symfony/src/Security/Authority/AuthorityTransitionGuard.php
+0 packages/kiwicaptcha/integrations/symfony/src/Security/Authority/PinnedAuthorityRefusalException.php
+0 packages/kiwicaptcha/integrations/symfony/src/Security/Authority/PinnedPrimaryAuthorityGuard.php
+0 packages/kiwicaptcha/integrations/symfony/src/Security/Authority/RuntimeAuthorityClassifier.php
 0 packages/kiwicaptcha/integrations/symfony/src/Security/InProcessArgonGate.php
 0 packages/kiwicaptcha/integrations/symfony/src/Security/IssuanceCounter.php
 0 packages/kiwicaptcha/integrations/symfony/src/Security/IssuanceRateLimiter.php
@@ -254,6 +261,8 @@
 0 packages/kiwicaptcha/integrations/symfony/src/Twig/KiwiCaptchaRuntime.php
 0 packages/kiwicaptcha/integrations/symfony/src/Validator/Constraints/KiwiCaptcha.php
 0 packages/kiwicaptcha/integrations/symfony/src/Validator/Constraints/KiwiCaptchaValidator.php
+0 packages/kiwicaptcha/integrations/symfony/tests/AssetControllerTest.php
+0 packages/kiwicaptcha/integrations/symfony/tests/AuthorityTransitionGuardTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/ChainedChallengeTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/ChainedIssuanceRollbackTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/ChainedTicketDeterminismTest.php
@@ -272,6 +281,11 @@
 0 packages/kiwicaptcha/integrations/symfony/tests/InProcessArgonGateTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/Kernel/ChainingKernelTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/Kernel/ChainingTestKernel.php
+0 packages/kiwicaptcha/integrations/symfony/tests/Kernel/DoctorHaSafeTestKernel.php
+0 packages/kiwicaptcha/integrations/symfony/tests/Kernel/DoctorHighAbuseDecoyDeferredNormalKernel.php
+0 packages/kiwicaptcha/integrations/symfony/tests/Kernel/DoctorPinnedPrimaryTestKernel.php
+0 packages/kiwicaptcha/integrations/symfony/tests/Kernel/FailClosedEnvPostureSentinelTestKernel.php
+0 packages/kiwicaptcha/integrations/symfony/tests/Kernel/FailClosedOpaqueFactoryClientTestKernel.php
 0 packages/kiwicaptcha/integrations/symfony/tests/Kernel/Fixtures/PingController.php
 0 packages/kiwicaptcha/integrations/symfony/tests/Kernel/Fixtures/app_routes.php
 0 packages/kiwicaptcha/integrations/symfony/tests/Kernel/HardenedTestKernel.php
@@ -303,6 +317,9 @@
 0 packages/kiwicaptcha/integrations/symfony/tests/KiwiHealthControllerTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/MetricsRedactionTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/OperationIdentityReplayTest.php
+0 packages/kiwicaptcha/integrations/symfony/tests/PinnedPrimaryAuthorityGuardTest.php
+0 packages/kiwicaptcha/integrations/symfony/tests/PinnedPrimaryAuthorityPromotionTest.php
+0 packages/kiwicaptcha/integrations/symfony/tests/PinnedPrimaryWiringTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/RateLimiterTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/RealRedisChainedChallengeTest.php
 0 packages/kiwicaptcha/integrations/symfony/tests/RealRedisIntegrationTest.php
@@ -344,6 +361,7 @@
 0 protocol/risk-v1/README.md
 0 tests/browser/router.php
 0 tests/browser/specs/a11y.spec.mjs
+0 tests/browser/specs/asset-mode.spec.mjs
 0 tests/browser/specs/chaining.spec.mjs
 0 tests/browser/specs/crossbrowser.spec.mjs
 0 tests/browser/specs/migration.spec.mjs

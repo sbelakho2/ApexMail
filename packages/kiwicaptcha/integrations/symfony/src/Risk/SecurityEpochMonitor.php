@@ -16,6 +16,19 @@ use KiwiCaptcha\Verifier;
  * verification, so a central policy bump revokes outstanding challenges
  * within one cache window instead of waiting for a redeploy.
  *
+ * The same cached central read also exposes the `min_protocol_version`
+ * field, the fleet-wide writer floor the challenge controller consults
+ * before arming protocol-v3 emission (risk.decoy_v3_enabled): v3 is
+ * emitted only when the confirmed central floor is >= 3. Unlike the
+ * epoch, the protocol floor is deliberately NOT monotonic: the floor is
+ * a fleet-capability coordination signal, not a revocation. The
+ * readiness gate admits any binary whose max protocol is >= the floor,
+ * so a lowered floor means the operator admitted older binaries back
+ * into the pool. v3 emission must stop on the next re-read, because a
+ * monotonic max would keep emitting v3 challenges those binaries
+ * reject. Absent, corrupt or unreadable state yields null (fail-safe:
+ * the issuance path falls back to protocol v2).
+ *
  * Four hardening properties:
  *
  *  1. Monotonic max: once this process has observed epoch N it never
@@ -25,6 +38,8 @@ use KiwiCaptcha\Verifier;
  *  2. Fail-safe on Redis failure: when the central read fails (Redis down,
  *     timeout), the monitor serves the last observed max — the verifier
  *     keeps enforcing the newest epoch it ever saw, never a weaker one.
+ *     The protocol floor serves null instead (v2 emission), the safe
+ *     direction for the writer gate.
  *  3. Bounded latency: the central value is re-read at most once per cache
  *     window, so the revocation latency is one TTL, never unbounded.
  *  4. Max-stale fail-closed: after the last successful central read, once
@@ -67,9 +82,22 @@ final class SecurityEpochMonitor
     /** The central hash field carrying the minimum policy epoch. */
     public const MIN_POLICY_EPOCH_FIELD = 'min_policy_epoch';
 
+    /** The central hash field carrying the fleet protocol floor. */
+    public const MIN_PROTOCOL_VERSION_FIELD = 'min_protocol_version';
+
     private int $observedMax = 0;
 
     private int $currentEpoch;
+
+    /**
+     * The last successfully read central `min_protocol_version` floor,
+     * non-monotonic: a lowered floor (the operator admitted older
+     * binaries back into the pool) must take effect on the next re-read,
+     * so v3 emission stops. Null = no confirmed floor (no Redis client,
+     * read failure, absent or corrupt field) — the fail-safe direction
+     * for the issuance-side writer gate.
+     */
+    private ?int $currentMinProtocolVersion = null;
 
     private float $refreshedAtMs = -PHP_FLOAT_MAX;
 
@@ -133,12 +161,14 @@ final class SecurityEpochMonitor
     }
 
     /**
-     * Re-read the central epoch when the cache window elapsed, apply the
-     * monotonic max to the verifier, and return the current effective epoch.
+     * Re-read the central policy when the cache window elapsed, apply the
+     * monotonic max of the epoch to the verifier, refresh the protocol
+     * floor, and return the current effective epoch.
      *
      * Never throws: a central-read failure serves the last-observed max
-     * (fail-safe). The verifier rotation is applied at most once per epoch
-     * change and mutates only the expected policy version: the
+     * (fail-safe) and the last-confirmed protocol floor (null when none
+     * was ever confirmed). The verifier rotation is applied at most once
+     * per epoch change and mutates only the expected policy version: the
      * construction-time region/issuer expectations are never rewritten.
      */
     public function currentEpoch(): int
@@ -146,10 +176,11 @@ final class SecurityEpochMonitor
         $now = $this->nowMs();
         if ($now - $this->refreshedAtMs >= $this->cacheSecs * 1000) {
             $this->refreshedAtMs = $now;
-            $central = $this->readCentralEpoch($now);
+            [$central, $centralFloor] = $this->readCentralPolicy($now);
             if ($central !== null) {
                 $this->observedMax = max($this->observedMax, $central);
             }
+            $this->currentMinProtocolVersion = $centralFloor;
             $this->apply(max($this->configuredEpoch, $this->observedMax));
         }
 
@@ -165,6 +196,23 @@ final class SecurityEpochMonitor
     public function refresh(): int
     {
         return $this->currentEpoch();
+    }
+
+    /**
+     * The central `min_protocol_version` floor from the last successful
+     * read within the cache window, or null when no floor is confirmed
+     * (no Redis client by design, a failed read, an absent key, or a
+     * corrupt field). Non-monotonic and non-sticky: a lowered central
+     * value takes effect on the next re-read, because the readiness gate
+     * admits any binary whose max protocol is >= the floor — a lowered
+     * floor re-admits older binaries, so v3 emission must stop. The
+     * issuance path consumes this value to gate decoy-armed (protocol
+     * v3) emission: arm only when the floor is >= 3, else emit v2
+     * (fail-safe).
+     */
+    public function minProtocolVersion(): ?int
+    {
+        return $this->currentMinProtocolVersion;
     }
 
     /** The highest central epoch this process ever observed (0 = none yet). */
@@ -204,48 +252,79 @@ final class SecurityEpochMonitor
 
     /**
      * The last-observed central epoch, or null when the read failed or the
-     * field is absent. A successful read, the HGET call itself answered
+     * field is absent. A successful read, the hash read itself answered
      * even with an absent field (the "no central policy configured" state
      * is legitimate and confirmed), refreshes the max-stale deadline; a
      * thrown read leaves {@see isStale()} to drift toward true.
+     *
+     * The second return value is the central `min_protocol_version` floor
+     * (null when absent, corrupt or unreadable): the issuance-side writer
+     * gate consumes it, and it never touches the max-stale window. A
+     * missing or corrupt floor only disables v3 emission, and protocol v2
+     * stays served, the safe direction.
+     *
+     * @return array{0: ?int, 1: ?int} [central epoch, central protocol floor]
      */
-    private function readCentralEpoch(float $now): ?int
+    private function readCentralPolicy(float $now): array
     {
         if ($this->redis === null) {
-            return null;
+            return [null, null];
         }
         try {
-            $value = $this->redis->hget($this->policyKey(), self::MIN_POLICY_EPOCH_FIELD);
+            $policy = $this->redis->hgetall($this->policyKey());
         } catch (\Throwable) {
-            // Fail-safe: serve the last-observed max, never a weaker epoch.
-            return null;
+            // Fail-safe: serve the last-observed max and the last
+            // confirmed floor, never a weaker epoch or an armed v3.
+            return [null, null];
         }
-        if ($value === null || $value === false) {
-            // A successful read with no central epoch configured (a fresh
+        if (!\is_array($policy) || $policy === []) {
+            // A successful read with no central policy configured (a fresh
             // deployment): the monitor is healthy and the success mark is
-            // refreshed — only the last-observed max keeps serving.
+            // refreshed — only the last-observed max keeps serving, and
+            // the floor stays unconfirmed (v2 emission).
             $this->lastSuccessAtMs = $now;
 
-            return null;
+            return [null, null];
         }
-        // Corrupt present state must never be indistinguishable from
-        // absent state: the central policy epoch is a canonical unsigned
-        // decimal integer, and a malformed value (abc, -1, 1.5, 1e3,
-        // whitespace variants, integer overflow) is NOT a successful
-        // read — the stale window is NOT refreshed (the verification
-        // fails closed once the max-stale bound passes) and the
-        // last-observed max keeps serving.
-        if (!\is_string($value) || !preg_match('/^(?:0|[1-9][0-9]*)$/D', $value)) {
-            return null;
+        $epoch = null;
+        $floor = null;
+        if (\array_key_exists(self::MIN_POLICY_EPOCH_FIELD, $policy)) {
+            $value = $policy[self::MIN_POLICY_EPOCH_FIELD];
+            if (\is_string($value) && preg_match('/^(?:0|[1-9][0-9]*)$/D', $value) === 1) {
+                $parsed = (int) $value;
+                if ((string) $parsed === $value) {
+                    $epoch = $parsed;
+                }
+            }
+            // Corrupt present epoch state must never be indistinguishable
+            // from absent state: a malformed value (abc, -1, 1.5, 1e3,
+            // integer overflow) is NOT a successful read — the stale
+            // window is NOT refreshed (the verification fails closed once
+            // the max-stale bound passes) and the last-observed max keeps
+            // serving. The protocol floor below is unaffected: a corrupt
+            // floor only stays null (v2 emission).
+            if ($epoch === null) {
+                return [null, null];
+            }
         }
-        $epoch = (int) $value;
-        if ((string) $epoch !== $value) {
-            // Integer overflow: the value does not fit a PHP int.
-            return null;
+        if (\array_key_exists(self::MIN_PROTOCOL_VERSION_FIELD, $policy)) {
+            $value = $policy[self::MIN_PROTOCOL_VERSION_FIELD];
+            if (\is_string($value) && preg_match('/^(?:0|[1-9][0-9]*)$/D', $value) === 1) {
+                $parsed = (int) $value;
+                if ((string) $parsed === $value) {
+                    $floor = $parsed;
+                }
+            }
+            // A corrupt protocol floor (abc, -1, 1.5, 1e3, overflow) is
+            // an unconfirmed floor: null, so the issuance gate emits v2.
+            // The stale window is deliberately NOT refreshed by the floor
+            // field: the epoch field above owns the freshness deadline.
         }
+        // The epoch field was confirmed (present and canonical) or
+        // legitimately absent; either way the central read succeeded.
         $this->lastSuccessAtMs = $now;
 
-        return $epoch;
+        return [$epoch, $floor];
     }
 
     private function apply(int $epoch): void

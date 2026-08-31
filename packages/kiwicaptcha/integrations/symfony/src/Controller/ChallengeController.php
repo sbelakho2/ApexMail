@@ -21,6 +21,7 @@ use KiwiCaptcha\Issuer;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskEventKind;
 use KiwiCaptcha\StorageInterface;
+use Psr\Log\LoggerInterface;
 use Symfony\Component\HttpFoundation\IpUtils;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Request;
@@ -99,14 +100,6 @@ final class ChallengeController
     private const TRUSTED_TLS_TAG_PATTERN = '/^[a-z0-9_+:|:-]{1,64}$/i';
 
     /**
-     * The server-issued decoy field name, a bounded per-issuance value
-     * derived from the challenge nonce. The widget renders it as a hidden
-     * honeypot field; a bot that fills it echoes it back as honeypot
-     * evidence.
-     */
-    private const DECOY_FIELD_PREFIX = 'decoy_';
-
-    /**
      * Headers carrying client identity or forwarding trust: each must
      * appear at most once, since intermediaries pick different values on
      * duplicates. A duplicate gets 400 `DUPLICATE_HEADER` before any
@@ -142,6 +135,16 @@ final class ChallengeController
 
     private JsonDuplicateKeyScanner $jsonDuplicateKeyScanner;
 
+    /**
+     * The once-per-process decoy-v3-gate warning guard: when
+     * risk.decoy_v3_enabled is true but the confirmed central
+     * min_protocol_version floor is below 3 (or unconfirmed), issuance
+     * falls back to protocol v2. This flag makes the actionable warning
+     * fire exactly once per process instead of once per issuance, so an
+     * issuance-rate log flood can never drown the signal.
+     */
+    private bool $decoyV3WarningLogged = false;
+
     public function __construct(
         private readonly Issuer $issuer,
         private readonly ?IssuanceRateLimiter $rateLimiter = null,
@@ -156,7 +159,7 @@ final class ChallengeController
         private readonly ?string $defaultRequestBinding = null,
         private readonly bool $enforceOrigin = false,
         private readonly ?ClientIpResolver $clientIpResolver = null,
-        private readonly ?string $publicBaseUrl = null,
+        private readonly ?\BelConsulting\KiwiCaptchaBundle\Security\ExpectedOrigin $expectedOrigin = null,
         private readonly ?ScopeIssuanceCap $scopeIssuanceCap = null,
         private readonly ?SecurityEpochMonitor $epochMonitor = null,
         private readonly ?int $challengeTtlSecs = null,
@@ -218,13 +221,82 @@ final class ChallengeController
          */
         private readonly ?\BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionStore $postSolveDispositionStore = null,
         /**
-         * The clock for the stage-2 remaining-lifetime clip (unix
-         * seconds; null = time()). Injectable so the near-expiry
-         * adversarial tests pin the chain's remaining lifetime exactly.
-         */
+          * The clock for the stage-2 remaining-lifetime clip (unix
+          * seconds; null = time()). Injectable so the near-expiry
+          * adversarial tests pin the chain's remaining lifetime exactly.
+          */
         private readonly ?\Closure $now = null,
+        /**
+         * The protocol-v3 writer switch (risk.decoy_v3_enabled, default
+         * false): when false, issuance never arms the authenticated
+         * decoy and always emits protocol v2. A new binary stays
+         * byte-compatible with parent-revision verifiers that reject
+         * protocol 3 as unknown, even with the risk gateway wired. When
+         * true, issuance may arm the decoy (protocol v3), subject to
+         * {@see self::protocolV3EmissionEnabled()}: the central
+         * security-policy floor must confirm >= 3 first, and any
+         * uncertainty falls back to v2.
+         */
+        private readonly bool $decoyV3Enabled = false,
+        /**
+         * The issuance-side logger (when the app has one): receives the
+         * once-per-process warning when decoy_v3_enabled cannot take
+         * effect because the central protocol floor is below 3 or
+         * unconfirmed. A raising logger must never break issuance: the
+         * warning path is best-effort.
+         */
+        private readonly ?LoggerInterface $logger = null,
     ) {
         $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
+    }
+
+    /**
+     * The protocol-v3 emission gate implements the audit's two-phase
+     * rollout invariant: the decoy (protocol v3) is armed only when the
+     * operator's writer switch (risk.decoy_v3_enabled) is true. The
+     * confirmed central security-policy floor
+     * ({kiwi:<ns>}:security-policy min_protocol_version, read through
+     * the SecurityEpochMonitor's cached central-policy snapshot) must
+     * also be >= 3. The floor is the fleet-wide reader capability
+     * statement: the readiness probe keeps every binary whose max
+     * protocol is below the floor out of the pool. A floor >= 3
+     * therefore means every serving verifier accepts protocol v3 before
+     * any node emits it. A floor below 3, an absent or corrupt floor, an
+     * unreadable central policy or no central policy at all (null epoch
+     * monitor / null security Redis) all fail safe to protocol v2
+     * emission. v3 is never armed on uncertainty. The actionable warning
+     * fires once per process. The SecurityEpochMonitor's refresh() runs
+     * earlier in the pipeline (the max-stale check), so this read is the
+     * freshest cached central state.
+     */
+    private function protocolV3EmissionEnabled(): bool
+    {
+        if (!$this->decoyV3Enabled) {
+            return false;
+        }
+        $floor = $this->epochMonitor?->minProtocolVersion();
+        if ($floor !== null && $floor >= 3) {
+            return true;
+        }
+        if (!$this->decoyV3WarningLogged) {
+            $this->decoyV3WarningLogged = true;
+            $detail = $floor === null
+                ? 'no confirmed central min_protocol_version (the policy hash is absent, corrupt, unreadable, or no security Redis is configured)'
+                : sprintf('the central min_protocol_version is %d', $floor);
+            $message = sprintf(
+                'kiwicaptcha: risk.decoy_v3_enabled is true but protocol-v3 emission stays DISABLED — %s (below 3). '.
+                'Raise the central {kiwi:<ns>}:security-policy min_protocol_version to 3 only after every serving binary accepts protocol v3 '.
+                '(deploy the new binaries fleet-wide and confirm no old binary remains); until then issuance keeps emitting protocol v2.',
+                $detail,
+            );
+            try {
+                $this->logger?->warning($message);
+            } catch (\Throwable) {
+                // A raising logger must never break issuance.
+            }
+        }
+
+        return false;
     }
 
     public function challenge(Request $request): JsonResponse
@@ -1215,20 +1287,32 @@ final class ChallengeController
         try {
             // The record carries server-owned issuance metadata (Siteverify
             // `hostname`), never signed, never sent. The value comes from
-            // the server-configured public_base_url, so a forged Host
-            // header can never influence the reported hostname; without
-            // public_base_url the hostname stays null.
-            $hostname = $this->publicBaseUrl !== null
-                ? parse_url($this->publicBaseUrl, PHP_URL_HOST) ?: null
-                : null;
+            // the server-configured public_base_url (the validated
+            // expected origin), so a forged Host header can never
+            // influence the reported hostname; without public_base_url
+            // the hostname stays null.
+            $hostname = $this->expectedOrigin?->host();
             // Issuance always uses the canonical client IP. A per-sitekey
             // ttl_secs override mints through a TTL-variant issuer,
             // {@see self::issuerForTtl()}, so the signed lifetime carries
-            // the override.
+            // the override. The adaptive-risk surface (risk wired) arms
+            // the authenticated decoy: the issuer picks a random
+            // pool name per issuance, {@see Issuer::issueWithDecoyField()},
+            // signs it into the canonical payload (protocol v3 record) and
+            // the challenge response carries the authenticated
+            // decoy_field — there is NO second nonce-hash decoy scheme in
+            // this controller. Arming is gated by the two-phase rollout
+            // invariant, {@see self::protocolV3EmissionEnabled()}: the
+            // operator's writer switch (risk.decoy_v3_enabled) must be
+            // true AND the confirmed central min_protocol_version floor
+            // must be >= 3; otherwise issuance emits protocol v2,
+            // byte-identical to the pre-decoy format, so a new node can
+            // never emit a challenge a parent-revision verifier rejects.
             $issuer = $this->issuerForTtl($ttlSecs);
+            $armDecoy = $this->risk !== null && $this->protocolV3EmissionEnabled();
             $challenge = $profile !== null
-                ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname)
-                : $issuer->issue($scope, $clientIp, $requestBinding, $hostname);
+                ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname, armDecoyField: $armDecoy)
+                : $issuer->issueWithDecoyField($scope, $clientIp, $armDecoy, $requestBinding, $hostname);
             // Chain stage binding: the newly minted challenge nonce must
             // differ from the chain's verified stage-1 nonce (server-held
             // in the state record). The nonces are server-minted random
@@ -1492,18 +1576,15 @@ final class ChallengeController
             throw $e;
         }
 
-        // Risk-v2 decoy field: when the adaptive risk engine is enabled,
-        // the issuance response carries the server-issued decoy field name
-        // so the widget can render a hidden honeypot field; a bot that
+        // The challenge response carries the authenticated decoy field
+        // name exactly when the issuance armed one: Challenge::toArray()
+        // includes `decoy_field` for an armed (protocol v3) issuance, so
+        // the widget can render the hidden honeypot field; a bot that
         // fills it echoes the marker back in a later challenge request,
         // which the risk-v2 surface feeds as honeypot evidence. The name
-        // is a bounded per-issuance value.
+        // is the issuer's authenticated per-issuance value, never a
+        // nonce-derived reconstruction.
         $challengeData = $challenge->toArray();
-        if ($this->risk !== null) {
-            // Deterministic per issuance: the nonce is base64, so the name
-            // is derived via sha256 to stay in the [0-9a-f] alphabet.
-            $challengeData['decoy_field'] = self::DECOY_FIELD_PREFIX.substr(hash('sha256', $challenge->nonce), 0, 8);
-        }
 
         // Handoff: the challenge is durably issued and stored, the metadata
         // identity persisted, and (stage 2) the chain durably transitioned
@@ -2264,7 +2345,7 @@ final class ChallengeController
                     return $this->privateJson($this->rebuildIssuanceResponse($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
                 }
                 // Pending but signed-expired (retained by the replay
-                // margin): the old nonce must become provably
+                // margin): the prior nonce must become provably
                 // non-redeemable before the chain is rearmed — the atomic
                 // pending->cancelled transition. If the cancellation wins,
                 // the outstanding slot is released and the chain rearmed;
@@ -2590,8 +2671,8 @@ final class ChallengeController
      * challenge from its stored record. The key set and order are the
      * same the original Challenge::toArray() produced (nonce, challenge,
      * salt, algorithm, mKib, t, p, targetBits, ttlSecs, minDurationMs,
-     * prefix), plus the deterministic decoy_field when the risk engine is
-     * enabled. Byte-identical with the original response.
+     * prefix), plus the record's authenticated decoy_field when the
+     * issuance armed one. Byte-identical with the original response.
      *
      * @param array<string, mixed> $recordData a ChallengeRecord's toArray()
      */
@@ -2856,10 +2937,13 @@ final class ChallengeController
             'minDurationMs' => $data['min_duration_ms'],
             'prefix' => $data['prefix'],
         ];
-        if ($this->risk !== null) {
-            // Deterministic per issuance: the nonce is base64, so the name
-            // is derived via sha256 to stay in the [0-9a-f] alphabet.
-            $response['decoy_field'] = self::DECOY_FIELD_PREFIX.substr(hash('sha256', $data['nonce']), 0, 8);
+        // The authenticated decoy name of the replayed record: the
+        // original response carried exactly this value (the issuer's
+        // per-issuance pool pick, signed into the canonical payload), so
+        // the rebuilt response is byte-identical — never a nonce-derived
+        // reconstruction.
+        if ($record->decoyField !== null) {
+            $response['decoy_field'] = $record->decoyField;
         }
 
         return $response;
@@ -2923,9 +3007,13 @@ final class ChallengeController
      * are allowed; a browser cross-site POST always carries one. When
      * present, the Origin must match the expected origin, which comes from
      * server config (public_base_url) when configured, so a forged Host
-     * header can never shift the expected origin. The comparison uses the
-     * same structured normalization as the allowlist,
-     * {@see self::normalizeOrigin()}; without public_base_url the
+     * header can never shift the expected origin. The configured value is
+     * received as the validated ExpectedOrigin object. The extension
+     * refuses anything that is not a canonical https origin before this
+     * point: a literal at container build time, an env-resolved value at
+     * service construction. The request-side candidate uses the same
+     * structured normalization as the allowlist,
+     * {@see self::normalizeOrigin()}. Without public_base_url the
      * expected origin is derived from the request's own scheme and host
      * (fine for localhost and dev; production deployments behind shared
      * infrastructure should set public_base_url).
@@ -2937,11 +3025,10 @@ final class ChallengeController
             return true;
         }
 
-        if ($this->publicBaseUrl !== null) {
-            $expected = self::normalizeOrigin($this->publicBaseUrl);
+        if ($this->expectedOrigin !== null) {
             $candidate = self::normalizeOrigin($origin);
 
-            return $expected !== null && $candidate !== null && $expected === $candidate;
+            return $candidate !== null && $this->expectedOrigin->normalized() === $candidate;
         }
 
         $expected = rtrim($request->getScheme().'://'.$request->getHttpHost(), '/');

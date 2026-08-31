@@ -295,7 +295,11 @@ pub enum VerifyOutcome {
         /// the verifier's clock-skew tolerance, where the elapsed time
         /// cannot be measured reliably (the same skew semantics as the
         /// minimum-duration floor) — and always `None` on non-valid
-        /// outcomes. Purely additive.
+        /// outcomes. A stored-success replay
+        /// (`from_stored_result == true`) also reports `None`: its
+        /// receipt measures the retry, not the original solve, and a
+        /// confidently incorrect value is worse than none. Purely
+        /// additive.
         solve_duration_ms: Option<u64>,
     },
     /// The solution is invalid; the reason explains why.
@@ -330,9 +334,11 @@ impl VerifyOutcome {
     /// verification receipt instant — unforgeable behavioral evidence
     /// (the client-reported token duration never feeds it). `None` on
     /// every non-valid outcome, for a record whose issuance clock is
-    /// unknown, and for a receipt that precedes issuance within the
+    /// unknown, for a receipt that precedes issuance within the
     /// verifier's clock-skew tolerance — exactly the semantics of the
-    /// minimum-duration floor.
+    /// minimum-duration floor — and always for a stored-success replay
+    /// (`from_stored_result == true`), whose receipt measures the retry,
+    /// not the original solve (the cross-language spec, shared with PHP).
     pub fn solve_duration_ms(&self) -> Option<u64> {
         match self {
             VerifyOutcome::Valid {
@@ -545,10 +551,26 @@ impl VerifyError {
 ///
 /// Returns [`VerifyError::MalformedRecord`] on any violation.
 pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
-    // Protocol version is part of the wire contract: only 1 (legacy,
-    // migration window) and 2 (current) exist — anything else is a
-    // corrupt/foreign record.
-    if record.protocol_version != 1 && record.protocol_version != 2 {
+    // Protocol version is part of the wire contract: 1 (legacy, migration
+    // window), 2 (unarmed) and 3 (decoy-capable) exist — anything else is
+    // a corrupt/foreign record. The protocol-vs-decoy grammar is explicit
+    // and total: the `|decoy_field` segment is a protocol v3 canonical
+    // extension, so a v2 record carrying a `decoy_field` is rejected here
+    // (the v2 canonical never includes the segment and such a record
+    // cannot have been signed by a conforming issuer — an armed issuance
+    // writes protocol v3), and a v3 record without a decoy is rejected
+    // too: the decoy is mandatory on v3, so a signed v2 record with its
+    // stored version flipped to 3 can never verify (the canonical shape
+    // itself authenticates the protocol capability). v1 and v2 accept a
+    // null decoy; v3 requires a present decoy; v2 + decoy and v3 without
+    // one are malformed.
+    if !(1..=3).contains(&record.protocol_version) {
+        return Err(VerifyError::MalformedRecord);
+    }
+    if record.protocol_version == 2 && record.decoy_field.is_some() {
+        return Err(VerifyError::MalformedRecord);
+    }
+    if record.protocol_version == 3 && record.decoy_field.is_none() {
         return Err(VerifyError::MalformedRecord);
     }
     if !crate::challenge::valid_identifier(&record.scope, 128) {
@@ -572,12 +594,12 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
             return Err(VerifyError::MalformedRecord);
         }
     }
-    // The decoy (honeypot) field name is an authenticated v2 canonical
-    // field: when present it must match the exact shape the issuer mints
-    // and the widget driver renders — 1..=64 bytes of `[A-Za-z0-9_-]` (no
-    // `.`, `:` or `|`, so the canonical segment structure can never be
-    // altered by a stored value). A non-conforming name is a corrupt or
-    // foreign record.
+    // The decoy (honeypot) field name is an authenticated protocol v3
+    // canonical field: when present it must match the exact shape the
+    // issuer mints and the widget driver renders — 1..=64 bytes of
+    // `[A-Za-z0-9_-]` (no `.`, `:` or `|`, so the canonical segment
+    // structure can never be altered by a stored value). A non-conforming
+    // name is a corrupt or foreign record.
     if let Some(decoy) = record.decoy_field.as_deref() {
         if !crate::challenge::valid_decoy_field_name(decoy) {
             return Err(VerifyError::MalformedRecord);
@@ -1867,11 +1889,63 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_three_is_malformed() {
-        // Only protocol versions 1 (legacy migration) and 2 (current) exist
-        // in the wire contract — anything else is a corrupt/foreign record.
+    fn protocol_version_three_without_a_decoy_is_malformed() {
+        // Protocol v3 is the decoy-capable canonical and the decoy is
+        // mandatory on v3: a signed v2 record re-versioned to 3 (the
+        // stored-version-flip forgery — the same canonical bytes, the
+        // same valid signature) must be rejected as malformed, before
+        // any signature work. The canonical shape itself authenticates
+        // the protocol capability: v3 without a decoy cannot come from a
+        // conforming issuer.
         let mut record = make_record(8);
         record.protocol_version = 3;
+        let counter = solve_for_test(&record).unwrap();
+        assert_eq!(
+            verify(&mut record, counter, 5000),
+            VerifyOutcome::Invalid(VerifyError::MalformedRecord)
+        );
+    }
+
+    #[test]
+    fn protocol_version_two_with_a_decoy_is_rejected_explicitly() {
+        // The protocol-vs-decoy grammar: the `|decoy_field` segment is a
+        // protocol v3 canonical extension, so a v2 record carrying a
+        // decoy is malformed — the v2 canonical never includes the
+        // segment, and such a record cannot have been signed by a
+        // conforming issuer (an armed issuance writes protocol v3). The
+        // rejection is explicit, before any signature work.
+        let mut record = make_record(8);
+        record.decoy_field = Some("company_website".to_string());
+        let counter = solve_for_test(&record).unwrap();
+        assert_eq!(
+            verify(&mut record, counter, 5000),
+            VerifyOutcome::Invalid(VerifyError::MalformedRecord)
+        );
+    }
+
+    #[test]
+    fn protocol_version_three_with_a_decoy_verifies_when_signed() {
+        // An armed v3 record (decoy segment in the canonical) verifies
+        // end to end: the signature covers the extended input and the
+        // validator accepts version 3 with a present decoy.
+        let mut record = make_record(8);
+        record.protocol_version = 3;
+        record.decoy_field = Some("company_website".to_string());
+        resign_v2(&mut record, "test-key-16-bytes!");
+        let counter = solve_for_test(&record).unwrap();
+        assert!(matches!(
+            verify(&mut record, counter, 5000),
+            VerifyOutcome::Valid { .. }
+        ));
+    }
+
+    #[test]
+    fn protocol_version_four_is_malformed() {
+        // Only protocol versions 1 (legacy migration), 2 (unarmed) and 3
+        // (decoy-capable) exist in the wire contract — anything else is a
+        // corrupt/foreign record.
+        let mut record = make_record(8);
+        record.protocol_version = 4;
         let counter = solve_for_test(&record).unwrap();
         let outcome = verify(&mut record, counter, 5000);
         assert_eq!(
@@ -2781,7 +2855,7 @@ mod tests {
         // could not detect a challenge that expired while the proof was
         // deriving, so the closure answers the first call (receipt)
         // inside the window and the second call (post-derive) past
-        // expiry — the exact race the round-80 field could not express.
+        // expiry — the exact race the closure-time field could not express.
         let mut record = make_record(8);
         let counter = solve_for_test(&record).unwrap();
         let expires_at = record.expires_at;

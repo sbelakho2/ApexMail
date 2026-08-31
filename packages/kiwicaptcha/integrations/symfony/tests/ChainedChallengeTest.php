@@ -410,7 +410,7 @@ final class ChainedChallengeTest extends TestCase
 
     public function testCancelledStage2RearmsWithAFreshNonceAndReleasesTheSlot(): void
     {
-        // P1: a cancelled stage-2 record is retained: find() still returns
+        // A cancelled stage-2 record is retained: find() still returns
         // it, consumedState() stays null) — the state-aware recovery must
         // never recover it as pending: the chain rearms with a fresh
         // nonce and the cancelled nonce's outstanding slot is released.
@@ -436,7 +436,7 @@ final class ChainedChallengeTest extends TestCase
 
         // The same chain retries: the cancelled nonce is never recovered
         // as pending — the chain rearms and a fresh nonce is minted, with
-        // the old slot released.
+        // the prior slot released.
         $retry = $controller->challenge($this->challengeRequest(json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'request_binding' => 'txn-alpha'], JSON_THROW_ON_ERROR)));
         self::assertSame(200, $retry->getStatusCode());
         $freshNonce = json_decode((string) $retry->getContent(), true)['nonce'];
@@ -447,9 +447,9 @@ final class ChainedChallengeTest extends TestCase
 
     public function testExpiredRetainedStage2IsRetiredBeforeRearm(): void
     {
-        // P1: a signed-expired-but-retained pending record is atomically
-        // retired (pending->cancelled) before the chain rearm — the old
-        // nonce becomes provably non-redeemable, never merely abandoned.
+        // A signed-expired-but-retained pending record is atomically
+        // retired (pending->cancelled) before the chain rearm — the
+        // prior nonce becomes provably non-redeemable, never merely abandoned.
         // The retention margin (30 s) keeps the expired record physically
         // present inside the [expires_at, expires_at + margin) window —
         // the Redis ttlMarginSecs shape the bundle forces — so the
@@ -1011,7 +1011,7 @@ final class ChainedChallengeTest extends TestCase
         self::assertSame(ChainReservationResult::Busy, $service->reserveStage2($requirement->chainId, 'owner-b'), 'reserve by another owner with a live lease is busy');
 
         // A non-owner can neither issue nor release the reservation.
-        self::assertSame(ChainIssuedResult::NotOwner, $service->markIssued($requirement->chainId, 'owner-b', 'n2'), 'a non-owner markIssued is an atomic no-op');
+        self::assertSame(ChainIssuedResult::NotOwner, $service->markIssued($requirement->chainId, 'owner-b', $this->stageNonce('foreign-mint')), 'a non-owner markIssued is an atomic no-op');
         $service->release($requirement->chainId, 'owner-b');
         self::assertSame('reserved', $service->requirementFor($requirement->chainId)?->state, 'a non-owner release does not free the reservation');
         self::assertSame('owner-a', $service->requirementFor($requirement->chainId)?->owner);

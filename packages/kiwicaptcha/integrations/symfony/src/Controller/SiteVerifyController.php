@@ -8,9 +8,9 @@ use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Http\FramingChecksTrait;
 use BelConsulting\KiwiCaptchaBundle\Http\JsonDuplicateKeyScanner;
 use BelConsulting\KiwiCaptchaBundle\Validator\Constraints\KiwiCaptchaValidator;
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor;
 use BelConsulting\KiwiCaptchaBundle\Security\RequestScopeAdmissionGate;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\IdempotencyClaim;
-use BelConsulting\KiwiCaptchaBundle\SiteVerify\RedisEval;
 use BelConsulting\KiwiCaptchaBundle\SiteVerify\SiteVerifyIdempotencyStore;
 use KiwiCaptcha\ConsumedStateReadableInterface;
 use KiwiCaptcha\DecodeError;
@@ -124,6 +124,16 @@ final class SiteVerifyController
      * 800, then 1000 ms).
      */
     private const PENDING_SAME_POLL_MAX_MS = 1000;
+
+    /**
+     * The guarded Lua seam for the log gate (docs/ha-authority.md).
+     * The flood gate is a known non-final mutation, so it rides the
+     * seam's ordinary mutation lane instead of the wrapper's
+     * unknown-EVAL security-final default (which would force an
+     * authority revalidation on every invalid-secret attempt under
+     * pinned_primary).
+     */
+    private readonly ?RedisSecurityCommandExecutor $luaGate;
 
     /**
      * @param array<string, string> $siteverifySecrets map of
@@ -255,6 +265,7 @@ final class SiteVerifyController
                 $idempotencyStore->leaseSeconds(),
             ));
         }
+        $this->luaGate = $logGate !== null ? new RedisSecurityCommandExecutor($logGate) : null;
     }
 
     /**
@@ -1419,9 +1430,9 @@ final class SiteVerifyController
     private function noteInvalidSecret(string $kind, string $gateKey): void
     {
         $count = null;
-        if ($this->logGate !== null) {
+        if ($this->luaGate !== null) {
             try {
-                $count = RedisEval::eval($this->logGate, self::LOG_GATE_LUA, $gateKey, [self::INVALID_SECRET_LOG_GATE_TTL_SECS]);
+                $count = $this->luaGate->executeMutation(self::LOG_GATE_LUA, $gateKey, [self::INVALID_SECRET_LOG_GATE_TTL_SECS]);
             } catch (\Throwable) {
                 $count = null; // telemetry failure must not affect verification
             }

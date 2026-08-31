@@ -13,8 +13,9 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpKernel\KernelInterface;
 
 /**
- * P0 regression: the binding authority must actually reach the
- * SiteVerifyController through the container. The round-66 wiring landed * on the ChallengeController definition instead (a duplicate setter with
+ * Regression: the binding authority must actually reach the
+ * SiteVerifyController through the container. The wiring landed
+ * on the ChallengeController definition instead (a duplicate setter with
  * a Siteverify comment); a unit-constructed controller cannot catch that
  * class of hole, so this test boots a real kernel and redeems real tokens.
  */

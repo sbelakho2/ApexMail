@@ -185,7 +185,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
 
     public function testUnscopedAcquireAndReleaseDeclareNoEmptyKeys(): void
     {
-        // P3 topology hardening: an unscoped acquire/release must never
+        // Topology hardening: an unscoped acquire/release must never
         // declare '' as a KEYS argument (an empty string has its own hash
         // slot and breaks the EVAL on Redis Cluster) — the global lease
         // set key is the same-slot placeholder, gated by the ARGV flags.
@@ -362,7 +362,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
 
     public function testOverCapAcquireFastFailsWithoutHoldingASlot(): void
     {
-        // Round-97: the saturation-pressure fast-fail is real. Once the
+        // The saturation-pressure fast-fail is real. Once the
         // waiters gauge exceeds the cap, the acquire script returns its
         // distinguishable sentinel (-1) and acquire() maps it to the
         // CapacityExceeded path: null, NO lease slot held, no counter
@@ -547,7 +547,7 @@ final class RedisAdmissionSemaphoreTest extends TestCase
 
     public function testDistinctScopesNeverCollideInThePerScopeBudget(): void
     {
-        // P3: a lossy sanitization collapsed tenant:a and tenant_a into one
+        // A lossy sanitization collapsed tenant:a and tenant_a into one
         // per-tenant budget — one scope could starve the other. The hashed
         // scope keeps them independent.
         $client = $this->requirePredis();

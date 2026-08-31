@@ -16,7 +16,7 @@ use KiwiCaptcha\Tests\Fixtures\Vectors;
 use PHPUnit\Framework\TestCase;
 
 /**
- * Real-Redis regression for the round-94 terminal-state admission fix:
+ * Real-Redis regression for the terminal-state admission fix:
  * a cancelled or already-consumed Argon record resolves through the
  * pre-admission runtime-state read (the Rust mirror's runtime-state
  * resolution). The scarce admission slot is never acquired, and the

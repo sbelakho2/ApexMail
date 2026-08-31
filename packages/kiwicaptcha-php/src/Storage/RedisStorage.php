@@ -144,6 +144,24 @@ local consumedBefore = 0
 if string.find(v, '"state":"consumed"', 1, true) then
   consumedBefore = 1
 else
+  -- The pending-envelope guard: a genuinely issued pending record
+  -- carries ONLY the null markers ("consumed_result":null and
+  -- "operation_identity":null) and no claim lease fields. A pending
+  -- envelope that ALSO carries a terminal or claim field (a non-null
+  -- consumed_result, a non-null operation_identity, or any
+  -- resume_owner / resume_until marker) is a corrupt or forged rewrite:
+  -- the state marker was flipped without removing the carried fields.
+  -- The transition REFUSES it with the missing/undecodable semantics
+  -- (nil), so the verifier fails the token closed instead of
+  -- re-deriving a fresh grant or installing the carried result. Only
+  -- the consume transition itself may introduce these fields, and only
+  -- into the envelope it just flipped.
+  if (string.find(v, '"consumed_result":', 1, true) and not string.find(v, '"consumed_result":null', 1, true))
+    or (string.find(v, '"operation_identity":', 1, true) and not string.find(v, '"operation_identity":null', 1, true))
+    or string.find(v, '"resume_owner":"', 1, true)
+    or string.find(v, '"resume_until":', 1, true) then
+    return nil
+  end
   local ttl = redis.call("TTL", KEYS[1])
   if ttl < 1 then ttl = 1 end
   local updated, n = string.gsub(v, '"state":"pending"', '"state":"consumed"', 1)

@@ -84,7 +84,7 @@ use KiwiCaptcha\ChallengeRuntimeState;
  *
  * Bounded retention: `store()` first prunes expired entries. When the
  * map is at the hard cap, {@see self::DEFAULT_MAX_ENTRIES} or the
- * constructor's $maxEntries, it evicts the oldest-expiring entries
+ * constructor's $maxEntries, it evicts the earliest-expiring entries
  * first, so a long-lived CLI process sharing one storage instance can
  * never accumulate unbounded state.
  */
@@ -93,7 +93,7 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
     /**
      * The default hard cap on retained entries. `store()` prunes
      * expired records first and then, only when the map is at the cap,
-     * evicts the oldest-expiring entries. A long-lived CLI process
+     * evicts the earliest-expiring entries. A long-lived CLI process
      * sharing one storage instance stays memory-bounded, matching what
      * the Redis backend gets for free from key TTLs.
      */
@@ -191,6 +191,15 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
         if ($entry['consumed']) {
             return new ConsumedRecord($entry['record'], false, true, $entry['result'], $entry['operationIdentity']);
         }
+        // The pending-envelope guard (the in-process mirror of the Redis
+        // consume script's raw-marker check): a pending record must not
+        // carry any terminal or claim field — a result, an operation
+        // identity, or a resume-claim lease. Only the consume transition
+        // itself may introduce them; a pending record that already
+        // carries one is refused with the missing semantics (null).
+        if ($entry['result'] !== null || $entry['operationIdentity'] !== null || $entry['claim'] !== null) {
+            return null;
+        }
         $this->records[$nonce]['consumed'] = true;
 
         return new ConsumedRecord($entry['record'], true, false, null, null);
@@ -213,6 +222,13 @@ final class ArrayStorage implements AtomicStorageInterface, \KiwiCaptcha\Consume
         }
         if ($entry['consumed']) {
             return new ConsumedRecord($entry['record'], false, true, $entry['result'], $entry['operationIdentity']);
+        }
+        // The pending-envelope guard, mirroring the Redis consume
+        // script's raw-marker check: a pending record that already
+        // carries a result, an operation identity or a resume-claim
+        // lease is refused with the missing semantics.
+        if ($entry['result'] !== null || $entry['operationIdentity'] !== null || $entry['claim'] !== null) {
+            return null;
         }
         $this->records[$nonce]['consumed'] = true;
         if ($validated !== null) {

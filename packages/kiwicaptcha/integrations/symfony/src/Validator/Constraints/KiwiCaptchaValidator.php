@@ -33,6 +33,7 @@ use KiwiCaptcha\Verifier;
 use KiwiCaptcha\VerifyError;
 use KiwiCaptcha\VerifyOutcome;
 use Psr\Log\LoggerInterface;
+use Symfony\Component\HttpFoundation\Exception\BadRequestException;
 use Symfony\Component\HttpFoundation\Request;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\Validator\Constraint;
@@ -539,10 +540,10 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         // re-run on the core's replay path, which is exactly why this
         // gate must hold for everything except the proven identity.
         if ($outcome->isOk() && $this->isStoredResult($outcome) && $operationId === null) {
-            // Native replay risk feedback (round-97): the classic replay
+            // Native replay risk feedback: the classic replay
             // of a solved token — a stored-valid, same-identity
             // retained-state retry without an explicit operation id —
-            // previously returned here with zero risk-model signal, so a
+            // used to return here with zero risk-model signal, so a
             // static identity replaying a consumed token polluted no
             // counters. The feedback is the same ReplayAttempt outcome
             // the core's AlreadyConsumed path feeds (RiskFeedback), with
@@ -588,7 +589,7 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             // retained-state replays enrich the model; server and
             // deployment-context outcomes produce no client event, so a
             // client is never punished for a backend or rollout
-            // condition). Previously the failures returned here without
+            // condition). The failures used to return here without
             // any evidence, leaving bad_proof, malformed and replay
             // counters fed only by issuance debt and velocity. The
             // evidence carries the canonical client IP only when one
@@ -935,7 +936,12 @@ final class KiwiCaptchaValidator extends ConstraintValidator
             return $outcome;
         }
 
-        return VerifyOutcome::valid($consumed->record->nonce, $consumed->consumedResult?->binding, true);
+        // The synthesized stored-result outcome carries the authenticated
+        // decoy name from the replayed record (the ConsumedRecord carries
+        // it, exactly like the core's stored-result acceptances) and no
+        // solve duration (the retry's receipt is not the solve's
+        // endpoint).
+        return VerifyOutcome::valid($consumed->record->nonce, $consumed->consumedResult?->binding, true, null, $consumed->record->decoyField);
     }
 
     /**
@@ -1314,20 +1320,26 @@ final class KiwiCaptchaValidator extends ConstraintValidator
         }
 
         // Form-submission honeypot (post-verification): the expected
-        // decoy field name derives from the verified nonce, 'decoy_' +
-        // the first 8 hex characters of sha256(nonce), the exact same
-        // derivation the challenge controller used when it emitted the
-        // field. Only that exact field is inspected: any other
-        // decoy_<hash> field is ignored, since a decoy name is
-        // server-issued and nonce-bound and a mismatched name is not
-        // this challenge's decoy. A filled expected field records
+        // decoy field name comes from the verified outcome,
+        // VerifyOutcome::decoyField(), the authenticated server-issued
+        // name of the verified record's challenge — the exact value the
+        // challenge response carried (armed issuance, protocol v3). It
+        // is never reconstructed from the nonce (the audit's "no second
+        // nonce-hash scheme"). Only that exact field is inspected: any
+        // other name is ignored, since a decoy name is server-issued and
+        // a mismatched name is not this challenge's decoy. When the
+        // outcome carries no decoy (the surface disabled), no decoy
+        // check runs at all. A filled expected field records
         // DecoyFieldSubmitted evidence and feeds the post-solve
         // assessment through the risk-v2 path, so the honeypot signal
         // actually moves the score. Evidence only: never a gate and
         // never affects the proof validity.
         $honeypotHit = false;
         if ($this->risk !== null && $request !== null) {
-            $honeypotHit = $this->formDecoyEvidence($request, self::expectedDecoyField($nonce));
+            $decoyField = \method_exists($outcome, 'decoyField') ? $outcome->decoyField() : null;
+            if ($decoyField !== null && $decoyField !== '') {
+                $honeypotHit = $this->formDecoyEvidence($request, $decoyField);
+            }
         }
 
         // The original pre-issue decision id was consumed atomically
@@ -2060,40 +2072,38 @@ final class KiwiCaptchaValidator extends ConstraintValidator
 
     /**
      * Form-submission honeypot: after a valid verification, the form's
-     * decoy field is compared against the exact expected name derived
-     * from the verified nonce, {@see self::expectedDecoyField()}, the
-     * same per-issuance derivation the challenge controller uses when
-     * it emits the field. Returns whether the exact decoy was filled.
-     * The caller then records the DecoyFieldSubmitted evidence under
-     * the nonce-derived honeypot:<sha256(nonce)> idempotency key, so a
-     * crash-taken-over computation never double-books the signal. It
-     * then runs the post-solve assessment through the risk-v2 path,
-     * where the honeypot signal actually moves the score. Any other
-     * decoy_<hash> field is ignored: a decoy name is server-issued and
-     * nonce-bound, so a mismatched name is not this challenge's decoy.
-     * Evidence only: never a gate and never affects the proof validity.
-     * Never throws: a broken gateway must never break the form.
+     * decoy field is compared against the exact authenticated name the
+     * verified outcome exposes, {@see VerifyOutcome::decoyField()}, the
+     * same per-issuance name the challenge response carried (the
+     * validator never reconstructs it from the nonce). Returns whether
+     * the exact decoy was filled. The caller then records the
+     * DecoyFieldSubmitted evidence under the nonce-derived
+     * honeypot:<sha256(nonce)> idempotency key, so a crash-taken-over
+     * computation never double-books the signal. It then runs the
+     * post-solve assessment through the risk-v2 path, where the
+     * honeypot signal actually moves the score. Any other field name is
+     * ignored: a decoy name is server-issued and a mismatched name is
+     * not this challenge's decoy. Evidence only: never a gate and never
+     * affects the proof validity. Never throws: a broken gateway must
+     * never break the form, and an ARRAY-shaped parameter under the
+     * decoy name (e.g. billing_address_line[]=x) is not a scalar decoy
+     * value — the deterministic answer is no evidence, never a
+     * BadRequestException from the input bag.
      */
     private function formDecoyEvidence(Request $request, string $expectedField): bool
     {
-        $value = $request->request->get($expectedField);
+        try {
+            $value = $request->request->get($expectedField);
+        } catch (BadRequestException) {
+            // A non-scalar (array-shaped) parameter under the decoy name:
+            // no usable decoy value — skip the evidence, never a 500.
+            return false;
+        }
         if (!\is_string($value) || $value === '') {
             return false;
         }
 
         return true;
-    }
-
-    /**
-     * The expected decoy field name for a verified nonce: the exact
-     * derivation the challenge controller emits at issuance,
-     * ChallengeController: 'decoy_' + the first 8 hex characters of
-     * sha256(nonce). Only the server-issued name for this challenge
-     * counts as honeypot evidence.
-     */
-    private static function expectedDecoyField(string $nonce): string
-    {
-        return 'decoy_'.substr(hash('sha256', $nonce), 0, 8);
     }
 
     /**
@@ -2285,7 +2295,13 @@ final class KiwiCaptchaValidator extends ConstraintValidator
     {
         $binding = $request?->attributes->get(self::REQUEST_BINDING_ATTRIBUTE);
         if (!\is_string($binding) || $binding === '') {
-            $binding = $request?->request->get('kiwi_request_binding');
+            try {
+                $binding = $request?->request->get('kiwi_request_binding');
+            } catch (BadRequestException) {
+                // An array-shaped kiwi_request_binding parameter is not a
+                // usable binding: deterministic no-binding, never a 500.
+                $binding = null;
+            }
         }
 
         return \is_string($binding) && $binding !== '' ? $binding : null;

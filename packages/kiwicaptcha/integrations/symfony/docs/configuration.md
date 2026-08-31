@@ -5,7 +5,294 @@ The bundle is configured under the `kiwi_captcha` key in
 default and validation. Options are validated at container-compile time where
 possible; the same bounds are enforced by the core package at runtime.
 
-## Base configuration
+## Quick start (verified flow)
+
+An ordinary installation configures four keys and nothing else. The
+profile fills every safety-relevant default, the secret comes from the
+environment, and the DSN builds every Redis-backed service:
+
+```yaml
+# config/packages/kiwi_captcha.yaml
+kiwi_captcha:
+    protection_profile: balanced   # balanced | privacy_strict | high_abuse | compatibility
+    secret_key: '%env(KIWI_SECRET_KEY)%'
+    public_base_url: '%env(KIWI_PUBLIC_URL)%'
+    redis_dsn: '%env(KIWI_REDIS_DSN)%'
+```
+
+- `.env`: `KIWI_SECRET_KEY` (generated), `KIWI_REDIS_DSN` and
+  `KIWI_PUBLIC_URL` (localhost defaults), all written by the Flex
+  recipe; see [flex-recipe.md](flex-recipe.md).
+- `redis_dsn` and `public_base_url` are env-managed (twelve-factor):
+  credentials, private hosts, TLS endpoints and database selection
+  belong in your environment or secrets manager, never in
+  source-controlled config files. The container resolves the
+  placeholders; the bundle validates the resolved DSN (redis:// or
+  rediss:// with a host, fail-closed) when the client is constructed.
+  A literal override in
+  this file is still possible and keeps the same validation.
+- `public_base_url` carries the same canonical-origin contract in both
+  forms.
+  A literal is validated at container build time.
+  An env-resolved value is validated with the identical rule when the
+  challenge controller is constructed at runtime: https only, a host,
+  no credentials, no path, no query, no fragment.
+  An invalid resolved origin fails closed with an error naming
+  `kiwi_captcha.public_base_url`.
+- Predis is a direct dependency of the bundle, so the DSN path works
+  out of the box; no separate client install is needed.
+- The Flex recipe ships this exact file; see
+  [flex-recipe.md](flex-recipe.md).
+
+Boot check: `bin/console kiwicaptcha:doctor` reports one status per
+check and exits non-zero on any failure. The minimal config above must
+reach `[PASS] Redis reachability`, `[PASS] Storage atomicity` and no
+`[FAIL]` row; every remaining `[WARN]` row names the deployment
+decision still open.
+
+What the DSN builds: the challenge storage
+(`KiwiCaptcha\Storage\RedisStorage`, atomic, so the production storage
+guard passes), the distributed issuance rate limiter, the Argon2id
+admission semaphore and, under `high_abuse`, the risk state store. An
+explicit service id wins over the DSN for its knob (`storage`,
+`redis_service`, `risk.redis_service`); see "Advanced configuration"
+below.
+
+## Protection profiles
+
+Ordinary deployments operate at the policy level: set one
+`protection_profile` and let the bundle derive the safety-relevant knobs
+you do not set. The profile fills **safe derived defaults** for the knobs
+it governs. With `protection_profile: null` (the default) every knob
+keeps its individual default and behavior is byte-identical to the
+pre-profile configuration.
+
+**The profile is the LOWEST-precedence configuration layer.** Symfony
+merges your config files in order, so the bundle applies the profile as
+the first, weakest layer of that merge: an explicit value in **any**
+config file always wins over the profile. This matters for layered
+configurations:
+
+```yaml
+# config/packages/kiwi_captcha.yaml
+kiwi_captcha:
+    protection_profile: high_abuse
+    rate_limit: 1          # explicit: wins over the profile's rate_limit 5
+
+# config/packages/prod/kiwi_captcha.yaml
+kiwi_captcha:
+    rate_limit: 100        # a LATER layer's explicit value also wins
+```
+
+```yaml
+# config/packages/kiwi_captcha.yaml
+kiwi_captcha:
+    protection_profile: high_abuse
+
+# config/packages/prod/kiwi_captcha.yaml
+kiwi_captcha:
+    protection_profile: compatibility   # the LAST profile wins
+```
+
+```yaml
+# config/packages/kiwi_captcha.yaml
+kiwi_captcha:
+    protection_profile: compatibility   # dev compatibility posture
+
+# config/packages/prod/kiwi_captcha.yaml
+kiwi_captcha:
+    protection_profile: null            # explicit null CLEARS the profile
+```
+
+The layering semantics:
+
+- The **final profile** is the last config layer containing the
+  `protection_profile` key; later layers override earlier ones. An
+  explicit `null` is a real selection: it clears the profile, its
+  derived defaults are dropped, and the visible `protection_profile`
+  field reports null in lockstep — the effective behavior always
+  corresponds to the visible field. A prod overlay can therefore
+  neutralize a dev compatibility profile with `protection_profile:
+  null`.
+- The profile fills its derived defaults only where no layer set the
+  knob explicitly. The profile defaults are the first array of the
+  merge, so a later layer that carries only `protection_profile` can
+  never override an explicit setting from an earlier layer. A base
+  `rate_limit: 1` stays 1 under a prod `protection_profile: high_abuse`
+  overlay, and the profile's other defaults still apply where no layer
+  set them.
+- Nested values merge key-by-key: an explicit `risk.weights.replay` in
+  one layer wins, and the profile still fills the other weights.
+- `high_abuse` chained step-up engages when
+  `risk.request_binding_authority` is wired in **any** layer; the
+  conditional is evaluated on the final merged configuration. Without
+  an authority anywhere, chaining stays off. An explicit
+  `risk.chaining.enabled` always wins, and an explicit `true` without an
+  authority is still refused at compile time.
+
+```yaml
+kiwi_captcha:
+    protection_profile: balanced   # balanced | privacy_strict | high_abuse | compatibility | ha_safe
+```
+
+| Knob | balanced | privacy_strict | high_abuse | compatibility | ha_safe |
+|------|----------|----------------|------------|---------------|---------|
+| `algorithm` | sha256 | sha256 | sha256 | sha256 | sha256 |
+| `difficulty_bits` / `argon2_difficulty_bits` | 18 / 8 | 18 / 8 | 18 / 8 | 18 / 8 | 18 / 8 |
+| `argon_m_kib` / `argon_t` / `argon_p` | 0 / 3 / 1 | 0 / 3 / 1 | 0 / 3 / 1 | 0 / 3 / 1 | 0 / 3 / 1 |
+| `challenge_ttl_secs` | 120 | 120 | 120 | 300 | 120 |
+| `rate_limit` | 10 | 10 | 5 | 10 | 10 |
+| `rate_limit_global` | 500 | 500 | 2000 | 500 | 500 |
+| `resource_capacity.issuance_per_second` | 500 | 500 | 2000 | 500 | 500 |
+| `privacy_mode` / `telemetry` | strict / off | strict / off | strict / off | strict / off | strict / off |
+| `enforce_telemetry` | false | false | false | false | false |
+| `min_duration_ms` | derived | 0 | derived | derived | derived |
+| `binding_mode` | nonce_ip_hmac | none | nonce_ip_hmac | none | nonce_ip_hmac |
+| `risk.enabled` | false | false | true | false | false |
+| `risk.decoy_v3_enabled` | false | false | true | false | false |
+| `risk.client_context` | false | false | false | false | false |
+| `risk.max_outstanding_challenges` | 20 | 20 | 10 | 20 | 20 |
+| `risk.max_outstanding_challenges_global` | 100000 | 100000 | 250000 | 100000 | 100000 |
+| `risk.hard_limits.process_per_second` | 10000 | 10000 | 5000 | 10000 | 10000 |
+| `risk.weights.bad_proof / malformed / replay / action_failure` | contract | contract | 320 / 340 / 380 / 160 | contract | contract |
+| `replay_durability` | best_effort | best_effort | best_effort | best_effort | operator_managed |
+| `ha_authority` | none | none | none | none | pinned_primary |
+
+Profile rationale:
+
+- balanced is the current default configuration, documented as such.
+  Picking it changes nothing: the derived values equal the tree defaults,
+  so behavior is byte-identical to no profile.
+- privacy_strict is the strongest first-party privacy posture. The
+  binding tag is dropped (`binding_mode: none`), so no IP-derived state
+  exists anywhere. Every behavioral evidence surface stays off and the
+  server-side solve-timing heuristic is disabled (`min_duration_ms: 0`).
+  Trade-off: relay protection is off, as documented on `binding_mode`.
+- high_abuse is for public signup/login surfaces under attack. Risk
+  is enabled, so it requires a Predis client and the extension fails
+  fast without one. The abuse-evidence weights rise, so proven abuse
+  outvotes trust signals sooner. Per-source limits tighten and the
+  aggregate issuance bounds widen in lockstep. The decoy surface arms
+  with protocol-v3 emission, which only engages once the central
+  `min_protocol_version` floor confirms. Chained-challenge step-up
+  engages automatically when `risk.request_binding_authority` is wired
+  in any configuration layer (the conditional runs on the final merged
+  configuration).
+- compatibility maximizes integration compatibility: sha256, a
+  conservative 300 s TTL (Turnstile token-lifetime parity), binding off
+  (IP churn behind NAT/mobile), risk and the decoy surface off
+  (protocol-v2 emission), no behavioral coupling.
+- ha_safe is the replay-safe HA posture: the deployment that wants the
+  authority-change contract mechanically enforced instead of only
+  contracted. It derives `replay_durability: operator_managed` +
+  `ha_authority: pinned_primary` and mirrors balanced everywhere else.
+  The pinned-primary authority guard pins the serving authority on
+  first use and refuses on any change; the doctor reports its state
+  and fails the deploy gate when the authority moved or the guard is
+  unarmed. Requires a direct single-node Predis client (a Predis
+  Sentinel/Cluster aggregate or a phpredis client is refused at
+  container build time). See the "HA authority" section below and
+  docs/ha-authority.md.
+
+The profiles never override an explicitly configured knob: the profile
+defaults are merged as the lowest-precedence layer, so they apply only
+where the key is absent from your configuration. `protection_profile:
+null` (the default) selects no profile, and any value outside the five
+names is refused.
+
+## HA authority: the mechanical replay-safety posture
+
+```yaml
+    # ── Authority-change replay safety ────────────────────────────────
+    # replay_durability: best_effort    # best_effort | operator_managed | fail_closed
+    # ha_authority: none                # none | pinned_primary
+    # ha_authority_reverify_secs: 5     # the guard's verification cache window
+    # ha_authority_expected: null       # "role|run_id", or a per-authority map (optional)
+```
+
+`replay_durability` declares the authority-change contract (see
+redis-topologies.md). `ha_authority: pinned_primary` makes it
+mechanical: the bundle wires the PinnedPrimaryAuthorityGuard around
+the storage/limiter/risk client, so the deployment can choose a
+mechanically enforced replay-safe HA mode instead of trusting the
+operator alone.
+
+How the pinned-primary guard behaves:
+
+- Per distinct Redis authority the bundle wires one guard and one pin:
+  the storage/limiter authority pins `{kiwi:<ns>}:authority:pin:storage`
+  and a distinct `risk.redis_service` pins
+  `{kiwi:<ns>}:authority:pin:risk`, each holding "role|run_id"
+  write-once (`SET NX`) in the same security-Redis namespace as every
+  other bundle key. A risk client that IS the storage client shares
+  the storage pin.
+- The runtime never auto-pins: an operator records the initial
+  authority pin through the explicit bootstrap command
+  `php bin/console kiwicaptcha:ha-initialize`; a guard with no pin and
+  no `ha_authority_expected` refuses every use with the initialize
+  message.
+- On every use it re-verifies the serving authority: the role must
+  equal the pinned role and the run_id must equal the pinned run_id.
+  Any change — a promotion to a stale replica, a restarted primary
+  with a new run_id, a re-pointed endpoint — raises the typed
+  LogicException naming the pinned vs observed identity, and the
+  deployment refuses to serve.
+- `ha_authority_expected` (optional) is the operator-provisioned
+  "role|run_id" identity. When set, the guard compares the serving
+  authority against it instead of the pin key: the configuration IS
+  the pin, and an immutable-identity deployment can skip the Redis pin
+  entirely. Two forms are accepted:
+  - the scalar string form applies the one identity to every authority
+    (`ha_authority_expected: "master|<run_id>"`);
+  - the per-authority map form applies a different identity to each
+    authority: `{"storage": "master|<run_id>", "risk":
+    "master|<run_id>"}`. This is the correct form for a deployment
+    whose storage Redis and risk Redis are different servers (one
+    scalar run_id cannot describe two authorities). When only one
+    Redis is used, the storage entry covers the shared authority; an
+    authority without an entry falls back to the pin key (it must be
+    initialized).
+- The verification result is cached in-process per connection object
+  for `ha_authority_reverify_secs` seconds (default 5), so the `INFO`
+  probe costs one round trip per window per process per connection,
+  not one per operation. A reconnect that replaces the connection
+  object invalidates the cache. The components execute their Lua
+  through the typed RedisSecurityCommandExecutor seam
+  (docs/ha-authority.md). The seam's security-final lane (the
+  siteverify finalize, the chain transitions, the post-solve final
+  disposition) bypasses the window and re-verifies before every write
+  (zero stale). The read and mutation lanes serve within the window.
+- A missing pin after it was established is a refusal, never a silent
+  re-pin. Re-pin explicitly after a deliberate authority change:
+  quiesce the deployment, then run
+  `php bin/console kiwicaptcha:ha-initialize --force` to record the
+  new authority.
+- The extension refuses the container build when the client is a
+  Predis Sentinel/Cluster aggregate or a phpredis `\Redis` client:
+  only a direct single-node Predis client can be mechanically guarded
+  (predis/predis is a direct bundle dependency). A retry-enabled
+  direct client is refused by the guard at runtime.
+
+The doctor's "HA authority" check audits every distinct authority and
+reports the guard state: the pinned identity, the last verification
+and the posture. It passes when every guard is armed and stable, and
+the pass output states exactly what the guard enforces (per-authority
+pins, zero-stale security-final transitions, connection-generation
+cache invalidation, operator-initialized bootstrap). It fails on a
+changed authority, an uninitialized deployment (naming
+`kiwicaptcha:ha-initialize`), or an unarmed guard under the posture,
+and it fails when the ha_safe profile's pinned_primary promise was
+overridden away. See docs/ha-authority.md for the full design and the
+deployment table.
+
+## Advanced configuration
+
+The per-knob reference below is the advanced layer. Most deployments set
+only a `protection_profile`, `secret_key`, `public_base_url` and
+`redis_dsn`, and never touch these knobs. Every option stays available
+and documented; a knob set explicitly always wins over the profile.
+
+### Base configuration
 
 ```yaml
 kiwi_captcha:
@@ -19,9 +306,11 @@ kiwi_captcha:
     route_prefix: /kiwi-captcha             # challenge endpoint prefix; the form
                                             # widget and standalone widget both
                                             # derive their endpoint from it
-    # Production requires a shared storage (Redis). The bundle fails fast with
-    # a LogicException if ArrayStorage is configured outside the test/dev
-    # environment (kernel.environment or APP_ENV).
+    # Production requires a shared storage (Redis). With redis_dsn set,
+    # the bundle constructs the Redis-backed services itself — no
+    # storage service wiring needed. Without a DSN the bundle fails fast
+    # with a LogicException if ArrayStorage is configured outside the
+    # test/dev environment (kernel.environment or APP_ENV).
     # storage: kiwicaptcha.storage.redis    # atomic pending→consumed Lua
     #                                       # transition: the consumed
     #                                       # record and its deterministic
@@ -30,6 +319,124 @@ kiwi_captcha:
     #                                       # observes the consumed state
     #                                       # instead of re-verifying
 ```
+
+### Asset delivery (`asset_mode`)
+
+The widget assets (the CSS, the WASM runtime, the driver and the Argon
+worker) ship in two delivery tiers, selected with `asset_mode`:
+
+```yaml
+kiwi_captcha:
+    asset_mode: files     # files (default) | inline (compatibility / zero-request)
+```
+
+`files` (default) emits versioned immutable first-party asset URLs under
+`{prefix}/assets/` (`widget.<sha256-12>.css`, `runtime.<sha256-12>.js`,
+`driver.<sha256-12>.js`, `worker.<sha256-12>.js`), served by the bundle
+with a long immutable cache lifetime
+(`Cache-Control: public, max-age=31536000, immutable`), the exact content
+hash in the URL and the content-hash ETag. Each asset is emitted once per
+page even with several widgets, and the tags carry SRI integrity
+attributes.
+
+The runtime and the worker are the lazy heavy modules: the page never
+downloads them eagerly. The widget container carries
+`data-kiwi-runtime-src` + `data-kiwi-runtime-integrity` and
+`data-kiwi-worker-src` + `data-kiwi-worker-integrity`, and the driver
+fetches the WASM runtime and the Argon worker asset only when a
+memory-hard challenge actually arrives. A page that only ever receives
+SHA-256 challenges pays no request for the Argon machinery. The worker is
+constructed from the fetched source as a same-origin Worker (no Blob
+URL), and it loads its WASM glue from the verified runtime asset, so the
+worker download is deduplicated across widgets like the runtime.
+
+Why immutable caching: the URL contains the content hash, so the bytes
+for a URL can never change. A browser or CDN may keep the response
+forever, and a deployment upgrade simply emits new hashed URLs. Unknown
+hashes are 404, so a stale page can never pair an old URL with new
+content.
+
+CSP per mode:
+
+- `files` (default): the assets are same-origin, so the existing
+  recommended profile already allows them (`script-src 'self'`,
+  `style-src 'self'`); the lazy runtime and worker fetches use
+  `connect-src 'self'`, and the same-origin Worker needs
+  `worker-src 'self'` — `blob:` is never required.
+- `inline` (compatibility / zero-request tier): every asset is embedded
+  into the page at render time (the historical behavior, zero requests,
+  no static asset handling). The worker is built from a Blob URL, so
+  this tier needs `worker-src blob:`.
+
+`inline` is the documented compatibility tier for zero-request
+deployments: it embeds the CSS, the WASM runtime and the driver into the
+page at render time. A deployment that cannot serve or cache the versioned
+asset URLs selects it explicitly.
+
+#### Ordinary-bootstrap size target
+
+The 160,000-byte widget-driver raw cap (with the gzip and brotli caps of
+50,000 / 45,000 bytes, see `packages/kiwicaptcha/tools/perf-budget.sh`)
+is the guardrail, not the goal. After the Argon worker split the driver
+no longer embeds the worker source (the glue carries it for inline mode;
+files mode fetches the versioned worker asset). The ordinary bootstrap,
+the bytes a plain SHA-256 page downloads before any memory-hard
+challenge, targets **sub-30 KB compressed** (gzip or brotli). Remaining
+lazy candidates, not yet split, would shrink the bootstrap further.
+The candidates are the provider-migration compatibility loader (the
+external `/api.js` path ships the full glue and driver eagerly) and the
+advanced risk-triggered modules (the decoy/polymorphism and
+client-context evidence machinery, loaded only when a risk-elevated
+challenge arrives).
+
+### Redis (`redis_dsn`)
+
+`redis_dsn` is the first-class, high-level Redis connection setting. Set
+one DSN and the bundle builds every Redis-backed service from it:
+
+```yaml
+# Twelve-factor form (recommended): the DSN lives in the environment.
+kiwi_captcha:
+    redis_dsn: '%env(KIWI_REDIS_DSN)%'
+```
+
+```yaml
+# Literal form: the shape is validated at container build time.
+kiwi_captcha:
+    redis_dsn: 'redis://user:pass@redis.example.com:6379/0?prefix=kiwi'
+```
+
+What the DSN builds:
+
+- The challenge storage (`KiwiCaptcha\Storage\RedisStorage`; atomic, so
+  the production storage guard passes), the distributed issuance rate
+  limiter, the Argon2id admission semaphore and, when risk is enabled,
+  the risk state store. All of them run over one `Predis\Client` built
+  from the DSN; Predis is a direct dependency of the bundle, so the DSN
+  path works out of the box.
+- The DSN shape is `redis://host:port/db?password=...&prefix=...` (or
+  `rediss://` for TLS). The DSN is handed to `Predis\Client` verbatim,
+  and the same fail-closed shape validation runs on both lanes. A
+  literal DSN is validated at container build time. An env-resolved
+  DSN is validated by the runtime guard when the client is constructed,
+  since the value flows through the container's parameter bag and the
+  load-time validation cannot see it. A malformed value
+  is refused with a clear error naming the option, and an unreachable
+  server is a runtime error on the first command, like any wired
+  client.
+- Env-managed DSNs follow twelve-factor practice: credentials, private
+  hosts, TLS endpoints and database selection belong in the
+  environment or a secrets manager, never in source-controlled config
+  files. The manifest-declared `.env` default is
+  `redis://127.0.0.1:6379/0`, and the bundle contract stays `redis://`
+  or `rediss://`.
+- An explicit service id wins over the DSN wherever both are set:
+  `storage` (your own `StorageInterface` service), `redis_service`
+  (your own client for the limiter/semaphore) and
+  `risk.redis_service` (your own `Predis\Client` for the risk state).
+  The DSN keeps filling the knobs you did not set.
+- With `redis_dsn: null` (the default) every existing wiring stays
+  byte-identical.
 
 Validation notes:
 
@@ -45,7 +452,7 @@ Validation notes:
   client-supplied `algorithm` field in the challenge POST is accepted only
   for forward-compatibility and never changes the issued algorithm.
 
-## Privacy posture
+### Privacy posture
 
 ```yaml
     # ── Privacy posture ──────────────────────────────────────────────────
@@ -82,7 +489,7 @@ The privacy modes themselves (strict vs standard, and why `binding_mode`
 is never forced) are the privacy contract; see
 [privacy.md](privacy.md#privacy-modes).
 
-## Production hardening
+### Production hardening
 
 ```yaml
     # ── Production hardening ──────────────────────────────────────────────
@@ -209,16 +616,22 @@ is never forced) are the privacy contract; see
     #                                    # by the 5000 ms safety margin
     #                                    # (compiled, see operations.md).
     # argon2_max_verification_runtime_ms: 30000
-    #                                    # maximum wall-clock a single Argon2
+    #                                    # the deployment SLO for the
+    #                                    # wall-clock a single Argon2
     #                                    # verification derivation may take
     #                                    # in this deployment, in ms. The
     #                                    # lease must exceed it by the 5000
     #                                    # ms safety margin (defaults: 45000
     #                                    # > 30000 + 5000 = 35000), enforced
     #                                    # at container compile time; the
-    #                                    # runtime cap is a deployment bound
-    #                                    # only, never enforced per-request
-    #                                    # inside the blocking hash.
+    #                                    # declared runtime is a deployment
+    #                                    # bound only, never an enforced
+    #                                    # wall-clock timeout inside the
+    #                                    # blocking hash (a pathological host
+    #                                    # can still outlive the lease:
+    #                                    # fencing keeps correctness, the
+    #                                    # concurrency cap may be exceeded
+    #                                    # in that expiry window).
     # argon2_semaphore_namespace: '%kernel.project_dir%'
     #                                       # per-deployment discriminator for
     #                                       # the Redis lease set and the
@@ -232,7 +645,9 @@ is never forced) are the privacy contract; see
     #                                       # gate and the atomic rate
     #                                       # limiter; when null, the
     #                                       # storage's own client is reused
-    #                                       # if storage is RedisStorage
+    #                                       # if storage is RedisStorage, or
+    #                                       # the redis_dsn client is used
+    #                                       # when redis_dsn is set
     # strict_kid_verification: false        # OPTIONAL strict current-kid
     #                                       # verification: when true,
     #                                       # strict keyring resolution is
@@ -258,7 +673,28 @@ is never forced) are the privacy contract; see
     #                                       # a retry re-claims it)
 ```
 
-## Risk configuration
+### Protocol rollout mode
+
+```yaml
+    # ── Protocol v3 rollout state ──────────────────────────────────────
+    # protocol_rollout:
+    #     mode: normal                  # normal | migration (default normal)
+    #
+    # The explicit migration state: the deployment declares whether it is
+    # deliberately in the two-phase protocol-v3 rollout. mode "normal"
+    # means no deliberate exception — under protection_profile:
+    # high_abuse with risk.decoy_v3_enabled: false the doctor FAILS the
+    # protocol-v3 writer check, because a false security switch alone
+    # does not prove the deployment is intentionally deferring v3
+    # emission (a forgotten override must not silently persist). mode
+    # "migration" declares the deliberate two-phase migration (v3
+    # emission deferred until the fleet floor is confirmed); the doctor
+    # records the same high_abuse deferral as a WARN (exit 0). The
+    # two-phase rollout procedure itself is unchanged; see operations.md
+    # "Protocol v3 two-phase rollout".
+```
+
+### Risk configuration
 
 The adaptive risk engine is opt-in and off by default. Enabling it adds a
 first-party continuity cookie; see [privacy.md](privacy.md#continuity-cookie)
@@ -304,8 +740,10 @@ kiwi_captcha:
         # The risk-v1 state lives in Redis (EVALSHA of the canonical Lua).
         # Required: risk.redis_service (a Predis\Client service id) — or the
         # bundle's redis_service / RedisStorage client when it is a Predis
-        # client. phpredis (\Redis) is NOT supported by the risk engine, and
-        # risk.enabled without any Predis client fails at container compile.
+        # client, or the redis_dsn client (a Predis\Client) when redis_dsn
+        # is set. phpredis (\Redis) is NOT supported by the risk engine,
+        # and risk.enabled without any Predis client fails at container
+        # compile.
         # redis_service: kiwicaptcha.risk.redis
         namespace: '%kernel.project_dir%'   # {kiwi:<namespace>} hash tag
         # master_secret: '%env(KIWI_RISK_SECRET)%'
@@ -415,6 +853,23 @@ kiwi_captcha:
         #                                   # validator returns
         #                                   # temporary_unavailable and the
         #                                   # controller refuses issuance 503
+        #     decoy_v3_enabled: false        # PROTOCOL-V3 WRITER SWITCH
+        #                                   # (default false): when false,
+        #                                   # issuance NEVER arms the
+        #                                   # authenticated decoy and always
+        #                                   # emits protocol v2 (byte-
+        #                                   # compatible with parent-revision
+        #                                   # verifiers). When true, issuance
+        #                                   # MAY arm the decoy (v3), but
+        #                                   # ONLY when the central security-
+        #                                   # policy floor ({kiwi:<ns>}:
+        #                                   # security-policy
+        #                                   # min_protocol_version) is
+        #                                   # confirmed >= 3; a lower or
+        #                                   # unreadable floor falls back to
+        #                                   # v2 with a once-per-process
+        #                                   # warning. See operations.md
+        #                                   # "Protocol v3 two-phase rollout".
         #     result_receipt_signing_key: null  # OPTIONAL base64
         #                                   # 32-byte Ed25519 seed; when set,
         #                                   # valid verifications export
@@ -512,7 +967,7 @@ kiwi_captcha:
         #         # http_only: true
 ```
 
-## Scope identity
+### Scope identity
 
 Scope ids are part of the Redis state identity. The `id` (or the
 crc32-derived default) must stay stable once deployed. Renaming a scope or
@@ -531,7 +986,7 @@ quota runs.
 - `reject`: true rejection, HTTP 429 `RISK_DENIED`, no challenge.
 - `minimum`: a synthetic policy (base_risk 100, min/degraded sha20) applies.
 
-## Transaction binding
+### Transaction binding
 
 A challenge can be bound to one application transaction. The issuing side
 signs a `request_binding` (1..128 chars of `[A-Za-z0-9._:-]`)
@@ -606,7 +1061,7 @@ Two binding modes:
   `KiwiCaptchaValidator::verifiedRequestBinding()`
   (`VerifyOutcome::requestBinding()`).
 
-## Identifier validation rules
+### Identifier validation rules
 
 Scope/tenant identifiers and request bindings are restricted to the
 `[A-Za-z0-9._:-]+` alphabet with a 128-char ceiling. The static
@@ -617,7 +1072,7 @@ under a valid identifier can never be redeemed under a different one. See
 [Identifier validation](security-hardening.md#identifier-validation) for
 the endpoint-level enforcement.
 
-## Signing-key rotation and abuse-identity secrets
+### Signing-key rotation and abuse-identity secrets
 
 The deployment keeps two secret families with different lifetimes:
 
@@ -653,7 +1108,7 @@ pseudonym. The extension logs an advisory note at container build time
 when rotation is configured (`kid` above 1 or a non-empty
 `secrets_by_kid`) without dedicated root keys; the note never throws.
 
-## Related documentation
+### Related documentation
 
 - [privacy.md](privacy.md): what the privacy keys mean (modes, telemetry,
   binding).

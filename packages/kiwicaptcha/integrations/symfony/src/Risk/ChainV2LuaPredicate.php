@@ -9,7 +9,8 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * authorization and transition boundary in Lua.
  *
  * The PHP decoder, {@see RedisChainedChallengeStateStore::validateState()},
- * is strict: a record with an unknown state, wrong state-dependent
+ * is strict: a record with an unknown key (deny-unknown-fields), an
+ * unknown state, wrong state-dependent
  * owner/lease/stage2-nonce invariants or a malformed field is corrupt and
  * fails closed. The Lua scripts must preserve that contract at the point
  * of authorization, not only when PHP re-reads the record. This function
@@ -35,11 +36,17 @@ namespace BelConsulting\KiwiCaptchaBundle\Risk;
  * only that representation.
  *
  * The predicate is prepended to each transition script (the const
- * concatenation with the script body's heredoc).
+ * concatenation with the script body's heredoc). It also carries the
+ * two lifetime guards every transition shares: the key-lifetime guard
+ * (a chain key whose TTL was stripped is corrupted state; a lifetime
+ * can never be manufactured from the configured TTL) and the
+ * signed-expiry guard. A past-expiry record whose key is still live is
+ * stale and fails closed, the mirror of the Array store's liveRecord()
+ * sweep.
  */
 final class ChainV2LuaPredicate
 {
-    /** @var string the Lua function `isValidChainRecord(rec) -> boolean` */
+    /** @var string the Lua functions `isValidChainRecord(rec)`, `chainKeyLifetimeMissing(ttl)` and `chainRecordExpired(rec, now)` */
     public const LUA = <<<'LUA'
 local function isKiwiInteger(x)
   return type(x) == 'number' and x == math.floor(x)
@@ -60,6 +67,16 @@ end
 local function isValidChainRecord(rec)
   if type(rec) ~= 'table' then
     return false
+  end
+  -- Deny unknown fields, the mirror of the PHP validateState's
+  -- deny-unknown-fields rule: a renamed or extra key (e.g. a
+  -- requestBinding spelled differently) is a corrupt or foreign record
+  -- and fails closed, exactly like the PHP decoder.
+  local knownKeys = { v = true, stage1Nonce = true, scope = true, obligationId = true, requiredAction = true, requiredRank = true, policyVersion = true, chainDepth = true, state = true, owner = true, leaseUntil = true, stage2Nonce = true, requestBinding = true, expiresAt = true }
+  for k in pairs(rec) do
+    if not knownKeys[k] then
+      return false
+    end
   end
   if rec['v'] ~= 2 then
     return false
@@ -140,6 +157,20 @@ local function isValidChainRecord(rec)
     return false
   end
   return true
+end
+-- The key-lifetime guard shared by every mutating transition: a chain
+-- key WITHOUT a TTL is corrupted state (the signed-ticket lifetime was
+-- stripped); a transition must never manufacture a lifetime from the
+-- configured TTL, it fails closed like the reservation does.
+local function chainKeyLifetimeMissing(ttl)
+  return ttl <= 0
+end
+-- The signed-expiry guard: an expired-but-live record (the key still
+-- exists while the record's own expiresAt lapsed) is stale, the same
+-- fail-closed semantics as the Array mirror's liveRecord() sweep. Call
+-- after isValidChainRecord, so expiresAt is a known integer.
+local function chainRecordExpired(rec, now)
+  return rec['expiresAt'] <= now
 end
 LUA;
 }

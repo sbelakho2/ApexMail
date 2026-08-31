@@ -81,25 +81,19 @@
 //! atomic single-use enforced by the consumed-state transition:
 //!
 //! ```text
-//! token decode → ONE pool checkout, held across the sequential store ops
-//! of the verification → runtime state (ONE GET on that connection; the
-//! single record source — the record rides on the state for every
-//! non-missing kind, so the peek and the gate below are one snapshot)
-//! → cheap validation (structure, v1 gate, signature, TTL incl. the
-//! future-time bound, scope, expected request binding, IP binding,
-//! region, policy epoch, issuer, server-measured min duration — the PHP
-//! `cheapPhaseCheck` precedence, so multi-failure records report the
-//! same error code in both languages) → terminal gate (a
-//! cancelled record fails as RecordNotFound and a consumed record resolves
-//! through the identity gate, from the same snapshot with no second read,
-//! before any admission) → optional Argon admission gate →
-//! store.consume(nonce) (Lua transition; the operation identity is recorded
-//! atomically when supplied) → first=false → the identity-gated retained
-//! outcome (stored Valid only for the recording operation identity;
-//! otherwise AlreadyConsumed; no committed outcome → ConsumeIndeterminate)
-//! → re-validation of the consumed record → derive hash (once) →
-//! final re-validation with a fresh clock read + current expectations →
-//! leading-zero check → best-effort commit_result
+//! token decode → checkout A (runtime state — ONE GET; the single record
+//! source, so the peek and the terminal gate below are one snapshot —
+//! cheap validation incl. the cheap-failure delete-if-pending cleanup,
+//! terminal gate) → checkout A released → Argon admission gate
+//! (connection-free) → checkout B (atomic consume + WAIT; the operation
+//! identity recorded atomically when supplied) → checkout B released →
+//! identity-gated resolution of the retained state when the record was
+//! already consumed → re-validation of the consumed record → derive hash
+//! (once; NO connection held — the hard property, so a
+//! memory-hard derivation never occupies a pool slot) → final
+//! re-validation with a fresh clock read + current expectations →
+//! leading-zero check → checkout C (best-effort commit_result + WAIT) →
+//! checkout C released
 //! ```
 //!
 //! The runtime-state snapshot is the single record source on the
@@ -388,6 +382,25 @@ local v = redis.call('GET', KEYS[1])
 if not v then return false end
 if string.find(v, '"state":"consumed"', 1, true) then
     return {v, 0}
+end
+-- The pending-envelope guard: a genuinely issued pending record
+-- carries ONLY the null markers ("consumed_result":null and
+-- "operation_identity":null) and no claim lease fields. A pending
+-- envelope that ALSO carries a terminal or claim field (a non-null
+-- consumed_result, a non-null operation_identity, or any
+-- resume_owner / resume_until marker) is a corrupt or forged rewrite:
+-- the state marker was flipped without removing the carried fields.
+-- The transition REFUSES it with the missing/undecodable semantics
+-- (false), so the verifier fails the token closed instead of
+-- re-deriving a fresh grant or installing the carried result. Only
+-- the consume transition itself may introduce these fields, and only
+-- into the envelope it just flipped. Mirrors the PHP consume script
+-- byte for byte.
+if (string.find(v, '"consumed_result":', 1, true) and not string.find(v, '"consumed_result":null', 1, true))
+    or (string.find(v, '"operation_identity":', 1, true) and not string.find(v, '"operation_identity":null', 1, true))
+    or string.find(v, '"resume_owner":"', 1, true)
+    or string.find(v, '"resume_until":', 1, true) then
+    return false
 end
 local updated, n = string.gsub(v, '"state":"pending"', '"state":"consumed"', 1)
 if n ~= 1 then
@@ -1345,11 +1358,14 @@ impl RedisChallengeStore {
 
     /// The single-snapshot runtime-state read on an already checked-out
     /// connection — the internal seam
-    /// [`ProductionVerifier::verify`] uses to run the whole sequential
-    /// verification (snapshot GET → consume → commit / cleanup) on ONE
-    /// pooled connection instead of paying a pool checkout (and its
-    /// validation PING) per op. Any command failure poisons the connection
-    /// via [`Self::run_command`]; the caller must not continue on it.
+    /// [`ProductionVerifier::verify`] uses for the snapshot phase of its
+    /// checkout-A block (the runtime-state GET; the cheap-failure cleanup
+    /// and the terminal gate share the same connection, then it is
+    /// released before the admission gate, the consume checkout and the
+    /// commit checkout — see the three-checkout model in
+    /// [`ProductionVerifier::verify`]). Any command failure poisons the
+    /// connection via [`Self::run_command`]; the caller must not continue
+    /// on it.
     fn runtime_state_with_conn(
         &self,
         conn: &mut r2d2::PooledConnection<StoreConnectionManager>,
@@ -1801,7 +1817,7 @@ return 1
     /// replica set advanced through the preceding primary replication
     /// stream, including an earlier uncertain write from another
     /// connection. A bare WAIT on a connection that wrote nothing cannot
-    /// prove another connection's write (the round-72 read-only barrier
+    /// prove another connection's write (the read-only barrier
     /// hole). A shortfall fails closed. No-op when `wait_replicas == 0`.
     pub fn establish_replication_fence(&self, what: &str) -> redis::RedisResult<()> {
         let (wait_replicas, wait_timeout_ms) = self.wait_config();
@@ -2006,7 +2022,10 @@ pub struct ProductionVerifier {
     expected_issuer: Option<String>,
     /// The `HKDF` purpose keys per signing key id, derived once per kid for
     /// the verifier's lifetime (the verifier owns immutable secrets — a
-    /// master secret never changes under a running verifier). The cheap
+    /// master secret never changes under a running verifier; the only
+    /// exception is the builder's [`ProductionVerifier::with_secrets_by_kid`],
+    /// which replaces the secret set and resets this cache so the prior
+    /// keys can never survive the replacement). The cheap
     /// phase runs up to four `HKDF` derivations per verification without
     /// this cache (signature + IP binding, each re-checked after the
     /// consume); with it, every signature / binding check after the first
@@ -2076,8 +2095,19 @@ impl ProductionVerifier {
     /// map's newest id (the forward/rollback guard) — is rejected with
     /// [`VerifyError::UnknownKid`] in the cheap phase, before any consume.
     /// Default: the single `secret_key` path.
+    ///
+    /// The per-kid `HKDF` purpose-key cache is reset here: the cache is
+    /// keyed on the configured secrets, so replacing them must invalidate
+    /// every key derived earlier. Without the reset, a later `set()`
+    /// is a no-op and the stale cache keeps serving the replaced secrets
+    /// — an in-process secret replacement would fail to revoke the prior
+    /// key (single-key → keyring leaves only the
+    /// `u32::MAX` sentinel entry and kid resolution yields
+    /// `UnknownKid`; keyring A → keyring B keeps deriving with A's
+    /// keys).
     pub fn with_secrets_by_kid(mut self, secrets: impl IntoIterator<Item = (u32, String)>) -> Self {
         self.secrets_by_kid = Some(secrets.into_iter().collect());
+        self.derived_keys = OnceLock::new();
         self
     }
 
@@ -2228,23 +2258,27 @@ impl ProductionVerifier {
     ///   outcome). There is no implicit "None disables" — the bypass
     ///   must be named, exactly like the PHP `RequestBindingExpectation`.
     ///
-    /// Flow: decode → ONE pool checkout (held across the sequential store
-    /// ops of the verification — any command failure poisons the
-    /// connection and the flow returns immediately) → runtime state (ONE
-    /// GET on that connection; the single record source —
-    /// the record rides on the state for every non-missing kind, so the
-    /// peek and the runtime-state gate fold into one snapshot;
-    /// cheap-failure cleanup may add a further
-    /// delete-if-pending transition) → cheap
+    /// Flow: decode → checkout A (runtime state — ONE GET, the single
+    /// record source; the record rides on the state for every non-missing
+    /// kind, so the peek and the runtime-state gate fold into one
+    /// snapshot; cheap-failure cleanup may add a further delete-if-pending
+    /// transition on the same connection) → checkout A released → cheap
     /// validation on that record → terminal gate (a cancelled record
     /// fails as RecordNotFound and a consumed record resolves through
     /// the identity gate, both from the same snapshot with no second
-    /// read and no admission) → Argon admission gate (acquire → lease)
-    /// → atomic consume (pending→consumed transition, the operation
-    /// identity recorded atomically when supplied) → identity-gated
-    /// resolution of the retained state when the record was already
-    /// consumed → re-validation of the consumed record → single derive
-    /// → leading-zero check → lease released by Drop. Terminal cheap
+    /// read and no admission) → Argon admission gate (acquire → lease;
+    /// connection-free — the snapshot connection is already released) →
+    /// checkout B (atomic consume, the pending→consumed transition, the
+    /// operation identity recorded atomically when supplied) → checkout B
+    /// released → identity-gated resolution of the retained state when
+    /// the record was already consumed → re-validation of the consumed
+    /// record → single derive, with NO pooled connection held (the
+    /// hard property: a memory-hard Argon2id derivation must
+    /// never occupy a verification-store slot; a default 4-slot pool
+    /// serves 4 concurrent Argon derivations plus any further request) →
+    /// leading-zero check → lease released by Drop → checkout C
+    /// (best-effort commit_result — a checkout or commit failure never
+    /// changes the outcome). Terminal cheap
     /// failures
     /// (malformed record, unsupported protocol, bad signature, expired,
     /// wrong scope, binding mismatch, IP mismatch, TooFast) consume the
@@ -2298,191 +2332,206 @@ impl ProductionVerifier {
             Err(_) => return VerifyOutcome::Invalid(VerifyError::MalformedToken),
         };
 
-        // 2. ONE pooled connection is held across the sequential store ops
-        //    of this verification (snapshot GET → consume → commit, or the
-        //    cheap-failure cleanup): exactly one pool checkout — and
-        //    therefore one r2d2 validation PING — instead of one per op.
-        //    Any command-level failure poisons the connection
+        // 2. checkout A — the snapshot connection of the three-checkout
+        //    model (snapshot/cheap on A, consume+WAIT on B, commit on C;
+        //    the derivation holds no connection): it covers the
+        //    runtime-state GET, the cheap phase (incl. its fused
+        //    delete-if-pending cleanup) and the terminal gate, then is
+        //    dropped before the admission gate and the derivation. No
+        //    pooled connection is ever held across
+        //    the memory-hard Argon2id hash: with the previous single-checkout
+        //    flow, four concurrent Argon verifications exhausted a default
+        //    4-slot pool (each held its slot through the derivation) and a
+        //    fifth request failed with StorageUnavailable while Redis sat
+        //    idle. Any command-level failure poisons the connection
         //    (Self::run_command) and the flow returns immediately; a
         //    mid-verification failure never continues on a possibly
-        //    desynced socket (the module's no-retry rule). The connection
-        //    is released (drop) before every replay-resolution return:
-        //    resolve_consumed may re-establish the replication fence on
-        //    its own checkout, and a single-connection pool
-        //    `with_pool_size(1)` must never contend with a held checkout.
-        let mut conn = match self.store.checkout() {
-            Ok(conn) => conn,
-            Err(_) => return VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
-        };
+        //    desynced socket (the module's no-retry rule).
+        let peek_record: Box<ChallengeRecord> = {
+            let mut conn = match self.store.checkout() {
+                Ok(conn) => conn,
+                Err(_) => return VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
+            };
 
-        // 2b. The single runtime-state snapshot (ONE GET on that
-        //     connection): the runtime state carries the decoded record
-        //     for every non-missing kind, so the peek and the
-        //     runtime-state gate below fold into one snapshot — the
-        //     round-95 mirror of the PHP combined read, where the verifier
-        //     skips find() entirely. This snapshot is the single record
-        //     source on the verification path; cheap-failure cleanup (step
-        //     3) and the other transitions below may add further storage
-        //     operations. Missing → RecordNotFound — the record was never
-        //     issued, was already consumed (consumed is classified below),
-        //     or expired away; an undecodable value also reads as Missing
-        //     (the lenient corrupt-key rule), and no cheap phase runs
-        //     without a record. A storage failure (unreachable backend,
-        //     timeout) → StorageUnavailable: the challenge was never
-        //     touched by the GET, so it is presumed intact and retryable.
-        let state = match self.store.runtime_state_with_conn(&mut conn, &token.nonce) {
-            Ok(state) => state,
-            Err(_) => return VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
-        };
-        // The peek is borrowed from the snapshot (no record clone): the
-        // cheap phase and the replay gate read through the borrow, and the
-        // authoritative copy arrives from the consume transition below
-        // (the gate at step 4 moves the snapshot; the borrow ends at the
-        // last use before it — every cheap-failure path returns early).
-        let peek: &ChallengeRecord = match &state {
-            RuntimeState::Missing => return VerifyOutcome::Invalid(VerifyError::RecordNotFound),
-            RuntimeState::Pending(record) | RuntimeState::Cancelled(record) => record,
-            RuntimeState::Consumed(consumed) => &consumed.record,
-        };
+            // 2b. The single runtime-state snapshot (ONE GET on that
+            //     connection): the runtime state carries the decoded record
+            //     for every non-missing kind, so the peek and the
+            //     runtime-state gate below fold into one snapshot — the
+            //     mirror of the PHP combined read, where the
+            //     verifier skips find() entirely. This snapshot is the
+            //     single record source on the verification path;
+            //     cheap-failure cleanup (step 3) may add a further storage
+            //     operation on this same connection. Missing →
+            //     RecordNotFound — the record was never issued, was
+            //     already consumed (consumed is classified below), or
+            //     expired away; an undecodable value also reads as Missing
+            //     (the lenient corrupt-key rule), and no cheap phase runs
+            //     without a record. A storage failure (unreachable
+            //     backend, timeout) → StorageUnavailable: the challenge
+            //     was never touched by the GET, so it is presumed intact
+            //     and retryable.
+            let state = match self.store.runtime_state_with_conn(&mut conn, &token.nonce) {
+                Ok(state) => state,
+                Err(_) => return VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
+            };
+            // The peek is borrowed from the snapshot (no record clone):
+            // the cheap phase and the replay gate read through the
+            // borrow, and the authoritative copy arrives from the consume
+            // transition below (the gate at step 4 moves the snapshot;
+            // the borrow ends at the last use before it — every
+            // cheap-failure path returns early).
+            let peek: &ChallengeRecord = match &state {
+                RuntimeState::Missing => {
+                    return VerifyOutcome::Invalid(VerifyError::RecordNotFound)
+                }
+                RuntimeState::Pending(record) | RuntimeState::Cancelled(record) => record,
+                RuntimeState::Consumed(consumed) => &consumed.record,
+            };
 
-        // 3. Cheap validation on the peeked record. Per the shared
-        //    cross-language consumption table (PHP mirrors this), terminal
-        //    cheap failures consume the record: malformed stored record,
-        //    unsupported protocol, bad signature, expired, wrong scope,
-        //    binding mismatch, IP mismatch and TooFast all burn the
-        //    challenge (best-effort DEL — a cleanup error never overrides
-        //    the typed outcome), matching PHP's one-shot cheap-failure
-        //    semantics. NOT consumed: missing IP/context (Rust requires
-        //    the IP), Argon capacity exhausted, admission backend
-        //    unavailable, storage unavailable (presumed intact) and
-        //    ConsumeIndeterminate (consume never retried). The expensive
-        //    proof itself is burned by the transition.
-        //
-        //    The delete is gated on the retained consumed state: a
-        //    consumed record failing a cheap check is the crash-recovery
-        //    evidence (it carries the committed deterministic outcome of
-        //    the original verification) and must survive to its retention
-        //    TTL, so it routes to the identity-gated consumed branch
-        //    instead of being deleted. Pending (and missing) records keep
-        //    the one-shot cheap-failure delete.
-        if let Err(e) = self.check_cheap(peek, scope, client_ip, now_ns, expected_request_binding) {
-            // The replay-exemption split (VerifyError::is_replay_exempt):
-            // only the narrow set of failures that describe the original
-            // redemption's circumstances — expiry, the IP binding, the
-            // missing client IP (and the telemetry gate, an exempt
-            // failure by classification) — may resolve through the
-            // identity-gated consumed branch. Every other failure is a
-            // security verdict about this request and stands even when
-            // the operation identity matches a consumed record's
-            // committed success: the stored success never replays around
-            // it, the record is kept intact, and the failure is
-            // returned. A pending (or missing) record keeps the one-shot
-            // cheap-failure delete for both classes.
+            // 3. Cheap validation on the peeked record. Per the shared
+            //    cross-language consumption table (PHP mirrors this), terminal
+            //    cheap failures consume the record: malformed stored record,
+            //    unsupported protocol, bad signature, expired, wrong scope,
+            //    binding mismatch, IP mismatch and TooFast all burn the
+            //    challenge (best-effort DEL — a cleanup error never overrides
+            //    the typed outcome), matching PHP's one-shot cheap-failure
+            //    semantics. NOT consumed: missing IP/context (Rust requires
+            //    the IP), Argon capacity exhausted, admission backend
+            //    unavailable, storage unavailable (presumed intact) and
+            //    ConsumeIndeterminate (consume never retried). The expensive
+            //    proof itself is burned by the transition.
             //
-            // The compositional replay gate: a first-error routing lets
-            // an exempt failure that sits early in the cheap-phase order
-            // (the expiry before scope/region/policy/issuer/binding, the
-            // IP binding before the minimum-duration floor) shadow every
-            // later hard verdict and replay the stored success around
-            // it. Before an exempt failure may route into the consumed
-            // branch, replay_security_check re-evaluates every hard
-            // invariant on the same peeked record; any failure wins with
-            // the evidence preserved by the fused transition below.
-            //
-            // The cleanup runs through the fused atomic transition: the
-            // delete decision and the delete itself are one script, so a
-            // record a concurrent redeemer consumes (and commits)
-            // between this failure and the cleanup is observed in its
-            // consumed state and never erased (the committed recovery
-            // evidence survives), and the retained state rides back on
-            // the answer — no second lookup.
-            match self
-                .store
-                .delete_if_pending_with_conn(&mut conn, &token.nonce)
+            //    The delete is gated on the retained consumed state: a
+            //    consumed record failing a cheap check is the crash-recovery
+            //    evidence (it carries the committed deterministic outcome of
+            //    the original verification) and must survive to its retention
+            //    TTL, so it routes to the identity-gated consumed branch
+            //    instead of being deleted. Pending (and missing) records keep
+            //    the one-shot cheap-failure delete.
+            if let Err(e) =
+                self.check_cheap(peek, scope, client_ip, now_ns, expected_request_binding)
             {
-                Ok(DeleteIfPending::Consumed(state)) => {
-                    if e.is_replay_exempt() {
-                        if let Err(hard) = self.replay_security_check(
-                            peek,
-                            scope,
-                            now_ns,
-                            expected_request_binding,
-                        ) {
-                            // A hard verdict masked by the exempt
-                            // circumstance: the evidence stays preserved
-                            // and the hard failure is the outcome.
-                            return VerifyOutcome::Invalid(hard);
+                // The replay-exemption split (VerifyError::is_replay_exempt):
+                // only the narrow set of failures that describe the original
+                // redemption's circumstances — expiry, the IP binding, the
+                // missing client IP (and the telemetry gate, an exempt
+                // failure by classification) — may resolve through the
+                // identity-gated consumed branch. Every other failure is a
+                // security verdict about this request and stands even when
+                // the operation identity matches a consumed record's
+                // committed success: the stored success never replays around
+                // it, the record is kept intact, and the failure is
+                // returned. A pending (or missing) record keeps the one-shot
+                // cheap-failure delete for both classes.
+                //
+                // The compositional replay gate: a first-error routing lets
+                // an exempt failure that sits early in the cheap-phase order
+                // (the expiry before scope/region/policy/issuer/binding, the
+                // IP binding before the minimum-duration floor) shadow every
+                // later hard verdict and replay the stored success around
+                // it. Before an exempt failure may route into the consumed
+                // branch, replay_security_check re-evaluates every hard
+                // invariant on the same peeked record; any failure wins with
+                // the evidence preserved by the fused transition below.
+                //
+                // The cleanup runs through the fused atomic transition: the
+                // delete decision and the delete itself are one script, so a
+                // record a concurrent redeemer consumes (and commits)
+                // between this failure and the cleanup is observed in its
+                // consumed state and never erased (the committed recovery
+                // evidence survives), and the retained state rides back on
+                // the answer — no second lookup.
+                match self
+                    .store
+                    .delete_if_pending_with_conn(&mut conn, &token.nonce)
+                {
+                    Ok(DeleteIfPending::Consumed(state)) => {
+                        if e.is_replay_exempt() {
+                            if let Err(hard) = self.replay_security_check(
+                                peek,
+                                scope,
+                                now_ns,
+                                expected_request_binding,
+                            ) {
+                                // A hard verdict masked by the exempt
+                                // circumstance: the evidence stays preserved
+                                // and the hard failure is the outcome.
+                                return VerifyOutcome::Invalid(hard);
+                            }
+                            // The snapshot connection is released before the
+                            // replay resolution: resolve_consumed may
+                            // re-establish the replication fence on its own
+                            // checkout, and a single-connection pool
+                            // `with_pool_size(1)` must never contend with a
+                            // held checkout.
+                            drop(conn);
+                            return self.resolve_consumed(*state, operation_identity, now_ns);
                         }
-                        // The held connection is released before the
-                        // replay resolution: resolve_consumed may
-                        // re-establish the replication fence on its own
-                        // checkout, and a single-connection pool
-                        // `with_pool_size(1)` must never contend with the
-                        // checkout held across this verification.
-                        drop(conn);
-                        return self.resolve_consumed(*state, operation_identity, now_ns);
+                        // A hard security verdict on a consumed record: the
+                        // fused transition kept the evidence and the failure
+                        // stands — the identity-gated replay never overrides it.
+                        return VerifyOutcome::Invalid(e);
                     }
-                    // A hard security verdict on a consumed record: the
-                    // fused transition kept the evidence and the failure
-                    // stands — the identity-gated replay never overrides it.
-                    return VerifyOutcome::Invalid(e);
-                }
-                Ok(DeleteIfPending::DeletedPending)
-                | Ok(DeleteIfPending::Missing)
-                | Ok(DeleteIfPending::Cancelled) => {
-                    // Missing, or the pending record was atomically
-                    // deleted, or the record is cancelled (dead but
-                    // retained — the cleanup never deletes it): the
-                    // one-shot verdict stands and the cancelled record is
-                    // never resurrectable.
-                    return VerifyOutcome::Invalid(e);
-                }
-                Err(_) => {
-                    // The fused read+delete failed: the record may be
-                    // the consumed evidence, so it is never deleted; the
-                    // typed retryable result lets the caller retry once
-                    // the store recovers.
-                    return VerifyOutcome::Invalid(VerifyError::StorageUnavailable);
+                    Ok(DeleteIfPending::DeletedPending)
+                    | Ok(DeleteIfPending::Missing)
+                    | Ok(DeleteIfPending::Cancelled) => {
+                        // Missing, or the pending record was atomically
+                        // deleted, or the record is cancelled (dead but
+                        // retained — the cleanup never deletes it): the
+                        // one-shot verdict stands and the cancelled record is
+                        // never resurrectable.
+                        return VerifyOutcome::Invalid(e);
+                    }
+                    Err(_) => {
+                        // The fused read+delete failed: the record may be
+                        // the consumed evidence, so it is never deleted; the
+                        // typed retryable result lets the caller retry once
+                        // the store recovers.
+                        return VerifyOutcome::Invalid(VerifyError::StorageUnavailable);
+                    }
                 }
             }
-        }
 
-        // 4. Runtime-state gate — the same single snapshot from step 2,
-        //    never a second read, moved here (the cheap-phase borrow
-        //    ended with the last early return above; the pending record
-        //    is taken by value, so no copy is made of the 12-string
-        //    record on any path). A terminal record never occupies an
-        //    admission slot and is never consumed. The cheap phase above
-        //    preserved every existing signature/security outcome; the
-        //    classification decides only what happens after it:
-        //    - Missing (unreachable here — step 2 already returned for
-        //      it; kept for defense in depth) or Cancelled (dead but
-        //      retained) → RecordNotFound, with no admission and no
-        //      consume — a cancel-once attacker cannot flood tokens
-        //      through scarce admission capacity to starve legitimate
-        //      memory-hard verifications;
-        //    - Consumed → the exact same identity-gated replay
-        //      resolution as the consume-loser path
-        //      ([`Self::resolve_consumed`]), the envelope already in
-        //      hand: same-operation identity with a committed result →
-        //      the stored outcome; wrong or null identity →
-        //      AlreadyConsumed; resultless → ConsumeIndeterminate. No
-        //      admission;
-        //    - Pending → the admission gate and the atomic consume
-        //      below, unchanged.
-        let peek_record: Box<ChallengeRecord> = match state {
-            RuntimeState::Missing | RuntimeState::Cancelled(_) => {
-                return VerifyOutcome::Invalid(VerifyError::RecordNotFound);
-            }
-            RuntimeState::Consumed(state) => {
-                // The held connection is released before the replay
-                // resolution (see the drop in the step-3 cheap-failure
-                // path): resolve_consumed may re-establish the
-                // replication fence on its own checkout.
-                drop(conn);
-                return self.resolve_consumed(*state, operation_identity, now_ns);
-            }
-            RuntimeState::Pending(record) => record,
+            // 4. Runtime-state gate — the same single snapshot from step 2,
+            //    never a second read, moved here (the cheap-phase borrow
+            //    ended with the last early return above; the pending record
+            //    is taken by value, so no copy is made of the 12-string
+            //    record on any path). A terminal record never occupies an
+            //    admission slot and is never consumed. The cheap phase above
+            //    preserved every existing signature/security outcome; the
+            //    classification decides only what happens after it:
+            //    - Missing (unreachable here — step 2 already returned for
+            //      it; kept for defense in depth) or Cancelled (dead but
+            //      retained) → RecordNotFound, with no admission and no
+            //      consume — a cancel-once attacker cannot flood tokens
+            //      through scarce admission capacity to starve legitimate
+            //      memory-hard verifications;
+            //    - Consumed → the exact same identity-gated replay
+            //      resolution as the consume-loser path
+            //      ([`Self::resolve_consumed`]), the envelope already in
+            //      hand: same-operation identity with a committed result →
+            //      the stored outcome; wrong or null identity →
+            //      AlreadyConsumed; resultless → ConsumeIndeterminate. No
+            //      admission;
+            //    - Pending → the admission gate and the atomic consume
+            //      below, unchanged.
+            let peek_record: Box<ChallengeRecord> = match state {
+                RuntimeState::Missing | RuntimeState::Cancelled(_) => {
+                    return VerifyOutcome::Invalid(VerifyError::RecordNotFound);
+                }
+                RuntimeState::Consumed(state) => {
+                    // The snapshot connection is released before the replay
+                    // resolution (see the drop in the step-3 cheap-failure
+                    // path): resolve_consumed may re-establish the
+                    // replication fence on its own checkout.
+                    drop(conn);
+                    return self.resolve_consumed(*state, operation_identity, now_ns);
+                }
+                RuntimeState::Pending(record) => record,
+            };
+            // checkout A ends here: the block scope releases the pooled
+            // connection before the admission gate and the derivation.
+            peek_record
         };
         let peek: &ChallengeRecord = &peek_record;
 
@@ -2495,7 +2544,9 @@ impl ProductionVerifier {
         //    `_lease` goes out of scope — mirroring the PHP
         //    acquire/hold/release-in-finally semantics. Both the `Ok(None)`
         //    (CapacityExceeded) and `Err(_)` (AdmissionUnavailable) paths
-        //    return without consuming — the record stays for a retry.
+        //    return without consuming — the record stays for a retry. The
+        //    gate itself is connection-free: checkout A was already
+        //    released, so a gate that blocks never holds a pool slot.
         let _lease: Option<Box<dyn ArgonLease>> = if peek.algorithm == PoWAlgorithm::Argon2id {
             match &self.argon_gate {
                 Some(gate) => match gate.acquire(peek) {
@@ -2509,45 +2560,57 @@ impl ProductionVerifier {
             None
         };
 
-        // 6. Atomic consume (the pending → consumed transition).
-        //    The one-shot bound: exactly one caller wins the transition and
-        //    derives; a concurrent loser observes `first == false` and
-        //    resolves the retained state through the identity gate (the
-        //    stored Valid only for the recording operation identity —
-        //    otherwise AlreadyConsumed — or the deterministic
-        //    InsufficientWork; ConsumeIndeterminate when the winner crashed
-        //    between the transition and the outcome commit) without
-        //    re-deriving. The operation identity, when supplied, is
-        //    recorded in the same atomic write (PHP
-        //    consumeWithOperationIdentity parity). An uncertain I/O failure
-        //    → ConsumeIndeterminate: the transition may or may not have
-        //    executed — the consume is never retried.
-        let consumed = match self.store.consume_with_operation_identity_with_conn(
-            &mut conn,
-            &token.nonce,
-            operation_identity,
-        ) {
-            Ok(Some(consumed)) => consumed,
-            Ok(None) => return VerifyOutcome::Invalid(VerifyError::RecordNotFound),
-            Err(_) => return VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
-        };
-        if !consumed.first {
-            // The held connection is released before the replay
-            // resolution (see the drop in the step-3 cheap-failure path):
-            // resolve_consumed may re-establish the replication fence on
-            // its own checkout.
-            drop(conn);
-            return self.resolve_consumed(
-                ConsumedState {
-                    record: consumed.record,
-                    stored_result: consumed.stored_result,
-                    operation_identity: consumed.operation_identity,
-                },
+        // 6. checkout B — the consume connection: the atomic
+        //    pending→consumed transition (and its verified WAIT) runs on
+        //    its own checkout and the connection is released again before
+        //    the derivation, so the winner derives with no connection
+        //    held. The one-shot bound: exactly one caller wins the
+        //    transition and derives; a concurrent loser observes
+        //    `first == false` and resolves the retained state through the
+        //    identity gate (the stored Valid only for the recording
+        //    operation identity — otherwise AlreadyConsumed — or the
+        //    deterministic InsufficientWork; ConsumeIndeterminate when the
+        //    winner crashed between the transition and the outcome commit)
+        //    without re-deriving. The operation identity, when supplied,
+        //    is recorded in the same atomic write (PHP
+        //    consumeWithOperationIdentity parity). An uncertain I/O
+        //    failure → ConsumeIndeterminate: the transition may or may not
+        //    have executed — the consume is never retried.
+        let record = {
+            let mut conn = match self.store.checkout() {
+                Ok(conn) => conn,
+                Err(_) => return VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
+            };
+            let consumed = match self.store.consume_with_operation_identity_with_conn(
+                &mut conn,
+                &token.nonce,
                 operation_identity,
-                now_ns,
-            );
-        }
-        let record = consumed.record;
+            ) {
+                Ok(Some(consumed)) => consumed,
+                Ok(None) => return VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+                Err(_) => return VerifyOutcome::Invalid(VerifyError::ConsumeIndeterminate),
+            };
+            if !consumed.first {
+                // The consume connection is released before the replay
+                // resolution (see the step-3 drop): resolve_consumed may
+                // re-establish the replication fence on its own checkout,
+                // and a single-connection pool `with_pool_size(1)` must
+                // never contend with a held checkout.
+                drop(conn);
+                return self.resolve_consumed(
+                    ConsumedState {
+                        record: consumed.record,
+                        stored_result: consumed.stored_result,
+                        operation_identity: consumed.operation_identity,
+                    },
+                    operation_identity,
+                    now_ns,
+                );
+            }
+            // checkout B ends here: the block scope releases the pooled
+            // connection before the re-validation and the derivation.
+            consumed.record
+        };
 
         // 7. Re-validation of the consumed record: it must carry the
         //    exact challenge that was peeked (constant-time string compare,
@@ -2595,7 +2658,11 @@ impl ProductionVerifier {
         //    the winner stores the proof verdict so concurrent/retried
         //    consumers return the same outcome without re-deriving. The
         //    commit is best-effort — a storage failure must never change
-        //    the outcome.
+        //    the outcome. checkout C — the commit connection: the
+        //    commit (and its verified WAIT) runs on its own checkout and
+        //    the connection is released as soon as the commit returns; a
+        //    checkout failure is treated exactly like a commit failure
+        //    (best-effort, the outcome stands).
         if leading_zero_bits(&hash) >= record.target_bits {
             let outcome = VerifyOutcome::Valid {
                 nonce: record.nonce.clone(),
@@ -2607,20 +2674,24 @@ impl ProductionVerifier {
                 // per verification), never a second clock read.
                 solve_duration_ms: measurable_solve_duration_ms(&record, now_ns),
             };
-            let _ = self.store.commit_result_with_conn(
-                &mut conn,
-                &token.nonce,
-                true,
-                record.request_binding.as_deref(),
-            );
+            if let Ok(mut conn) = self.store.checkout() {
+                let _ = self.store.commit_result_with_conn(
+                    &mut conn,
+                    &token.nonce,
+                    true,
+                    record.request_binding.as_deref(),
+                );
+            }
             outcome
         } else {
-            let _ = self.store.commit_result_with_conn(
-                &mut conn,
-                &token.nonce,
-                false,
-                record.request_binding.as_deref(),
-            );
+            if let Ok(mut conn) = self.store.checkout() {
+                let _ = self.store.commit_result_with_conn(
+                    &mut conn,
+                    &token.nonce,
+                    false,
+                    record.request_binding.as_deref(),
+                );
+            }
             VerifyOutcome::Invalid(VerifyError::InsufficientWork)
         }
     }
@@ -2894,18 +2965,19 @@ impl ProductionVerifier {
     /// resolve through exactly this logic, so the two paths can never
     /// diverge on what a retained outcome means.
     ///
-    /// The identity-proven replay of a stored success carries the
-    /// server-measured solve duration computed from the replayed
-    /// record's issuance clock and `now_ns` — this verification's
-    /// receipt instant, the same single instant the caller fed the
-    /// minimum-duration floor — unforgeable behavioral evidence for
-    /// the risk layer, never the client-reported duration (the PHP
-    /// `resolveConsumedRecord()` mirror).
+    /// The identity-proven replay of a stored success carries NO
+    /// server-measured solve duration (the cross-language spec, shared with
+    /// the PHP core): the duration is computed only for a fresh
+    /// derivation, whose receipt instant belongs to the solve being
+    /// measured. A replayed receipt measures the retry's elapsed time,
+    /// not the original solve, so the replay outcome reports `None` — a
+    /// confidently incorrect value is worse than none (persisting the
+    /// original measurement in the envelope is deferred).
     fn resolve_consumed(
         &self,
         state: ConsumedState,
         operation_identity: Option<&str>,
-        now_ns: u64,
+        _now_ns: u64,
     ) -> VerifyOutcome {
         match state.stored_result {
             Some(result) if !result.valid => VerifyOutcome::Invalid(VerifyError::InsufficientWork),
@@ -2934,14 +3006,18 @@ impl ProductionVerifier {
                     {
                         return VerifyOutcome::Invalid(VerifyError::StorageUnavailable);
                     }
-                    // The duration is computed before the record fields are
-                    // moved into the outcome.
-                    let solve_duration_ms = measurable_solve_duration_ms(&state.record, now_ns);
+                    // The stored-success replay carries NO server-measured
+                    // solve duration (the cross-language spec): the duration is
+                    // computed only for a fresh derivation, whose receipt
+                    // instant belongs to the solve being measured. A
+                    // replayed receipt measures the retry's elapsed time,
+                    // not the original solve — a confidently incorrect
+                    // value is worse than none, so `None` is returned.
                     VerifyOutcome::Valid {
                         nonce: state.record.nonce,
                         request_binding: result.binding,
                         from_stored_result: true,
-                        solve_duration_ms,
+                        solve_duration_ms: None,
                     }
                 } else {
                     VerifyOutcome::Invalid(VerifyError::AlreadyConsumed)
@@ -3013,7 +3089,7 @@ impl ProductionVerifier {
         self.check_authenticated_shape(record)?;
         self.check_scope(record, scope)?;
         // The same canonical helper as every other binding enforcement
-        // site (exact Option-equality; the old nullable replay path is
+        // site (exact Option-equality; the legacy nullable replay path is
         // gone, so a committed result can never replay through an
         // ambiguous interpretation).
         check_request_binding(record.request_binding.as_deref(), expected_request_binding)?;
@@ -3108,7 +3184,10 @@ impl ProductionVerifier {
 
     /// The `HKDF` purpose keys of the record's signing secret, derived once
     /// per key id and cached for the verifier's lifetime (the secrets are
-    /// immutable, so the derivation is a pure function of the kid). The
+    /// immutable once configured — the builder's
+    /// [`ProductionVerifier::with_secrets_by_kid`] replacement resets the
+    /// cache, so the derivation is a pure function of the kid under the
+    /// current secret set). The
     /// cache is precomputed as ONE map on first use — every configured
     /// kid under a `secrets_by_kid` map, or the single secret under the
     /// `u32::MAX` sentinel (the single-key path always derives from the
@@ -3411,6 +3490,80 @@ mod tests {
         assert!(
             Arc::ptr_eq(&keys_1, &keys_1_after),
             "the cached Arc is stable across repeated cheap phases"
+        );
+    }
+
+    /// The builder's secret replacement must invalidate the per-kid cache:
+    /// the write-once `OnceLock` keeps the map built under the prior secret
+    /// set, so without the reset a single-key → keyring switch leaves
+    /// only the `u32::MAX` sentinel entry (kid resolution yields
+    /// UnknownKid) and a keyring A → keyring B switch keeps serving A's
+    /// stale keys for reused kid ids. The store's client never needs to
+    /// be reachable: `resolve_derived_keys` is pure.
+    #[test]
+    fn with_secrets_by_kid_resets_the_derived_keys_cache() {
+        let client = redis::Client::open("redis://127.0.0.1:1/").expect("placeholder URL parses");
+        let secret_2 = "fedcba9876543210fedcba9876543210";
+        let issued = issue_challenge(
+            &sha_config(4),
+            "login",
+            IP,
+            now_unix(),
+            now_micros(),
+            0,
+            None,
+        )
+        .expect("kid 1 issuance");
+
+        // Single-key path primed: the cache holds the u32::MAX sentinel
+        // map derived from the single secret.
+        let single = ProductionVerifier::new(
+            RedisChallengeStore::new(client.clone(), "kf-reset-single:"),
+            SECRET,
+        );
+        single
+            .resolve_derived_keys(&issued.record)
+            .expect("the single-key sentinel entry resolves");
+        // The keyring replacement must reset: kid 1 now resolves to the
+        // ring's secret, never the stale sentinel entry.
+        let switched = single.with_secrets_by_kid([(1u32, secret_2.to_string())]);
+        let keys = switched
+            .resolve_derived_keys(&issued.record)
+            .expect("the keyring's kid must resolve after the switch");
+        assert_eq!(
+            keys.challenge_key(),
+            DerivedKeys::from_master(secret_2, None).challenge_key(),
+            "the cache must serve the replaced secret's keys, not the sentinel's"
+        );
+
+        // Keyring A → keyring B reusing the same kid id: the stale A
+        // keys must be gone (the revocation property at the cache level).
+        let mut config_5 = sha_config(4);
+        config_5.secret_key = SECRET.into();
+        config_5.kid = 5;
+        let issued_5 = issue_challenge(&config_5, "login", IP, now_unix(), now_micros(), 0, None)
+            .expect("kid 5 issuance");
+        let ring_a = ProductionVerifier::new(
+            RedisChallengeStore::new(client.clone(), "kf-reset-ring:"),
+            SECRET,
+        )
+        .with_secrets_by_kid([(5u32, SECRET.to_string())]);
+        ring_a
+            .resolve_derived_keys(&issued_5.record)
+            .expect("kid 5 resolves under ring A");
+        let ring_b = ring_a.with_secrets_by_kid([(5u32, secret_2.to_string())]);
+        let keys_b = ring_b
+            .resolve_derived_keys(&issued_5.record)
+            .expect("kid 5 must resolve under the replaced ring");
+        assert_eq!(
+            keys_b.challenge_key(),
+            DerivedKeys::from_master(secret_2, None).challenge_key(),
+            "kid 5 must derive from the replaced ring's secret"
+        );
+        assert_ne!(
+            keys_b.challenge_key(),
+            DerivedKeys::from_master(SECRET, None).challenge_key(),
+            "the replaced ring must never serve ring A's stale keys"
         );
     }
 

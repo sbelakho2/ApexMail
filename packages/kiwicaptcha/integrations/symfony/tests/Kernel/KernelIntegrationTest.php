@@ -46,6 +46,17 @@ final class KernelIntegrationTest extends TestCase
         return $this->container()->get('twig');
     }
 
+    /**
+     * The files-mode emission registry is request-scoped; direct twig
+     * renders never cross a kernel.request, so the registry must be reset
+     * between renders when a test asserts the emitted asset tags.
+     */
+    private function resetAssetRegistry(): void
+    {
+        $runtime = $this->container()->get(\BelConsulting\KiwiCaptchaBundle\Twig\KiwiCaptchaRuntime::class);
+        $runtime->reset();
+    }
+
     private function solveToken(Challenge $challenge): string
     {
         $counter = 0;
@@ -83,6 +94,7 @@ final class KernelIntegrationTest extends TestCase
 
     public function testFormRendersWidgetMarkupWithNonce(): void
     {
+        $this->resetAssetRegistry();
         $factory = $this->container()->get('form.factory');
         $form = $factory->createNamed('captcha', KiwiCaptchaType::class, null, [
             'scope' => 'login',
@@ -91,37 +103,51 @@ final class KernelIntegrationTest extends TestCase
 
         $html = $this->twig()->render('@Test/form.html.twig', ['form' => $form->createView()]);
 
-        self::assertStringContainsString('<style nonce="n-csp-abc123">', $html);
-        self::assertSame(2, substr_count($html, '<script nonce="n-csp-abc123">'));
+        // The default files tier: versioned immutable asset tags (the SRI
+        // stylesheet link + the driver script, the nonce on the script).
+        self::assertStringContainsString('<link rel="stylesheet" href="/kiwi-captcha/assets/widget.', $html);
+        self::assertStringContainsString('<script src="/kiwi-captcha/assets/driver.', $html);
+        self::assertSame(1, substr_count($html, ' nonce="n-csp-abc123"'), 'the nonce rides the files-mode driver script tag exactly once');
         self::assertStringContainsString('data-kiwi-endpoint="/kiwi-captcha/challenge"', $html);
         self::assertStringContainsString('data-kiwi-scope="login"', $html);
         self::assertStringContainsString('data-kiwi-telemetry="off"', $html, 'default strict privacy mode renders telemetry off');
         self::assertStringContainsString('name="captcha"', $html);
         self::assertStringContainsString('data-kiwi-token', $html);
-        // The inlined assets are present in the form-rendered markup.
-        self::assertStringContainsString('.kiwi-container', $html);
-        self::assertStringContainsString('KIWI_WASM_B64', $html);
-        self::assertStringContainsString('window.KiwiCaptcha = {', $html);
-        self::assertStringContainsString('render: kiwiRender', $html);
+        // The runtime and the worker stay lazy: no inline blocks, no
+        // runtime/worker script tags — their URLs and SRI digests ride the
+        // container attributes.
+        self::assertStringContainsString('data-kiwi-runtime-src="/kiwi-captcha/assets/runtime.', $html);
+        self::assertStringContainsString('data-kiwi-worker-src="/kiwi-captcha/assets/worker.', $html);
+        self::assertStringNotContainsString('<style', $html);
+        self::assertStringNotContainsString('KIWI_WASM_B64', $html);
     }
 
     public function testFormRendersWidgetMarkupWithoutNonce(): void
     {
+        $this->resetAssetRegistry();
         $factory = $this->container()->get('form.factory');
         $form = $factory->createNamed('captcha', KiwiCaptchaType::class, null, ['scope' => 'login']);
 
         $html = $this->twig()->render('@Test/form.html.twig', ['form' => $form->createView()]);
 
-        self::assertStringContainsString('<style>', $html);
-        self::assertSame(2, substr_count($html, '<script>'));
+        // The default files tier: no inline style/script blocks at all —
+        // the stylesheet link and the driver script are the only tags.
+        self::assertStringNotContainsString('<style', $html);
+        self::assertStringNotContainsString('KIWI_WASM_B64', $html);
+        self::assertStringContainsString('<link rel="stylesheet" href="/kiwi-captcha/assets/widget.', $html);
+        self::assertStringContainsString('<script src="/kiwi-captcha/assets/driver.', $html);
+        self::assertStringContainsString('data-kiwi-runtime-src=', $html);
+        self::assertStringContainsString('data-kiwi-worker-src=', $html);
     }
 
     public function testStandaloneWidgetFunctionEmitsNonce(): void
     {
+        $this->resetAssetRegistry();
         $html = $this->twig()->render('@Test/widget-function.html.twig', ['nonce' => 'n-csp-xyz']);
 
-        self::assertStringContainsString('<style nonce="n-csp-xyz">', $html);
-        self::assertSame(2, substr_count($html, '<script nonce="n-csp-xyz">'));
+        self::assertStringContainsString('<link rel="stylesheet" href="/kiwi-captcha/assets/widget.', $html);
+        self::assertStringContainsString('<script src="/kiwi-captcha/assets/driver.', $html);
+        self::assertSame(1, substr_count($html, ' nonce="n-csp-xyz"'), 'the nonce rides the files-mode driver script tag exactly once');
         self::assertStringContainsString('data-kiwi-endpoint="/kiwi-captcha/challenge"', $html);
         self::assertStringContainsString('data-kiwi-scope="login"', $html);
         self::assertStringContainsString('name="kiwi__token"', $html);
@@ -167,7 +193,8 @@ final class KernelIntegrationTest extends TestCase
         $html = $this->twig()->render('@Test/form.html.twig', ['form' => $form->createView()]);
         // The driver script always mentions the attribute; the container
         // must not carry it when no binding is configured.
-        self::assertStringContainsString('data-kiwi-telemetry="off">', $html, 'without the option the widget container must not render data-kiwi-request-binding');
+        self::assertStringContainsString('data-kiwi-telemetry="off"', $html, 'the container must carry the default telemetry mode');
+        self::assertStringNotContainsString('data-kiwi-request-binding=', $html, 'without the option the widget container must not render data-kiwi-request-binding');
     }
 
     public function testStandaloneWidgetRequestBindingContext(): void

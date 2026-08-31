@@ -352,7 +352,7 @@ final class RealRedisPostSolveDispositionTest extends TestCase
 
     public function testClaimWithoutDecisionKeyDeclaresNoEmptyKeysAgainstRealRedis(): void
     {
-        // P1 topology: the risk-disabled Redis-Cluster failure — the
+        // Topology: the risk-disabled Redis-Cluster failure — the
         // claim must never declare '' as a KEYS argument (an empty string
         // has its own hash slot). The record key itself is the same-slot
         // placeholder and the ARGV flag gates it.

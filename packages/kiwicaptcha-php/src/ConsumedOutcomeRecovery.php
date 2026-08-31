@@ -96,6 +96,11 @@ final class ConsumedOutcomeRecovery
             return VerifyOutcome::invalid(VerifyError::AlreadyConsumed);
         }
 
-        return VerifyOutcome::valid($consumed->record->nonce, $consumed->consumedResult->binding, true);
+        // The stored valid outcome is an authorization grant, released
+        // only to the logical operation that consumed the record. It is a
+        // stored-result replay: no solve duration (the retry's receipt is
+        // not the solve's endpoint, the shared PHP/Rust spec), the
+        // authenticated decoy name from the replayed record.
+        return VerifyOutcome::valid($consumed->record->nonce, $consumed->consumedResult->binding, true, null, $consumed->record->decoyField);
     }
 }

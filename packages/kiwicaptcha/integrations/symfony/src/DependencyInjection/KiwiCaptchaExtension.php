@@ -5,9 +5,12 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\DependencyInjection;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\ApiJsController;
+use BelConsulting\KiwiCaptchaBundle\Controller\AssetController;
 use BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController;
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
 use BelConsulting\KiwiCaptchaBundle\Controller\SiteVerifyController;
+use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaDoctorCommand;
+use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaHaInitializeCommand;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayChainedChallengeStateStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ArrayPostSolveDispositionStore;
 use BelConsulting\KiwiCaptchaBundle\Risk\ChainedChallengeTicketService;
@@ -28,6 +31,11 @@ use BelConsulting\KiwiCaptchaBundle\Risk\RiskGateway;
 use BelConsulting\KiwiCaptchaBundle\Risk\RiskProfileResolver;
 use BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor;
 use BelConsulting\KiwiCaptchaBundle\Routing\KiwiCaptchaRouteLoader;
+use BelConsulting\KiwiCaptchaBundle\Security\ExpectedOrigin;
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\AuthorityGuardedPredisClient;
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\AuthorityTransitionGuard;
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\RuntimeAuthorityClassifier;
 use BelConsulting\KiwiCaptchaBundle\Security\InProcessArgonGate;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceCounter;
 use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
@@ -73,18 +81,43 @@ use Symfony\Component\DependencyInjection\Extension\Extension;
 use Symfony\Component\DependencyInjection\Extension\PrependExtensionInterface;
 use Symfony\Component\DependencyInjection\Reference;
 
+/**
+ * SECURITY-MAINTAINER material: the wiring invariants enforced in this
+ * extension are deep design rationale, intentionally not published at
+ * the integration layer. See docs/operations.md for the maintainer
+ * view and docs/security-hardening.md for the integration actions.
+ */
 final class KiwiCaptchaExtension extends Extension implements PrependExtensionInterface
 {
     private const ARRAY_STORAGE_ID = 'kiwi_captcha.storage.array';
+    private const DSN_REDIS_CLIENT_ID = 'kiwi_captcha.redis.dsn';
+    private const DSN_STORAGE_ID = 'kiwi_captcha.storage.redis_dsn';
+    private const EXPECTED_ORIGIN_ID = 'kiwi_captcha.expected_origin';
+    private const AUTHORITY_GUARD_ID = 'kiwi_captcha.authority_transition_guard';
+    private const CHECKED_CLIENT_ID = 'kiwi_captcha.redis.checked';
 
     /**
-     * The mechanical safety margin (ms) between the Argon admission lease
-     * (argon2_lease_ms) and the deployment's maximum verification runtime
-     * (argon2_max_verification_runtime_ms): the lease must exceed the
-     * runtime by at least this margin, or the container refuses to
-     * compile. The margin absorbs clock skew and lease bookkeeping so the
-     * lease-expiry-before-hash-termination invariant holds by
-     * construction, not by operator promise.
+     * raw service id => checked wrapper id, keyed by container. The
+     * memoization is per container because prepend() runs on the real
+     * container and load() on the temporary one: the same raw client id
+     * must map to one wrapper per container, never across containers.
+     *
+     * @var array<int, array<string, string>>
+     */
+    private array $checkedClientIdsByContainer = [];
+
+    /**
+     * The SLO safety margin (ms) between the Argon admission lease
+     * (argon2_lease_ms) and the deployment's declared maximum verification
+     * runtime (argon2_max_verification_runtime_ms): the lease must exceed
+     * the declared runtime by at least this margin, or the container
+     * refuses to compile. The margin absorbs clock skew and lease
+     * bookkeeping so the lease-expiry-before-hash-termination invariant
+     * is a deliberate deployment SLO, not a silent operator promise. The
+     * declared runtime is not an enforced wall-clock timeout around the
+     * blocking Argon hash: on a pathological host a hash can still outlive
+     * the lease (fencing keeps correctness, resource concurrency may
+     * still be exceeded in the expiry window).
      */
     private const ARGON_LEASE_SAFETY_MARGIN_MS = 5000;
 
@@ -111,6 +144,20 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      */
     public function prepend(ContainerBuilder $container): void
     {
+        // The fail_closed posture refusal runs here, on the real
+        // container, because the extension load() compiles against a
+        // temporary container where application-defined client services
+        // are invisible. The raw config layers are inspected, so only
+        // an explicit replay_durability "fail_closed" engages.
+        $this->refuseFailClosedAggregateWiring($container);
+        // The runtime authority guard covers the client of an
+        // application-defined RedisStorage too: the durability-critical
+        // pending->consumed transition lives in RedisStorage, so under
+        // fail_closed its client must be classified like every other
+        // Redis-backed consumer. The patch runs here, on the real
+        // container, where the application's storage definition is
+        // visible; the load-time container is temporary and lacks it.
+        $this->guardAppDefinedStorageClients($container);
         if (!$container->hasExtension('framework')) {
             return;
         }
@@ -127,10 +174,189 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         ]);
     }
 
+    /**
+     * The posture refusal lanes for the kernel build flow. The
+     * extension load() runs inside a temporary container (Symfony
+     * compiles every extension in isolation and merges the result), so
+     * application-defined client services are invisible at load time.
+     * The prepend hook runs on the real container before that, where
+     * every definition is visible, so the classification reaches the
+     * actual client wiring. The raw config layers carry the posture.
+     * An explicit replay_durability "fail_closed" or ha_authority
+     * "pinned_primary" in any layer engages the refusal for the client
+     * services the effective merge would wire (redis_service,
+     * risk.redis_service, and a RedisStorage storage definition's own
+     * client), with later layers winning like the merge. An
+     * env-resolved posture cannot be classified at build time and
+     * skips this lane, exactly like the load-time lane.
+     */
+    private function refuseFailClosedAggregateWiring(ContainerBuilder $container): void
+    {
+        $layers = $container->getExtensionConfig('kiwi_captcha');
+        $posture = null;
+        $haAuthority = null;
+        $redisService = null;
+        $riskRedisService = null;
+        $storage = null;
+        foreach ($layers as $layer) {
+            if (!\is_array($layer)) {
+                continue;
+            }
+            if (\array_key_exists('replay_durability', $layer)) {
+                $posture = $layer['replay_durability'];
+            }
+            if (\array_key_exists('ha_authority', $layer)) {
+                $haAuthority = $layer['ha_authority'];
+            }
+            if (\array_key_exists('redis_service', $layer)) {
+                $redisService = $layer['redis_service'];
+            }
+            if (isset($layer['risk']) && \is_array($layer['risk']) && \array_key_exists('redis_service', $layer['risk'])) {
+                $riskRedisService = $layer['risk']['redis_service'];
+            }
+            if (\array_key_exists('storage', $layer)) {
+                $storage = $layer['storage'];
+            }
+        }
+        $failClosed = $posture === 'fail_closed';
+        $pinnedPrimary = $haAuthority === 'pinned_primary';
+        if (!$failClosed && !$pinnedPrimary) {
+            return;
+        }
+        foreach ([$redisService, $riskRedisService] as $clientId) {
+            if (!\is_string($clientId) || $clientId === '') {
+                continue;
+            }
+            $aggregate = $this->predisAggregateLabel(new Reference($clientId), $container, sprintf('the "%s" Redis client', $clientId));
+            if ($aggregate !== null) {
+                throw new \LogicException(
+                    $failClosed
+                        ? self::failClosedRefusalMessage($aggregate)
+                        : self::pinnedPrimaryRefusalMessage($aggregate)
+                );
+            }
+            if ($pinnedPrimary) {
+                $class = $this->definitionClass($clientId, $container);
+                if ($class === null) {
+                    throw new \LogicException(self::pinnedPrimaryUnverifiableClientMessage($clientId, 'its class cannot be resolved at build time'));
+                }
+                if (!is_a($class, \Predis\Client::class, true)) {
+                    throw new \LogicException(self::pinnedPrimaryUnverifiableClientMessage($clientId, sprintf('its class %s is not a Predis\Client (phpredis \Redis cannot be mechanically guarded)', $class)));
+                }
+            }
+        }
+        if (!\is_string($storage) || $storage === '') {
+            return;
+        }
+        $id = $this->resolveParameterizedServiceId($storage, $container);
+        $seenAliases = [];
+        while ($id !== null && $container->hasAlias($id)) {
+            if (isset($seenAliases[$id]) || \count($seenAliases) >= 32) {
+                $id = null;
+                break;
+            }
+            $seenAliases[$id] = true;
+            $resolved = $this->resolveParameterizedServiceId((string) $container->getAlias($id), $container);
+            if ($resolved === null) {
+                $id = null;
+                break;
+            }
+            $id = $resolved;
+        }
+        if ($id === null || !$container->hasDefinition($id)) {
+            return;
+        }
+        $definition = $container->getDefinition($id);
+        $class = $this->resolveParameterizedClass($definition->getClass(), $container);
+        if ($class === null || !is_a($class, RedisStorage::class, true)) {
+            return;
+        }
+        $client = $definition->getArgument(0);
+        if (!$client instanceof Reference) {
+            return;
+        }
+        $clientId = $this->resolveParameterizedServiceId((string) $client, $container);
+        if ($clientId === null) {
+            return;
+        }
+        $aggregate = $this->predisAggregateLabel(new Reference($clientId), $container, sprintf('the storage client of "%s"', $storage));
+        if ($aggregate !== null) {
+            throw new \LogicException(
+                $failClosed
+                    ? self::failClosedRefusalMessage($aggregate)
+                    : self::pinnedPrimaryRefusalMessage($aggregate)
+            );
+        }
+        if ($pinnedPrimary) {
+            $clientClass = $this->definitionClass($clientId, $container);
+            if ($clientClass === null) {
+                throw new \LogicException(self::pinnedPrimaryUnverifiableClientMessage($clientId, 'its class cannot be resolved at build time'));
+            }
+            if (!is_a($clientClass, \Predis\Client::class, true)) {
+                throw new \LogicException(self::pinnedPrimaryUnverifiableClientMessage($clientId, sprintf('its class %s is not a Predis\Client (phpredis \Redis cannot be mechanically guarded)', $clientClass)));
+            }
+        }
+    }
+
+    /**
+     * The shared fail_closed refusal message: names the posture, the
+     * aggregate, and the remediation options (a pinned-primary or
+     * topology adapter, or the weaker postures). The remediation text
+     * is the single source shared with the runtime guard's refusal, so
+     * the build-time and runtime lanes name the same options.
+     */
+    private static function failClosedRefusalMessage(string $aggregate): string
+    {
+        return sprintf(
+            'kiwi_captcha.replay_durability is "fail_closed", but %s — the fail_closed posture refuses to rely on automatic failover, because a stale-replica promotion can re-enable replay of a consumed or burned challenge. %s',
+            $aggregate,
+            RuntimeAuthorityClassifier::FAIL_CLOSED_REMEDIATION,
+        );
+    }
+
+    /**
+     * The pinned_primary refusal message: names the posture and the
+     * remediation. Mirrors the fail_closed message but for the
+     * mechanical-authority posture, where the guard exists and the
+     * aggregate would defeat it (the guard pins one node; an aggregate
+     * can change the serving node under the client).
+     */
+    private static function pinnedPrimaryRefusalMessage(string $aggregate): string
+    {
+        return sprintf(
+            'kiwi_captcha.ha_authority is "pinned_primary", but %s — the pinned-primary authority guard pins ONE serving node, and an automatic-failover aggregate can change the serving node under the client, which is exactly the change the pin exists to detect at the deployment boundary. Wire a direct single-node Predis client (standalone connection with retries disabled), or set ha_authority: none and choose replay_durability operator_managed / best_effort (see docs/ha-authority.md).',
+            $aggregate,
+        );
+    }
+
+    /**
+     * The pinned_primary unguardable-client refusal: names the client
+     * and why the mechanical guarantee cannot be wired.
+     */
+    private static function pinnedPrimaryUnverifiableClientMessage(string $clientId, string $reason): string
+    {
+        return sprintf(
+            'kiwi_captcha.ha_authority is "pinned_primary", but the "%s" Redis client cannot be mechanically guarded (%s). The pinned-primary guard intercepts every command through a Predis\Client wrapper, so a phpredis \Redis client or an unresolvable client would silently serve unguarded — refused instead. Wire a direct single-node Predis\Client (predis/predis is a direct bundle dependency), or set ha_authority: none (see docs/ha-authority.md).',
+            $clientId,
+            $reason,
+        );
+    }
+
     public function load(array $configs, ContainerBuilder $container): void
     {
         $configuration = new Configuration();
-        $config = $this->processConfiguration($configuration, $configs);
+        // The protection profile is the LOWEST-precedence configuration
+        // layer: its defaults are prepended as the first array of the
+        // processing stack, so an explicit value in ANY config file wins
+        // (Symfony's Processor normalizes and merges each array in stack
+        // order; a later layer carrying only `protection_profile` can
+        // therefore never inject profile defaults that override earlier
+        // explicit settings). ProtectionProfileDefaults::finalize() then
+        // applies the chaining postcondition (the profile-derived
+        // chaining default engages only when a request-binding authority
+        // exists in the final merged configuration).
+        $config = $this->processConfiguration($configuration, ProtectionProfileDefaults::stack($configs));
+        $config = ProtectionProfileDefaults::finalize($config, $configs);
         // Canonicalize the historical secrets map once, at configuration
         // processing time: every downstream consumer (the verifier keyring
         // and the Siteverify security-context digest) receives the same
@@ -301,18 +527,20 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // than the configured concurrency cap (positive feedback: more
         // contention -> longer hashes -> more expiries). Renewal during
         // the blocking native hash is impractical in PHP, so the
-        // invariant is made mechanical: the deployment bounds the
-        // maximum verification runtime
+        // deployment declares its SLO: the maximum verification runtime
         // (argon2_max_verification_runtime_ms) and the lease must exceed
         // it by the safety margin, enforced at container compile time in
         // every environment (a misconfiguration is fatal everywhere,
-        // exactly like the other argon validations). The runtime cap is
-        // a deployment bound only: it is never enforced per-request
-        // inside the blocking hash, and the semaphore keeps using
-        // argon2_lease_ms as today.
+        // exactly like the other argon validations). The declared runtime
+        // is a deployment bound only: it is never enforced per-request
+        // inside the blocking hash (there is no real execution bound
+        // around the blocking Argon call), so the lease-expiry-during-
+        // hash remains theoretically possible on a pathological host —
+        // fencing keeps correctness, the resource concurrency cap may
+        // still be exceeded in that expiry window.
         if ($config['argon2_lease_ms'] <= $config['argon2_max_verification_runtime_ms'] + self::ARGON_LEASE_SAFETY_MARGIN_MS) {
             throw new \LogicException(sprintf(
-                'kiwi_captcha.argon2_lease_ms %d must exceed argon2_max_verification_runtime_ms %d by the safety margin of %d ms (%d <= %d + %d = %d): a Redis admission lease that can expire while an Argon2 verification is still running admits more derivations than the configured concurrency cap (ZREMRANGEBYSCORE pruning, no lease renewal), and the positive-feedback cycle (more contention -> longer hashes -> more expiries) amplifies it. Raise argon2_lease_ms or lower argon2_max_verification_runtime_ms; the runtime cap is the mechanical bound that guarantees the lease outlives any permitted verification.',
+                'kiwi_captcha.argon2_lease_ms %d must exceed argon2_max_verification_runtime_ms %d by the safety margin of %d ms (%d <= %d + %d = %d): a Redis admission lease that can expire while an Argon2 verification is still running admits more derivations than the configured concurrency cap (ZREMRANGEBYSCORE pruning, no lease renewal), and the positive-feedback cycle (more contention -> longer hashes -> more expiries) amplifies it. Raise argon2_lease_ms or lower argon2_max_verification_runtime_ms; the declared runtime is the deployment SLO that the lease must outlive by the margin (not an enforced wall-clock bound around the blocking hash).',
                 $config['argon2_lease_ms'],
                 $config['argon2_max_verification_runtime_ms'],
                 self::ARGON_LEASE_SAFETY_MARGIN_MS,
@@ -370,26 +598,106 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
 
         // Production never derives the expected origin from an arbitrary
         // Host header. When same_origin_only (the default) is active in a
-        // production environment, public_base_url is required and
-        // validated at container compile time, so the config trap
-        // (falling back to request Host) becomes a boot error.
+        // production environment, public_base_url is required, so the
+        // config trap (falling back to request Host) becomes a boot
+        // error. A Symfony %env()% placeholder is accepted here: the
+        // container resolves it at compile/runtime, and the resolved
+        // value receives the identical validation from the runtime lane
+        // (ExpectedOrigin::fromPublicBaseUrl) when the controller is
+        // constructed — the placeholder itself is opaque at build time.
         $environment = $this->environment($container);
         if (\in_array($environment, ['test', 'dev'], true) === false
             && ($config['same_origin_only'] || $config['risk']['enforce_origin'] || ($config['risk']['siteverify_secrets'] ?? []) !== [])
         ) {
-            $this->requireProductionPublicBaseUrl($config['public_base_url'], $config['same_origin_only'], $environment);
+            $this->requireProductionPublicBaseUrl($config['public_base_url'], $environment);
+        }
+        // The canonical-HTTPS origin contract is one validator with two
+        // lanes, both fail-closed. A literal value is validated here at
+        // container build time in every environment (test/dev included):
+        // the runtime guard would refuse a broken literal at controller
+        // construction anyway, so the build fails early with the
+        // actionable message. An env-resolved value skips this lane and
+        // is validated by the exact same contract
+        // (ExpectedOrigin::publicBaseUrlViolation) when the ExpectedOrigin
+        // service is constructed at runtime, never reaching the
+        // controller unvalidated.
+        if ($config['public_base_url'] !== null && !self::isEnvPlaceholder($config['public_base_url'])) {
+            $violation = ExpectedOrigin::publicBaseUrlViolation($config['public_base_url']);
+            if ($violation !== null) {
+                throw new \LogicException(sprintf(
+                    'KiwiCaptcha: public_base_url %s — a literal value is validated at container build time; an env-managed value is validated with the same canonical-HTTPS contract when the challenge controller is constructed.',
+                    $violation,
+                ));
+            }
         }
 
-        $storageRef = $this->resolveStorage($config['storage'], $this->environment($container), $container);
+        // The runtime authority-transition guard: the authoritative
+        // fail_closed enforcement point (docs/ha-authority.md). The
+        // guard is constructed with the replay_durability posture — a
+        // %env()% placeholder is resolved by the container when the
+        // guard is constructed, so an env-derived posture is enforced
+        // here, exactly where the build-time lanes cannot see it. The
+        // checked-client wrappers below run this guard on the actual
+        // client instance at every Redis-backed service construction.
+        // The compile-time lanes stay (early UX) but are explicitly
+        // non-authoritative: they inspect definition shapes and cannot
+        // classify an env-resolved posture or an opaque construction.
+        $container->setDefinition(self::AUTHORITY_GUARD_ID, (new Definition(RuntimeAuthorityClassifier::class, [$config['replay_durability']]))->setPublic(true));
+
+        // redis_dsn is the high-level Redis connection setting: when set
+        // (and the corresponding explicit service-id knob is NOT set),
+        // the extension constructs the Redis-backed services itself from
+        // the DSN — the challenge storage (RedisStorage), the distributed
+        // rate limiter, the Argon admission and the risk state. An
+        // explicit service id always wins over the DSN for its knob:
+        // `storage` (a custom StorageInterface service), `redis_service`
+        // (a custom client for the limiter/semaphore) and
+        // `risk.redis_service` (a custom Predis client for the risk
+        // state) keep their documented precedence. The DSN client is a
+        // Predis\Client, the same client family the risk engine requires,
+        // so one connection drives every Redis-backed service.
+        $dsnClientRef = null;
+        if ($config['redis_dsn'] !== null) {
+            $dsnClientRef = $this->buildDsnRedisClient((string) $config['redis_dsn'], $container);
+        }
+        $storageExplicitlySet = self::configLayerDefines($configs, 'storage');
+        if ($dsnClientRef !== null && !$storageExplicitlySet) {
+            // The DSN-built challenge storage: the ordinary production
+            // deployment needs no storage service wiring at all. The
+            // client rides the checked-client seam, so the storage's
+            // construction runs the runtime guard on the actual client.
+            $container->setDefinition(self::DSN_STORAGE_ID, new Definition(RedisStorage::class, [$this->checkedRedisClientRef($dsnClientRef, '', $container)]));
+            $storageRef = new Reference(self::DSN_STORAGE_ID);
+            $storageId = self::DSN_STORAGE_ID;
+        } else {
+            $storageRef = $this->resolveStorage($config['storage'], $this->environment($container), $container);
+            $storageId = $config['storage'];
+        }
         $this->requireAtomicStorageWhenNeeded(
             $storageRef,
-            $config['storage'],
+            $storageId,
             $this->environment($container),
             (bool) ($config['allow_best_effort_storage'] ?? false),
             $config['risk']['siteverify_secrets'] ?? [],
             $container,
         );
-        $redisRef = $this->resolveRedisClient((string) $storageRef, $config['redis_service'], $container);
+        // The raw client reference feeds the build-time classification
+        // lanes (definition-shape checks) and the risk client reuse
+        // decision; the checked reference feeds every consumer, so each
+        // Redis-backed service construction runs the runtime guard on
+        // the actual instance. The two never diverge at runtime: the
+        // checked wrapper returns the raw client unchanged after the
+        // guard passes.
+        $rawRedisRef = null;
+        if ($dsnClientRef !== null && $config['redis_service'] === null) {
+            // No explicit client service id: the DSN client drives the
+            // distributed rate limiter and the Argon admission.
+            $rawRedisRef = $dsnClientRef;
+            $redisRef = $this->checkedRedisClientRef($dsnClientRef, '', $container);
+        } else {
+            $rawRedisRef = $this->resolveRedisClient((string) $storageRef, $config['redis_service'], $container);
+            $redisRef = $this->checkedRedisClientRef($rawRedisRef, '', $container);
+        }
 
         // Hard distributed-resource semantics (the architectural
         // invariant): a deployment claiming a temporal issuance limit
@@ -459,7 +767,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 }
                 if ($poolClass === null) {
                     throw new \LogicException(sprintf(
-                        'kiwi_captcha.rate_limit_cache ("%s") cannot be resolved to a service class at container compile time — the production pool guard fails closed (an uninspectable pool cannot be proven cross-worker, exactly like the storage path\'s unresolvable-class refusal). Reference a concrete pool service id whose class is visible to the extension: the id may carry %%parameter%% placeholders and alias hops, but they must resolve to a real definition whose class (literal or %%param%%) is resolvable here. An external pool service the extension cannot see must be aliased or defined before this bundle loads.',
+                        'kiwi_captcha.rate_limit_cache ("%s") cannot be resolved to a service class, so the production pool guard fails closed (an uninspectable pool cannot be proven cross-worker, exactly like the storage path\'s unresolvable-class refusal). Reference a concrete pool service id whose class is visible to the extension: the id may carry %%parameter%% placeholders and alias hops, but they must resolve to a real definition whose class (literal or %%param%%) is resolvable here. An external pool service the extension cannot see must be aliased or defined before this bundle loads.',
                         $config['rate_limit_cache'],
                     ));
                 }
@@ -635,7 +943,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setPublic(true));
         // The recovery-claim derivation TTL (resume_claim_ttl_secs) is
         // wired by name ($resumeClaimTtlSecs) when the installed core's
-        // Verifier declares the parameter (added in the round-94 core);
+        // Verifier declares the parameter (a core addition);
         // an older core simply keeps its constructor default. The guard
         // exists because Symfony's ResolveNamedArgumentsPass refuses a
         // named argument the class does not declare at container compile
@@ -695,11 +1003,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $issuanceCounterRef = null;
         $outstandingRef = null;
         $chainServiceRef = null;
+        $chainStoreRef = null;
         $bindingAuthorityRef = $riskConfig['request_binding_authority'] !== null
             ? new Reference($riskConfig['request_binding_authority'])
             : null;
         $riskResolverRef = null;
         $riskRedis = null;
+        $riskRedisRaw = null;
         if ($riskConfig['enabled']) {
             // Ladder validation (defense in depth; the config tree refuses
             // the same shape at compile time): the argon escalation ladder
@@ -720,7 +1030,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 ));
             }
             [$policyConfig, $scopeIds, $postSolveScopes, $unknownScopeId] = $this->buildRiskPolicy($riskConfig);
-            $riskRedis = $this->resolveRiskRedisClient($riskConfig, $redisRef, $container);
+            // The risk client rides the same checked-client seam: the
+            // raw reference feeds the reuse/class decisions (a checked
+            // wrapper definition has no inspectable class), the checked
+            // reference feeds every risk consumer so their construction
+            // runs the runtime guard on the actual client.
+            $riskRedisRaw = $this->resolveRiskRedisClient($riskConfig, $rawRedisRef, $container);
+            $riskRedis = $this->checkedRedisClientRef($riskRedisRaw, 'risk', $container);
             $namespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', (string) $riskConfig['namespace']) ?: 'kiwi';
 
             $riskMaster = $riskConfig['master_secret'] ?? $config['secret_key'];
@@ -1046,6 +1362,55 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 $chainServiceRef = new Reference(ChainedChallengeTicketService::class);
             }
         }
+        // The replay_durability posture is the explicit authority-change
+        // contract (docs/redis-topologies.md, docs/ha-authority.md). Under
+        // fail_closed the deployment refuses to rely on automatic failover:
+        // a Predis Sentinel or Cluster aggregate client routes commands
+        // through promotion machinery, so the bundle refuses the container
+        // build here, with the posture named and the remediation options.
+        // Single-node direct clients are fine under every posture.
+        //
+        // This lane is early UX only, never the boundary: it classifies
+        // definition shapes, and an env-resolved posture (which skips
+        // the literal comparison) or an opaque client construction
+        // (which the shape walk cannot inspect) is invisible to it. The
+        // runtime authority-transition guard wired above is the
+        // authoritative lane: it runs on the actual constructed client
+        // at service construction with the resolved posture, so the
+        // invariant holds in every wiring path.
+        if ($config['replay_durability'] === 'fail_closed') {
+            $aggregate = $this->predisAggregateLabel($rawRedisRef, $container, 'the storage/limiter Redis client')
+                ?? $this->predisAggregateLabel($riskRedisRaw, $container, 'the risk Redis client');
+            if ($aggregate !== null) {
+                throw new \LogicException(self::failClosedRefusalMessage($aggregate));
+            }
+        }
+        // The client of an application-defined RedisStorage rides the
+        // checked-client seam too: the durability-critical
+        // pending->consumed transition lives in RedisStorage, so under
+        // fail_closed its own client must be classified at storage
+        // construction. The DSN-built storage already carries the
+        // checked client; this patch covers a storage service the
+        // application defines (visible in unit containers here, on the
+        // real container in prepend()).
+        $this->guardStorageClientByStorageValue($config['storage'], $container);
+        // The ha_authority posture wires the mechanical pinned-primary
+        // guard (docs/ha-authority.md): the storage/limiter/risk client
+        // is decorated with the authority guard wrapper, so every
+        // durability-critical command is preceded by the pin check —
+        // the deployment can choose a mechanically enforced
+        // replay-safe HA mode instead of trusting the operator alone.
+        // Under "none" (the default) nothing is wired and the current
+        // boundary stays byte-identical. One guard and one pin are
+        // wired per distinct Redis authority: the storage/limiter
+        // authority (`{kiwi:<ns>}:authority:pin:storage`) and a
+        // distinct risk authority (`{kiwi:<ns>}:authority:pin:risk`);
+        // a risk client that IS the storage client shares the storage
+        // guard and pin.
+        $authorityGuardRefs = [];
+        if ($config['ha_authority'] === 'pinned_primary') {
+            $authorityGuardRefs = $this->wirePinnedPrimaryAuthorityGuard($config, $redisRef, $riskRedis, $container);
+        }
         // Trusted client-IP policy, wired unconditionally (not gated on
         // risk.enabled): the canonical client IP feeds the challenge
         // binding tag, the rate-limit identity and the risk source
@@ -1173,6 +1538,19 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // per-sitekey map carries no binding dimension, so the global
         // server-owned mode is the only binding control.
         $sitekeyPolicy = $riskConfig['sitekeys'] ?? [];
+        // The same-origin expected origin comes from server config,
+        // never the Host header. The controller receives the validated
+        // ExpectedOrigin value object, never the raw string: a literal
+        // was validated at build time above, and an env-resolved value
+        // is validated by the same factory when the service is
+        // constructed, the runtime lane mirroring createDsnClient().
+        // A malformed resolved origin therefore fails closed with the
+        // typed LogicException naming the option instead of silently
+        // weakening the same-origin check.
+        $expectedOriginRef = null;
+        if ($config['public_base_url'] !== null) {
+            $expectedOriginRef = $this->buildExpectedOriginService((string) $config['public_base_url'], $container);
+        }
         $container->setDefinition(ChallengeController::class, (new Definition(ChallengeController::class, [
             new Reference('kiwi_captcha.issuer'),
             $rateLimiterRef,
@@ -1197,8 +1575,10 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // source).
             ->setArgument('$clientIpResolver', new Reference(ClientIpResolver::class))
             // The same-origin expected origin comes from server config,
-            // never the Host header.
-            ->setArgument('$publicBaseUrl', $config['public_base_url'])
+            // never the Host header: the controller receives the
+            // validated ExpectedOrigin object (or null when
+            // public_base_url is not configured).
+            ->setArgument('$expectedOrigin', $expectedOriginRef)
             // The per-scope issuance cap (fixed-window Redis
             // counter; null when disabled).
             ->setArgument('$scopeIssuanceCap', $scopeCapRef)
@@ -1245,6 +1625,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // The security-policy epoch a presented chain ticket must
             // match (a chain from an older epoch is refused).
             ->setArgument('$policyVersion', $config['risk']['policy_version'])
+            // The protocol-v3 writer switch (risk.decoy_v3_enabled,
+            // default false): issuance arms the authenticated decoy only
+            // when this is true AND the SecurityEpochMonitor confirms the
+            // central min_protocol_version floor >= 3. The default keeps
+            // every deployment emitting protocol v2 — the two-phase
+            // rollout gate, see operations.md.
+            ->setArgument('$decoyV3Enabled', $config['risk']['decoy_v3_enabled'])
+            // The issuance-side logger (when the app has one) receives
+            // the once-per-process decoy_v3_enabled-but-floor-too-low
+            // warning.
+            ->setArgument('$logger', $loggerRef)
             ->addTag('controller.service_arguments')->setPublic(true));
 
         // Challenge route (configured prefix; see KiwiCaptchaRouteLoader).
@@ -1335,11 +1726,20 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $assetsDir,
         ]))->addTag('controller.service_arguments')->setPublic(true));
 
+        // Versioned immutable widget assets (asset_mode "files"):
+        // GET {prefix}/assets/{name}.{hash}.{js|css} serves the same
+        // bytes the inline mode embeds, with the content hash in the URL,
+        // a long immutable cache lifetime, the Content-Length and the
+        // content-hash ETag.
+        $container->setDefinition(AssetController::class, (new Definition(AssetController::class, [
+            $assetsDir,
+        ]))->addTag('controller.service_arguments')->setPublic(true));
+
         // Health endpoints: /health/live is always 200 while the process
         // runs. /health/ready is 200 only when the signing keys are
         // configured, the security Redis answers a (cached) PING and the
         // central security-policy state is compatible
-        // ({kiwi:<ns>}:security-policy: min_protocol_version <= 2 and
+        // ({kiwi:<ns>}:security-policy: min_protocol_version <= 3 and
         // min_policy_epoch <= risk.policy_version; key absent = the
         // binary's own config is authoritative). Argon queue fullness and
         // transient probe timeouts never fail readiness.
@@ -1498,7 +1898,8 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setArgument('$chainTtlSecs', $riskConfig['chaining']['ttl_secs'])
             ->addTag('validator.constraint_validator'));
 
-        // Twig widget runtime + twig function (embeds the shared widget assets).
+        // Twig widget runtime + twig function (embeds the shared widget
+        // assets, or emits the versioned files-mode asset tags).
         $container->setDefinition(KiwiCaptchaRuntime::class, (new Definition(KiwiCaptchaRuntime::class, [
             $config['route_prefix'],
             null,
@@ -1517,9 +1918,56 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // the runtime can also refuse the per-render override.
             $config['risk']['client_context'],
             $config['privacy_mode'] === 'strict',
-        ]))->addTag('twig.runtime'));
+            // The asset delivery tier: "files" (default) emits versioned
+            // immutable first-party asset URLs with SRI + once-per-page
+            // dedup and lazily fetches the WASM runtime and the Argon
+            // worker only when a memory-hard challenge arrives; "inline"
+            // is the compatibility / zero-request tier. The kernel.reset
+            // tag clears the request-scoped emission registry between
+            // requests in long-lived runtimes.
+            $config['asset_mode'],
+        ]))
+            ->addTag('twig.runtime')
+            ->addTag('kernel.reset', ['method' => 'reset']));
         $container->setDefinition(TwigExtension::class, (new Definition(TwigExtension::class))
             ->addTag('twig.extension'));
+
+        // Environment doctor (kiwicaptcha:doctor): validates the
+        // production wiring from the same effective configuration and
+        // the same services the extension just built, so a check can
+        // never drift from the wiring it audits. Redis references and
+        // the chain/siteverify stores are passed as resolved, exactly
+        // like every other consumer of this extension. The pinned-
+        // primary authority guards are passed keyed by authority label
+        // (storage / risk), so the HA authority check audits each
+        // distinct authority's pin.
+        $container->setDefinition(KiwiCaptchaDoctorCommand::class, (new Definition(KiwiCaptchaDoctorCommand::class, [
+            $environment,
+            $config,
+            new Reference(StorageInterface::class),
+            new Reference('kiwi_captcha.config'),
+            new Reference(SecurityEpochMonitor::class),
+            $redisRef,
+            $riskRedis,
+            $chainStoreRef,
+            $idempotencyStoreRef,
+            $authorityGuardRefs,
+        ]))
+            ->addTag('console.command')
+            ->setPublic(true));
+
+        // The explicit authority bootstrap (kiwicaptcha:ha-initialize):
+        // the operator records the initial authority pin(s) for the
+        // pinned-primary authority guard(s), refusing an existing pin
+        // unless --force is given after a deliberate quiesce. The
+        // production runtime never auto-pins, so this command is the
+        // only way a pinned_primary deployment becomes armed.
+        $container->setDefinition(KiwiCaptchaHaInitializeCommand::class, (new Definition(KiwiCaptchaHaInitializeCommand::class, [
+            $config,
+            $authorityGuardRefs,
+        ]))
+            ->addTag('console.command')
+            ->setPublic(true));
     }
 
     /**
@@ -1550,38 +1998,53 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     }
 
     /**
-     * The production origin invariant. The challenge controller's
+     * The production missing-origin rule. The challenge controller's
      * same-origin check must compare against server config
      * (public_base_url), never the request's own scheme+host, otherwise a
      * forged Host header defines the security boundary. Fail closed at
-     * boot: prod + same-origin enforcement + missing/invalid
-     * public_base_url is a configuration error.
+     * boot: prod + same-origin enforcement + missing public_base_url is a
+     * configuration error. A Symfony %env(...)% placeholder is accepted
+     * here: the container resolves it at compile/runtime, so the
+     * literal-shape checks are skipped and the resolved value is
+     * validated by the runtime lane (ExpectedOrigin::fromPublicBaseUrl)
+     * when the controller is constructed. The literal-shape contract
+     * itself lives in ExpectedOrigin::publicBaseUrlViolation and runs
+     * for every literal in every environment.
      */
-    private function requireProductionPublicBaseUrl(mixed $publicBaseUrl, bool $sameOriginOnly, string $environment): void
+    private function requireProductionPublicBaseUrl(mixed $publicBaseUrl, string $environment): void
     {
+        if (self::isEnvPlaceholder($publicBaseUrl)) {
+            return;
+        }
         if (!\is_string($publicBaseUrl) || $publicBaseUrl === '') {
             throw new \LogicException(sprintf(
                 'KiwiCaptcha: production (environment "%s") with same-origin enforcement (or Siteverify configured) REQUIRES public_base_url — the expected origin must come from server config, never the request Host header. Set e.g. public_base_url: "https://captcha.example.com".',
                 $environment,
             ));
         }
-        $parts = parse_url($publicBaseUrl);
-        $scheme = $parts['scheme'] ?? null;
-        $host = $parts['host'] ?? null;
-        $isHttps = $scheme === 'https';
-        if (!$isHttps) {
-            throw new \LogicException('KiwiCaptcha: public_base_url must be an absolute https:// URL in production (got "'.$publicBaseUrl.'").');
+    }
+
+    /**
+     * Define the ExpectedOrigin service for a configured public_base_url.
+     * Both lanes construct it through the same runtime factory
+     * {@see ExpectedOrigin::fromPublicBaseUrl()}. A literal passed the
+     * build-time validation above and the factory re-validates it
+     * (idempotent), while an env placeholder is resolved by the
+     * container's parameter bag before the factory runs. The
+     * fail-closed canonical-origin validation therefore applies to the
+     * resolved value unseen by the load-time lane. The controller never
+     * receives the raw string.
+     */
+    private function buildExpectedOriginService(string $publicBaseUrl, ContainerBuilder $container): Reference
+    {
+        if (!$container->hasDefinition(self::EXPECTED_ORIGIN_ID)) {
+            $container->setDefinition(self::EXPECTED_ORIGIN_ID, (new Definition(ExpectedOrigin::class))
+                ->setFactory([ExpectedOrigin::class, 'fromPublicBaseUrl'])
+                ->setArguments([$publicBaseUrl])
+                ->setPublic(true));
         }
-        if ($host === null || (isset($parts['user']) || isset($parts['pass']))) {
-            throw new \LogicException('KiwiCaptcha: public_base_url must carry a hostname and NO username/password (got "'.$publicBaseUrl.'").');
-        }
-        if (isset($parts['query']) || isset($parts['fragment'])) {
-            throw new \LogicException('KiwiCaptcha: public_base_url must not carry a query or fragment (got "'.$publicBaseUrl.'").');
-        }
-        $path = $parts['path'] ?? '';
-        if ($path !== '' && $path !== '/') {
-            throw new \LogicException('KiwiCaptcha: public_base_url must have an empty path or "/" (got "'.$publicBaseUrl.'").');
-        }
+
+        return new Reference(self::EXPECTED_ORIGIN_ID);
     }
 
     /**
@@ -1675,6 +2138,222 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     }
 
     /**
+     * Wire the pinned-primary authority guards (ha_authority
+     * "pinned_primary", docs/ha-authority.md): one guard and one pin
+     * per distinct Redis authority.
+     *
+     *  - the storage/limiter authority: one guard service
+     *    (`kiwi_captcha.ha_authority_guard.storage`) bound to the raw
+     *    storage/limiter Redis client, pinning
+     *    `{kiwi:<ns>}:authority:pin:storage`. Its `INFO` reads and
+     *    pin-key operations never pass through the guarded wrapper, so
+     *    the check cannot recurse into itself.
+     *  - a distinct risk authority: a second guard
+     *    (`kiwi_captcha.ha_authority_guard.risk`) bound to the raw risk
+     *    Redis client, pinning `{kiwi:<ns>}:authority:pin:risk`. When
+     *    the risk client IS the storage/limiter client, the storage
+     *    guard and pin cover both (one pin per distinct authority).
+     *  - the storage/limiter Redis client service decorated with
+     *    AuthorityGuardedPredisClient, so every command the bundle
+     *    components issue (including the verified-WAIT executeRaw) is
+     *    preceded by the pin check. A distinct risk client gets its own
+     *    guarded decorator consulting its own guard.
+     *
+     * The optional `ha_authority_expected` operator-provisioned identity
+     * is passed to every guard: the scalar shorthand applies to every
+     * authority, and the per-authority map form applies each entry to
+     * its own authority (an authority without an entry falls back to
+     * the pin key).
+     *
+     * The decoration targets the resolved client service id, so the
+     * storage (DSN-built or user RedisStorage), the limiter, the
+     * admission semaphore and the risk state all receive the guarded
+     * client through their existing references.
+     *
+     * @return array<string, Reference> the guard services keyed by
+     *         authority label ("storage", "risk")
+     */
+    private function wirePinnedPrimaryAuthorityGuard(array $config, ?Reference $redisRef, ?Reference $riskRedis, ContainerBuilder $container): array
+    {
+        if ($redisRef === null) {
+            throw new \LogicException(
+                'kiwi_captcha.ha_authority is "pinned_primary", but no storage/limiter Redis client is wired — the pinned-primary guard pins the serving authority of the security Redis, and without a client there is no authority to pin and nothing to enforce. Configure redis_dsn / redis_service / a RedisStorage storage (a direct single-node Predis client), or set ha_authority: none (see docs/ha-authority.md).'
+            );
+        }
+        $namespace = preg_replace('/[^A-Za-z0-9_.-]/', '_', (string) ($config['risk']['namespace'] ?? 'kiwicaptcha')) ?: 'kiwi';
+        $expectedConfig = $config['ha_authority_expected'] ?? null;
+        if (\is_string($expectedConfig) && $expectedConfig !== '') {
+            // The scalar shorthand: ONE expected identity applies to
+            // every authority.
+            $expectedShorthand = $expectedConfig;
+            $expectedByAuthority = [];
+        } elseif (\is_array($expectedConfig)) {
+            // The per-authority map: each entry applies to its own
+            // authority; an authority without an entry falls back to
+            // the pin key (it must be initialized).
+            $expectedShorthand = null;
+            $expectedByAuthority = $expectedConfig;
+        } else {
+            $expectedShorthand = null;
+            $expectedByAuthority = [];
+        }
+        $this->assertPinnedPrimaryClientClass($redisRef, 'the storage/limiter Redis client', $container);
+        $redisId = $this->resolveClientServiceId((string) $redisRef, $container);
+        if ($redisId === null) {
+            throw new \LogicException(sprintf(
+                'kiwi_captcha.ha_authority is "pinned_primary", but the storage/limiter Redis client ("%s") cannot be resolved to a service the bundle can decorate at build time. Wire a direct single-node Predis\Client service id, or set ha_authority: none (see docs/ha-authority.md).',
+                (string) $redisRef,
+            ));
+        }
+        $storageGuardId = 'kiwi_captcha.ha_authority_guard.storage';
+        $container->setDefinition($storageGuardId, (new Definition(PinnedPrimaryAuthorityGuard::class, [
+            new Reference($redisId.'.inner'),
+            $namespace,
+            $config['ha_authority_reverify_secs'],
+            'storage',
+            $expectedByAuthority['storage'] ?? $expectedShorthand,
+        ]))
+            ->setPublic(true));
+        $guardRefs = ['storage' => new Reference($storageGuardId)];
+        $this->decorateGuardedClient($storageGuardId, $redisId, 'kiwi_captcha.redis.authority_guarded', $container);
+        $decorated = [$redisId => true];
+        if ($riskRedis !== null) {
+            $riskId = $this->resolveClientServiceId((string) $riskRedis, $container);
+            if ($riskId === null) {
+                throw new \LogicException(sprintf(
+                    'kiwi_captcha.ha_authority is "pinned_primary", but the risk Redis client ("%s") cannot be resolved to a service the bundle can decorate at build time. Wire a direct single-node Predis\Client service id, or set ha_authority: none (see docs/ha-authority.md).',
+                    (string) $riskRedis,
+                ));
+            }
+            if (isset($decorated[$riskId])) {
+                // The risk client IS the storage/limiter client: one
+                // physical authority, so the storage guard and pin
+                // cover both.
+                return $guardRefs;
+            }
+            $this->assertPinnedPrimaryClientClass($riskRedis, 'the risk Redis client', $container);
+            $riskGuardId = 'kiwi_captcha.ha_authority_guard.risk';
+            $container->setDefinition($riskGuardId, (new Definition(PinnedPrimaryAuthorityGuard::class, [
+                new Reference($riskId.'.inner'),
+                $namespace,
+                $config['ha_authority_reverify_secs'],
+                'risk',
+                $expectedByAuthority['risk'] ?? $expectedShorthand,
+            ]))
+                ->setPublic(true));
+            $guardRefs['risk'] = new Reference($riskGuardId);
+            $this->decorateGuardedClient($riskGuardId, $riskId, 'kiwi_captcha.risk.redis.authority_guarded', $container);
+        }
+
+        return $guardRefs;
+    }
+
+    /**
+     * Register one guarded-client decorator. The named service id is
+     * decorated with AuthorityGuardedPredisClient (priority -1000 =
+     * outermost, so it guards every other decorator on the client).
+     * The raw client is preserved at `<clientId>.inner` for the
+     * guard: the renamed id is explicit, so the guard's reference is a
+     * stable string, and the decorator's own inner argument uses the
+     * `.inner` magic reference the DecoratorServicePass rewrites.
+     */
+    private function decorateGuardedClient(string $guardId, string $clientId, string $decoratorId, ContainerBuilder $container): void
+    {
+        $container->setDefinition($decoratorId, (new Definition(AuthorityGuardedPredisClient::class, [
+            new Reference($guardId),
+            new Reference('.inner'),
+        ]))
+            ->setDecoratedService($clientId, $clientId.'.inner', -1000)
+            ->setPublic(true));
+    }
+
+    /**
+     * The pinned_primary client-class refusal at load time: aggregates
+     * and phpredis/non-Predis clients are refused when their service is
+     * visible to the extension (the DSN lane and every bundle-defined
+     * client). The checked-client seam is chased to its RAW client so
+     * the classification sees the real definition shape, never the
+     * checked wrapper. Application-defined services are invisible to
+     * load() (the temporary-container merge); the prepend lane
+     * classifies those, and the guard's own constructor and checks are
+     * the runtime backstop for anything the build could not see.
+     */
+    private function assertPinnedPrimaryClientClass(?Reference $ref, string $label, ContainerBuilder $container): void
+    {
+        $raw = $this->rawClientRefOf($ref, $container);
+        if ($raw === null) {
+            return;
+        }
+        $aggregate = $this->predisAggregateLabel($raw, $container, $label);
+        if ($aggregate !== null) {
+            throw new \LogicException(self::pinnedPrimaryRefusalMessage($aggregate));
+        }
+        $id = $this->resolveParameterizedServiceId((string) $raw, $container);
+        if ($id === null) {
+            return;
+        }
+        $class = $this->definitionClass($id, $container);
+        if ($class === null) {
+            return;
+        }
+        if (!is_a($class, \Predis\Client::class, true)) {
+            throw new \LogicException(self::pinnedPrimaryUnverifiableClientMessage($id, sprintf('its class %s is not a Predis\Client (phpredis \Redis cannot be mechanically guarded)', $class)));
+        }
+    }
+
+    /**
+     * Chase a client reference through the checked-client seam to the
+     * RAW client reference: a checked definition (the
+     * {@see self::checkedRedisClient()} factory) is transparent, and
+     * its first argument is the raw client it wraps. Any other
+     * definition is returned unchanged. Unresolvable references are
+     * returned as-is (the classification lanes then skip them, and the
+     * prepend lane or the runtime backstop covers the path).
+     */
+    private function rawClientRefOf(?Reference $ref, ContainerBuilder $container): ?Reference
+    {
+        if ($ref === null) {
+            return null;
+        }
+        $id = $this->resolveParameterizedServiceId((string) $ref, $container);
+        if ($id === null || !$container->hasDefinition($id)) {
+            return $ref;
+        }
+        $definition = $container->getDefinition($id);
+        $factory = $definition->getFactory();
+        if (\is_array($factory) && ($factory[0] ?? null) === self::class && ($factory[1] ?? null) === 'checkedRedisClient') {
+            $client = $definition->getArgument(0);
+            if ($client instanceof Reference) {
+                return $this->rawClientRefOf($client, $container);
+            }
+        }
+
+        return $ref;
+    }
+
+    /**
+     * Resolve a client service id to the final definition id: walks
+     * %%parameter%% placeholders and alias chains to the END (bounded
+     * and cycle-guarded), or null when the id stays unresolvable or
+     * has no definition the bundle could decorate.
+     */
+    private function resolveClientServiceId(string $id, ContainerBuilder $container): ?string
+    {
+        $seen = [];
+        while (true) {
+            $resolved = $this->resolveParameterizedServiceId($id, $container);
+            if ($resolved === null || isset($seen[$resolved]) || \count($seen) >= 32) {
+                return null;
+            }
+            $seen[$resolved] = true;
+            if (!$container->hasAlias($resolved)) {
+                return $container->hasDefinition($resolved) ? $resolved : null;
+            }
+            $id = (string) $container->getAlias($resolved);
+        }
+    }
+
+    /**
      * Find the Redis client to use for the Argon2 admission gate and the
      * atomic rate limiter.
      *
@@ -1707,6 +2386,150 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         $client = $definition->getArgument(0);
 
         return $client instanceof Reference ? $client : null;
+    }
+
+    /**
+     * Build the Predis client defined from the high-level redis_dsn
+     * setting (the bundle's DSN-backed client pattern: one
+     * Predis\Client constructed from the connection DSN, driving the
+     * challenge storage, the distributed rate limiter, the Argon
+     * admission and the risk state store).
+     *
+     * Two validation lanes, both fail-closed. A literal DSN is
+     * shape-validated at container build time: it must be a redis://
+     * or rediss:// URL with a host, refused with an actionable message
+     * instead of failing the first request. A Symfony %env(...)%
+     * placeholder skips the load-time shape check, because the value
+     * is resolved by the container's parameter bag at compile/runtime.
+     * The client is then constructed through the runtime guard
+     * {@see self::createDsnClient()}, which runs the same shape
+     * validation on the resolved DSN before Predis sees it. Predis
+     * alone is not clear enough: a scheme-less string silently
+     * defaults to tcp://127.0.0.1, so the guard turns a malformed
+     * env-resolved DSN into the typed LogicException naming the
+     * option instead of a confusing connection to the wrong host. A
+     * reachable-but-absent server stays a runtime error on the
+     * first command (Predis connects lazily), exactly like every
+     * other wired client.
+     */
+    private function buildDsnRedisClient(string $dsn, ContainerBuilder $container): Reference
+    {
+        if (!class_exists(\Predis\Client::class)) {
+            throw new \LogicException(
+                'kiwi_captcha.redis_dsn requires predis/predis (composer require predis/predis): the DSN-backed Redis client is built as a Predis\Client so the same connection drives the challenge storage, the distributed rate limiter, the Argon admission semaphore and the risk state store (the risk engine is typed Predis\Client).'
+            );
+        }
+        if (self::isEnvPlaceholder($dsn)) {
+            if (!$container->hasDefinition(self::DSN_REDIS_CLIENT_ID)) {
+                $container->setDefinition(self::DSN_REDIS_CLIENT_ID, (new Definition(\Predis\Client::class))
+                    ->setFactory([self::class, 'createDsnClient'])
+                    ->setArguments([$dsn])
+                    ->setPublic(true));
+            }
+
+            return new Reference(self::DSN_REDIS_CLIENT_ID);
+        }
+        $violation = self::dsnShapeViolation($dsn);
+        if ($violation !== null) {
+            throw new \LogicException(sprintf(
+                'kiwi_captcha.redis_dsn %s — the DSN is handed to Predis\Client verbatim, so a malformed DSN fails closed at container build time instead of failing the first request.',
+                $violation,
+            ));
+        }
+        if (!$container->hasDefinition(self::DSN_REDIS_CLIENT_ID)) {
+            $container->setDefinition(self::DSN_REDIS_CLIENT_ID, (new Definition(\Predis\Client::class, [$dsn]))->setPublic(true));
+        }
+
+        return new Reference(self::DSN_REDIS_CLIENT_ID);
+    }
+
+    /**
+     * Runtime construction guard for the env-managed DSN client. The
+     * container resolves the %env(...)% placeholder to the real DSN
+     * before invoking this factory, so the fail-closed shape validation
+     * runs on the resolved value (unseen by the load-time lane). The
+     * typed LogicException names the option and the accepted shape; the
+     * literal lane enforces the identical contract at build time.
+     */
+    public static function createDsnClient(string $dsn): \Predis\Client
+    {
+        $violation = self::dsnShapeViolation($dsn);
+        if ($violation !== null) {
+            throw new \LogicException(sprintf(
+                'kiwi_captcha.redis_dsn %s — the value was resolved from the environment at runtime, so the malformed DSN fails closed when the client is constructed instead of connecting to the wrong host.',
+                $violation,
+            ));
+        }
+
+        return new \Predis\Client($dsn);
+    }
+
+    /**
+     * The fail-closed DSN shape contract shared by the build-time and
+     * runtime lanes: a redis:// or rediss:// URL with a host. Returns a
+     * description of the violation, or null when the DSN shape is
+     * acceptable.
+     */
+    private static function dsnShapeViolation(mixed $dsn): ?string
+    {
+        if (!\is_string($dsn)) {
+            return 'must be a redis:// or rediss:// URL with a host';
+        }
+        $parts = parse_url($dsn);
+        $scheme = $parts['scheme'] ?? null;
+        $host = $parts['host'] ?? null;
+        if (!\is_string($scheme) || !\in_array($scheme, ['redis', 'rediss'], true)
+            || !\is_string($host) || $host === ''
+        ) {
+            return sprintf('must be a redis:// or rediss:// URL with a host (got "%s")', $dsn);
+        }
+
+        return null;
+    }
+
+    /**
+     * Whether the value is an env-managed form of a Symfony %env(...)%
+     * placeholder. Two shapes reach the extension:
+     *  - the raw placeholder '%env(KIWI_REDIS_DSN)%' (plain
+     *    ContainerBuilder usage, e.g. unit tests);
+     *  - Symfony's env marker (env_<16 hex>_<name>_<32 hex>), the form
+     *    MergeExtensionConfigurationPass resolves the placeholder into
+     *    before the extension load() runs in a kernel container; the
+     *    dumped container resolves the same marker back to the env
+     *    value at runtime.
+     * Both are opaque at extension time, so the load-time shape
+     * validations skip them; the resolved value is validated where it
+     * is consumed.
+     */
+    private static function isEnvPlaceholder(mixed $value): bool
+    {
+        if (!\is_string($value)) {
+            return false;
+        }
+        if (preg_match('/^%env\([^%]+\)%$/D', $value) === 1) {
+            return true;
+        }
+
+        return preg_match('/^env_[a-f0-9]{16}_\w+_[a-f0-9]{32}$/iD', $value) === 1;
+    }
+
+    /**
+     * Whether any raw configuration layer explicitly defines the key
+     * (array_key_exists semantics, so an explicit null counts as set).
+     * Used to decide whether an explicit service-id knob wins over the
+     * high-level redis_dsn setting.
+     *
+     * @param array<int, array<string, mixed>> $configs
+     */
+    private static function configLayerDefines(array $configs, string $key): bool
+    {
+        foreach ($configs as $layer) {
+            if (\is_array($layer) && \array_key_exists($key, $layer)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function environment(ContainerBuilder $container): string
@@ -1893,7 +2716,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             $class = $this->definitionClass((string) $bundleRedis, $container);
             if ($class === null) {
                 throw new \LogicException(
-                    'kiwi_captcha.risk.enabled cannot reuse the bundle Redis client: its service class is not visible to the '.
+                    'kiwi_captcha.risk.enabled cannot reuse the bundle Redis client: its service class stays invisible to the '.
                     'extension. Set risk.redis_service explicitly to a Predis\Client service id.'
                 );
             }
@@ -1942,7 +2765,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     /**
      * Resolve the %%parameter%% placeholders inside a definition's class,
      * e.g. `class: '%app.cache.class%'`, to the literal class name, or
-     * null when the class is not a resolvable string. A missing parameter
+     * null when the type stays unresolvable as a string. A missing parameter
      * is NOT silently ignored: the caller's unresolvable path applies,
      * mirroring requireAtomicStorageWhenNeeded()'s %param% class handling
      * but for any placeholder position, not only whole-string params.
@@ -2028,6 +2851,108 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
     }
 
     /**
+     * Whether a wired Redis client is a Predis replication or cluster
+     * aggregate, judged from the definition the build can inspect.
+     * The classification mirrors the runtime VerifiedWaitGuard and the
+     * doctor command. A Predis\Client whose constructor options carry
+     * the "replication" (Sentinel or master-slave) or "cluster" option
+     * builds a ReplicationInterface or ClusterInterface connection at
+     * runtime, so the same topology boundary applies at build time.
+     * Returns the aggregate label, null when the client is a single-node
+     * direct connection (phpredis, a standalone Predis DSN, a plain tcp
+     * parameters array) or when the definition is opaque to the build.
+     * An uninspectable client cannot be proven an aggregate and stays
+     * allowed, exactly like the runtime guard only refuses what the
+     * connection object proves.
+     */
+    private function predisAggregateLabel(?Reference $ref, ContainerBuilder $container, string $label): ?string
+    {
+        if ($ref === null) {
+            return null;
+        }
+        $id = $this->resolveParameterizedServiceId((string) $ref, $container);
+        if ($id === null) {
+            return null;
+        }
+        $seenAliases = [];
+        while ($container->hasAlias($id)) {
+            if (isset($seenAliases[$id]) || \count($seenAliases) >= 32) {
+                return null;
+            }
+            $seenAliases[$id] = true;
+            $resolved = $this->resolveParameterizedServiceId((string) $container->getAlias($id), $container);
+            if ($resolved === null) {
+                return null;
+            }
+            $id = $resolved;
+        }
+        $seen = [];
+        while ($container->hasDefinition($id) && !isset($seen[$id])) {
+            $seen[$id] = true;
+            $definition = $container->getDefinition($id);
+            $class = $this->resolveParameterizedClass($definition->getClass(), $container);
+            if ($class !== null && !is_a($class, \Predis\Client::class, true)) {
+                // phpredis and every non-Predis client: the runtime
+                // guard classifies only Predis aggregates, so the same
+                // boundary applies here.
+                return null;
+            }
+            $aggregateOptions = $this->predisAggregateOptions($definition, $container);
+            if ($aggregateOptions !== null) {
+                if (isset($aggregateOptions['replication'])) {
+                    return sprintf('%s is a Predis replication aggregate (Sentinel or master-slave)', $label);
+                }
+                if (isset($aggregateOptions['cluster'])) {
+                    return sprintf('%s is a Predis Redis Cluster aggregate', $label);
+                }
+            }
+            if (!$definition instanceof ChildDefinition) {
+                return null;
+            }
+            $id = $definition->getParent();
+        }
+
+        return null;
+    }
+
+    /**
+     * The constructor-options array of a Predis\Client definition that
+     * proves an aggregate topology (a "replication" or "cluster" option
+     * key), or null when no argument carries one. Both argument
+     * positions are inspected, since the aggregate shape is
+     * conventionally options in the second position. %param% values are
+     * resolved through the parameter bag. An argument that stays opaque
+     * (a Reference, an unresolved parameter) is skipped, never treated
+     * as an aggregate.
+     */
+    private function predisAggregateOptions(Definition $definition, ContainerBuilder $container): ?array
+    {
+        foreach ($definition->getArguments() as $argument) {
+            if (!\is_array($argument)) {
+                continue;
+            }
+            try {
+                $resolved = $container->getParameterBag()->resolveValue($argument);
+            } catch (\Throwable) {
+                continue;
+            }
+            if (!\is_array($resolved)) {
+                continue;
+            }
+            if (\array_key_exists('replication', $resolved) || \array_key_exists('cluster', $resolved)) {
+                return $resolved;
+            }
+            foreach ($resolved as $entry) {
+                if (\is_array($entry) && (\array_key_exists('replication', $entry) || \array_key_exists('cluster', $entry))) {
+                    return $entry;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Canonicalize the historical secrets map to array<int, string> keys:
      * the single source of truth for the kid-keyed keyring handed to
      * VerificationSecurityContext. The tree has already refused textual
@@ -2051,7 +2976,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
 
     /**
      * Whether the installed core's Verifier constructor declares the
-     * `$resumeClaimTtlSecs` parameter (the round-94 recovery-claim TTL).
+     * `$resumeClaimTtlSecs` parameter (the recovery-claim TTL).
      * The bundle wires the named argument only when the parameter exists,
      * because Symfony's ResolveNamedArgumentsPass refuses named arguments
      * the class does not declare, at container compile time.
@@ -2069,5 +2994,136 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         }
 
         return false;
+    }
+
+    /**
+     * The checked-client factory: constructs the underlying client
+     * (lazily, at this wrapper's own construction) and runs the
+     * authority-transition guard against the actual instance before any
+     * consumer receives it. The guard refuses under fail_closed when
+     * the instance is an authority-change aggregate or uninspectable;
+     * the same client instance is returned, so the wrapper is
+     * transparent to consumers and to later decoration (the
+     * pinned-primary guard decorates the raw instance).
+     */
+    public static function checkedRedisClient(mixed $client, AuthorityTransitionGuard $guard): mixed
+    {
+        $guard->assertServeEligible($client);
+
+        return $client;
+    }
+
+    /**
+     * The checked-client seam: wrap a raw client reference in the
+     * authority-guard wrapper definition, or return the existing
+     * wrapper when this container already checked the same raw client
+     * id. The DSN client is shared by the storage, the limiter, the
+     * admission and the risk state, so there is one wrapper per raw
+     * client per container.
+     *
+     * The wrapper has no service class (it is a factory definition), so
+     * the raw reference MUST be kept for every build-time classification
+     * lane; consumers receive the checked reference.
+     */
+    private function checkedRedisClientRef(?Reference $ref, string $suffix, ContainerBuilder $container): ?Reference
+    {
+        if ($ref === null) {
+            return null;
+        }
+        $rawId = (string) $ref;
+        $containerKey = spl_object_id($container);
+        if (isset($this->checkedClientIdsByContainer[$containerKey][$rawId])) {
+            return new Reference($this->checkedClientIdsByContainer[$containerKey][$rawId]);
+        }
+        $base = self::CHECKED_CLIENT_ID.($suffix !== '' ? '.'.$suffix : '');
+        $checkedId = $base;
+        if ($container->hasDefinition($checkedId) || $container->hasAlias($checkedId)) {
+            // A second distinct raw client under the same role label
+            // (e.g. a DSN client plus an explicit redis_service): the
+            // fallback id carries the sanitized raw id so the wrapper
+            // stays deterministic and self-describing.
+            $sanitized = preg_replace('/[^A-Za-z0-9_.-]/', '_', $rawId) ?: 'client';
+            $checkedId = $base.'.'.$sanitized;
+            $i = 1;
+            while ($container->hasDefinition($checkedId) || $container->hasAlias($checkedId)) {
+                $checkedId = $base.'.'.$sanitized.'.'.(++$i);
+            }
+        }
+        $this->checkedClientIdsByContainer[$containerKey][$rawId] = $checkedId;
+        $container->setDefinition($checkedId, (new Definition(\Predis\Client::class))
+            ->setFactory([self::class, 'checkedRedisClient'])
+            ->setArguments([$ref, new Reference(self::AUTHORITY_GUARD_ID)])
+            ->setPublic(true));
+
+        return new Reference($checkedId);
+    }
+
+    /**
+     * Route the client of a RedisStorage definition through the
+     * checked-client seam: the durability-critical pending->consumed
+     * transition lives in RedisStorage, so under fail_closed its own
+     * client must be classified at storage construction like every
+     * other Redis-backed consumer. The definition's client argument (a
+     * Reference) is replaced by the checked wrapper; an unresolvable
+     * definition, a non-RedisStorage class or a non-Reference client
+     * argument stays untouched (the consumers' own seam and the
+     * build-time lanes cover the visible paths).
+     */
+    private function guardStorageClientByStorageValue(string $storage, ContainerBuilder $container): void
+    {
+        $id = $this->resolveServiceId($storage, $container);
+        if ($id === null || !$container->hasDefinition($id)) {
+            return;
+        }
+        $definition = $container->getDefinition($id);
+        $class = $this->resolveParameterizedClass($definition->getClass(), $container);
+        if ($class === null || !is_a($class, RedisStorage::class, true)) {
+            return;
+        }
+        $client = $definition->getArgument(0);
+        if (!$client instanceof Reference) {
+            return;
+        }
+        $definition->setArgument(0, $this->checkedRedisClientRef($client, 'storage', $container));
+    }
+
+    /**
+     * The prepend-time storage patch: parse the configured storage
+     * value from the raw kiwi_captcha config layers and route its
+     * client through the checked seam on the real container, where an
+     * application-defined storage definition is visible.
+     */
+    private function guardAppDefinedStorageClients(ContainerBuilder $container): void
+    {
+        $storage = null;
+        foreach ($container->getExtensionConfig('kiwi_captcha') as $layer) {
+            if (\is_array($layer) && \array_key_exists('storage', $layer)) {
+                $storage = $layer['storage'];
+            }
+        }
+        if (\is_string($storage) && $storage !== '') {
+            $this->guardStorageClientByStorageValue($storage, $container);
+        }
+    }
+
+    /**
+     * Resolve a configured service id through %%parameter%% placeholders
+     * and alias chains to its final definition id, or null when
+     * unresolvable (a missing parameter, an env marker, an alias cycle,
+     * an over-long chain).
+     */
+    private function resolveServiceId(string $id, ContainerBuilder $container): ?string
+    {
+        $id = $this->resolveParameterizedServiceId($id, $container);
+        $seenAliases = [];
+        while ($id !== null && $container->hasAlias($id)) {
+            if (isset($seenAliases[$id]) || \count($seenAliases) >= 32) {
+                return null;
+            }
+            $seenAliases[$id] = true;
+            $id = $this->resolveParameterizedServiceId((string) $container->getAlias($id), $container);
+        }
+
+        return $id;
     }
 }

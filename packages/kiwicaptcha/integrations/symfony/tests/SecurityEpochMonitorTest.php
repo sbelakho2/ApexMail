@@ -25,7 +25,11 @@ use Symfony\Component\Validator\Validation;
  * monotonic in-process max (ignoring a regressed central value), serves
  * the last-observed max on Redis failure, and feeds the verifier's
  * expected policy epoch per verification. A central bump revokes
- * old-version challenges within one cache window.
+ * old-version challenges within one cache window. The same cached read
+ * exposes min_protocol_version, the fleet protocol floor for the
+ * decoy-v3 emission gate: non-monotonic (a lowered floor re-admits
+ * older binaries, so v3 emission must stop) and null on any
+ * uncertainty (fail-safe to v2).
  */
 final class SecurityEpochMonitorTest extends TestCase
 {
@@ -128,8 +132,8 @@ final class SecurityEpochMonitorTest extends TestCase
 
     public function testEpochBumpNeverDisablesTheIssuerExpectation(): void
     {
-        // The security boundary the audit found: the monitor previously
-        // rotated the shared verifier with rotateDeploymentExpectations()
+        // The security boundary: the monitor used to
+        // rotate the shared verifier with rotateDeploymentExpectations()
         // carrying a null issuer, so a central epoch bump silently
         // disabled issuer enforcement on every later verification. The
         // monitor now mutates only the policy epoch. The verifier starts
@@ -255,6 +259,74 @@ final class SecurityEpochMonitorTest extends TestCase
         $monitor = new SecurityEpochMonitor($verifier, null, 'test-ns', 1, 1, $this->clock(...));
         self::assertSame(1, $monitor->currentEpoch());
         self::assertSame(0, $monitor->observedMax());
+    }
+
+    // ── The min_protocol_version floor (the decoy-v3 emission gate) ──
+
+    private function setCentralProtocolFloor(FakePredisClient $redis, int $floor): void
+    {
+        $redis->hset(self::POLICY_KEY, SecurityEpochMonitor::MIN_PROTOCOL_VERSION_FIELD, (string) $floor);
+    }
+
+    public function testMinProtocolVersionFloorIsReadFromTheCentralPolicy(): void
+    {
+        [, $verifier] = $this->pair(1);
+        $redis = new FakePredisClient();
+        $this->setCentralEpoch($redis, 1);
+        $this->setCentralProtocolFloor($redis, 3);
+        $monitor = new SecurityEpochMonitor($verifier, $redis, 'test-ns', 1, 1, $this->clock(...));
+        self::assertNull($monitor->minProtocolVersion(), 'before the first refresh no floor is confirmed');
+        $monitor->currentEpoch();
+        self::assertSame(3, $monitor->minProtocolVersion(), 'the first refresh confirms the central floor');
+    }
+
+    public function testMinProtocolVersionIsNotMonotonic(): void
+    {
+        // The floor is a fleet-capability coordination signal, NOT a
+        // revocation: the readiness gate admits any binary whose max
+        // protocol is >= the floor, so a lowered floor means the operator
+        // admitted older binaries back into the pool — v3 emission must
+        // stop on the next re-read. A monotonic max would keep emitting
+        // v3 challenges those binaries reject.
+        [, $verifier] = $this->pair(1);
+        $redis = new FakePredisClient();
+        $this->setCentralEpoch($redis, 1);
+        $this->setCentralProtocolFloor($redis, 3);
+        $monitor = new SecurityEpochMonitor($verifier, $redis, 'test-ns', 1, 1, $this->clock(...));
+        $monitor->currentEpoch();
+        self::assertSame(3, $monitor->minProtocolVersion());
+
+        $this->setCentralProtocolFloor($redis, 2);
+        $this->clockMs = 2000; // past the cache window -> a re-read happens
+        $monitor->currentEpoch();
+        self::assertSame(2, $monitor->minProtocolVersion(), 'a regressed floor is observed immediately (never a sticky 3)');
+    }
+
+    public function testMinProtocolVersionFailsSafeToNullWhenTheReadFails(): void
+    {
+        [, $verifier] = $this->pair(1);
+        $redis = new FakePredisClient();
+        $this->setCentralEpoch($redis, 1);
+        $this->setCentralProtocolFloor($redis, 3);
+        $monitor = new SecurityEpochMonitor($verifier, $redis, 'test-ns', 1, 1, $this->clock(...));
+        $monitor->currentEpoch();
+        self::assertSame(3, $monitor->minProtocolVersion());
+
+        // Redis goes down: the floor becomes null (unconfirmed) — the
+        // issuance gate falls back to v2; it must never serve a stale 3
+        // on uncertainty.
+        $redis->failCommand = '*';
+        $this->clockMs = 2000;
+        $monitor->currentEpoch();
+        self::assertNull($monitor->minProtocolVersion(), 'an unreadable central policy leaves the floor unconfirmed');
+    }
+
+    public function testMinProtocolVersionIsNullWithoutRedis(): void
+    {
+        [, $verifier] = $this->pair(1);
+        $monitor = new SecurityEpochMonitor($verifier, null, 'test-ns', 1, 1, $this->clock(...));
+        $monitor->currentEpoch();
+        self::assertNull($monitor->minProtocolVersion(), 'no central state by design means no confirmed floor — v2 emission');
     }
 
     /**
@@ -460,7 +532,7 @@ final class SecurityEpochMonitorTest extends TestCase
     {
         $count = 0;
         foreach ($redis->calls as $call) {
-            if ($call[0] === 'HGET') {
+            if ($call[0] === 'HGETALL') {
                 $count++;
             }
         }

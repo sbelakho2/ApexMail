@@ -121,8 +121,18 @@ pub enum BindingMode {
 ///   `nonce|scope|ip_hash|issued_at`; `binding_tag` carries the legacy
 ///   `hash_ip` value (the sha256 digest of secret and ip) and reads the legacy `ip_hash` JSON
 ///   key via serde alias. Kept verifiable for the migration window (max TTL).
-/// - `protocol_version == 2` (current): signed with the v2 full-parameter
-///   canonical input and a nonce-bound `binding_tag`.
+/// - `protocol_version == 2` (current, unarmed): signed with the v2
+///   full-parameter canonical input and a nonce-bound `binding_tag` —
+///   byte-identical to the pre-decoy record format.
+/// - `protocol_version == 3` (decoy-capable): the v2 canonical base plus
+///   the `|decoy_field` segment appended after `kid`. The decoy is
+///   mandatory on v3 — a v3 record without a decoy is rejected by
+///   validation, so a stored version flip (a signed v2 record re-versioned
+///   to 3) can never verify: the authenticated canonical shape itself
+///   establishes the protocol capability. A v2 record carrying a
+///   `decoy_field` is rejected by validation too — the v2 canonical never
+///   includes the segment, so v2 => no decoy and v3 => decoy present is
+///   the total grammar.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChallengeRecord {
@@ -184,9 +194,18 @@ pub struct ChallengeRecord {
     #[serde(default)]
     pub attempts_used: u32,
     /// Protocol version: 1 = legacy v1 canonical signing + legacy `ip_hash`
-    /// binding; 2 = v2 full-parameter signing + nonce-bound `binding_tag`.
-    /// New records are issued with 2; 1 is the serde default so stored
-    /// pre-v2 records keep verifying during the migration window (max TTL).
+    /// binding; 2 = v2 full-parameter signing + nonce-bound `binding_tag`
+    /// (the unarmed issuance format, byte-identical to the pre-decoy
+    /// records); 3 = the decoy-capable canonical — the v2 18-field base
+    /// plus the `|decoy_field` segment appended after `kid`, with the
+    /// decoy mandatory on v3. New records are issued with 3 when a decoy
+    /// is armed and 2 otherwise; 1 is the serde default so stored pre-v2
+    /// records keep verifying during the migration window (max TTL). The
+    /// protocol-vs-decoy grammar is total and validated: a v2 record
+    /// carrying a `decoy_field` AND a v3 record without one are both
+    /// rejected as malformed, so the protocol capability is fully
+    /// inferable from the authenticated canonical shape — a stored
+    /// version flip can never change the effective protocol.
     #[serde(default = "default_protocol_version")]
     pub protocol_version: u8,
     /// Region the challenge was issued for. It is an authenticated field of
@@ -233,17 +252,23 @@ pub struct ChallengeRecord {
     #[serde(default)]
     pub hostname: Option<String>,
     /// The server-issued decoy (honeypot) form-field name armed for this
-    /// challenge (see [`DECOY_FIELD_POOL`]). `None` = no decoy armed (the
+    /// challenge, drawn from the combinatorial grammar (see
+    /// [`DECOY_GRAMMAR_SLOT1_QUALIFIER`]). `None` = no decoy armed (the
     /// default, and the shape every pre-decoy record carries). The name is
-    /// an authenticated v2 canonical field — the final segment
-    /// `|<decoy_field>`, appended after the `kid` (the v2 canonical
-    /// signing input, documented below) — so a stored/tampered record
-    /// cannot change or drop it without breaking the signature.
+    /// an authenticated canonical field of protocol v3 — the final segment
+    /// `|<decoy_field>`, appended after the `kid` (the canonical signing
+    /// input, documented below) — so a stored/tampered record cannot
+    /// change or drop it without breaking the signature.
     ///
-    /// Wire-compatible both directions: the JSON key is absent when `None`
+    /// Wire compatibility: unarmed records are byte-identical to the
+    /// pre-decoy format — the JSON key is absent when `None`
     /// (`skip_serializing_if`), so pre-decoy writers and readers keep
-    /// their exact byte format, and a decoy-armed record simply carries
-    /// one extra string key.
+    /// their exact byte format. A decoy-armed record is protocol v3 and
+    /// requires a v3-capable verifier: an old verifier rejects version 3
+    /// as unknown, so the capability is always inferable from
+    /// `protocol_version` — a v2 record carrying `decoy_field` is
+    /// rejected explicitly by validation, and a v3 record without a decoy
+    /// is rejected too (the decoy is mandatory on v3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decoy_field: Option<String>,
     /// Key identifier of the signing secret this challenge was issued with.
@@ -510,14 +535,14 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
     )
 }
 
-/// Protocol v2 canonical input (`protocol_version == 2`): the full parameter
+/// Protocol v2/v3 canonical input: the full parameter
 /// set so no issuance parameter can be tampered with without breaking the
 /// signature:
 /// `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`.
 /// `region`, `request_binding` and `issuer` render as the empty segment when
 /// unset; `kid` is the final field, appended after the issuer.
 ///
-/// # The decoy-field extension (round-97)
+/// # The decoy-field extension (protocol v3)
 ///
 /// When the issuer arms a decoy (honeypot) form field
 /// (`issue_challenge_with_decoy`), the field name is appended as ONE extra
@@ -529,15 +554,27 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 ///   issuer|kid|decoy_field
 /// ```
 ///
-/// - `decoy_field` is the literal decoy name (e.g. `company_website`), drawn
-///   from [`DECOY_FIELD_POOL`], so it can never contain the `|` separator
-///   (the pool alphabet is `[a-z_]`; validation accepts `[A-Za-z0-9_-]`
-///   only, 1..=64 bytes).
-/// - The segment is appended only when a decoy is armed. `None` renders
+/// - `decoy_field` is the literal armed decoy name (e.g.
+///   `billing_address_line_a3f9c21d8e5b7401`): a grammar prefix drawn
+///   from the combinatorial vocabularies ([`DECOY_GRAMMAR_SLOT1_QUALIFIER`],
+///   [`DECOY_GRAMMAR_SLOT2_CATEGORY`] and
+///   [`DECOY_GRAMMAR_SLOT3_FORM`]) plus the 16-hex `CSPRNG` suffix, so it
+///   can never contain the `|` separator (the alphabet is `[a-z_0-9]`;
+///   validation accepts `[A-Za-z0-9_-]` only, 1..=64 bytes).
+/// - The segment is appended only when a decoy is armed, and an armed
+///   record is issued as `protocol_version == 3`. `None` renders
 ///   nothing extra — the canonical string is byte-identical to the
-///   pre-extension format, so outstanding challenges and cross-language
-///   records keep verifying unchanged across the upgrade, and the extension
-///   is invisible until a deployment opts in.
+///   pre-extension format and the record stays `protocol_version == 2`,
+///   so unarmed records and cross-language records keep verifying
+///   unchanged across the upgrade.
+/// - The grammar is total: v2 => no decoy segment, v3 => decoy segment
+///   present. Validation enforces both directions, so the protocol
+///   capability is fully inferable from the authenticated canonical
+///   shape — a stored version flip (a signed v2 record re-versioned to
+///   3) keeps the plain 18-field canonical and is rejected as
+///   malformed, and a v2 record carrying `decoy_field` is rejected too
+///   (an old verifier rejects version 3 as unknown — the capability
+///   becomes inferable from `protocol_version`, which is the point).
 /// - PHP parity (exact recipe for the PHP core): build the same 18-field
 ///   base string, then append `'|' . $decoyField` if and only if the record
 ///   carries a non-null `decoy_field`; sign/HMAC-verify the result with the
@@ -732,7 +769,7 @@ pub struct Issued {
 ///
 /// Entries older than 1 second are pruned lazily on every `get` and `put`,
 /// and the map is HARD-bounded: a `put` that would exceed the maximum
-/// evicts the oldest entry, so 256 is a real memory maximum regardless of
+/// evicts the least-recently-used entry, so 256 is a real memory maximum regardless of
 /// how many distinct IP+scope pairs arrive within a window.
 pub struct ChallengeCache {
     entries: HashMap<String, (Issued, Instant)>,
@@ -829,33 +866,149 @@ pub const MAX_PARALLELISM: u32 = 4;
 /// Used to derive the per-challenge minimum solve duration.
 pub const SHA256_SOLVER_HASHES_PER_SEC: f64 = 5e9;
 
-/// The server-side pool of decoy (honeypot) form-field names. When a
-/// deployment arms the decoy surface ([`issue_challenge_with_decoy`]), the
-/// issuer picks one name uniformly at random (`CSPRNG`) per issuance: the
-/// names look like ordinary optional form fields a generic bot filler
-/// would populate, while a human never sees them (the widget driver
-/// renders the chosen name as a hidden, never-auto-filled text input).
+/// The combinatorial decoy-name grammar, the server-side naming space for
+/// decoy (honeypot) form fields. When a deployment arms the decoy surface
+/// ([`issue_challenge_with_decoy`]), the issuer draws one lowercase word
+/// per slot (`CSPRNG`) and joins them with '_' to form the grammar prefix
+/// {slot1}_{slot2}_{slot3}, e.g. `secondary_contact_phone` or
+/// `billing_company_url`. The three position-specific vocabularies below
+/// are shared verbatim with the PHP
+/// `Issuer::DECOY_GRAMMAR_SLOT1_QUALIFIER` / `_SLOT2_CATEGORY` /
+/// `_SLOT3_FORM` (same words, same order). The pick itself is never
+/// coordinated between the languages: the issuing core signs whatever it
+/// picked, and verification validates alphabet plus canonical, never the
+/// name.
 ///
-/// The pool alphabet is deliberately `[a-z_]` — a subset of the
-/// `[A-Za-z0-9_-]{1,64}` shape the widget driver accepts and of the
-/// validation alphabet here, so no pool name can ever smuggle the `|`
-/// canonical-payload separator or any other structurally meaningful
-/// character. PHP maintains the identical pool (same names, same order);
-/// the picked name is authenticated by the v2 signature, so the two cores
-/// never need to agree on the pick, only on the pool's alphabet and the
-/// canonical-format extension documented on
-/// [`canonical_signing_input_v2`].
-pub const DECOY_FIELD_POOL: &[&str] = &[
-    "company_website",
-    "fax_number",
-    "secondary_phone",
-    "office_extension",
-    "alternate_email",
-    "home_address_line",
-    "middle_name",
-    "assistant_name",
-    "department_code",
-    "backup_phone",
+/// The armed name is the prefix plus a per-issuance random suffix:
+/// {slot1}_{slot2}_{slot3}_{suffix} with a 16-lowercase-hex suffix drawn
+/// from 8 [`security_random`] bytes (see [`compose_decoy_prefix`] and
+/// [`decoy_name_suffix`]), e.g.
+/// `billing_address_line_a3f9c21d8e5b7401`. The suffix is the collision
+/// disambiguator: an application field whose name equals a grammar prefix
+/// (a plausible real field name, e.g. `billing_address_line`) can still
+/// collide with an armed name only when it also equals the per-issuance
+/// 64-bit suffix. The accidental-match probability for a given issued
+/// name is 2^-64, so a forced collision is a deliberate act, never an
+/// accident.
+///
+/// Prefix space size: `SLOT1`.len() * `SLOT2`.len() * `SLOT3`.len() =
+/// 32 * 29 * 30 = 27,840 distinct prefixes. Each triple joins to a
+/// unique string because '_' cannot occur inside a word. The prefix is
+/// `[a-z_]+` of at most 30 bytes (the longest word is 10 bytes); the
+/// armed name adds 1 + 16 bytes for the '_' + suffix, at most 47 bytes.
+/// Every armed name is a subset of the `[A-Za-z0-9_-]{1,64}` shape the
+/// widget driver and the validation accept. No name can ever smuggle the
+/// `|` canonical-payload separator.
+/// The legacy 10-name pool words (company_website, fax_number, ...) all
+/// remain present as vocabulary entries, but the `SELECTION` is
+/// combinatorial: a fixed 10-name pool is log2(10) ~ 3.32 bits of
+/// enumerable space, the grammar prefix space is log2(27,840) ~ 14.8
+/// bits, and the armed name space is 27,840 * 2^64, so two consecutive
+/// challenges share a full name with probability ~2^-64.
+pub const DECOY_GRAMMAR_SLOT1_QUALIFIER: &[&str] = &[
+    "secondary",
+    "alternate",
+    "billing",
+    "office",
+    "personal",
+    "company",
+    "home",
+    "backup",
+    "department",
+    "business",
+    "primary",
+    "work",
+    "emergency",
+    "mobile",
+    "regional",
+    "corporate",
+    "team",
+    "project",
+    "default",
+    "temporary",
+    "external",
+    "internal",
+    "private",
+    "shared",
+    "general",
+    "local",
+    "main",
+    "national",
+    "seasonal",
+    "guest",
+    "middle",
+    "assistant",
+];
+
+/// The slot-2 vocabulary (the category slot) of the decoy-name grammar,
+/// see [`DECOY_GRAMMAR_SLOT1_QUALIFIER`]. The word `company` appears in
+/// both slot 1 and slot 2 on purpose: `billing_company_url` and
+/// `company_billing_url` are both plausible optional field names.
+pub const DECOY_GRAMMAR_SLOT2_CATEGORY: &[&str] = &[
+    "contact",
+    "address",
+    "phone",
+    "email",
+    "website",
+    "fax",
+    "company",
+    "account",
+    "profile",
+    "order",
+    "invoice",
+    "support",
+    "service",
+    "sales",
+    "location",
+    "region",
+    "branch",
+    "division",
+    "directory",
+    "registry",
+    "record",
+    "file",
+    "entry",
+    "channel",
+    "portal",
+    "platform",
+    "list",
+    "archive",
+    "history",
+];
+
+/// The slot-3 vocabulary (the form slot) of the decoy-name grammar, see
+/// [`DECOY_GRAMMAR_SLOT1_QUALIFIER`].
+pub const DECOY_GRAMMAR_SLOT3_FORM: &[&str] = &[
+    "phone",
+    "url",
+    "number",
+    "line",
+    "code",
+    "name",
+    "extension",
+    "email",
+    "address",
+    "link",
+    "id",
+    "key",
+    "value",
+    "info",
+    "details",
+    "notes",
+    "lookup",
+    "search",
+    "query",
+    "reference",
+    "alias",
+    "handle",
+    "username",
+    "label",
+    "tag",
+    "entry",
+    "record",
+    "index",
+    "field",
+    "form",
 ];
 
 /// Whether `s` is a conforming decoy (honeypot) field name: 1..=64 bytes of
@@ -869,12 +1022,111 @@ pub(crate) fn valid_decoy_field_name(s: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
 }
 
-/// Pick a random decoy field name from [`DECOY_FIELD_POOL`] with the
-/// `CSPRNG` (never a weak/insecure fallback — an RNG failure propagates to
-/// the caller as [`SignError::Rng`], exactly like the nonce/salt draws).
-fn pick_decoy_field() -> Result<&'static str, SignError> {
-    let byte = security_random::<1>().map_err(|_| SignError::Rng)?[0];
-    Ok(DECOY_FIELD_POOL[byte as usize % DECOY_FIELD_POOL.len()])
+/// The combinatorial prefix space size, `SLOT1`.len() * `SLOT2`.len() *
+/// `SLOT3`.len().
+pub const fn decoy_grammar_space_size() -> usize {
+    DECOY_GRAMMAR_SLOT1_QUALIFIER.len()
+        * DECOY_GRAMMAR_SLOT2_CATEGORY.len()
+        * DECOY_GRAMMAR_SLOT3_FORM.len()
+}
+
+/// Whether `name` is a grammar prefix: three underscore-joined
+/// vocabulary words, each from its position-specific list, within the
+/// `[A-Za-z0-9_-]{1,64}` validation shape.
+pub fn is_grammar_decoy_prefix(name: &str) -> bool {
+    if !valid_decoy_field_name(name) {
+        return false;
+    }
+    let mut parts = name.split('_');
+    let (Some(s1), Some(s2), Some(s3), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    DECOY_GRAMMAR_SLOT1_QUALIFIER.contains(&s1)
+        && DECOY_GRAMMAR_SLOT2_CATEGORY.contains(&s2)
+        && DECOY_GRAMMAR_SLOT3_FORM.contains(&s3)
+}
+
+/// Whether `name` is an armed decoy name: a grammar prefix
+/// ([`is_grammar_decoy_prefix`]) plus '_' plus the 16 lowercase hex
+/// suffix characters, within the `[A-Za-z0-9_-]{1,64}` validation shape.
+pub fn is_grammar_decoy_name(name: &str) -> bool {
+    if !valid_decoy_field_name(name) {
+        return false;
+    }
+    let mut parts = name.split('_');
+    let (Some(s1), Some(s2), Some(s3), Some(suffix), None) = (
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+        parts.next(),
+    ) else {
+        return false;
+    };
+    DECOY_GRAMMAR_SLOT1_QUALIFIER.contains(&s1)
+        && DECOY_GRAMMAR_SLOT2_CATEGORY.contains(&s2)
+        && DECOY_GRAMMAR_SLOT3_FORM.contains(&s3)
+        && suffix.len() == 16
+        && suffix
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// The deterministic grammar prefix for the given vocabulary indices,
+/// {slot1}_{slot2}_{slot3}. Pure and public so tests can enumerate the
+/// prefix space, pin the vocabularies, and run fixed-seed collision
+/// statistics without touching the `CSPRNG`.
+pub fn compose_decoy_prefix(slot1: usize, slot2: usize, slot3: usize) -> String {
+    format!(
+        "{}_{}_{}",
+        DECOY_GRAMMAR_SLOT1_QUALIFIER[slot1],
+        DECOY_GRAMMAR_SLOT2_CATEGORY[slot2],
+        DECOY_GRAMMAR_SLOT3_FORM[slot3]
+    )
+}
+
+/// The per-issuance random suffix of an armed decoy name: 16 lowercase
+/// hex characters drawn from 8 bytes of the `CSPRNG`, 64 random bits.
+/// The suffix is the collision disambiguator of the armed name space: a
+/// grammar prefix alone is a plausible real field name, so only the
+/// suffix makes an armed name unguessable and accidental collision
+/// impossible. Mirrors the PHP `Issuer::decoyNameSuffix`.
+fn decoy_name_suffix() -> Result<String, SignError> {
+    let bytes = security_random::<8>().map_err(|_| SignError::Rng)?;
+    Ok(hex::encode(&bytes))
+}
+
+/// Pick a random armed decoy field name with the `CSPRNG` (never a
+/// weak/insecure fallback — an RNG failure propagates to the caller as
+/// [`SignError::Rng`], exactly like the nonce/salt draws): a grammar
+/// prefix (each slot draws an unbiased index via rejection sampling)
+/// plus the fresh 16-hex suffix.
+fn pick_decoy_field() -> Result<String, SignError> {
+    Ok(format!(
+        "{}_{}",
+        compose_decoy_prefix(
+            pick_decoy_slot_index(DECOY_GRAMMAR_SLOT1_QUALIFIER.len())?,
+            pick_decoy_slot_index(DECOY_GRAMMAR_SLOT2_CATEGORY.len())?,
+            pick_decoy_slot_index(DECOY_GRAMMAR_SLOT3_FORM.len())?,
+        ),
+        decoy_name_suffix()?,
+    ))
+}
+
+/// One unbiased vocabulary index draw: rejection sampling over a single
+/// `CSPRNG` byte, so every word in the vocabulary has exactly equal
+/// probability (a plain modulo of a byte would bias vocabularies whose
+/// length does not divide 256).
+fn pick_decoy_slot_index(vocab_len: usize) -> Result<usize, SignError> {
+    let limit = 256 - (256 % vocab_len);
+    loop {
+        let byte = security_random::<1>().map_err(|_| SignError::Rng)?[0];
+        if (byte as usize) < limit {
+            return Ok(byte as usize % vocab_len);
+        }
+    }
 }
 
 /// Expected hashes per second for the Argon2id wasm solver at moderate memory
@@ -938,7 +1190,7 @@ impl ChallengeCache {
         // Hard bound: pruning removes only expired entries, so a burst
         // of distinct fresh keys inside one TTL window could otherwise
         // grow the map without limit. After the prune, the map is still
-        // over the maximum: evict the oldest entry (the linear scan is
+        // over the maximum: evict the least-recently-used entry (the linear scan is
         // acceptable at the 256-entry scale; a cache miss is already the
         // cheaper alternative to a fresh issuance, and the bound is what
         // matters: 256 is a real maximum, not a per-second rate).
@@ -1036,16 +1288,21 @@ pub fn issue_challenge(
 /// (`DecoyFieldSubmitted`, `honeypot_hit`). Identical to
 /// [`issue_challenge`] in every other respect (same wire format, same
 /// signing, same storage); when `arm_decoy_field` is true the issuer picks
-/// a random field name from the server-side [`DECOY_FIELD_POOL`] (`CSPRNG`;
-/// a fresh independent pick per issuance, so two challenges never share a
-/// predictable decoy), sets it on the client-facing
+/// a fresh armed name, a grammar prefix plus a fresh 16-hex `CSPRNG`
+/// suffix (see [`DECOY_GRAMMAR_SLOT1_QUALIFIER`], `CSPRNG`; a fresh
+/// independent pick per issuance — the suffix gives every issuance its
+/// own 64 random bits, so the probability that two consecutive
+/// challenges share a full name is ~2^-64, and accidental collision
+/// with any other name, application fields included, is
+/// cryptographically impossible), sets it on the client-facing
 /// [`IssuedChallenge::decoy_field`] (the widget driver renders the hidden
 /// input from that key) AND on the stored record's authenticated
-/// `decoy_field`, signed into the v2 canonical input as the final
+/// `decoy_field`, signed into the canonical input as the final
 /// `|<decoy_field>` segment — a client cannot strip or swap the decoy
-/// without breaking the signature the verifier re-checks. `false` behaves
-/// exactly like [`issue_challenge`] (no decoy, byte-identical canonical
-/// string).
+/// without breaking the signature the verifier re-checks. An armed
+/// issuance writes `protocol_version == 3` (the decoy-capable canonical);
+/// `false` behaves exactly like [`issue_challenge`] (no decoy,
+/// `protocol_version == 2`, byte-identical canonical string).
 #[allow(clippy::too_many_arguments)]
 pub fn issue_challenge_with_decoy(
     config: &ChallengeConfig,
@@ -1192,18 +1449,19 @@ fn issue_challenge_inner(
         .min_duration_ms
         .unwrap_or_else(|| config.min_duration_ms_for(target_bits));
 
-    // Protocol v2: sign the full-parameter canonical input so no issuance
-    // parameter (algorithm, difficulty, TTL, salt, …) can be tampered with
-    // without breaking the signature. The challenge string is
-    // `base64(canonical).hex_tag` — same structure as v1. The signature is
-    // computed with the `HKDF`-derived challenge key, never the
+    // Protocol v2/v3: sign the full-parameter canonical input so no
+    // issuance parameter (algorithm, difficulty, TTL, salt, …) can be
+    // tampered with without breaking the signature. The challenge string
+    // is `base64(canonical).hex_tag` — same structure as v1. The signature
+    // is computed with the `HKDF`-derived challenge key, never the
     // master secret directly.
     //
     // The decoy (honeypot) field name, when armed, is picked before the
     // canonical input is built: it is an authenticated issuance parameter
-    // (the final `|<decoy_field>` segment), signed like every other.
+    // (the final `|<decoy_field>` segment), signed like every other, and
+    // the record is issued as protocol v3.
     let decoy_field: Option<String> = if arm_decoy_field {
-        Some(pick_decoy_field()?.to_string())
+        Some(pick_decoy_field()?)
     } else {
         None
     };
@@ -1225,7 +1483,10 @@ fn issue_challenge_inner(
         min_duration_ms,
         issued_at_ns: now_ns,
         attempts_used: 0,
-        protocol_version: 2,
+        // Armed issuance writes protocol v3 (the decoy-capable canonical,
+        // signed with the decoy segment when present); unarmed issuance
+        // stays v2, byte-identical to the pre-decoy format.
+        protocol_version: if arm_decoy_field { 3 } else { 2 },
         region: config.region.clone(),
         policy_version: config.policy_version,
         request_binding: request_binding.map(str::to_string),
@@ -1397,6 +1658,8 @@ mod hex {
 mod tests {
     use super::*;
     use crate::verify::RequestBindingExpectation;
+    use rand::rngs::StdRng;
+    use rand::{Rng, SeedableRng};
 
     // Test "now_ns" values are epoch microseconds (1_700_000_000_000_000 µs
     // ≈ 2023-11-14 UTC) — the unit the crate shares with PHP, see
@@ -1868,10 +2131,10 @@ mod tests {
 
     #[test]
     fn challenge_cache_is_hard_bounded_even_with_all_fresh_entries() {
-        // The audit's finding: pruning removes only expired entries, so
+        // The finding: pruning removes only expired entries, so
         // a burst of distinct fresh keys inside one window could
-        // previously grow the map without limit. The hard bound evicts
-        // the oldest entry after the prune, so 256 is a real maximum.
+        // grow the map without limit. The hard bound evicts
+        // the least-recently-used entry after the prune, so 256 is a real maximum.
         let mut cache = ChallengeCache::with_ttl_for_test(Duration::from_secs(60));
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
@@ -2066,10 +2329,13 @@ mod tests {
     // ── decoy (honeypot) field issuance ──────────────────────────────
 
     #[test]
-    fn decoy_field_issuance_arms_a_signed_pool_name() {
+    fn decoy_field_issuance_arms_a_signed_armed_name() {
         // Armed: the client-facing token and the stored record both carry
-        // a pool name, the canonical input ends with the `|<name>` segment,
-        // and the signature verifies over that exact extended input.
+        // the armed name (a grammar prefix plus the 16-hex suffix, at
+        // most 47 bytes), the record is issued as protocol v3 (the
+        // decoy-capable canonical), the canonical input ends with the
+        // `|<name>` segment, and the signature verifies over that exact
+        // extended input.
         let issued = issue_challenge_with_decoy(
             &profile_base_config(),
             "login",
@@ -2083,11 +2349,24 @@ mod tests {
         .unwrap();
         let decoy = issued.challenge.decoy_field.clone().expect("decoy armed");
         assert!(
-            DECOY_FIELD_POOL.contains(&decoy.as_str()),
-            "the decoy name must come from the server-side pool (got {decoy})"
+            is_grammar_decoy_name(&decoy),
+            "the decoy name must be a grammar prefix plus suffix (got {decoy})"
+        );
+        assert!(
+            is_grammar_decoy_prefix(&decoy[..decoy.len() - 17]),
+            "the name must start with a grammar prefix"
         );
         assert!(valid_decoy_field_name(&decoy));
+        assert!(
+            decoy.len() <= 47,
+            "the armed name (prefix + suffix) must be at most 47 bytes (got {})",
+            decoy.len()
+        );
         assert_eq!(issued.record.decoy_field.as_deref(), Some(decoy.as_str()));
+        assert_eq!(
+            issued.record.protocol_version, 3,
+            "an armed issuance writes protocol v3 (the decoy-capable canonical)"
+        );
 
         let canonical = canonical_signing_input_v2(&issued.record);
         assert!(
@@ -2097,7 +2376,7 @@ mod tests {
         assert_eq!(
             canonical.split('|').count(),
             19,
-            "v2 canonical input: 18 base fields + the decoy segment"
+            "v3 canonical input: the 18-field v2 base + the decoy segment"
         );
         // The signature covers the extended input (verifies as issued).
         let sig = crate::verify::signature_from_challenge(&issued.record);
@@ -2140,11 +2419,242 @@ mod tests {
     }
 
     #[test]
+    fn decoy_grammar_prefix_space_is_large_and_every_prefix_valid() {
+        // The combinatorial prefix space: `SLOT1` * `SLOT2` * `SLOT3` =
+        // 32 * 29 * 30 = 27,840 distinct prefixes (each triple joins to a
+        // unique string), thousands+, and every member complies with the
+        // `[A-Za-z0-9_-]{1,64}` validation shape the widget driver and
+        // the stored-record validator accept (the longest prefix is 30
+        // bytes; the armed name adds 17 more).
+        let space = decoy_grammar_space_size();
+        assert_eq!(space, 27_840);
+        assert!(
+            space > 1_000,
+            "the grammar prefix space must be thousands+ (got {space})"
+        );
+        let mut all: Vec<String> = Vec::with_capacity(space);
+        for s1 in DECOY_GRAMMAR_SLOT1_QUALIFIER {
+            for s2 in DECOY_GRAMMAR_SLOT2_CATEGORY {
+                for s3 in DECOY_GRAMMAR_SLOT3_FORM {
+                    let name = format!("{s1}_{s2}_{s3}");
+                    assert!(
+                        valid_decoy_field_name(&name),
+                        "{name} must comply with the validation alphabet"
+                    );
+                    assert!(
+                        name.len() <= 64,
+                        "{name} must be at most 64 bytes (got {})",
+                        name.len()
+                    );
+                    assert!(is_grammar_decoy_prefix(&name));
+                    all.push(name);
+                }
+            }
+        }
+        all.sort();
+        all.dedup();
+        assert_eq!(
+            all.len(),
+            space,
+            "every triple must compose a unique prefix"
+        );
+
+        // A 20,000-draw sample (seeded, deterministic) must not collapse
+        // into a small distinct set — the effective prefix space is the
+        // grammar space, not an accidentally tiny subset.
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut drawn = std::collections::HashSet::new();
+        for _ in 0..20_000 {
+            let idx = rng.gen_range(0..space);
+            drawn.insert(compose_decoy_prefix(
+                idx / (29 * 30),
+                (idx % (29 * 30)) / 30,
+                idx % 30,
+            ));
+        }
+        assert!(
+            drawn.len() > 1_000,
+            "20,000 draws must hit more than 1,000 distinct prefixes (got {})",
+            drawn.len()
+        );
+    }
+
+    #[test]
+    fn decoy_grammar_consecutive_draw_collisions_are_bounded() {
+        // Fixed-seed statistical test: 10,000 consecutive pairs drawn
+        // uniformly from the 27,840-prefix space. The expected number of
+        // equal consecutive pairs is ~10,000 / 27,840 ~ 0.36. The bound
+        // is set at < 2 collisions, i.e. a deterministic pass at the
+        // ~1/N collision probability per pair. The full armed-name
+        // collision probability is 2^-64 per pair (the suffix), so the
+        // prefix-space statistic pins the grammar half only.
+        let space = decoy_grammar_space_size();
+        let mut rng = StdRng::seed_from_u64(7);
+        let mut collisions = 0u32;
+        let mut previous: Option<String> = None;
+        for _ in 0..10_000 {
+            let idx = rng.gen_range(0..space);
+            let current = compose_decoy_prefix(idx / (29 * 30), (idx % (29 * 30)) / 30, idx % 30);
+            if previous.as_deref() == Some(current.as_str()) {
+                collisions += 1;
+            }
+            previous = Some(current);
+        }
+        assert!(
+            collisions < 2,
+            "10,000 consecutive pairs must collide < 2 times (got {collisions})"
+        );
+    }
+
+    #[test]
+    fn decoy_name_suffix_is_16_lowercase_hex_from_8_random_bytes() {
+        // The suffix generator: exactly 16 lowercase hex characters, the
+        // hex of 8 `CSPRNG` bytes — the 64 random bits that make an
+        // armed name unguessable and accidental collision impossible.
+        let suffix = decoy_name_suffix().unwrap();
+        assert_eq!(suffix.len(), 16, "the suffix must be 16 hex chars");
+        assert!(
+            suffix
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+            "the suffix must be lowercase hex (got {suffix})"
+        );
+
+        // Two consecutive draws must differ: a fresh draw per call, so
+        // identical suffixes across a handful of draws would indicate a
+        // broken RNG, not a collision.
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..20 {
+            seen.insert(decoy_name_suffix().unwrap());
+            if seen.len() >= 2 {
+                break;
+            }
+        }
+        assert!(seen.len() >= 2, "consecutive suffixes must vary");
+    }
+
+    #[test]
+    fn two_consecutive_armed_names_differ_in_the_suffix() {
+        // The statistical core of the collision guarantee: 40 consecutive
+        // armed compositions carry 40 distinct 64-bit suffixes (2^-64 per
+        // pair), every composed name complies with the full validation
+        // shape, and the armed name stays under the 64-byte bound (at
+        // most 47 bytes).
+        let mut seen_suffixes = std::collections::HashSet::new();
+        for _ in 0..40 {
+            let name = compose_decoy_prefix(0, 0, 0) + "_" + &decoy_name_suffix().unwrap();
+            assert!(
+                is_grammar_decoy_name(&name),
+                "{name} must be an armed grammar name"
+            );
+            assert!(
+                valid_decoy_field_name(&name),
+                "{name} must comply with the [A-Za-z0-9_-]{{1,64}} validation shape"
+            );
+            assert!(
+                name.len() <= 47,
+                "{name} must be at most 47 bytes (the 64-byte validation bound)"
+            );
+            seen_suffixes.insert(name[name.len() - 16..].to_string());
+        }
+        assert_eq!(
+            seen_suffixes.len(),
+            40,
+            "40 consecutive armed compositions must carry 40 distinct 64-bit suffixes"
+        );
+    }
+
+    #[test]
+    fn decoy_grammar_vocabularies_are_pinned_and_bounded() {
+        // The vocabularies are position-specific, lowercase-only words of
+        // 2..=10 bytes, and the longest composed name stays well under
+        // the 64-byte validation bound.
+        for (vocab, lo, hi) in [
+            (DECOY_GRAMMAR_SLOT1_QUALIFIER, 25, 35),
+            (DECOY_GRAMMAR_SLOT2_CATEGORY, 25, 35),
+            (DECOY_GRAMMAR_SLOT3_FORM, 25, 35),
+        ] {
+            assert!(
+                vocab.len() >= lo && vocab.len() <= hi,
+                "each vocabulary must hold 25-35 words (got {})",
+                vocab.len()
+            );
+            for w in vocab {
+                assert!(
+                    (2..=10).contains(&w.len()) && w.bytes().all(|b| b.is_ascii_lowercase()),
+                    "vocabulary words must be lowercase [a-z]{{2,10}} (got {w})"
+                );
+            }
+        }
+        // The legacy 10-name pool words all remain generatable vocabulary
+        // entries (the words stay; only the enumerable `SELECTION` is gone).
+        for legacy in [
+            "company",
+            "fax",
+            "number",
+            "secondary",
+            "phone",
+            "office",
+            "extension",
+            "alternate",
+            "email",
+            "home",
+            "address",
+            "line",
+            "middle",
+            "name",
+            "assistant",
+            "department",
+            "code",
+            "backup",
+            "website",
+        ] {
+            assert!(
+                DECOY_GRAMMAR_SLOT1_QUALIFIER.contains(&legacy)
+                    || DECOY_GRAMMAR_SLOT2_CATEGORY.contains(&legacy)
+                    || DECOY_GRAMMAR_SLOT3_FORM.contains(&legacy),
+                "the legacy pool word {legacy} must remain a vocabulary entry"
+            );
+        }
+        assert!(is_grammar_decoy_prefix("secondary_contact_phone"));
+        assert!(is_grammar_decoy_prefix("billing_company_url"));
+        assert!(!is_grammar_decoy_prefix("secondary_contact"));
+        assert!(!is_grammar_decoy_prefix("secondary_contact_phone_extra"));
+        assert!(!is_grammar_decoy_prefix("Secondary_Contact_Phone"));
+        assert!(!is_grammar_decoy_prefix("company|website"));
+        // The full armed shape: a prefix plus the 16-hex suffix. A bare
+        // prefix is a plausible real field name, so only the suffix makes
+        // an armed name; a prefix without it is not an armed name.
+        assert!(is_grammar_decoy_name(
+            "secondary_contact_phone_a3f9c21d8e5b7401"
+        ));
+        assert!(is_grammar_decoy_name(
+            "billing_address_line_0000000000000000"
+        ));
+        assert!(!is_grammar_decoy_name("secondary_contact_phone"));
+        assert!(!is_grammar_decoy_name(
+            "secondary_contact_phone_000000000000000"
+        ));
+        assert!(!is_grammar_decoy_name(
+            "secondary_contact_phone_00000000000000000"
+        ));
+        assert!(!is_grammar_decoy_name(
+            "secondary_contact_phone_ABCDEF0123456789"
+        ));
+        assert!(!is_grammar_decoy_name(
+            "secondary_contact_phone_000000000000000g"
+        ));
+        assert!(!is_grammar_decoy_name(
+            "secondary_contact_phone_extra_0000000000000000"
+        ));
+    }
+
+    #[test]
     fn decoy_field_disabled_keeps_the_old_wire_and_canonical_format() {
-        // The plain path (and the explicit false arm) issues NO decoy: the
-        // canonical string keeps the exact pre-extension shape (18 fields,
-        // kid last — byte-identical), and neither JSON surface carries the
-        // key.
+        // The plain path (and the explicit false arm) issues NO decoy and
+        // stays protocol v2: the canonical string keeps the exact
+        // pre-extension shape (18 fields, kid last — byte-identical), and
+        // neither JSON surface carries the key.
         for issued in [
             issue_challenge(
                 &profile_base_config(),
@@ -2170,6 +2680,10 @@ mod tests {
         ] {
             assert!(issued.challenge.decoy_field.is_none());
             assert!(issued.record.decoy_field.is_none());
+            assert_eq!(
+                issued.record.protocol_version, 2,
+                "an unarmed issuance stays protocol v2, byte-identical to the pre-decoy format"
+            );
             let canonical = canonical_signing_input_v2(&issued.record);
             assert_eq!(
                 canonical.split('|').count(),
@@ -2251,14 +2765,14 @@ mod tests {
         let secret = "test-key-16-bytes!";
         assert!(verify_signature_v2(&armed.record, sig, secret).unwrap());
 
-        // Renamed.
+        // Renamed to a different grammar name (same shape, different pick).
         let mut renamed = armed.record.clone();
-        let other = DECOY_FIELD_POOL
-            .iter()
-            .find(|n| Some(n.to_string()) != renamed.decoy_field)
-            .unwrap()
-            .to_string();
-        renamed.decoy_field = Some(other);
+        let renamed_name = if renamed.decoy_field.as_deref() == Some("secondary_contact_phone") {
+            "billing_company_url"
+        } else {
+            "secondary_contact_phone"
+        };
+        renamed.decoy_field = Some(renamed_name.to_string());
         assert!(!verify_signature_v2(&renamed, sig, secret).unwrap());
 
         // Stripped (the client-cannot-remove-it property).
@@ -2279,7 +2793,7 @@ mod tests {
         .unwrap();
         let plain_sig = crate::verify::signature_from_challenge(&plain.record);
         let mut spliced = plain.record.clone();
-        spliced.decoy_field = Some(DECOY_FIELD_POOL[0].to_string());
+        spliced.decoy_field = Some("secondary_contact_phone".to_string());
         assert!(!verify_signature_v2(&spliced, plain_sig, secret).unwrap());
     }
 

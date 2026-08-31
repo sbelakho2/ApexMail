@@ -529,7 +529,7 @@ final class VerifierResumeTest extends TestCase
 
     public function testResultlessResumeExpiringDuringDerivationWithInvalidProofIsExpired(): void
     {
-        // Round-95 audit fix, Rust parity: the post-derive revalidation
+        // Rust parity: the post-derive revalidation
         // runs for both a valid and an invalid derivation, so an
         // insufficient proof on a record that expires mid-derive
         // commits Expired, never a stale InsufficientWork (the Rust
@@ -1188,9 +1188,9 @@ final class VerifierResumeTest extends TestCase
 
     public function testClaimLoserNeverTouchesTheArgonGate(): void
     {
-        // Round-90 audit fix: the claim is acquired before the Argon
+        // The claim is acquired before the Argon
         // admission gate. A recovery that loses the claim must never
-        // have acquired an Argon capacity slot (the old order leaked
+        // have acquired an Argon capacity slot (the earlier order leaked
         // the slot for the whole lease TTL). The loser answers the
         // retryable ConsumeIndeterminate with the gate untouched.
         [$storage, $record, $token] = $this->issueAndSolveArgon();
@@ -1606,7 +1606,7 @@ final class VerifierResumeTest extends TestCase
         self::assertTrue($outcome->isOk(), 'the correct context resolves the retained Valid');
     }
 
-    // ── The configurable resume-claim TTL (round-94 audit fix) ─────────
+    // ── The configurable resume-claim TTL ──────────────────────────────
 
     public function testResumeClaimTtlDefaultsToSixtyAndIsConfigurable(): void
     {

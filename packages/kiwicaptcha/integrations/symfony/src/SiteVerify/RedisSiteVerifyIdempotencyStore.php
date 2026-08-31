@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
 
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\RedisSecurityCommandExecutor;
+
 /**
  * Redis-backed atomic idempotency store.
  *
@@ -32,10 +34,18 @@ namespace BelConsulting\KiwiCaptchaBundle\SiteVerify;
  * a crashed owner blocks the key. After expiry an atomic takeover
  * transfers ownership to a waiter, and the lease length itself (not any
  * process-global timer) protects a live owner mid-verification.
+ *
+ * Every Lua transition executes through the guarded
+ * {@see RedisSecurityCommandExecutor} seam (docs/ha-authority.md): the
+ * finalize is the security-final transition (the zero-stale lane forces
+ * the pinned-primary authority revalidation immediately before the
+ * write), and the claim/takeover/renew are ordinary mutations.
  */
 final class RedisSiteVerifyIdempotencyStore implements SiteVerifyIdempotencyStore
 {
     private const PREFIX = 'siteverify-idem:';
+
+    private readonly RedisSecurityCommandExecutor $lua;
 
     private const CLAIM_LUA = <<<'LUA'
 local key = KEYS[1]
@@ -166,13 +176,14 @@ LUA;
         private readonly int $waitTimeoutMs = 100,
     ) {
         $this->refuseVerifiedWaitOnUnsupportedPredisClients();
+        $this->lua = new RedisSecurityCommandExecutor($redis);
     }
 
     public function claim(string $backendId, string $idempotencyKey, string $responseHash, int $ttlSeconds, string $remoteipFingerprint, ?int $leaseSeconds = null, ?string $binding = null): array
     {
         $owner = bin2hex(random_bytes(16));
         $lease = $leaseSeconds ?? $this->leaseSeconds;
-        $result = RedisEval::eval($this->redis, self::CLAIM_LUA, $this->key($backendId, $idempotencyKey), [$responseHash, $owner, max(1, $ttlSeconds), $lease, $remoteipFingerprint, $binding ?? '']);
+        $result = $this->lua->executeMutation(self::CLAIM_LUA, $this->key($backendId, $idempotencyKey), [$responseHash, $owner, max(1, $ttlSeconds), $lease, $remoteipFingerprint, $binding ?? '']);
 
         $claim = match ((string) $result) {
             'claimed' => IdempotencyClaim::Claimed,
@@ -199,7 +210,7 @@ LUA;
         // maintained across the takeover (null = the configured lease —
         // the controller always passes null; the lease is never derived
         // from a token's remaining validity).
-        $result = RedisEval::eval($this->redis, self::TAKEOVER_LUA, $this->key($backendId, $idempotencyKey), [$owner, $responseHash, $remoteipFingerprint, $leaseSeconds ?? $this->leaseSeconds, max(1, $ttlSeconds), $binding ?? '']);
+        $result = $this->lua->executeMutation(self::TAKEOVER_LUA, $this->key($backendId, $idempotencyKey), [$owner, $responseHash, $remoteipFingerprint, $leaseSeconds ?? $this->leaseSeconds, max(1, $ttlSeconds), $binding ?? '']);
 
         $takeover = match ((string) $result) {
             'took_over' => IdempotencyClaim::TookOver,
@@ -220,7 +231,7 @@ LUA;
     public function finalize(string $backendId, string $idempotencyKey, string $responseHash, string $owner, array $canonicalResponse): bool
     {
         $payload = (string) json_encode($canonicalResponse, JSON_THROW_ON_ERROR);
-        $result = RedisEval::eval($this->redis, self::FINALIZE_LUA, $this->key($backendId, $idempotencyKey), [$owner, $responseHash, $payload, max(1, $this->retentionTtl($idempotencyKey))]);
+        $result = $this->lua->executeSecurityFinal(self::FINALIZE_LUA, $this->key($backendId, $idempotencyKey), [$owner, $responseHash, $payload, max(1, $this->retentionTtl($idempotencyKey))]);
         $finalized = (int) $result === 1;
         // The verified-WAIT durability barrier applies to the successful
         // finalize only: the completed state must survive a promotion.
@@ -233,7 +244,7 @@ LUA;
 
     public function renew(string $backendId, string $idempotencyKey, string $owner): bool
     {
-        $result = RedisEval::eval($this->redis, self::RENEW_LUA, $this->key($backendId, $idempotencyKey), [$owner, $this->leaseSeconds, max(1, $this->retentionTtl($idempotencyKey))]);
+        $result = $this->lua->executeMutation(self::RENEW_LUA, $this->key($backendId, $idempotencyKey), [$owner, $this->leaseSeconds, max(1, $this->retentionTtl($idempotencyKey))]);
         $renewed = (string) $result === '1';
         // A lost renewal write after a promotion would resurrect an older
         // (expired) lease state; the barrier applies to the successful

@@ -20,11 +20,15 @@ use PHPUnit\Framework\TestCase;
  * The server-measured solve duration exposed on valid outcomes, see
  * {@see \KiwiCaptcha\VerifyOutcome::solveDurationMs()}: computed from
  * the record's issued_at_ns and the verification receipt clock only,
- * never the client-reported token duration. The exact
- * skew-tolerance semantics of the minimum-duration floor apply: a
- * receipt preceding issuance within the 5s tolerance is unmeasurable
- * (null), and beyond it the record is TooFast, never a valid outcome
- * at all. Null on every non-valid outcome; purely additive.
+ * never the client-reported token duration — and only for a fresh
+ * derivation. An identity-proven replay of a stored success reports
+ * null: the retry's receipt is not the solve's endpoint, so the span
+ * must not be re-computed for the replay (the shared PHP/Rust spec).
+ * The exact skew-tolerance semantics of the minimum-duration floor
+ * apply: a receipt preceding issuance within the 5s tolerance is
+ * unmeasurable (null), and beyond it the record is TooFast, never a
+ * valid outcome at all. Null on every non-valid outcome; purely
+ * additive.
  */
 final class VerifyOutcomeSolveDurationTest extends TestCase
 {
@@ -147,7 +151,7 @@ final class VerifyOutcomeSolveDurationTest extends TestCase
         self::assertNull($outcome->solveDurationMs(), 'a receipt preceding issuance within the skew tolerance is unmeasurable');
     }
 
-    public function testReplayOfAStoredSuccessCarriesTheDurationToo(): void
+    public function testReplayOfAStoredSuccessReportsNoDuration(): void
     {
         if (!\class_exists(\Predis\Client::class)) {
             self::markTestSkipped('predis/predis is not installed');
@@ -158,6 +162,11 @@ final class VerifyOutcomeSolveDurationTest extends TestCase
         $storage->consumeWithOperationIdentity($record->nonce, $identity);
         self::assertTrue($storage->commitResult($record->nonce, true, null));
 
+        // The retry arrives 30s after issuance: a re-computed span would
+        // report 30000ms, but the solve happened long before this receipt —
+        // the retry's receipt is NOT the solve's endpoint, so the stored
+        // success reports null (the audit-sanctioned spec: no confidently
+        // incorrect value on a stored-result replay).
         $outcome = $this->verifier($storage)->verify(
             $token,
             Vectors::SECRET,
@@ -169,7 +178,34 @@ final class VerifyOutcomeSolveDurationTest extends TestCase
 
         self::assertTrue($outcome->isOk(), sprintf('the identity-proven replay resolves the stored success, got %s', $outcome->code()));
         self::assertTrue($outcome->fromStoredResult, 'the replay comes from the stored result');
-        self::assertSame(30_000, $outcome->solveDurationMs(), 'the replay-of-valid path carries the server-measured span to its own receipt');
+        self::assertNull($outcome->solveDurationMs(), 'a stored-result replay must NOT report the retry\'s elapsed time as the solve duration');
+    }
+
+    public function testFreshResultlessResumeDerivationCarriesTheDuration(): void
+    {
+        if (!\class_exists(\Predis\Client::class)) {
+            self::markTestSkipped('predis/predis is not installed');
+        }
+        // The resume path's fresh derivation is a genuine solve endpoint:
+        // consume the record with the identity, commit NO result, then
+        // resume — the resultless derivation carries the measured span to
+        // its own receipt.
+        $client = new FakePredisClient();
+        [$storage, $record, $token] = $this->issueAndSolve($client, 'dur-resume-');
+        $identity = 'op-'.hash('sha256', 'solve-duration-resume');
+        $storage->consumeWithOperationIdentity($record->nonce, $identity);
+
+        $outcome = (new Verifier($storage, now: static fn (): int => self::ISSUED_AT))->resumeConsumedOperation(
+            $token,
+            Vectors::SECRET,
+            $identity,
+            'login',
+            self::CLIENT_IP,
+        );
+
+        self::assertTrue($outcome->isOk(), sprintf('the resultless resume must derive fresh, got %s', $outcome->code()));
+        self::assertFalse($outcome->fromStoredResult, 'the resumed derivation is fresh, not a stored replay');
+        self::assertNotNull($outcome->solveDurationMs(), 'the fresh resultless-resume derivation carries the server-measured span');
     }
 
     public function testNonValidOutcomesNeverCarryADuration(): void
