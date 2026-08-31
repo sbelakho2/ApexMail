@@ -32,6 +32,16 @@ final class ConfigTest extends TestCase
         self::assertSame(PoWAlgorithm::Sha256, $config->algorithm);
     }
 
+    public function testTargetBitsDefaultsTo18(): void
+    {
+        // The converged SHA-256 default: 18 is the ordinary baseline
+        // across the core, the Symfony bundle and the documented
+        // examples; 20 stays the elevated rung via adaptive risk
+        // escalation, never the default.
+        $config = new Config(secretKey: Vectors::SECRET);
+        self::assertSame(18, $config->targetBits);
+    }
+
     public function testArgon2WithT1Throws(): void
     {
         $this->expectException(\InvalidArgumentException::class);

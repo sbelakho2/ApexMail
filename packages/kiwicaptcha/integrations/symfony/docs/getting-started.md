@@ -242,9 +242,11 @@ At runtime the driver refuses cross-origin challenge endpoints.
 
 Worker directive per asset mode:
 
-- `files` (default): the worker is a same-origin Worker constructed from
-  the versioned `worker.<hash>.js` asset the driver fetched and
-  SRI-verified. `worker-src 'self'` is required; `blob:` is never
+- `files` (default): the worker is a same-origin Worker constructed
+  after the driver cryptographically preflights the fetched
+  `worker.<hash>.js` asset: the bytes are hashed and compared against
+  the page-issued digest, then the content-addressed URL is loaded by
+  the browser APIs. `worker-src 'self'` is required; `blob:` is never
   allowed. The stylesheet link, the driver script and the lazy runtime
   and worker fetches are covered by `style-src 'self'`,
   `script-src 'self'` and `connect-src 'self'`.

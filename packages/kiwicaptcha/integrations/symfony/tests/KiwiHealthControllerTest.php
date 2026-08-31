@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace BelConsulting\KiwiCaptchaBundle\Tests;
 
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use PHPUnit\Framework\TestCase;
 
@@ -17,7 +18,12 @@ use PHPUnit\Framework\TestCase;
  * min_protocol_version <= 3 (this binary's max protocol: the
  * decoy-capable v3 canonical) and min_policy_epoch <= the configured
  * risk.policy_version. An absent key leaves the binary's own
- * configuration authoritative.
+ * configuration authoritative. Under ha_authority pinned_primary the
+ * readiness additionally forces a fresh authority-guard check per
+ * wired authority (never the ordinary verification window) and
+ * answers 503 with ha_authority_uninitialized / ha_authority_changed /
+ * ha_authority_unreachable when the pin is uninitialized or the
+ * authority changed.
  */
 final class KiwiHealthControllerTest extends TestCase
 {
@@ -26,6 +32,32 @@ final class KiwiHealthControllerTest extends TestCase
     private function controller(FakePredisClient $client, int $policyVersion = 1, ?callable $nowMs = null): KiwiHealthController
     {
         return new KiwiHealthController(self::SECRET, $client, 'health-test', $policyVersion, $nowMs);
+    }
+
+    /**
+     * The pinned-authority controller: the guard is wired like the
+     * extension wires it under ha_authority pinned_primary (the guard
+     * binds the raw client, the readiness leg checks it fresh).
+     */
+    private function pinnedController(FakePredisClient $client, PinnedPrimaryAuthorityGuard $guard, ?\Predis\Client $riskRedis = null): KiwiHealthController
+    {
+        return new KiwiHealthController(
+            self::SECRET,
+            $client,
+            'health-test',
+            1,
+            null,
+            0,
+            null,
+            16384,
+            ['storage' => $guard],
+            $riskRedis,
+        );
+    }
+
+    private function guard(FakePredisClient $client, int $reverifySecs = 60): PinnedPrimaryAuthorityGuard
+    {
+        return new PinnedPrimaryAuthorityGuard($client, 'health-test', $reverifySecs, 'storage');
     }
 
     private function requirePredis(): FakePredisClient
@@ -257,5 +289,125 @@ final class KiwiHealthControllerTest extends TestCase
         self::assertSame(200, $exact->ready()->getStatusCode(), 'exactly the required memory is ready');
         $oneBelow = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 1, 319);
         self::assertSame(503, $oneBelow->ready()->getStatusCode(), 'one MiB below the requirement is not ready');
+    }
+
+    // ── the pinned-primary authority-eligibility leg ────────────────────
+
+    public function testReadyRefusesAnUninitializedPinnedAuthority(): void
+    {
+        // Before kiwicaptcha:ha-initialize (and without
+        // ha_authority_expected) the pin is uninitialized: the pod must
+        // not be ready, or the LB routes traffic to an instance that
+        // refuses every security-critical transition.
+        $client = $this->requirePredis();
+        $controller = $this->pinnedController($client, $this->guard($client));
+
+        $response = $controller->ready();
+        self::assertSame(503, $response->getStatusCode(), 'a pod whose authority pin is uninitialized must not be ready');
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame('ha_authority_uninitialized', $body['reason'], 'the machine-readable reason names the uninitialized authority');
+        self::assertSame('storage', $body['authority'], 'the failing authority label is reported');
+    }
+
+    public function testReadyPassesAnInitializedPinnedAuthority(): void
+    {
+        $client = $this->requirePredis();
+        $guard = $this->guard($client);
+        $guard->initializePin();
+        $controller = $this->pinnedController($client, $guard);
+
+        self::assertSame(200, $controller->ready()->getStatusCode(), 'an initialized, stable pinned authority is ready');
+    }
+
+    public function testReadyRefusesAChangedAuthority(): void
+    {
+        // The authority restarts (a new run_id on the same endpoint):
+        // the pod must leave the pool immediately, even though the
+        // ordinary guard check would still be cached.
+        $client = $this->requirePredis();
+        $guard = $this->guard($client);
+        $guard->initializePin();
+        $controller = $this->pinnedController($client, $guard);
+        self::assertSame(200, $controller->ready()->getStatusCode(), 'ready while the authority is stable');
+
+        $client->infoReplication['run_id'] = str_repeat('b', 40);
+        $client->infoServer['run_id'] = str_repeat('b', 40);
+
+        $response = $controller->ready();
+        self::assertSame(503, $response->getStatusCode(), 'a changed authority must fail readiness immediately');
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame('ha_authority_changed', $body['reason'], 'the machine-readable reason names the changed authority');
+        self::assertSame('storage', $body['authority']);
+    }
+
+    public function testReadyRecoversAfterAnAuthorizedReinitialize(): void
+    {
+        // The documented recovery: quiesce, then re-initialize with
+        // --force after the deliberate authority change. The pod is
+        // ready again once the guard is re-pinned to the new identity.
+        $client = $this->requirePredis();
+        $guard = $this->guard($client);
+        $guard->initializePin();
+        $controller = $this->pinnedController($client, $guard);
+
+        $client->infoReplication['run_id'] = str_repeat('b', 40);
+        $client->infoServer['run_id'] = str_repeat('b', 40);
+        self::assertSame(503, $controller->ready()->getStatusCode(), 'the changed authority is not ready');
+
+        $guard->initializePin(true);
+        self::assertSame(200, $controller->ready()->getStatusCode(), 'the authorized re-initialize restores readiness');
+    }
+
+    public function testReadyForcesAFreshGuardCheckNeverTheOrdinaryWindow(): void
+    {
+        // M2: the readiness leg must never serve on the guard's 5 s
+        // ordinary verification cache: every probe re-verifies the
+        // authority (the security-final lane), so a change is observed
+        // immediately, not after the window.
+        $client = $this->requirePredis();
+        $guard = $this->guard($client, reverifySecs: 60);
+        $guard->initializePin();
+        $controller = $this->pinnedController($client, $guard);
+
+        $infosBefore = \count(array_filter($client->calls, static fn (array $call): bool => $call[0] === 'INFO'));
+        self::assertSame(200, $controller->ready()->getStatusCode());
+        $infosAfterFirst = \count(array_filter($client->calls, static fn (array $call): bool => $call[0] === 'INFO'));
+
+        self::assertSame(200, $controller->ready()->getStatusCode());
+        $infosAfterSecond = \count(array_filter($client->calls, static fn (array $call): bool => $call[0] === 'INFO'));
+        self::assertGreaterThan($infosBefore, $infosAfterFirst, 'the first probe verifies the authority');
+        self::assertGreaterThan(
+            $infosAfterFirst,
+            $infosAfterSecond,
+            'every readiness probe re-verifies the authority: never the ordinary 5 s verification window',
+        );
+    }
+
+    public function testReadyPassesSilentlyWhenNoAuthorityGuardIsWired(): void
+    {
+        // ha_authority none (the default): the leg passes silently and
+        // the existing readiness legs decide.
+        $client = $this->requirePredis();
+        $this->setPolicy($client, 4, 1);
+        $controller = $this->controller($client);
+        $response = $controller->ready();
+        self::assertSame(503, $response->getStatusCode(), 'the other legs still decide');
+        self::assertStringContainsString('min_protocol_version', (string) $response->getContent(), 'the failing leg is the central policy, not the authority leg');
+    }
+
+    public function testReadyRefusesAnUnreachablePinnedAuthority(): void
+    {
+        // The authority cannot be verified at all (the info read
+        // fails): fail closed with the unreachable reason.
+        $client = $this->requirePredis();
+        $guard = $this->guard($client);
+        $guard->initializePin();
+        $controller = $this->pinnedController($client, $guard);
+
+        $client->failCommand = 'INFO';
+        $response = $controller->ready();
+        self::assertSame(503, $response->getStatusCode(), 'an unverifiable pinned authority must not be ready');
+        $body = json_decode((string) $response->getContent(), true);
+        self::assertSame('ha_authority_unreachable', $body['reason']);
     }
 }

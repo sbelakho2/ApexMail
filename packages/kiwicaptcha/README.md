@@ -89,7 +89,7 @@ let config = ChallengeConfig {
     m_kib: 0,                // Argon2id memory (KiB); ignored for SHA-256
     t: 1,                    // time cost; irrelevant for SHA-256
     p: 1,                    // parallelism; irrelevant for SHA-256
-    target_bits: 16,         // SHA-256 difficulty (leading zero bits)
+    target_bits: 18,         // SHA-256 difficulty (leading zero bits; 18 = ordinary default, 20 = elevated rung)
     argon2_target_bits: 8,   // ignored for SHA-256
     ttl_secs: 120,
     min_duration_ms: None,   // None => derived from the difficulty

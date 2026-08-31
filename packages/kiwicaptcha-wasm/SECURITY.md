@@ -49,8 +49,8 @@ Notes:
   An SRI-protected cross-origin script without `crossorigin` will be blocked.
 - Re-run the tool after every rebuild and update the tags.
   A hash mismatch means the bytes on the wire are not the bytes you pinned.
-- **Workers cannot use `integrity=`:** `new Worker(url)` has no SRI parameter, so the worker source must be protected differently.
-  - files mode: the driver fetches the versioned `worker.<hash>.js` asset itself and verifies the page-issued SRI digest against the fetched bytes. Only then does it construct a same-origin Worker from the content-addressed URL. The constructor serves exactly the verified bytes (immutable cache, hash in the URL), so unverified worker code never runs. A worker URL without the SRI digest keeps the legacy direct-construction path.
+- **Workers cannot use `integrity=`:** `new Worker(url)` has no SRI parameter, so the worker and the runtime the browser APIs load must be protected differently.
+  - files mode: the driver fetches the versioned `worker.<hash>.js` asset itself, hashes the fetched bytes, and compares them against the page-issued digest (a cryptographic preflight in the SRI digest format). Only then does it hand the content-addressed same-origin URL to the browser APIs: the `Worker` constructor loads the worker asset, and the worker's `importScripts` loads the runtime. The browser loads the preflight-verified bytes because the URLs are content-addressed and immutable (an unknown hash is a 404); this is preflight verification of the fetched bytes, not literal executed-byte SRI. A worker URL without the digest keeps the legacy direct-construction path.
   - the bundled driver's inline tier builds a Blob worker from the glue's embedded worker source (local code, no network fetch at all).
   - The worker's own protocol-id handshake (`ready`/`done` messages, plus the wasm glue's exported `solver_protocol_version()` verified before `ready`) makes the driver refuse a stale/mismatched worker.
     A cached old worker can never contribute a solution.

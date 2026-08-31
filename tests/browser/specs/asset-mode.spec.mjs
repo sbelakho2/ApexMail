@@ -4,14 +4,17 @@ import { createHash } from 'node:crypto';
 // The files-mode asset delivery tier (kiwi_captcha.asset_mode "files"):
 // versioned immutable first-party asset URLs with exact content hashes,
 // long cache lifetimes, SRI, once-per-page dedup, and the lazy heavy
-// modules — the driver fetches the WASM runtime AND the Argon worker asset
+// modules: the driver fetches the WASM runtime AND the Argon worker asset
 // only when a memory-hard challenge arrives, so a plain SHA-256 page pays
-// nothing for the Argon machinery. The worker runs as a same-origin Worker
-// constructed from the fetched + SRI-verified worker.<hash>.js source (no
-// Blob, no blob: CSP), and the integrity verification fails closed when
-// the page cannot compute the digest. The inline compatibility tier keeps
-// its zero-request Blob-worker behavior; this spec pins both modes
-// explicitly.
+// nothing for the Argon machinery.
+// The worker runs as a same-origin Worker whose source the driver
+// cryptographically preflights: the fetched bytes are hashed and
+// compared against the page-issued digest, then the content-addressed
+// URL is loaded by the Worker constructor (no Blob, no blob: CSP).
+// The integrity verification fails closed when the page cannot
+// compute the digest.
+// The inline compatibility tier keeps its zero-request Blob-worker
+// behavior; this spec pins both modes explicitly.
 test.describe('KiwiCaptcha files-mode asset delivery', () => {
   // Collects the asset request URLs into a live array; the assertions
   // filter it at check time (a snapshot at collection time would be
@@ -190,7 +193,8 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     // against the worker's own URL — in files mode that is a NON-versioned
     // URL next to worker.<hash>.js, a 404 probe against the versioned
     // asset route (and, on an app serving a stale unversioned file, a
-    // runtime that could initialize before the SRI-verified one arrives).
+    // runtime that could initialize before the driver-preflight-verified
+    // one arrives).
     // The worker must boot with no runtime and the driver must direct it:
     // every request the page makes for the assets must be a versioned
     // content-addressed URL — zero requests to any non-versioned asset
@@ -215,8 +219,10 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
   });
 
   test('the worker runs as a same-origin Worker constructed from the fetched asset (no Blob URL, no blob: worker)', async ({ page }) => {
-    // The files-mode worker asset is fetched + SRI-verified by the driver
-    // and then constructed via new Worker(workerUrl): a same-origin
+    // The files-mode worker asset is fetched and cryptographically
+    // preflight-verified by the driver (the bytes are hashed and compared
+    // against the page-issued digest), and the content-addressed URL is
+    // then loaded by new Worker(workerUrl): a same-origin
     // Worker. No URL.createObjectURL is ever called for the files-mode
     // worker, so worker-src 'self' (never blob:) is the CSP requirement.
     await page.addInitScript(() => {
@@ -357,8 +363,8 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     expect(await page.locator('[data-kiwi-token]').inputValue()).toBe('');
   });
 
-  test('a tampered worker asset (SRI mismatch) is refused before construction', async ({ page }) => {
-    // The worker bytes served differ from the page-issued SRI digest: the
+  test('a tampered worker asset (digest mismatch) is refused before construction', async ({ page }) => {
+    // The worker bytes served differ from the page-issued digest: the
     // driver must fail closed (worker-unavailable, integrity-mismatch),
     // never construct a Worker from unverified bytes.
     await page.route('**/assets/worker*.js', async (route) => {
@@ -368,6 +374,80 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     await page.goto('/?assets=files&algorithm=argon2id');
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'kiwi:worker-unavailable', { timeout: 60_000 });
     expect(await page.locator('[data-kiwi-token]').inputValue()).toBe('');
+  });
+
+  test('a cross-origin lookalike runtime URL is refused by the worker origin guard (parsed origin equality, never a prefix check)', async ({ page }) => {
+    // Serve the files-mode widget page from the http://localhost origin
+    // (route-fulfilled; the same-origin assets and the challenge are
+    // forwarded to the real fixture) with data-kiwi-runtime-src rewritten
+    // to a lookalike of that origin: http://localhost:8085/... starts with
+    // the origin string http://localhost (a prefix-based indexOf check
+    // would accept it) but parses to a different origin, and it resolves
+    // to the real fixture, which serves the real glue. The driver's lazy
+    // preflight fetch of the lookalike is fulfilled with the real glue
+    // bytes (CORS-open), so the page-issued digest verifies; the worker's
+    // own importScripts of the same URL reaches the real fixture. Only
+    // the worker's origin guard stands between the lookalike and that
+    // importScripts. The guard must refuse it: the worker never loads
+    // the foreign-origin runtime, the solve fails closed, and no token
+    // is minted. (A prefix-based check would accept the lookalike, import
+    // the real glue, and mint a token.)
+    const real = 'http://127.0.0.1:8085';
+    const lookalikeRequests = [];
+    page.on('request', (req) => {
+      const u = req.url();
+      if (u.includes('http://localhost:8085/')) lookalikeRequests.push(u);
+    });
+    await page.route('**', async (route) => {
+      if (route.request().resourceType() !== 'document') {
+        await route.continue();
+        return;
+      }
+      const res = await page.request.get(real + '/?assets=files&algorithm=argon2id');
+      let html = await res.text();
+      const m = html.match(/data-kiwi-runtime-src="([^"]+)"/);
+      if (m) {
+        // The fixture emits a relative runtime URL; rewrite it into the
+        // absolute lookalike of the http://localhost page origin.
+        html = html.replace(
+          `data-kiwi-runtime-src="${m[1]}"`,
+          `data-kiwi-runtime-src="http://localhost:8085${m[1]}"`,
+        );
+      }
+      await route.fulfill({ response: res, body: html });
+    });
+    await page.route(/\/kiwi-captcha\/assets\/runtime/, async (route) => {
+      // The driver's preflight fetch of the lookalike: real glue bytes,
+      // CORS-open so the cross-origin read succeeds. The worker's
+      // importScripts of the same URL bypasses the page routes and is
+      // served the same bytes by the real fixture.
+      const res = await route.fetch();
+      const body = await res.body();
+      await route.fulfill({
+        response: res,
+        headers: { 'access-control-allow-origin': '*' },
+        body,
+      });
+    });
+    await page.route(/\/kiwi-captcha\/assets\//, async (route) => {
+      const res = await page.request.get(real + new URL(route.request().url()).pathname);
+      await route.fulfill({ response: res });
+    });
+    await page.route(/\/challenge/, async (route) => {
+      // The challenge POST must reach the real fixture (it persists the
+      // issued record its verify endpoint checks later).
+      const req = route.request();
+      const body = req.postData() ? JSON.parse(req.postData()) : undefined;
+      const res = await page.request.post(real + new URL(req.url()).pathname, {
+        headers: { 'Content-Type': 'application/json' },
+        data: body,
+      });
+      await route.fulfill({ response: res });
+    });
+    await page.goto('http://localhost/?assets=files&algorithm=argon2id');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'kiwi:worker-unavailable', { timeout: 60_000 });
+    expect(await page.locator('[data-kiwi-token]').inputValue(), 'the refused lookalike runtime must never mint a token').toBe('');
+    expect(lookalikeRequests.length, 'the driver preflight fetch of the lookalike must have happened').toBeGreaterThanOrEqual(1);
   });
 });
 

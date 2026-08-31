@@ -186,8 +186,10 @@ Profile rationale:
   authority-change contract mechanically enforced instead of only
   contracted. It derives `replay_durability: operator_managed` +
   `ha_authority: pinned_primary` and mirrors balanced everywhere else.
-  The pinned-primary authority guard pins the serving authority on
-  first use and refuses on any change; the doctor reports its state
+  The pinned-primary authority guard is initialized explicitly
+  (`php bin/console kiwicaptcha:ha-initialize`, or by provisioning
+  `ha_authority_expected`; production never auto-pins). It refuses on
+  any authority change. The doctor reports its state
   and fails the deploy gate when the authority moved or the guard is
   unarmed. Requires a direct single-node Predis client (a Predis
   Sentinel/Cluster aggregate or a phpredis client is refused at
@@ -251,7 +253,10 @@ How the pinned-primary guard behaves:
     scalar run_id cannot describe two authorities). When only one
     Redis is used, the storage entry covers the shared authority; an
     authority without an entry falls back to the pin key (it must be
-    initialized).
+    initialized). A shared physical authority must have exactly one
+    expected identity: if storage and risk resolve to the same Redis
+    client, supplying different identities for them is rejected at
+    configuration time (the same identity may be repeated for both).
 - The verification result is cached in-process per connection object
   for `ha_authority_reverify_secs` seconds (default 5), so the `INFO`
   probe costs one round trip per window per process per connection,
@@ -275,15 +280,26 @@ How the pinned-primary guard behaves:
 
 The doctor's "HA authority" check audits every distinct authority and
 reports the guard state: the pinned identity, the last verification
-and the posture. It passes when every guard is armed and stable, and
-the pass output states exactly what the guard enforces (per-authority
-pins, zero-stale security-final transitions, connection-generation
-cache invalidation, operator-initialized bootstrap). It fails on a
+and the posture. It passes when every guard is armed and stable. The
+pass output states exactly what the guard enforces: per-authority
+pins, zero-stale security-final transitions, the verified-WAIT
+durability session (the causal fence write and the WAIT under the
+same authority epoch as the mutation), connection-generation cache
+invalidation, and the operator-initialized bootstrap. It fails on a
 changed authority, an uninitialized deployment (naming
 `kiwicaptcha:ha-initialize`), or an unarmed guard under the posture,
 and it fails when the ha_safe profile's pinned_primary promise was
 overridden away. See docs/ha-authority.md for the full design and the
 deployment table.
+
+Readiness under the posture: `/health/ready` forces a fresh guard
+check per wired authority (the security-final lane, never the
+ordinary verification window). A pod whose pin is uninitialized or
+whose authority changed leaves the pool immediately with the
+machine-readable reason `ha_authority_uninitialized` /
+`ha_authority_changed` / `ha_authority_unreachable` (503). With
+`ha_authority: none` the leg passes silently. See the operations
+documentation for the health endpoints.
 
 ## Advanced configuration
 
@@ -298,7 +314,7 @@ and documented; a knob set explicitly always wins over the profile.
 kiwi_captcha:
     secret_key: '%env(KIWI_SECRET_KEY)%'   # required, min 16 bytes
     algorithm: sha256                       # sha256 | argon2id
-    difficulty_bits: 20                     # SHA-256 leading zero bits
+    difficulty_bits: 18                     # SHA-256 leading zero bits (18 = the ordinary default; 20 = the elevated rung, reached via adaptive risk escalation)
     argon_m_kib: 0                          # Argon2id memory (KiB); 0 = sha256 only
     argon_t: 3                              # Argon2id requires t >= 3 and p == 1
     argon_p: 1
@@ -336,8 +352,8 @@ kiwi_captcha:
 with a long immutable cache lifetime
 (`Cache-Control: public, max-age=31536000, immutable`), the exact content
 hash in the URL and the content-hash ETag. Each asset is emitted once per
-page even with several widgets, and the tags carry SRI integrity
-attributes.
+page even with several widgets; the stylesheet and driver tags carry SRI
+integrity attributes (browser-enforced SRI on the executed script).
 
 The runtime and the worker are the lazy heavy modules: the page never
 downloads them eagerly. The widget container carries
@@ -345,10 +361,13 @@ downloads them eagerly. The widget container carries
 `data-kiwi-worker-src` + `data-kiwi-worker-integrity`, and the driver
 fetches the WASM runtime and the Argon worker asset only when a
 memory-hard challenge actually arrives. A page that only ever receives
-SHA-256 challenges pays no request for the Argon machinery. The worker is
-constructed from the fetched source as a same-origin Worker (no Blob
-URL), and it loads its WASM glue from the verified runtime asset, so the
-worker download is deduplicated across widgets like the runtime.
+SHA-256 challenges pays no request for the Argon machinery. The driver
+hashes the fetched bytes and compares them against the page-issued
+digests (a cryptographic preflight). Then the content-addressed
+same-origin URLs are loaded by the browser APIs: the Worker constructor
+for the worker asset, and the worker's importScripts for its WASM glue.
+No Blob URL is created, so the worker download is deduplicated across
+widgets like the runtime.
 
 Why immutable caching: the URL contains the content hash, so the bytes
 for a URL can never change. A browser or CDN may keep the response
@@ -442,7 +461,10 @@ Validation notes:
 
 - `secret_key`: at least 16 bytes; 32 random bytes recommended.
 - `difficulty_bits`: SHA-256 difficulty, 1..=20 (the browser solver
-  ceiling); the config tree ceiling tracks the core constant.
+  ceiling); the config tree ceiling tracks the core constant. The
+  default 18 is the ordinary baseline (mean ≈ 262k hashes, p99 ≈
+  1.21M, exhaustion ≈ 5.2×10⁻⁹ within the solver cap); 20 is the
+  elevated rung, reached via adaptive risk escalation.
 - `argon_t >= 3` and `argon_p == 1`: the intentional Argon2id protocol
   profile (libsodium's raw Argon2id interface, so Rust and PHP verify
   identical hashes).

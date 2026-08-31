@@ -9,24 +9,24 @@
     },
     "budgets": {
         "widget_driver": {
-            "raw_bytes": 142140,
-            "gzip_bytes": 40395,
-            "brotli_bytes": 34119,
+            "raw_bytes": 142847,
+            "gzip_bytes": 40589,
+            "brotli_bytes": 34280,
             "raw_cap_bytes": 160000,
             "gzip_cap_bytes": 50000,
             "brotli_cap_bytes": 45000,
             "copies_identical": true,
-            "note": "The three copies (the canonical WASM asset, the core crate resources and the bundle public copy) are byte-identical at 142140 bytes; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes (an equality gate, not just the cap)."
+            "note": "The three copies (the canonical WASM asset, the core crate resources and the bundle public copy) are byte-identical at 142847 bytes; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes (an equality gate, not just the cap)."
         },
         "widget_worker": {
-            "raw_bytes": 19491,
+            "raw_bytes": 20233,
             "copies_identical": true,
-            "note": "The Argon worker asset (kiwi-worker.js), three byte-identical copies at 19491 bytes; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
+            "note": "The Argon worker asset (kiwi-worker.js), three byte-identical copies at 20233 bytes; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
         },
         "widget_runtime": {
-            "raw_bytes": 92340,
+            "raw_bytes": 93093,
             "copies_identical": true,
-            "note": "The wasm glue runtime asset (kiwicaptcha-wasm.js), three byte-identical copies at 92340 bytes; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
+            "note": "The wasm glue runtime asset (kiwicaptcha-wasm.js), three byte-identical copies at 93093 bytes; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
         },
         "widget_css": {
             "raw_bytes": 13863,

@@ -39,6 +39,24 @@ use Predis\Command\CommandInterface;
  * execute on a changed authority inside a stale window: the window
  * applies to ordinary reads and non-final writes only.
  *
+ * Durability session (the verified-WAIT barrier): the core
+ * RedisStorage brackets its causal replication fence write and the
+ * WAIT in {@see self::withDurabilitySession()}. Inside the session
+ * every intercepted command forces the zero-stale guard lane AND the
+ * connection-generation equality: the guard's cached entry must match
+ * the connection object that is about to execute the command. A
+ * reconnect to a changed authority between the security-final
+ * mutation and the WAIT is therefore observed by the barrier's own
+ * verification. The round trip forces the reconnect and reads the new
+ * authority, and the refusal happens before the fence write or the
+ * WAIT executes. The WAIT runs only on the still-pinned connection. A `WAIT`
+ * `executeRaw` outside an explicit session rides the same
+ * durability-session lane: a WAIT only exists to prove a write of
+ * this connection, so it is never served from the window. The
+ * post-dispatch connection-generation check refuses the barrier
+ * result when the connection object changed during the dispatch. The
+ * ordinary lane keeps its short cache for every other command.
+ *
  * The guard caches its verification for a short window per connection
  * object (spl_object_id), so the wrapper costs one `INFO` probe per
  * window per connection per process, not one round trip per command.
@@ -115,6 +133,15 @@ final class AuthorityGuardedPredisClient extends \Predis\Client
      */
     private array $laneStack = [];
 
+    /**
+     * The durability-session depth: a `withDurabilitySession()` call
+     * brackets the verified-WAIT barrier (the causal fence write and
+     * the WAIT) so every command inside forces the zero-stale guard
+     * lane and the connection-generation equality, never the
+     * ordinary window.
+     */
+    private int $durabilitySessionDepth = 0;
+
     public function __construct(
         private readonly AuthorityTransitionGuard $guard,
         private readonly \Predis\Client $inner,
@@ -139,8 +166,47 @@ final class AuthorityGuardedPredisClient extends \Predis\Client
         }
     }
 
+    /**
+     * Run an operation inside the durability session: the verified-WAIT
+     * barrier (the core RedisStorage's causal fence write + WAIT) must
+     * execute under the same authority epoch as the security-final
+     * mutation that preceded it. Every command the operation issues is
+     * preceded by the zero-stale guard verification AND the
+     * connection-generation equality, never the ordinary cached
+     * window. The connection is pinned (established) before the
+     * session starts, so no command of the barrier can dispatch on a
+     * lazily established connection that points elsewhere. A reconnect
+     * to a changed authority between the mutation and the WAIT is
+     * observed by the barrier's own verification and refuses before
+     * the fence write or the WAIT executes.
+     */
+    public function withDurabilitySession(callable $operation): mixed
+    {
+        $this->durabilitySessionDepth++;
+        try {
+            // Pin the connection NOW: the barrier must never dispatch
+            // on a lazily established connection that could point
+            // elsewhere (a reconnect between the mutation and the WAIT
+            // is exactly the authority change the session exists to
+            // refuse before the WAIT).
+            $this->inner->connect();
+
+            return $operation();
+        } finally {
+            $this->durabilitySessionDepth--;
+        }
+    }
+
     public function executeCommand(CommandInterface $command): mixed
     {
+        if ($this->durabilitySessionDepth > 0) {
+            // Inside the durability session every command — the fence
+            // write included — is preceded by the zero-stale
+            // verification and the connection-generation equality.
+            $this->assertDurabilitySessionSafe();
+
+            return $this->inner->executeCommand($command);
+        }
         $this->guard->assertServeEligible($this->inner, $this->isForcedSecurityFinalCommand($command));
 
         return $this->inner->executeCommand($command);
@@ -151,6 +217,11 @@ final class AuthorityGuardedPredisClient extends \Predis\Client
         if (strtoupper((string) $commandID) === 'SCRIPT') {
             $this->recordScriptLoad($arguments);
         }
+        if ($this->durabilitySessionDepth > 0) {
+            $this->assertDurabilitySessionSafe();
+
+            return $this->inner->__call($commandID, $arguments);
+        }
         $this->guard->assertServeEligible($this->inner, $this->isForcedSecurityFinalCall($commandID, $arguments));
 
         return $this->inner->__call($commandID, $arguments);
@@ -158,8 +229,19 @@ final class AuthorityGuardedPredisClient extends \Predis\Client
 
     public function executeRaw(array $arguments, &$error = null): mixed
     {
-        // The verified-WAIT executeRaw carries WAIT, never a
-        // security-final mutation, so the ordinary window lane applies.
+        if ($this->durabilitySessionDepth > 0 || $this->isWaitBarrier($arguments)) {
+            // The verified-WAIT barrier: the durability-session lane.
+            // A WAIT only exists to prove a write of this connection,
+            // so it is never served from the ordinary window — the
+            // zero-stale verification and the connection-generation
+            // equality run before the WAIT, and the post-dispatch
+            // equality check refuses the result when the connection
+            // changed during the dispatch.
+            return $this->executeRawDurabilitySession($arguments, $error);
+        }
+
+        // A non-WAIT raw command (debug, client, ...) keeps the
+        // ordinary lane and its short cache.
         $this->guard->assertServeEligible($this->inner);
 
         return $this->inner->executeRaw($arguments, $error);
@@ -167,28 +249,44 @@ final class AuthorityGuardedPredisClient extends \Predis\Client
 
     public function pipeline(...$arguments): mixed
     {
-        $this->guard->assertServeEligible($this->inner);
+        if ($this->durabilitySessionDepth > 0) {
+            $this->assertDurabilitySessionSafe();
+        } else {
+            $this->guard->assertServeEligible($this->inner);
+        }
 
         return $this->inner->pipeline(...$arguments);
     }
 
     public function transaction(...$arguments): mixed
     {
-        $this->guard->assertServeEligible($this->inner);
+        if ($this->durabilitySessionDepth > 0) {
+            $this->assertDurabilitySessionSafe();
+        } else {
+            $this->guard->assertServeEligible($this->inner);
+        }
 
         return $this->inner->transaction(...$arguments);
     }
 
     public function pubSubLoop(...$arguments): mixed
     {
-        $this->guard->assertServeEligible($this->inner);
+        if ($this->durabilitySessionDepth > 0) {
+            $this->assertDurabilitySessionSafe();
+        } else {
+            $this->guard->assertServeEligible($this->inner);
+        }
 
         return $this->inner->pubSubLoop(...$arguments);
     }
 
     public function monitor(): mixed
     {
-        $this->guard->assertServeEligible($this->inner);
+        if ($this->durabilitySessionDepth > 0) {
+            $this->assertDurabilitySessionSafe();
+        } else {
+            $this->guard->assertServeEligible($this->inner);
+        }
 
         return $this->inner->monitor();
     }
@@ -280,6 +378,107 @@ final class AuthorityGuardedPredisClient extends \Predis\Client
         $sub = $arguments[0] ?? null;
         if (\is_string($sub) && strtoupper($sub) === 'LOAD' && \is_string($arguments[1] ?? null)) {
             $this->scriptBodiesBySha[sha1($arguments[1])] = $arguments[1];
+        }
+    }
+
+    /**
+     * Whether a raw `executeRaw` argument list carries the verified-WAIT
+     * barrier (`WAIT numreplicas timeout`).
+     *
+     * @param list<mixed> $arguments
+     */
+    private function isWaitBarrier(array $arguments): bool
+    {
+        return strtoupper((string) ($arguments[0] ?? '')) === 'WAIT';
+    }
+
+    /**
+     * The durability-session pre-dispatch boundary: force the zero-stale
+     * authority verification AND the connection-generation equality.
+     *
+     * The verification bypasses the ordinary window and performs a real
+     * round trip on the current connection. A reconnect that replaced
+     * the serving node is therefore observed here: a dropped
+     * connection is re-established by the round trip, and the newly
+     * connected authority (B) is compared against the pin. A changed
+     * identity refuses before any barrier command executes. The
+     * equality check then binds the verification to the connection
+     * object that is about to execute the barrier. The guard's cached
+     * entry must match the current connection, and a verification that
+     * could not be bound to an inspectable connection object is
+     * refused too: the WAIT must run on the connection the check
+     * verified.
+     *
+     * @return int the verified connection object id (spl_object_id)
+     */
+    private function assertDurabilitySessionSafe(): int
+    {
+        $this->guard->assertServeEligible($this->inner, true);
+        $verified = $this->guard->lastVerifiedConnectionId();
+        $current = $this->connectionIdOf($this->inner);
+        if ($verified === null || $current === null || $verified !== $current) {
+            throw new PinnedAuthorityRefusalException(
+                sprintf(
+                    'pinned_primary durability barrier REFUSED: the connection the authority check just verified (%s) does not match the connection that would execute the barrier (%s) — the WAIT must run on the still-pinned authority connection, never on a reconnected one, and a verification that cannot be bound to a connection object proves nothing. The barrier is refused before execution (see docs/ha-authority.md).',
+                    $verified === null ? 'none (not bound to a connection object)' : (string) $verified,
+                    $current === null ? 'none (uninspectable)' : (string) $current,
+                ),
+                $this->guard->lastVerifiedIdentity(),
+            );
+        }
+
+        return $verified;
+    }
+
+    /**
+     * Execute a raw command under the durability-session boundary: the
+     * zero-stale verification + connection-generation equality before
+     * the dispatch, and the post-dispatch equality check after it.
+     * The post-dispatch check refuses the barrier result when the
+     * connection object changed during the dispatch (a reconnect in
+     * the WAIT itself would prove nothing about the original write);
+     * a failed dispatch propagates raw, never masked.
+     *
+     * @param list<mixed> $arguments
+     */
+    private function executeRawDurabilitySession(array $arguments, &$error = null): mixed
+    {
+        $verifiedId = $this->assertDurabilitySessionSafe();
+        try {
+            $result = $this->inner->executeRaw($arguments, $error);
+        } catch (\Throwable $e) {
+            // A failed barrier already fails closed: the post-dispatch
+            // check would only mask the real failure.
+            throw $e;
+        }
+        $current = $this->connectionIdOf($this->inner);
+        if ($current === null || $current !== $verifiedId) {
+            throw new PinnedAuthorityRefusalException(
+                sprintf(
+                    'pinned_primary durability barrier REFUSED: the connection object that executed the barrier (%s) is not the connection the authority check verified (%s) — a reconnect during the barrier dispatch can move the WAIT to a different authority, whose acknowledgement proves nothing about the original write. The barrier result is refused (see docs/ha-authority.md).',
+                    $current === null ? 'uninspectable' : (string) $current,
+                    (string) $verifiedId,
+                ),
+                $this->guard->lastVerifiedIdentity(),
+            );
+        }
+
+        return $result;
+    }
+
+    /**
+     * The spl_object_id of the client's current connection object, or
+     * null when no connection object is inspectable. Mirrors the
+     * guard's own connection-generation key.
+     */
+    private function connectionIdOf(\Predis\Client $client): ?int
+    {
+        try {
+            $connection = $client->getConnection();
+
+            return $connection === null ? null : spl_object_id($connection);
+        } catch (\Throwable) {
+            return null;
         }
     }
 

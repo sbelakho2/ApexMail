@@ -34,14 +34,16 @@ final class Config
      * at 20 bits (5,000,000 hashes), so higher difficulties would be
      * unsolvable for legit clients and are rejected at construction.
      *
-     * The ceiling is not the baseline: at 20 a legitimate solve still
-     * fails within the 5,000,000-hash cap with probability ≈ 0.8494%
-     * (about 1 in 118). This core therefore keeps 20 as its library
-     * default, the strongest browser-solvable rung. The Symfony bundle,
-     * the user-facing default, issues 18 as the ordinary baseline
-     * (mean ≈ 262k hashes, p99 ≈ 1.21M, exhaustion within the cap
-     * ≈ 5.2×10⁻⁹), with 20 as the elevated rung reached via adaptive
-     * risk escalation.
+     * The ceiling is not the baseline: 18 is the ordinary default,
+     * converged across the core, the Symfony bundle and the documented
+     * examples. The 16-vs-18 choice is benchmark-driven: the
+     * client-performance lab measures the SHA 16/18/20 ladder, and 18
+     * is the benchmark-selected ordinary baseline (mean ≈ 262k hashes,
+     * p99 ≈ 1.21M, exhaustion within the 5,000,000-hash cap
+     * ≈ 5.2×10⁻⁹). SHA20 stays the elevated rung, reached via adaptive
+     * risk escalation: at 20 a legitimate solve still fails within the
+     * 5,000,000-hash cap with probability ≈ 0.8494% (about 1 in 118),
+     * so 20 is never the default.
      */
     public const MAX_SHA_TARGET_BITS = 20;
 
@@ -123,7 +125,7 @@ final class Config
         public readonly int $mKib = 0,
         public readonly int $t = 3,
         public readonly int $p = 1,
-        public readonly int $targetBits = 20,
+        public readonly int $targetBits = 18,
         public readonly int $argon2TargetBits = 8,
         public readonly int $ttlSecs = 120,
         public readonly ?int $minDurationMs = null,

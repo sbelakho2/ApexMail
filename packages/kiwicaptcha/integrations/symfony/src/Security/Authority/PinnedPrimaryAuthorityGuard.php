@@ -248,6 +248,33 @@ final class PinnedPrimaryAuthorityGuard implements AuthorityTransitionGuard
     }
 
     /**
+     * The connection object generation (spl_object_id) the last
+     * successful verification was bound to, or null when no
+     * verification was ever cached for a connection (never verified,
+     * or a client whose connection object cannot be inspected). The
+     * durability-session boundary of the verified-WAIT barrier
+     * compares this against the connection that is about to execute
+     * the barrier, so the WAIT can never run on a connection the
+     * guard did not just verify.
+     */
+    public function lastVerifiedConnectionId(): ?int
+    {
+        return $this->verifiedConnections === [] ? null : array_key_first($this->verifiedConnections);
+    }
+
+    /**
+     * The identity ("role|run_id") of the last successful
+     * verification, or null when the guard never verified an
+     * identity. The durability-session refusals name it, so the
+     * operator sees which identity the guard was bound to when the
+     * barrier was refused.
+     */
+    public function lastVerifiedIdentity(): ?string
+    {
+        return $this->lastVerifiedIdentity;
+    }
+
+    /**
      * The guard's observable state for the doctor: armed (an identity
      * is established and was verified), the pinned identity (the
      * expected identity when configured, else the pin key value), the

@@ -186,6 +186,13 @@ Under `ha_authority: pinned_primary` (derived by the `ha_safe` protection profil
     Set a finite cap for a meaningful check.
     The calculation is protective because the live-hash bound is the deployment's declared SLO: the lease/runtime invariant (see "Argon2id verification concurrency cap") makes the configured concurrency the planning case.
     Under a compliant hash the worst case is the configured concurrency, never more.
+  - the pinned-primary authority is eligible (only under `ha_authority: pinned_primary` / the `ha_safe` profile):
+    every wired authority guard (storage, and a distinct risk authority) passes a fresh check — the security-final lane, never the ordinary verification window.
+    A pod whose pin is uninitialized or whose authority changed (a restarted primary with a new run_id, a re-pointed endpoint) exits readiness immediately (503) with the machine-readable reason `ha_authority_uninitialized` / `ha_authority_changed` / `ha_authority_unreachable`.
+    The failing authority label rides along (`"authority": "storage"` / `"risk"`).
+    The load balancer must therefore never route to an instance that refuses every security-critical transition.
+    When `ha_authority` is none the leg is inert.
+    See docs/ha-authority.md "The readiness contract".
 
 Argon queue fullness and transient timeouts never fail readiness.
 All responses carry `Cache-Control: no-store` + `Pragma: no-cache`.

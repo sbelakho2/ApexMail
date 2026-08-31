@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace BelConsulting\KiwiCaptchaBundle\Controller;
 
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedAuthorityRefusalException;
+use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
 use KiwiCaptcha\ChallengeProfile;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Response;
@@ -46,6 +48,18 @@ use Symfony\Component\HttpFoundation\Response;
  *         = unlimited) the check is skipped: the invariant is only
  *         meaningful with a finite cap, and an unlimited cap needs an
  *         explicit budget decision.
+ *      5. the pinned-primary authority is eligible (only under
+ *         `ha_authority: pinned_primary` / the `ha_safe` profile): every
+ *         wired authority guard passes a fresh check. The guard's
+ *         ordinary verification window is deliberately bypassed. A pod
+ *         whose pin is uninitialized or whose authority changed (a
+ *         restarted primary with a new run_id, a re-pointed endpoint) is
+ *         taken out of the pool immediately, never inside a stale
+ *         window. A failing authority returns 503 with the
+ *         machine-readable reason ha_authority_uninitialized /
+ *         ha_authority_changed / ha_authority_unreachable. When
+ *         ha_authority is none (no guards wired) the leg passes
+ *         silently.
  *
  * The route paths follow the configured route_prefix (default
  * /kiwi-captcha/health/live + /health/ready) and are registered by
@@ -115,6 +129,25 @@ final class KiwiHealthController
      *                                                   per-verification
      *                                                   memory of the risk
      *                                                   ladder.
+     * @param array<string, PinnedPrimaryAuthorityGuard> $authorityGuards
+     *                                                   the wired pinned-
+     *                                                   primary authority
+     *                                                   guards keyed by
+     *                                                   authority label
+     *                                                   ("storage", "risk"),
+     *                                                   empty when
+     *                                                   ha_authority is not
+     *                                                   pinned_primary (the
+     *                                                   leg then passes
+     *                                                   silently).
+     * @param \Predis\Client|null        $riskRedis      the distinct risk
+     *                                                   Redis client (the
+     *                                                   client the risk
+     *                                                   authority guard
+     *                                                   verifies), null
+     *                                                   when absent or when
+     *                                                   the risk client IS
+     *                                                   the storage client.
      */
     public function __construct(
         private readonly string $secretKey,
@@ -125,6 +158,8 @@ final class KiwiHealthController
         private readonly int $argonConcurrency = 0,
         private readonly ?int $containerMemoryMib = null,
         private readonly int $argonEnvelopeMemoryKib = 16384,
+        private readonly array $authorityGuards = [],
+        private readonly \Predis\Client|null $riskRedis = null,
     ) {
     }
 
@@ -156,8 +191,72 @@ final class KiwiHealthController
         if (!$this->memoryBudgetOk()) {
             return $this->json(['status' => 'not_ready', 'reason' => 'memory_budget_invariant'], Response::HTTP_SERVICE_UNAVAILABLE);
         }
+        [$authorityOk, $authorityReason, $authorityLabel] = $this->authorityEligible();
+        if (!$authorityOk) {
+            $data = ['status' => 'not_ready', 'reason' => $authorityReason];
+            if ($authorityLabel !== null) {
+                $data['authority'] = $authorityLabel;
+            }
+
+            return $this->json($data, Response::HTTP_SERVICE_UNAVAILABLE);
+        }
 
         return $this->json(['status' => 'ready']);
+    }
+
+    /**
+     * The pinned-primary authority-eligibility leg: under
+     * `ha_authority: pinned_primary` (and the `ha_safe` profile) the pod
+     * is ready only when every wired authority guard passes a fresh
+     * check. The check calls {@see PinnedPrimaryAuthorityGuard::
+     * assertServeEligible()} with the security-final lane, which bypasses
+     * the guard's ordinary verification window. A readiness probe must
+     * never serve on a cached verification from before an authority
+     * change. A load balancer would otherwise route traffic to an
+     * instance that is no longer security-eligible. When ha_authority is
+     * none (no guards wired) the leg passes silently.
+     *
+     * @return array{0: bool, 1: string, 2: ?string} [ok, machine-readable
+     *         reason, the authority label that failed (null when none)]
+     */
+    private function authorityEligible(): array
+    {
+        foreach ($this->authorityGuards as $label => $guard) {
+            if (!$guard instanceof PinnedPrimaryAuthorityGuard) {
+                continue;
+            }
+            $client = $label === 'risk' ? $this->riskRedis : $this->redis;
+            if ($client === null) {
+                return [false, 'ha_authority_unreachable', $label];
+            }
+            try {
+                // securityFinal = true: the fresh check bypasses the
+                // verification window, exactly like a security-final
+                // transition would.
+                $guard->assertServeEligible($client, true);
+            } catch (PinnedAuthorityRefusalException $e) {
+                if ($e->pinnedIdentity() === null) {
+                    // No pin and no ha_authority_expected identity: the
+                    // deployment never bootstrapped the authority.
+                    return [false, 'ha_authority_uninitialized', $label];
+                }
+                if ($e->observedIdentity() === null) {
+                    // The serving identity could not be read at all (the
+                    // info probe failed): unverifiable means stale, never
+                    // a pass.
+                    return [false, 'ha_authority_unreachable', $label];
+                }
+
+                // The pinned/expected identity and the serving identity
+                // differ: a promotion, a restarted primary, a re-point.
+                return [false, 'ha_authority_changed', $label];
+            } catch (\Throwable) {
+                // The check could not run at all: fail closed, never pass.
+                return [false, 'ha_authority_unreachable', $label];
+            }
+        }
+
+        return [true, 'ha_authority_ok', null];
     }
 
     /**

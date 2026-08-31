@@ -30,6 +30,12 @@ use PHPUnit\Framework\TestCase;
  * - an initial migration with pre-existing state refuses until the
  *   operator runs the explicit bootstrap.
  * - a lost pin is refused and never re-pinned.
+ * - the verified-WAIT durability session (M1): a restart of the
+ *   authority between the security-final mutation and the WAIT
+ *   barrier refuses the barrier before the fence write or the WAIT
+ *   executes. The WAIT never runs on the changed authority and the
+ *   stored state stays unchanged. Without the restart the barrier
+ *   succeeds with the acked causal fence.
  *
  * The suite boots its own redis-server instances, never the shared CI
  * Redis service, following the promotion suite's convention: gated on
@@ -180,6 +186,87 @@ final class HaAuthorityAdversarialRealRedisTest extends TestCase
             '--save', '',
         ], $name, $port);
         $this->waitForPong($port, 10);
+    }
+
+    /**
+     * Boot a redis-server in its OWN scratch directory (the master +
+     * replica topology of the WAIT-boundary suite must not share one
+     * append-only file) with append-only persistence, flushed before
+     * use. A replica (extraArgs containing `--replicaof`) is
+     * read-only and cannot be flushed; pass $flush false for it.
+     *
+     * @param list<string> $extraArgs
+     */
+    private function bootRedisIsolated(int $port, string $name, string $dir, array $extraArgs = [], bool $flush = true): void
+    {
+        $args = array_merge([
+            '--port', (string) $port,
+            '--dir', $dir,
+            '--appendonly', 'yes',
+            '--save', '',
+            '--appendfsync', 'always',
+        ], $extraArgs);
+        $this->spawnRedisServer($args, $name, $port);
+        $this->waitForPong($port, 10);
+        if ($flush) {
+            $this->client($port)->flushall();
+        }
+    }
+
+    /**
+     * Restart a redis-server on the same port from its own scratch
+     * directory: a graceful SIGTERM shutdown (the append-only file is
+     * fully flushed), then a fresh boot with a new run_id and the
+     * persisted state. The outgoing process is awaited to actually
+     * exit before the replacement spawns, so the port is never lost
+     * to a race (a master with attached replicas may take a moment
+     * to shut down).
+     */
+    private function restartRedisIsolated(int $port, string $name, string $dir): void
+    {
+        $index = $this->procIndexByPort[$port] ?? null;
+        if ($index !== null && isset($this->procs[$index])) {
+            proc_terminate($this->procs[$index], 15);
+            $deadline = microtime(true) + 5;
+            while (microtime(true) < $deadline) {
+                $status = proc_get_status($this->procs[$index]);
+                if ($status !== false && !$status['running']) {
+                    break;
+                }
+                usleep(100_000);
+            }
+        }
+        $this->spawnRedisServer([
+            '--port', (string) $port,
+            '--dir', $dir,
+            '--appendonly', 'yes',
+            '--save', '',
+            '--appendfsync', 'always',
+        ], $name, $port);
+        $this->waitForPong($port, 10);
+    }
+
+    /**
+     * Wait until a real replica acknowledged a write on the master
+     * (WAIT 1 returns 1): the acked-barrier control needs a replica
+     * that is actually caught up.
+     */
+    private function waitForReplicaSync(int $masterPort): void
+    {
+        $probe = $this->client($masterPort);
+        $deadline = microtime(true) + 20;
+        while (microtime(true) < $deadline) {
+            try {
+                $probe->set('replica-sync-probe', '1');
+                if ($probe->executeRaw(['WAIT', '1', '1000']) === 1) {
+                    return;
+                }
+            } catch (\Throwable) {
+                // the master may still be booting
+            }
+            usleep(150_000);
+        }
+        self::fail('the replica never acknowledged a write (WAIT never returned 1)');
     }
 
     private function waitForPong(int $port, int $timeoutSecs): void
@@ -547,6 +634,135 @@ final class HaAuthorityAdversarialRealRedisTest extends TestCase
             self::assertStringContainsString('was pinned to master|'.$pinnedRunId, $e->getMessage());
         }
         self::assertNull($client->get($this->pinKey('storage')), 'the guard must never re-pin after a pin loss');
+    }
+
+    /**
+     * M1: the verified WAIT must compose with the authority fence. A
+     * restart of the authority between the security-final mutation and
+     * the WAIT barrier is observed by the barrier's own zero-stale
+     * verification. The round trip reconnects to the restarted server
+     * and reads the new run_id, and the refusal happens before the
+     * fence write or the WAIT executes. The WAIT never runs on the
+     * changed authority, and the stored security state is
+     * byte-identical.
+     */
+    public function testWaitBarrierRefusesWhenTheAuthorityRestartsBetweenTheMutationAndTheWait(): void
+    {
+        $this->envRedisOrSkip();
+        $this->binaryOrSkip();
+        $this->setupTmpDir();
+        $masterDir = $this->tmpDir.'/master';
+        $replicaDir = $this->tmpDir.'/replica';
+        if (!mkdir($masterDir, 0o700, true) && !is_dir($masterDir)) {
+            self::markTestSkipped('cannot create the WAIT-boundary master directory');
+        }
+        if (!mkdir($replicaDir, 0o700, true) && !is_dir($replicaDir)) {
+            self::markTestSkipped('cannot create the WAIT-boundary replica directory');
+        }
+        $masterPort = $this->freePort();
+        $replicaPort = $this->freePort();
+        $this->bootRedisIsolated($masterPort, 'master', $masterDir);
+        $this->bootRedisIsolated($replicaPort, 'replica', $replicaDir, ['--replicaof', '127.0.0.1', (string) $masterPort], flush: false);
+        $this->waitForReplicaSync($masterPort);
+
+        $raw = $this->client($masterPort);
+        $guard = new PinnedPrimaryAuthorityGuard($raw, self::NS, 5, 'storage');
+        $guard->initializePin();
+        $pinnedRunId = $this->runIdOf($raw);
+        $wrapped = new AuthorityGuardedPredisClient($guard, $raw);
+
+        // The security-final mutation on A: the pending→consumed
+        // transition through the wait-free storage (no barrier yet).
+        $waitFree = new RedisStorage($wrapped, 'wait-boundary:', waitReplicas: 0);
+        $record = $this->storePendingRecord($waitFree, 'boundary-nonce');
+        $consumed = $waitFree->consume($record->nonce);
+        self::assertNotNull($consumed, 'the security-final consume transition lands on A');
+        self::assertTrue($consumed->consumedNow, 'the consume is a fresh pending→consumed transition');
+        $recordKey = 'wait-boundary:'.$record->nonce;
+        $before = $raw->get($recordKey);
+        self::assertIsString($before, 'the consumed envelope exists on A');
+        self::assertStringContainsString('"state":"consumed"', $before, 'the mutation on A is the consumed envelope');
+
+        // The authority restarts between the mutation and the WAIT
+        // barrier: a new run_id on the same endpoint, the state (the
+        // append-only file) preserved.
+        $this->restartRedisIsolated($masterPort, 'master-restarted', $masterDir);
+        $raw->disconnect();
+        $newRunId = $this->runIdOf($raw);
+        self::assertNotSame($pinnedRunId, $newRunId, 'a restarted Redis always regenerates its run_id');
+        self::assertSame('master|'.$pinnedRunId, $raw->get($this->pinKey('storage')), 'the pin survives the restart through the append-only file');
+
+        // The WAIT barrier refuses before executing: the durability
+        // session observes the changed authority and refuses before
+        // the fence write or the WAIT.
+        $barriered = new RedisStorage($wrapped, 'wait-boundary:', waitReplicas: 1, waitTimeoutMs: 100);
+        try {
+            $barriered->establishReplicationFence('the WAIT-boundary test');
+            self::fail('the WAIT barrier must refuse when the authority changed between the mutation and the WAIT');
+        } catch (PinnedAuthorityRefusalException $e) {
+            self::assertStringContainsString('pinned master|'.$pinnedRunId, $e->getMessage());
+            self::assertStringContainsString('observed master|'.$newRunId, $e->getMessage());
+        }
+
+        // The stored state is unchanged: the refused barrier wrote
+        // nothing — the record holds the exact mutation bytes and no
+        // fence token exists on the changed authority (the WAIT never
+        // executed on B).
+        self::assertSame($before, $raw->get($recordKey), 'the stored security state is unchanged by the refused barrier');
+        self::assertNull($raw->get('wait-boundary:replication-fence'), 'the refused barrier never wrote its fence: the WAIT never executed on the changed authority');
+    }
+
+    /**
+     * M1 control: with no authority change between the mutation and
+     * the WAIT, the durability session succeeds with the acked
+     * barrier. Every durability-critical mutation (store, the
+     * pending→consumed transition, the result commit) writes its
+     * causal fence and the replica acknowledges it.
+     */
+    public function testWaitBarrierSucceedsWithTheAckedFenceOnThePinnedAuthority(): void
+    {
+        $this->envRedisOrSkip();
+        $this->binaryOrSkip();
+        $this->setupTmpDir();
+        $masterDir = $this->tmpDir.'/master';
+        $replicaDir = $this->tmpDir.'/replica';
+        if (!mkdir($masterDir, 0o700, true) && !is_dir($masterDir)) {
+            self::markTestSkipped('cannot create the WAIT-boundary master directory');
+        }
+        if (!mkdir($replicaDir, 0o700, true) && !is_dir($replicaDir)) {
+            self::markTestSkipped('cannot create the WAIT-boundary replica directory');
+        }
+        $masterPort = $this->freePort();
+        $replicaPort = $this->freePort();
+        $this->bootRedisIsolated($masterPort, 'master', $masterDir);
+        $this->bootRedisIsolated($replicaPort, 'replica', $replicaDir, ['--replicaof', '127.0.0.1', (string) $masterPort], flush: false);
+        $this->waitForReplicaSync($masterPort);
+
+        $raw = $this->client($masterPort);
+        $guard = new PinnedPrimaryAuthorityGuard($raw, self::NS, 5, 'storage');
+        $guard->initializePin();
+        $wrapped = new AuthorityGuardedPredisClient($guard, $raw);
+        $storage = new RedisStorage($wrapped, 'wait-control:', waitReplicas: 1, waitTimeoutMs: 2000);
+
+        // Every durability-critical mutation rides the barrier: each
+        // one writes its causal fence and WAITs for the replica ack.
+        $record = $this->storePendingRecord($storage, 'control-nonce');
+        $consumed = $storage->consume($record->nonce);
+        self::assertNotNull($consumed, 'the barriered consume succeeds on the pinned authority');
+        self::assertTrue($consumed->consumedNow);
+        self::assertTrue($storage->commitResult($record->nonce, true, 'txn-boundary'), 'the barriered result commit succeeds');
+        $state = $storage->consumedState($record->nonce);
+        self::assertNotNull($state?->consumedResult, 'the committed result is retained');
+        self::assertTrue($state->consumedResult->valid);
+
+        // The acked barrier left its causal fence on the pinned
+        // authority.
+        $fence = $raw->get('wait-control:replication-fence');
+        self::assertIsString($fence, 'the verified WAIT succeeds with the acked barrier');
+        self::assertMatchesRegularExpression('/^[0-9a-f]{32}$/D', $fence, 'the fence is the fresh random token of the last barrier');
+
+        // The pinned authority is still serving.
+        $guard->assertServeEligible($raw);
     }
 
     /**

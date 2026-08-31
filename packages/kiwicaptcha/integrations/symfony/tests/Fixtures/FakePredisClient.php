@@ -102,6 +102,34 @@ final class FakePredisClient extends \Predis\Client
         return $this->connectionOverride;
     }
 
+    /**
+     * No-op connect: the emulated commands never open a real socket,
+     * and the durability session of the pinned-primary wrapper pins
+     * its connection with `connect()` before the barrier commands.
+     */
+    public function connect(): void
+    {
+    }
+
+    /**
+     * Raw-command emulation: records the call and answers the
+     * emulated server. The verified-WAIT barrier (`WAIT` through the
+     * guarded wrapper's `executeRaw`) lands here; the default answer
+     * is the replica-less ack 0, overridable via
+     * {@see FakePredisClient::$waitAck}.
+     *
+     * @param list<mixed> $arguments
+     */
+    public function executeRaw(array $arguments, &$error = null): mixed
+    {
+        $this->calls[] = ['RAW', $arguments];
+
+        return $this->waitAck;
+    }
+
+    /** The ack the emulated `WAIT` answers (default 0 = no replica). */
+    public int $waitAck = 0;
+
     /** @internal test hook: advance the fake Redis server clock (ms). */
     public function setTimeMs(float $ms): void
     {

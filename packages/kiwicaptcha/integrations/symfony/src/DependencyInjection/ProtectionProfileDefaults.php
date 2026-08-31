@@ -68,8 +68,10 @@ final class ProtectionProfileDefaults
      *    derived default mirrors balanced (the tree defaults). The
      *    mechanical pinned-primary authority guard turns the
      *    operator_managed contract into a bundle-enforced guarantee:
-     *    the guard pins the serving authority on first use and refuses
-     *    on any change, and the doctor reports its state. An explicit
+     *    the deployment initializes the guard explicitly
+     *    (kiwicaptcha:ha-initialize or ha_authority_expected; the
+     *    production runtime never auto-pins), the guard refuses on any
+     *    authority change, and the doctor reports its state. An explicit
      *    override of ha_authority or replay_durability in any layer
      *    wins (the doctor then FAILs the "HA authority" check when the
      *    profile promises pinned_primary but the effective posture

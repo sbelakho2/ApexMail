@@ -1769,6 +1769,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setArgument('$argonConcurrency', $config['argon2_max_concurrent_verifications'])
             ->setArgument('$containerMemoryMib', $config['risk']['container_memory_mib'])
             ->setArgument('$argonEnvelopeMemoryKib', $riskConfig['argon_verification_memory_kib'])
+            // The pinned-primary authority-eligibility leg: the wired
+            // guards (keyed by authority label) and the distinct risk
+            // Redis client they verify. Under pinned_primary / ha_safe
+            // the readiness probe forces a fresh guard check per
+            // authority (never the ordinary verification window), so a
+            // pod whose pin is uninitialized or whose authority changed
+            // leaves the pool immediately.
+            ->setArgument('$authorityGuards', $authorityGuardRefs)
+            ->setArgument('$riskRedis', $riskRedis)
             ->addTag('controller.service_arguments')->setPublic(true));
 
         // Form type (renders the widget through the form theme). The
@@ -2163,7 +2172,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      * is passed to every guard: the scalar shorthand applies to every
      * authority, and the per-authority map form applies each entry to
      * its own authority (an authority without an entry falls back to
-     * the pin key).
+     * the pin key). When the risk client IS the storage client (one
+     * shared physical authority), the map form supplying different
+     * identities for storage and risk is refused at configuration time:
+     * a shared physical authority must have exactly one expected
+     * identity.
      *
      * The decoration targets the resolved client service id, so the
      * storage (DSN-built or user RedisStorage), the limiter, the
@@ -2228,7 +2241,22 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             if (isset($decorated[$riskId])) {
                 // The risk client IS the storage/limiter client: one
                 // physical authority, so the storage guard and pin
-                // cover both.
+                // cover both. A shared physical authority can have
+                // exactly ONE expected identity: the per-authority map
+                // supplying different identities for storage and risk
+                // on the same Redis is a contradiction that could never
+                // both be true, so it is rejected at configuration time
+                // (never silently resolved by the storage entry).
+                $storageExpected = $expectedByAuthority['storage'] ?? null;
+                $riskExpected = $expectedByAuthority['risk'] ?? null;
+                if ($storageExpected !== null && $riskExpected !== null && $storageExpected !== $riskExpected) {
+                    throw new \LogicException(sprintf(
+                        'kiwi_captcha.ha_authority_expected supplies different identities for the storage and risk authorities ("%s" vs "%s"), but risk.redis_service resolves to the same Redis client as the storage/limiter client — one shared physical authority can have exactly one expected identity. Use one identity for the shared authority (the storage entry covers it, the per-authority map may repeat it), or wire a distinct risk.redis_service for a genuinely separate risk authority (see docs/ha-authority.md).',
+                        $storageExpected,
+                        $riskExpected,
+                    ));
+                }
+
                 return $guardRefs;
             }
             $this->assertPinnedPrimaryClientClass($riskRedis, 'the risk Redis client', $container);

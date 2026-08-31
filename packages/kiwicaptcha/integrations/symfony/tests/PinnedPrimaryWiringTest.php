@@ -116,6 +116,18 @@ final class PinnedPrimaryWiringTest extends TestCase
         self::assertArrayNotHasKey('risk', $doctorArgs[9], 'no risk guard when the risk client is not wired');
         $initializeArgs = $container->getDefinition(KiwiCaptchaHaInitializeCommand::class)->getArguments();
         self::assertSame('kiwi_captcha.ha_authority_guard.storage', (string) $initializeArgs[1]['storage'], 'the initialize command receives the storage guard');
+
+        $health = $container->getDefinition(\BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController::class);
+        self::assertSame(
+            'kiwi_captcha.ha_authority_guard.storage',
+            (string) $health->getArgument('$authorityGuards')['storage'],
+            'the readiness probe receives the storage guard for its fresh authority-eligibility leg',
+        );
+        self::assertSame(
+            'kiwi_captcha.redis.checked',
+            (string) $health->getArgument('$riskRedis'),
+            'the risk client rides along (risk is enabled and reuses the storage client here; no risk guard is wired for a shared authority)',
+        );
     }
 
     public function testPinnedPrimaryAppliesToTheDsnBuiltClientToo(): void
@@ -172,6 +184,11 @@ final class PinnedPrimaryWiringTest extends TestCase
         self::assertSame('kiwi_captcha.ha_authority_guard.risk', (string) $doctorArgs[9]['risk'], 'the doctor audits each distinct authority');
         $initializeArgs = $container->getDefinition(KiwiCaptchaHaInitializeCommand::class)->getArguments();
         self::assertSame('kiwi_captcha.ha_authority_guard.risk', (string) $initializeArgs[1]['risk'], 'the initialize command pins each distinct authority');
+
+        $health = $container->getDefinition(\BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController::class);
+        self::assertSame('kiwi_captcha.ha_authority_guard.storage', (string) $health->getArgument('$authorityGuards')['storage']);
+        self::assertSame('kiwi_captcha.ha_authority_guard.risk', (string) $health->getArgument('$authorityGuards')['risk'], 'the readiness leg audits each distinct authority');
+        self::assertSame('kiwi_captcha.redis.checked.risk', (string) $health->getArgument('$riskRedis'), 'the readiness leg verifies the risk guard against the risk client');
     }
 
     public function testPinnedPrimarySharesOneGuardWhenTheRiskClientIsTheStorageClient(): void
@@ -313,6 +330,100 @@ final class PinnedPrimaryWiringTest extends TestCase
         self::assertFalse($container->hasDefinition('kiwi_captcha.ha_authority_guard.risk'), 'one pin per distinct authority: the risk client IS the storage client');
         $storageGuard = $this->guardDefinition($container, 'storage');
         self::assertSame($storageIdentity, $storageGuard['arguments'][4], 'the storage entry covers the shared authority');
+    }
+
+    public function testPinnedPrimaryAcceptsOneExpectedIdentityRepeatedForTheSharedAuthority(): void
+    {
+        // M6b legitimate form: the map may repeat the same identity for
+        // storage and risk even on one shared physical Redis — exactly
+        // one expected identity for the shared authority, so the wiring
+        // proceeds (the storage guard carries it, no risk guard).
+        $identity = 'master|'.str_repeat('a', 40);
+        $container = $this->load([
+            [
+                'secret_key' => self::SECRET,
+                'redis_service' => 'fake_redis',
+                'risk' => [
+                    'enabled' => true,
+                    'redis_service' => 'fake_redis',
+                    'request_binding_authority' => 'fake_redis',
+                ],
+                'ha_authority' => 'pinned_primary',
+                'ha_authority_expected' => ['storage' => $identity, 'risk' => $identity],
+            ],
+        ]);
+
+        self::assertTrue($container->hasDefinition('kiwi_captcha.ha_authority_guard.storage'));
+        self::assertFalse($container->hasDefinition('kiwi_captcha.ha_authority_guard.risk'), 'one shared authority: no second guard');
+        self::assertSame($identity, $this->guardDefinition($container, 'storage')['arguments'][4], 'the shared authority carries its one expected identity');
+    }
+
+    public function testPinnedPrimaryRefusesConflictingExpectedIdentitiesOnOneSharedRedis(): void
+    {
+        // M6b: storage and risk resolve to the same physical Redis but
+        // ha_authority_expected supplies different identities for them.
+        // A shared physical authority must have exactly one expected
+        // identity. Rejected at configuration time, never silently
+        // resolved.
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'test');
+        $container->setParameter('kernel.project_dir', self::PROJECT_DIR);
+        $container->register('fake_redis', FakePredisClient::class);
+
+        $this->expectException(\LogicException::class);
+        $this->expectExceptionMessage('one shared physical authority can have exactly one expected identity');
+
+        (new KiwiCaptchaExtension())->load([
+            [
+                'secret_key' => self::SECRET,
+                'redis_service' => 'fake_redis',
+                'risk' => [
+                    'enabled' => true,
+                    'redis_service' => 'fake_redis',
+                    'request_binding_authority' => 'fake_redis',
+                ],
+                'ha_authority' => 'pinned_primary',
+                'ha_authority_expected' => [
+                    'storage' => 'master|'.str_repeat('a', 40),
+                    'risk' => 'master|'.str_repeat('b', 40),
+                ],
+            ],
+        ], $container);
+    }
+
+    public function testPinnedPrimaryAllowsDistinctExpectedIdentitiesForDistinctAuthorities(): void
+    {
+        // M6b legitimate distinct-authority case: two physical Redises,
+        // each with its own expected identity, wire their own guards.
+        // (The wiring assertions live in
+        // testPinnedPrimaryWiresDistinctExpectedIdentitiesPerAuthority;
+        // this test pins the load-time acceptance.)
+        $container = new ContainerBuilder();
+        $container->setParameter('kernel.environment', 'test');
+        $container->setParameter('kernel.project_dir', self::PROJECT_DIR);
+        $container->register('fake_redis', FakePredisClient::class);
+        $container->register('fake_risk_redis', FakePredisClient::class);
+        (new KiwiCaptchaExtension())->load([
+            [
+                'secret_key' => self::SECRET,
+                'redis_service' => 'fake_redis',
+                'risk' => [
+                    'enabled' => true,
+                    'redis_service' => 'fake_risk_redis',
+                    'request_binding_authority' => 'fake_redis',
+                ],
+                'ha_authority' => 'pinned_primary',
+                'ha_authority_expected' => [
+                    'storage' => 'master|'.str_repeat('a', 40),
+                    'risk' => 'master|'.str_repeat('b', 40),
+                ],
+            ],
+        ], $container);
+
+        self::assertTrue($container->hasDefinition('kiwi_captcha.ha_authority_guard.storage'));
+        self::assertTrue($container->hasDefinition('kiwi_captcha.ha_authority_guard.risk'));
+        self::assertSame('master|'.str_repeat('a', 40), $this->guardDefinition($container, 'storage')['arguments'][4]);
+        self::assertSame('master|'.str_repeat('b', 40), $this->guardDefinition($container, 'risk')['arguments'][4]);
     }
 
     public function testPinnedPrimaryRefusesAnAggregateClient(): void

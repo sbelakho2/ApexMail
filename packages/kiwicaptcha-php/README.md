@@ -163,7 +163,7 @@ use KiwiCaptcha\Storage\RedisStorage;
 $config = new Config(
     secretKey: 'your-32-byte-hmac-secret',
     algorithm: PoWAlgorithm::Sha256,
-    targetBits: 20,
+    targetBits: 18,   // the ordinary default; 20 is the elevated rung (adaptive risk escalation)
 );
 
 // Argon2id mode requires t >= 3 and p == 1 (Config throws otherwise).

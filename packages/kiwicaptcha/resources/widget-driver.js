@@ -291,7 +291,10 @@
   //    (the glue's embedded workerSource plus the inline glue source) —
   //    zero requests, byte-identical behavior;
   //  - files mode constructs a SAME-ORIGIN Worker from the versioned
-  //    worker.<hash>.js asset the driver fetched and SRI-verified — no
+  //    worker.<hash>.js asset the driver fetched and preflight-verified
+  //    (the fetched bytes are hashed and compared against the page-issued
+  //    digest, then the content-addressed URL is handed to the browser's
+  //    Worker constructor) — no
   //    Blob URL, so files mode needs worker-src 'self' (never blob:), and
   //    the glue rides the worker's own importScripts of the verified
   //    runtime asset (the { type: "glue" } handshake below);
@@ -302,8 +305,8 @@
   //    never eagerly imports a relative runtime on its own.
   // The worker NEVER probes an unversioned runtime at startup in any
   // path: it boots with no runtime and the driver always supplies the
-  // runtime URL explicitly (files mode: the SRI-verified versioned
-  // runtime asset; legacy path: the derived URL).
+  // runtime URL explicitly (files mode: the driver-preflight-verified
+  // versioned runtime asset; legacy path: the derived URL).
   // If the worker cannot be created or the solve fails inside it, the
   // widget enters the controlled kiwi:worker-unavailable state. There is
   // NO main-thread Argon2 fallback and no weaker-profile retry — the
@@ -337,9 +340,13 @@
   // memory-hard challenge arrives: a SHA-256 solve pays no request at all,
   // the pure-JS solver runs. Both fetches are bounded (two retries),
   // deduplicated per URL across every widget on the page (a shared
-  // promise), and verified against the page-issued SRI digests
+  // promise), and cryptographically preflight-verified against the
+  // page-issued digests
   // (data-kiwi-runtime-integrity / data-kiwi-worker-integrity) BEFORE the
-  // bytes are used. A failure enters the controlled worker-unavailable
+  // bytes are used: the fetched bytes are hashed with crypto.subtle and
+  // compared to the digest; only then is the content-addressed URL loaded
+  // by the browser APIs (the Worker constructor / the worker's
+  // importScripts). A failure enters the controlled worker-unavailable
   // state, never a main-thread Argon hash and never a weaker-profile
   // retry. The integrity verification FAILS CLOSED: when a digest IS
   // demanded but the page cannot compute it (no crypto.subtle.digest),
@@ -428,8 +435,9 @@
     var workerIntegrity = container.getAttribute("data-kiwi-worker-integrity");
     var runtimeSrc = container.getAttribute("data-kiwi-runtime-src");
     var runtimeIntegrity = container.getAttribute("data-kiwi-runtime-integrity");
-    // Files-mode worker asset: a versioned worker URL WITH its SRI digest
-    // is the theme-emitted lazy worker asset (fetched + verified below and
+    // Files-mode worker asset: a versioned worker URL WITH its integrity
+    // digest is the theme-emitted lazy worker asset (fetched and
+    // preflight-verified below and
     // run as a same-origin Worker). A worker URL WITHOUT the integrity
     // attribute keeps the legacy explicit static-worker path.
     var lazyWorkerAsset = !!(workerSrc && workerIntegrity);
@@ -439,7 +447,8 @@
     var glue = workerSrc ? null : (kiwiFindGlueSource() || kiwiCompatGlue);
     // The runtime URL handed to the worker through the { type: "glue" }
     // handshake. The driver ALWAYS directs the worker's runtime: files
-    // mode passes the page-issued versioned runtime asset (SRI-verified by
+    // mode passes the page-issued versioned runtime asset
+    // (driver-preflight-verified by
     // the driver's fetch below); the legacy static-worker path derives the
     // runtime URL from the worker's own URL — the exact resolution the
     // worker's historical relative importScripts used, now supplied
@@ -457,7 +466,8 @@
       // URL-constructed worker: the same-origin worker loads the glue
       // itself (importScripts of the runtime URL the driver supplies via
       // the { type: "glue" } message). For files mode the driver STILL
-      // fetches + SRI-verifies the runtime glue: the immutable
+      // fetches + cryptographically preflight-verifies the runtime glue:
+      // the immutable
       // content-addressed URL then serves the identical bytes to the
       // worker's importScripts from the HTTP cache, so the runtime is
       // downloaded exactly once per page across widgets. The legacy
@@ -480,13 +490,14 @@
       var workerResult = both[1];
       if (glueResult && glueResult.error) {
         // The lazy runtime fetch failed after its bounded retries (or its
-        // SRI could not be verified): fail closed — never a main-thread
+        // preflight digest check could not be verified): fail closed —
+        // never a main-thread
         // Argon hash, never a weaker-profile retry.
         return { unavailable: true, reason: glueResult.error };
       }
       if (workerResult && workerResult.error) {
         // The lazy worker asset fetch failed after its bounded retries (or
-        // its SRI could not be verified): fail closed the same way.
+        // its preflight digest check could not be verified): fail closed the same way.
         return { unavailable: true, reason: workerResult.error };
       }
       var resolvedGlue = glueResult ? glueResult.src : null;
@@ -497,12 +508,13 @@
         try {
           if (workerSrc) {
             // Files mode: a SAME-ORIGIN Worker constructed from the
-            // fetched + SRI-verified asset URL. The Worker constructor
+            // content-addressed URL of the fetched + preflight-verified
+            // asset. The Worker constructor
             // loads the script through the browser's worker-script
             // fetcher — a platform fetch of the SAME content-addressed
             // URL, which can only ever serve the exact verified bytes
             // (the hash is in the URL and an unknown hash is a 404), so
-            // the running worker IS the verified source; a Blob is never
+            // the running worker IS the preflight-verified source; a Blob is never
             // created, so files mode needs worker-src 'self', not blob:.
             // The driver's lazy fetch stays deduplicated per URL (the
             // page issues exactly one window.fetch for worker.<hash>.js);
@@ -639,10 +651,12 @@
           // and only then solves; the solve message (posted right after)
           // is queued behind the glue handshake. The driver ALWAYS
           // supplies the runtime URL explicitly (files mode: the
-          // SRI-verified versioned runtime asset; legacy static-worker
+          // driver-preflight-verified versioned runtime asset; legacy
+          // static-worker
           // path: the URL derived from the worker's own URL), so the
           // worker never probes an unversioned runtime on its own. The
-          // worker only ever accepts a same-origin runtime URL.
+          // worker only ever accepts a same-origin runtime URL (parsed
+          // origin equality, never a string prefix).
           if (glueRuntimeSrc) {
             worker.postMessage({ v: 1, type: "glue", runtimeSrc: glueRuntimeSrc });
           }

@@ -6,10 +6,13 @@
  * prepended with the glue), so no network request is made; (2) a
  * SAME-ORIGIN Worker constructed by the driver from a worker URL (files
  * mode: the versioned worker.<hash>.js asset the driver fetched and
- * SRI-verified; the legacy explicit data-kiwi-worker-src path: the
- * configured static URL). This worker NEVER imports a runtime itself: it
+ * cryptographically preflight-verified: the fetched bytes are hashed and
+ * compared against the page-issued digest, then the content-addressed
+ * URL is loaded by the browser APIs; the legacy explicit
+ * data-kiwi-worker-src path: the configured static URL). This worker
+ * NEVER imports a runtime itself: it
  * boots with no runtime and the driver ALWAYS supplies the runtime URL
- * via a { type: "glue" } message (files mode: the SRI-verified versioned
+ * via a { type: "glue" } message (files mode: the driver-preflight-verified versioned
  * runtime asset; legacy path: the runtime URL the driver derives from the
  * worker's own URL), so the worker importScripts exactly the
  * driver-directed bytes and no unversioned relative URL is ever probed.
@@ -20,10 +23,14 @@
  *        prefix/salt are base64 strings (the driver passes the decoded byte
  *        lengths alongside); the worker decodes them itself.
  *   in : { type: "glue", runtimeSrc } (every URL-constructed worker) —
- *        the driver supplies the runtime asset URL (same-origin; SRI-
- *        verified by the driver in files mode, derived from the worker's
- *        own URL on the legacy path); the worker importScripts it,
- *        verifies the wasm protocol version and only then announces ready.
+ *        the driver supplies the runtime asset URL (same-origin; in
+ *        files mode the driver hashes the fetched bytes and compares
+ *        them against the page-issued digest as a cryptographic
+ *        preflight, then the content-addressed URL is loaded by the
+ *        browser APIs — the worker importScripts it; on the legacy path
+ *        the URL is derived from the worker's own URL), the worker
+ *        importScripts it, verifies the wasm protocol version and only
+ *        then announces ready.
  *   out: { type: "ready", buildId } on startup (solver protocol id)
  *        { type: "progress", counter } every 1000 hashes
  *        { type: "done", counter, buildId }  |  { type: "failed", reason }
@@ -60,7 +67,7 @@
   // and the driver supplies the runtime URL AFTER construction via the
   // { type: "glue" } message (see below) — no relative importScripts, so
   // no unversioned URL is ever probed and no stale app-served runtime can
-  // race the SRI-verified one. Inline mode's prepended glue has already
+  // race the driver-preflight-verified one. Inline mode's prepended glue has already
   // run by the time this source executes, so its window.__kiwiCaptchaWasm
   // export is picked up here; a URL-constructed worker (files mode or the
   // legacy data-kiwi-worker-src path) has no glue until the driver's glue
@@ -72,8 +79,10 @@
   // The driver constructs this worker from a worker URL (files mode: the
   // versioned worker asset; legacy path: the configured static URL) and
   // supplies the runtime (wasm glue) URL AFTER construction via a
-  // { type: "glue" } message — files mode passes the SRI-verified versioned
-  // runtime URL, the legacy path the runtime URL derived from the worker's
+  // { type: "glue" } message — files mode passes the driver-preflight-verified
+  // versioned runtime URL (the driver hashed the fetched bytes and
+  // compared them against the page-issued digest before this handshake),
+  // the legacy path the runtime URL derived from the worker's
   // own URL. The runtime URL is content-addressed and immutable in files
   // mode, so the importScripts below serves exactly the bytes the driver
   // verified on the main thread.
@@ -88,7 +97,7 @@
     kiwiGluePromise = new Promise(function (resolve) {
       var url = null;
       try { url = new URL(kiwiRuntimeSrc, self.location.href).href; } catch (e) { resolve(null); return; }
-      if (url.indexOf(self.location.origin) !== 0) { resolve(null); return; }
+      if (new URL(url).origin !== self.location.origin) { resolve(null); return; }
       try { importScripts(url); } catch (e) {}
       if (typeof self !== "undefined" && self.__kiwiCaptchaWasm) {
         loader = self.__kiwiCaptchaWasm;
@@ -361,13 +370,15 @@
     if (!m || typeof m !== "object" || m.v !== 1) return;
     if (m.type === "glue") {
       // The driver supplies the runtime asset URL after construction
-      // (files mode: SRI-verified; legacy static-worker path: derived).
+      // (files mode: driver-preflight-verified; legacy static-worker path: derived).
       // The URL must stay on this origin — a foreign runtime would be a
-      // supply-chain break.
+      // supply-chain break. The check compares the PARSED ORIGIN, not a
+      // string prefix: a lookalike hostname such as example.com.evil.test
+      // must never pass for example.com.
       if (typeof m.runtimeSrc !== "string" || m.runtimeSrc === "") return;
       var url = null;
       try { url = new URL(m.runtimeSrc, self.location.href).href; } catch (e) {}
-      if (!url || url.indexOf(self.location.origin) !== 0) return;
+      if (!url || new URL(url).origin !== self.location.origin) return;
       kiwiRuntimeSrc = url;
       kiwiGluePromise = null;
       ensureGlue();

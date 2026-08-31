@@ -577,26 +577,19 @@ LUA;
      * connection. A future pinned-master implementation may
      * restore Sentinel support.
      */
+    /**
+     * The public failed-barrier replay guard entry
+     * ({@see \KiwiCaptcha\ReplicationBarrierInterface}, the verifier's
+     * stored-success acceptance fence): the same causal fence + verified
+     * WAIT as every durability-critical transition, through the same
+     * {@see self::waitAndVerify()} path. A wait-free storage
+     * (waitReplicas = 0) has no barrier to re-establish and returns
+     * immediately.
+     */
     public function establishReplicationFence(string $what): void
     {
         if ($this->waitReplicas <= 0) {
             return;
-        }
-        // The causal replication fence: a fresh write on this connection
-        // immediately before the WAIT. Replication is ordered, so a
-        // replica that acknowledges the fence has advanced through the
-        // preceding primary stream (the originally unproven mutation
-        // included); a bare WAIT on a connection that wrote nothing
-        // cannot prove another connection's write.
-        $fenceKey = $this->prefix.'replication-fence';
-        $token = bin2hex(random_bytes(16));
-        if ($this->client instanceof \Redis) {
-            $ok = $this->client->set($fenceKey, $token, ['PX' => 60_000]);
-        } else {
-            $ok = $this->client->setex($fenceKey, 60, $token);
-        }
-        if ($ok === false || $ok === null) {
-            throw new \KiwiCaptcha\Storage\ReplicaWaitException(sprintf('the replication fence write failed after %s', $what));
         }
         $this->waitAndVerify($what);
     }
@@ -1212,8 +1205,77 @@ LUA;
     }
 
     /**
-     * Block until at least waitReplicas replicas acknowledged the previous
-     * write, and fail closed when they did not.
+     * The durability barrier: the causal replication fence write
+     * followed by the verified WAIT, executed under the durability
+     * session when the client exposes one.
+     *
+     * The fence write happens under the same authority epoch as the
+     * security-final mutation that preceded the barrier. When the
+     * client is the bundle's {@see AuthorityGuardedPredisClient}
+     * wrapper (ha_authority "pinned_primary"), the whole
+     * [fence write, WAIT] pair runs inside `withDurabilitySession()`.
+     * The session forces the zero-stale authority verification AND the
+     * connection-generation equality (the guard's cached entry must
+     * match the connection about to execute) before every barrier
+     * command. A reconnect to a changed authority between the
+     * mutation and the WAIT is therefore observed by the barrier's own
+     * verification and refuses before the fence write or the WAIT
+     * executes. The WAIT runs only on the still-pinned authority
+     * connection. The structural `method_exists` seam keeps the core
+     * package free of a bundle dependency: without the wrapper (the
+     * plain client path) the barrier is the same fence + WAIT without
+     * the authority checks, exactly the pre-pinned_primary behavior.
+     *
+     * The causal fence: a fresh write on the accepting connection
+     * immediately before the WAIT. Replication is ordered, so a
+     * replica that acknowledges the fence has advanced through the
+     * preceding primary stream (the originally unproven mutation
+     * included). A bare WAIT on a connection that wrote nothing cannot
+     * prove another connection's write.
+     */
+    private function waitAndVerify(string $what): void
+    {
+        $barrier = function () use ($what): void {
+            $this->writeReplicationFence($what);
+            $this->wait($what);
+        };
+        if (\is_object($this->client) && method_exists($this->client, 'withDurabilitySession')) {
+            // The pinned-primary guarded wrapper: the fence write and
+            // the WAIT execute under the same authority epoch as the
+            // mutation, with the zero-stale verification and the
+            // connection-generation equality before every command.
+            $this->client->withDurabilitySession($barrier);
+
+            return;
+        }
+        $barrier();
+    }
+
+    /**
+     * The causal replication fence write: a fresh random-token write on
+     * the accepting connection, immediately before the WAIT. The key
+     * TTL bounds the fence's lifetime (60 s), so a stale fence can
+     * never grow unbounded. A failed write fails the barrier closed
+     * with the typed {@see ReplicaWaitException}.
+     */
+    private function writeReplicationFence(string $what): void
+    {
+        $fenceKey = $this->prefix.'replication-fence';
+        $token = bin2hex(random_bytes(16));
+        if ($this->client instanceof \Redis) {
+            $ok = $this->client->set($fenceKey, $token, ['PX' => 60_000]);
+        } else {
+            $ok = $this->client->setex($fenceKey, 60, $token);
+        }
+        if ($ok === false || $ok === null) {
+            throw new ReplicaWaitException(sprintf('the replication fence write failed after %s', $what));
+        }
+    }
+
+    /**
+     * The verified WAIT itself: block until at least waitReplicas
+     * replicas acknowledged the previous write, and fail closed when
+     * they did not.
      *
      * Redis WAIT returns the number of replicas that processed the write
      * (0 on a replica-less server). The barrier asserts that number
@@ -1223,7 +1285,7 @@ LUA;
      * downgrading the guarantee; that failure is exactly the failover
      * replay window this barrier exists to close.
      */
-    private function waitAndVerify(string $what): void
+    private function wait(string $what): void
     {
         if ($this->client instanceof \Redis) {
             // phpredis has no typed wait method; rawCommand sends the

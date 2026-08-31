@@ -490,4 +490,106 @@ final class PinnedPrimaryAuthorityGuardTest extends TestCase
             'the refused security-final write never reaches the client: the guard refuses before the mutation',
         );
     }
+
+    // ── The durability session (the verified-WAIT barrier) ──────────────
+
+    public function testTheWaItBarrierForcesAZeroStaleVerificationNeverTheCachedWindow(): void
+    {
+        // M1: executeRaw(['WAIT', ...]) must NOT ride the ordinary
+        // cached lane. The WAIT proves a write of this connection, so
+        // the barrier forces the zero-stale verification even when the
+        // ordinary check would still be served from the 5 s window.
+        $fake = $this->fake();
+        $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 60, 'storage');
+        $guard->initializePin();
+        $wrapped = new AuthorityGuardedPredisClient($guard, $fake);
+
+        // An ordinary command caches the verification (60 s window).
+        $wrapped->set('warmup', '1');
+        $infoAfterOrdinary = $this->infoCalls($fake);
+        self::assertGreaterThan(0, $infoAfterOrdinary, 'the first ordinary command verifies the authority');
+
+        // The WAIT barrier re-verifies anyway, inside the window: the
+        // ordinary cache must never serve a WAIT.
+        $wrapped->executeRaw(['WAIT', '1', '100']);
+        self::assertGreaterThan(
+            $infoAfterOrdinary,
+            $this->infoCalls($fake),
+            'the WAIT barrier forces a fresh zero-stale authority verification, never the cached window',
+        );
+    }
+
+    public function testTheDurabilitySessionBindsEveryBarrierCommandToTheVerifiedConnection(): void
+    {
+        // M1: inside withDurabilitySession every command (the causal
+        // fence write AND the WAIT) is preceded by the zero-stale
+        // verification and the connection-generation equality. The
+        // guard's cached entry must match the connection that is about
+        // to execute the barrier.
+        $fake = $this->fake();
+        $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 60, 'storage');
+        $guard->initializePin();
+        $wrapped = new AuthorityGuardedPredisClient($guard, $fake);
+        $wrapped->set('warmup', '1');
+        $infoAfterOrdinary = $this->infoCalls($fake);
+
+        // The barrier inside the session: the fence write (SET) and
+        // the WAIT each re-verify inside the 60 s window.
+        $wrapped->withDurabilitySession(function () use ($wrapped): void {
+            $wrapped->set('kiwi:fence:replication-fence', bin2hex(random_bytes(16)));
+            $wrapped->executeRaw(['WAIT', '1', '100']);
+        });
+        self::assertGreaterThan(
+            $infoAfterOrdinary,
+            $this->infoCalls($fake),
+            'the durability session re-verifies the authority before every barrier command, never the cached window',
+        );
+    }
+
+    public function testTheDurabilitySessionRefusesAChangedAuthorityBeforeAnyBarrierCommand(): void
+    {
+        // M1: a reconnect to a changed authority between the
+        // security-final mutation and the WAIT must be observed by the
+        // barrier's own verification and refused before the fence
+        // write or the WAIT executes. The stored state stays untouched
+        // by the refused barrier.
+        $fake = $this->fake();
+        $guard = new PinnedPrimaryAuthorityGuard($fake, self::NS, 60, 'storage');
+        $guard->initializePin();
+        $wrapped = new AuthorityGuardedPredisClient($guard, $fake);
+        $wrapped->set('kiwi:fence:replication-fence', 'pre-restart-token');
+
+        // The authority changed (a restarted primary with a new
+        // run_id); the verification window has NOT expired.
+        $fake->infoReplication['run_id'] = self::RUN_ID_B;
+        $fake->infoServer['run_id'] = self::RUN_ID_B;
+
+        $barrierCommandsBefore = \count(array_filter(
+            $fake->calls,
+            static fn (array $call): bool => $call[0] === 'SET' || $call[0] === 'RAW',
+        ));
+        try {
+            $wrapped->withDurabilitySession(function () use ($wrapped): void {
+                $wrapped->set('kiwi:fence:replication-fence', bin2hex(random_bytes(16)));
+                $wrapped->executeRaw(['WAIT', '1', '100']);
+            });
+            self::fail('the durability barrier must refuse when the authority changed, inside the window');
+        } catch (PinnedAuthorityRefusalException $e) {
+            self::assertStringContainsString('pinned master|'.self::RUN_ID_A, $e->getMessage());
+            self::assertStringContainsString('observed master|'.self::RUN_ID_B, $e->getMessage());
+        }
+        self::assertSame(
+            $barrierCommandsBefore,
+            \count(array_filter(
+                $fake->calls,
+                static fn (array $call): bool => $call[0] === 'SET' || $call[0] === 'RAW',
+            )),
+            'the refused barrier never reaches the client: neither the fence write nor the WAIT executes on the changed authority',
+        );
+        self::assertSame(
+            'pre-restart-token',
+            $fake->strings['kiwi:fence:replication-fence'] ?? null,
+            'the stored state is unchanged: the refused barrier wrote nothing',
+        );
+    }
 }

@@ -26,8 +26,10 @@ namespace BelConsulting\KiwiCaptchaBundle\Security\Authority;
  *    operator_managed and best_effort every classification serves and
  *    the doctor carries the deployment contract.
  *  - {@see PinnedPrimaryAuthorityGuard} is the pinned-primary
- *    variant: it pins the serving authority on first use and refuses
- *    on any change, making the operator contract mechanical.
+ *    variant: the deployment bootstraps the pin explicitly
+ *    (kiwicaptcha:ha-initialize or ha_authority_expected; the
+ *    production runtime never auto-pins) and the guard refuses on any
+ *    authority change, making the operator contract mechanical.
  *
  * The refusal contract is deliberately strict: the guard can only
  * fail closed, and an unverifiable authority is treated as unsafe.
