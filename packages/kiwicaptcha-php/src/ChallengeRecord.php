@@ -139,7 +139,7 @@ final class ChallengeRecord
         'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
         'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
         'attempts_used', 'region', 'policy_version', 'request_binding',
-        'issuer', 'kid', 'hostname', 'decoy_field',
+        'issuer', 'kid', 'hostname', 'decoy_field', 'execution_program',
     ];
 
     /**
@@ -185,6 +185,19 @@ final class ChallengeRecord
         // (the legacy shape). Signed as the final v3 canonical segment,
         // appended after the kid; the JSON key is omitted when null.
         public readonly ?string $decoyField = null,
+        // The ExecutionChallengeV1 program (base64 of the bytecode blob,
+        // see ExecutionChallengeGenerator) armed for this challenge;
+        // null = no execution dimension (the legacy shape, byte-identical
+        // to the pre-execution wire format). The JSON key is omitted when
+        // null. The program is never sent in the challenge payload; it
+        // rides the challenge response for the driver and it is never
+        // signed into the canonical payload: its integrity is bound by
+        // the execution digest, which the verifier recomputes from this
+        // stored program and the record's nonce — a substituted program
+        // changes both the digest key and the expected trace, so it can
+        // never verify against a digest computed from the original
+        // program.
+        public readonly ?string $executionProgram = null,
     ) {
     }
 
@@ -285,6 +298,12 @@ final class ChallengeRecord
         // verifying; old readers never see the key).
         if ($this->decoyField !== null) {
             $data['decoy_field'] = $this->decoyField;
+        }
+        // The execution program is omitted when unarmed, the same
+        // skip_serializing_if mirror: an unarmed record is byte-identical
+        // to the pre-execution format in both directions.
+        if ($this->executionProgram !== null) {
+            $data['execution_program'] = $this->executionProgram;
         }
 
         return $data;
@@ -441,6 +460,23 @@ final class ChallengeRecord
             }
         }
 
+        // Option field: the ExecutionChallengeV1 program. Absent (the
+        // legacy shape) and an explicit JSON null both decode to null;
+        // a present value must be a well-formed program (canonical
+        // standard base64 of a parseable blob, bounded by
+        // ExecutionChallengeGenerator::MAX_PROGRAM_BASE64), otherwise the
+        // record cannot be verified against its execution dimension and
+        // is corrupt or foreign.
+        if (isset($data['execution_program']) && $data['execution_program'] !== null) {
+            self::requireString($data['execution_program'], 'execution_program');
+            if (\strlen($data['execution_program']) > ExecutionChallengeGenerator::MAX_PROGRAM_BASE64) {
+                throw MalformedRecordException::oversized('execution_program', \strlen($data['execution_program']));
+            }
+            if (!ExecutionChallengeGenerator::isValidProgram($data['execution_program'])) {
+                throw MalformedRecordException::invalidExecutionProgram();
+            }
+        }
+
         // The protocol-vs-decoy grammar: the decoy segment is a protocol
         // v3 canonical extension, and the grammar is total: v2 => no
         // decoy, v3 => decoy present. A v2 record that carries
@@ -491,6 +527,9 @@ final class ChallengeRecord
             // The armed decoy (honeypot) name, or null for the legacy
             // shape (absent key / JSON null).
             decoyField: $data['decoy_field'] ?? null,
+            // The armed ExecutionChallengeV1 program, or null for the
+            // legacy shape (absent key / JSON null).
+            executionProgram: $data['execution_program'] ?? null,
         );
     }
 

@@ -32,9 +32,9 @@ use Symfony\Component\Routing\RouteCollection;
  *  -  GET   {prefix}/assets/{name}.{hash}.{js|css}
  *                                      (the versioned immutable widget
  *                                       assets of asset_mode "files":
- *                                       runtime/widget/driver/worker, served
- *                                       with a long immutable cache
- *                                       lifetime).
+ *                                       runtime/widget/driver/worker/
+ *                                       execution, served with a long
+ *                                       immutable cache lifetime).
  *  - GET   {prefix}/health/live        (liveness, always 200).
  *  - GET   {prefix}/health/ready       (readiness, 200 only when signing
  *                                       keys + security Redis + the central
@@ -101,20 +101,21 @@ final class KiwiCaptchaRouteLoader extends Loader
         ));
 
         // The versioned immutable asset route (asset_mode "files"): the
-        // theme emits {prefix}/assets/{name}.{sha256-12}.{js|css} URLs and
+        // theme emits {prefix}/assets/{name}.{sha256-64}.{js|css} URLs and
         // the controller serves the exact inline-mode bytes with a long
-        // immutable cache lifetime, an exact content hash in the URL, the
-        // content-hash ETag and the Content-Length. The hash is
+        // immutable cache lifetime, the full 256-bit content hash in the
+        // URL, the content-hash ETag and the Content-Length. The hash is
         // validated before any bytes are served; an unknown hash is a 404.
         // The `name` constraint is the complete asset set: the widget css,
-        // the driver js, the lazy WASM runtime js and the same-origin
-        // worker js. A Twig-emitted URL must always match this route (the
-        // KernelBrowser invariant test asserts every rendered URL is
-        // routable), so the constraint is the four names, never a subset.
+        // the driver js, the lazy WASM runtime js, the same-origin worker
+        // js and the lazy execution interpreter js. A Twig-emitted URL
+        // must always match this route (the KernelBrowser invariant test
+        // asserts every rendered URL is routable), so the constraint is
+        // the five names, never a subset.
         $routes->add('kiwicaptcha_asset', new Route(
             $prefix.'/assets/{name}.{hash}.{extension}',
             ['_controller' => [AssetController::class, 'asset']],
-            ['name' => 'runtime|widget|driver|worker', 'hash' => '[0-9a-f]{12}', 'extension' => 'js|css'],
+            ['name' => 'execution|runtime|widget|driver|worker', 'hash' => '[0-9a-f]{64}', 'extension' => 'js|css'],
             [],
             '',
             [],

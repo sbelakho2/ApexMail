@@ -78,12 +78,12 @@ final class StrictParserTest extends TestCase
         self::assertNull($record->requestBinding);
         self::assertNull($record->issuer);
         self::assertSame(1, $record->kid, 'kid defaults to 1 on the wire');
-        self::assertSame(24, \count(ChallengeRecord::WIRE_KEYS));
-        // An unarmed record omits the optional decoy_field key entirely
-        // (the skip_serializing_if mirror), so toArray() emits exactly the
-        // 23 always-present keys.
+        self::assertSame(25, \count(ChallengeRecord::WIRE_KEYS));
+        // An unarmed record omits the optional decoy_field and
+        // execution_program keys entirely (the skip_serializing_if
+        // mirror), so toArray() emits exactly the 23 always-present keys.
         self::assertSame(
-            \array_values(\array_diff(ChallengeRecord::WIRE_KEYS, ['decoy_field'])),
+            \array_values(\array_diff(ChallengeRecord::WIRE_KEYS, ['decoy_field', 'execution_program'])),
             \array_keys($record->toArray()),
         );
         self::assertNull($record->decoyField);
@@ -344,17 +344,17 @@ final class StrictParserTest extends TestCase
         self::assertSame('QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY', $record->salt);
     }
 
-    public function testWireKeySetIsPinnedTo24(): void
+    public function testWireKeySetIsPinnedTo25(): void
     {
-        // decoy_field is the one Option key omitted from toArray() when
-        // null (the Rust skip_serializing_if mirror); every other key is
-        // always present.
+        // decoy_field and execution_program are the two Option keys
+        // omitted from toArray() when null (the Rust
+        // skip_serializing_if mirror); every other key is always present.
         self::assertSame([
             'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
             'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
             'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
             'attempts_used', 'region', 'policy_version', 'request_binding',
-            'issuer', 'kid', 'hostname', 'decoy_field',
+            'issuer', 'kid', 'hostname', 'decoy_field', 'execution_program',
         ], ChallengeRecord::WIRE_KEYS);
     }
 

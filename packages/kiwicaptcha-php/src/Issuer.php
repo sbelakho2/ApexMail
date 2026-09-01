@@ -178,6 +178,7 @@ final class Issuer
             policyVersion: $c->policyVersion,
             issuer: $c->issuer,
             kid: $c->kid,
+            executionKey: $c->executionKey,
         );
 
         return new self($clone, $this->storage, $this->now, $this->region);
@@ -237,6 +238,9 @@ final class Issuer
         ?string $requestBinding = null,
         ?string $hostname = null,
         ?string $decoyNameOverride = null,
+        bool $armExecution = false,
+        ?string $executionAction = null,
+        string $executionVersion = '1',
     ): Challenge {
         if ($decoyNameOverride !== null && !Config::isValidDecoyFieldName($decoyNameOverride)) {
             throw new \InvalidArgumentException('decoy name override must be 1-64 characters of [A-Za-z0-9_-]');
@@ -248,6 +252,79 @@ final class Issuer
             $requestBinding,
             $hostname,
             $armDecoyField ? ($decoyNameOverride ?? self::pickDecoyField()) : null,
+            $armExecution,
+            $executionAction,
+            $executionVersion,
+        );
+    }
+
+    /**
+     * Issue a challenge with the ExecutionChallengeV1 dimension armed,
+     * the browser-execution surface of the adaptive-risk layer.
+     * When `$armExecution` is true the issuer generates a deterministic
+     * bytecode program from the challenge context via
+     * {@see ExecutionChallengeGenerator::generate()}, stamps it on the
+     * stored record's `execution_program` and on the client-facing
+     * {@see Challenge::$executionProgram}, base64, omitted when
+     * unarmed. The driver runs the program in its sandboxed ephemeral
+     * interpreter and presents the resulting execution digest with the
+     * solution token. The verifier recomputes the expected digest from
+     * the stored program and rejects a mismatch with the deterministic
+     * ExecutionMismatch outcome. The dimension is supplementary
+     * evidence only, never the sole acceptance boundary. The PoW proof
+     * and the record state machinery still gate.
+     *
+     * Arming requires the configured execution_key (see
+     * {@see Config::$executionKey}); arming without the key throws
+     * {@see \InvalidArgumentException}, so a deployment cannot arm the
+     * dimension by accident. `$executionAction` is the provider-style
+     * action of the request, 1..32 chars of [A-Za-z0-9._:-], default
+     * "default", and `$executionVersion` the dimension protocol
+     * version, default 1. Both are embedded in the program and bound by
+     * the digest.
+     *
+     * @throws \InvalidArgumentException when arming without an
+     *                                   execution_key, or with an invalid
+     *                                   action/version
+     */
+    public function issueWithExecutionField(
+        string $scope,
+        string $clientIp,
+        bool $armExecution,
+        ?string $requestBinding = null,
+        ?string $hostname = null,
+        ?string $executionAction = null,
+        string $executionVersion = '1',
+        bool $armDecoyField = false,
+        ?string $decoyNameOverride = null,
+        ?ChallengeProfile $profile = null,
+    ): Challenge {
+        if ($profile !== null) {
+            return $this->issueWithProfile(
+                $scope,
+                $clientIp,
+                $profile,
+                requestBinding: $requestBinding,
+                hostname: $hostname,
+                armDecoyField: $armDecoyField,
+                armExecution: $armExecution,
+                executionAction: $executionAction,
+                executionVersion: $executionVersion,
+            );
+        }
+        if ($decoyNameOverride !== null && !Config::isValidDecoyFieldName($decoyNameOverride)) {
+            throw new \InvalidArgumentException('decoy name override must be 1-64 characters of [A-Za-z0-9_-]');
+        }
+
+        return $this->issueChallenge(
+            $scope,
+            $clientIp,
+            $requestBinding,
+            $hostname,
+            $armDecoyField ? ($decoyNameOverride ?? self::pickDecoyField()) : null,
+            $armExecution,
+            $executionAction,
+            $executionVersion,
         );
     }
 
@@ -374,7 +451,11 @@ final class Issuer
     /**
      * The shared issuance body, see the {@see self::issue()} contract;
      * `$decoyField` is the already-picked honeypot name, or null for the
-     * legacy unarmed path.
+     * legacy unarmed path. `$armExecution` arms the
+     * ExecutionChallengeV1 dimension (see
+     * {@see self::issueWithExecutionField()}): the program is generated
+     * from the challenge context after the nonce exists. The program
+     * binds the nonce, so it can only be minted inside issuance.
      */
     private function issueChallenge(
         string $scope,
@@ -382,6 +463,9 @@ final class Issuer
         ?string $requestBinding,
         ?string $hostname,
         ?string $decoyField,
+        bool $armExecution = false,
+        ?string $executionAction = null,
+        string $executionVersion = '1',
     ): Challenge {
         $scopeLen = \strlen($scope);
         if ($scopeLen < 1 || $scopeLen > 128) {
@@ -444,6 +528,27 @@ final class Issuer
         $challenge = base64_encode($payload).'.'.$signature;
         $prefix = $challenge.'|'.$salt.'|';
 
+        // The ExecutionChallengeV1 program, minted from the challenge
+        // context once the nonce exists (the program binds the nonce).
+        // Arming without the configured execution_key is a
+        // misconfiguration and refuses the issuance: the execution
+        // dimension can never be armed by accident.
+        $executionProgram = null;
+        if ($armExecution) {
+            if ($this->config->executionKey === null) {
+                throw new \InvalidArgumentException(
+                    'execution challenges are armed but no execution_key is configured'
+                );
+            }
+            $executionProgram = ExecutionChallengeGenerator::generate(
+                $this->config->executionKey,
+                $nonce,
+                $scope,
+                $executionAction ?? 'default',
+                $executionVersion,
+            );
+        }
+
         $record = new ChallengeRecord(
             nonce: $nonce,
             scope: $scope,
@@ -476,6 +581,7 @@ final class Issuer
             issuer: $this->config->issuer,
             kid: $this->config->kid,
             decoyField: $decoyField,
+            executionProgram: $executionProgram,
         );
         $this->storage->store($record);
 
@@ -492,6 +598,7 @@ final class Issuer
             minDurationMs: $minDurationMs,
             prefix: $prefix,
             decoyField: $decoyField,
+            executionProgram: $executionProgram,
         );
     }
 
@@ -525,6 +632,9 @@ final class Issuer
         ?string $requestBinding = null,
         ?string $hostname = null,
         bool $armDecoyField = false,
+        bool $armExecution = false,
+        ?string $executionAction = null,
+        string $executionVersion = '1',
     ): Challenge {
         $profile->validate();
 
@@ -575,13 +685,14 @@ final class Issuer
             policyVersion: $this->config->policyVersion,
             issuer: $this->config->issuer,
             kid: $this->config->kid,
+            executionKey: $this->config->executionKey,
         );
         $nowFn = $now !== null ? static fn (): int => $now : $this->now;
 
         // The hostname (server-owned issuance metadata) must
         // survive the profile path.
         return (new self($config, $this->storage, $nowFn, $this->region))
-            ->issueWithDecoyField($scope, $clientIp, $armDecoyField, $requestBinding, $hostname);
+            ->issueWithDecoyField($scope, $clientIp, $armDecoyField, $requestBinding, $hostname, null, $armExecution, $executionAction, $executionVersion);
     }
 
     /**

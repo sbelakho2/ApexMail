@@ -33,6 +33,7 @@ fn sha_config(target_bits: u32) -> ChallengeConfig {
     ChallengeConfig {
         secret_key: SECRET.into(),
         kid: 1,
+        execution_key: None,
         algorithm: PoWAlgorithm::Sha256,
         m_kib: 0,
         t: 1,
@@ -61,6 +62,7 @@ fn byte_mutations_never_panic_on_any_parse_path() {
         counter: 1,
         duration_ms: 5000,
         telemetry: serde_json::json!({"v": 2, "mode": "full", "wd": false, "me": 1, "ke": 2}),
+        execution_digest: None,
     }
     .encode()
     .into_bytes();
@@ -105,6 +107,7 @@ fn byte_mutations_never_panic_on_any_parse_path() {
                 expected_issuer: None,
                 expected_policy_version: None,
                 client_ip: Some(IP),
+                execution_digest: None,
                 telemetry: None,
                 enforce_telemetry: false,
                 max_attempts: 0,

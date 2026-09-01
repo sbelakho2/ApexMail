@@ -48,6 +48,13 @@ final class Challenge
         // The armed decoy (honeypot) form-field name; null = no decoy
         // (the legacy wire shape — the key is omitted when null).
         public readonly ?string $decoyField = null,
+        // The armed ExecutionChallengeV1 program (base64 of the bytecode
+        // blob); null = no execution dimension (the legacy wire shape —
+        // the key is omitted when null). Present only when the server
+        // armed the dimension, see Issuer::issueWithExecutionField();
+        // the driver runs it and presents the resulting digest with the
+        // solution token.
+        public readonly ?string $executionProgram = null,
     ) {
     }
 
@@ -73,6 +80,12 @@ final class Challenge
         // unarmed responses keep the exact pre-decoy byte format.
         if ($this->decoyField !== null) {
             $data['decoy_field'] = $this->decoyField;
+        }
+        // The execution program key is absent when the dimension is not
+        // armed: old clients ignore the new key and unarmed responses
+        // keep the exact pre-execution byte format.
+        if ($this->executionProgram !== null) {
+            $data['execution_program'] = $this->executionProgram;
         }
 
         return $data;

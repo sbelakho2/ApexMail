@@ -36,6 +36,7 @@ fn config() -> ChallengeConfig {
         region: None,                     // Some("eu") for region-bound deployments
         issuer: None,                     // Some("auth-gateway") to pin the issuer
         kid: 1,                           // single-key deployment
+        execution_key: None,              // ExecutionChallengeV1 off (no key)
     }
 }
 
@@ -65,6 +66,7 @@ fn quickstart() -> Result<(), String> {
         counter,
         duration_ms: 1,
         telemetry: serde_json::json!({}), // telemetry is OFF by default -> empty object
+        execution_digest: None,
     };
     let raw = token.encode();
     let decoded = SolutionToken::decode(&raw).map_err(|e| format!("token decode failed: {e}"))?;
@@ -92,6 +94,7 @@ fn quickstart() -> Result<(), String> {
         expected_issuer: None,
         expected_policy_version: Some(1),
         client_ip: Some("203.0.113.7"), // must match the issuance IP (Bound mode)
+        execution_digest: None,
         telemetry: Some(&decoded.telemetry),
         enforce_telemetry: false, // default widget sends no telemetry — never reject on it
         accept_legacy_v1: false,  // v2 is the only issued format

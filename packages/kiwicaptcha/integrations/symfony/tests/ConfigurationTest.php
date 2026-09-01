@@ -1231,4 +1231,122 @@ final class ConfigurationTest extends TestCase
 
         $this->process(['asset_mode' => 'cdn']);
     }
+
+    // ── Route prefix canonicalization (route_prefix) ──────────────────────
+
+    public function testRoutePrefixDefaultsToKiwiCaptcha(): void
+    {
+        self::assertSame('/kiwi-captcha', $this->process()['route_prefix'], 'the default prefix is unchanged: /kiwi-captcha');
+    }
+
+    /**
+     * The canonical form: a leading "/", no trailing slash. A configured
+     * trailing slash normalizes away, so with and without it the processed
+     * value is identical — every consumer (the route loader, the Twig
+     * runtime, the form type and the container parameter) sees exactly one
+     * canonical prefix.
+     */
+    public function testRoutePrefixTrailingSlashNormalizesIdentically(): void
+    {
+        self::assertSame('/kiwi-captcha', $this->process(['route_prefix' => '/kiwi-captcha'])['route_prefix']);
+        self::assertSame('/kiwi-captcha', $this->process(['route_prefix' => '/kiwi-captcha/'])['route_prefix'], 'a single trailing slash is normalized away');
+        self::assertSame('/security/captcha', $this->process(['route_prefix' => '/security/captcha/'])['route_prefix']);
+        self::assertSame('/a/b/c', $this->process(['route_prefix' => '/a/b/c/'])['route_prefix']);
+    }
+
+    public function testRoutePrefixRequiresALeadingSlash(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+        $this->expectExceptionMessage('begin with "/"');
+
+        $this->process(['route_prefix' => 'kiwi-captcha']);
+    }
+
+    public function testRoutePrefixRejectsDoubleSlashSequences(): void
+    {
+        try {
+            $this->process(['route_prefix' => '/kiwi//captcha']);
+            self::fail('an internal "//" must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('"//"', $e->getMessage());
+        }
+
+        try {
+            $this->process(['route_prefix' => '/kiwi/captcha//']);
+            self::fail('a trailing "//" must be refused (only ONE trailing slash is normalized away)');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('"//"', $e->getMessage());
+        }
+    }
+
+    public function testRoutePrefixRejectsDotPathSegments(): void
+    {
+        foreach (['/kiwi/./captcha', '/kiwi/../captcha', '/./kiwi', '/../kiwi'] as $malformed) {
+            try {
+                $this->process(['route_prefix' => $malformed]);
+                self::fail(sprintf('the dot segment %s must be refused', $malformed));
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('"." or ".."', $e->getMessage());
+            }
+        }
+    }
+
+    public function testRoutePrefixRejectsBackslashes(): void
+    {
+        try {
+            $this->process(['route_prefix' => '/kiwi\\captcha']);
+            self::fail('a backslash must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('backslashes', $e->getMessage());
+        }
+    }
+
+    public function testRoutePrefixRejectsQueryStringsAndFragments(): void
+    {
+        foreach (['/kiwi-captcha?next=/x', '/kiwi-captcha#frag'] as $malformed) {
+            try {
+                $this->process(['route_prefix' => $malformed]);
+                self::fail(sprintf('%s must be refused', $malformed));
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('must not contain', $e->getMessage());
+            }
+        }
+    }
+
+    public function testRoutePrefixRejectsControlCharacters(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+        $this->expectExceptionMessage('control characters');
+
+        $this->process(['route_prefix' => "/kiwi-\x07captcha"]);
+    }
+
+    public function testRoutePrefixRejectsPercentEncodedPathAmbiguity(): void
+    {
+        foreach (['/kiwi%2Fcaptcha', '/%2e%2e/captcha', '/kiwi%5Ccaptcha', '/kiwi%20captcha'] as $malformed) {
+            try {
+                $this->process(['route_prefix' => $malformed]);
+                self::fail(sprintf('%s must be refused (percent-encoded path ambiguity)', $malformed));
+            } catch (InvalidConfigurationException $e) {
+                self::assertStringContainsString('"%', $e->getMessage());
+            }
+        }
+    }
+
+    public function testRoutePrefixRejectsEmptyAndBareRootValues(): void
+    {
+        try {
+            $this->process(['route_prefix' => '']);
+            self::fail('an empty prefix must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('non-empty', $e->getMessage());
+        }
+
+        try {
+            $this->process(['route_prefix' => '/']);
+            self::fail('the bare root "/" must be refused (it normalizes to an empty prefix)');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('bare root', $e->getMessage());
+        }
+    }
 }

@@ -27,13 +27,13 @@ final class AssetControllerTest extends TestCase
         return new AssetController(self::ASSETS_DIR);
     }
 
-    /** @return array{0: string, 1: string, 2: string} [name, url hash, full sha256] */
+    /** @return array{0: string, 1: string, 2: string} [name, url hash (the full 256-bit sha256 hex), full sha256] */
     private function assetFixture(string $name, string $file, string $ext): array
     {
         $body = (string) file_get_contents(self::ASSETS_DIR.'/'.$file);
         $full = hash('sha256', $body);
 
-        return [$name, substr($full, 0, 12), $full];
+        return [$name, $full, $full];
     }
 
     private function assertImmutableCache(Response $response): void
@@ -65,6 +65,7 @@ final class AssetControllerTest extends TestCase
         yield 'runtime js' => ['runtime', 'kiwicaptcha-wasm.js', 'js', 'application/javascript; charset=UTF-8'];
         yield 'driver js' => ['driver', 'widget-driver.js', 'js', 'application/javascript; charset=UTF-8'];
         yield 'worker js' => ['worker', 'kiwi-worker.js', 'js', 'application/javascript; charset=UTF-8'];
+        yield 'execution js' => ['execution', 'execution-interpreter.js', 'js', 'application/javascript; charset=UTF-8'];
     }
 
     public function testUnknownHashIs404(): void
@@ -72,7 +73,7 @@ final class AssetControllerTest extends TestCase
         [$name, , ] = $this->assetFixture('driver', 'widget-driver.js', 'js');
 
         $this->expectException(NotFoundHttpException::class);
-        $this->controller()->asset(new Request(), $name, '000000000000', 'js');
+        $this->controller()->asset(new Request(), $name, str_repeat('0', 64), 'js');
     }
 
     public function testWrongNameExtensionPairIs404(): void
@@ -86,7 +87,7 @@ final class AssetControllerTest extends TestCase
     public function testUnknownAssetNameIs404(): void
     {
         $this->expectException(NotFoundHttpException::class);
-        $this->controller()->asset(new Request(), 'logo', '0123456789ab', 'js');
+        $this->controller()->asset(new Request(), 'logo', str_repeat('0', 64), 'js');
     }
 
     public function testIfNoneMatchReturns304(): void

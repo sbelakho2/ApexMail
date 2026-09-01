@@ -224,8 +224,8 @@ echo "assets/kiwicaptcha-wasm.js regenerated"
 # resources/ directory (cargo package verification builds the tarball in
 # isolation and cannot reach outside the crate) — keep the copies
 # byte-identical; CI enforces it (widget-assets parity job).
-cp assets/widget-driver.js assets/widget.css assets/kiwicaptcha-wasm.js assets/kiwi-worker.js ../kiwicaptcha/resources/
-cp assets/widget-driver.js assets/widget.css assets/kiwicaptcha-wasm.js assets/kiwi-worker.js ../kiwicaptcha/integrations/symfony/Resources/public/
+cp assets/widget-driver.js assets/widget.css assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/execution-interpreter.js ../kiwicaptcha/resources/
+cp assets/widget-driver.js assets/widget.css assets/kiwicaptcha-wasm.js assets/kiwi-worker.js assets/execution-interpreter.js ../kiwicaptcha/integrations/symfony/Resources/public/
 echo "kiwicaptcha core + symfony public resources synced"
 
 # Byte-parity enforcement: every mirrored destination must be byte-identical
@@ -233,7 +233,7 @@ echo "kiwicaptcha core + symfony public resources synced"
 # released bytes on every installation path. CI enforces the same parity.
 MIRROR_FAILED=0
 for mirror in ../kiwicaptcha/resources ../kiwicaptcha/integrations/symfony/Resources/public; do
-  for f in widget-driver.js widget.css kiwicaptcha-wasm.js kiwi-worker.js; do
+  for f in widget-driver.js widget.css kiwicaptcha-wasm.js kiwi-worker.js execution-interpreter.js; do
     if ! cmp -s "assets/$f" "$mirror/$f"; then
       echo "ASSET PARITY FAILED: $mirror/$f differs from assets/$f" >&2
       MIRROR_FAILED=1

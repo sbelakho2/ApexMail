@@ -223,6 +223,7 @@ fn sha_config(target_bits: u32) -> ChallengeConfig {
     ChallengeConfig {
         secret_key: SECRET.into(),
         kid: 1,
+        execution_key: None,
         algorithm: PoWAlgorithm::Sha256,
         m_kib: 0,
         t: 1,
@@ -245,6 +246,7 @@ fn argon_config(target_bits: u32) -> ChallengeConfig {
     ChallengeConfig {
         secret_key: SECRET.into(),
         kid: 1,
+        execution_key: None,
         algorithm: PoWAlgorithm::Argon2id,
         m_kib: 128,
         t: 3,
@@ -277,6 +279,7 @@ fn encode_token(nonce: &str, counter: u64) -> String {
         counter,
         duration_ms: 5000,
         telemetry: serde_json::json!({}),
+        execution_digest: None,
     }
     .encode()
 }
@@ -3450,6 +3453,7 @@ fn verifier_secrets_by_kid_selects_the_secret_and_rejects_unknown_kids() {
     let issued = issue_challenge(
         &ChallengeConfig {
             kid: 2,
+            execution_key: None,
             ..ChallengeConfig {
                 secret_key: key_b.into(),
                 ..sha_config(4)
@@ -3894,6 +3898,7 @@ fn revoked_kid_is_rejected_before_signature_checks() {
     let issued = issue_challenge(
         &ChallengeConfig {
             kid: 2,
+            execution_key: None,
             ..ChallengeConfig {
                 secret_key: key_b.into(),
                 ..sha_config(4)

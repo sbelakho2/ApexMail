@@ -9,7 +9,11 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
 
 /**
  * Test kernel with a non-default challenge route prefix, exercising the
- * auto-registered route's configured-path behavior.
+ * auto-registered route's configured-path behavior. The configured value
+ * deliberately carries a trailing slash: the configuration tree
+ * canonicalizes it (single canonical form, no trailing slash), so every
+ * consumer — the route loader, the Twig runtime, the form type and the
+ * container parameter — sees exactly '/security/captcha'.
  */
 final class PrefixedTestKernel extends TestKernel
 {
@@ -29,7 +33,7 @@ final class PrefixedTestKernel extends TestKernel
             $container->loadFromExtension('kiwi_captcha', [
                 'secret_key' => self::SECRET,
                 'difficulty_bits' => 8,
-                'route_prefix' => '/security/captcha',
+                'route_prefix' => '/security/captcha/',
             ]);
         });
     }

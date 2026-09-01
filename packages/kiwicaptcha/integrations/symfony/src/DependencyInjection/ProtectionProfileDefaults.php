@@ -100,6 +100,7 @@ final class ProtectionProfileDefaults
                 'enabled' => false,
                 'decoy_v3_enabled' => false,
                 'client_context' => false,
+                'execution_challenge' => 'off',
                 'hard_limits' => ['process_per_second' => 10000],
                 'max_outstanding_challenges' => 20,
                 'max_outstanding_challenges_global' => 100000,
@@ -126,6 +127,11 @@ final class ProtectionProfileDefaults
                 'enabled' => false,
                 'decoy_v3_enabled' => false,
                 'client_context' => false,
+                // The privacy_strict profile forces the execution
+                // dimension off. finalize() re-asserts it after the
+                // merge, so an explicit override in any config layer
+                // cannot re-arm it under the profile.
+                'execution_challenge' => 'off',
                 'hard_limits' => ['process_per_second' => 10000],
                 'max_outstanding_challenges' => 20,
                 'max_outstanding_challenges_global' => 100000,
@@ -152,6 +158,7 @@ final class ProtectionProfileDefaults
                 'enabled' => true,
                 'decoy_v3_enabled' => true,
                 'client_context' => false,
+                'execution_challenge' => 'on',
                 'hard_limits' => ['process_per_second' => 5000],
                 'max_outstanding_challenges' => 10,
                 'max_outstanding_challenges_global' => 250000,
@@ -186,6 +193,7 @@ final class ProtectionProfileDefaults
                 'enabled' => false,
                 'decoy_v3_enabled' => false,
                 'client_context' => false,
+                'execution_challenge' => 'off',
                 'hard_limits' => ['process_per_second' => 10000],
                 'max_outstanding_challenges' => 20,
                 'max_outstanding_challenges_global' => 100000,
@@ -207,6 +215,7 @@ final class ProtectionProfileDefaults
                 'enabled' => false,
                 'decoy_v3_enabled' => false,
                 'client_context' => false,
+                'execution_challenge' => 'off',
                 'hard_limits' => ['process_per_second' => 10000],
                 'max_outstanding_challenges' => 20,
                 'max_outstanding_challenges_global' => 100000,
@@ -295,20 +304,30 @@ final class ProtectionProfileDefaults
     }
 
     /**
-     * Post-processing chaining postcondition (an extension post-step,
-     * run after the Processor merge over the whole stack). The
-     * high_abuse profile engages chained step-up only when the final
-     * merged configuration carries a `risk.request_binding_authority`;
-     * the chain anchor is the authoritative transaction binding, never
-     * an unexamined client string. With the authority absent, chaining
-     * stays at its tree default (false) — mirroring the historical
-     * conditional semantics, with one deliberate improvement: the
-     * authority may now live in any configuration layer, not only the
-     * layer carrying the profile. An explicit
-     * `risk.chaining.enabled` in any raw layer always wins (the
-     * tree's own validation refuses the explicit combination without
-     * an authority at compile time, so a configuration error is never
-     * silently ignored).
+     * Post-processing postconditions (extension post-steps, run after
+     * the Processor merge over the whole stack).
+     *
+     * 1. The high_abuse profile engages chained step-up only when the
+     *    final merged configuration carries a
+     *    `risk.request_binding_authority`; the chain anchor is the
+     *    authoritative transaction binding, never an unexamined client
+     *    string. With the authority absent, chaining stays at its tree
+     *    default (false) — mirroring the historical conditional
+     *    semantics, with one deliberate improvement: the authority may
+     *    now live in any configuration layer, not only the layer
+     *    carrying the profile. An explicit `risk.chaining.enabled` in
+     *    any raw layer always wins (the tree's own validation refuses
+     *    the explicit combination without an authority at compile time,
+     *    so a configuration error is never silently ignored).
+     *
+     * 2. The privacy_strict profile forces `risk.execution_challenge`
+     *    off. The profile's derived default is off, the lowest-
+     *    precedence layer, and this post-step re-asserts it after the
+     *    merge, so an explicit `risk.execution_challenge: on` in any
+     *    config layer cannot re-arm the browser-execution dimension
+     *    under the strongest first-party privacy posture. The force is
+     *    unconditional. An operator who wants the dimension must
+     *    change the profile, never an override.
      *
      * @param array<string, mixed>                $config     the processed configuration
      * @param array<int, array<string, mixed>> $rawConfigs the raw stack, for the explicit-setting scan
@@ -317,6 +336,9 @@ final class ProtectionProfileDefaults
      */
     public static function finalize(array $config, array $rawConfigs): array
     {
+        if (self::selectedProfile($rawConfigs) === 'privacy_strict') {
+            $config['risk']['execution_challenge'] = 'off';
+        }
         if (self::selectedProfile($rawConfigs) !== 'high_abuse'
             || ($config['risk']['request_binding_authority'] ?? null) === null
         ) {

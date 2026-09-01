@@ -25,5 +25,6 @@ cp "$ROOT/packages/kiwicaptcha-wasm/assets/kiwicaptcha-wasm.js" "$DEST/kiwicaptc
 cp "$ROOT/packages/kiwicaptcha-wasm/assets/kiwi-worker.js"       "$DEST/kiwi-worker.js"
 cp "$ROOT/packages/kiwicaptcha-wasm/assets/widget-driver.js"   "$DEST/widget-driver.js"
 cp "$ROOT/packages/kiwicaptcha-wasm/assets/widget.css"          "$DEST/widget.css"
+cp "$ROOT/packages/kiwicaptcha-wasm/assets/execution-interpreter.js" "$DEST/execution-interpreter.js"
 
 echo "Widget assets synced to $DEST"

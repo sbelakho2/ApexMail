@@ -30,6 +30,9 @@ use KiwiCaptcha\Verifier;
 
 $secret = '0123456789abcdef0123456789abcdef';
 $GLOBALS['kiwi_secret'] = $secret;
+// The ExecutionChallengeV1 fixture key (a dedicated key, mirroring the
+// bundle's kiwi_captcha.execution_key): armed only under ?execution=1.
+$GLOBALS['kiwi_execution_secret'] = 'fedcba9876543210fedcba9876543210';
 $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
 
 // php -S re-includes this router per request, so in-process state is lost —
@@ -726,7 +729,7 @@ function recoverIssuedResponse(string $stage2Nonce): ?array
  * core enforces, so a malformed override falls back to the default
  * instead of crashing the fixture.
  */
-function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm, bool $armDecoy = false, ?int $ttlOverride = null, ?string $pinnedDecoy = null, int $shaBits = 8, int $argonBits = 4, int $argonMKib = 64): ?array
+function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm, bool $armDecoy = false, ?int $ttlOverride = null, ?string $pinnedDecoy = null, int $shaBits = 8, int $argonBits = 4, int $argonMKib = 64, bool $armExecution = false, ?string $executionAction = null): ?array
 {
     $shaBits = min(max($shaBits, 1), Config::MAX_SHA_TARGET_BITS);
     $argonBits = min(max($argonBits, 1), Config::MAX_ARGON2_TARGET_BITS);
@@ -741,12 +744,24 @@ function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm,
         targetBits: $shaBits,
         argon2TargetBits: $argonBits,
         minDurationMs: 0,
+        // The ExecutionChallengeV1 keyed-PRF key: the fixture uses a
+        // dedicated key (the mirror of kiwi_captcha.execution_key), so
+        // the execution dimension is armed only under ?execution=1 and
+        // never by accident.
+        executionKey: $GLOBALS['kiwi_execution_secret'],
     );
     $storage = new ArrayStorage();
     $issuer = new Issuer($config, $storage, now: static fn (): int => time());
-    $challenge = $armDecoy
-        ? $issuer->issueWithDecoyField($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), true, $binding, null, $pinnedDecoy)
-        : $issuer->issue($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), $binding);
+    if ($armExecution) {
+        // The armed issuance path: program generated from the challenge
+        // context (nonce/scope/action/version), stamped on the record
+        // AND the response; the driver runs it and presents the digest.
+        $challenge = $issuer->issueWithExecutionField($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), true, $binding, null, $executionAction ?? 'default', '1', $armDecoy, $pinnedDecoy);
+    } else {
+        $challenge = $armDecoy
+            ? $issuer->issueWithDecoyField($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), true, $binding, null, $pinnedDecoy)
+            : $issuer->issue($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), $binding);
+    }
     $record = $storage->find($challenge->nonce);
     if ($record === null) {
         return null;
@@ -1019,7 +1034,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     $shaBits = ctype_digit((string) ($_GET['bits'] ?? '')) ? (int) $_GET['bits'] : 8;
     $argonBits = ctype_digit((string) ($_GET['argon_bits'] ?? '')) ? (int) $_GET['argon_bits'] : 4;
     $argonMKib = ctype_digit((string) ($_GET['m_kib'] ?? '')) ? (int) $_GET['m_kib'] : 64;
-    $challenge = mintChallenge($scope, $presentedBinding, $algorithm, ($_GET['decoy'] ?? '') === 'pool', $ttlOverride, $pinnedDecoy, $shaBits, $argonBits, $argonMKib);
+    // The ExecutionChallengeV1 fixture seam (?execution=1): the mirror
+    // of the bundle's risk.execution_challenge gate — the challenge
+    // response carries an execution program the driver must run (the
+    // digest rides the solution token; the fixture's /verify recomputes
+    // the expected digest from the stored program).
+    $armExecution = ($_GET['execution'] ?? '') === '1';
+    $executionAction = isset($body['action']) && is_string($body['action']) ? $body['action'] : null;
+    $challenge = mintChallenge($scope, $presentedBinding, $algorithm, ($_GET['decoy'] ?? '') === 'pool', $ttlOverride, $pinnedDecoy, $shaBits, $argonBits, $argonMKib, $armExecution, $executionAction);
     if ($challenge === null) {
         http_response_code(500);
         echo '{"error":"record missing"}';
@@ -1455,10 +1477,10 @@ if ($path === '/kiwi-worker.js' || $path === '/kiwicaptcha-wasm.js' || $path ===
 }
 
 // ── Files-mode versioned asset route (asset_mode "files") ──────────────
-// GET /kiwi-captcha/assets/{name}.{sha256-12}.{js|css} serves the exact
-// bytes the inline page embeds, with the content hash in the URL, a long
-// immutable cache lifetime, the Content-Length and the content-hash
-// ETag. An unknown hash is a 404, exactly like the bundle's
+// GET /kiwi-captcha/assets/{name}.{sha256-64}.{js|css} serves the exact
+// bytes the inline page embeds, with the full 256-bit content hash in the
+// URL, a long immutable cache lifetime, the Content-Length and the
+// content-hash ETag. An unknown hash is a 404, exactly like the bundle's
 // AssetController (the fixture mirrors the bundle route; the spec asserts
 // the headers, the 404 and the 304 revalidation).
 $assetSpecs = [
@@ -1466,8 +1488,9 @@ $assetSpecs = [
     'runtime' => ['file' => 'kiwicaptcha-wasm.js', 'type' => 'application/javascript; charset=UTF-8'],
     'driver' => ['file' => 'widget-driver.js', 'type' => 'application/javascript; charset=UTF-8'],
     'worker' => ['file' => 'kiwi-worker.js', 'type' => 'application/javascript; charset=UTF-8'],
+    'execution' => ['file' => 'execution-interpreter.js', 'type' => 'application/javascript; charset=UTF-8'],
 ];
-if (preg_match('~^/kiwi-captcha/assets/(widget|runtime|driver|worker)\.([0-9a-f]{12})\.(js|css)$~', $path, $m) === 1) {
+if (preg_match('~^/kiwi-captcha/assets/(widget|runtime|driver|worker|execution)\.([0-9a-f]{64})\.(js|css)$~', $path, $m) === 1) {
     [, $assetName, $assetHash, $assetExt] = $m;
     $spec = $assetSpecs[$assetName];
     if (($assetName === 'widget' ? 'css' : 'js') !== $assetExt) {
@@ -1484,7 +1507,9 @@ if (preg_match('~^/kiwi-captcha/assets/(widget|runtime|driver|worker)\.([0-9a-f]
         return true;
     }
     $assetFull = hash('sha256', $assetBody);
-    if (!hash_equals(substr($assetFull, 0, 12), $assetHash)) {
+    // The URL hash is the full 256-bit digest, the same value as the
+    // ETag below, so a URL can only address the exact served bytes.
+    if (!hash_equals($assetFull, $assetHash)) {
         http_response_code(404);
         echo 'not found';
 
@@ -1590,6 +1615,7 @@ if ($path === '/' || $path === '/index.html') {
     if (($_GET['ttl'] ?? '') !== '') $endpointQuery[] = 'ttl='.rawurlencode((string) $_GET['ttl']);
     if (($_GET['capture'] ?? '') !== '') $endpointQuery[] = 'capture='.rawurlencode((string) $_GET['capture']);
     if (($_GET['escalate'] ?? '') === 'argon') $endpointQuery[] = 'escalate=argon';
+    if (($_GET['execution'] ?? '') === '1') $endpointQuery[] = 'execution=1';
     // Client-performance-lab difficulty knobs, propagated to the
     // challenge endpoint (opt-in; absent = the historical fixture):
     // ?bits=<1..20> (SHA-256 target bits), ?argon_bits=<1..10> and
@@ -1625,13 +1651,14 @@ if ($path === '/' || $path === '/index.html') {
             'runtime' => 'kiwicaptcha-wasm.js',
             'driver' => 'widget-driver.js',
             'worker' => 'kiwi-worker.js',
+            'execution' => 'execution-interpreter.js',
         ];
         $assetLink = static function (string $name, string $ext) use ($repo, $assetFiles): array {
             $body = (string) file_get_contents($repo.'/packages/kiwicaptcha-wasm/assets/'.$assetFiles[$name]);
             $full = hash('sha256', $body);
 
             return [
-                'url' => '/kiwi-captcha/assets/'.$name.'.'.substr($full, 0, 12).'.'.$ext,
+                'url' => '/kiwi-captcha/assets/'.$name.'.'.$full.'.'.$ext,
                 'sri' => 'sha256-'.base64_encode(hash('sha256', $body, true)),
             ];
         };
@@ -1639,16 +1666,24 @@ if ($path === '/' || $path === '/index.html') {
         $driverAsset = $assetLink('driver', 'js');
         $runtimeAsset = $assetLink('runtime', 'js');
         $workerAsset = $assetLink('worker', 'js');
+        $executionAsset = $assetLink('execution', 'js');
         $assetTags = '<link rel="stylesheet" href="'.$widgetAsset['url'].'" integrity="'.$widgetAsset['sri'].'">'."\n"
             .'<script src="'.$driverAsset['url'].'" integrity="'.$driverAsset['sri'].'"></script>'."\n";
         $runtimeAttr = ' data-kiwi-runtime-src="'.$runtimeAsset['url'].'" data-kiwi-runtime-integrity="'.$runtimeAsset['sri'].'"';
         $workerAttrFiles = ' data-kiwi-worker-src="'.$workerAsset['url'].'" data-kiwi-worker-integrity="'.$workerAsset['sri'].'"';
+        // The ExecutionChallengeV1 interpreter asset stays lazy in the
+        // files tier (exactly like the runtime/worker): its URL + SRI
+        // ride the container and the driver fetches it only when an
+        // armed challenge arrives (a SHA-only page pays zero bytes).
+        $executionAttrFiles = ' data-kiwi-execution-src="'.$executionAsset['url'].'" data-kiwi-execution-integrity="'.$executionAsset['sri'].'"';
+    } else {
+        $executionAttrFiles = '';
     }
     header('Content-Type: text/html');
     $containers = '';
     for ($i = 1; $i <= $widgets; ++$i) {
         $containerId = $widgets === 1 ? 'kiwicaptcha-root' : 'kiwicaptcha-root-'.$i;
-        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$runtimeAttr}{$workerAttrFiles}>
+        $containers .= "<div class=\"kiwi-container\" id=\"{$containerId}\" data-kiwi-endpoint=\"{$endpoint}\" data-kiwi-scope=\"login\" data-kiwi-algorithm=\"{$algorithm}\"{$workerAttr}{$binding}{$lang}{$chainAttr}{$riskContextAttr}{$runtimeAttr}{$workerAttrFiles}{$executionAttrFiles}>
   <input type=\"hidden\" name=\"kiwi__token\" data-kiwi-token value=\"\" />
   <div class=\"kiwi-widget\" data-kiwi-widget data-state=\"idle\">
     <div class=\"kiwi-icon-wrapper\"><svg></svg><div class=\"kiwi-glow\"></div></div>

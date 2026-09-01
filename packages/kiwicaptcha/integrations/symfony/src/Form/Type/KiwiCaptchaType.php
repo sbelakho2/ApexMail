@@ -72,6 +72,8 @@ class KiwiCaptchaType extends AbstractType
         $view->vars['runtime_integrity'] = $this->runtime?->runtimeIntegrity() ?? '';
         $view->vars['worker_src'] = $this->runtime?->workerSrc() ?? '';
         $view->vars['worker_integrity'] = $this->runtime?->workerIntegrity() ?? '';
+        $view->vars['execution_src'] = $this->runtime?->executionSrc() ?? '';
+        $view->vars['execution_integrity'] = $this->runtime?->executionIntegrity() ?? '';
     }
 
     public function configureOptions(OptionsResolver $resolver): void

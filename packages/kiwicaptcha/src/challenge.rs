@@ -271,6 +271,19 @@ pub struct ChallengeRecord {
     /// is rejected too (the decoy is mandatory on v3).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decoy_field: Option<String>,
+    /// The ExecutionChallengeV1 program (base64 of the bytecode blob, see
+    /// [`crate::execution`]) armed for this challenge; `None` = no
+    /// execution dimension (the legacy shape — the JSON key is absent
+    /// when `None`, byte-identical to the pre-execution wire format).
+    /// The program is never sent in the challenge payload (it rides the
+    /// challenge response for the driver) and never signed into the
+    /// canonical payload: its integrity is bound by the execution
+    /// digest, which the verifier recomputes from this stored program
+    /// and the record's nonce — a substituted program changes both the
+    /// digest key and the expected trace, so it can never verify
+    /// against a digest computed from the original program.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_program: Option<String>,
     /// Key identifier of the signing secret this challenge was issued with.
     /// The final v2 canonical field (`|<kid>` after the issuer);
     /// a verifier configured with a `secrets_by_kid` map selects the signing
@@ -368,6 +381,14 @@ pub struct ChallengeConfig {
     /// so the verifier can rotate secrets: it picks the signing secret by
     /// this id from its `secrets_by_kid` map. Default 1. Must be >= 1.
     pub kid: u32,
+    /// The ExecutionChallengeV1 keyed-PRF key (min 16 bytes), see
+    /// [`crate::execution`]. `None` (the default) = execution challenges
+    /// are never issued: issuance with the execution surface armed
+    /// refuses (the generator errors), so a deployment cannot arm the
+    /// dimension without the key. The key never leaves the server: it
+    /// only feeds the program generator; the browser digest uses the
+    /// program blob itself as its content-derived key.
+    pub execution_key: Option<String>,
 }
 
 impl ChallengeConfig {
@@ -1280,6 +1301,9 @@ pub fn issue_challenge(
         active_solves,
         request_binding,
         false,
+        false,
+        None,
+        None,
     )
 }
 
@@ -1323,6 +1347,60 @@ pub fn issue_challenge_with_decoy(
         active_solves,
         request_binding,
         arm_decoy_field,
+        false,
+        None,
+        None,
+    )
+}
+
+/// Issue a challenge with the ExecutionChallengeV1 dimension armed —
+/// the browser-execution surface of the adaptive-risk layer: when
+/// `arm_execution` is true the issuer mints a deterministic bytecode
+/// program from the challenge context (nonce, scope, action, version)
+/// via [`crate::execution::generate`], stamps it on the stored record's
+/// `execution_program` AND the client-facing
+/// [`IssuedChallenge::execution_program`] (base64, omitted when
+/// unarmed). The driver runs the program in its sandboxed ephemeral
+/// interpreter and presents the resulting execution digest with the
+/// solution token; the verifier recomputes the expected digest from the
+/// stored program and rejects a mismatch with the deterministic
+/// `ExecutionMismatch`. The dimension is supplementary evidence only —
+/// never the sole acceptance boundary; the PoW proof and the record
+/// state machinery still gate.
+///
+/// Arming requires the configured `execution_key` (see
+/// [`ChallengeConfig::execution_key`]); arming without the key refuses
+/// with [`SignError::ExecutionKeyNotConfigured`]. `execution_action` is
+/// the provider-style action of the request (1..32 chars of
+/// `[A-Za-z0-9._:-]`, default "default") and `execution_version` the
+/// dimension protocol version (default "1"); both are embedded in the
+/// program and bound by the digest.
+#[allow(clippy::too_many_arguments)]
+pub fn issue_challenge_with_execution(
+    config: &ChallengeConfig,
+    scope: &str,
+    client_ip: &str,
+    now_unix: u64,
+    now_ns: u64,
+    active_solves: u64,
+    request_binding: Option<&str>,
+    arm_execution: bool,
+    execution_action: Option<&str>,
+    execution_version: Option<&str>,
+    arm_decoy_field: bool,
+) -> Result<Issued, SignError> {
+    issue_challenge_inner(
+        config,
+        scope,
+        client_ip,
+        now_unix,
+        now_ns,
+        active_solves,
+        request_binding,
+        arm_decoy_field,
+        arm_execution,
+        execution_action,
+        execution_version,
     )
 }
 
@@ -1337,6 +1415,9 @@ fn issue_challenge_inner(
     active_solves: u64,
     request_binding: Option<&str>,
     arm_decoy_field: bool,
+    arm_execution: bool,
+    execution_action: Option<&str>,
+    execution_version: Option<&str>,
 ) -> Result<Issued, SignError> {
     if !valid_identifier(scope, 128) {
         return Err(SignError::InvalidScope);
@@ -1465,6 +1546,34 @@ fn issue_challenge_inner(
     } else {
         None
     };
+    // The ExecutionChallengeV1 program, minted from the challenge
+    // context once the nonce exists (the program binds the nonce).
+    // Arming without the configured execution_key is a
+    // misconfiguration and refuses the issuance: the execution
+    // dimension can never be armed by accident.
+    let execution_program: Option<String> = if arm_execution {
+        match &config.execution_key {
+            None => return Err(SignError::ExecutionKeyNotConfigured),
+            Some(key) => Some(
+                crate::execution::generate(
+                    key.as_bytes(),
+                    &nonce,
+                    scope,
+                    execution_action.unwrap_or("default"),
+                    execution_version.unwrap_or("1"),
+                )
+                .map_err(|e| match e {
+                    crate::execution::GenerateError::KeyTooShort => {
+                        SignError::ExecutionKeyNotConfigured
+                    }
+                    crate::execution::GenerateError::InvalidAction => SignError::InvalidIdentifier,
+                    crate::execution::GenerateError::InvalidVersion => SignError::InvalidIdentifier,
+                })?,
+            ),
+        }
+    } else {
+        None
+    };
     let mut record = ChallengeRecord {
         nonce: nonce.clone(),
         scope: scope.to_string(),
@@ -1493,6 +1602,7 @@ fn issue_challenge_inner(
         issuer: config.issuer.clone(),
         kid: config.kid,
         decoy_field: decoy_field.clone(),
+        execution_program: execution_program.clone(),
     };
     let canonical = canonical_signing_input_v2(&record);
     let signature = sign_canonical_v2(&canonical, &config.secret_key)?;
@@ -1514,6 +1624,7 @@ fn issue_challenge_inner(
         algorithm,
         min_duration_ms,
         decoy_field,
+        execution_program,
     };
 
     Ok(Issued {
@@ -1617,6 +1728,11 @@ pub enum SignError {
     InvalidTtl,
     #[error("min_duration_ms must be < ttl_secs * 1000 — a floor at or above the TTL leaves no acceptable submission time")]
     InvalidMinDuration,
+    /// Execution challenges were armed for this issuance but no
+    /// `execution_key` is configured — the execution dimension can never
+    /// be armed by accident.
+    #[error("execution challenges are armed but no execution_key is configured")]
+    ExecutionKeyNotConfigured,
 }
 
 // Minimal hex encode/decode to avoid pulling in a `hex` crate dependency —
@@ -1670,6 +1786,7 @@ mod tests {
         let config = ChallengeConfig {
             secret_key: "super-secret-key".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             argon2_target_bits: 8,
@@ -1805,6 +1922,7 @@ mod tests {
             &ChallengeConfig {
                 secret_key: key.into(),
                 kid: 1,
+                execution_key: None,
                 algorithm: PoWAlgorithm::Sha256,
                 m_kib: 0,
                 t: 1,
@@ -1858,6 +1976,7 @@ mod tests {
         let config = ChallengeConfig {
             secret_key: "0123456789abcdef0123456789abcdef".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -1929,6 +2048,7 @@ mod tests {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -1974,6 +2094,7 @@ mod tests {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2019,6 +2140,7 @@ mod tests {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2059,6 +2181,7 @@ mod tests {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2092,6 +2215,7 @@ mod tests {
             &ChallengeConfig {
                 secret_key: "test-key-16-bytes!".into(),
                 kid: 1,
+                execution_key: None,
                 algorithm: PoWAlgorithm::Sha256,
                 m_kib: 65_536,
                 argon2_target_bits: 8,
@@ -2139,6 +2263,7 @@ mod tests {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2182,6 +2307,7 @@ mod tests {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2232,6 +2358,7 @@ mod tests {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2271,6 +2398,7 @@ mod tests {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2307,6 +2435,7 @@ mod tests {
         ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -2858,6 +2987,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2951,6 +3081,7 @@ mod tests {
                 expected_scope: None,
                 expected_request_binding: RequestBindingExpectation::Unenforced,
                 client_ip: Some("1.2.3.4"),
+                execution_digest: None,
                 expected_region: None,
                 expected_issuer: None,
                 expected_policy_version: None,
@@ -3004,6 +3135,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3328,6 +3460,7 @@ mod tests {
         let base = profile_base_config();
         let with_kid = ChallengeConfig {
             kid: 5,
+            execution_key: None,
             ..base.clone()
         };
         let issued = issue_challenge(

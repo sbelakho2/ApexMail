@@ -64,6 +64,7 @@ fn sha_config(secret: &str, kid: u32) -> ChallengeConfig {
         region: None,
         issuer: None,
         policy_version: 1,
+        execution_key: None,
     }
 }
 
@@ -73,6 +74,7 @@ fn encode_token(nonce: &str, counter: u64) -> String {
         counter,
         duration_ms: 5000,
         telemetry: serde_json::json!({}),
+        execution_digest: None,
     }
     .encode()
 }

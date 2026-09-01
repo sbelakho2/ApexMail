@@ -80,14 +80,17 @@ test.describe('KiwiCaptcha postMessage boundary', () => {
         source.match(/postMessage\([^)]*["']\*["']/g) ?? [],
         `${name}: no postMessage may use the "*" wildcard target origin`
       ).toEqual([]);
-      // Every window/document-level "message" listener must be paired with
-      // an event.origin check (there are none today; this fails closed if
-      // one is ever added unguarded).
+      // Every window/document-level "message" listener must be guarded:
+      // an event.origin check, or the stronger event.source identity
+      // check (the driver's ExecutionChallengeV1 listener accepts only
+      // the driver-created sandboxed iframe's contentWindow — the exact
+      // window object it spawned, not just a matching origin string).
+      // This fails closed if an unguarded listener is ever added.
       const listeners = source.match(/addEventListener\(\s*["']message["']/g) ?? [];
       if (listeners.length > 0) {
         expect(
-          source.match(/\.origin\b/g),
-          `${name}: every addEventListener("message") must be paired with an event.origin check`
+          source.match(/\.origin\b|event\.source\s*!==|\.source\s*!==/g),
+          `${name}: every addEventListener("message") must be paired with an event.origin or event.source-identity check`
         ).not.toBeNull();
       }
     }

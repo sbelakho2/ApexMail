@@ -3381,6 +3381,7 @@ mod tests {
         crate::challenge::ChallengeConfig {
             secret_key: SECRET.into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -3405,6 +3406,7 @@ mod tests {
             counter,
             duration_ms: 5000,
             telemetry: serde_json::json!({}),
+            execution_digest: None,
         }
         .encode()
     }

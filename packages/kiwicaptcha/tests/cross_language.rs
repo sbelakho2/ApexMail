@@ -70,6 +70,7 @@ fn rust_verifies_php_issued_record() {
         expected_issuer: None,
         expected_policy_version: None,
         client_ip: Some("198.51.100.7"),
+        execution_digest: None,
         telemetry: None,
         enforce_telemetry: false,
         max_attempts: 0,
@@ -103,6 +104,7 @@ fn rust_verifies_php_issued_record() {
         expected_issuer: None,
         expected_policy_version: None,
         client_ip: Some("9.9.9.9"),
+        execution_digest: None,
         telemetry: None,
         enforce_telemetry: false,
         max_attempts: 0,
@@ -148,6 +150,7 @@ fn rust_issues_record_for_php() {
     let config = kiwicaptcha::challenge::ChallengeConfig {
         secret_key: "0123456789abcdef0123456789abcdef".into(),
         kid: 1,
+        execution_key: None,
         algorithm,
         m_kib,
         t,
@@ -908,6 +911,7 @@ fn encode_token(nonce: &str, counter: u64) -> String {
         counter,
         duration_ms: 5000,
         telemetry: serde_json::json!({}),
+        execution_digest: None,
     }
     .encode()
 }
@@ -928,6 +932,7 @@ fn issue_armed_for_interop() -> kiwicaptcha::challenge::Issued {
     let config = ChallengeConfig {
         secret_key: "0123456789abcdef0123456789abcdef".into(),
         kid: 1,
+        execution_key: None,
         algorithm: PoWAlgorithm::Sha256,
         m_kib: 0,
         t: 1,
@@ -994,6 +999,7 @@ fn issue_record_for_interop() -> kiwicaptcha::challenge::ChallengeRecord {
     let config = ChallengeConfig {
         secret_key: "0123456789abcdef0123456789abcdef".into(),
         kid: 1,
+        execution_key: None,
         algorithm: PoWAlgorithm::Sha256,
         m_kib: 0,
         t: 1,

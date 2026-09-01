@@ -236,6 +236,15 @@ pub struct VerifyContext<'a> {
     /// Only records with an empty binding tag (`BindingMode::None`) verify
     /// without an IP.
     pub client_ip: Option<&'a str>,
+    /// The execution digest the solution token presents for an
+    /// ExecutionChallengeV1-armed record (64 lowercase hex characters);
+    /// `None` on the unarmed token shape. When the record carries an
+    /// execution program, the presented digest must equal the expected
+    /// digest recomputed from the stored program (constant-time
+    /// compare) — a missing or mismatched digest is the deterministic
+    /// [`VerifyError::ExecutionMismatch`]. An unarmed record runs no
+    /// execution check (byte-identical legacy behavior).
+    pub execution_digest: Option<&'a str>,
     /// Browser/environment telemetry gathered by the widget (client-controlled
     /// and forgeable — treated strictly as a supplementary signal).
     pub telemetry: Option<&'a serde_json::Value>,
@@ -444,6 +453,18 @@ pub enum VerifyError {
     CapacityExceeded,
     #[error("admission gate unavailable — try again shortly")]
     AdmissionUnavailable,
+    /// The record carries an armed ExecutionChallengeV1 program, but the
+    /// presented execution digest does not match the expected digest
+    /// recomputed from the stored program, a constant-time compare, or
+    /// no digest was presented at all. A hard verdict (never
+    /// replay-exempt), and never the sole acceptance boundary: the PoW
+    /// proof and the record state machinery still gate. The expected
+    /// digest is a pure function of (program, nonce), so the verifier
+    /// needs no secret; a substituted program changes both the digest
+    /// key and the expected trace, and a digest from another challenge
+    /// fails on the nonce-bound context.
+    #[error("execution digest does not match the expected program trace of the challenge")]
+    ExecutionMismatch,
 }
 
 impl VerifyError {
@@ -490,6 +511,7 @@ impl VerifyError {
             Self::AlreadyConsumed => "already_consumed",
             Self::CapacityExceeded => "capacity_exceeded",
             Self::AdmissionUnavailable => "admission_unavailable",
+            Self::ExecutionMismatch => "execution_mismatch",
         }
     }
 
@@ -951,6 +973,35 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         }
     }
 
+    // 7d. The ExecutionChallengeV1 binding (hard): an armed record
+    //     demands a presented execution digest that matches the expected
+    //     digest recomputed from the stored program; a missing or
+    //     mismatched digest is the deterministic ExecutionMismatch. An
+    //     unarmed record skips the check entirely (byte-identical
+    //     current behavior — a stray digest on an unarmed token is
+    //     inert). The expected digest is a pure function of (program,
+    //     nonce): the program embeds the scope/action/version context
+    //     and the trace is deterministic, so the verifier needs no
+    //     secret to recompute it. The comparison is constant-time
+    //     (ct_eq).
+    if let Some(program) = &ctx.record.execution_program {
+        match ctx.execution_digest {
+            None => return VerifyOutcome::Invalid(VerifyError::ExecutionMismatch),
+            Some(presented) => {
+                let expected = match crate::execution::expected_digest(program, &ctx.record.nonce) {
+                    Some(digest) => digest,
+                    // The record's program failed the parse
+                    // (validate_record already rejects this shape;
+                    // defense in depth).
+                    None => return VerifyOutcome::Invalid(VerifyError::MalformedRecord),
+                };
+                if !ct_eq(expected.as_bytes(), presented.as_bytes()) {
+                    return VerifyOutcome::Invalid(VerifyError::ExecutionMismatch);
+                }
+            }
+        }
+    }
+
     // 3. Minimum duration — server-measured. The client-reported duration_ms
     //    is forgeable and is deliberately not trusted for enforcement. The
     //    floor is a timing-anomaly heuristic: a fast bot can wait before
@@ -1359,6 +1410,7 @@ mod tests {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 100,
             t: 1,
@@ -1385,6 +1437,7 @@ mod tests {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib,
             t: 3, // libsodium-representable (t >= 3, p == 1) — issuance rejects t < 3
@@ -1424,6 +1477,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1481,6 +1535,7 @@ mod tests {
                 expected_issuer: Some("prod"),
                 expected_policy_version: Some(2),
                 client_ip,
+                execution_digest: None,
                 telemetry: None,
                 enforce_telemetry: false,
                 max_attempts: 0,
@@ -1605,6 +1660,7 @@ mod tests {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 4,
             t: 3,
@@ -1633,6 +1689,7 @@ mod tests {
             let config = ChallengeConfig {
                 secret_key: "test-key-16-bytes!".into(),
                 kid: 1,
+                execution_key: None,
                 algorithm: PoWAlgorithm::Argon2id,
                 m_kib: 128,
                 t,
@@ -1665,6 +1722,7 @@ mod tests {
         let base = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -1703,6 +1761,7 @@ mod tests {
         let base = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -1741,6 +1800,7 @@ mod tests {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 128,
             t: 7,
@@ -1769,6 +1829,7 @@ mod tests {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 128,
             t: 3,
@@ -1796,6 +1857,7 @@ mod tests {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: crate::challenge::SOLVER_MAX_ARGON2_M_KIB + 1,
             t: 3,
@@ -1839,6 +1901,7 @@ mod tests {
             let config = ChallengeConfig {
                 secret_key: "test-key-16-bytes!".into(),
                 kid: 1,
+                execution_key: None,
                 algorithm: PoWAlgorithm::Argon2id,
                 m_kib: 128,
                 t: 3,
@@ -1868,6 +1931,7 @@ mod tests {
         let max_bits = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 128,
             t: 3,
@@ -1983,6 +2047,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2019,6 +2084,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2055,6 +2121,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2099,6 +2166,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2133,6 +2201,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2167,6 +2236,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("9.9.9.9"), // different from issuance IP 1.2.3.4
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2201,6 +2271,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: None,
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2220,6 +2291,7 @@ mod tests {
         let config = ChallengeConfig {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -2254,6 +2326,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
 
             expected_region: None,
             expected_issuer: None,
@@ -2288,6 +2361,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2314,6 +2388,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2348,6 +2423,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2372,6 +2448,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2407,6 +2484,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2440,6 +2518,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2475,6 +2554,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2502,6 +2582,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2535,6 +2616,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2569,6 +2651,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2603,6 +2686,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2639,6 +2723,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2674,6 +2759,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2708,6 +2794,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2883,6 +2970,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2917,6 +3005,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2956,6 +3045,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3068,6 +3158,7 @@ mod tests {
             expected_scope: Some("signup"),
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3100,6 +3191,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3132,6 +3224,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3233,6 +3326,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3258,6 +3352,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3410,6 +3505,7 @@ mod tests {
         let config = ChallengeConfig {
             secret_key: "0123456789abcdef0123456789abcdef".into(),
             kid: 1,
+            execution_key: None,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -3484,6 +3580,7 @@ mod tests {
             &ChallengeConfig {
                 secret_key: "test-key-16-bytes!".into(),
                 kid: 1,
+                execution_key: None,
                 algorithm: PoWAlgorithm::Sha256,
                 m_kib: 100,
                 t: 1,
@@ -3524,6 +3621,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3555,6 +3653,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("9.9.9.9"), // different from issuance IP 1.2.3.4
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3600,6 +3699,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3634,6 +3734,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3668,6 +3769,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3695,6 +3797,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3733,6 +3836,7 @@ mod tests {
             expected_issuer: Some("auth-gw-us"),
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3768,6 +3872,7 @@ mod tests {
             expected_issuer: Some("auth-gw"),
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3802,6 +3907,7 @@ mod tests {
             expected_issuer: Some("auth-gw"),
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3829,6 +3935,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3876,6 +3983,7 @@ mod tests {
             issuer: None,
             policy_version: 1,
             kid,
+            execution_key: None,
         };
         issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None)
             .unwrap()
@@ -3914,6 +4022,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3944,6 +4053,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3971,6 +4081,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4010,6 +4121,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4037,6 +4149,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4079,6 +4192,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4110,6 +4224,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4141,6 +4256,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4187,6 +4303,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4215,6 +4332,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4257,6 +4375,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4496,6 +4615,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4529,6 +4649,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4569,6 +4690,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4620,6 +4742,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4732,6 +4855,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4770,6 +4894,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4813,6 +4938,7 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4991,6 +5117,7 @@ mod tests {
             request_binding: None,
             issuer: None,
             kid: 1,
+            execution_program: None,
             hostname: None,
             decoy_field: None,
         }
@@ -5011,6 +5138,7 @@ mod tests {
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("192.168.1.5"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -5099,6 +5227,7 @@ mod tests {
             expected_scope: Some("signup"),
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
+            execution_digest: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,

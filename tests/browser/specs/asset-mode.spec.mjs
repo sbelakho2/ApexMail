@@ -86,7 +86,9 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
       expect(res.status(), `the referenced asset must exist: ${url}`).toBe(200);
       const body = await res.body();
       const fullHash = createHash('sha256').update(body).digest('hex');
-      const expectedUrl = url.replace(/\.([0-9a-f]{12})\./, '.' + fullHash.slice(0, 12) + '.');
+      // The URL hash is the full 256-bit sha256 of the served bytes (the
+      // same digest the ETag carries).
+      const expectedUrl = url.replace(/\.([0-9a-f]{64})\./, '.' + fullHash + '.');
       expect(expectedUrl).toBe(url);
 
       const headers = res.headers();
@@ -124,8 +126,9 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     const body = await good.body();
 
     // A wrong hash under the same asset name is a 404 (never stale bytes).
-    const wrongHash = body.toString('utf8').slice(0, 12).replace(/[0-9a-f]/g, (c) => (c === '0' ? '1' : '0'));
-    const badUrl = driverUrl.replace(/\.([0-9a-f]{12})\./, '.' + wrongHash + '.');
+    const goodHash = driverUrl.match(/\.([0-9a-f]{64})\./)[1];
+    const wrongHash = (goodHash[0] === '0' ? '1' : '0') + goodHash.slice(1);
+    const badUrl = driverUrl.replace(/\.([0-9a-f]{64})\./, '.' + wrongHash + '.');
     const bad = await page.request.get(badUrl);
     expect(bad.status()).toBe(404);
 
@@ -206,7 +209,7 @@ test.describe('KiwiCaptcha files-mode asset delivery', () => {
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', { timeout: 120_000 });
 
     const unversioned = requests.filter(
-      (u) => u.includes('/kiwi-captcha/assets/') && !/\.([0-9a-f]{12})\.(js|css)$/.test(u),
+      (u) => u.includes('/kiwi-captcha/assets/') && !/\.([0-9a-f]{64})\.(js|css)$/.test(u),
     );
     expect(
       unversioned,

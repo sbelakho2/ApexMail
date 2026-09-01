@@ -137,4 +137,17 @@ final class MalformedRecordException extends \RuntimeException
     {
         return new self(sprintf('record field "%s" must not be null', $field));
     }
+
+    /**
+     * The optional ExecutionChallengeV1 program is not a well-formed
+     * program blob: non-canonical base64, an unknown format version, an
+     * out-of-bound scope/action/op count, an unknown opcode or a
+     * truncated operand section. A record carrying it cannot be
+     * verified against its execution dimension, so it is a corrupt or
+     * foreign record.
+     */
+    public static function invalidExecutionProgram(): self
+    {
+        return new self('record field "execution_program" must be a well-formed ExecutionChallengeV1 program blob (canonical base64 of a parseable program)');
+    }
 }

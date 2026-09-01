@@ -401,6 +401,25 @@ The binding tag is a nonce-bound HMAC, never a stable IP-derived identifier, so 
 The QUIC policy above is the operator's deployment policy (which scopes bind, when to step up), implemented with the existing knobs.
 The protocol's fail-closed behavior is unchanged and documented by test.
 
+## ExecutionChallengeV1 (operations view)
+
+ExecutionChallengeV1 is a Cap-style supplementary evidence layer. When
+the risk.execution_challenge gate is on and a risk trigger passes, the
+issued challenge carries an execution program the widget driver runs in
+a sandboxed ephemeral iframe. The resulting execution digest rides the
+solution token. The verifier rejects a mismatch with the deterministic
+execution_mismatch outcome.
+
+The dimension is supplementary evidence only and is never the sole
+acceptance boundary. The proof-of-work proof and the record state
+machinery always gate. The gate is inert without the execution_key, so
+an existing high_abuse deployment without the key keeps issuing
+byte-identically. The interpreter is a fixed audited bytecode VM: no
+eval, no new Function, no fingerprinting. A SHA-only challenge without
+a program pays zero bytes for it. The privacy_strict profile forces the
+gate off; high_abuse arms it; balanced defaults it off. See
+configuration.md "ExecutionChallengeV1" for the operator contract.
+
 ## Graceful shutdown sequence
 
 The deployment must drain verification work, not kill it mid-hash.

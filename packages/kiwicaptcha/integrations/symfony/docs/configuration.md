@@ -151,6 +151,7 @@ kiwi_captcha:
 | `risk.enabled` | false | false | true | false | false |
 | `risk.decoy_v3_enabled` | false | false | true | false | false |
 | `risk.client_context` | false | false | false | false | false |
+| `risk.execution_challenge` | off | off (forced) | on | off | off |
 | `risk.max_outstanding_challenges` | 20 | 20 | 10 | 20 | 20 |
 | `risk.max_outstanding_challenges_global` | 100000 | 100000 | 250000 | 100000 | 100000 |
 | `risk.hard_limits.process_per_second` | 10000 | 10000 | 5000 | 10000 | 10000 |
@@ -174,10 +175,11 @@ Profile rationale:
   outvotes trust signals sooner. Per-source limits tighten and the
   aggregate issuance bounds widen in lockstep. The decoy surface arms
   with protocol-v3 emission, which only engages once the central
-  `min_protocol_version` floor confirms. Chained-challenge step-up
-  engages automatically when `risk.request_binding_authority` is wired
-  in any configuration layer (the conditional runs on the final merged
-  configuration).
+  `min_protocol_version` floor confirms. The ExecutionChallengeV1 gate
+  arms (see the "ExecutionChallengeV1" section below). Chained-
+  challenge step-up engages automatically when
+  `risk.request_binding_authority` is wired in any configuration layer
+  (the conditional runs on the final merged configuration).
 - compatibility maximizes integration compatibility: sha256, a
   conservative 300 s TTL (Turnstile token-lifetime parity), binding off
   (IP churn behind NAT/mobile), risk and the decoy surface off
@@ -301,7 +303,55 @@ machine-readable reason `ha_authority_uninitialized` /
 `ha_authority: none` the leg passes silently. See the operations
 documentation for the health endpoints.
 
+
+## ExecutionChallengeV1: the browser-execution dimension
+
+ExecutionChallengeV1 is the Cap-style supplementary evidence layer of
+the challenge stack. When armed, the challenge response carries an
+`execution_program`, a deterministic bytecode blob. The widget driver
+lazily loads the fixed audited interpreter asset,
+`execution.<sha256>.js`, served by the immutable content-addressed
+asset route with SRI. It runs the program in a sandboxed ephemeral
+iframe and appends the resulting execution digest to the solution
+token. The verifier recomputes the expected digest from the stored
+program and rejects a mismatch with the deterministic
+`execution_mismatch` outcome.
+
+Two knobs control the dimension:
+
+- `kiwi_captcha.execution_key` (string, default null): the keyed-PRF
+  secret that generates the programs. Null means execution challenges
+  are never issued. The key never leaves the server: it only feeds the
+  program generator, and the browser digest uses the program blob
+  itself as its content-derived key, so rotating the key does not
+  invalidate outstanding challenges.
+- `risk.execution_challenge` (enum, default off): the issuance gate.
+  When on, issuance arms the dimension when a risk trigger passes, a
+  non-Allow risk decision, or every issuance when the risk engine is
+  not wired. The gate is inert without an `execution_key`, so turning
+  it on before configuring the key never breaks issuance and never
+  arms anything.
+
+The dimension is supplementary evidence only. It is never the sole
+acceptance boundary: the proof-of-work proof and the record state
+machinery always gate, and a missing or wrong digest fails with the
+deterministic `execution_mismatch`, never a silent success. The
+interpreter is a fixed audited bytecode VM with no eval, no new
+Function and no fingerprinting; the DOM ops run in a sandboxed
+ephemeral iframe created per challenge and removed after the run. A
+SHA-only challenge without a program pays zero bytes for the
+interpreter: the asset is fetched only when an armed challenge
+arrives.
+
+Profiles: the gate defaults off under `balanced` and
+`compatibility`, it is forced off under `privacy_strict` (an explicit
+override cannot re-arm it under the profile), and it defaults on under
+`high_abuse`. An explicit `risk.execution_challenge` value in any
+config layer always wins over the balanced and high_abuse derived
+defaults; only privacy_strict keeps the force.
+
 ## Advanced configuration
+
 
 The per-knob reference below is the advanced layer. Most deployments set
 only a `protection_profile`, `secret_key`, `public_base_url` and
@@ -321,7 +371,15 @@ kiwi_captcha:
     challenge_ttl_secs: 120
     route_prefix: /kiwi-captcha             # challenge endpoint prefix; the form
                                             # widget and standalone widget both
-                                            # derive their endpoint from it
+                                            # derive their endpoint from it.
+                                            # Canonicalized at container build
+                                            # time to ONE canonical form: must
+                                            # begin with "/", no "//", "." or
+                                            # ".." segments, no "\", "?", "#",
+                                            # control characters or "%", and a
+                                            # trailing "/" is normalized away
+                                            # (with or without it configures
+                                            # the same prefix)
     # Production requires a shared storage (Redis). With redis_dsn set,
     # the bundle constructs the Redis-backed services itself — no
     # storage service wiring needed. Without a DSN the bundle fails fast
@@ -347,13 +405,22 @@ kiwi_captcha:
 ```
 
 `files` (default) emits versioned immutable first-party asset URLs under
-`{prefix}/assets/` (`widget.<sha256-12>.css`, `runtime.<sha256-12>.js`,
-`driver.<sha256-12>.js`, `worker.<sha256-12>.js`), served by the bundle
+`{prefix}/assets/` (`widget.<sha256-64>.css`, `runtime.<sha256-64>.js`,
+`driver.<sha256-64>.js`, `worker.<sha256-64>.js`), served by the bundle
 with a long immutable cache lifetime
 (`Cache-Control: public, max-age=31536000, immutable`), the exact content
 hash in the URL and the content-hash ETag. Each asset is emitted once per
 page even with several widgets; the stylesheet and driver tags carry SRI
 integrity attributes (browser-enforced SRI on the executed script).
+
+**256-bit content addressing.** The hash in the asset URL is the full
+sha256 digest of the served bytes (256 bits, 64 hex characters) — never
+a truncated prefix. Two different byte strings can therefore never share
+an addressable URL: a 48-bit truncation could in principle collide, a
+full 256-bit digest cannot. The URL hash equals the ETag exactly, so the
+address, the served bytes and the validator's digest are one and the
+same value. The route constraint is `[0-9a-f]{64}`, and an unknown or
+truncated hash is a 404, never a cache-bypass serve.
 
 The runtime and the worker are the lazy heavy modules: the page never
 downloads them eagerly. The widget container carries

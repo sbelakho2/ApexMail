@@ -39,6 +39,7 @@ final class AssetRouteKernelIntegrationTest extends TestCase
         'driver' => ['file' => 'widget-driver.js', 'content_type' => 'application/javascript; charset=UTF-8', 'ext' => 'js'],
         'runtime' => ['file' => 'kiwicaptcha-wasm.js', 'content_type' => 'application/javascript; charset=UTF-8', 'ext' => 'js'],
         'worker' => ['file' => 'kiwi-worker.js', 'content_type' => 'application/javascript; charset=UTF-8', 'ext' => 'js'],
+        'execution' => ['file' => 'execution-interpreter.js', 'content_type' => 'application/javascript; charset=UTF-8', 'ext' => 'js'],
     ];
 
     private static ?KernelBrowser $browser = null;
@@ -58,8 +59,8 @@ final class AssetRouteKernelIntegrationTest extends TestCase
 
     /**
      * Render the default (files-mode) widget markup and extract every
-     * Twig-generated asset URL it carries: `{name}.{sha256-12}.{ext}`
-     * under the configured asset prefix.
+     * Twig-generated asset URL it carries: `{name}.{sha256-64}.{ext}`
+     * (the full 256-bit content hash) under the configured asset prefix.
      *
      * @return list<array{name: string, hash: string, ext: string, url: string}>
      */
@@ -78,9 +79,10 @@ final class AssetRouteKernelIntegrationTest extends TestCase
         self::assertStringContainsString('/kiwi-captcha/assets/driver.', $html, 'the default files-mode render emits the driver script');
         self::assertStringContainsString('data-kiwi-runtime-src="/kiwi-captcha/assets/runtime.', $html, 'the lazy runtime URL rides the container attribute');
         self::assertStringContainsString('data-kiwi-worker-src="/kiwi-captcha/assets/worker.', $html, 'the same-origin worker URL rides the container attribute');
+        self::assertStringContainsString('data-kiwi-execution-src="/kiwi-captcha/assets/execution.', $html, 'the lazy execution interpreter URL rides the container attribute');
 
-        preg_match_all('~/(kiwi-captcha/assets/(widget|driver|runtime|worker)\.([0-9a-f]{12})\.(css|js))~', $html, $matches, PREG_SET_ORDER);
-        self::assertCount(4, $matches, 'the files-mode widget render emits exactly the four asset URLs (widget, driver, runtime, worker)');
+        preg_match_all('~/(kiwi-captcha/assets/(execution|widget|driver|runtime|worker)\.([0-9a-f]{64})\.(css|js))~', $html, $matches, PREG_SET_ORDER);
+        self::assertCount(5, $matches, 'the files-mode widget render emits exactly the five asset URLs (widget, driver, runtime, worker, execution)');
 
         $urls = [];
         foreach ($matches as $match) {
@@ -124,9 +126,9 @@ final class AssetRouteKernelIntegrationTest extends TestCase
     {
         $urls = $this->renderedAssetUrls();
 
-        // The four rendered names are exactly the routable asset set:
-        // css, driver js, runtime js, worker js.
-        self::assertEqualsCanonicalizing(['widget', 'driver', 'runtime', 'worker'], array_column($urls, 'name'));
+        // The five rendered names are exactly the routable asset set:
+        // css, driver js, runtime js, worker js, execution js.
+        self::assertEqualsCanonicalizing(['widget', 'driver', 'runtime', 'worker', 'execution'], array_column($urls, 'name'));
 
         foreach ($urls as $asset) {
             $name = $asset['name'];
@@ -141,7 +143,7 @@ final class AssetRouteKernelIntegrationTest extends TestCase
             self::assertSame(200, $response->getStatusCode(), sprintf('%s (%s) must route through the real router', $name, $asset['url']));
             self::assertSame($spec['content_type'], $response->headers->get('Content-Type'), $name.' serves its exact MIME type');
             self::assertSame($embedded, (string) $response->getContent(), $name.' serves the exact bytes the inline mode embeds');
-            self::assertSame(substr($fullHash, 0, 12), $asset['hash'], $name.' hash in the URL is the sha256-12 of the served bytes');
+            self::assertSame($fullHash, $asset['hash'], $name.' hash in the URL is the full 256-bit sha256 of the served bytes');
             self::assertSame('"'.$fullHash.'"', $response->headers->get('ETag'), $name.' ETag is the full content hash');
             self::assertSame((string) \strlen($embedded), $response->headers->get('Content-Length'));
             $this->assertImmutableCacheContract($response);
@@ -175,18 +177,19 @@ final class AssetRouteKernelIntegrationTest extends TestCase
     public function testAnUnknownHashStays404ThroughTheRouter(): void
     {
         $urls = $this->renderedAssetUrls();
-        self::$browser->request('GET', str_replace('.'.($urls[0]['hash']).'.', '.000000000000.', $urls[0]['url']));
+        self::$browser->request('GET', str_replace('.'.($urls[0]['hash']).'.', '.'.str_repeat('0', 64).'.', $urls[0]['url']));
         self::assertSame(404, self::$browser->getResponse()->getStatusCode(), 'an unknown content hash is a 404 through the router, never a cache-bypass serve');
     }
 
     public function testTheAssetUrlHashDeterministicallyMatchesTheResourceBytes(): void
     {
         // The router serves the shipped resource byte-for-byte: the URL
-        // hash must equal the sha256-12 of the committed resource file,
-        // which is what the Twig runtime hashed at render time.
+        // hash must equal the full 256-bit sha256 of the committed
+        // resource file, which is what the Twig runtime hashed at render
+        // time.
         foreach (self::ASSET_SPECS as $name => $spec) {
             $embedded = (string) file_get_contents(self::ASSETS_DIR.'/'.$spec['file']);
-            $expectedHash = substr(hash('sha256', $embedded), 0, 12);
+            $expectedHash = hash('sha256', $embedded);
             self::$browser->request('GET', '/kiwi-captcha/assets/'.$name.'.'.$expectedHash.'.'.$spec['ext']);
             self::assertSame(200, self::$browser->getResponse()->getStatusCode(), $name.' routes under its deterministic content hash');
             self::assertSame($embedded, (string) self::$browser->getResponse()->getContent());

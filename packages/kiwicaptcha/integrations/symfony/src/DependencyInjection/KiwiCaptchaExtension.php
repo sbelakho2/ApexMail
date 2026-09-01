@@ -424,6 +424,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
                 '(set privacy_mode to "standard" AND risk.client_context to true).'
             );
         }
+        // The ExecutionChallengeV1 gate is inert without the
+        // execution_key: the controller arms only when the issuer's
+        // config carries the key, so a deployment that turns the gate on
+        // but configures no key simply never issues execution programs
+        // (the dimension is supplementary evidence only, never the sole
+        // acceptance boundary — an inert gate is never a security hole).
+        // Configuring the key is what engages the dimension.
 
         // Cross-option invariants (validated here, after the config tree):
         // - a rotation shorter than the sliding window would drop live hits
@@ -814,6 +821,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // services.
             ->setArgument('$issuer', $config['issuer'])
             ->setArgument('$kid', $config['kid'])
+            // The ExecutionChallengeV1 keyed-PRF key (null = the
+            // dimension is never issued). The gate on without a key is
+            // refused below, so an armed deployment always carries the
+            // key.
+            ->setArgument('$executionKey', $config['execution_key'])
             ->setPublic(true);
         $container->setDefinition('kiwi_captcha.config', $configDef);
 
@@ -1632,6 +1644,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // every deployment emitting protocol v2 — the two-phase
             // rollout gate, see operations.md.
             ->setArgument('$decoyV3Enabled', $config['risk']['decoy_v3_enabled'])
+            // The ExecutionChallengeV1 gate (risk.execution_challenge,
+            // default off): when on, issuance MAY arm the browser-
+            // execution dimension when a risk trigger passes. The gate
+            // on without execution_key was refused at compile time above.
+            ->setArgument('$executionGate', $config['risk']['execution_challenge'] === 'on')
             // The issuance-side logger (when the app has one) receives
             // the once-per-process decoy_v3_enabled-but-floor-too-low
             // warning.

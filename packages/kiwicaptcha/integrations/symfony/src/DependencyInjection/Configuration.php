@@ -10,6 +10,7 @@ use KiwiCaptcha\Risk\RiskV2Weights;
 use KiwiCaptcha\Risk\RiskWeights;
 use Symfony\Component\Config\Definition\Builder\TreeBuilder;
 use Symfony\Component\Config\Definition\ConfigurationInterface;
+use Symfony\Component\Config\Definition\Exception\InvalidConfigurationException;
 
 /**
  * SECURITY-MAINTAINER material: the cross-field invariants enforced in
@@ -277,11 +278,66 @@ final class Configuration implements ConfigurationInterface
                     ->defaultNull()
                 ->end()
                 ->scalarNode('route_prefix')
-                    ->info('Prefix for the challenge endpoint route.')
+                    ->info('Prefix for the challenge endpoint routes (default /kiwi-captcha). Canonicalized at container build time to one canonical form: begins with a single "/", contains no empty ("//") or dot segments, no backslashes, no query strings, no fragments, no control characters and no percent-encoded bytes (a "%" is refused fail-closed), and the trailing slash is normalized away. Every route and Twig URL receives this canonical prefix.')
                     ->defaultValue('/kiwi-captcha')
+                    ->validate()
+                        ->always()
+                        ->then(static function (mixed $value): string {
+                            // The canonical form is decided here, once, so
+                            // every consumer (the route loader, the Twig
+                            // runtime, the form type and the container
+                            // parameter) sees the same string. A literal
+                            // that violates the path grammar is refused at
+                            // compile time instead of producing a route or
+                            // URL that cannot be addressed canonically.
+                            if (!\is_string($value) || $value === '') {
+                                throw new InvalidConfigurationException('kiwi_captcha.route_prefix must be a non-empty string path beginning with "/"');
+                            }
+                            if ($value[0] !== '/') {
+                                throw new InvalidConfigurationException('kiwi_captcha.route_prefix must begin with "/" (a relative prefix is not a routable path)');
+                            }
+                            $canonical = $value;
+                            if (str_ends_with($canonical, '/')) {
+                                $canonical = substr($canonical, 0, -1);
+                            }
+                            if ($canonical === '') {
+                                throw new InvalidConfigurationException('kiwi_captcha.route_prefix cannot be the bare root "/" (the canonical form must contain at least one segment)');
+                            }
+                            if (str_contains($canonical, '%')) {
+                                throw new InvalidConfigurationException('kiwi_captcha.route_prefix must not contain "%" (percent-encoded path ambiguity is refused fail-closed)');
+                            }
+                            if (str_contains($canonical, '\\')) {
+                                throw new InvalidConfigurationException('kiwi_captcha.route_prefix must not contain backslashes');
+                            }
+                            if (str_contains($canonical, '?')) {
+                                throw new InvalidConfigurationException('kiwi_captcha.route_prefix must not contain a query string ("?")');
+                            }
+                            if (str_contains($canonical, '#')) {
+                                throw new InvalidConfigurationException('kiwi_captcha.route_prefix must not contain a fragment ("#")');
+                            }
+                            if (preg_match('/[\x00-\x1F\x7F]/', $canonical) === 1) {
+                                throw new InvalidConfigurationException('kiwi_captcha.route_prefix must not contain control characters');
+                            }
+                            // The empty element before the leading "/" is the
+                            // absolute-path marker, not a segment; every
+                            // other empty element ("//", a "/a//" tail) is a
+                            // noncanonical double slash.
+                            $segments = explode('/', $canonical);
+                            for ($i = 1, $count = \count($segments); $i < $count; $i++) {
+                                if ($segments[$i] === '') {
+                                    throw new InvalidConfigurationException('kiwi_captcha.route_prefix must not contain "//" (empty path segments are refused)');
+                                }
+                                if ($segments[$i] === '.' || $segments[$i] === '..') {
+                                    throw new InvalidConfigurationException('kiwi_captcha.route_prefix must not contain "." or ".." path segments');
+                                }
+                            }
+
+                            return $canonical;
+                        })
+                    ->end()
                 ->end()
                 ->enumNode('asset_mode')
-                    ->info('Widget asset delivery tier. "files" (default) is the recommended production tier: the theme emits versioned immutable first-party asset URLs ({prefix}/assets/widget.<sha256-12>.css, runtime.<sha256-12>.js, driver.<sha256-12>.js, worker.<sha256-12>.js) with long cache lifetimes and SRI integrity attributes, deduplicated once per page across widgets, and the driver fetches the WASM runtime and the Argon worker asset only when a memory-hard challenge arrives, so a plain SHA-256 page pays nothing for the Argon machinery. The worker runs as a same-origin Worker (no Blob), so files mode needs worker-src \'self\'. "inline" is the documented compatibility / zero-request tier: it embeds the CSS, the WASM runtime and the driver into the page at render time (the historical behavior) and builds its worker from a Blob URL, so inline needs worker-src blob:.')
+                    ->info('Widget asset delivery tier. "files" (default) is the recommended production tier: the theme emits versioned immutable first-party asset URLs ({prefix}/assets/widget.<sha256-64>.css, runtime.<sha256-64>.js, driver.<sha256-64>.js, worker.<sha256-64>.js — the full 256-bit sha256 hex of the served bytes) with long cache lifetimes and SRI integrity attributes, deduplicated once per page across widgets, and the driver fetches the WASM runtime and the Argon worker asset only when a memory-hard challenge arrives, so a plain SHA-256 page pays nothing for the Argon machinery. The worker runs as a same-origin Worker (no Blob), so files mode needs worker-src \'self\'. "inline" is the documented compatibility / zero-request tier: it embeds the CSS, the WASM runtime and the driver into the page at render time (the historical behavior) and builds its worker from a Blob URL, so inline needs worker-src blob:.')
                     ->values(['inline', 'files'])
                     ->defaultValue('files')
                 ->end()
@@ -698,6 +754,11 @@ final class Configuration implements ConfigurationInterface
                             ->info('OPT-IN coarse client-context collection: when true, the rendered widget container carries data-kiwi-risk-context="coarse" and the widget sends a deliberately coarse capability tag (viewport class, pointer class, language family, timezone class — no canvas/audio/font/GPU signals, no stable identifiers) with every challenge request. Default false: the widget collects no device-capability or screen-size signal in any mode. Refused under privacy_mode "strict" — enabling it requires the operator to deliberately enable coarse client context (privacy_mode "standard" plus this explicit opt-in).')
                             ->defaultFalse()
                         ->end()
+                        ->enumNode('execution_challenge')
+                            ->info('EXECUTIONCHALLENGEV1 GATE (enum "off" | "on", default "off"): whether issuance MAY arm the browser-execution dimension (the Cap-style layer, see kiwi_captcha.execution_key). "off" (default) = no execution program is ever issued (the byte-identical legacy path). "on" = issuance arms a deterministic execution program when a RISK TRIGGER passes (a non-Allow risk decision; with the risk engine disabled the gate itself is the trigger), and the driver must run it and present the execution digest — a missing/mismatched digest is the deterministic execution-mismatch verification failure. The gate on requires kiwi_captcha.execution_key (refused at compile time otherwise). The dimension is SUPPLEMENTARY EVIDENCE ONLY, never the sole acceptance boundary: the PoW proof and the record state machinery always gate. Off under the privacy_strict protection profile (the profile forces it off); on under high_abuse; available in balanced (default off).')
+                            ->values(['off', 'on'])
+                            ->defaultValue('off')
+                        ->end()
                         ->integerNode('container_memory_mib')
                             ->info('Memory budget of the process container in MiB . When configured, /health/ready requires argon2_max_concurrent_verifications * max-adaptive-profile-memory (64 MiB — the risk profiles\' argon64 m_kib 65536 KiB) + 256 MiB headroom <= container_memory_mib; a violated invariant refuses startup (503 memory_budget_invariant). null (or a concurrency cap of 0 = unlimited) keeps the check skipped/documented — the invariant is only meaningful with a finite concurrency cap.')
                             ->defaultNull()
@@ -892,6 +953,14 @@ final class Configuration implements ConfigurationInterface
                     ->info('The pinned-primary guard verification cache window in seconds (default 5, min 1): the guard re-reads the serving authority (INFO + pin-key compare) at most every N seconds per process per connection object; within the window every non-security-final check passes without a round trip. A mutating security-final transition (consume, commit, chain or idempotency finalize) bypasses the window and re-verifies before every write (zero stale), and so does the verified-WAIT durability barrier (the causal fence write and the WAIT, which additionally assert the connection-generation equality before executing). A reconnect that replaces the connection object invalidates the cache. A smaller window detects an authority change sooner, a larger window costs less INFO traffic.')
                     ->defaultValue(5)
                     ->min(1)
+                ->end()
+                ->scalarNode('execution_key')
+                    ->info('EXECUTIONCHALLENGEV1 KEYED-PRF KEY (string of at least 16 bytes, default null): the secret that generates the deterministic browser-execution programs (the Cap-style dimension, see ExecutionChallengeGenerator). Null (default) = execution challenges are never issued — arming without the key is refused. The key NEVER leaves the server: it only feeds the program generator; the browser digest uses the program blob itself as its content-derived key, so the deployment can rotate it without invalidating outstanding challenges. Requires the risk.execution_challenge gate to be on to have any effect; the gate on without a key is refused at compile time.')
+                    ->defaultNull()
+                    ->validate()
+                        ->ifTrue(static fn ($v): bool => \is_string($v) && \strlen($v) < 16)
+                        ->thenInvalid('execution_key must be a string of at least 16 bytes when configured')
+                    ->end()
                 ->end()
                 ->variableNode('ha_authority_expected')
                     ->info('THE OPERATOR-PROVISIONED EXPECTED AUTHORITY IDENTITY (default null): the "role|run_id" identity the pinned-primary guard must observe, the same shape as the pin value (e.g. "master|5f8d..."). Two forms are accepted. The scalar string form applies the ONE identity to EVERY authority (storage and, when distinct, risk). The per-authority map form {"storage": "master|...", "risk": "master|..."} applies a DIFFERENT expected identity to each authority — a deployment whose storage Redis and risk Redis are different servers cannot share one run_id, and the map is the contract that says so; when only one Redis is used the storage entry covers the shared authority, and an authority without an entry falls back to the pin key (it must be initialized). When set, the guard compares the serving authority against this value INSTEAD of the `{kiwi:<ns>}:authority:pin:<suffix>` key — the configuration is the pin, so an immutable-identity deployment can skip the Redis pin entirely. The guard refuses when the serving identity differs, and kiwicaptcha:ha-initialize refuses when the configured identity disagrees with the connected server. Production never auto-pins: without this option the deployment must run kiwicaptcha:ha-initialize to record the pin before the guard serves. See docs/ha-authority.md.')

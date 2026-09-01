@@ -280,12 +280,14 @@
 
   // ── Same-origin Argon2id Web Worker ────────────
   // postMessage BOUNDARY: this driver NEVER posts to the parent page — all
-  // postMessage usage is worker-internal (driver <-> worker solve traffic
-  // and the internal MessageChannel yield). There is no
-  // window.addEventListener("message") / parent.postMessage anywhere in
-  // this file, so no cross-origin target exists and no origin check or
-  // rate-limit window is required on a page-level listener (the browser
-  // test suite asserts this statically — see tests/browser/specs).
+  // postMessage usage is worker-internal (driver <-> worker solve traffic,
+  // the internal MessageChannel yield, and the driver-created sandboxed
+  // execution iframe of the ExecutionChallengeV1 dimension). The ONE
+  // window message listener (kiwiRunExecution) accepts only messages whose
+  // event.source is the driver-created iframe's contentWindow AND whose
+  // per-run id matches, so no cross-origin target exists and forged page
+  // traffic is ignored — the browser test suite asserts this behavior
+  // (forged postMessage payloads never mint a token).
   // The memory-hard solver ALWAYS runs off the main thread:
   //  - inline mode constructs the historical Blob worker from local code
   //    (the glue's embedded workerSource plus the inline glue source) —
@@ -428,6 +430,147 @@
     });
     kiwiWorkerAssetCache[url] = promise;
     return promise;
+  }
+
+  // ── ExecutionChallengeV1: the lazy execution interpreter ────
+  // The Cap-style dimension: when a challenge response carries an
+  // execution_program, the driver lazily loads the FIXED audited
+  // interpreter asset (execution.<sha256>.js) and runs the program in a
+  // SANDBOXED EPHEMERAL IFRAME (srcdoc with a minimal document,
+  // sandbox="allow-scripts allow-same-origin" — allow-same-origin is
+  // REQUIRED because an opaque-origin sandboxed document cannot load a
+  // same-origin script under the recommended CSP `script-src 'self'`,
+  // and the loaded content is the SRI-pinned audited asset plus
+  // bytecode data, never untrusted code). The interpreter computes the
+  // execution digest (hex HMAC-SHA256 keyed by the program bytes over
+  // the challenge context + the deterministic canonical op trace) and
+  // the driver appends it to the solution token; the server recomputes
+  // the expected digest from the STORED program and rejects a mismatch
+  // with the deterministic execution-mismatch outcome. The dimension is
+  // supplementary evidence only — never the sole acceptance boundary.
+  //
+  // Lazy invariant: a SHA-only challenge without a program pays ZERO
+  // bytes for the interpreter. The iframe's <script src integrity=...>
+  // is THE single fetch (same-origin, CSP-clean): the browser's native
+  // SRI verification is the fail-closed preflight (a digest mismatch
+  // never executes), and the browser's memory/HTTP cache dedups the
+  // asset across the page — a page with several armed challenges
+  // performs exactly ONE network fetch of the interpreter (asserted by
+  // the request-accounting spec). There is deliberately NO driver-side
+  // fetch of the interpreter: it would add a second request without
+  // adding a check the native SRI pin does not already perform.
+  // The iframe is created per armed challenge and REMOVED after the run
+  // (a fresh document per run keeps the DOM state machine
+  // deterministic).
+  //
+  // Every failure — missing/refused asset, SRI mismatch (no ready
+  // handshake), iframe or interpreter failure, timeout — enters the
+  // controlled kiwi:execution-unavailable state (the worker-unavailable
+  // pattern): never a silent success, never a weaker-profile fallback.
+  var kiwiExecutionRunCounter = 0;
+  var KIWI_EXECUTION_TIMEOUT_MS = 10000;
+  // Run one execution program in a fresh sandboxed ephemeral iframe and
+  // resolve with the 64-hex execution digest. Rejects with a reason
+  // string on every failure (fail closed).
+  function kiwiRunExecution(program, nonce, container, W) {
+    return new Promise(function (resolve, reject) {
+      var executionSrc = (container.getAttribute ? container.getAttribute("data-kiwi-execution-src") : null)
+        || (W.getAttribute ? W.getAttribute("data-kiwi-execution-src") : null);
+      var executionIntegrity = (container.getAttribute ? container.getAttribute("data-kiwi-execution-integrity") : null)
+        || (W.getAttribute ? W.getAttribute("data-kiwi-execution-integrity") : null);
+      if (!executionSrc || !executionIntegrity) {
+        // An armed challenge without a configured interpreter asset
+        // URL is a deployment mismatch: fail closed.
+        reject("execution-asset-unconfigured");
+        return;
+      }
+      var iframe = document.createElement("iframe");
+      iframe.setAttribute("sandbox", "allow-scripts allow-same-origin");
+      iframe.setAttribute("aria-hidden", "true");
+      iframe.style.cssText = "position:absolute;width:0;height:0;border:0;visibility:hidden;";
+      // The interpreter runs via a SAME-ORIGIN script src with the SRI
+      // pin (CSP `script-src 'self'` clean — no new directive, never an
+      // inline script): the browser fetches the asset ONCE per page
+      // (cache-deduped), verifies the integrity attribute BEFORE any
+      // byte executes (fail closed: a mismatch never runs), and a wrong
+      // asset simply never sends the ready handshake, so the driver
+      // times out into the controlled error state.
+      iframe.srcdoc = "<!doctype html><html><head><meta charset=\"utf-8\"></head><body><script src=\"" +
+        executionSrc.replace(/&/g, "&amp;").replace(/"/g, "&quot;") +
+        "\" integrity=\"" + executionIntegrity.replace(/"/g, "&quot;") + "\"><\/script><\/body><\/html>";
+      // The run message targets the iframe with the PAGE'S OWN ORIGIN
+      // (the srcdoc iframe is same-origin — never a "*" wildcard): the
+      // message carries the program + nonce, and only the driver-created
+      // iframe can be the target.
+      // The per-run id is channel hygiene (defense in depth): the
+      // authoritative gate is the event.source === iframe.contentWindow
+      // check below. A monotonic counter suffices — no randomness is
+      // needed anywhere in the execution plumbing, and none exists in
+      // the interpreter's op semantics.
+      kiwiExecutionRunCounter = (kiwiExecutionRunCounter + 1) >>> 0;
+      var runId = "kiwi-exec-" + kiwiExecutionRunCounter.toString(36) + "-" + nonce.slice(0, 8);
+      var settled = false;
+      var timeout = setTimeout(function () {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject("execution-timeout");
+      }, KIWI_EXECUTION_TIMEOUT_MS);
+      var onMessage = function (event) {
+        // ONLY the driver-created iframe may answer: the source must be
+        // this iframe's contentWindow (forged page traffic — event.source
+        // is the page window — is ignored, exactly like the existing
+        // no-page-listener posture) and the per-run id must match.
+        if (event.source !== iframe.contentWindow) return;
+        var data = event.data;
+        if (!data || !data.protocol || data.protocol !== "kiwi-execution-v1") return;
+        if (data.type === "kiwi-execution-ready") {
+          try {
+            iframe.contentWindow.postMessage({
+              type: "kiwi-execution-run",
+              protocol: "kiwi-execution-v1",
+              id: runId,
+              program: program,
+              nonce: nonce
+            }, window.location.origin);
+          } catch (e) { fail("execution-iframe"); }
+          return;
+        }
+        if (data.type === "kiwi-execution-result" && data.payload && data.payload.id === runId) {
+          var digest = data.payload.digest;
+          if (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest)) {
+            fail("execution-digest-malformed");
+            return;
+          }
+          if (settled) return;
+          settled = true;
+          clearTimeout(timeout);
+          cleanup();
+          resolve(digest);
+          return;
+        }
+        if (data.type === "kiwi-execution-error" && data.payload && data.payload.id === runId) {
+          fail("execution-interpreter-" + (data.payload.reason || "error"));
+        }
+      };
+      function fail(reason) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        cleanup();
+        reject(reason);
+      }
+      function cleanup() {
+        try { window.removeEventListener("message", onMessage); } catch (e) {}
+        try { if (iframe.parentNode) iframe.parentNode.removeChild(iframe); } catch (e) {}
+      }
+      // The listener is attached BEFORE the iframe is appended: the
+      // interpreter's ready handshake can arrive as soon as the script
+      // loads, and a late listener would miss it (the race the
+      // request-accounting spec pins down).
+      window.addEventListener("message", onMessage);
+      document.body.appendChild(iframe);
+    });
   }
   function solveWithWorker(data, onProgress, container, deadline) {
     var terminateHandle = function () {};
@@ -787,6 +930,19 @@
       if (mKib < 8 * p) throw new Error("Challenge malformed");
     }
     if (data.ttlSecs !== undefined && (typeof data.ttlSecs !== "number" || !isFinite(data.ttlSecs) || Math.floor(data.ttlSecs) !== data.ttlSecs || data.ttlSecs < 1 || data.ttlSecs > 300)) throw new Error("Challenge malformed");
+    // The optional ExecutionChallengeV1 program (base64 of the bytecode
+    // blob): bounded, non-empty, standard base64. When present the driver
+    // must run it (see kiwiRunExecution) — a malformed program is a
+    // challenge-content failure, never a solve.
+    if (data.execution_program !== undefined) {
+      if (typeof data.execution_program !== "string" || data.execution_program.length < 1 || data.execution_program.length > 4096) throw new Error("Challenge malformed");
+      try {
+        var execBytes = b64decode(data.execution_program);
+        if (!execBytes || execBytes.length < 8) throw new Error("Challenge malformed");
+      } catch (e) {
+        throw new Error("Challenge malformed");
+      }
+    }
   }
 
   // ── Coarse client-context descriptor (risk-v2 evidence) ─────────────
@@ -1593,6 +1749,27 @@
       // provider error callback fires immediately.
       fireErrorCallback("worker-unavailable");
     }
+    // ExecutionChallengeV1 interpreter failure (an armed challenge whose
+    // program could not run — asset fetch/integrity failure, iframe
+    // failure, timeout) enters this controlled state, the worker-
+    // unavailable pattern: the token is cleared, the solution is NEVER
+    // submitted without its execution digest (never a silent success,
+    // never a weaker-profile fallback), and the widget stays
+    // reacquirable (Retry re-runs the whole flow).
+    function executionUnavailable(reason) {
+      clearInterval(countdownTimer);
+      telemetry.stop();
+      if (tokenEl) tokenEl.value = "";
+      setBinding("");
+      if (countdownEl) countdownEl.textContent = "";
+      setStatus(kiwiT("statusWorkerUnavailable"), kiwiT("badgeUnavailable"), "kiwi:execution-unavailable");
+      setHint(kiwiT("hintWorker"));
+      setProgress(0);
+      announce(kiwiT("statusWorkerUnavailable"));
+      dispatch("execution-unavailable", { reason: reason || "execution-failed" });
+      delete W.dataset.kiwiStarted;
+      fireErrorCallback("execution-unavailable");
+    }
     // BFCache restore: a persisted pageshow must NOT auto-solve — it
     // clears the solved state and leaves the widget idle, ready to
     // reacquire on the next interaction or page re-init. The restore also
@@ -1792,7 +1969,30 @@
         if (result && result.deadline) throw new Error("Expired");
         if (!result) throw new Error("Exhausted");
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
-        tokenEl.value = btoa(data.nonce + "." + result.counter + "." + result.duration + "." + JSON.stringify(telemetry.build()));
+        // EXECUTIONCHALLENGEV1: an armed challenge response carries an
+        // execution_program. The driver runs it in the sandboxed ephemeral
+        // interpreter (lazily loaded execution.<hash>.js, deduped per page,
+        // SRI-preflight-verified) and appends the resulting execution
+        // digest to the solution token. Any interpreter/fetch failure
+        // enters the controlled kiwi:execution-unavailable state — never a
+        // silent success, never a weaker-profile fallback. A SHA-only
+        // challenge without a program pays zero bytes for the interpreter.
+        var executionDigest = null;
+        if (data.execution_program) {
+          var execResult = null;
+          try {
+            execResult = await kiwiRunExecution(data.execution_program, data.nonce, container, W);
+          } catch (e) {
+            if (!kiwiGenerationCurrent(widgetId, gen)) return;
+            executionUnavailable(typeof e === "string" ? e : (e && e.message ? e.message : "execution-failed"));
+            return;
+          }
+          if (!kiwiGenerationCurrent(widgetId, gen)) return;
+          if (!execResult) { executionUnavailable("execution-failed"); return; }
+          executionDigest = execResult;
+        }
+        if (!kiwiGenerationCurrent(widgetId, gen)) return;
+        tokenEl.value = btoa(data.nonce + "." + result.counter + "." + result.duration + "." + JSON.stringify(telemetry.build()) + (executionDigest ? "." + executionDigest : ""));
         setBinding(requestBinding || "");
         // The deferred decoy strategy creates its input after the first
         // solve completes (see kiwiRenderDecoy / kiwiFlushDecoy).

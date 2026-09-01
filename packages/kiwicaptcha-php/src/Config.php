@@ -118,6 +118,15 @@ final class Config
      *                                      (UnknownKid when the record's kid is unknown or
      *                                      ahead of the newest configured kid, the
      *                                      rollback/forward guard).
+     * @param string|null $executionKey     The ExecutionChallengeV1 keyed-PRF key (min 16
+     *                                      bytes). Null (default) = execution challenges
+     *                                      are never issued: issuance with the execution
+     *                                      surface armed refuses (the issuer throws), so
+     *                                      a deployment cannot arm the dimension without
+     *                                      the key. The key never leaves the server: it
+     *                                      only feeds the program generator; the browser
+     *                                      digest uses the program blob itself as its
+     *                                      content-derived key.
      */
     public function __construct(
         public readonly string $secretKey,
@@ -134,9 +143,13 @@ final class Config
         public readonly int $policyVersion = 1,
         public readonly ?string $issuer = null,
         public readonly int $kid = 1,
+        public readonly ?string $executionKey = null,
     ) {
         if (\strlen($secretKey) < 16) {
             throw new \InvalidArgumentException('KiwiCaptcha secret key must be at least 16 bytes');
+        }
+        if ($executionKey !== null && \strlen($executionKey) < 16) {
+            throw new \InvalidArgumentException('KiwiCaptcha execution key must be at least 16 bytes');
         }
         if ($kid < 1 || $kid > 4_294_967_295) {
             throw new \InvalidArgumentException(

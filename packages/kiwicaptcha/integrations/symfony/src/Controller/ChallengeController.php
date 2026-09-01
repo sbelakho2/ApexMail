@@ -239,6 +239,20 @@ final class ChallengeController
          */
         private readonly bool $decoyV3Enabled = false,
         /**
+         * The ExecutionChallengeV1 gate (risk.execution_challenge,
+         * default off). When true, issuance may arm the browser-
+         * execution dimension, see
+         * {@see self::executionArmingEnabled()}. The issued challenge
+         * then carries an execution program the driver must run, and
+         * the presented execution digest is verified server-side, the
+         * deterministic execution-mismatch failure on a missing or
+         * wrong digest. The dimension is supplementary evidence only,
+         * never the sole acceptance boundary. The PoW proof and the
+         * record state machinery always gate. The gate is inert
+         * without an execution_key (never a breakage, never an arm).
+         */
+        private readonly bool $executionGate = false,
+        /**
          * The issuance-side logger (when the app has one): receives the
          * once-per-process warning when decoy_v3_enabled cannot take
          * effect because the central protocol floor is below 3 or
@@ -248,6 +262,41 @@ final class ChallengeController
         private readonly ?LoggerInterface $logger = null,
     ) {
         $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
+    }
+
+    /**
+     * Whether this issuance arms the ExecutionChallengeV1 dimension,
+     * the cleanest seam for the risk gate. The dimension is armed when
+     * the risk.execution_challenge gate is on and a risk trigger
+     * passes. With the risk engine wired, the trigger is a non-Allow
+     * pre-issue decision, the same population the decoy surface
+     * targets. Without the risk engine, the gate itself is the
+     * trigger, so a deployment that turned the gate on arms every
+     * issuance. The program is generated from the challenge context
+     * inside the issuer, see
+     * {@see \KiwiCaptcha\Issuer::issueWithExecutionField()}.
+     *
+     * @param array{decision: \KiwiCaptcha\Risk\RiskDecision, action: \KiwiCaptcha\Risk\RiskAction}|null $riskDecision the resolved pre-issue decision, null when risk declined or was not wired
+     */
+    private function executionArmingEnabled(?array $riskDecision): bool
+    {
+        if (!$this->executionGate) {
+            return false;
+        }
+        // The gate is inert without the keyed-PRF key: the issuer cannot
+        // mint an execution program, so an armed issuance would refuse at
+        // request time — a guaranteed outage. The controller arms only
+        // when the key is configured (see Config::$executionKey).
+        if ($this->issuer->config()->executionKey === null) {
+            return false;
+        }
+        if ($this->risk === null || $riskDecision === null) {
+            // The risk engine is off (or declined to evaluate): the gate
+            // alone is the trigger.
+            return true;
+        }
+
+        return $riskDecision['action'] !== RiskAction::Allow;
     }
 
     /**
@@ -1040,6 +1089,12 @@ final class ChallengeController
         // risk-denied 429 without issuing.
         $profile = null;
         $riskAssessed = false;
+        // The ExecutionChallengeV1 risk trigger: the resolved pre-issue
+        // decision (or null when the engine declined / was not wired).
+        // executionArmingEnabled() arms the dimension when the gate is
+        // on AND the trigger passes (a non-Allow decision; without the
+        // risk engine, the gate alone).
+        $executionRiskDecision = null;
         if ($this->risk !== null) {
             if ($riskSession === null) {
                 $riskSession = $this->continuityCookie?->mint();
@@ -1138,6 +1193,10 @@ final class ChallengeController
                 $effectiveAction = $chainRequirement !== null
                     ? $this->effectiveChainAction($decision->action, $chainRequirement->requiredAction->value)
                     : $decision->action;
+                // The risk trigger of the execution gate: the effective
+                // action (chain floor included), so a stage-2 issuance
+                // never loses the trigger its chain promised.
+                $executionRiskDecision = ['decision' => $decision, 'action' => $effectiveAction];
                 if ($effectiveAction === RiskAction::StepUp) {
                     // Step-up is application-defined (verified email link,
                     // passkey, existing session, and so on): KiwiCaptcha
@@ -1310,9 +1369,19 @@ final class ChallengeController
             // never emit a challenge a parent-revision verifier rejects.
             $issuer = $this->issuerForTtl($ttlSecs);
             $armDecoy = $this->risk !== null && $this->protocolV3EmissionEnabled();
+            // The ExecutionChallengeV1 seam: the dimension is armed when
+            // the risk.execution_challenge gate is on AND a risk trigger
+            // passes, see {@see self::executionArmingEnabled()}; the
+            // program is generated from the challenge context
+            // inside the issuer. The
+            // provider-style action of the request rides the program
+            // (bounded 1..32 chars, already validated above) so the
+            // digest binds the action; the dimension protocol version is
+            // the fixed v1.
+            $armExecution = $this->executionArmingEnabled($executionRiskDecision);
             $challenge = $profile !== null
-                ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname, armDecoyField: $armDecoy)
-                : $issuer->issueWithDecoyField($scope, $clientIp, $armDecoy, $requestBinding, $hostname);
+                ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname, armDecoyField: $armDecoy, armExecution: $armExecution, executionAction: $action, executionVersion: '1')
+                : $issuer->issueWithExecutionField($scope, $clientIp, $armExecution, $requestBinding, $hostname, $action, '1', $armDecoy);
             // Chain stage binding: the newly minted challenge nonce must
             // differ from the chain's verified stage-1 nonce (server-held
             // in the state record). The nonces are server-minted random

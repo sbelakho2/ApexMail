@@ -75,6 +75,13 @@ pub struct IssuedChallenge {
     /// capability is inferable from `protocol_version`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decoy_field: Option<String>,
+    /// The ExecutionChallengeV1 program (base64 of the bytecode blob)
+    /// armed for this challenge; `None` = no execution dimension (the
+    /// legacy shape — the key is absent from the JSON). The driver runs
+    /// it in its sandboxed ephemeral interpreter and presents the
+    /// resulting execution digest with the solution token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_program: Option<String>,
 }
 
 /// The client-submitted solution, decoded from the `kiwi__token` hidden input.
@@ -103,16 +110,30 @@ pub struct SolutionToken {
     /// Raw telemetry JSON (browser/environment signals), opaque to the token
     /// layer — scored by the verifier.
     pub telemetry: serde_json::Value,
+    /// The ExecutionChallengeV1 execution digest (64 lowercase hex
+    /// characters) presented for an execution-armed challenge; `None` on
+    /// the unarmed shape. The digest is computed by the browser
+    /// interpreter from the issued program and binds the submission to
+    /// the challenge context; the verifier recomputes the expected
+    /// digest from the stored program and rejects a mismatch with the
+    /// deterministic `ExecutionMismatch` outcome.
+    pub execution_digest: Option<String>,
 }
 
 impl SolutionToken {
     /// Encode the token into the compact wire format stored in `kiwi__token`.
     pub fn encode(&self) -> String {
         let telemetry_str = serde_json::to_string(&self.telemetry).unwrap_or_default();
-        let plain = format!(
+        let mut plain = format!(
             "{}.{}.{}.{}",
             self.nonce, self.counter, self.duration_ms, telemetry_str
         );
+        // The execution digest is an optional fifth segment: an unarmed
+        // token stays byte-identical to the four-segment shape.
+        if let Some(digest) = &self.execution_digest {
+            plain.push('.');
+            plain.push_str(digest);
+        }
         B64.encode(plain)
     }
 
@@ -137,13 +158,32 @@ impl SolutionToken {
         }
         let plain = String::from_utf8(plain).map_err(|_| DecodeError::InvalidUtf8)?;
 
-        // The telemetry segment is JSON which may itself contain dots, so split
-        // only on the first three dots.
-        let mut parts = plain.splitn(4, '.');
-        let nonce = parts.next().ok_or(DecodeError::Malformed)?;
-        let counter_str = parts.next().ok_or(DecodeError::Malformed)?;
-        let duration_str = parts.next().ok_or(DecodeError::Malformed)?;
-        let telemetry_str = parts.next().ok_or(DecodeError::Malformed)?;
+        // The wire grammar splits on ALL dots: the first three segments
+        // are nonce/counter/duration, and the final segment is the
+        // execution digest exactly when it is 64 lowercase hex characters
+        // (the shape the driver's interpreter produces) — the telemetry
+        // is everything between. A JSON telemetry object can never end
+        // with a 64-hex tail (it must close with '}'), so the
+        // discriminator is unambiguous (PHP parity), and a malformed
+        // digest tail on an armed token fails the telemetry JSON parse
+        // below (fail closed).
+        let parts: Vec<&str> = plain.split('.').collect();
+        if parts.len() < 4 {
+            return Err(DecodeError::Malformed);
+        }
+        let nonce = parts[0];
+        let counter_str = parts[1];
+        let duration_str = parts[2];
+        let last = parts[parts.len() - 1];
+        let execution_digest;
+        let telemetry_str;
+        if parts.len() >= 5 && last.len() == 64 && last.bytes().all(|b| b.is_ascii_hexdigit()) {
+            execution_digest = Some(last.to_string());
+            telemetry_str = parts[3..parts.len() - 1].join(".");
+        } else {
+            execution_digest = None;
+            telemetry_str = parts[3..].join(".");
+        }
 
         // The nonce must be exactly the standard-base64 encoding of 32 bytes
         // (44 characters): a well-formed nonce is what the issuer mints, so
@@ -179,7 +219,7 @@ impl SolutionToken {
             return Err(DecodeError::InvalidDuration);
         }
         let telemetry: serde_json::Value =
-            serde_json::from_str(telemetry_str).map_err(|_| DecodeError::Malformed)?;
+            serde_json::from_str(&telemetry_str).map_err(|_| DecodeError::Malformed)?;
         // Telemetry must be a JSON object in both implementations ({} for an
         // off widget, {v,mode,me,ke,...} otherwise) — arrays, strings,
         // numbers, booleans and null are not part of the wire language.
@@ -192,6 +232,7 @@ impl SolutionToken {
             counter,
             duration_ms,
             telemetry,
+            execution_digest,
         })
     }
 }
@@ -227,6 +268,7 @@ mod tests {
             counter: 42,
             duration_ms: 850,
             telemetry: serde_json::json!({"wd": true, "hc": 8}),
+            execution_digest: None,
         };
         let encoded = token.encode();
         let decoded = SolutionToken::decode(&encoded).unwrap();
@@ -250,6 +292,7 @@ mod tests {
             counter: 1,
             duration_ms: 2,
             telemetry: serde_json::json!({"ua": "Mozilla/5.0 (X11; Linux x86_64)"}),
+            execution_digest: None,
         };
         let encoded = token.encode();
         let decoded = SolutionToken::decode(&encoded).unwrap();
@@ -300,6 +343,7 @@ mod tests {
             counter: 1,
             duration_ms: 2,
             telemetry,
+            execution_digest: None,
         };
         assert!(
             matches!(
@@ -325,6 +369,7 @@ mod tests {
                 counter,
                 duration_ms: 2,
                 telemetry: serde_json::json!({}),
+                execution_digest: None,
             };
             assert!(
                 matches!(
@@ -343,6 +388,7 @@ mod tests {
             counter: crate::challenge::SOLVER_MAX_HASHES - 1,
             duration_ms: 2,
             telemetry: serde_json::json!({}),
+            execution_digest: None,
         };
         assert!(SolutionToken::decode(&token.encode()).is_ok());
     }
@@ -363,6 +409,7 @@ mod tests {
                 counter: 1,
                 duration_ms: 2,
                 telemetry: bad,
+                execution_digest: None,
             };
             assert!(
                 matches!(
@@ -381,6 +428,7 @@ mod tests {
             counter: 1,
             duration_ms: MAX_DURATION_MS + 1,
             telemetry: serde_json::json!({}),
+            execution_digest: None,
         };
         assert!(
             matches!(
@@ -394,6 +442,7 @@ mod tests {
             counter: 1,
             duration_ms: MAX_DURATION_MS,
             telemetry: serde_json::json!({}),
+            execution_digest: None,
         };
         assert!(SolutionToken::decode(&ok.encode()).is_ok());
     }
@@ -405,6 +454,7 @@ mod tests {
             counter: 1,
             duration_ms: 2,
             telemetry: serde_json::json!({}),
+            execution_digest: None,
         };
         assert!(
             matches!(
@@ -425,6 +475,7 @@ mod tests {
             counter: 1,
             duration_ms: 2,
             telemetry: serde_json::json!({}),
+            execution_digest: None,
         };
         assert!(
             matches!(
@@ -447,6 +498,7 @@ mod tests {
             counter: 1,
             duration_ms: 2,
             telemetry: serde_json::json!({}),
+            execution_digest: None,
         };
         assert!(
             matches!(
@@ -473,6 +525,7 @@ mod tests {
             counter: 42,
             duration_ms: 850,
             telemetry: serde_json::json!({"wd": true}),
+            execution_digest: None,
         }
     }
 
@@ -509,6 +562,7 @@ mod tests {
             counter: 42,
             duration_ms: 850,
             telemetry: serde_json::json!({"a": 1}),
+            execution_digest: None,
         };
         let encoded = token.encode();
         assert_eq!(encoded.len() % 4, 0);
@@ -531,6 +585,7 @@ mod tests {
             counter: 42,
             duration_ms: 850,
             telemetry: serde_json::json!({"a": 1}),
+            execution_digest: None,
         };
         let encoded = token.encode();
         assert!(encoded.ends_with('='));
@@ -588,5 +643,59 @@ mod tests {
             ),
             "a url-safe nonce segment must be rejected"
         );
+    }
+
+    #[test]
+    fn execution_digest_round_trips_as_the_final_segment() {
+        let digest = "f".repeat(64);
+        let token = SolutionToken {
+            nonce: valid_token().nonce,
+            counter: 42,
+            duration_ms: 850,
+            telemetry: serde_json::json!({"wd": true}),
+            execution_digest: Some(digest.clone()),
+        };
+        let encoded = token.encode();
+        let plain = B64.decode(&encoded).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&plain),
+            format!("{}.42.850.{{\"wd\":true}}.{digest}", valid_token().nonce)
+        );
+        let decoded = SolutionToken::decode(&encoded).unwrap();
+        assert_eq!(decoded.execution_digest.as_deref(), Some(digest.as_str()));
+    }
+
+    #[test]
+    fn execution_digest_survives_dotted_telemetry() {
+        // The digest is the final segment; dotted telemetry stays whole.
+        let digest = "0".repeat(64);
+        let token = SolutionToken {
+            nonce: valid_token().nonce,
+            counter: 1,
+            duration_ms: 2,
+            telemetry: serde_json::json!({"ua": "Mozilla/5.0 (X11; Linux x86_64)"}),
+            execution_digest: Some(digest.clone()),
+        };
+        let decoded = SolutionToken::decode(&token.encode()).unwrap();
+        assert_eq!(decoded.execution_digest.as_deref(), Some(digest.as_str()));
+        assert_eq!(decoded.telemetry["ua"], "Mozilla/5.0 (X11; Linux x86_64)");
+    }
+
+    #[test]
+    fn execution_digest_must_be_64_hex() {
+        // A malformed digest tail (not 64 lowercase hex) is not the wire
+        // language: it parses as part of the telemetry and fails the JSON
+        // object requirement (fail closed).
+        let token = SolutionToken {
+            nonce: valid_token().nonce,
+            counter: 1,
+            duration_ms: 2,
+            telemetry: serde_json::json!({}),
+            execution_digest: Some("XYZ".to_string()),
+        };
+        assert!(matches!(
+            SolutionToken::decode(&token.encode()),
+            Err(DecodeError::Malformed)
+        ));
     }
 }

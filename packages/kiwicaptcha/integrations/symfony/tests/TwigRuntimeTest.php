@@ -61,12 +61,21 @@ final class TwigRuntimeTest extends TestCase
         // field next to the token.
         self::assertStringContainsString('request_binding', $html, 'the driver must include the request_binding challenge field');
         self::assertStringContainsString('input[name="kiwi_request_binding"]', $html, 'the driver must create the hidden kiwi_request_binding form input');
-        // No external requests: no <link>, no <script src>, no fetchable URLs
-        // (the SVG xmlns is an XML namespace, not a network fetch).
+        // No external requests: no <link>, no external <script src>, no
+        // fetchable URLs (the SVG xmlns is an XML namespace, not a
+        // network fetch). The inlined driver's own source mentions the
+        // execution iframe's script tag with an escaped quote
+        // (`<script src=\"` — a string literal, never a tag); only
+        // real external references are banned.
         self::assertStringNotContainsString('<link ', $html);
-        self::assertStringNotContainsString('<script src=', $html);
+        self::assertStringNotContainsString('<script src="/', $html);
+        self::assertStringNotContainsString('<script src="http', $html);
         self::assertStringNotContainsString('https://', $html);
         self::assertStringNotContainsString('http://api.', $html);
+        // The lazy execution interpreter URL rides the container as an
+        // attribute (both asset tiers; the fetch happens only when an
+        // armed challenge arrives, never for a SHA-only page).
+        self::assertStringContainsString('data-kiwi-execution-src="/kiwi-captcha/assets/execution.', $html);
     }
 
     public function testDefaultEndpointUsesRoutePrefix(): void
@@ -102,21 +111,21 @@ final class TwigRuntimeTest extends TestCase
 
         // The stylesheet link and the driver script carry the versioned
         // URLs and the SRI integrity of the exact bytes they reference.
-        preg_match_all('~<link rel="stylesheet" href="(/kiwi-captcha/assets/widget\.[0-9a-f]{12}\.css)" integrity="(sha256-[A-Za-z0-9+/=]+)">~', $html, $cssMatches);
+        preg_match_all('~<link rel="stylesheet" href="(/kiwi-captcha/assets/widget\.[0-9a-f]{64}\.css)" integrity="(sha256-[A-Za-z0-9+/=]+)">~', $html, $cssMatches);
         self::assertCount(1, $cssMatches[0], 'the widget stylesheet must be emitted exactly once');
-        self::assertSame('/kiwi-captcha/assets/widget.'.substr(hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget.css')), 0, 12).'.css', $cssMatches[1][0]);
+        self::assertSame('/kiwi-captcha/assets/widget.'.hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget.css')).'.css', $cssMatches[1][0]);
         self::assertSame('sha256-'.base64_encode(hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget.css'), true)), $cssMatches[2][0]);
 
-        preg_match_all('~<script src="(/kiwi-captcha/assets/driver\.[0-9a-f]{12}\.js)" integrity="(sha256-[A-Za-z0-9+/=]+)"></script>~', $html, $driverMatches);
+        preg_match_all('~<script src="(/kiwi-captcha/assets/driver\.[0-9a-f]{64}\.js)" integrity="(sha256-[A-Za-z0-9+/=]+)"></script>~', $html, $driverMatches);
         self::assertCount(1, $driverMatches[0], 'the driver script must be emitted exactly once');
-        self::assertSame('/kiwi-captcha/assets/driver.'.substr(hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget-driver.js')), 0, 12).'.js', $driverMatches[1][0]);
+        self::assertSame('/kiwi-captcha/assets/driver.'.hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget-driver.js')).'.js', $driverMatches[1][0]);
         self::assertSame('sha256-'.base64_encode(hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/widget-driver.js'), true)), $driverMatches[2][0]);
 
         // The runtime stays lazy: no runtime script tag (only the driver
         // script is emitted); its URL and SRI digest ride the container
         // attributes for the driver's argon-time fetch.
         self::assertStringNotContainsString('<script src="/kiwi-captcha/assets/runtime.', $html, 'the runtime must never be emitted as a script tag');
-        self::assertStringContainsString('data-kiwi-runtime-src="/kiwi-captcha/assets/runtime.'.substr(hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/kiwicaptcha-wasm.js')), 0, 12).'.js"', $html);
+        self::assertStringContainsString('data-kiwi-runtime-src="/kiwi-captcha/assets/runtime.'.hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/kiwicaptcha-wasm.js')).'.js"', $html);
         self::assertStringContainsString('data-kiwi-runtime-integrity="sha256-'.base64_encode(hash('sha256', (string) file_get_contents(__DIR__.'/../Resources/public/kiwicaptcha-wasm.js'), true)).'"', $html);
     }
 
@@ -151,7 +160,8 @@ final class TwigRuntimeTest extends TestCase
         $html = $runtime->renderWidget($env, ['endpoint' => '/kiwi-captcha/challenge']);
 
         self::assertStringNotContainsString('<link ', $html);
-        self::assertStringNotContainsString('<script src=', $html);
+        self::assertStringNotContainsString('<script src="/', $html);
+        self::assertStringNotContainsString('<script src="http', $html);
         self::assertStringNotContainsString('data-kiwi-runtime-src=', $html, 'inline mode renders no runtime URL attribute');
     }
 
@@ -226,7 +236,8 @@ final class TwigRuntimeTest extends TestCase
         $html = $runtime->renderWidget($env, []);
         // The driver script always mentions the attribute; the container
         // must not carry it when no binding is configured.
-        self::assertStringContainsString('data-kiwi-telemetry="off">', $html, 'no binding configured: the container must not render data-kiwi-request-binding');
+        self::assertStringContainsString('data-kiwi-telemetry="off"', $html, 'no binding configured: the container must not render data-kiwi-request-binding');
+        self::assertStringNotContainsString('data-kiwi-request-binding=', $html);
 
         // The static risk.request_binding config default renders into the
         // widget container.

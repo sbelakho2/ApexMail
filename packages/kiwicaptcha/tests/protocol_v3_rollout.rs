@@ -52,6 +52,7 @@ fn sha256_config() -> ChallengeConfig {
     ChallengeConfig {
         secret_key: SECRET.into(),
         kid: 1,
+        execution_key: None,
         algorithm: PoWAlgorithm::Sha256,
         m_kib: 0,
         t: 1,
@@ -93,6 +94,7 @@ fn verify_ctx<'a>(
         expected_issuer: None,
         expected_policy_version: None,
         client_ip: Some("198.51.100.7"),
+        execution_digest: None,
         telemetry: None,
         enforce_telemetry: false,
         max_attempts: 0,
@@ -227,6 +229,7 @@ fn acceptance_predicate_pins_the_set_boundaries() {
         issuer: None,
         hostname: None,
         decoy_field: None,
+        execution_program: None,
         kid: 1,
     };
     for version in [0u8, 4u8] {

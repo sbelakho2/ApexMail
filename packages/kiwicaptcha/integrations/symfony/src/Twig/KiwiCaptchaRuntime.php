@@ -53,12 +53,14 @@ final class KiwiCaptchaRuntime
         'runtime' => ['wasm', 'js'],
         'driver' => ['driver', 'js'],
         'worker' => ['worker', 'js'],
+        'execution' => ['execution', 'js'],
     ];
 
     private readonly string $css;
     private readonly string $wasm;
     private readonly string $driver;
     private readonly string $worker;
+    private readonly string $execution;
 
     /** @var array<string, array{url: string, sri: string}>|null */
     private ?array $assetInfo = null;
@@ -82,6 +84,7 @@ final class KiwiCaptchaRuntime
         $this->wasm = $this->readAsset($assetDir, 'kiwicaptcha-wasm.js');
         $this->driver = $this->readAsset($assetDir, 'widget-driver.js');
         $this->worker = $this->readAsset($assetDir, 'kiwi-worker.js');
+        $this->execution = $this->readAsset($assetDir, 'execution-interpreter.js');
     }
 
     private function readAsset(string $dir, string $name): string
@@ -115,6 +118,11 @@ final class KiwiCaptchaRuntime
         return $this->worker;
     }
 
+    public function execution(): string
+    {
+        return $this->execution;
+    }
+
     public function assetMode(): string
     {
         return $this->assetMode;
@@ -134,10 +142,11 @@ final class KiwiCaptchaRuntime
 
     /**
      * The versioned asset descriptors of files mode: the content-addressed
-     * URL ({prefix}/assets/{name}.{sha256-12}.{ext}) and the SRI
-     * integrity value (sha256-<base64 of the full content hash>), both
-     * derived from the exact bytes the inline mode embeds and the asset
-     * route serves.
+     * URL ({prefix}/assets/{name}.{sha256-64}.{ext}, the full 256-bit
+     * sha256 hex of the content, the same digest the asset route's ETag
+     * carries) and the SRI integrity value (sha256-<base64 of the full
+     * content hash>). Both derive from the exact bytes the inline mode
+     * embeds and the asset route serves.
      *
      * @return array<string, array{url: string, sri: string}>
      */
@@ -147,12 +156,12 @@ final class KiwiCaptchaRuntime
             return $this->assetInfo;
         }
         $prefix = rtrim($this->routePrefix, '/');
-        $contents = ['widget' => $this->css, 'runtime' => $this->wasm, 'driver' => $this->driver, 'worker' => $this->worker];
+        $contents = ['widget' => $this->css, 'runtime' => $this->wasm, 'driver' => $this->driver, 'worker' => $this->worker, 'execution' => $this->execution];
         $info = [];
         foreach (self::ASSET_KEYS as $key => [$var, $ext]) {
             $content = $contents[$key];
             $info[$key] = [
-                'url' => $prefix.'/assets/'.$key.'.'.substr(hash('sha256', $content), 0, 12).'.'.$ext,
+                'url' => $prefix.'/assets/'.$key.'.'.hash('sha256', $content).'.'.$ext,
                 'sri' => 'sha256-'.base64_encode(hash('sha256', $content, true)),
             ];
         }
@@ -254,6 +263,32 @@ final class KiwiCaptchaRuntime
     }
 
     /**
+     * The driver's data-kiwi-execution-src value: the versioned
+     * execution-interpreter asset URL the driver fetches lazily when an
+     * armed challenge arrives (ExecutionChallengeV1). Emitted in both
+     * asset tiers. The interpreter is never embedded. The lazy
+     * invariant says a SHA-only page without an execution program pays
+     * zero bytes for it, and the URL is the same content-addressed
+     * route in both tiers. Empty when the asset is unavailable.
+     */
+    public function executionSrc(): string
+    {
+        return $this->assets()['execution']['url'];
+    }
+
+    /**
+     * The driver's data-kiwi-execution-integrity value: the SRI digest
+     * of the execution-interpreter asset (sha256-<base64>), verified by
+     * the driver against the fetched bytes (and pinned on the sandboxed
+     * iframe's own script tag) before any byte runs. Empty when the
+     * asset is unavailable.
+     */
+    public function executionIntegrity(): string
+    {
+        return $this->assets()['execution']['sri'];
+    }
+
+    /**
      * The explicit `frame-ancestors` CSP directive for the widget page:
      * the space-separated allowlisted origins
      * (risk.challenge_origin_allowlist), always explicit, never
@@ -324,6 +359,8 @@ final class KiwiCaptchaRuntime
             'runtime_integrity' => $this->runtimeIntegrity(),
             'worker_src' => $this->workerSrc(),
             'worker_integrity' => $this->workerIntegrity(),
+            'execution_src' => $this->executionSrc(),
+            'execution_integrity' => $this->executionIntegrity(),
         ]);
     }
 }

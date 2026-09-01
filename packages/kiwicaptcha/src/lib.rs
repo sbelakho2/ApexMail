@@ -39,6 +39,7 @@
 //! License: **MIT**
 
 pub mod challenge;
+pub mod execution;
 pub mod keys;
 pub mod logo;
 pub mod profile;

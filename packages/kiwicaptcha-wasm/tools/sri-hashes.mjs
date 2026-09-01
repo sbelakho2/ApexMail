@@ -17,7 +17,7 @@ import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const assetsDir = join(here, "..", "assets");
 
-const DEFAULT_ASSETS = ["kiwicaptcha-wasm.js", "kiwi-worker.js", "widget-driver.js", "widget.css"];
+const DEFAULT_ASSETS = ["kiwicaptcha-wasm.js", "kiwi-worker.js", "widget-driver.js", "widget.css", "execution-interpreter.js"];
 const names = process.argv.slice(2).length ? process.argv.slice(2) : DEFAULT_ASSETS;
 
 for (const name of names) {

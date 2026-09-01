@@ -37,6 +37,7 @@ enum VerifyError: string
     case ConsumeIndeterminate = 'consume_indeterminate';
     case AlreadyConsumed = 'already_consumed';
     case RequestBindingMismatch = 'request_binding_mismatch';
+    case ExecutionMismatch = 'execution_mismatch';
 
     /**
      * Whether this failure is exempt from the one-shot policy on a
@@ -94,6 +95,7 @@ enum VerifyError: string
             self::ConsumeIndeterminate => 'verification storage response indeterminate — the challenge may or may not have been consumed',
             self::AlreadyConsumed => 'the challenge was already consumed by a different logical operation',
             self::RequestBindingMismatch => 'the challenge is not bound to the expected application transaction',
+            self::ExecutionMismatch => 'the execution digest does not match the expected program trace of the challenge',
         };
     }
 }

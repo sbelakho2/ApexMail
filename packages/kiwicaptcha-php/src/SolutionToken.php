@@ -7,9 +7,11 @@ namespace KiwiCaptcha;
 /**
  * The client-submitted solution, decoded from the `kiwi__token` hidden input.
  *
- * Wire format: `base64(nonce "." counter "." duration_ms "." telemetry_json)`.
+ * Wire format: `base64(nonce "." counter "." duration_ms "." telemetry_json
+ * ["." execution_digest])`.
  * The telemetry segment may itself contain dots, so decoding splits only on
- * the first three dots.
+ * the first four dots (an armed challenge appends the execution digest as
+ * a fifth segment; an unarmed token keeps the exact four-segment shape).
  */
 final class SolutionToken
 {
@@ -18,6 +20,14 @@ final class SolutionToken
         public readonly int $counter,
         public readonly int $durationMs,
         public readonly array $telemetry,
+        // The ExecutionChallengeV1 execution digest (64 lowercase hex
+        // characters) presented for an execution-armed challenge; null
+        // on the unarmed shape. The digest is computed by the browser
+        // interpreter from the issued program and binds the submission
+        // to the challenge context; the verifier recomputes the expected
+        // digest from the stored program and rejects a mismatch with the
+        // deterministic ExecutionMismatch outcome.
+        public readonly ?string $executionDigest = null,
     ) {
     }
 
@@ -40,10 +50,13 @@ final class SolutionToken
 
     /**
      * @param array<string, mixed> $telemetry
+     * @param string|null          $executionDigest 64-lowercase-hex execution
+     *                                              digest, or null for the
+     *                                              legacy four-segment shape
      */
-    public static function create(string $nonce, int $counter, int $durationMs, array $telemetry): self
+    public static function create(string $nonce, int $counter, int $durationMs, array $telemetry, ?string $executionDigest = null): self
     {
-        return new self($nonce, $counter, $durationMs, $telemetry);
+        return new self($nonce, $counter, $durationMs, $telemetry, $executionDigest);
     }
 
     public function encode(): string
@@ -58,6 +71,11 @@ final class SolutionToken
             // as {} and an assoc array as {"k":v,...}, never [].
             (string) json_encode((object) $this->telemetry, JSON_UNESCAPED_SLASHES)
         );
+        // The execution digest is an optional fifth segment: an unarmed
+        // token stays byte-identical to the four-segment shape.
+        if ($this->executionDigest !== null) {
+            $plain .= '.'.$this->executionDigest;
+        }
 
         return base64_encode($plain);
     }
@@ -93,11 +111,28 @@ final class SolutionToken
             throw DecodeError::invalidUtf8();
         }
 
-        $parts = explode('.', $plain, 4);
-        if (\count($parts) !== 4) {
+        // The wire grammar splits on ALL dots: the first three segments
+        // are nonce/counter/duration, and the final segment is the
+        // execution digest exactly when it is 64 lowercase hex characters
+        // (the shape the driver's interpreter produces) — the telemetry
+        // is everything between. A JSON telemetry object can never end
+        // with a 64-hex tail (it must close with '}'), so the
+        // discriminator is unambiguous, and a malformed digest tail on
+        // an armed token fails the telemetry JSON parse below (fail
+        // closed).
+        $parts = explode('.', $plain);
+        if (\count($parts) < 4) {
             throw DecodeError::malformed();
         }
-        [$nonce, $counterStr, $durationStr, $telemetryStr] = $parts;
+        $last = $parts[\count($parts) - 1];
+        $executionDigest = null;
+        if (\count($parts) >= 5 && preg_match('/^[0-9a-f]{64}$/D', $last) === 1) {
+            $executionDigest = $last;
+            $telemetryStr = implode('.', \array_slice($parts, 3, -1));
+        } else {
+            $telemetryStr = implode('.', \array_slice($parts, 3));
+        }
+        [$nonce, $counterStr, $durationStr] = $parts;
 
         // The nonce is base64(32 random bytes): exactly 44 chars, standard
         // alphabet with one padding '='. Anything else cannot come from
@@ -140,6 +175,13 @@ final class SolutionToken
             throw DecodeError::malformed();
         }
 
-        return new self($nonce, $counter, $durationMs, (array) $telemetry);
+        // The optional execution digest must be exactly 64 lowercase hex
+        // characters (the hex HMAC-SHA256 shape the driver's interpreter
+        // produces); any other shape is not part of the wire language.
+        if ($executionDigest !== null && preg_match('/^[0-9a-f]{64}$/D', $executionDigest) !== 1) {
+            throw DecodeError::malformed();
+        }
+
+        return new self($nonce, $counter, $durationMs, (array) $telemetry, $executionDigest);
     }
 }

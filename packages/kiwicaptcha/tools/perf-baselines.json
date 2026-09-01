@@ -9,14 +9,14 @@
     },
     "budgets": {
         "widget_driver": {
-            "raw_bytes": 142847,
-            "gzip_bytes": 40589,
-            "brotli_bytes": 34280,
+            "raw_bytes": 153738,
+            "gzip_bytes": 43643,
+            "brotli_bytes": 36712,
             "raw_cap_bytes": 160000,
             "gzip_cap_bytes": 50000,
             "brotli_cap_bytes": 45000,
             "copies_identical": true,
-            "note": "The three copies (the canonical WASM asset, the core crate resources and the bundle public copy) are byte-identical at 142847 bytes; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes (an equality gate, not just the cap)."
+            "note": "The three copies (the canonical WASM asset, the core crate resources and the bundle public copy) are byte-identical at 153738 bytes; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes (an equality gate, not just the cap)."
         },
         "widget_worker": {
             "raw_bytes": 20233,

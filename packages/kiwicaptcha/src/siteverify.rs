@@ -103,7 +103,8 @@ fn map_error(reason: &VerifyError) -> String {
         | VerifyError::UnsupportedArgon2Params
         | VerifyError::BotDetected
         | VerifyError::MalformedToken
-        | VerifyError::RecordNotFound => "invalid-input-response".into(),
+        | VerifyError::RecordNotFound
+        | VerifyError::ExecutionMismatch => "invalid-input-response".into(),
     }
 }
 
@@ -231,6 +232,7 @@ mod tests {
             issuer: None,
             kid: 1,
             decoy_field: None,
+            execution_program: None,
         };
         let _ = &mut record;
         let resp = siteverify_response(
