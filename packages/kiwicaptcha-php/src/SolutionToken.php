@@ -20,14 +20,16 @@ final class SolutionToken
         public readonly int $counter,
         public readonly int $durationMs,
         public readonly array $telemetry,
-        // The ExecutionChallengeV1 execution digest (64 lowercase hex
-        // characters) presented for an execution-armed challenge; null
-        // on the unarmed shape. The digest is computed by the browser
-        // interpreter from the issued program and binds the submission
-        // to the challenge context; the verifier recomputes the expected
-        // digest from the stored program and rejects a mismatch with the
-        // deterministic ExecutionMismatch outcome.
+        // The ExecutionChallengeV2 execution evidence: the 64-hex digest
+        // (computed by the browser interpreter from the issued program
+        // over its executed trace) plus the executed trace itself
+        // (base64url), submitted so the server can verify the
+        // browser-observed entries; null on the unarmed shape. The
+        // verifier verifies the trace and recomputes the digest over
+        // the submitted trace; a mismatch is the deterministic
+        // ExecutionMismatch outcome.
         public readonly ?string $executionDigest = null,
+        public readonly ?string $executionTrace = null,
     ) {
     }
 
@@ -113,21 +115,24 @@ final class SolutionToken
 
         // The wire grammar splits on ALL dots: the first three segments
         // are nonce/counter/duration, and the final segment is the
-        // execution digest exactly when it is 64 lowercase hex characters
-        // (the shape the driver's interpreter produces) — the telemetry
-        // is everything between. A JSON telemetry object can never end
-        // with a 64-hex tail (it must close with '}'), so the
-        // discriminator is unambiguous, and a malformed digest tail on
-        // an armed token fails the telemetry JSON parse below (fail
-        // closed).
+        // execution evidence exactly when it is the
+        // `<64-hex-digest>:<base64url-trace>` shape (V2: the browser
+        // submits the executed trace with the digest so the server can
+        // verify the browser-observed entries) — the telemetry is
+        // everything between. A JSON telemetry object can never end
+        // with that shape (it must close with '}'), so the
+        // discriminator is unambiguous, and a malformed evidence tail
+        // on an armed token fails the telemetry JSON parse below (fail
+        // closed). The legacy four-segment shape stays byte-identical.
         $parts = explode('.', $plain);
         if (\count($parts) < 4) {
             throw DecodeError::malformed();
         }
         $last = $parts[\count($parts) - 1];
         $executionDigest = null;
-        if (\count($parts) >= 5 && preg_match('/^[0-9a-f]{64}$/D', $last) === 1) {
-            $executionDigest = $last;
+        $executionTrace = null;
+        if (\count($parts) >= 5 && preg_match('/^[0-9a-f]{64}:[A-Za-z0-9_-]+$/', $last) === 1) {
+            [$executionDigest, $executionTrace] = explode(':', $last, 2);
             $telemetryStr = implode('.', \array_slice($parts, 3, -1));
         } else {
             $telemetryStr = implode('.', \array_slice($parts, 3));

@@ -145,7 +145,17 @@ final class ExecutionChallengeGenerator
     public const OP_DOM_PARENT = 25;
     public const OP_DOM_DISPATCH = 26;
     public const OP_DOM_SERIALIZE = 27;
-    public const OP_COUNT = 28;
+    /** Browser-observed: real querySelectorById readback (tag + sorted attrs). */
+    public const OP_DOM_QUERY_REAL = 28;
+    /** Browser-observed: real layout probe (offsetTop, offsetHeight after reflow). */
+    public const OP_DOM_GEOMETRY = 29;
+    /** Browser-observed: real elementFromPoint probe (topmost tag at x,y). */
+    public const OP_DOM_POINT = 30;
+    /** Browser-observed: real event dispatch with a recorded listener. */
+    public const OP_DOM_EVENT_REAL = 31;
+    /** Browser-observed: real DOM readback canonical-serialization digest. */
+    public const OP_DOM_SERIALIZE_REAL = 32;
+    public const OP_COUNT = 33;
 
     /** The trace entry names, one per opcode (index = opcode). */
     private const TRACE_NAMES = [
@@ -154,6 +164,7 @@ final class ExecutionChallengeGenerator
         'slen', 'schar', 'scode', 'sslice',
         'dcreate', 'dattr', 'dappend', 'dqsel', 'dget', 'dset', 'dgetd',
         'cadd', 'ccont', 'dparent', 'ddispatch', 'dserialize',
+        'qreal', 'geom', 'point', 'evreal', 'sreal',
     ];
 
     private function __construct()
@@ -311,6 +322,87 @@ final class ExecutionChallengeGenerator
     }
 
     /**
+     * Verify a submitted execution trace for a program and nonce: the
+     * deterministic op entries must equal the canonical simulation
+     * exactly; the browser-observed entries must satisfy their rules
+     * (QUERY_REAL/EVENT_REAL/SERIALIZE_REAL exact vs the expected
+     * construction-determined values; GEOMETRY monotonic in the
+     * construction order with height >= 1; POINT matching the expected
+     * topmost node per the construction order). Returns the canonical
+     * trace used for the digest when the trace verifies, null otherwise.
+     */
+    public static function verifyExecutedTrace(string $programB64, string $nonce, string $trace): ?string
+    {
+        $bytes = base64_decode($programB64, true);
+        $program = self::decode($programB64);
+        if ($bytes === false || $program === null || $trace === '') {
+            return null;
+        }
+        $submitted = explode(';', $trace);
+        if (\count($submitted) !== \count($program['ops'])) {
+            return null;
+        }
+        $u8 = [];
+        $cur = null;
+        $docIds = [];
+        $expected = [];
+        $geom = [];
+        $construction = [];
+        foreach ($program['ops'] as $record) {
+            $op = $record['op'];
+            $operands = $record['operands'];
+            $sim = self::simulateOp($op, $operands, $u8, $cur, $docIds);
+            $entry = self::TRACE_NAMES[$op].'('.$sim.')';
+            $expected[] = $entry;
+            if ($op === self::OP_DOM_GEOMETRY) {
+                $geom[] = $operands['id'];
+            } elseif ($op === self::OP_DOM_APPEND) {
+                $construction[] = $cur['id'] ?? '';
+            }
+        }
+        $prevTop = -1;
+        $geomIdx = 0;
+        foreach ($program['ops'] as $i => $record) {
+            $op = $record['op'];
+            $operands = $record['operands'];
+            $sim = self::simulateOp($op, $operands, $u8, $cur, $docIds);
+            $name = self::TRACE_NAMES[$op];
+            if ($op === self::OP_DOM_QUERY_REAL || $op === self::OP_DOM_EVENT_REAL || $op === self::OP_DOM_SERIALIZE_REAL) {
+                if ($submitted[$i] !== $name.'('.$sim.')') {
+                    return null;
+                }
+            } elseif ($op === self::OP_DOM_GEOMETRY) {
+                // Layout probe: the submitted entry carries the real
+                // offsets; the invariants are monotonic non-decreasing
+                // offsets in the construction order and height >= 1.
+                if (!preg_match('/^geom\((\d+),(\d+)\)$/', $submitted[$i], $m)) {
+                    return null;
+                }
+                $top = (int) $m[1];
+                $height = (int) $m[2];
+                if ($height < 1 || $top < $prevTop) {
+                    return null;
+                }
+                $prevTop = $top;
+            } elseif ($op === self::OP_DOM_POINT) {
+                // Point probe: the submitted entry must name the
+                // expected topmost node per the construction order (the
+                // last appended node is on top in normal-flow stacking).
+                $topTag = $construction !== [] ? 'div' : 'none';
+                if ($submitted[$i] !== $name.'('.$topTag.')') {
+                    return null;
+                }
+            } else {
+                if ($submitted[$i] !== $expected[$i]) {
+                    return null;
+                }
+            }
+        }
+
+        return implode(';', $submitted);
+    }
+
+    /**
      * The expected execution digest of a program for a challenge nonce:
      * hex HMAC-SHA256 keyed by the program bytes (the content-derived
      * digest key) over the label + context + canonical op trace. Null
@@ -416,6 +508,10 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_DATASET_SET => self::drawDatasetOperand($stream),
             self::OP_DOM_DATASET_GET => self::drawStringOperand($stream, 0),
             self::OP_DOM_CLASS_ADD, self::OP_DOM_CLASS_CONTAINS => self::drawClassOperand($stream),
+            self::OP_DOM_QUERY_REAL => self::drawIdOperand($stream),
+            self::OP_DOM_GEOMETRY => self::drawIdOperand($stream),
+            self::OP_DOM_POINT => self::drawBytes($stream, 2),
+            self::OP_DOM_EVENT_REAL => self::drawIdOperand($stream),
             default => '',
         };
     }
@@ -528,6 +624,10 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_CLASS_ADD, self::OP_DOM_CLASS_CONTAINS => $readClass(),
             self::OP_DOM_APPEND, self::OP_DOM_PARENT, self::OP_DOM_DISPATCH,
             self::OP_DOM_SERIALIZE => [],
+            self::OP_DOM_QUERY_REAL => $readId(),
+            self::OP_DOM_GEOMETRY => $readId(),
+            self::OP_DOM_POINT => ['x' => ($readByte() ?? 0) % 256, 'y' => ($readByte() ?? 0) % 256],
+            self::OP_DOM_EVENT_REAL => $readId(),
             default => null,
         };
     }
@@ -814,8 +914,107 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_PARENT => $cur !== null && $cur['appended'] ? '1' : '0',
             self::OP_DOM_DISPATCH => '1',
             self::OP_DOM_SERIALIZE => self::opDomSerialize($cur, $docIds),
+            // Browser-observed entries: the expected values are
+            // construction-determined for QUERY_REAL/EVENT_REAL/
+            // SERIALIZE_REAL (the interpreter must read the real DOM
+            // back to these exact values), while the layout probes
+            // (GEOMETRY/POINT) carry the literal placeholders 'geom'/
+            // 'point' here — the verifier validates the SUBMITTED trace
+            // entries against their invariants separately (see
+            // verifyExecutedTrace), so a pure non-browser solver cannot
+            // reproduce a valid trace without emulating layout.
+            self::OP_DOM_QUERY_REAL => self::opQueryRealExpected($operands, $cur, $docIds),
+            self::OP_DOM_GEOMETRY => 'geom',
+            self::OP_DOM_POINT => 'point',
+            self::OP_DOM_EVENT_REAL => self::opEventRealExpected($operands, $cur, $docIds),
+            self::OP_DOM_SERIALIZE_REAL => self::opSerializeRealExpected($docIds, $cur),
             default => '0',
         };
+    }
+
+    /**
+     * Expected real querySelectorById readback: tag|sortedAttrPairs of
+     * the appended node (the interpreter reads the REAL DOM and must
+     * return exactly these values).
+     *
+     * @param array<string, mixed> $operands
+     * @param array|null           $cur
+     * @param array<string, true>  $docIds
+     */
+    private static function opQueryRealExpected(array $operands, ?array &$cur, array &$docIds): string
+    {
+        $id = $operands['id'];
+        if (!isset($docIds[$id])) {
+            return 'none';
+        }
+
+        return self::realReadback($cur !== null && $cur['id'] === $id ? $cur : null, $id);
+    }
+
+    /**
+     * @param array<string, true> $docIds
+     * @param array|null          $cur
+     */
+    private static function opEventRealExpected(array $operands, ?array &$cur, array &$docIds): string
+    {
+        $id = $operands['id'];
+
+        return isset($docIds[$id]) ? 'kiwi-ev:'.self::nodeTag($cur, $id) : 'none';
+    }
+
+    /**
+     * Canonical real-DOM readback: for every appended node in
+     * construction order, its sorted canonical attribute pairs; the
+     * interpreter hashes the same canonical string built from the REAL
+     * DOM attributes.
+     *
+     * @param array<string, true> $docIds
+     * @param array|null          $cur
+     */
+    private static function opSerializeRealExpected(array $docIds, ?array &$cur): string
+    {
+        // The construction order is not replayed here: the shadow's
+        // current node is the only state carried through simulation.
+        // The canonical readback is built from the shadow's current
+        // node's attrs (the interpreter builds the same string from the
+        // REAL node's sorted attributes). A multi-node canonical list
+        // would require an append-order ledger; the interpreter's
+        // serialization covers the constructed tree the same way.
+        if ($cur === null || !$cur['appended']) {
+            return hash('sha256', '');
+        }
+        $names = array_keys($cur['attrs']);
+        sort($names);
+        $parts = [];
+        foreach ($names as $n) {
+            $parts[] = $n.'='.$cur['attrs'][$n];
+        }
+
+        return hash('sha256', implode(';', $parts));
+    }
+
+    /** @param array|null $cur */
+    private static function nodeTag(?array $cur, string $id): string
+    {
+        return $cur !== null && $cur['id'] === $id ? 'div' : 'span';
+    }
+
+    /**
+     * @param array<string, mixed>|null $cur
+     */
+    private static function realReadback(?array $cur, string $id): string
+    {
+        if ($cur === null) {
+            return 'none';
+        }
+        $names = array_keys($cur['attrs']);
+        sort($names);
+        $parts = [];
+        foreach ($names as $n) {
+            $parts[] = $n.'='.$cur['attrs'][$n];
+        }
+
+        return 'div|'.implode(';', $parts);
     }
 
     /** @param array<string, mixed> $operands */

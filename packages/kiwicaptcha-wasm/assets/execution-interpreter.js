@@ -85,7 +85,8 @@
     "u8c", "u8w", "u8r", "u8rot",
     "slen", "schar", "scode", "sslice",
     "dcreate", "dattr", "dappend", "dqsel", "dget", "dset", "dgetd",
-    "cadd", "ccont", "dparent", "ddispatch", "dserialize"
+    "cadd", "ccont", "dparent", "ddispatch", "dserialize",
+    "qreal", "geom", "point", "evreal", "sreal"
   ];
 
   // ── Minimal SHA-256 (FIPS 180-4), deterministic ─────────────────────
@@ -583,6 +584,58 @@
           }
           var serialized = cur ? serializeAttrs(cur) : "";
           value = b64Encode(asciiBytes(serialized));
+          break;
+        }
+        case 28: { // QUERY_REAL: the real node readback by id.
+          var qid = bytesToAscii(opValue(ops, "id"));
+          var real = doc.getElementById(qid);
+          if (!real) { value = "none"; break; }
+          var names = [];
+          for (var ai = 0; ai < real.attributes.length; ai++) names.push(real.attributes[ai].name);
+          names.sort();
+          var parts = [];
+          for (var qi = 0; qi < names.length; qi++) parts.push(names[qi] + "=" + real.getAttribute(names[qi]));
+          value = real.tagName.toLowerCase() + "|" + parts.join(";");
+          break;
+        }
+        case 29: { // GEOMETRY: the real layout probe (reflow forced).
+          var gid = bytesToAscii(opValue(ops, "id"));
+          var gnode = doc.getElementById(gid);
+          if (!gnode) { value = "0,0"; break; }
+          value = gnode.offsetTop + "," + gnode.offsetHeight;
+          break;
+        }
+        case 30: { // POINT: the real elementFromPoint probe.
+          var px = opValue(ops, "x"), py = opValue(ops, "y");
+          var hit = doc.elementFromPoint(px, py);
+          value = hit ? hit.tagName.toLowerCase() : "none";
+          break;
+        }
+        case 31: { // EVENT_REAL: a real listener records the dispatch.
+          var eid = bytesToAscii(opValue(ops, "id"));
+          var enode = doc.getElementById(eid);
+          if (!enode) { value = "none"; break; }
+          var recorded = null;
+          function onEv() { recorded = "kiwi-ev:" + (enode.tagName || "").toLowerCase(); }
+          enode.addEventListener("kiwi-ev", onEv);
+          try { enode.dispatchEvent(new doc.defaultView.Event("kiwi-ev")); } catch (e) {}
+          value = recorded || "none";
+          break;
+        }
+        case 32: { // SERIALIZE_REAL: the canonical real readback digest.
+          var ids = Object.keys(docIds).sort();
+          var canon = "";
+          for (var si = 0; si < ids.length; si++) {
+            var rn = doc.getElementById(ids[si]);
+            if (!rn) continue;
+            var rnames = [];
+            for (var ri2 = 0; ri2 < rn.attributes.length; ri2++) rnames.push(rn.attributes[ri2].name);
+            rnames.sort();
+            var rparts = [];
+            for (var rj = 0; rj < rnames.length; rj++) rparts.push(rnames[rj] + "=" + rn.getAttribute(rnames[rj]));
+            canon += ids[si] + ":" + rparts.join(";") + "|";
+          }
+          value = bytesToHex(sha256Bytes(asciiBytes(canon)));
           break;
         }
         default:
