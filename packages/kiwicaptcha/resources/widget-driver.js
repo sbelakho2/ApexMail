@@ -1836,17 +1836,24 @@
         // EXECUTION CAPABILITY ADVERTISEMENT: when the widget container or
         // widget element carries the configured execution interpreter
         // asset (data-kiwi-execution-src + integrity), the driver declares
-        // the highest execution-program version it can run
-        // (execution_max_version=2) with the challenge request, so the
-        // server issues the version-2 causal grammar only to clients that
-        // advertised the capability. An older driver or a widget without
-        // the execution tier never sends the field, and the server treats
-        // its absence as version 1 (the construction-to-probe grammar).
+        // the highest execution-program version it can run via the
+        // Kiwi-Execution-Max-Version request header (value 2) on the
+        // challenge request, so the server issues the version-2 causal
+        // grammar only to clients that advertised the capability. The
+        // advertisement rides an ignorable HTTP header, never a body
+        // field: a server that validates challenge bodies against a
+        // closed field set answers 422 UNKNOWN_FIELDS to an unknown body
+        // field before any version-2 emission is even enabled, while an
+        // unknown header is ignored. An older driver or a widget without
+        // the execution tier never sends the header, and the server
+        // treats its absence as version 1 (the construction-to-probe
+        // grammar).
         var execSrcAttr = (container.getAttribute ? container.getAttribute("data-kiwi-execution-src") : null)
           || (W.getAttribute ? W.getAttribute("data-kiwi-execution-src") : null);
         var execIntegrityAttr = (container.getAttribute ? container.getAttribute("data-kiwi-execution-integrity") : null)
           || (W.getAttribute ? W.getAttribute("data-kiwi-execution-integrity") : null);
-        if (execSrcAttr && execIntegrityAttr) reqBody.execution_max_version = 2;
+        var reqHeaders = { "Accept": "application/json", "Content-Type": "application/json" };
+        if (execSrcAttr && execIntegrityAttr) reqHeaders["Kiwi-Execution-Max-Version"] = "2";
         if (algorithm !== "sha256") reqBody.algorithm = algorithm;
         if (requestBinding) reqBody.request_binding = requestBinding;
         // CHAIN TICKET: when the widget container carries a server-issued
@@ -1919,7 +1926,7 @@
         if (rw) { rw.abortController = abortController; rw.abortTimer = abortTimer; }
         var resp, data;
         try {
-          resp = await fetch(endpoint, { method:"POST", credentials:"same-origin", cache:"no-store", redirect:"error", referrerPolicy:"no-referrer", headers:{"Accept":"application/json","Content-Type":"application/json"}, body: JSON.stringify(reqBody), signal: abortController.signal });
+          resp = await fetch(endpoint, { method:"POST", credentials:"same-origin", cache:"no-store", redirect:"error", referrerPolicy:"no-referrer", headers: reqHeaders, body: JSON.stringify(reqBody), signal: abortController.signal });
           if (!resp.ok) throw new Error("Challenge failed");
           try {
             data = await resp.json();

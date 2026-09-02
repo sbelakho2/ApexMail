@@ -230,14 +230,18 @@ test.describe('ExecutionChallengeV1 (browser)', () => {
   test('an N-1 client (no version-2 capability) is issued a version-1 program, no observe entry, and still verifies end to end', async ({ page }) => {
     // The real execution-versioning gate: the fixture issues the
     // version-2 causal grammar only when the client advertised
-    // execution_max_version >= 2 with the challenge request. A stale
-    // page whose driver never advertises the capability must receive a
-    // version-1 program; the fixture lever ?execution_max_version=1
-    // stands in for the absent advertisement. The grammar byte of the
-    // blob is 1, the executed trace carries no obs( entry, and the
-    // solve still verifies end to end: the current interpreter runs
-    // both generations.
-    await page.goto('/?assets=files&execution=1&execution_max_version=1');
+    // Kiwi-Execution-Max-Version >= 2 on the challenge request. The
+    // route below rewrites the armed driver's header value to 1,
+    // standing in for a stale page whose driver never advertises (the
+    // server reads the header, and absent and 1 both mint version 1).
+    // The grammar byte of the blob is 1, the executed trace carries no
+    // obs( entry, and the solve still verifies end to end: the current
+    // interpreter runs both generations.
+    await page.route('**/challenge*', async (route) => {
+      const headers = { ...route.request().headers(), 'kiwi-execution-max-version': '1' };
+      await route.continue({ headers });
+    });
+    await page.goto('/?assets=files&execution=1');
     await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', {
       timeout: 120_000,
     });
@@ -254,9 +258,13 @@ test.describe('ExecutionChallengeV1 (browser)', () => {
     ).toBe(false);
 
     // The grammar version byte of the program the same N-1 issuance
-    // mints. The blob layout is: format(1), scopeLen(1), scope,
-    // actionLen(1), action, opVersion(1), then opCount(1).
-    const resp = await page.request.post('http://127.0.0.1:8085/challenge?execution=1&execution_max_version=1', {
+    // mints. The direct mint passes the header value 1, the same
+    // advertisement a stale driver presents (absent and 1 mint the
+    // same version-1 program). The blob layout is: format(1),
+    // scopeLen(1), scope, actionLen(1), action, opVersion(1), then
+    // opCount(1).
+    const resp = await page.request.post('http://127.0.0.1:8085/challenge?execution=1', {
+      headers: { 'Kiwi-Execution-Max-Version': '1' },
       data: { scope: 'login' },
     });
     const challenge = await resp.json();

@@ -29,11 +29,14 @@ use Symfony\Component\HttpFoundation\Response;
  *         queue fullness is never consulted.
  *      3. the central security-policy state is compatible: the Redis key
  *         `{kiwi:<ns>}:security-policy` (a hash with
- *         `min_protocol_version` and `min_policy_epoch`). When the key is
+ *         `min_protocol_version`, `min_policy_epoch` and the optional
+ *         `min_execution_version`). When the key is
  *         present, ready requires min_protocol_version <= 4 (this
  *         binary's max protocol version, the execution-capable
- *         canonical) and min_policy_epoch <= the
- *         configured risk.policy_version. A newer central policy
+ *         canonical), min_execution_version <= 2 (this binary's max
+ *         execution-program version; an absent field imposes nothing)
+ *         and min_policy_epoch <= the configured
+ *         risk.policy_version. A newer central policy
  *         (mixed-version rolling deployments, rollbacks) takes an
  *         outdated binary out of the pool before it serves traffic it
  *         cannot honor. When the key is absent the binary's own
@@ -83,6 +86,18 @@ final class KiwiHealthController
      * (`challenge::MAX_PROTOCOL_VERSION`).
      */
     public const MAX_PROTOCOL_VERSION = 4;
+
+    /**
+     * The binary's maximum execution-program version: 2 since the
+     * causal observe grammar (execution version 2, opcode 33) landed —
+     * this binary verifies and interprets version-2 programs. A central
+     * security-policy hash demanding a higher execution version means
+     * this binary cannot honor the version-2 programs the fleet now
+     * writes, so it must not be ready. Mirrored by the php-core
+     * (`ExecutionChallengeGenerator::MAX_EXECUTION_VERSION`) and the
+     * Rust crate (`execution::MAX_EXECUTION_VERSION`).
+     */
+    public const MAX_EXECUTION_VERSION = 2;
 
     /** Fixed headroom of the memory-budget invariant, in MiB. */
     public const MEMORY_HEADROOM_MIB = 256;
@@ -371,10 +386,11 @@ final class KiwiHealthController
     /**
      * Central security-policy compatibility (cached ~1 s):
      * `{kiwi:<ns>}:security-policy` hash. When present, ready requires
-     * min_protocol_version <= {@see self::MAX_PROTOCOL_VERSION} and
-     * min_policy_epoch <= the configured risk.policy_version. When absent
-     * (or when no Redis is configured) the binary's own configuration is
-     * authoritative.
+     * min_protocol_version <= {@see self::MAX_PROTOCOL_VERSION},
+     * min_execution_version <= {@see self::MAX_EXECUTION_VERSION} (an
+     * absent execution floor imposes nothing) and min_policy_epoch <=
+     * the configured risk.policy_version. When absent (or when no Redis
+     * is configured) the binary's own configuration is authoritative.
      *
      * @return array{0: bool, 1: ?string} [compatible, machine-readable reason]
      */
@@ -394,11 +410,11 @@ final class KiwiHealthController
             $policy = $this->redis->hgetall('{kiwi:'.$this->namespace.'}:security-policy');
             if (\is_array($policy) && $policy !== []) {
                 // Corrupt present policy state must fail closed: a
-                // malformed min_protocol_version / min_policy_epoch (abc,
-                // -1, 1.5, 1e3, overflow) makes the node NOT ready — it is
-                // never silently collapsed toward zero and interpreted as
-                // absent.
-                foreach (['min_protocol_version', 'min_policy_epoch'] as $field) {
+                // malformed min_protocol_version / min_policy_epoch /
+                // min_execution_version (abc, -1, 1.5, 1e3, overflow)
+                // makes the node NOT ready — it is never silently
+                // collapsed toward zero and interpreted as absent.
+                foreach (['min_protocol_version', 'min_policy_epoch', 'min_execution_version'] as $field) {
                     if (\array_key_exists($field, $policy)) {
                         $raw = $policy[$field];
                         if (!\is_string($raw) || preg_match('/^(?:0|[1-9][0-9]*)$/D', $raw) !== 1) {
@@ -416,12 +432,16 @@ final class KiwiHealthController
                 if ($ok) {
                     $minProtocol = (int) ($policy['min_protocol_version'] ?? 0);
                     $minEpoch = (int) ($policy['min_policy_epoch'] ?? 0);
+                    $minExecution = (int) ($policy['min_execution_version'] ?? 0);
                     if ($minProtocol > self::MAX_PROTOCOL_VERSION) {
                         $ok = false;
                         $reason = 'security_policy_incompatible:min_protocol_version_'.$minProtocol;
                     } elseif ($minEpoch > $this->policyVersion) {
                         $ok = false;
                         $reason = 'security_policy_incompatible:min_policy_epoch_'.$minEpoch;
+                    } elseif ($minExecution > self::MAX_EXECUTION_VERSION) {
+                        $ok = false;
+                        $reason = 'security_policy_incompatible:min_execution_version_'.$minExecution;
                     }
                 }
             }

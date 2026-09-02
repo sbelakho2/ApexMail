@@ -681,7 +681,6 @@ test.describe('KiwiCaptcha narrow request shape', () => {
     // only under the explicit data-kiwi-risk-context="coarse" opt-in.
     expect(src).toMatch(/var reqBody = \{ scope: scope \};/);
     expect(src.match(/reqBody\.\w+/g) ?? []).toEqual([
-      'reqBody.execution_max_version',
       'reqBody.algorithm',
       'reqBody.request_binding',
       'reqBody.chain_ticket',
@@ -692,6 +691,27 @@ test.describe('KiwiCaptcha narrow request shape', () => {
       'reqBody.cdata',
       'reqBody.sitekey',
     ]);
+  });
+
+  test('the execution capability advertisement rides the Kiwi-Execution-Max-Version request header, never a body field (static source assertion)', () => {
+    const src = driverSource();
+    // The execution tier is advertised out-of-band on purpose: the
+    // challenge body is validated against a closed field set, so an
+    // unknown body field is refused (422 `UNKNOWN_FIELDS`) before any
+    // version-2 emission is even enabled, while an ignorable request
+    // header keeps a server that never heard of it working unchanged.
+    // The header is attached only under the same condition that arms
+    // the execution surface (data-kiwi-execution-src + integrity) and
+    // with the exact integer-string value 2, and the fetch carries the
+    // header object built right next to the body.
+    expect(src.match(/Kiwi-Execution-Max-Version/g) ?? []).not.toEqual([]);
+    expect(src).toMatch(/var reqHeaders = \{ "Accept": "application\/json", "Content-Type": "application\/json" \};/);
+    expect(src).toMatch(/if \(execSrcAttr && execIntegrityAttr\) reqHeaders\["Kiwi-Execution-Max-Version"\] = "2";/);
+    expect(src.match(/reqHeaders\["Kiwi-Execution-Max-Version"\] = "2";/g) ?? []).toHaveLength(1);
+    expect(src).toMatch(/headers: reqHeaders,/);
+    // The narrow request shape holds: the capability must never exist
+    // as a body field anywhere in the driver.
+    expect(src.match(/reqBody\.execution_max_version/g) ?? []).toEqual([]);
   });
 
   test('with a binding and argon2id the wire body contains exactly {scope, algorithm, request_binding} — no client_context without the opt-in (runtime)', async ({ page }) => {

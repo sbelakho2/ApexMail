@@ -1066,25 +1066,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     // state, and no SecurityEpochMonitor or {kiwi:<ns>}:security-policy
     // hash is wired in the fixture. The effective grammar version is
     // therefore 2 exactly when the client advertised
-    // execution_max_version >= 2 with the challenge request; the
-    // current driver sends 2 when the execution tier is configured.
-    // Any other value issues version 1, since an older driver never
-    // sends the field, exactly like the N-1 knob below.
-    // ?execution_max_version=<1|2> on the endpoint overrides the
-    // advertised capability: the fixture lever standing in for a stale
-    // page whose driver never advertises. The GET override wins over
-    // the body claim, since the server reads the capability the client
-    // presents, and the knob simulates what that client presents.
+    // Kiwi-Execution-Max-Version: 2 on the challenge request; the
+    // current driver sends that header when the execution tier is
+    // configured. Absence, an empty value, garbage or a value below 2
+    // issues version 1, since an older driver never sends the header,
+    // and a header value never 422s (the same rule as the bundle
+    // controller). The capability is read only from the header: the
+    // fixture mirrors the bundle's closed challenge-body field set,
+    // where an unknown body field is refused, so a body claim is never
+    // read.
     $executionMaxVersion = 1;
-    $capability = $body['execution_max_version'] ?? null;
-    if (is_int($capability)) {
-        $executionMaxVersion = $capability >= 2 ? 2 : 1;
-    } elseif (is_string($capability) && ctype_digit($capability)) {
-        $executionMaxVersion = (int) $capability >= 2 ? 2 : 1;
-    }
-    $getCapability = (string) ($_GET['execution_max_version'] ?? '');
-    if (ctype_digit($getCapability)) {
-        $executionMaxVersion = (int) $getCapability >= 2 ? 2 : 1;
+    $headerCapability = (string) ($_SERVER['HTTP_KIWI_EXECUTION_MAX_VERSION'] ?? '');
+    if (preg_match('/^(?:0|[1-9][0-9]*)$/D', $headerCapability) === 1) {
+        $executionMaxVersion = (int) $headerCapability >= 2 ? 2 : 1;
     }
     $challenge = mintChallenge($scope, $presentedBinding, $algorithm, ($_GET['decoy'] ?? '') === 'pool', $ttlOverride, $pinnedDecoy, $shaBits, $argonBits, $argonMKib, $armExecution, $executionAction, $executionMaxVersion);
     if ($challenge === null) {
@@ -1661,12 +1655,12 @@ if ($path === '/' || $path === '/index.html') {
     if (($_GET['capture'] ?? '') !== '') $endpointQuery[] = 'capture='.rawurlencode((string) $_GET['capture']);
     if (($_GET['escalate'] ?? '') === 'argon') $endpointQuery[] = 'escalate=argon';
     if (($_GET['execution'] ?? '') === '1') $endpointQuery[] = 'execution=1';
-    // The execution-capability lever (?execution_max_version=<1|2>):
-    // propagated to the challenge endpoint so a spec can simulate a
-    // stale page whose driver never advertises the version-2
-    // capability (the fixture then issues version-1 programs).
-    if (($_GET['execution_max_version'] ?? '') !== '' && ctype_digit((string) $_GET['execution_max_version'])) $endpointQuery[] = 'execution_max_version='.rawurlencode((string) $_GET['execution_max_version']);
-    // Client-performance-lab difficulty knobs, propagated to the
+    // The execution-capability lever never rides the page or the query
+    // string: the fixture reads the Kiwi-Execution-Max-Version request
+    // header like the bundle controller, so a spec that simulates a
+    // stale page sends or rewrites that header on the challenge
+    // request itself. Client-performance-lab difficulty knobs,
+    // propagated to the
     // challenge endpoint (opt-in; absent = the historical fixture):
     // ?bits=<1..20> (SHA-256 target bits), ?argon_bits=<1..10> and
     // ?m_kib=<8..65536> (Argon2id target bits and memory envelope).

@@ -50,7 +50,7 @@ final class ChallengeController
     private const IDENTIFIER_PATTERN = '/^[A-Za-z0-9._:-]{1,128}$/D';
 
     /** The JSON fields the challenge POST accepts. */
-    private const ACCEPTED_PAYLOAD_FIELDS = ['scope', 'algorithm', 'request_binding', 'action', 'cdata', 'sitekey', 'decoy_field', 'honeypot', 'client_context', 'chain_ticket', 'execution_max_version'];
+    private const ACCEPTED_PAYLOAD_FIELDS = ['scope', 'algorithm', 'request_binding', 'action', 'cdata', 'sitekey', 'decoy_field', 'honeypot', 'client_context', 'chain_ticket'];
 
     /**
      * The highest execution-program grammar version this node can emit.
@@ -280,9 +280,9 @@ final class ChallengeController
          * execution_version, default 1): the operator-side ceiling of the
          * grammar this deployment emits. Version 2 (the causal observe
          * grammar) is never emitted unless this cap is >= 2, the client
-         * advertised an execution_max_version >= 2, and the confirmed
-         * central security-policy floor ({kiwi:<ns>}:security-policy
-         * min_execution_version) is >= 2, see
+         * advertised the `Kiwi-Execution-Max-Version` header with a value
+         * >= 2, and the confirmed central security-policy floor
+         * ({kiwi:<ns>}:security-policy min_execution_version) is >= 2, see
          * {@see self::effectiveExecutionVersion()}. A node that never
          * raised the cap keeps emitting version-1 programs to every
          * client, byte-compatible with the construction-to-probe
@@ -394,8 +394,9 @@ final class ChallengeController
      * Version 2 (the causal observe grammar, opcode 33) is emitted only
      * when every rung of the gate is up:
      *
-     *  1. the client advertised `execution_max_version` >= 2, and an
-     *     older client never advertises, so it receives version 1;
+     *  1. the client advertised the `Kiwi-Execution-Max-Version` header
+     *     with a value >= 2, and an older client never advertises, so it
+     *     receives version 1;
      *  2. the node cap kiwi_captcha.execution_version is >= 2, so the
      *     operator never emits v2 without raising the cap;
      *  3. the confirmed central security-policy hash
@@ -752,11 +753,9 @@ final class ChallengeController
             || (array_key_exists('honeypot', $payload) && $payload['honeypot'] !== null && !\is_string($payload['honeypot']))
             || (array_key_exists('client_context', $payload) && $payload['client_context'] !== null && !\is_string($payload['client_context']))
             || (array_key_exists('chain_ticket', $payload) && $payload['chain_ticket'] !== null && !\is_string($payload['chain_ticket']))
-            || (array_key_exists('execution_max_version', $payload) && $payload['execution_max_version'] !== null
-                && !\is_int($payload['execution_max_version']) && !\is_string($payload['execution_max_version']))
         ) {
             return $this->privateJson(
-                ['error' => ['code' => 'INVALID_JSON', 'message' => 'The challenge request fields must be strings (execution_max_version may be an integer).']],
+                ['error' => ['code' => 'INVALID_JSON', 'message' => 'The challenge request fields must be strings.']],
                 Response::HTTP_UNPROCESSABLE_ENTITY,
             );
         }
@@ -817,24 +816,24 @@ final class ChallengeController
 
         // Execution-capability advertisement: the client declares the
         // highest execution-program grammar version its interpreter can
-        // run (`execution_max_version`). The widget driver sends 2 when
-        // the deployment configured the execution tier; absence, a
-        // non-integer or a value below 2 means the client only knows
-        // version 1 (an old driver, a stale open page, or any client
-        // that never advertises). The field is a capability claim, not
-        // a security gate: a malformed value degrades to 1, never a
-        // 422, and the issued version is further capped by the node
-        // config and the central fleet floor, see
+        // run via the `Kiwi-Execution-Max-Version` HTTP request header.
+        // The widget driver sends the header with value 2 when the
+        // deployment configured the execution tier; absence, an empty
+        // value, garbage or a value below 2 means the client only knows
+        // version 1 (an older driver, a stale open page, or any client
+        // that never advertises). The advertisement rides an ignorable
+        // header, never a body field: a server generation that
+        // validates challenge bodies against a closed field set would
+        // answer 422 `UNKNOWN_FIELDS` to an unknown body field, while
+        // an unknown header is ignored. The header is a capability
+        // claim, not a security gate: a malformed value degrades to 1,
+        // never a 422, and the issued version is further capped by the
+        // node config and the central fleet floor, see
         // {@see self::effectiveExecutionVersion()}.
         $clientExecutionCapability = 1;
-        $rawCapability = $payload['execution_max_version'] ?? null;
-        if (\is_int($rawCapability)) {
-            $clientExecutionCapability = $rawCapability;
-        } elseif (\is_string($rawCapability) && preg_match('/^(?:0|[1-9][0-9]*)$/D', $rawCapability) === 1) {
-            $parsedCapability = (int) $rawCapability;
-            if ((string) $parsedCapability === $rawCapability) {
-                $clientExecutionCapability = $parsedCapability;
-            }
+        $rawCapability = $request->headers->get('Kiwi-Execution-Max-Version');
+        if (\is_string($rawCapability) && preg_match('/^(?:0|[1-9][0-9]*)$/D', $rawCapability) === 1) {
+            $clientExecutionCapability = (int) $rawCapability;
         }
         $clientExecutionCapability = $clientExecutionCapability >= self::MAX_EXECUTION_VERSION
             ? self::MAX_EXECUTION_VERSION

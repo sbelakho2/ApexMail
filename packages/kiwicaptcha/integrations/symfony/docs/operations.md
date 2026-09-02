@@ -173,7 +173,7 @@ Under `ha_authority: pinned_primary` (derived by the `ha_safe` protection profil
     Transient probe timeouts never fail readiness on their own.
     The first failure is debounced for one cache window; two consecutive failures flip readiness;
   - the central security-policy state is compatible.
-    The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch`), when present, requires `min_protocol_version <= 4` (this binary's max protocol: the execution-capable v4 canonical) and `min_policy_epoch <= risk.policy_version`.
+    The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch` and the optional `min_execution_version`), when present, requires `min_protocol_version <= 4` (this binary's max protocol: the execution-capable v4 canonical), `min_execution_version <= 2` (this binary's max execution-program version; an absent execution floor imposes nothing) and `min_policy_epoch <= risk.policy_version`.
     When absent, the binary's own configuration is authoritative;
   - the memory-budget invariant holds (only when `risk.container_memory_mib` is configured):
     `argon2_max_concurrent_verifications × the fixed Argon verification envelope (risk.argon_verification_memory_kib, the risk ladder's worst-case per-verification memory; default 16384 KiB) + 256 MiB headroom <= container_memory_mib`.
@@ -366,6 +366,19 @@ re-admitted; the next re-read stops version-2 emission within one cache
 window. Version-1 and version-2 records both verify on the current
 generation for the remainder of their TTL, so the drain window only
 bounds stale open pages, never stored records.
+
+The execution floor gained its reader-side enforcement (the readiness
+gate) only in this binary generation. An older serving binary does not
+know the `min_execution_version` field at all: its readiness probe
+keeps enforcing only `min_protocol_version` and `min_policy_epoch`, so
+it stays in the pool however high the execution floor is raised. The
+execution floor therefore drains nothing by itself, unlike the protocol
+floor. Raising `min_execution_version` to 2 requires every serving
+binary to support execution version 2 first. This binary's
+`/health/ready` enforces the floor mechanically: a declared floor above
+its max execution version (2) takes the node out of the pool. Older
+binaries ignore the field, so the operator must not raise the floor
+until this fixed generation is fully deployed.
 
 The doctor's protocol-writer checks keep covering the execution
 surface: under `high_abuse` (which turns `risk.execution_challenge` on

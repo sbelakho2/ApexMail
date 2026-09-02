@@ -9,14 +9,14 @@
     },
     "budgets": {
         "widget_driver": {
-            "raw_bytes": 155409,
-            "gzip_bytes": 43977,
-            "brotli_bytes": 37012,
+            "raw_bytes": 155837,
+            "gzip_bytes": 44229,
+            "brotli_bytes": 37147,
             "raw_cap_bytes": 160000,
             "gzip_cap_bytes": 50000,
             "brotli_cap_bytes": 45000,
             "copies_identical": true,
-            "note": "The three copies (the canonical WASM asset, the core crate resources and the bundle public copy) are byte-identical at 155409 bytes, re-recorded on 2026-09-02 after the execution_max_version capability advertisement (the driver now declares execution version 2 on the challenge request when the execution tier is configured); perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes (an equality gate, not just the cap)."
+            "note": "The three copies (the canonical WASM asset, the core crate resources and the bundle public copy) are byte-identical at 155837 bytes, re-recorded on 2026-09-02 after moving the execution capability advertisement from the challenge body into the ignorable Kiwi-Execution-Max-Version request header (the driver now declares execution version 2 through that header, and only when the execution tier is configured; the challenge body stays the closed field set); perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes (an equality gate, not just the cap)."
         },
         "widget_worker": {
             "raw_bytes": 20233,

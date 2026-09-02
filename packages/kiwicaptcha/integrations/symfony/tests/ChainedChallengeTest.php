@@ -1382,11 +1382,14 @@ final class ChainedChallengeTest extends TestCase
             executionVersionCap: 2,
         );
 
-        $body = json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'execution_max_version' => 2], JSON_THROW_ON_ERROR);
+        $body = json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR);
+        // The capability advertisement rides the request header, never
+        // the challenge body (the body is a closed field set).
+        $capabilityHeader = ['HTTP_Kiwi_Execution_Max_Version' => '2'];
         // The first request issues the execution-armed stage-2
         // challenge; the response is then lost (simulated by a second
         // request instead of a solve).
-        $first = $controller->challenge($this->challengeRequest($body));
+        $first = $controller->challenge($this->challengeRequest($body, $capabilityHeader));
         self::assertSame(200, $first->getStatusCode(), sprintf('the execution-armed stage-2 issuance must mint: %s', (string) $first->getContent()));
         $firstPayload = json_decode((string) $first->getContent(), true);
         self::assertIsArray($firstPayload);
@@ -1397,7 +1400,7 @@ final class ChainedChallengeTest extends TestCase
 
         // The second request with the same ticket: the chain is issued —
         // the retry recovers the already-issued challenge.
-        $second = $controller->challenge($this->challengeRequest($body));
+        $second = $controller->challenge($this->challengeRequest($body, $capabilityHeader));
         self::assertSame(200, $second->getStatusCode(), sprintf('an issued chain must recover on retry: %s', (string) $second->getContent()));
         self::assertSame((string) $first->getContent(), (string) $second->getContent(), 'the recovered execution-armed response must be byte-identical to the lost response, execution_program included');
         self::assertSame($firstPayload['nonce'], json_decode((string) $second->getContent(), true)['nonce'], 'the recovery returns the same issued nonce');

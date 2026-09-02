@@ -202,7 +202,7 @@ final class RealRedisChainedChallengeTest extends TestCase
         return \KiwiCaptcha\SolutionToken::create($challenge['nonce'], $counter - 1, 5000, [], $digest, base64_encode($trace))->encode();
     }
 
-    private function challengeRequest(string $body): Request
+    private function challengeRequest(string $body, array $headers = []): Request
     {
         return \BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\JsonRequest::create(
             '/kiwi-captcha/challenge',
@@ -210,7 +210,7 @@ final class RealRedisChainedChallengeTest extends TestCase
             [],
             [],
             [],
-            ['REMOTE_ADDR' => '198.51.100.7'],
+            array_merge(['REMOTE_ADDR' => '198.51.100.7'], $headers),
             $body,
         );
     }
@@ -351,8 +351,11 @@ final class RealRedisChainedChallengeTest extends TestCase
             executionVersionCap: 2,
         );
 
-        $body = json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'execution_max_version' => 2], JSON_THROW_ON_ERROR);
-        $first = $controller->challenge($this->challengeRequest($body));
+        $body = json_encode(['scope' => 'login', 'chain_ticket' => $ticket], JSON_THROW_ON_ERROR);
+        // The capability advertisement rides the request header, never
+        // the challenge body (the body is a closed field set).
+        $capabilityHeader = ['HTTP_Kiwi_Execution_Max_Version' => '2'];
+        $first = $controller->challenge($this->challengeRequest($body, $capabilityHeader));
         self::assertSame(200, $first->getStatusCode(), sprintf('the execution-armed stage-2 issuance must mint over real Redis: %s', (string) $first->getContent()));
         $firstPayload = json_decode((string) $first->getContent(), true);
         self::assertIsArray($firstPayload);
@@ -363,7 +366,7 @@ final class RealRedisChainedChallengeTest extends TestCase
 
         // The retry with the same ticket recovers the issued challenge
         // (the chain state stayed issued over real Redis).
-        $second = $controller->challenge($this->challengeRequest($body));
+        $second = $controller->challenge($this->challengeRequest($body, $capabilityHeader));
         self::assertSame(200, $second->getStatusCode(), sprintf('an issued chain must recover on retry over real Redis: %s', (string) $second->getContent()));
         self::assertSame((string) $first->getContent(), (string) $second->getContent(), 'the recovered execution-armed response must equal the lost response, execution_program included');
 

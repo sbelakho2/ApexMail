@@ -249,12 +249,15 @@ final class ExecutionChallengeDimensionTest extends TestCase
      * A full armed-issuance controller request (the container wiring of
      * {@see self::testArmedIssuanceAndVerificationThroughTheController()},
      * with the node's execution_version cap raised to 2 and the central
-     * execution floor seeded). Returns the response and the shared
-     * in-memory challenge storage.
+     * execution floor seeded). The capability advertisement rides the
+     * `Kiwi-Execution-Max-Version` request header exactly like the
+     * widget driver sends it; passing null means the request carries no
+     * header (an older client that never advertises). Returns the
+     * response and the shared in-memory challenge storage.
      *
      * @return array{0: \Symfony\Component\HttpFoundation\Response, 1: \KiwiCaptcha\Storage\ArrayStorage}
      */
-    private function armedIssuance(string $json): array
+    private function armedIssuance(string $json, ?string $capabilityHeader = null): array
     {
         $container = $this->load([[
             'secret_key' => self::SECRET,
@@ -270,11 +273,15 @@ final class ExecutionChallengeDimensionTest extends TestCase
         $monitor = $container->get(\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::class);
         $this->seedExecutionPolicy($redis, $monitor);
 
-        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], [
+        $server = [
             'CONTENT_TYPE' => 'application/json',
             'REMOTE_ADDR' => '127.0.0.1',
             'HTTP_ORIGIN' => 'http://localhost',
-        ], $json);
+        ];
+        if ($capabilityHeader !== null) {
+            $server['HTTP_Kiwi_Execution_Max_Version'] = $capabilityHeader;
+        }
+        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], $server, $json);
         $response = $controller->challenge($request);
 
         return [$response, $container->get('kiwi_captcha.storage.array')];
@@ -294,10 +301,12 @@ final class ExecutionChallengeDimensionTest extends TestCase
     {
         // The three-way execution-versioning gate: the causal observe
         // grammar (version 2) is issued only when the client advertised
-        // execution_max_version >= 2 AND the node's execution_version
-        // cap is >= 2 AND the confirmed central min_execution_version
-        // floor is >= 2. All three hold here.
-        [$response, $storage] = $this->armedIssuance('{"scope":"login","action":"login-action","execution_max_version":2}');
+        // the Kiwi-Execution-Max-Version header with a value >= 2 AND
+        // the node's execution_version cap is >= 2 AND the confirmed
+        // central min_execution_version floor is >= 2. All three hold
+        // here; the request body is the bare closed field set, so the
+        // header alone carries the capability.
+        [$response, $storage] = $this->armedIssuance('{"scope":"login","action":"login-action"}', '2');
         self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
         $payload = json_decode((string) $response->getContent(), true);
         self::assertIsArray($payload);
@@ -326,11 +335,15 @@ final class ExecutionChallengeDimensionTest extends TestCase
         self::assertTrue($this->verifyWithRecord($storage, $payload['nonce'], $token), 'the version-2 solve must verify');
     }
 
-    public function testClientWithoutTheCapabilityAdvertisedReceivesVersion1(): void
+    public function testClientWithoutTheCapabilityHeaderReceivesVersion1(): void
     {
-        // No execution_max_version in the request: an older client. The
-        // node cap and the central floor are both at 2, but the client
-        // gate alone keeps the issuance at version 1.
+        // No Kiwi-Execution-Max-Version header on the request: an older
+        // client (a driver generation that never advertises, or a widget
+        // without the execution tier). The body is the same bare closed
+        // field set as the header-2 case above, so the header is what
+        // the controller reads. The node cap and the central floor are
+        // both at 2, but the client gate alone keeps the issuance at
+        // version 1.
         [$response, $storage] = $this->armedIssuance('{"scope":"login"}');
         self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
         $payload = json_decode((string) $response->getContent(), true);
@@ -364,7 +377,8 @@ final class ExecutionChallengeDimensionTest extends TestCase
             'CONTENT_TYPE' => 'application/json',
             'REMOTE_ADDR' => '127.0.0.1',
             'HTTP_ORIGIN' => 'http://localhost',
-        ], '{"scope":"login","execution_max_version":2}');
+            'HTTP_Kiwi_Execution_Max_Version' => '2',
+        ], '{"scope":"login"}');
         $response = $controller->challenge($request);
         self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
         $payload = json_decode((string) $response->getContent(), true);
@@ -395,11 +409,52 @@ final class ExecutionChallengeDimensionTest extends TestCase
             'CONTENT_TYPE' => 'application/json',
             'REMOTE_ADDR' => '127.0.0.1',
             'HTTP_ORIGIN' => 'http://localhost',
-        ], '{"scope":"login","execution_max_version":2}');
+            'HTTP_Kiwi_Execution_Max_Version' => '2',
+        ], '{"scope":"login"}');
         $response = $controller->challenge($request);
         self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
         $payload = json_decode((string) $response->getContent(), true);
         self::assertSame(1, $this->programVersion($payload['execution_program']), 'no declared execution floor on the confirmed policy keeps version 1');
+    }
+
+    public function testMalformedOrNonPositiveCapabilityHeaderValuesDegradeToVersion1AndNever422(): void
+    {
+        // The header is a capability claim, never a gate: a value that
+        // is empty, garbage or below 2 must degrade to version 1 with a
+        // 200 response, exactly like the absent header. Only integer
+        // strings parse (2 and above are capped at the node ceiling);
+        // a header never produces a 422.
+        foreach (['', 'abc', '-1', '0', '1', ' 2', '2.0', '007'] as $value) {
+            [$response] = $this->armedIssuance('{"scope":"login"}', $value);
+            self::assertSame(200, $response->getStatusCode(), 'header value '.var_export($value, true).' must never 422: '.(string) $response->getContent());
+            $payload = json_decode((string) $response->getContent(), true);
+            self::assertSame(1, $this->programVersion($payload['execution_program']), 'header value '.var_export($value, true).' degrades to version 1');
+        }
+        // The negative control: the same wiring issues version 2 for a
+        // well-formed header value, so the matrix above is not a broken
+        // fixture arm.
+        [$response] = $this->armedIssuance('{"scope":"login"}', '2');
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode((string) $response->getContent(), true);
+        self::assertSame(2, $this->programVersion($payload['execution_program']), 'the wiring control: a header value 2 still issues version 2');
+    }
+
+    public function testBodyCarryingExecutionMaxVersionIs422UnknownFieldsPreservingTheClosedContract(): void
+    {
+        // The closed challenge-body field set never grew: a request
+        // whose JSON body carries execution_max_version is refused with
+        // 422 `UNKNOWN_FIELDS`, with or without the capability header.
+        // That is exactly why the capability moved out of the body: a
+        // new widget that never sends the field keeps working against a
+        // server generation that validates bodies against the closed
+        // set.
+        [$response] = $this->armedIssuance('{"scope":"login","execution_max_version":2}');
+        self::assertSame(422, $response->getStatusCode(), (string) $response->getContent());
+        self::assertSame('UNKNOWN_FIELDS', json_decode((string) $response->getContent(), true)['error']['code']);
+
+        [$response] = $this->armedIssuance('{"scope":"login","execution_max_version":2}', '2');
+        self::assertSame(422, $response->getStatusCode(), 'a body field is refused before any capability read, even with the header: '.(string) $response->getContent());
+        self::assertSame('UNKNOWN_FIELDS', json_decode((string) $response->getContent(), true)['error']['code']);
     }
 
     public function testGateOffIssuanceIsByteIdenticalLegacy(): void

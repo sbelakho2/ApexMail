@@ -15,8 +15,10 @@ use PHPUnit\Framework\TestCase;
  * when the signing keys are configured, the security Redis answers a
  * (cached, debounced) ping, and the central security-policy state
  * ({kiwi:<ns>}:security-policy) is compatible. Compatible means
- * min_protocol_version <= 3 (this binary's max protocol: the
- * decoy-capable v3 canonical) and min_policy_epoch <= the configured
+ * min_protocol_version <= 4 (this binary's max protocol: the
+ * execution-capable v4 canonical), min_execution_version <= 2 (this
+ * binary's max execution-program version; an absent execution floor
+ * imposes nothing) and min_policy_epoch <= the configured
  * risk.policy_version. An absent key leaves the binary's own
  * configuration authoritative. Under ha_authority pinned_primary the
  * readiness additionally forces a fresh authority-guard check per
@@ -73,11 +75,29 @@ final class KiwiHealthControllerTest extends TestCase
         return new FakePredisClient();
     }
 
-    private function setPolicy(FakePredisClient $client, int $minProtocolVersion, int $minPolicyEpoch): void
+    private function setPolicy(FakePredisClient $client, int $minProtocolVersion, int $minPolicyEpoch, ?int $minExecutionVersion = null): void
     {
-        $client->hashes['{kiwi:health-test}:security-policy'] = [
+        $policy = [
             'min_protocol_version' => (string) $minProtocolVersion,
             'min_policy_epoch' => (string) $minPolicyEpoch,
+        ];
+        if ($minExecutionVersion !== null) {
+            $policy['min_execution_version'] = (string) $minExecutionVersion;
+        }
+        $client->hashes['{kiwi:health-test}:security-policy'] = $policy;
+    }
+
+    /**
+     * A policy hash carrying a raw `min_execution_version` value (the
+     * corrupt-field cases: the field is present, so it must never be
+     * collapsed toward absent).
+     */
+    private function setRawExecutionFloor(FakePredisClient $client, string $raw): void
+    {
+        $client->hashes['{kiwi:health-test}:security-policy'] = [
+            'min_protocol_version' => '1',
+            'min_policy_epoch' => '1',
+            'min_execution_version' => $raw,
         ];
     }
 
@@ -154,6 +174,62 @@ final class KiwiHealthControllerTest extends TestCase
         $response = $controller->ready();
         self::assertSame(503, $response->getStatusCode(), 'min_policy_epoch 2 > the configured risk.policy_version 1 — the policy was revoked while this binary still issues under it');
         self::assertStringContainsString('min_policy_epoch', (string) $response->getContent());
+    }
+
+    public function testReadyOkWithTheExecutionFloorAtTheBinaryMax(): void
+    {
+        // The binary's max execution-program version is 2 (the causal
+        // observe grammar): a central floor of exactly 2 is compatible,
+        // like a protocol floor exactly at the binary's max.
+        $client = $this->requirePredis();
+        $this->setPolicy($client, 4, 1, 2);
+        $controller = $this->controller($client, policyVersion: 1);
+
+        self::assertSame(200, $controller->ready()->getStatusCode(), 'min_execution_version 2 <= the binary max (2) — the execution-v2-capable binary stays in the pool');
+    }
+
+    public function testNotReadyWhenCentralPolicyDemandsExecutionVersion3(): void
+    {
+        // The execution floor is a reader floor exactly like the
+        // protocol floor: a central min_execution_version above this
+        // binary's max (2) must take it out of the pool, or a mixed
+        // fleet could hand it version-2 programs it cannot honor.
+        $client = $this->requirePredis();
+        $this->setPolicy($client, 4, 1, 3);
+        $controller = $this->controller($client, policyVersion: 1);
+
+        $response = $controller->ready();
+        self::assertSame(503, $response->getStatusCode(), 'a central min_execution_version of 3 exceeds this binary\'s max (2) — it must leave the pool (mixed-version rolling deployment)');
+        self::assertSame('security_policy_incompatible:min_execution_version_3', json_decode((string) $response->getContent(), true)['reason'], 'the machine-readable reason names the execution floor with its numeric suffix');
+    }
+
+    public function testNotReadyWhenCentralPolicyCarriesACorruptExecutionFloor(): void
+    {
+        // Corrupt present min_execution_version state must fail closed
+        // exactly like the other two fields: abc, -1, 1.5 and integer
+        // overflow are never silently collapsed toward zero and treated
+        // as absent.
+        foreach (['abc', '-1', '1.5', '99999999999999999999999999999999999999'] as $raw) {
+            $client = $this->requirePredis();
+            $this->setRawExecutionFloor($client, $raw);
+            $controller = $this->controller($client, policyVersion: 1);
+
+            $response = $controller->ready();
+            self::assertSame(503, $response->getStatusCode(), 'a corrupt min_execution_version ('.$raw.') must fail readiness');
+            self::assertSame('security_policy_state_corrupt:min_execution_version', json_decode((string) $response->getContent(), true)['reason'], 'the machine-readable reason names the corrupt execution field');
+        }
+    }
+
+    public function testReadyOkWithNoExecutionFloorDeclared(): void
+    {
+        // The min_execution_version key is optional: a policy without it
+        // declares no execution floor (parsed as 0), so the binary's
+        // own execution capability decides.
+        $client = $this->requirePredis();
+        $this->setPolicy($client, 4, 1);
+        $controller = $this->controller($client, policyVersion: 1);
+
+        self::assertSame(200, $controller->ready()->getStatusCode(), 'an absent min_execution_version imposes no execution constraint');
     }
 
     public function testNotReadyWhenSecurityRedisIsUnreachable(): void
