@@ -48,8 +48,12 @@ The default posture is strict privacy: telemetry off, same-origin
 enforcement on, the timing heuristic off, and the coarse client-context
 opt-in refused. Where the system keeps state about a source, it keeps
 only keyed ephemeral pseudonyms (HMAC-derived, epoch-rotating, never a
-raw IP or a stable identifier), and it never fingerprint: no canvas,
-audio, font or GPU signals exist in the product. The privacy contract
+raw IP or a stable identifier). No canvas, audio, or GPU signal exists
+anywhere in the product. The experimental execution dimension may
+transmit challenge-scoped, low-entropy browser-layout evidence: the
+observed height of a text line rendered with the engine's default
+font, inside the armed execution trace only. Privacy Strict mode
+disables the dimension entirely. The privacy contract
 and the strict-mode consequences are in
 [docs/privacy.md](docs/privacy.md).
 

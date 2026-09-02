@@ -60,6 +60,9 @@ final class RealRedisChainedChallengeTest extends TestCase
 
     private const SECRET = '0123456789abcdef0123456789abcdef';
 
+    /** The ExecutionChallengeV1 keyed-PRF key of the execution tests. */
+    private const EXECUTION_KEY = 'fedcba9876543210fedcba9876543210';
+
     private const NAMESPACE = 'ci-chain';
 
     private \Predis\Client $client;
@@ -108,10 +111,10 @@ final class RealRedisChainedChallengeTest extends TestCase
         return new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], policy: $policy);
     }
 
-    private function controller(RedisChainedChallengeStateStore $store, StorageInterface $storage, ?\BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionStore $dispositions = null): ChallengeController
+    private function controller(RedisChainedChallengeStateStore $store, StorageInterface $storage, ?\BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionStore $dispositions = null, ?Issuer $issuer = null, ?\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor $epochMonitor = null, bool $executionGate = false, int $executionVersionCap = 1): ChallengeController
     {
         return new ChallengeController(
-            new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage),
+            $issuer ?? new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage),
             null,
             true,
             $this->gateway(),
@@ -121,7 +124,82 @@ final class RealRedisChainedChallengeTest extends TestCase
             chainTickets: $this->service($store),
             policyVersion: 1,
             postSolveDispositionStore: $dispositions,
+            epochMonitor: $epochMonitor,
+            executionGate: $executionGate,
+            executionVersionCap: $executionVersionCap,
         );
+    }
+
+    /** An execution-capable issuer over the same real Redis storage. */
+    private function executionIssuer(StorageInterface $storage): Issuer
+    {
+        return new Issuer(new Config(
+            secretKey: self::SECRET,
+            executionKey: self::EXECUTION_KEY,
+            targetBits: 8,
+            ttlSecs: 120,
+        ), $storage);
+    }
+
+    /**
+     * The confirmed central execution policy of the test. The policy
+     * hash is seeded on the real security Redis exactly like the
+     * production operator procedure, confirming the protocol-v4 floor
+     * and the min_execution_version 2 floor.
+     */
+    private function executionPolicyMonitor(StorageInterface $storage): \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor
+    {
+        $monitor = new \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor(
+            new \KiwiCaptcha\Verifier($storage),
+            $this->client,
+            'ci-chain-exec',
+            1,
+            1,
+        );
+        $this->client->hset($monitor->policyKey(), 'min_policy_epoch', '1');
+        $this->client->hset($monitor->policyKey(), 'min_protocol_version', '4');
+        $this->client->hset($monitor->policyKey(), 'min_execution_version', '2');
+
+        return $monitor;
+    }
+
+    /**
+     * The grammar version byte of a program blob (the byte after the
+     * length-prefixed scope and action, before the op count).
+     */
+    private function programVersion(string $programB64): int
+    {
+        $blob = base64_decode($programB64, true);
+        $pos = 1;
+        $pos += 1 + \ord($blob[$pos]);
+        $pos += 1 + \ord($blob[$pos]);
+
+        return \ord($blob[$pos]);
+    }
+
+    /**
+     * Solve an execution-armed challenge with the real execution
+     * evidence (decode program -> canonical trace -> digest over the
+     * trace) and return the solution token.
+     *
+     * @param array<string, mixed> $challenge
+     */
+    private function solveExecutionChallenge(array $challenge): string
+    {
+        $program = \KiwiCaptcha\ExecutionChallengeGenerator::decode($challenge['execution_program']);
+        self::assertNotNull($program, 'the issued program must decode');
+        $trace = \KiwiCaptcha\ExecutionChallengeGenerator::executedTraceFor($program);
+        $digest = \KiwiCaptcha\ExecutionChallengeGenerator::digestOverTrace($challenge['execution_program'], $challenge['nonce'], $trace);
+        self::assertNotNull($digest, 'the digest over the canonical trace must compute');
+        $saltBytes = base64_decode($challenge['salt'], true);
+        $counter = 0;
+        do {
+            $hash = hash('sha256', $challenge['prefix'].$counter.$saltBytes, true);
+            $counter++;
+        } while (\KiwiCaptcha\Verifier::leadingZeroBits($hash) < $challenge['targetBits']);
+        usleep(((int) $challenge['minDurationMs'] + 10) * 1000);
+
+        return \KiwiCaptcha\SolutionToken::create($challenge['nonce'], $counter - 1, 5000, [], $digest, base64_encode($trace))->encode();
     }
 
     private function challengeRequest(string $body): Request
@@ -245,6 +323,62 @@ final class RealRedisChainedChallengeTest extends TestCase
         // The idempotent same-nonce retry confirms, never a second mint.
         self::assertSame(ChainIssuedResult::IssuedSame, $service->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('stage2-nonce')));
         self::assertSame(ChainIssuedResult::Conflict, $service->markIssued($requirement->chainId, 'owner-a', $this->stageNonce('other-nonce')));
+    }
+
+    public function testExecutionArmedStage2LostResponseRecoversTheExactResponseAndVerifiesAgainstRealRedis(): void
+    {
+        // The stage-2 replay-path contract over the real Redis machine:
+        // an execution-armed stage-2 issuance whose response is lost
+        // (the markIssued Lua landed durably) recovers a response
+        // byte-identical with the original — execution_program
+        // included — because the fresh handoff and the recovery
+        // serialize the same stored record through the single canonical
+        // issuance-response serializer. The recovered challenge then
+        // solves and verifies against the stored record with the real
+        // execution evidence.
+        $storage = new \KiwiCaptcha\Storage\RedisStorage($this->client);
+        $store = $this->store();
+        $service = $this->service($store);
+        $requirement = $service->requireStage2($this->nonce(), 'login', '', 1, RiskAction::Sha16, time() + 300);
+        $ticket = $service->ticketFor($requirement->chainId, time() + 300);
+
+        $controller = $this->controller(
+            $store,
+            $storage,
+            issuer: $this->executionIssuer($storage),
+            epochMonitor: $this->executionPolicyMonitor($storage),
+            executionGate: true,
+            executionVersionCap: 2,
+        );
+
+        $body = json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'execution_max_version' => 2], JSON_THROW_ON_ERROR);
+        $first = $controller->challenge($this->challengeRequest($body));
+        self::assertSame(200, $first->getStatusCode(), sprintf('the execution-armed stage-2 issuance must mint over real Redis: %s', (string) $first->getContent()));
+        $firstPayload = json_decode((string) $first->getContent(), true);
+        self::assertIsArray($firstPayload);
+        self::assertArrayHasKey('execution_program', $firstPayload, 'the armed stage-2 response carries the execution program');
+        self::assertSame(2, $this->programVersion($firstPayload['execution_program']), 'the version-2 grammar goes to the capable client');
+        self::assertArrayNotHasKey('execution_version', $firstPayload, 'execution_version never appears on the client-facing surface');
+        self::assertArrayNotHasKey('execution_commitment', $firstPayload, 'execution_commitment never appears on the client-facing surface');
+
+        // The retry with the same ticket recovers the issued challenge
+        // (the chain state stayed issued over real Redis).
+        $second = $controller->challenge($this->challengeRequest($body));
+        self::assertSame(200, $second->getStatusCode(), sprintf('an issued chain must recover on retry over real Redis: %s', (string) $second->getContent()));
+        self::assertSame((string) $first->getContent(), (string) $second->getContent(), 'the recovered execution-armed response must equal the lost response, execution_program included');
+
+        // The stored record carries the same program the response
+        // serializes.
+        $record = $storage->find($firstPayload['nonce']);
+        self::assertNotNull($record, 'the issued record must be readable over real Redis');
+        self::assertSame($firstPayload['execution_program'], $record->executionProgram, 'the stored record and the response carry the same program');
+
+        // The recovered challenge solves and verifies against the
+        // stored record (the single-use consume runs over real Redis).
+        $token = $this->solveExecutionChallenge($firstPayload);
+        $verifier = new \KiwiCaptcha\Verifier($storage, now: static fn (): int => time());
+        $outcome = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7');
+        self::assertTrue($outcome->isOk(), sprintf('the recovered execution-armed challenge must verify over real Redis: %s', $outcome->error?->value ?? 'ok'));
     }
 
     public function testMarkVerifiedDeletesTheObligationAtomically(): void

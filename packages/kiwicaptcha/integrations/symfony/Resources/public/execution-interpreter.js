@@ -273,9 +273,11 @@
     var actionBytes = take(actionLen);
     if (actionBytes === null) return null;
     var opVersion = byte();
-    // The op version is the canonical numeric byte, exactly 1 — no
-    // arbitrary byte (the mirrors reject any other value).
-    if (opVersion !== 1) return null;
+    // Execution versions 1 and 2 are both accepted (the compat window:
+    // old challenges stay executable for their whole TTL); each version
+    // bounds its own opcode space below — version 1 never carries the
+    // version-2 observe opcode (33).
+    if (opVersion !== 1 && opVersion !== 2) return null;
     var opCount = byte();
     if (opCount === null || opCount < MIN_OPS || opCount > MAX_OPS) return null;
 
@@ -290,7 +292,9 @@
     var ops = [];
     for (var i = 0; i < opCount; i++) {
       var opcode = byte();
-      if (opcode === null || opcode >= OP_COUNT) return null;
+      if (opcode === null) return null;
+      // Version 1 programs never carry the version-2 observe opcode.
+      if (opcode >= (opVersion === 1 ? OP_COUNT - 1 : OP_COUNT)) return null;
       var operands = [];
       switch (opcode) {
         case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 7: {

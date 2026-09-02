@@ -342,7 +342,7 @@ that implements the full public semantics can still fabricate a
 coherent trace: the values are evidence, not a cryptographic proof of
 a browser.
 
-Two knobs control the dimension:
+Three knobs control the dimension:
 
 - `kiwi_captcha.execution_key` (string, default null): the keyed-PRF
   secret that generates the programs. Null means execution challenges
@@ -363,14 +363,30 @@ Two knobs control the dimension:
   invalidates the challenge. The gate is inert without an
   `execution_key`, so turning it on before configuring the key never
   breaks issuance and never arms anything.
+- `kiwi_captcha.execution_version` (int 1 or 2, default 1): the
+  node's execution-program grammar cap. Version 2 is the causal
+  observe grammar (opcode 33); version 1 is the construction-to-probe
+  grammar every interpreter generation runs. A node emits version 2
+  only when the client advertised `execution_max_version` >= 2 with
+  the challenge request, this cap is raised to 2, and the confirmed
+  central security-policy floor (`{kiwi:<ns>}:security-policy`
+  `min_execution_version`) is >= 2. The current widget driver
+  advertises the field when the execution tier is configured.
+  Every other combination emits version 1, so a mixed fleet of older
+  binaries and stale open pages is never handed the newer grammar.
+  The cap defaults to 1: raising it declares the node ready to write
+  version-2 programs, and the counterpart central floor is declared by
+  the operator, see operations.md "Execution versioning".
 
 The dimension is supplementary evidence only. It is never the sole
 acceptance boundary: the proof-of-work proof and the record state
 machinery always gate, and a missing or wrong digest fails with the
 deterministic `execution_mismatch`, never a silent success. The
-interpreter is a fixed audited bytecode VM with no eval, no new
-Function and no fingerprinting; the DOM ops run in an ephemeral
-sandboxed iframe (srcdoc with the `allow-scripts` and
+interpreter is a fixed audited bytecode VM with no eval and no new
+Function. Its only browser-observed input is the observe op's byte:
+the challenge-scoped layout height of the default-font text line. It
+constructs no persistent device fingerprint. The DOM ops run in an
+ephemeral sandboxed iframe (srcdoc with the `allow-scripts` and
 `allow-same-origin` sandbox flags) created per challenge and removed
 after the run. The iframe is containment for the first-party pinned
 interpreter, not a hostile-code security boundary. A

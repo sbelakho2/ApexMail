@@ -96,6 +96,17 @@ attribute under strict — a per-render `risk_client_context` override is
 ignored there too. So strict deployments keep collecting no
 device-capability or screen-size signal under every configuration.
 
+## Execution dimension (experimental)
+
+The experimental execution dimension is the only product surface that
+reads a browser-rendering value. When a challenge is execution-armed,
+the program's observe op measures the layout height of a canonical text
+line rendered with the engine's default font. The value is
+challenge-scoped and low-entropy, and it travels only inside the armed
+execution trace. KiwiCaptcha constructs no persistent device
+fingerprint. Under `privacy_mode: strict` the dimension is forced off,
+and no override re-arms it.
+
 ## Logs and metrics never carry identity
 
 Decisions are logged through the app's `logger` (info for decisions,
@@ -109,9 +120,10 @@ counters, global level, store latency, without identity labels.
 ## Claims
 
 The "no third-party requests", "behavioral telemetry off by default", "no
-device-capability or screen-size signals unless opted in", and "no
-canvas/audio/font/GPU fingerprints" claims — with their exact scopes,
-assumptions and the tests that evidence them — live in
+device-capability or screen-size signals unless opted in", and "the
+coarse client-context descriptor collects no canvas/audio/font-list/GPU
+fingerprints" claims. Their exact scopes, assumptions and owning tests
+live in
 [claims-registry.md](claims-registry.md).
 
 ## Related links

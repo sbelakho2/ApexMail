@@ -62,6 +62,9 @@ final class ChainedChallengeTest extends TestCase
 {
     private const SECRET = '0123456789abcdef0123456789abcdef';
 
+    /** The ExecutionChallengeV1 keyed-PRF key of the execution tests. */
+    private const EXECUTION_KEY = 'fedcba9876543210fedcba9876543210';
+
     /** The post-solve vector that demands Argon32 (score 813). */
     private const ARGON32_VECTOR = ['source_fast' => 900, 'subnet_fast' => 1000, 'issue_debt' => 1000, 'replay' => 699, 'network_risk' => 890];
 
@@ -197,6 +200,115 @@ final class ChainedChallengeTest extends TestCase
     }
 
     /**
+     * An execution-capable issuer (the mirror of a deployment with
+     * kiwi_captcha.execution_key configured).
+     */
+    private function executionIssuer(StorageInterface $storage): Issuer
+    {
+        return new Issuer(new Config(
+            secretKey: self::SECRET,
+            executionKey: self::EXECUTION_KEY,
+            algorithm: PoWAlgorithm::Sha256,
+            targetBits: 8,
+            ttlSecs: 120,
+        ), $storage);
+    }
+
+    /**
+     * The confirmed central execution policy of a stage-2 execution
+     * test. The SecurityEpochMonitor reads the {kiwi:<ns>}:
+     * security-policy hash through the fake security Redis. The seeded
+     * hash confirms the protocol-v4 floor for arming and the
+     * min_execution_version 2 floor for version-2 emission, exactly
+     * like the real deployment's central policy.
+     */
+    private function executionPolicyMonitor(StorageInterface $storage, string $namespace): \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor
+    {
+        $redis = new FakePredisClient();
+        $monitor = new \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor(
+            new Verifier($storage),
+            $redis,
+            $namespace,
+            1,
+            1,
+        );
+        $redis->hset($monitor->policyKey(), 'min_policy_epoch', '1');
+        $redis->hset($monitor->policyKey(), 'min_protocol_version', '4');
+        $redis->hset($monitor->policyKey(), 'min_execution_version', '2');
+
+        return $monitor;
+    }
+
+    /**
+     * The grammar version byte of a program blob (the byte after the
+     * length-prefixed scope and action, before the op count).
+     */
+    private function programVersion(string $programB64): int
+    {
+        $blob = base64_decode($programB64, true);
+        $pos = 1;
+        $pos += 1 + \ord($blob[$pos]);
+        $pos += 1 + \ord($blob[$pos]);
+
+        return \ord($blob[$pos]);
+    }
+
+    /**
+     * Brute-force the winning counter of whichever algorithm the
+     * challenge carries (the same derivation the browser solver
+     * performs).
+     *
+     * @param array<string, mixed> $challenge
+     */
+    private function winningCounter(array $challenge): int
+    {
+        $saltBytes = base64_decode($challenge['salt'], true);
+        $counter = 0;
+        if (($challenge['algorithm'] ?? 'sha256') === 'argon2id') {
+            do {
+                $hash = sodium_crypto_pwhash(
+                    32,
+                    $challenge['prefix'].$counter,
+                    $saltBytes,
+                    $challenge['t'],
+                    $challenge['mKib'] * 1024,
+                    SODIUM_CRYPTO_PWHASH_ALG_ARGON2ID13,
+                );
+                $counter++;
+            } while (Verifier::leadingZeroBits($hash) < $challenge['targetBits']);
+        } else {
+            do {
+                $hash = hash('sha256', $challenge['prefix'].$counter.$saltBytes, true);
+                $counter++;
+            } while (Verifier::leadingZeroBits($hash) < $challenge['targetBits']);
+        }
+
+        return $counter - 1;
+    }
+
+    /**
+     * Solve an execution-armed challenge response with the real
+     * execution evidence (decode program -> canonical trace -> digest
+     * over the trace) and return the solution token. Sleeps past the
+     * server-measured minimum-duration floor exactly like the
+     * repository's other solve helpers.
+     *
+     * @param array<string, mixed> $challenge
+     */
+    private function solveExecutionChallenge(array $challenge): string
+    {
+        $program = \KiwiCaptcha\ExecutionChallengeGenerator::decode($challenge['execution_program']);
+        self::assertNotNull($program, 'the issued program must decode');
+        $trace = \KiwiCaptcha\ExecutionChallengeGenerator::executedTraceFor($program);
+        $digest = \KiwiCaptcha\ExecutionChallengeGenerator::digestOverTrace($challenge['execution_program'], $challenge['nonce'], $trace);
+        self::assertNotNull($digest, 'the digest over the canonical trace must compute');
+        $counter = $this->winningCounter($challenge);
+        usleep(((int) $challenge['minDurationMs'] + 10) * 1000);
+
+        return \KiwiCaptcha\SolutionToken::create($challenge['nonce'], $counter, 5000, [], $digest, base64_encode($trace))->encode();
+    }
+
+    /**
      * Validate a token through the full Symfony pipeline with a
      * chaining-enabled validator.
      *
@@ -282,12 +394,18 @@ final class ChainedChallengeTest extends TestCase
     }
 
     /**
-     * A controller wired for a bound or unbound stage-2 flow.
+     * A controller wired for a bound or unbound stage-2 flow. The
+     * execution seam is opt-in: an execution-capable issuer
+     * ($issuer with the keyed-PRF key), the confirmed central
+     * execution policy ($epochMonitor over a seeded policy hash) and
+     * the risk.execution_challenge gate ($executionGate) together arm
+     * the dimension; $executionVersionCap is the node's
+     * kiwi_captcha.execution_version knob.
      */
-    private function chainController(StorageInterface $storage, ChainedChallengeTicketService $service, RiskGateway $gateway, ?OutstandingChallenges $outstanding = null, ?SiteVerifyMetadataStore $metadataStore = null, ?RequestBindingAuthorityInterface $authority = null, ?\BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionStore $postSolveDispositionStore = null): ChallengeController
+    private function chainController(StorageInterface $storage, ChainedChallengeTicketService $service, RiskGateway $gateway, ?OutstandingChallenges $outstanding = null, ?SiteVerifyMetadataStore $metadataStore = null, ?RequestBindingAuthorityInterface $authority = null, ?\BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionStore $postSolveDispositionStore = null, ?Issuer $issuer = null, ?\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor $epochMonitor = null, bool $executionGate = false, int $executionVersionCap = 1): ChallengeController
     {
         return new ChallengeController(
-            $this->issuer($storage),
+            $issuer ?? $this->issuer($storage),
             null,
             true,
             $gateway,
@@ -300,6 +418,9 @@ final class ChainedChallengeTest extends TestCase
             bindingAuthority: $authority,
             policyVersion: 1,
             postSolveDispositionStore: $postSolveDispositionStore,
+            executionGate: $executionGate,
+            epochMonitor: $epochMonitor,
+            executionVersionCap: $executionVersionCap,
         );
     }
 
@@ -1231,6 +1352,71 @@ final class ChainedChallengeTest extends TestCase
         self::assertSame((string) $first->getContent(), (string) $second->getContent(), 'the recovery response must be byte-identical to the lost response');
         self::assertSame($firstNonce, json_decode((string) $second->getContent(), true)['nonce'], 'the recovery returns the SAME issued nonce');
         self::assertSame($recordCount, $this->storageRecordCount($storage), 'an issued chain NEVER re-mints — no second challenge record');
+    }
+
+    public function testExecutionArmedStage2LostResponseRecoversTheExactResponseAndVerifies(): void
+    {
+        // The stage-2 replay-path contract for the execution dimension:
+        // an execution-armed stage-2 issuance whose response is lost
+        // must recover a response byte-identical with the original,
+        // execution_program included — both the fresh handoff and every
+        // recovery serialize the same stored record through the single
+        // canonical issuance-response serializer. A recovery that
+        // dropped the program would leave the client deterministically
+        // unsolvable (the stored record stays armed and the verifier
+        // demands the execution digest).
+        $storage = new ArrayStorage();
+        $chainStore = new ArrayChainedChallengeStateStore();
+        $chainService = $this->chainService($chainStore);
+        $requirement = $chainService->requireStage2($this->nonce(), 'login', '', 1, RiskAction::Sha16, time() + 300);
+        $ticket = $chainService->ticketFor($requirement->chainId, time() + 300);
+
+        $risk = $this->riskStack(SignalVector::fromArray(self::SHA16_VECTOR));
+        $controller = $this->chainController(
+            $storage,
+            $chainService,
+            $risk['gateway'],
+            issuer: $this->executionIssuer($storage),
+            epochMonitor: $this->executionPolicyMonitor($storage, 'stage2-exec'),
+            executionGate: true,
+            executionVersionCap: 2,
+        );
+
+        $body = json_encode(['scope' => 'login', 'chain_ticket' => $ticket, 'execution_max_version' => 2], JSON_THROW_ON_ERROR);
+        // The first request issues the execution-armed stage-2
+        // challenge; the response is then lost (simulated by a second
+        // request instead of a solve).
+        $first = $controller->challenge($this->challengeRequest($body));
+        self::assertSame(200, $first->getStatusCode(), sprintf('the execution-armed stage-2 issuance must mint: %s', (string) $first->getContent()));
+        $firstPayload = json_decode((string) $first->getContent(), true);
+        self::assertIsArray($firstPayload);
+        self::assertArrayHasKey('execution_program', $firstPayload, 'the armed stage-2 response carries the execution program');
+        self::assertSame(2, $this->programVersion($firstPayload['execution_program']), 'the version-2 grammar goes to the capable client');
+        self::assertArrayNotHasKey('execution_version', $firstPayload, 'execution_version never appears on the client-facing surface');
+        self::assertArrayNotHasKey('execution_commitment', $firstPayload, 'execution_commitment never appears on the client-facing surface');
+
+        // The second request with the same ticket: the chain is issued —
+        // the retry recovers the already-issued challenge.
+        $second = $controller->challenge($this->challengeRequest($body));
+        self::assertSame(200, $second->getStatusCode(), sprintf('an issued chain must recover on retry: %s', (string) $second->getContent()));
+        self::assertSame((string) $first->getContent(), (string) $second->getContent(), 'the recovered execution-armed response must be byte-identical to the lost response, execution_program included');
+        self::assertSame($firstPayload['nonce'], json_decode((string) $second->getContent(), true)['nonce'], 'the recovery returns the same issued nonce');
+
+        // The stored record is the same record the response serializes
+        // (the record's execution_program and the response's bytes).
+        $record = $storage->find($firstPayload['nonce']);
+        self::assertNotNull($record, 'the issued record must be stored');
+        self::assertSame($firstPayload['execution_program'], $record->executionProgram, 'the stored record and the response carry the same program');
+        self::assertSame(2, $record->executionVersion, 'the stored record stamps the emitted grammar version');
+
+        // The recovered challenge is actually solvable: decode the
+        // program, run the canonical trace, digest over the trace, solve
+        // the PoW, and the verifier accepts the token against the stored
+        // record — the recovery never mints an unsolvable response.
+        $token = $this->solveExecutionChallenge($firstPayload);
+        $verifier = new Verifier($storage, now: static fn (): int => time());
+        $outcome = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7');
+        self::assertTrue($outcome->isOk(), sprintf('the recovered execution-armed challenge must verify: %s', $outcome->error?->value ?? 'ok'));
     }
 
     public function testIssuedStateIsNotTerminal(): void

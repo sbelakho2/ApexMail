@@ -217,6 +217,191 @@ final class ExecutionChallengeDimensionTest extends TestCase
         self::assertSame(VerifyError::ExecutionMismatch, $verifier->verify($missing, self::SECRET, 'login', '127.0.0.1')->error);
     }
 
+    /**
+     * Seed the fake security Redis with the confirmed central policy the
+     * two-phase gates require: the protocol-v4 floor (arming) and the
+     * execution-grammar floor (version 2 emission), plus the epoch.
+     */
+    private function seedExecutionPolicy(\BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient $redis, \BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor $monitor, int $protocolFloor = 4, ?int $executionFloor = 2): void
+    {
+        $redis->hset($monitor->policyKey(), 'min_policy_epoch', '1');
+        $redis->hset($monitor->policyKey(), 'min_protocol_version', (string) $protocolFloor);
+        if ($executionFloor !== null) {
+            $redis->hset($monitor->policyKey(), 'min_execution_version', (string) $executionFloor);
+        }
+    }
+
+    /**
+     * The grammar version byte of a program blob (the byte after the
+     * length-prefixed scope and action, before the op count).
+     */
+    private function programVersion(string $programB64): int
+    {
+        $blob = base64_decode($programB64, true);
+        $pos = 1;
+        $pos += 1 + \ord($blob[$pos]);
+        $pos += 1 + \ord($blob[$pos]);
+
+        return \ord($blob[$pos]);
+    }
+
+    /**
+     * A full armed-issuance controller request (the container wiring of
+     * {@see self::testArmedIssuanceAndVerificationThroughTheController()},
+     * with the node's execution_version cap raised to 2 and the central
+     * execution floor seeded). Returns the response and the shared
+     * in-memory challenge storage.
+     *
+     * @return array{0: \Symfony\Component\HttpFoundation\Response, 1: \KiwiCaptcha\Storage\ArrayStorage}
+     */
+    private function armedIssuance(string $json): array
+    {
+        $container = $this->load([[
+            'secret_key' => self::SECRET,
+            'execution_key' => self::EXECUTION_KEY,
+            'execution_version' => 2,
+            'redis_service' => 'fake_redis',
+            'risk' => ['enabled' => true, 'redis_service' => 'fake_redis', 'execution_challenge' => 'on'],
+            'storage' => 'kiwi_captcha.storage.array',
+            'difficulty_bits' => 8,
+        ]]);
+        $controller = $container->get(ChallengeController::class);
+        $redis = $container->get('fake_redis');
+        $monitor = $container->get(\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::class);
+        $this->seedExecutionPolicy($redis, $monitor);
+
+        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], [
+            'CONTENT_TYPE' => 'application/json',
+            'REMOTE_ADDR' => '127.0.0.1',
+            'HTTP_ORIGIN' => 'http://localhost',
+        ], $json);
+        $response = $controller->challenge($request);
+
+        return [$response, $container->get('kiwi_captcha.storage.array')];
+    }
+
+    /** Verify a solved token against the stored record (the core path). */
+    private function verifyWithRecord(\KiwiCaptcha\Storage\ArrayStorage $storage, string $nonce, string $token): bool
+    {
+        $record = $storage->find($nonce);
+        self::assertNotNull($record, 'the stored record must exist for the solve to verify');
+        $verifier = new Verifier($storage, now: static fn (): int => time());
+
+        return $verifier->verify($token, self::SECRET, 'login', '127.0.0.1')->isOk();
+    }
+
+    public function testVersion2GrammarIsIssuedOnlyWhenClientConfigAndFloorAllConfirm(): void
+    {
+        // The three-way execution-versioning gate: the causal observe
+        // grammar (version 2) is issued only when the client advertised
+        // execution_max_version >= 2 AND the node's execution_version
+        // cap is >= 2 AND the confirmed central min_execution_version
+        // floor is >= 2. All three hold here.
+        [$response, $storage] = $this->armedIssuance('{"scope":"login","action":"login-action","execution_max_version":2}');
+        self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+        $payload = json_decode((string) $response->getContent(), true);
+        self::assertIsArray($payload);
+        self::assertArrayHasKey('execution_program', $payload, 'an armed issuance must carry the execution program');
+        self::assertSame(2, $this->programVersion($payload['execution_program']), 'the version-2 causal grammar is issued to a capable client');
+        // The client-facing surface never carries the stored-record
+        // canonical fields.
+        self::assertArrayNotHasKey('execution_version', $payload, 'execution_version never appears on the client-facing surface');
+        self::assertArrayNotHasKey('execution_commitment', $payload, 'execution_commitment never appears on the client-facing surface');
+        // The stored record carries the same program the response carries.
+        $record = $storage->find($payload['nonce']);
+        self::assertNotNull($record);
+        self::assertSame($payload['execution_program'], $record->executionProgram, 'the response program is the stored program');
+        self::assertSame(2, $record->executionVersion, 'the stored record stamps the emitted grammar version');
+
+        // The program's deterministic trace carries the causal observe
+        // entry, and the full solve verifies end to end.
+        $program = ExecutionChallengeGenerator::decode($payload['execution_program']);
+        self::assertNotNull($program);
+        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        self::assertStringContainsString('obs(', $trace, 'the version-2 grammar writes the causal observe entry');
+        $expected = ExecutionChallengeGenerator::digestOverTrace($payload['execution_program'], $payload['nonce'], $trace);
+        self::assertNotNull($expected);
+        $counter = $this->winningCounter($payload);
+        $token = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected, base64_encode($trace))->encode();
+        self::assertTrue($this->verifyWithRecord($storage, $payload['nonce'], $token), 'the version-2 solve must verify');
+    }
+
+    public function testClientWithoutTheCapabilityAdvertisedReceivesVersion1(): void
+    {
+        // No execution_max_version in the request: an older client. The
+        // node cap and the central floor are both at 2, but the client
+        // gate alone keeps the issuance at version 1.
+        [$response, $storage] = $this->armedIssuance('{"scope":"login"}');
+        self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+        $payload = json_decode((string) $response->getContent(), true);
+        self::assertIsArray($payload);
+        self::assertArrayHasKey('execution_program', $payload, 'the dimension is still armed (the protocol-v4 floor holds)');
+        self::assertSame(1, $this->programVersion($payload['execution_program']), 'a client that never advertised the capability receives version 1');
+        $record = $storage->find($payload['nonce']);
+        self::assertNotNull($record);
+        self::assertSame(1, $record->executionVersion, 'the stored record stamps version 1 for an older client');
+    }
+
+    public function testNodeCapBelowTwoKeepsEveryIssuanceAtVersion1(): void
+    {
+        // The node cap (kiwi_captcha.execution_version) defaults to 1:
+        // even a capable client on a confirmed floor-2 fleet receives
+        // version 1 until the operator raises the node cap.
+        $container = $this->load([[
+            'secret_key' => self::SECRET,
+            'execution_key' => self::EXECUTION_KEY,
+            'redis_service' => 'fake_redis',
+            'risk' => ['enabled' => true, 'redis_service' => 'fake_redis', 'execution_challenge' => 'on'],
+            'storage' => 'kiwi_captcha.storage.array',
+            'difficulty_bits' => 8,
+        ]]);
+        $controller = $container->get(ChallengeController::class);
+        self::assertSame(1, $container->getDefinition(ChallengeController::class)->getArgument('$executionVersionCap'), 'the execution_version knob defaults to 1');
+        $redis = $container->get('fake_redis');
+        $monitor = $container->get(\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::class);
+        $this->seedExecutionPolicy($redis, $monitor);
+        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], [
+            'CONTENT_TYPE' => 'application/json',
+            'REMOTE_ADDR' => '127.0.0.1',
+            'HTTP_ORIGIN' => 'http://localhost',
+        ], '{"scope":"login","execution_max_version":2}');
+        $response = $controller->challenge($request);
+        self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+        $payload = json_decode((string) $response->getContent(), true);
+        self::assertSame(1, $this->programVersion($payload['execution_program']), 'the node cap below 2 keeps issuance at version 1');
+    }
+
+    public function testPolicyWithoutTheExecutionFloorKeyKeepsVersion1(): void
+    {
+        // A confirmed policy with min_protocol_version 4 but no
+        // min_execution_version key: the fleet floor is not declared at
+        // 2, so a capable client on a cap-2 node still receives version 1
+        // (the permissive read 0 is below 2 — version 2 is never emitted
+        // until the operator explicitly declares the floor).
+        $container = $this->load([[
+            'secret_key' => self::SECRET,
+            'execution_key' => self::EXECUTION_KEY,
+            'execution_version' => 2,
+            'redis_service' => 'fake_redis',
+            'risk' => ['enabled' => true, 'redis_service' => 'fake_redis', 'execution_challenge' => 'on'],
+            'storage' => 'kiwi_captcha.storage.array',
+            'difficulty_bits' => 8,
+        ]]);
+        $controller = $container->get(ChallengeController::class);
+        $redis = $container->get('fake_redis');
+        $monitor = $container->get(\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::class);
+        $this->seedExecutionPolicy($redis, $monitor, protocolFloor: 4, executionFloor: null);
+        $request = Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], [
+            'CONTENT_TYPE' => 'application/json',
+            'REMOTE_ADDR' => '127.0.0.1',
+            'HTTP_ORIGIN' => 'http://localhost',
+        ], '{"scope":"login","execution_max_version":2}');
+        $response = $controller->challenge($request);
+        self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+        $payload = json_decode((string) $response->getContent(), true);
+        self::assertSame(1, $this->programVersion($payload['execution_program']), 'no declared execution floor on the confirmed policy keeps version 1');
+    }
+
     public function testGateOffIssuanceIsByteIdenticalLegacy(): void
     {
         $container = $this->load([[

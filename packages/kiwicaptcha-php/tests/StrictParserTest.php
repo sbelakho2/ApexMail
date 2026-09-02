@@ -257,8 +257,8 @@ final class StrictParserTest extends TestCase
             'must be an integer',
         ];
 
-        yield 'execution_version not the canonical byte 1 rejected' => [
-            self::base() + ['execution_program' => $program, 'execution_version' => 2, 'execution_commitment' => hash('sha256', $program)],
+        yield 'execution_version not the canonical byte 1|2 rejected' => [
+            self::mutate('protocol_version', 4) + ['execution_program' => $program, 'execution_version' => 3, 'execution_commitment' => hash('sha256', $program)],
             'must be exactly 1',
         ];
 
@@ -442,6 +442,39 @@ final class StrictParserTest extends TestCase
         self::assertSame($data['execution_program'], $roundTripped->toArray()['execution_program']);
         self::assertSame(1, $roundTripped->toArray()['execution_version']);
         self::assertSame($data['execution_commitment'], $roundTripped->toArray()['execution_commitment']);
+    }
+
+    public function testV4RecordWithExecutionVersionTwoRoundTrips(): void
+    {
+        // The compat window accepts both canonical execution versions
+        // on the record wire: 1 (the legacy construction-to-probe
+        // grammar, exercised by the fixtures above) and 2 (the causal
+        // observe grammar). A version-2 program rides the same
+        // protocol-v4 triplet shape.
+        $program = \KiwiCaptcha\ExecutionChallengeGenerator::generate(
+            '0123456789abcdef0123456789abcdef',
+            '2l0IVh1xuKNjzcCDyV+X0lrceMHlHvmqCs5MdDw8tw0=',
+            'login',
+            'login-action',
+            2,
+        );
+        $data = self::base();
+        $data['protocol_version'] = 4;
+        $data['execution_program'] = $program;
+        $data['execution_version'] = 2;
+        $data['execution_commitment'] = hash('sha256', $program);
+
+        $record = ChallengeRecord::fromArray($data);
+
+        self::assertSame(4, $record->protocolVersion);
+        self::assertSame($program, $record->executionProgram);
+        self::assertSame(2, $record->executionVersion);
+
+        $roundTripped = ChallengeRecord::fromArray($record->toArray());
+        self::assertSame($program, $roundTripped->executionProgram);
+        self::assertSame(2, $roundTripped->executionVersion);
+        self::assertSame($record->executionCommitment, $roundTripped->executionCommitment);
+        self::assertSame(2, $roundTripped->toArray()['execution_version']);
     }
 
     public function testV4WithoutADecoyStillRoundTrips(): void

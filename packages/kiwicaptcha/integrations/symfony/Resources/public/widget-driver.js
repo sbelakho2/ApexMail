@@ -1833,6 +1833,20 @@
         if (algorithm !== "sha256" && algorithm !== "argon2id") algorithm = "sha256";
         var requestBinding = W.getAttribute("data-kiwi-request-binding") || container.getAttribute("data-kiwi-request-binding");
         var reqBody = { scope: scope };
+        // EXECUTION CAPABILITY ADVERTISEMENT: when the widget container or
+        // widget element carries the configured execution interpreter
+        // asset (data-kiwi-execution-src + integrity), the driver declares
+        // the highest execution-program version it can run
+        // (execution_max_version=2) with the challenge request, so the
+        // server issues the version-2 causal grammar only to clients that
+        // advertised the capability. An older driver or a widget without
+        // the execution tier never sends the field, and the server treats
+        // its absence as version 1 (the construction-to-probe grammar).
+        var execSrcAttr = (container.getAttribute ? container.getAttribute("data-kiwi-execution-src") : null)
+          || (W.getAttribute ? W.getAttribute("data-kiwi-execution-src") : null);
+        var execIntegrityAttr = (container.getAttribute ? container.getAttribute("data-kiwi-execution-integrity") : null)
+          || (W.getAttribute ? W.getAttribute("data-kiwi-execution-integrity") : null);
+        if (execSrcAttr && execIntegrityAttr) reqBody.execution_max_version = 2;
         if (algorithm !== "sha256") reqBody.algorithm = algorithm;
         if (requestBinding) reqBody.request_binding = requestBinding;
         // CHAIN TICKET: when the widget container carries a server-issued

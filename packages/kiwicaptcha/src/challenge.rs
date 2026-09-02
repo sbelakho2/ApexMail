@@ -645,7 +645,8 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 ///   issuer|kid[|decoy_field]|execution_version|execution_commitment
 /// ```
 ///
-/// - `execution_version` is the canonical numeric byte 1 (decimal on the
+/// - `execution_version` is the canonical numeric byte 1 or 2 (decimal
+///   on the
 ///   wire; never `|`-capable).
 /// - `execution_commitment` is the hex SHA-256 of the stored program's
 ///   base64 wire string: 64 lowercase hex characters, never

@@ -29,6 +29,15 @@ use KiwiCaptcha\Verifier;
  * reject. Absent, corrupt or unreadable state yields null (fail-safe:
  * the issuance path falls back to protocol v2).
  *
+ * The same read also exposes the optional `min_execution_version`
+ * field, the execution-grammar floor the challenge controller consults
+ * before emitting execution version 2 (the causal observe grammar).
+ * The value is null when no confirmed policy exists, 0 when a
+ * confirmed policy declares no execution floor, and the parsed floor
+ * otherwise. The key is optional and permissive at the read level.
+ * Both 0 and null stay below 2, so the writer keeps emitting execution
+ * version 1 until the operator explicitly declares the floor.
+ *
  * Four hardening properties:
  *
  *  1. Monotonic max: once this process has observed epoch N it never
@@ -85,6 +94,18 @@ final class SecurityEpochMonitor
     /** The central hash field carrying the fleet protocol floor. */
     public const MIN_PROTOCOL_VERSION_FIELD = 'min_protocol_version';
 
+    /**
+     * The central hash field carrying the fleet execution-grammar floor
+     * (min_execution_version): the writer-side floor the challenge
+     * controller consults before emitting execution version 2 (the
+     * causal observe grammar), exactly like min_protocol_version gates
+     * the protocol rungs. The key is optional: a confirmed policy
+     * without it reads as 0 — permissive, no declared execution floor —
+     * never null, so a policy-without-the-key is never confused with an
+     * unconfirmed policy.
+     */
+    public const MIN_EXECUTION_VERSION_FIELD = 'min_execution_version';
+
     private int $observedMax = 0;
 
     private int $currentEpoch;
@@ -98,6 +119,17 @@ final class SecurityEpochMonitor
      * for the issuance-side writer gate.
      */
     private ?int $currentMinProtocolVersion = null;
+
+    /**
+     * The last successfully read central `min_execution_version` floor,
+     * non-monotonic like the protocol floor. Null = no confirmed
+     * central policy at all (no Redis client, read failure, absent or
+     * unreadable policy); 0 = a confirmed policy without the key (no
+     * declared execution floor — permissive at the read level). Both
+     * stay below 2, so the issuance-side gate emits execution version 2
+     * only when the operator explicitly declared the floor.
+     */
+    private ?int $currentMinExecutionVersion = null;
 
     private float $refreshedAtMs = -PHP_FLOAT_MAX;
 
@@ -176,11 +208,12 @@ final class SecurityEpochMonitor
         $now = $this->nowMs();
         if ($now - $this->refreshedAtMs >= $this->cacheSecs * 1000) {
             $this->refreshedAtMs = $now;
-            [$central, $centralFloor] = $this->readCentralPolicy($now);
+            [$central, $centralFloor, $centralExecutionFloor] = $this->readCentralPolicy($now);
             if ($central !== null) {
                 $this->observedMax = max($this->observedMax, $central);
             }
             $this->currentMinProtocolVersion = $centralFloor;
+            $this->currentMinExecutionVersion = $centralExecutionFloor;
             $this->apply(max($this->configuredEpoch, $this->observedMax));
         }
 
@@ -213,6 +246,31 @@ final class SecurityEpochMonitor
     public function minProtocolVersion(): ?int
     {
         return $this->currentMinProtocolVersion;
+    }
+
+    /**
+     * The central `min_execution_version` floor from the last
+     * successful read within the cache window.
+     *
+     * Returns null when no central policy is confirmed at all: no Redis
+     * client by design, a failed read, or an absent or unreadable
+     * policy hash. The issuance path then stays at execution version 1,
+     * the mirror of the no-confirmed-policy rule for the protocol gate.
+     *
+     * Returns 0 when a confirmed policy carries no execution floor: the
+     * key is optional and permissive at the read level, and it imposes
+     * nothing on the readiness gate.
+     *
+     * Otherwise the parsed floor is returned. The floor is
+     * non-monotonic and non-sticky like the protocol floor: a lowered
+     * value takes effect on the next re-read. The challenge controller
+     * emits execution version 2, the causal observe grammar, only when
+     * this floor is >= 2, the client advertised the capability, and the
+     * node's execution-version cap is >= 2.
+     */
+    public function minExecutionVersion(): ?int
+    {
+        return $this->currentMinExecutionVersion;
     }
 
     /** The highest central epoch this process ever observed (0 = none yet). */
@@ -260,34 +318,43 @@ final class SecurityEpochMonitor
      * The second return value is the central `min_protocol_version` floor
      * (null when absent, corrupt or unreadable): the issuance-side writer
      * gate consumes it, and it never touches the max-stale window. A
-     * missing or corrupt floor only disables v3 emission, and protocol v2
-     * stays served, the safe direction.
+     * missing or corrupt floor only disables v3/v4 emission, and the
+     * older protocol rungs stay served, the safe direction.
      *
-     * @return array{0: ?int, 1: ?int} [central epoch, central protocol floor]
+     * The third return value is the central `min_execution_version`
+     * floor (null when no confirmed policy at all, 0 when a confirmed
+     * policy carries no execution floor, the parsed value otherwise):
+     * the issuance-side execution-version gate consumes it. A corrupt
+     * value stays null (unconfirmed), which only keeps execution
+     * version 2 unemitted.
+     *
+     * @return array{0: ?int, 1: ?int, 2: ?int} [central epoch, central protocol floor, central execution floor]
      */
     private function readCentralPolicy(float $now): array
     {
         if ($this->redis === null) {
-            return [null, null];
+            return [null, null, null];
         }
         try {
             $policy = $this->redis->hgetall($this->policyKey());
         } catch (\Throwable) {
             // Fail-safe: serve the last-observed max and the last
-            // confirmed floor, never a weaker epoch or an armed v3.
-            return [null, null];
+            // confirmed floors, never a weaker epoch or an armed
+            // v3/v4/execution-v2.
+            return [null, null, null];
         }
         if (!\is_array($policy) || $policy === []) {
             // A successful read with no central policy configured (a fresh
             // deployment): the monitor is healthy and the success mark is
             // refreshed — only the last-observed max keeps serving, and
-            // the floor stays unconfirmed (v2 emission).
+            // the floors stay unconfirmed (older-rung emission).
             $this->lastSuccessAtMs = $now;
 
-            return [null, null];
+            return [null, null, null];
         }
         $epoch = null;
         $floor = null;
+        $executionFloor = null;
         if (\array_key_exists(self::MIN_POLICY_EPOCH_FIELD, $policy)) {
             $value = $policy[self::MIN_POLICY_EPOCH_FIELD];
             if (\is_string($value) && preg_match('/^(?:0|[1-9][0-9]*)$/D', $value) === 1) {
@@ -301,10 +368,10 @@ final class SecurityEpochMonitor
             // integer overflow) is NOT a successful read — the stale
             // window is NOT refreshed (the verification fails closed once
             // the max-stale bound passes) and the last-observed max keeps
-            // serving. The protocol floor below is unaffected: a corrupt
-            // floor only stays null (v2 emission).
+            // serving. The protocol/execution floors below are unaffected:
+            // a corrupt floor only stays null (older-rung emission).
             if ($epoch === null) {
-                return [null, null];
+                return [null, null, null];
             }
         }
         if (\array_key_exists(self::MIN_PROTOCOL_VERSION_FIELD, $policy)) {
@@ -316,15 +383,39 @@ final class SecurityEpochMonitor
                 }
             }
             // A corrupt protocol floor (abc, -1, 1.5, 1e3, overflow) is
-            // an unconfirmed floor: null, so the issuance gate emits v2.
-            // The stale window is deliberately NOT refreshed by the floor
-            // field: the epoch field above owns the freshness deadline.
+            // an unconfirmed floor: null, so the issuance gate emits the
+            // older protocol rungs. The stale window is deliberately NOT
+            // refreshed by the floor field: the epoch field above owns
+            // the freshness deadline.
+        }
+        if (\array_key_exists(self::MIN_EXECUTION_VERSION_FIELD, $policy)) {
+            $value = $policy[self::MIN_EXECUTION_VERSION_FIELD];
+            if (\is_string($value) && preg_match('/^(?:0|[1-9][0-9]*)$/D', $value) === 1) {
+                $parsed = (int) $value;
+                if ((string) $parsed === $value) {
+                    $executionFloor = $parsed;
+                }
+            }
+            // A corrupt execution floor (abc, -1, 1.5, 1e3, overflow)
+            // stays null — an unconfirmed floor that only keeps execution
+            // version 2 unemitted (the fail-safe direction for the writer
+            // gate), never silently collapsed to the permissive 0. The
+            // stale window is deliberately NOT refreshed by this field
+            // either.
+        }
+        // A confirmed policy without the min_execution_version key has no
+        // declared execution floor and reads 0 — permissive at the read
+        // level (it imposes nothing on the readiness gate), but below 2,
+        // so the issuance gate never emits execution version 2 until the
+        // operator explicitly declares the floor.
+        if ($executionFloor === null && !\array_key_exists(self::MIN_EXECUTION_VERSION_FIELD, $policy)) {
+            $executionFloor = 0;
         }
         // The epoch field was confirmed (present and canonical) or
         // legitimately absent; either way the central read succeeded.
         $this->lastSuccessAtMs = $now;
 
-        return [$epoch, $floor];
+        return [$epoch, $floor, $executionFloor];
     }
 
     private function apply(int $epoch): void

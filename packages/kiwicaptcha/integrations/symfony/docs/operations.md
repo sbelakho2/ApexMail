@@ -317,6 +317,65 @@ Residual bounds and failure behavior:
 - Verification never consults the floor: a v3 record verifies on any v3-capable binary regardless of the current floor.
   That is deliberate, since the floor is a writer coordination signal and readers accept what they support.
 
+### Execution versioning
+
+Protocol v4 carries a second, independent generation signal inside the
+execution dimension: the execution-program grammar version stamped into
+every armed program's version byte. Version 1 is the
+construction-to-probe grammar with opcodes 0..32; version 2 adds the
+causal observe grammar, whose opcode 33 reads a genuine browser layout
+measurement. Older binaries and stale open pages only know version 1,
+so version 2 must never reach them: a mixed fleet cannot tell the two
+grammars apart by protocol_version alone, since both are protocol v4.
+
+The issuance-side gate is three-way. A node emits version 2 only when
+every rung is up:
+
+1. the client advertised `execution_max_version` >= 2 with the
+   challenge request. The current widget driver sends the field when
+   the deployment configured the execution tier; an older driver never
+   advertises and the server treats absence as version 1.
+2. the node's `kiwi_captcha.execution_version` cap is raised to 2
+   (default 1). The cap is the writer switch: no node emits version 2
+   until the operator declares it ready.
+3. the confirmed central security-policy hash
+   (`{kiwi:<ns>}:security-policy`) carries `min_execution_version`
+   >= 2, the fleet floor. The key is optional: a policy without it
+   reads as a permissive 0, and a policy that is absent, corrupt or
+   unreadable reads as unconfirmed. Both keep the writer at version 1,
+   exactly like the `min_protocol_version` rule keeps an unconfirmed
+   floor from arming v3 or v4.
+
+The procedure mirrors the v4 rollout. Deploy the version-2-capable
+binaries and interpreter assets everywhere, confirm no older binary or
+stale page remains that would misparse a version-2 program, then
+declare the floor and raise the node caps:
+
+```bash
+redis-cli HSET "{kiwi:<namespace>}:security-policy" \
+    min_execution_version 2
+# then, on every node:
+#     kiwi_captcha:
+#         execution_version: 2
+```
+
+A node whose cap or floor is below 2 keeps emitting version-1 programs
+to every client, byte-compatible with the version-1 grammar. A rollback
+lowers the floor (or deletes the key) before older binaries are
+re-admitted; the next re-read stops version-2 emission within one cache
+window. Version-1 and version-2 records both verify on the current
+generation for the remainder of their TTL, so the drain window only
+bounds stale open pages, never stored records.
+
+The doctor's protocol-writer checks keep covering the execution
+surface: under `high_abuse` (which turns `risk.execution_challenge` on
+by default) a node that arms the dimension without the confirmed
+protocol-v4 floor fails the deploy gate unless
+`protocol_rollout.mode: migration` declares the deliberate deferral.
+The version rungs above ride on top of that gate: they only choose
+between the version-1 and version-2 grammar of an already-armed
+issuance.
+
 The post-solve disposition record schema migrates in two phases.
 This release writes schema version 1 (chain_required records carry their chain_expires_at bound, a shape an earlier release already accepts) and reads both versions 1 and 2.
 A future release switches the writer to version 2 once the compatibility horizon has passed, and the version-1 schema is retired later still.
@@ -456,8 +515,10 @@ The dimension is supplementary evidence only and is never the sole
 acceptance boundary. The proof-of-work proof and the record state
 machinery always gate. The gate is inert without the execution_key, so
 an existing high_abuse deployment without the key keeps issuing
-byte-identically. The interpreter is a fixed audited bytecode VM: no
-eval, no new Function, no fingerprinting. A SHA-only challenge without
+byte-identically. The interpreter is a fixed audited bytecode VM with no
+eval and no new Function; it reads exactly one browser value, the
+observe op's challenge-scoped text-line height, and builds no
+persistent fingerprint. A SHA-only challenge without
 a program pays zero bytes for it. The privacy_strict profile forces the
 gate off; high_abuse arms it; balanced defaults it off. See
 configuration.md "ExecutionChallengeV1" for the operator contract.

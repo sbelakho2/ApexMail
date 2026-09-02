@@ -50,7 +50,17 @@ final class ChallengeController
     private const IDENTIFIER_PATTERN = '/^[A-Za-z0-9._:-]{1,128}$/D';
 
     /** The JSON fields the challenge POST accepts. */
-    private const ACCEPTED_PAYLOAD_FIELDS = ['scope', 'algorithm', 'request_binding', 'action', 'cdata', 'sitekey', 'decoy_field', 'honeypot', 'client_context', 'chain_ticket'];
+    private const ACCEPTED_PAYLOAD_FIELDS = ['scope', 'algorithm', 'request_binding', 'action', 'cdata', 'sitekey', 'decoy_field', 'honeypot', 'client_context', 'chain_ticket', 'execution_max_version'];
+
+    /**
+     * The highest execution-program grammar version this node can emit.
+     * Mirrors the core's ExecutionChallengeGenerator::MAX_EXECUTION_VERSION
+     * (2 = the causal observe grammar; 1 = the construction-to-probe
+     * grammar without opcode 33). The effective per-issuance version is
+     * selected by {@see self::effectiveExecutionVersion()}; the capability
+     * a client advertises is capped at this ceiling.
+     */
+    private const MAX_EXECUTION_VERSION = 2;
 
     /** Turnstile-compatible shapes, per Cloudflare's docs. */
     private const ACTION_PATTERN = '/^[a-z0-9_-]{1,32}$/i';
@@ -265,6 +275,20 @@ final class ChallengeController
          * warning path is best-effort.
          */
         private readonly ?LoggerInterface $logger = null,
+        /**
+         * The node's execution-program version cap (kiwi_captcha.
+         * execution_version, default 1): the operator-side ceiling of the
+         * grammar this deployment emits. Version 2 (the causal observe
+         * grammar) is never emitted unless this cap is >= 2, the client
+         * advertised an execution_max_version >= 2, and the confirmed
+         * central security-policy floor ({kiwi:<ns>}:security-policy
+         * min_execution_version) is >= 2, see
+         * {@see self::effectiveExecutionVersion()}. A node that never
+         * raised the cap keeps emitting version-1 programs to every
+         * client, byte-compatible with the construction-to-probe
+         * grammar of earlier releases.
+         */
+        private readonly int $executionVersionCap = 1,
     ) {
         $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
     }
@@ -361,6 +385,52 @@ final class ChallengeController
         }
 
         return false;
+    }
+
+    /**
+     * The effective execution-program grammar version of this issuance,
+     * the real execution-versioning gate of the dimension.
+     *
+     * Version 2 (the causal observe grammar, opcode 33) is emitted only
+     * when every rung of the gate is up:
+     *
+     *  1. the client advertised `execution_max_version` >= 2, and an
+     *     older client never advertises, so it receives version 1;
+     *  2. the node cap kiwi_captcha.execution_version is >= 2, so the
+     *     operator never emits v2 without raising the cap;
+     *  3. the confirmed central security-policy hash
+     *     {kiwi:<ns>}:security-policy carries min_execution_version
+     *     >= 2, the fleet floor.
+     *
+     * A policy that is absent, unreadable or unconfirmed reads null,
+     * so only version 1 may be emitted: the mirror of the protocol-v4
+     * rule, where no confirmed central policy means no arming. A
+     * confirmed policy without the key reads 0, a permissive state
+     * with no declared floor that is still below 2, so version 2 is
+     * never emitted until the operator declares the floor explicitly.
+     *
+     * Everything else emits version 1, the construction-to-probe
+     * grammar with opcodes 0..32 and no observe opcode, which every
+     * interpreter generation runs. The two generations are
+     * distinguishable by the version byte alone, so a mixed fleet of
+     * old binaries and stale open pages can never be handed the newer
+     * grammar by accident.
+     *
+     * The protocol-v4 emission gate, {@see self::executionArmingEnabled()},
+     * stays the protocol gate: arming itself still requires the
+     * confirmed central min_protocol_version floor >= 4.
+     */
+    private function effectiveExecutionVersion(int $clientCapability): int
+    {
+        if ($clientCapability < 2 || $this->executionVersionCap < 2) {
+            return 1;
+        }
+        $floor = $this->epochMonitor?->minExecutionVersion();
+        if ($floor === null || $floor < 2) {
+            return 1;
+        }
+
+        return 2;
     }
 
     /**
@@ -682,9 +752,11 @@ final class ChallengeController
             || (array_key_exists('honeypot', $payload) && $payload['honeypot'] !== null && !\is_string($payload['honeypot']))
             || (array_key_exists('client_context', $payload) && $payload['client_context'] !== null && !\is_string($payload['client_context']))
             || (array_key_exists('chain_ticket', $payload) && $payload['chain_ticket'] !== null && !\is_string($payload['chain_ticket']))
+            || (array_key_exists('execution_max_version', $payload) && $payload['execution_max_version'] !== null
+                && !\is_int($payload['execution_max_version']) && !\is_string($payload['execution_max_version']))
         ) {
             return $this->privateJson(
-                ['error' => ['code' => 'INVALID_JSON', 'message' => 'The challenge request fields must be strings.']],
+                ['error' => ['code' => 'INVALID_JSON', 'message' => 'The challenge request fields must be strings (execution_max_version may be an integer).']],
                 Response::HTTP_UNPROCESSABLE_ENTITY,
             );
         }
@@ -742,6 +814,32 @@ final class ChallengeController
                 Response::HTTP_UNPROCESSABLE_ENTITY,
             );
         }
+
+        // Execution-capability advertisement: the client declares the
+        // highest execution-program grammar version its interpreter can
+        // run (`execution_max_version`). The widget driver sends 2 when
+        // the deployment configured the execution tier; absence, a
+        // non-integer or a value below 2 means the client only knows
+        // version 1 (an old driver, a stale open page, or any client
+        // that never advertises). The field is a capability claim, not
+        // a security gate: a malformed value degrades to 1, never a
+        // 422, and the issued version is further capped by the node
+        // config and the central fleet floor, see
+        // {@see self::effectiveExecutionVersion()}.
+        $clientExecutionCapability = 1;
+        $rawCapability = $payload['execution_max_version'] ?? null;
+        if (\is_int($rawCapability)) {
+            $clientExecutionCapability = $rawCapability;
+        } elseif (\is_string($rawCapability) && preg_match('/^(?:0|[1-9][0-9]*)$/D', $rawCapability) === 1) {
+            $parsedCapability = (int) $rawCapability;
+            if ((string) $parsedCapability === $rawCapability) {
+                $clientExecutionCapability = $parsedCapability;
+            }
+        }
+        $clientExecutionCapability = $clientExecutionCapability >= self::MAX_EXECUTION_VERSION
+            ? self::MAX_EXECUTION_VERSION
+            : 1;
+
 
         // Identifier validation: scopes and request bindings must match
         // `[A-Za-z0-9._:-]+` with the 128-char ceiling before they reach
@@ -1441,12 +1539,18 @@ final class ChallengeController
             // (an armed issuance writes protocol v4 with the signed
             // commitment). The provider-style action of the request
             // rides the program (bounded 1..32 chars, already validated
-            // above) so the digest binds the action; the dimension
-            // protocol version is the fixed canonical byte 1.
+            // above) so the digest binds the action. The grammar
+            // version of the program is the effective execution version
+            // of this issuance, {@see self::effectiveExecutionVersion()}
+            // — version 2 (the causal observe grammar) only when the
+            // client advertised it, the node's execution_version cap is
+            // >= 2 and the confirmed central min_execution_version
+            // floor is >= 2; every other issuance stamps version 1.
             $armExecution = $this->executionArmingEnabled($executionRiskDecision);
+            $executionVersion = $this->effectiveExecutionVersion($clientExecutionCapability);
             $challenge = $profile !== null
-                ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname, armDecoyField: $armDecoy, armExecution: $armExecution, executionAction: $action, executionVersion: 1)
-                : $issuer->issueWithExecutionField($scope, $clientIp, $armExecution, $requestBinding, $hostname, $action, 1, $armDecoy);
+                ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname, armDecoyField: $armDecoy, armExecution: $armExecution, executionAction: $action, executionVersion: $executionVersion)
+                : $issuer->issueWithExecutionField($scope, $clientIp, $armExecution, $requestBinding, $hostname, $action, $executionVersion, $armDecoy);
             // Chain stage binding: the newly minted challenge nonce must
             // differ from the chain's verified stage-1 nonce (server-held
             // in the state record). The nonces are server-minted random
@@ -1710,15 +1814,56 @@ final class ChallengeController
             throw $e;
         }
 
-        // The challenge response carries the authenticated decoy field
-        // name exactly when the issuance armed one: Challenge::toArray()
-        // includes `decoy_field` for an armed (protocol v3) issuance, so
-        // the widget can render the hidden honeypot field; a bot that
-        // fills it echoes the marker back in a later challenge request,
-        // which the risk-v2 surface feeds as honeypot evidence. The name
-        // is the issuer's authenticated per-issuance value, never a
-        // nonce-derived reconstruction.
-        $challengeData = $challenge->toArray();
+        // The handoff body is serialized from the stored record through
+        // the single canonical issuance-response serializer,
+        // {@see self::issuanceResponseFromRecord()}: the record was
+        // durably stored by the issuer (the mint's storage write ran
+        // before the commit point above), and the recovery paths
+        // rebuild the response from that same stored record, so the
+        // handoff body and every later recovery body are byte-identical
+        // by construction — the response can never carry an
+        // execution_program (or an authenticated decoy_field) the
+        // stored record does not carry, and vice versa. The record is
+        // derived from the same issuance, so the fields match
+        // Challenge::toArray() exactly (ttlSecs = expires_at -
+        // issued_at); execution_version and execution_commitment never
+        // appear on the client-facing surface. Without a controller
+        // storage reference (test-only wiring; the production
+        // extension always wires one) the challenge object itself is
+        // the same issuance and its toArray() key set is identical, so
+        // it stands in for the record. A wired storage that cannot
+        // confirm the stored record fails closed with the retryable
+        // 503: handing out a challenge whose stored record is
+        // unreadable would mint a response a recovery could not
+        // reproduce and a solve could not verify.
+        if ($this->storage === null) {
+            $challengeData = $challenge->toArray();
+        } else {
+            $storedRecord = null;
+            try {
+                $storedRecord = $this->storage->find($challenge->nonce);
+            } catch (\Throwable $e) {
+                error_log(sprintf('kiwicaptcha: stored-record read failed before handoff for nonce_id=%s: %s', $this->nonceId($challenge->nonce), $e->getMessage()));
+            }
+            if ($storedRecord === null) {
+                if (!$stage2IssuedCommitted) {
+                    // Proven not handed out: the whole uncommitted
+                    // issuance attempt is rolled back.
+                    $this->rollbackUncommittedIssuance($challenge, $outstandingAdmissionHeld, $clientIp, $chainId, $chainOwner);
+                }
+                // After the durable stage-2 commit there is
+                // intentionally NO mutation: the retry recovers the
+                // same issued challenge through the chain state.
+                return $this->privateJson(
+                    ['error' => ['code' => 'SERVICE_UNAVAILABLE', 'message' => 'Challenge issuance is temporarily unavailable. Try again later.']],
+                    Response::HTTP_SERVICE_UNAVAILABLE,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
+            $challengeData = self::issuanceResponseFromRecord($storedRecord);
+        }
 
         // Handoff: the challenge is durably issued and stored, the metadata
         // identity persisted, and (stage 2) the chain durably transitioned
@@ -2476,7 +2621,7 @@ final class ChallengeController
                     // fence per store before the hand-out.
                     $this->confirmRecoveryBarriers();
 
-                    return $this->privateJson($this->rebuildIssuanceResponse($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+                    return $this->privateJson(self::issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
                 }
                 // Pending but signed-expired (retained by the replay
                 // margin): the prior nonce must become provably
@@ -2582,7 +2727,7 @@ final class ChallengeController
             // fence before the hand-out.
             $this->confirmRecoveryBarriers();
 
-            return $this->privateJson($this->rebuildIssuanceResponse($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+            return $this->privateJson(self::issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
         }
         $result = $consumed->consumedResult;
         if ($result === null) {
@@ -2636,8 +2781,11 @@ final class ChallengeController
      * Recovery of an issued or verified chain (the terminal states). The
      * original stage-2 issuance already ran durably (challenge record plus
      * metadata identity). The retry reads the issued challenge record
-     * (storage find by the state's stage2Nonce) and rebuilds the exact
-     * issuance response the original request returned, with no re-mint, no
+     * through the storage find by the state's stage2Nonce, then
+     * serializes it through the single canonical issuance-response
+     * serializer, {@see self::issuanceResponseFromRecord()}, the same
+     * function the fresh handoff uses. The recovered response is
+     * byte-identical with the original request's, with no re-mint, no
      * re-admission and no re-consume. An issued or verified state never
      * allows a second mint.
      *
@@ -2660,7 +2808,7 @@ final class ChallengeController
 
         $this->confirmRecoveryBarriers();
 
-        return $this->privateJson($this->rebuildIssuanceResponse($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+        return $this->privateJson(self::issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
     }
 
     /**
@@ -2801,14 +2949,19 @@ final class ChallengeController
     }
 
     /**
-     * Rebuild the exact issuance response of an already-issued stage-2
-     * challenge from its stored record. The key set and order are the
-     * same the original Challenge::toArray() produced (nonce, challenge,
-     * salt, algorithm, mKib, t, p, targetBits, ttlSecs, minDurationMs,
-     * prefix), plus the record's authenticated decoy_field when the
-     * issuance armed one. Byte-identical with the original response.
+     * Rearm an issued-but-unrecoverable stage-2 chain (the challenge
+     * record is missing, cancelled or committed-invalid): the chain
+     * returns to `available` so the pipeline can reserve and mint a
+     * fresh stage-2 challenge. Recovery of a recoverable issued chain
+     * instead serializes the stored record through the single canonical
+     * issuance-response serializer,
+     * {@see self::issuanceResponseFromRecord()}, the same function the
+     * fresh handoff uses — the recovery body is byte-identical with the
+     * original response by construction.
      *
-     * @param array<string, mixed> $recordData a ChallengeRecord's toArray()
+     * Returns null when the chain was rearmed (the caller proceeds to
+     * the reservation and mint); a failed rearm (a different transition
+     * won the race) answers the retryable 503.
      */
     private function rearmIssuedStage2(string $chainId, string $stage2Nonce, Request $request, ?string $riskSession, bool $mintedCookie): ?JsonResponse
     {
@@ -2936,7 +3089,7 @@ final class ChallengeController
 
                 $this->confirmRecoveryBarriers();
 
-                return $this->privateJson($this->rebuildIssuanceResponse($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
+                return $this->privateJson(self::issuanceResponseFromRecord($record), Response::HTTP_OK, $request, $riskSession, $mintedCookie);
             case \BelConsulting\KiwiCaptchaBundle\Risk\PostSolveDispositionKind::StepUp:
                 // The final disposition is StepUp: transition to the
                 // terminal step_up_required (the obligation mapping is
@@ -3055,7 +3208,30 @@ final class ChallengeController
         $this->chainTickets?->establishReplicationFence('the stage-2 recovery chain acceptance');
     }
 
-    private function rebuildIssuanceResponse(\KiwiCaptcha\ChallengeRecord $record): array
+    /**
+     * The ONE canonical issuance-response serializer of the controller.
+     * It emits the client-facing challenge response key set in the
+     * exact order Challenge::toArray() uses: nonce, challenge, salt,
+     * algorithm, mKib, t, p, targetBits, ttlSecs, minDurationMs,
+     * prefix. The authenticated decoy_field follows when the record
+     * carries one, then the execution_program when the record carries
+     * one. execution_version and execution_commitment are stored-record
+     * canonical fields and never appear on the client-facing surface.
+     *
+     * Both handoff paths serialize through this function. The fresh
+     * handoff of {@see self::challenge()} serializes the stored record
+     * after the issuance commit. Every stage-2 recovery path does too:
+     * {@see self::inspectIssuedStage2()},
+     * {@see self::recoverIssuedResponse()} and
+     * {@see self::resolveConsumedStage2Disposition()}. The handoff
+     * body and every later recovery body of the same challenge are
+     * therefore byte-identical by construction. The response can never
+     * carry an execution_program or decoy_field the stored record does
+     * not carry, and a recovery can never drop one the record carries.
+     * Each value comes from the record, never a nonce-derived
+     * reconstruction.
+     */
+    private static function issuanceResponseFromRecord(\KiwiCaptcha\ChallengeRecord $record): array
     {
         $data = $record->toArray();
         $response = [
@@ -3071,13 +3247,18 @@ final class ChallengeController
             'minDurationMs' => $data['min_duration_ms'],
             'prefix' => $data['prefix'],
         ];
-        // The authenticated decoy name of the replayed record: the
-        // original response carried exactly this value (the issuer's
-        // per-issuance pool pick, signed into the canonical payload), so
-        // the rebuilt response is byte-identical — never a nonce-derived
-        // reconstruction.
+        // The authenticated decoy name of the record: the original
+        // response carried exactly this value (the issuer's per-issuance
+        // pool pick, signed into the canonical payload).
         if ($record->decoyField !== null) {
             $response['decoy_field'] = $record->decoyField;
+        }
+        // The armed execution program of the record: the original
+        // response carried exactly these bytes, so a stage-2 recovery of
+        // an execution-armed challenge stays solvable (the stored record
+        // and the response can never diverge).
+        if ($record->executionProgram !== null) {
+            $response['execution_program'] = $record->executionProgram;
         }
 
         return $response;

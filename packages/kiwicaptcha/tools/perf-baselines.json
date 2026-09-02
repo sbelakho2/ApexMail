@@ -9,14 +9,14 @@
     },
     "budgets": {
         "widget_driver": {
-            "raw_bytes": 154274,
-            "gzip_bytes": 43647,
-            "brotli_bytes": 36790,
+            "raw_bytes": 155409,
+            "gzip_bytes": 43977,
+            "brotli_bytes": 37012,
             "raw_cap_bytes": 160000,
             "gzip_cap_bytes": 50000,
             "brotli_cap_bytes": 45000,
             "copies_identical": true,
-            "note": "The three copies (the canonical WASM asset, the core crate resources and the bundle public copy) are byte-identical at 154274 bytes, re-recorded on 2026-09-02; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes (an equality gate, not just the cap)."
+            "note": "The three copies (the canonical WASM asset, the core crate resources and the bundle public copy) are byte-identical at 155409 bytes, re-recorded on 2026-09-02 after the execution_max_version capability advertisement (the driver now declares execution version 2 on the challenge request when the execution tier is configured); perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes (an equality gate, not just the cap)."
         },
         "widget_worker": {
             "raw_bytes": 20233,
@@ -34,14 +34,14 @@
             "note": "The widget stylesheet (widget.css), three byte-identical copies at 13863 bytes; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
         },
         "widget_execution": {
-            "raw_bytes": 33181,
-            "gzip_bytes": 9816,
-            "brotli_bytes": 8417,
+            "raw_bytes": 33452,
+            "gzip_bytes": 9933,
+            "brotli_bytes": 8518,
             "raw_cap_bytes": 34000,
             "gzip_cap_bytes": 10200,
             "brotli_cap_bytes": 8800,
             "copies_identical": true,
-            "note": "The execution interpreter asset (execution-interpreter.js), three byte-identical copies at 32740 bytes raw, 9712 gzip and 8311 brotli, recorded on 2026-09-02; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes (the equality gate) and enforces the raw/gzip/brotli caps exactly like the widget driver."
+            "note": "The execution interpreter asset (execution-interpreter.js), three byte-identical copies at 33452 bytes raw, 9933 gzip and 8518 brotli, recorded on 2026-09-02; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes (the equality gate) and enforces the raw/gzip/brotli caps exactly like the widget driver."
         },
         "challenge_response_json": {
             "sha256_bytes_min": 1014,

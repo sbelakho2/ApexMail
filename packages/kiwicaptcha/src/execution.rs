@@ -158,6 +158,10 @@ pub const FORMAT_VERSION: u8 = 1;
 /// The op-version byte stamped into the program.
 pub const PROTOCOL_VERSION: u8 = 1;
 
+/// The highest execution version this generator can emit (2 adds the
+/// observe opcode and the causal u8 chain).
+pub const MAX_EXECUTION_VERSION: u8 = 2;
+
 /// The deterministic op-count bounds of every issued program.
 pub const MIN_OPS: u8 = 8;
 pub const MAX_OPS: u8 = 24;
@@ -366,7 +370,7 @@ pub fn generate(
     if !is_identifier(action, 32) {
         return Err(GenerateError::InvalidAction);
     }
-    if version != PROTOCOL_VERSION {
+    if version != 1 && version != 2 {
         return Err(GenerateError::InvalidVersion);
     }
     if !is_identifier(scope, 128) {
@@ -393,12 +397,16 @@ pub fn generate(
     program.push(action.len() as u8);
     program.extend_from_slice(action.as_bytes());
     program.push(version);
-    // The V2 causal chain needs 9 ops at minimum (construction, the
-    // u8 create/observe/read/rotate block and the link probe) plus the
-    // drawn 1..3 extra probes — so the floor rises to 11 and every
-    // stamped count always fits its emitted records; the grammar
-    // bounds 8..24 are unchanged.
-    let op_count = 11 + (cursor.next_byte() % 14);
+    // Version 1 carries the construction-to-probe skeleton with no
+    // observe opcode (floor 8); version 2 adds the causal u8 chain, so
+    // its floor rises to 11 (the fixed chain plus the 1..3 extra
+    // probes) while the grammar bounds 8..24 stay unchanged and every
+    // stamped count always fits its emitted records.
+    let op_count = if version == 2 {
+        11 + (cursor.next_byte() % 14)
+    } else {
+        8 + (cursor.next_byte() % 17)
+    };
     program.push(op_count);
 
     // The guaranteed structure of every armed program: a mandatory
@@ -425,21 +433,23 @@ pub fn generate(
     let mutate = mutates[(cursor.next_byte() % 3) as usize];
     ops.push((mutate, draw_operands(&mut cursor, mutate)));
     ops.push((OP_DOM_APPEND, Vec::new()));
-    // The causal chain: `U8_CREATE(len)` then `OBSERVE` writes the
-    // browser-observed height at a drawn index inside the array,
-    // `U8_READ` reads that same byte back (its exact entry must equal
-    // the observed value), and the checksum/rotate consumer runs over
-    // the array still carrying the observed byte.
-    let u8c_byte = cursor.next_byte();
-    ops.push((OP_U8_CREATE, vec![u8c_byte]));
-    let u8_len = 8 + (u8c_byte % 57);
-    let obs_idx_byte = cursor.next_byte() % u8_len;
-    let mut obs_operands = id_operand.clone();
-    obs_operands.push(obs_idx_byte);
-    ops.push((OP_DOM_OBSERVE, obs_operands));
-    ops.push((OP_U8_READ, vec![obs_idx_byte]));
-    let u8_consumer = [OP_U8_WRITE, OP_U8_ROTATE][(cursor.next_byte() % 2) as usize];
-    ops.push((u8_consumer, draw_operands(&mut cursor, u8_consumer)));
+    if version == 2 {
+        // The causal chain: `U8_CREATE(len)` then `OBSERVE` writes the
+        // browser-observed height at a drawn index inside the array,
+        // `U8_READ` reads that same byte back (its exact entry must equal
+        // the observed value), and the checksum/rotate consumer runs over
+        // the array still carrying the observed byte.
+        let u8c_byte = cursor.next_byte();
+        ops.push((OP_U8_CREATE, vec![u8c_byte]));
+        let u8_len = 8 + (u8c_byte % 57);
+        let obs_idx_byte = cursor.next_byte() % u8_len;
+        let mut obs_operands = id_operand.clone();
+        obs_operands.push(obs_idx_byte);
+        ops.push((OP_DOM_OBSERVE, obs_operands));
+        ops.push((OP_U8_READ, vec![obs_idx_byte]));
+        let u8_consumer = [OP_U8_WRITE, OP_U8_ROTATE][(cursor.next_byte() % 2) as usize];
+        ops.push((u8_consumer, draw_operands(&mut cursor, u8_consumer)));
+    }
     let link_probes = [OP_DOM_QUERY_REAL, OP_DOM_GEOMETRY, OP_DOM_EVENT_REAL];
     ops.push((
         link_probes[(cursor.next_byte() % 3) as usize],
@@ -662,7 +672,10 @@ pub fn decode(program_b64: &str) -> Option<Program> {
         return None;
     }
     let op_version = cursor.take_strict(1)?[0];
-    if op_version != PROTOCOL_VERSION {
+    // Execution versions 1 and 2 are both accepted (the compat window:
+    // old challenges stay verifiable for their whole TTL); each version
+    // bounds its own opcode space below.
+    if op_version != 1 && op_version != 2 {
         // The op version is exactly 1 — no arbitrary byte. Only the one
         // canonical version of the wire contract exists, so a foreign
         // blob stamped with any other byte is malformed.
@@ -676,7 +689,15 @@ pub fn decode(program_b64: &str) -> Option<Program> {
     let mut ops = Vec::with_capacity(op_count as usize);
     for _ in 0..op_count {
         let opcode = cursor.take_strict(1)?[0];
-        if opcode >= OP_COUNT {
+        // Version 1 programs never carry the version-2 observe opcode
+        // (33): an old interpreter must be able to reject a newer
+        // grammar by the declared version byte alone.
+        let max_opcode = if op_version == 1 {
+            OP_COUNT - 1
+        } else {
+            OP_COUNT
+        };
+        if opcode >= max_opcode {
             return None;
         }
         ops.push(Op {
@@ -1487,16 +1508,45 @@ mod tests {
 
     #[test]
     fn fixed_opcode_set_is_fully_reachable() {
-        let mut seen = std::collections::HashSet::new();
+        // Both canonical execution versions are sampled: a version-1
+        // program draws its fillers from the other 28 opcodes (0..27)
+        // and its probe block from 28..32, so the version-1 corpus
+        // reaches exactly 33 opcodes — the observe opcode (33) is a
+        // version-2 extension and must never appear in a version-1
+        // program. The version-2 causal grammar always stamps the
+        // observe op, so its corpus reaches all 34 fixed opcodes.
+        let mut seen_v1 = std::collections::HashSet::new();
         for i in 0..64u32 {
-            let nonce = B64.encode(sha2::Sha256::digest(format!("nonce-{i}").as_bytes()));
+            let nonce = B64.encode(sha2::Sha256::digest(format!("nonce-v1-{i}").as_bytes()));
             let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
             let program = decode(&p).unwrap();
+            assert_eq!(program.op_version, 1);
             for op in &program.ops {
-                seen.insert(op.opcode);
+                seen_v1.insert(op.opcode);
             }
         }
-        assert_eq!(seen.len(), OP_COUNT as usize);
+        assert_eq!(
+            seen_v1.len(),
+            (OP_COUNT - 1) as usize,
+            "the version-1 opcode space is 0..32 (the observe opcode never appears)"
+        );
+        assert!(!seen_v1.contains(&OP_DOM_OBSERVE));
+        let mut seen_v2 = std::collections::HashSet::new();
+        for i in 0..64u32 {
+            let nonce = B64.encode(sha2::Sha256::digest(format!("nonce-v2-{i}").as_bytes()));
+            let p = generate(KEY, &nonce, "login", "login-action", 2).unwrap();
+            let program = decode(&p).unwrap();
+            assert_eq!(program.op_version, 2);
+            for op in &program.ops {
+                seen_v2.insert(op.opcode);
+            }
+        }
+        assert_eq!(
+            seen_v2.len(),
+            OP_COUNT as usize,
+            "the version-2 corpus reaches the full fixed opcode set"
+        );
+        assert!(seen_v2.contains(&OP_DOM_OBSERVE));
     }
 
     #[test]
@@ -1514,8 +1564,9 @@ mod tests {
         // never from the browser-observed probes.
         for i in 0..128u32 {
             let nonce = B64.encode(sha2::Sha256::digest(format!("guaranteed-{i}").as_bytes()));
-            let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
+            let p = generate(KEY, &nonce, "login", "login-action", 2).unwrap();
             let program = decode(&p).expect("the program must parse");
+            assert_eq!(program.op_version, 2);
             assert!((program.ops.len() as u8) >= MIN_OPS && (program.ops.len() as u8) <= MAX_OPS);
             let first = &program.ops[0];
             assert_eq!(
@@ -1638,8 +1689,9 @@ mod tests {
         // value but does not carry it coherently through the later
         // checksum/read entries is rejected.
         let nonce = B64.encode(sha2::Sha256::digest(b"obsforge-0"));
-        let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
+        let p = generate(KEY, &nonce, "login", "login-action", 2).unwrap();
         let program = decode(&p).expect("the program must parse");
+        assert_eq!(program.op_version, 2);
         let trace = executed_trace_for(&program);
         assert!(verify_executed_trace(&p, &nonce, &trace).is_some());
         let obs_entry = trace
@@ -1706,8 +1758,9 @@ mod tests {
         let mut found = 0u32;
         for i in 0..128u32 {
             let nonce = B64.encode(sha2::Sha256::digest(format!("forge-{i}").as_bytes()));
-            let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
+            let p = generate(KEY, &nonce, "login", "login-action", 2).unwrap();
             let program = decode(&p).expect("the program must parse");
+            assert_eq!(program.op_version, 2);
             let trace = executed_trace_for(&program);
             assert!(verify_executed_trace(&p, &nonce, &trace).is_some());
             let link = program.ops[7].opcode;
@@ -1753,7 +1806,7 @@ mod tests {
         // construction append is missing every probe entry and must be
         // rejected.
         let nonce = B64.encode(sha2::Sha256::digest(b"forge-trunc"));
-        let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
+        let p = generate(KEY, &nonce, "login", "login-action", 2).unwrap();
         let program = decode(&p).expect("the program must parse");
         let trace = executed_trace_for(&program);
         let prefix = "dcreate(";
@@ -1769,6 +1822,152 @@ mod tests {
         assert!(
             verify_executed_trace(&p, &nonce, truncated).is_none(),
             "a trace without the probe entries must be rejected"
+        );
+    }
+
+    #[test]
+    fn version_one_programs_carry_the_legacy_skeleton() {
+        // The N-1 generation corpus: a version-1 program is the legacy
+        // construction-to-probe skeleton — no observe opcode (33), no
+        // causal u8 chain, its link probe at op 3 (the construction
+        // block is ops[0..2] and the probe block opens immediately
+        // after), floor 8 — and its browser-equivalent executed trace
+        // verifies against the current verifier and never carries an
+        // 'obs(' entry; the causal observe write is a v2-only
+        // extension.
+        for i in 0..128u32 {
+            let nonce = B64.encode(sha2::Sha256::digest(format!("v1-skel-{i}").as_bytes()));
+            let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
+            let program = decode(&p).expect("the program must parse");
+            assert_eq!(program.op_version, 1);
+            assert!(
+                (program.ops.len() as u8) >= MIN_OPS && (program.ops.len() as u8) <= MAX_OPS,
+                "a version-1 program has the 8..24 op bounds"
+            );
+            for op in &program.ops {
+                assert!(
+                    op.opcode != OP_DOM_OBSERVE,
+                    "a version-1 program never carries the observe opcode"
+                );
+            }
+            let first = &program.ops[0];
+            assert_eq!(
+                first.opcode, OP_DOM_CREATE,
+                "op 0 is the construction create"
+            );
+            let created_id = match first.operands.get("id") {
+                Some(Operand::Bytes(b)) => b.clone(),
+                _ => panic!("the create op must carry its drawn id bytes"),
+            };
+            assert!(matches!(
+                program.ops[1].opcode,
+                OP_DOM_SET_ATTR | OP_DOM_DATASET_SET | OP_DOM_CLASS_ADD
+            ));
+            assert_eq!(
+                program.ops[2].opcode, OP_DOM_APPEND,
+                "op 2 is the construction append"
+            );
+            // No causal chain: the probe block opens at op 3.
+            let link = program.ops[3].opcode;
+            assert!(
+                matches!(
+                    link,
+                    OP_DOM_QUERY_REAL | OP_DOM_GEOMETRY | OP_DOM_EVENT_REAL
+                ),
+                "the version-1 link probe sits at op 3 (no u8 chain)"
+            );
+            let mut seen_constructed_probe = false;
+            let mut index = 3usize;
+            while index < program.ops.len() && program.ops[index].opcode >= OP_DOM_QUERY_REAL {
+                let op = &program.ops[index];
+                if matches!(
+                    op.opcode,
+                    OP_DOM_QUERY_REAL | OP_DOM_GEOMETRY | OP_DOM_EVENT_REAL
+                ) {
+                    let id = match op.operands.get("id") {
+                        Some(Operand::Bytes(b)) => b.clone(),
+                        _ => panic!("id-carrying probes must carry their id operand"),
+                    };
+                    assert_eq!(
+                        id, created_id,
+                        "every id-carrying probe references the constructed id"
+                    );
+                    seen_constructed_probe = true;
+                }
+                index += 1;
+            }
+            assert!(
+                seen_constructed_probe,
+                "at least one probe reads the constructed id"
+            );
+            for op in &program.ops[index..] {
+                assert!(
+                    op.opcode <= OP_DOM_SERIALIZE,
+                    "the filler ops are drawn from the other 28 opcodes, never 28..32"
+                );
+            }
+            let trace = executed_trace_for(&program);
+            assert!(
+                verify_executed_trace(&p, &nonce, &trace).is_some(),
+                "the executed trace of a version-1 program must verify"
+            );
+            // The causal observe write is a v2-only extension, so a
+            // version-1 trace never carries the observe entry.
+            assert!(!trace.contains("obs("));
+        }
+    }
+
+    #[test]
+    fn version_bytes_cannot_cross_the_grammar_fence() {
+        // The N-1 decode fence: a version-2 program blob (whose causal
+        // chain stamps the observe opcode 33) with its version byte
+        // rewritten to 1 must decode to null — an old interpreter
+        // rejects the newer grammar by the declared version byte alone,
+        // before any opcode is read. And a version-1 blob carrying a
+        // crafted opcode-33 op must decode to null too: opcode 33 is
+        // outside the version-1 opcode space (0..32).
+        let scope_len = b"login".len();
+        let action_len = b"login-action".len();
+        let version_at = 3 + scope_len + action_len;
+        let op0_at = version_at + 2;
+
+        let v2_b64 = generate(KEY, NONCE, "login", "login-action", 2).unwrap();
+        let v2_bytes = B64.decode(&v2_b64).unwrap();
+        assert_eq!(v2_bytes[version_at], 2);
+        assert!(
+            decode(&v2_b64).is_some(),
+            "the version-2 program must parse"
+        );
+        let mut downgraded = v2_bytes.clone();
+        downgraded[version_at] = 1;
+        let downgraded_b64 = B64.encode(downgraded);
+        assert!(
+            decode(&downgraded_b64).is_none(),
+            "a version-2 program with opcode 33 must never decode as version 1"
+        );
+
+        let v1_b64 = generate(KEY, NONCE, "login", "login-action", 1).unwrap();
+        let mut v1_bytes = B64.decode(&v1_b64).unwrap();
+        assert_eq!(v1_bytes[version_at], 1);
+        assert_eq!(
+            v1_bytes[op0_at], OP_DOM_CREATE,
+            "op 0 is the construction create"
+        );
+        assert!(decode(&v1_b64).is_some());
+        v1_bytes[op0_at] = OP_DOM_OBSERVE;
+        let crafted_b64 = B64.encode(v1_bytes);
+        assert!(
+            decode(&crafted_b64).is_none(),
+            "opcode 33 inside a version-1 blob must be rejected"
+        );
+
+        // A version byte outside the canonical set 1|2 is refused at
+        // the decode fence, never interpreted as either grammar.
+        let mut foreign_version = v2_bytes;
+        foreign_version[version_at] = 3;
+        assert!(
+            decode(&B64.encode(foreign_version)).is_none(),
+            "a version byte other than 1 or 2 must decode to null"
         );
     }
 

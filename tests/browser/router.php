@@ -510,7 +510,7 @@ final class FixtureBindingAuthority implements \BelConsulting\KiwiCaptchaBundle\
  */
 function rebuildChallengeResponse(array $recordData): array
 {
-    return [
+    $response = [
         'nonce' => $recordData['nonce'],
         'challenge' => $recordData['challenge'],
         'salt' => $recordData['salt'],
@@ -523,6 +523,20 @@ function rebuildChallengeResponse(array $recordData): array
         'minDurationMs' => $recordData['min_duration_ms'],
         'prefix' => $recordData['prefix'],
     ];
+    // The canonical issuance-response key set of the bundle controller
+    // (issuanceResponseFromRecord): the authenticated decoy field and
+    // the execution program ride the response exactly when the stored
+    // record carries them, so a recovered stage-2 response is
+    // byte-identical with the original handoff (execution_version and
+    // execution_commitment never appear on the client-facing surface).
+    if (isset($recordData['decoy_field']) && $recordData['decoy_field'] !== null) {
+        $response['decoy_field'] = $recordData['decoy_field'];
+    }
+    if (isset($recordData['execution_program']) && $recordData['execution_program'] !== null) {
+        $response['execution_program'] = $recordData['execution_program'];
+    }
+
+    return $response;
 }
 
 /**
@@ -729,7 +743,7 @@ function recoverIssuedResponse(string $stage2Nonce): ?array
  * core enforces, so a malformed override falls back to the default
  * instead of crashing the fixture.
  */
-function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm, bool $armDecoy = false, ?int $ttlOverride = null, ?string $pinnedDecoy = null, int $shaBits = 8, int $argonBits = 4, int $argonMKib = 64, bool $armExecution = false, ?string $executionAction = null): ?array
+function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm, bool $armDecoy = false, ?int $ttlOverride = null, ?string $pinnedDecoy = null, int $shaBits = 8, int $argonBits = 4, int $argonMKib = 64, bool $armExecution = false, ?string $executionAction = null, int $executionVersion = 1): ?array
 {
     $shaBits = min(max($shaBits, 1), Config::MAX_SHA_TARGET_BITS);
     $argonBits = min(max($argonBits, 1), Config::MAX_ARGON2_TARGET_BITS);
@@ -756,7 +770,10 @@ function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm,
         // The armed issuance path: program generated from the challenge
         // context (nonce/scope/action/version), stamped on the record
         // AND the response; the driver runs it and presents the digest.
-        $challenge = $issuer->issueWithExecutionField($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), true, $binding, null, $executionAction ?? 'default', 1, $armDecoy, $pinnedDecoy);
+        // $executionVersion is the grammar version selected by the
+        // /challenge handler (the mirror of the bundle controller's
+        // effectiveExecutionVersion rule); see the handler comment.
+        $challenge = $issuer->issueWithExecutionField($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), true, $binding, null, $executionAction ?? 'default', $executionVersion, $armDecoy, $pinnedDecoy);
     } else {
         $challenge = $armDecoy
             ? $issuer->issueWithDecoyField($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), true, $binding, null, $pinnedDecoy)
@@ -1041,7 +1058,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     // the expected digest from the stored program).
     $armExecution = ($_GET['execution'] ?? '') === '1';
     $executionAction = isset($body['action']) && is_string($body['action']) ? $body['action'] : null;
-    $challenge = mintChallenge($scope, $presentedBinding, $algorithm, ($_GET['decoy'] ?? '') === 'pool', $ttlOverride, $pinnedDecoy, $shaBits, $argonBits, $argonMKib, $armExecution, $executionAction);
+    // Execution version selection, the mirror of the bundle controller's
+    // effectiveExecutionVersion rule. The fixture simulates a current
+    // deployment of the v2-capable generation, so it assumes its own
+    // execution-version cap and the central fleet floor are confirmed
+    // at 2: ?execution=1 stands in for the whole execution rollout
+    // state, and no SecurityEpochMonitor or {kiwi:<ns>}:security-policy
+    // hash is wired in the fixture. The effective grammar version is
+    // therefore 2 exactly when the client advertised
+    // execution_max_version >= 2 with the challenge request; the
+    // current driver sends 2 when the execution tier is configured.
+    // Any other value issues version 1, since an older driver never
+    // sends the field, exactly like the N-1 knob below.
+    // ?execution_max_version=<1|2> on the endpoint overrides the
+    // advertised capability: the fixture lever standing in for a stale
+    // page whose driver never advertises. The GET override wins over
+    // the body claim, since the server reads the capability the client
+    // presents, and the knob simulates what that client presents.
+    $executionMaxVersion = 1;
+    $capability = $body['execution_max_version'] ?? null;
+    if (is_int($capability)) {
+        $executionMaxVersion = $capability >= 2 ? 2 : 1;
+    } elseif (is_string($capability) && ctype_digit($capability)) {
+        $executionMaxVersion = (int) $capability >= 2 ? 2 : 1;
+    }
+    $getCapability = (string) ($_GET['execution_max_version'] ?? '');
+    if (ctype_digit($getCapability)) {
+        $executionMaxVersion = (int) $getCapability >= 2 ? 2 : 1;
+    }
+    $challenge = mintChallenge($scope, $presentedBinding, $algorithm, ($_GET['decoy'] ?? '') === 'pool', $ttlOverride, $pinnedDecoy, $shaBits, $argonBits, $argonMKib, $armExecution, $executionAction, $executionMaxVersion);
     if ($challenge === null) {
         http_response_code(500);
         echo '{"error":"record missing"}';
@@ -1616,6 +1661,11 @@ if ($path === '/' || $path === '/index.html') {
     if (($_GET['capture'] ?? '') !== '') $endpointQuery[] = 'capture='.rawurlencode((string) $_GET['capture']);
     if (($_GET['escalate'] ?? '') === 'argon') $endpointQuery[] = 'escalate=argon';
     if (($_GET['execution'] ?? '') === '1') $endpointQuery[] = 'execution=1';
+    // The execution-capability lever (?execution_max_version=<1|2>):
+    // propagated to the challenge endpoint so a spec can simulate a
+    // stale page whose driver never advertises the version-2
+    // capability (the fixture then issues version-1 programs).
+    if (($_GET['execution_max_version'] ?? '') !== '' && ctype_digit((string) $_GET['execution_max_version'])) $endpointQuery[] = 'execution_max_version='.rawurlencode((string) $_GET['execution_max_version']);
     // Client-performance-lab difficulty knobs, propagated to the
     // challenge endpoint (opt-in; absent = the historical fixture):
     // ?bits=<1..20> (SHA-256 target bits), ?argon_bits=<1..10> and

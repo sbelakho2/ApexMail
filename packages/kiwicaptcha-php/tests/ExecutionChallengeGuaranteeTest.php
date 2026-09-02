@@ -29,7 +29,12 @@ final class ExecutionChallengeGuaranteeTest extends TestCase
     private const KEY = '0123456789abcdef0123456789abcdef';
     private const SCOPE = 'login';
     private const ACTION = 'login-action';
-    private const VERSION = 1;
+    // The corpus helpers generate version-2 programs: the guaranteed
+    // structure they assert is the causal grammar (the observe chain at
+    // ops[3..6] and the link probe at ops[7]). Version-1 programs are
+    // the legacy construction-to-probe skeleton, pinned by
+    // testVersionOneProgramsCarryTheLegacySkeleton below.
+    private const VERSION = 2;
 
     public function testCausalObserveForgeriesAreRejected(): void
     {
@@ -337,6 +342,80 @@ final class ExecutionChallengeGuaranteeTest extends TestCase
             ExecutionChallengeGenerator::verifyExecutedTrace($programB64, $nonce, $truncated),
             'a trace without the probe entries must be rejected',
         );
+    }
+
+    public function testVersionOneProgramsCarryTheLegacySkeleton(): void
+    {
+        // The N-1 grammar corpus: a version-1 program is the legacy
+        // construction-to-probe skeleton — no observe opcode (33), no
+        // causal u8 chain, its link probe at ops[3] (the construction
+        // block is ops[0..2] and the probe block opens immediately
+        // after), floor 8 — and its browser-equivalent executed trace
+        // verifies against the current verifier and carries no 'obs('
+        // entry (the causal observe write is a v2-only extension).
+        $probeOps = [
+            ExecutionChallengeGenerator::OP_DOM_QUERY_REAL,
+            ExecutionChallengeGenerator::OP_DOM_GEOMETRY,
+            ExecutionChallengeGenerator::OP_DOM_EVENT_REAL,
+        ];
+        $mutateOps = [
+            ExecutionChallengeGenerator::OP_DOM_SET_ATTR,
+            ExecutionChallengeGenerator::OP_DOM_DATASET_SET,
+            ExecutionChallengeGenerator::OP_DOM_CLASS_ADD,
+        ];
+        for ($i = 0; $i < 96; $i++) {
+            $label = sprintf('v1-skeleton-%03d', $i);
+            $nonce = $this->nonceFor($label);
+            $programB64 = ExecutionChallengeGenerator::generate(self::KEY, $nonce, self::SCOPE, self::ACTION, 1);
+            $decoded = ExecutionChallengeGenerator::decode($programB64);
+            self::assertNotNull($decoded);
+            self::assertSame(1, $decoded['op_version']);
+            $ops = $decoded['ops'];
+            $count = \count($ops);
+            // The version-1 floor is 8 (no causal chain pushes the
+            // structure higher).
+            self::assertGreaterThanOrEqual(8, $count, 'a version-1 program has the 8-op floor');
+            self::assertLessThanOrEqual(ExecutionChallengeGenerator::MAX_OPS, $count);
+            foreach ($ops as $op) {
+                self::assertLessThan(
+                    ExecutionChallengeGenerator::OP_DOM_OBSERVE,
+                    $op['op'],
+                    'a version-1 program never carries the observe opcode',
+                );
+            }
+            // The construction block: create with a drawn id, a mutate
+            // op on that node, an append.
+            $createdId = $this->constructedId($decoded);
+            self::assertContains($ops[1]['op'], $mutateOps, 'op 1 is a mutate op on the created node');
+            self::assertSame(ExecutionChallengeGenerator::OP_DOM_APPEND, $ops[2]['op'], 'op 2 is the construction append');
+            // No causal chain: the probe block starts at ops[3].
+            self::assertContains($ops[3]['op'], $probeOps, 'the version-1 link probe sits at op 3 (no u8 chain)');
+            $probeEnd = 3;
+            $seenConstructedProbe = false;
+            while ($probeEnd < $count && $ops[$probeEnd]['op'] >= ExecutionChallengeGenerator::OP_DOM_QUERY_REAL) {
+                $probe = $ops[$probeEnd];
+                if (\in_array($probe['op'], $probeOps, true)) {
+                    self::assertSame($createdId, $probe['operands']['id'], 'every id-carrying probe references the constructed id');
+                    $seenConstructedProbe = true;
+                }
+                $probeEnd++;
+            }
+            self::assertTrue($seenConstructedProbe, 'at least one probe reads the constructed id');
+            for ($k = $probeEnd; $k < $count; $k++) {
+                self::assertLessThan(ExecutionChallengeGenerator::OP_DOM_QUERY_REAL, $ops[$k]['op'], 'the filler ops never draw the browser-observed probes');
+            }
+            // The executed trace of a version-1 program verifies on the
+            // current verifier (the compat window) and is a pure
+            // construction-to-probe trace: no causal observe entry.
+            $trace = ExecutionChallengeGenerator::executedTraceFor($decoded);
+            self::assertStringNotContainsString('obs(', $trace, 'a version-1 trace never carries an observe entry');
+            self::assertNotNull(
+                ExecutionChallengeGenerator::verifyExecutedTrace($programB64, $nonce, $trace),
+                'the executed trace of a version-1 program must verify',
+            );
+            self::assertNotNull(ExecutionChallengeGenerator::digestOverTrace($programB64, $nonce, $trace));
+            self::assertNotNull(ExecutionChallengeGenerator::expectedDigest($programB64, $nonce));
+        }
     }
 
     public function testLayoutProbeForgeriesAreRejected(): void

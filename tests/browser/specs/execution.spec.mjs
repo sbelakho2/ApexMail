@@ -227,6 +227,52 @@ test.describe('ExecutionChallengeV1 (browser)', () => {
     expect(opCount).toBeLessThanOrEqual(24);
   });
 
+  test('an N-1 client (no version-2 capability) is issued a version-1 program, no observe entry, and still verifies end to end', async ({ page }) => {
+    // The real execution-versioning gate: the fixture issues the
+    // version-2 causal grammar only when the client advertised
+    // execution_max_version >= 2 with the challenge request. A stale
+    // page whose driver never advertises the capability must receive a
+    // version-1 program; the fixture lever ?execution_max_version=1
+    // stands in for the absent advertisement. The grammar byte of the
+    // blob is 1, the executed trace carries no obs( entry, and the
+    // solve still verifies end to end: the current interpreter runs
+    // both generations.
+    await page.goto('/?assets=files&execution=1&execution_max_version=1');
+    await expect(page.locator('[data-kiwi-widget]')).toHaveAttribute('data-state', 'done', {
+      timeout: 120_000,
+    });
+    const token = await page.locator('[data-kiwi-token]').inputValue();
+    expect(token.length).toBeGreaterThan(0);
+    const plain = Buffer.from(token, 'base64').toString('utf8');
+    const evidence = plain.split('.').at(-1).split(':');
+    expect(evidence.length, 'the execution evidence must be present after the digest').toBe(2);
+    const standard = evidence[1].replace(/-/g, '+').replace(/_/g, '/');
+    const trace = Buffer.from(standard, 'base64').toString('utf8');
+    expect(
+      trace.includes('obs('),
+      'a version-1 program must never carry the causal observe entry'
+    ).toBe(false);
+
+    // The grammar version byte of the program the same N-1 issuance
+    // mints. The blob layout is: format(1), scopeLen(1), scope,
+    // actionLen(1), action, opVersion(1), then opCount(1).
+    const resp = await page.request.post('http://127.0.0.1:8085/challenge?execution=1&execution_max_version=1', {
+      data: { scope: 'login' },
+    });
+    const challenge = await resp.json();
+    expect(typeof challenge.execution_program).toBe('string');
+    const blob = Buffer.from(challenge.execution_program, 'base64');
+    let pos = 1;
+    const scopeLen = blob[pos++];
+    pos += scopeLen;
+    const actionLen = blob[pos++];
+    pos += actionLen;
+    expect(blob[pos], 'the grammar version byte of an N-1 issuance must be 1').toBe(1);
+
+    const result = await verifyToken(page, token);
+    expect(result.body.ok, `the version-1 solve must verify end to end (got ${result.body.code})`).toBe(true);
+  });
+
   test('an interpreter failure enters the controlled kiwi:execution-unavailable state, never a silent success', async ({ page }) => {
     // Route the interpreter asset to a 404: the iframe's script never
     // loads, no ready handshake arrives, and the driver must enter the

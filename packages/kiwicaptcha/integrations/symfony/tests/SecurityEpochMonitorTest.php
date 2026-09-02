@@ -329,6 +329,95 @@ final class SecurityEpochMonitorTest extends TestCase
         self::assertNull($monitor->minProtocolVersion(), 'no central state by design means no confirmed floor — v2 emission');
     }
 
+    // ── The min_execution_version floor (the execution-v2 writer gate) ─
+
+    private function setCentralExecutionFloor(FakePredisClient $redis, int $floor): void
+    {
+        $redis->hset(self::POLICY_KEY, SecurityEpochMonitor::MIN_EXECUTION_VERSION_FIELD, (string) $floor);
+    }
+
+    public function testMinExecutionVersionFloorIsReadFromTheCentralPolicy(): void
+    {
+        [, $verifier] = $this->pair(1);
+        $redis = new FakePredisClient();
+        $this->setCentralEpoch($redis, 1);
+        $this->setCentralProtocolFloor($redis, 4);
+        $this->setCentralExecutionFloor($redis, 2);
+        $monitor = new SecurityEpochMonitor($verifier, $redis, 'test-ns', 1, 1, $this->clock(...));
+        self::assertNull($monitor->minExecutionVersion(), 'before the first refresh no execution floor is confirmed');
+        $monitor->currentEpoch();
+        self::assertSame(2, $monitor->minExecutionVersion(), 'the first refresh confirms the central execution floor');
+    }
+
+    public function testMinExecutionVersionIsNotMonotonic(): void
+    {
+        [, $verifier] = $this->pair(1);
+        $redis = new FakePredisClient();
+        $this->setCentralEpoch($redis, 1);
+        $this->setCentralExecutionFloor($redis, 2);
+        $monitor = new SecurityEpochMonitor($verifier, $redis, 'test-ns', 1, 1, $this->clock(...));
+        $monitor->currentEpoch();
+        self::assertSame(2, $monitor->minExecutionVersion());
+
+        $this->setCentralExecutionFloor($redis, 1);
+        $this->clockMs = 2000; // past the cache window -> a re-read happens
+        $monitor->currentEpoch();
+        self::assertSame(1, $monitor->minExecutionVersion(), 'a regressed execution floor is observed immediately (never sticky)');
+    }
+
+    public function testConfirmedPolicyWithoutTheExecutionFloorKeyReadsZero(): void
+    {
+        // The min_execution_version key is optional: a confirmed policy
+        // without it has no declared execution floor. The accessor reads
+        // 0 — permissive at the read level, never null, so a
+        // policy-without-the-key is never confused with an unconfirmed
+        // policy — but 0 stays below 2, so the issuance-side gate keeps
+        // emitting execution version 1 until the operator declares the
+        // floor explicitly.
+        [, $verifier] = $this->pair(1);
+        $redis = new FakePredisClient();
+        $this->setCentralEpoch($redis, 1);
+        $this->setCentralProtocolFloor($redis, 4);
+        $monitor = new SecurityEpochMonitor($verifier, $redis, 'test-ns', 1, 1, $this->clock(...));
+        $monitor->currentEpoch();
+        self::assertSame(0, $monitor->minExecutionVersion(), 'a confirmed policy without the key reads 0 (permissive, below 2)');
+    }
+
+    public function testMinExecutionVersionFailsSafeWhenTheReadFails(): void
+    {
+        [, $verifier] = $this->pair(1);
+        $redis = new FakePredisClient();
+        $this->setCentralEpoch($redis, 1);
+        $this->setCentralExecutionFloor($redis, 2);
+        $monitor = new SecurityEpochMonitor($verifier, $redis, 'test-ns', 1, 1, $this->clock(...));
+        $monitor->currentEpoch();
+        self::assertSame(2, $monitor->minExecutionVersion());
+
+        $redis->failCommand = '*';
+        $this->clockMs = 2000;
+        $monitor->currentEpoch();
+        self::assertNull($monitor->minExecutionVersion(), 'an unreadable central policy leaves the execution floor unconfirmed');
+    }
+
+    public function testMinExecutionVersionIsNullWithoutAnyCentralPolicy(): void
+    {
+        [, $verifier] = $this->pair(1);
+        $monitor = new SecurityEpochMonitor($verifier, null, 'test-ns', 1, 1, $this->clock(...));
+        $monitor->currentEpoch();
+        self::assertNull($monitor->minExecutionVersion(), 'no central state by design means no confirmed policy — execution version 1');
+    }
+
+    public function testCorruptExecutionFloorStaysNullNeverCollapsedToZero(): void
+    {
+        [, $verifier] = $this->pair(1);
+        $redis = new FakePredisClient();
+        $this->setCentralEpoch($redis, 1);
+        $redis->hset(self::POLICY_KEY, SecurityEpochMonitor::MIN_EXECUTION_VERSION_FIELD, 'abc');
+        $monitor = new SecurityEpochMonitor($verifier, $redis, 'test-ns', 1, 1, $this->clock(...));
+        $monitor->currentEpoch();
+        self::assertNull($monitor->minExecutionVersion(), 'a corrupt execution floor is an unconfirmed floor, never the permissive 0');
+    }
+
     /**
      * The validator path ("the validator + any verification path
      * use the monitor's current epoch"): a monitor observing the bump makes

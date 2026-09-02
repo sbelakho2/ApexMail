@@ -628,7 +628,9 @@ pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
     // invalidates the challenge. The commitment compare is constant-time
     // (ct_eq).
     if execution_present {
-        if record.execution_version != Some(1) || record.execution_commitment.is_none() {
+        if !matches!(record.execution_version, Some(1) | Some(2))
+            || record.execution_commitment.is_none()
+        {
             return Err(VerifyError::MalformedRecord);
         }
         let commitment = record.execution_commitment.as_deref().unwrap_or("");

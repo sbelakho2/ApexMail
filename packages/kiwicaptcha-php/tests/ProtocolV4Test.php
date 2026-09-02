@@ -417,10 +417,13 @@ final class ProtocolV4Test extends TestCase
         self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'a stored version flip to 4 cannot manufacture the execution capability');
     }
 
-    public function testExecutionVersionNotOneIsMalformed(): void
+    public function testNonCanonicalExecutionVersionIsMalformed(): void
     {
-        // execution_version is the canonical numeric byte: exactly 1.
-        // A hand-rolled record carrying version 2 is corrupt.
+        // execution_version is the canonical numeric byte 1 or 2 (the
+        // compat window: version 1 is the legacy construction-to-probe
+        // grammar, version 2 the causal observe grammar). A hand-rolled
+        // record carrying version 3 is corrupt and fails the verifier's
+        // record gate as MalformedRecord.
         $storage = new ArrayStorage();
         $issuer = new Issuer($this->config(), $storage);
         $challenge = $issuer->issueWithExecutionField('login', '198.51.100.7', true, executionAction: 'a');
@@ -450,7 +453,7 @@ final class ProtocolV4Test extends TestCase
             hostname: $record->hostname,
             decoyField: $record->decoyField,
             executionProgram: $record->executionProgram,
-            executionVersion: 2,
+            executionVersion: 3,
             executionCommitment: $record->executionCommitment,
         );
         $storage->store($record);
@@ -461,7 +464,7 @@ final class ProtocolV4Test extends TestCase
             'login',
             '198.51.100.7',
         );
-        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'execution_version must be exactly the canonical byte 1');
+        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'execution_version must be exactly the canonical byte 1 or 2');
     }
 
     public function testV4AcceptedByTheCurrentVerifierAndRejectedByOldGenerations(): void

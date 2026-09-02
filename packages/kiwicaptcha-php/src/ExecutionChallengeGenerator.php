@@ -105,7 +105,8 @@ final class ExecutionChallengeGenerator
 
     /** The program blob format version. */
     public const FORMAT_VERSION = 1;
-    public const OP_VERSION = 1;
+    /** The highest execution version this generator can emit (2 adds the observe opcode and the causal u8 chain). */
+    public const MAX_EXECUTION_VERSION = 2;
 
     /** The op-version byte stamped into the program (bumped on op-semantics changes). */
     public const PROTOCOL_VERSION = 1;
@@ -219,9 +220,9 @@ final class ExecutionChallengeGenerator
                 'execution action must be 1-32 characters of [A-Za-z0-9._:-]'
             );
         }
-        if ($version !== 1) {
+        if ($version !== 1 && $version !== 2) {
             throw new \InvalidArgumentException(
-                'execution version must be exactly 1 (the canonical numeric byte; no other interpreter exists)'
+                'execution version must be 1 or 2 (the canonical numeric bytes; version 2 adds the observe opcode and the causal u8 chain)'
             );
         }
         if ($scope === '' || \strlen($scope) > 128 || preg_match('/^[A-Za-z0-9._:-]+$/D', $scope) !== 1) {
@@ -243,28 +244,30 @@ final class ExecutionChallengeGenerator
         $program .= \chr(\strlen($action));
         $program .= $action;
         $program .= \chr($version);
-        // The V2 causal chain needs 11 ops at minimum: the fixed
-        // skeleton (construction, the u8 create/observe/read/rotate
-        // block and the link probe) plus the drawn 1..3 extra probes —
-        // so the floor rises to 11 and every stamped count always fits
-        // its emitted records; the grammar bounds 8..24 are unchanged.
-        $opCount = 11 + (self::nextByte($stream) % 14);
+        // Version 1 carries the construction-to-probe skeleton with no
+        // observe opcode; version 2 adds the causal u8 chain, so its
+        // floor rises to 11 (the fixed chain plus the 1..3 extra
+        // probes) while the grammar bounds 8..24 stay unchanged and
+        // every stamped count always fits its emitted records.
+        $opCount = $version === 2
+            ? 11 + (self::nextByte($stream) % 14)
+            : 8 + (self::nextByte($stream) % 17);
         $program .= \chr($opCount);
 
         // The guaranteed structure of every armed program: a mandatory
         // DOM construction block (createElement with a drawn id, a
-        // mutate op on that node, an append), a mandatory causal u8
-        // chain (create the array, observe the real height of the
-        // constructed node into it, read the observed byte back,
-        // checksum/rotate over it) and a mandatory real-probe block
-        // (one of the browser-observed id probes 28/29/31 plus 1..3
-        // further real probes). The probe and observe id operand is
-        // the constructed id bytes, drawn once and reused, so every
-        // probe reads a real constructed node after the append. The
-        // remaining op slots are filled from the other 28 opcodes, so
-        // the count stays within MIN_OPS..MAX_OPS while every program
-        // exercises real DOM construction, real layout observation and
-        // probe reads against constructed nodes.
+        // mutate op on that node, an append), on version 2 a mandatory
+        // causal u8 chain (create the array, observe the real layout
+        // height of the constructed node into it, read the observed
+        // byte back, checksum/rotate over it) and a mandatory
+        // real-probe block (one of the browser-observed id probes
+        // 28/29/31 plus 1..3 further real probes). The probe and
+        // observe id operand is the constructed id bytes, drawn once
+        // and reused, so every probe reads a real constructed node
+        // after the append. The remaining op slots are filled from the
+        // other 28 opcodes, so the count stays within MIN_OPS..MAX_OPS
+        // while every program exercises real DOM construction, real
+        // layout observation and probe reads against constructed nodes.
         $ops = [];
         $tag = self::drawBytes($stream, 1);
         $idOperand = self::drawIdOperand($stream);
@@ -273,19 +276,22 @@ final class ExecutionChallengeGenerator
         $mutate = $mutates[self::nextByte($stream) % 3];
         $ops[] = [$mutate, self::drawOperands($stream, $mutate)];
         $ops[] = [self::OP_DOM_APPEND, ''];
-        // The causal chain: U8_CREATE(len) then the observe op writes the
-        // browser-observed height at a drawn index inside the array,
-        // U8_READ reads that same byte back (its exact entry must equal
-        // the observed value), and the checksum/rotate consumer runs
-        // over the array still carrying the observed byte.
-        $u8cByte = self::nextByte($stream);
-        $ops[] = [self::OP_U8_CREATE, \chr($u8cByte)];
-        $u8Len = 8 + ($u8cByte % 57);
-        $obsIdxByte = \chr(self::nextByte($stream) % $u8Len);
-        $ops[] = [self::OP_DOM_OBSERVE, $idOperand.$obsIdxByte];
-        $ops[] = [self::OP_U8_READ, $obsIdxByte];
-        $u8Consumer = [self::OP_U8_WRITE, self::OP_U8_ROTATE][self::nextByte($stream) % 2];
-        $ops[] = [$u8Consumer, self::drawOperands($stream, $u8Consumer)];
+        if ($version === 2) {
+            // The causal chain: U8_CREATE(len) then the observe op
+            // writes the browser-observed height at a drawn index
+            // inside the array, U8_READ reads that same byte back (its
+            // exact entry must equal the observed value), and the
+            // checksum/rotate consumer runs over the array still
+            // carrying the observed byte.
+            $u8cByte = self::nextByte($stream);
+            $ops[] = [self::OP_U8_CREATE, \chr($u8cByte)];
+            $u8Len = 8 + ($u8cByte % 57);
+            $obsIdxByte = \chr(self::nextByte($stream) % $u8Len);
+            $ops[] = [self::OP_DOM_OBSERVE, $idOperand.$obsIdxByte];
+            $ops[] = [self::OP_U8_READ, $obsIdxByte];
+            $u8Consumer = [self::OP_U8_WRITE, self::OP_U8_ROTATE][self::nextByte($stream) % 2];
+            $ops[] = [$u8Consumer, self::drawOperands($stream, $u8Consumer)];
+        }
         $linkProbes = [self::OP_DOM_QUERY_REAL, self::OP_DOM_GEOMETRY, self::OP_DOM_EVENT_REAL];
         $ops[] = [$linkProbes[self::nextByte($stream) % 3], $idOperand];
         $extraProbes = 1 + (self::nextByte($stream) % 3);
@@ -372,7 +378,10 @@ final class ExecutionChallengeGenerator
             return null;
         }
         $opVersion = $read(1);
-        if ($opVersion === null || \ord($opVersion) !== self::OP_VERSION) {
+        // Execution versions 1 and 2 are both accepted (the compat
+        // window: old challenges stay verifiable for their whole TTL);
+        // each version bounds its own opcode space below.
+        if ($opVersion === null || (\ord($opVersion) !== 1 && \ord($opVersion) !== 2)) {
             return null;
         }
         $opCount = $read(1);
@@ -391,7 +400,12 @@ final class ExecutionChallengeGenerator
                 return null;
             }
             $opcode = \ord($opcode);
-            if ($opcode >= self::OP_COUNT) {
+            // Version 1 programs never carry the version-2 observe
+            // opcode (33): the interpreter of a mixed fleet must be
+            // able to reject a newer grammar by the declared version
+            // byte alone.
+            $maxOpcode = \ord($opVersion) === 1 ? self::OP_COUNT - 1 : self::OP_COUNT;
+            if ($opcode >= $maxOpcode) {
                 return null;
             }
             $operands = self::readOperands($read, $opcode);

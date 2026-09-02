@@ -1652,6 +1652,13 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // gate). The gate on without execution_key was refused at
             // compile time above.
             ->setArgument('$executionGate', $config['risk']['execution_challenge'] === 'on')
+            // The node's execution-program version cap
+            // (kiwi_captcha.execution_version, default 1): the effective
+            // per-issuance grammar version is 2 only when the client
+            // advertised execution_max_version >= 2, this cap is >= 2
+            // and the SecurityEpochMonitor confirms the central
+            // min_execution_version floor >= 2.
+            ->setArgument('$executionVersionCap', $config['execution_version'])
             // The issuance-side logger (when the app has one) receives
             // the once-per-process decoy_v3_enabled-but-floor-too-low
             // warning.
