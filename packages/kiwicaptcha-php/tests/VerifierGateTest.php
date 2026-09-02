@@ -764,6 +764,120 @@ final class VerifierGateTest extends TestCase
         self::assertNull($storage->current, 'a malformed record must be deleted');
     }
 
+    public function testRecordWhoseStoredNonceDiffersFromTheLookupKeyIsMalformedAndNeverConsumed(): void
+    {
+        // A corrupt storage key-value pairing: the record served under the
+        // token's nonce carries a different — but self-consistent and
+        // properly signed — nonce field. Without the consistency check the
+        // cheap phase would pass and the record would be processed; the
+        // verifier must answer the deterministic MalformedRecord instead,
+        // never consuming or deriving anything.
+        $served = $this->v2Sha256Record();
+        $tokenNonce = $this->validNonce();
+        self::assertNotSame($tokenNonce, $served->nonce, 'the stub must serve a record whose nonce differs from the requested key');
+        $counters = ['consumes' => 0];
+        $storage = new class($served, $counters) implements StorageInterface {
+            private ChallengeRecord $served;
+
+            private array $counters;
+
+            public function __construct(ChallengeRecord $served, array &$counters)
+            {
+                $this->served = $served;
+                $this->counters = &$counters;
+            }
+
+            public function store(ChallengeRecord $record): void
+            {
+            }
+
+            public function find(string $nonce): ?ChallengeRecord
+            {
+                return $this->served;
+            }
+
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                $this->counters['consumes']++;
+
+                return null;
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return false;
+            }
+
+            public function delete(string $nonce): void
+            {
+            }
+        };
+
+        $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
+        $outcome = $verifier->verify($this->tokenFor($tokenNonce, 0), Vectors::SECRET, 'login', self::CLIENT_IP);
+
+        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'a stored-nonce/lookup-key mismatch is the deterministic MalformedRecord');
+        self::assertSame(0, $counters['consumes'], 'the mismatched record must never be consumed or processed');
+    }
+
+    public function testConsumedEnvelopeWhoseStoredNonceDiffersFromTheLookupKeyIsMalformed(): void
+    {
+        // The snapshot reads a pending-shaped record under the token nonce
+        // (the cheap phase passes), but the consumed envelope it carries
+        // holds a different record (a corrupt per-call pairing that a
+        // single-snapshot read can only produce in an exotic backend).
+        // The retained resolution must refuse it with the deterministic
+        // MalformedRecord instead of replaying the envelope's stored
+        // success.
+        $peek = $this->v2Sha256Record();
+        $envelope = $this->v2Sha256Record();
+        self::assertNotSame($peek->nonce, $envelope->nonce, 'the envelope must hold a record of a different nonce');
+        $storage = new class($peek, $envelope) implements StorageInterface, \KiwiCaptcha\ChallengeRuntimeStateReadableInterface {
+            public function __construct(
+                private ChallengeRecord $peek,
+                private ChallengeRecord $envelope,
+            ) {
+            }
+
+            public function store(ChallengeRecord $record): void
+            {
+            }
+
+            public function find(string $nonce): ?ChallengeRecord
+            {
+                return $this->peek;
+            }
+
+            public function runtimeState(string $nonce): \KiwiCaptcha\ChallengeRuntimeState
+            {
+                return new \KiwiCaptcha\ChallengeRuntimeState(
+                    \KiwiCaptcha\ChallengeRuntimeStateKind::Consumed,
+                    $this->peek,
+                    new \KiwiCaptcha\ConsumedRecord($this->envelope, false, true, new \KiwiCaptcha\ConsumedResult(true, null), 'op'),
+                );
+            }
+
+            public function consume(string $nonce): ?\KiwiCaptcha\ConsumedRecord
+            {
+                return null;
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return false;
+            }
+
+            public function delete(string $nonce): void
+            {
+            }
+        };
+
+        $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
+        $outcome = $verifier->verify($this->tokenFor($peek->nonce, 0), Vectors::SECRET, 'login', self::CLIENT_IP, operationIdentity: 'op');
+
+        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'a stored-nonce mismatch in the consumed envelope must not replay a stored success');
+    }
+
     public function testMalformedSaltLengthBurnsRecord(): void
     {
         $record = $this->v2Sha256Record(salt: base64_encode(random_bytes(15)));

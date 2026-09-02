@@ -561,7 +561,7 @@ final class Verifier
         // to preserve). The same helper revalidates the retained
         // consumed record on the consumed-operation resume path
         // {@see self::resumeConsumedOperation()}.
-        $failure = $this->cheapPhaseCheck($peek, $secretKey, $expectedScope, $clientIp, true, $receiptNs, $expectation, $token->executionDigest);
+        $failure = $this->cheapPhaseCheck($peek, $token->nonce, $secretKey, $expectedScope, $clientIp, true, $receiptNs, $expectation, $token->executionDigest);
         if ($failure !== null) {
             // The cleanup runs through the fused atomic transition when
             // the storage offers it, see {@see AtomicDeleteIfPendingInterface}:
@@ -746,7 +746,7 @@ final class Verifier
                 // that produced the peek: resolve it directly, never a
                 // second read.
                 if ($runtime->consumed !== null) {
-                    return $this->resolveConsumedRecord($runtime->consumed, $operationIdentity, $receiptNs);
+                    return $this->resolveConsumedRecord($runtime->consumed, $token->nonce, $operationIdentity, $receiptNs);
                 }
                 // Safety net kept only for an exotic storage that
                 // reported Consumed without the envelope: re-read via
@@ -760,7 +760,7 @@ final class Verifier
                         return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
                     }
                     if ($retained !== null) {
-                        return $this->resolveConsumedRecord($retained, $operationIdentity, $receiptNs);
+                        return $this->resolveConsumedRecord($retained, $token->nonce, $operationIdentity, $receiptNs);
                     }
                 }
             }
@@ -827,9 +827,18 @@ final class Verifier
                 // {@see self::resolveConsumedRecord()}, used by both this
                 // consume path and the pre-admission terminal-state
                 // check, so the two can never diverge.
-                return $this->resolveConsumedRecord($consumed, $operationIdentity, $receiptNs);
+                return $this->resolveConsumedRecord($consumed, $token->nonce, $operationIdentity, $receiptNs);
             }
             $record = $consumed->record;
+
+            // The consumed instance must carry the token nonce it was
+            // consumed under: a stored nonce that differs from the lookup
+            // key is an impossible corrupt key-value pairing and fails
+            // closed with the deterministic MalformedRecord before any
+            // processing.
+            if ($record->nonce !== $token->nonce) {
+                return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+            }
 
             // The consumed instance must be the same challenge that was
             // validated and HMAC-checked via peek. The v2 HMAC signs every
@@ -981,8 +990,17 @@ final class Verifier
      * StorageUnavailable, never a generic exception escaping the
      * verifier.
      */
-    private function resolveConsumedRecord(ConsumedRecord $consumed, ?string $operationIdentity, ?int $receiptNs): VerifyOutcome
+    private function resolveConsumedRecord(ConsumedRecord $consumed, string $tokenNonce, ?string $operationIdentity, ?int $receiptNs): VerifyOutcome
     {
+        if ($consumed->record->nonce !== $tokenNonce) {
+            // The retained envelope was loaded by $tokenNonce (the token's
+            // nonce / the storage key); a stored nonce field that differs
+            // is an impossible corrupt key-value pairing and is refused
+            // with the deterministic corrupt-record failure before any
+            // processing (Redis is a trusted control plane; this is
+            // consistency hardening, not an attacker boundary).
+            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+        }
         if ($consumed->consumedResult === null) {
             return VerifyOutcome::invalid(VerifyError::ConsumeIndeterminate);
         }
@@ -1188,6 +1206,17 @@ final class Verifier
             return VerifyOutcome::invalid(VerifyError::ConsumeIndeterminate);
         }
 
+        // Nonce consistency: the retained record was loaded by the token's
+        // nonce; a stored nonce field that differs from the lookup key is
+        // an impossible corrupt key-value pairing and is refused with the
+        // deterministic MalformedRecord before any processing (the
+        // committed-result fast path and the resumed derivation alike).
+        // Redis is a trusted control plane — consistency hardening, not
+        // an attacker boundary.
+        if ($consumed->record->nonce !== $token->nonce) {
+            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+        }
+
         // 4b. Application transaction binding, enforced before the resumed
         //     derivation AND the committed-result fast path, through the
         //     same canonical helper as every other binding check (exact
@@ -1278,7 +1307,7 @@ final class Verifier
         // buys nothing). An exempt failure runs the compositional replay
         // gate first — the same rule as the ordinary path: the exempt
         // circumstance may not mask a hard verdict that also applies.
-        $failure = $this->cheapPhaseCheck($record, $secretKey, $expectedScope, $clientIp, false, 0, $expectation, $token->executionDigest);
+        $failure = $this->cheapPhaseCheck($record, $token->nonce, $secretKey, $expectedScope, $clientIp, false, 0, $expectation, $token->executionDigest);
         if ($failure !== null) {
             if ($failure->isReplayExempt()
                 && ($hard = $this->replaySecurityCheck($record, $secretKey, $expectedScope, $expectation, $token->executionDigest)) !== null
@@ -1334,7 +1363,7 @@ final class Verifier
                     return VerifyOutcome::invalid(VerifyError::StorageUnavailable);
                 }
                 if ($loserState?->consumedResult !== null) {
-                    return $this->acceptStoredResumeResult($loserState, 'the resumed claim-refused re-read acceptance', $receiptNs);
+                    return $this->acceptStoredResumeResult($loserState, $token->nonce, 'the resumed claim-refused re-read acceptance', $receiptNs);
                 }
 
                 return VerifyOutcome::invalid(VerifyError::ConsumeIndeterminate);
@@ -1436,7 +1465,7 @@ final class Verifier
                     $after = null;
                 }
                 if ($after?->consumedResult !== null) {
-                    return $this->acceptStoredResumeResult($after, 'the resumed post-commit read acceptance', $receiptNs);
+                    return $this->acceptStoredResumeResult($after, $token->nonce, 'the resumed post-commit read acceptance', $receiptNs);
                 }
 
                 // A genuinely missing result. With a held claim the
@@ -1504,8 +1533,17 @@ final class Verifier
      * the shared PHP/Rust spec) and the authenticated decoy name from
      * the replayed record.
      */
-    private function acceptStoredResumeResult(ConsumedRecord $after, string $fenceReason, ?int $receiptNs): VerifyOutcome
+    private function acceptStoredResumeResult(ConsumedRecord $after, string $tokenNonce, string $fenceReason, ?int $receiptNs): VerifyOutcome
     {
+        if ($after->record->nonce !== $tokenNonce) {
+            // The retained envelope was loaded by $tokenNonce (the token's
+            // nonce / the storage key); a stored nonce field that differs
+            // is an impossible corrupt key-value pairing and is refused
+            // with the deterministic corrupt-record failure before any
+            // processing (Redis is a trusted control plane; this is
+            // consistency hardening, not an attacker boundary).
+            return VerifyOutcome::invalid(VerifyError::MalformedRecord);
+        }
         try {
             if ($this->storage instanceof \KiwiCaptcha\ReplicationBarrierInterface) {
                 $this->storage->establishReplicationFence($fenceReason);
@@ -1639,6 +1677,11 @@ final class Verifier
      * and the consumed-operation resume path, run in the order of the
      * ordinary path; the first failing check decides the outcome:
      *
+     *   0.  nonce consistency: the record was loaded by $tokenNonce (the
+     *       token's nonce / the storage key); its stored nonce field must
+     *       equal the lookup key. A mismatch is an impossible corrupt
+     *       key-value pairing and fails with the deterministic
+     *       MalformedRecord, before any further processing.
      *   1.  structural validation, see {@see self::validateRecord()}.
      *   1b. protocol version gate (v1 only during an explicit migration
      *       window).
@@ -1716,6 +1759,7 @@ final class Verifier
      */
     private function cheapPhaseCheck(
         ChallengeRecord $record,
+        string $tokenNonce,
         string $secretKey,
         ?string $expectedScope,
         ?string $clientIp,
@@ -1724,6 +1768,17 @@ final class Verifier
         RequestBindingExpectation $expectation,
         ?string $presentedExecutionDigest = null,
     ): ?VerifyError {
+        // 0. Nonce consistency: the record was loaded by $tokenNonce (the
+        //     token's nonce / the storage key); its stored nonce field must
+        //     equal the lookup key. A mismatch is an impossible corrupt
+        //     key-value pairing — the record can never be the challenge the
+        //     token names — and fails deterministically with MalformedRecord
+        //     before any further processing (Redis is a trusted control
+        //     plane; this is consistency hardening, not an attacker
+        //     boundary).
+        if ($record->nonce !== $tokenNonce) {
+            return VerifyError::MalformedRecord;
+        }
         // 1-2b. The authenticated hard core: structure, protocol gate,
         //       kid revocation/resolution, signature, Argon ceilings.
         if (($e = $this->checkAuthenticatedShape($record, $secretKey)) !== null) {

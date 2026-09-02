@@ -1567,6 +1567,7 @@ fn issue_challenge_inner(
                         SignError::ExecutionKeyNotConfigured
                     }
                     crate::execution::GenerateError::InvalidAction => SignError::InvalidIdentifier,
+                    crate::execution::GenerateError::InvalidScope => SignError::InvalidIdentifier,
                     crate::execution::GenerateError::InvalidVersion => SignError::InvalidIdentifier,
                 })?,
             ),

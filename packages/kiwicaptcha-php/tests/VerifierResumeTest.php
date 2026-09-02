@@ -742,6 +742,73 @@ final class VerifierResumeTest extends TestCase
         self::assertSame(VerifyError::ConsumeIndeterminate, $refused->error, 'a record without any identity must be refused');
     }
 
+    public function testResumeRecordWhoseStoredNonceDiffersFromTheLookupKeyIsMalformed(): void
+    {
+        // A corrupt key-value pairing: consumedState() (looked up by the
+        // token's nonce) returns a retained envelope whose stored record
+        // carries a different nonce. The identity gate alone cannot catch
+        // this — the envelope's own identity is exact — so the
+        // consistency check refuses the impossible record with the
+        // deterministic MalformedRecord before any processing: never a
+        // stored-success replay, never a resumed derivation.
+        [$inner, $record, $token] = $this->issueAndSolve();
+        $identity = $this->identity('corrupt-key-value-pairing');
+        $inner->consumeWithOperationIdentity($record->nonce, $identity);
+        $inner->commitResult($record->nonce, true, $record->requestBinding);
+
+        $storage = new class($inner, $record->nonce) implements StorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface {
+            public function __construct(
+                private readonly ArrayStorage $inner,
+                private readonly string $servedNonce,
+            ) {
+            }
+
+            public function store(ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consumedState(string $nonce): ?ConsumedRecord
+            {
+                // Serve the retained envelope of $servedNonce under any
+                // queried key: the corrupt pairing under test.
+                return $this->inner->consumedState($this->servedNonce);
+            }
+
+            public function consume(string $nonce): ?ConsumedRecord
+            {
+                return $this->inner->consume($nonce);
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+        };
+
+        $tokenNonce = base64_encode(random_bytes(32));
+        self::assertNotSame($tokenNonce, $record->nonce, 'the looked-up key must differ from the served record\'s stored nonce');
+        $outcome = (new Verifier($storage, now: static fn (): int => self::ISSUED_AT))->resumeConsumedOperation(
+            SolutionToken::create($tokenNonce, 0, 5000, [])->encode(),
+            Vectors::SECRET,
+            $identity,
+            'login',
+            self::CLIENT_IP,
+        );
+
+        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'a stored-nonce/lookup-key mismatch on the resume path is the deterministic MalformedRecord');
+    }
+
     public function testNonceWithNoRecordIsRefused(): void
     {
         $verifier = new Verifier(new ArrayStorage());

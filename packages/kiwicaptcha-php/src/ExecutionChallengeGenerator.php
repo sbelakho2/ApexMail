@@ -199,6 +199,16 @@ final class ExecutionChallengeGenerator
                 'execution version must be 1-8 characters of [A-Za-z0-9._:-]'
             );
         }
+        if ($scope === '' || \strlen($scope) > 128 || preg_match('/^[A-Za-z0-9._:-]+$/D', $scope) !== 1) {
+            // The decoder's scope grammar is 1-128 bytes of the same
+            // alphabet, see decode(): a scope outside it would generate
+            // a blob the module itself refuses to decode — a scope above
+            // 255 bytes would also wrap the length byte — so it is
+            // refused here, before any stream work.
+            throw new \InvalidArgumentException(
+                'execution scope must be 1-128 characters of [A-Za-z0-9._:-]'
+            );
+        }
         $stream = self::prfStream($executionKey, $nonce, $scope, $action, $version);
 
         $program = '';
@@ -623,7 +633,7 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_DATASET_GET => $readString(),
             self::OP_DOM_CLASS_ADD, self::OP_DOM_CLASS_CONTAINS => $readClass(),
             self::OP_DOM_APPEND, self::OP_DOM_PARENT, self::OP_DOM_DISPATCH,
-            self::OP_DOM_SERIALIZE => [],
+            self::OP_DOM_SERIALIZE, self::OP_DOM_SERIALIZE_REAL => [],
             self::OP_DOM_QUERY_REAL => $readId(),
             self::OP_DOM_GEOMETRY => $readId(),
             self::OP_DOM_POINT => ['x' => ($readByte() ?? 0) % 256, 'y' => ($readByte() ?? 0) % 256],

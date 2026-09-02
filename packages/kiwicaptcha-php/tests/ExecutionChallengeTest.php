@@ -143,6 +143,50 @@ final class ExecutionChallengeTest extends TestCase
         self::assertFalse(ExecutionChallengeGenerator::isValidProgram(base64_encode(str_repeat("\x01", ExecutionChallengeGenerator::MAX_PROGRAM_BASE64))));
     }
 
+    public function testGenerateRejectsInvalidScopes(): void
+    {
+        // The generator enforces the decoder's scope grammar (1-128 bytes
+        // of [A-Za-z0-9._:-]) up front: an empty, over-long or
+        // out-of-alphabet scope must throw instead of producing a blob
+        // the module's own decode() refuses.
+        $bad = [
+            'empty' => '',
+            'whitespace' => 'log in',
+            'separator pipe' => 'login|signup',
+            'non-ascii' => "h\xC3\xA9llo",
+            '129 bytes' => str_repeat('a', 129),
+        ];
+        foreach ($bad as $label => $scope) {
+            try {
+                ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, $scope, self::ACTION, self::VERSION);
+                self::fail(sprintf('scope %s (%s) must be rejected by generate()', $label, var_export($scope, true)));
+            } catch (\InvalidArgumentException $e) {
+                self::assertSame(
+                    'execution scope must be 1-128 characters of [A-Za-z0-9._:-]',
+                    $e->getMessage(),
+                );
+            }
+        }
+        // A 256-byte scope would previously wrap the length byte (chr of
+        // strlen): refused cleanly before any stream work.
+        $this->expectException(\InvalidArgumentException::class);
+        ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, str_repeat('b', 256), self::ACTION, self::VERSION);
+    }
+
+    public function testGenerateAcceptsTheBoundary128ByteScope(): void
+    {
+        // The exact decoder boundary: 128 bytes of the alphabet generate
+        // AND decode (a >128-byte scope previously produced a blob whose
+        // length byte exceeded the decoder's bound, so decode() refused
+        // it; since the fix the generator throws instead, see
+        // testGenerateRejectsInvalidScopes).
+        $scope = str_repeat('a', 128);
+        $program = ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, $scope, self::ACTION, self::VERSION);
+        $decoded = ExecutionChallengeGenerator::decode($program);
+        self::assertNotNull($decoded, 'a boundary-length scope must round-trip through decode()');
+        self::assertSame($scope, $decoded['scope']);
+    }
+
     public function testExpectedDigestShapeAndNonceBinding(): void
     {
         $program = ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, self::SCOPE, self::ACTION, self::VERSION);

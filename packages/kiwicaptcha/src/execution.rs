@@ -305,6 +305,14 @@ pub fn generate(
         return Err(GenerateError::InvalidAction);
     }
     let op_version: u8 = version.parse().map_err(|_| GenerateError::InvalidVersion)?;
+    // The decoder's scope grammar is 1-128 bytes of the same alphabet
+    // (see `decode`): a scope outside it would generate a blob the
+    // module itself refuses to decode (a >255-byte scope would also
+    // wrap the u8 length byte), so it is refused here, before any
+    // stream work.
+    if !is_identifier(scope, 128) {
+        return Err(GenerateError::InvalidScope);
+    }
 
     let mut cursor = Cursor::new(prf_stream(execution_key, nonce, scope, action, version));
 
@@ -868,6 +876,8 @@ pub enum GenerateError {
     KeyTooShort,
     #[error("execution action must be 1-32 characters of [A-Za-z0-9._:-]")]
     InvalidAction,
+    #[error("execution scope must be 1-128 characters of [A-Za-z0-9._:-]")]
+    InvalidScope,
     #[error("execution version must be a canonical decimal u8")]
     InvalidVersion,
 }
@@ -928,6 +938,51 @@ mod tests {
             generate(b"short", NONCE, "login", "login-action", "1"),
             Err(GenerateError::KeyTooShort)
         );
+    }
+
+    #[test]
+    fn invalid_scopes_are_rejected() {
+        // The generator enforces the decoder's scope grammar (1-128 bytes
+        // of [A-Za-z0-9._:-]) up front: an empty, over-long or
+        // out-of-alphabet scope must be refused instead of producing a
+        // blob the module's own decode() rejects.
+        let long_scope = "a".repeat(129);
+        let bad: [(&str, &str); 5] = [
+            ("empty", ""),
+            ("whitespace", "log in"),
+            ("separator pipe", "login|signup"),
+            ("non-ascii", "héllo"),
+            ("129 bytes", &long_scope),
+        ];
+        for (label, scope) in bad {
+            assert_eq!(
+                generate(KEY, NONCE, scope, "login-action", "1"),
+                Err(GenerateError::InvalidScope),
+                "{label} scope must be rejected"
+            );
+        }
+        // A >255-byte scope would previously wrap the u8 length byte:
+        // refused cleanly with InvalidScope (never a panic, never a
+        // wrapped length byte on the wire).
+        let over_255 = "b".repeat(300);
+        assert_eq!(
+            generate(KEY, NONCE, &over_255, "login-action", "1"),
+            Err(GenerateError::InvalidScope),
+            "a >255-byte scope must be rejected cleanly"
+        );
+    }
+
+    #[test]
+    fn boundary_128_byte_scope_generates_and_decodes() {
+        // The exact decoder boundary: 128 bytes of the alphabet generate
+        // AND decode (a >128-byte scope previously produced a blob whose
+        // length byte exceeded the decoder's bound, so decode() refused
+        // it; since the fix the generator throws/errors instead, see
+        // invalid_scopes_are_rejected).
+        let scope = "a".repeat(128);
+        let program = generate(KEY, NONCE, &scope, "login-action", "1").unwrap();
+        let decoded = decode(&program).expect("a boundary-length scope must round-trip");
+        assert_eq!(decoded.scope, scope);
     }
 
     #[test]
