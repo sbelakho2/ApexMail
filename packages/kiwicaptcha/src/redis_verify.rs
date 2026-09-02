@@ -182,8 +182,8 @@ use crate::challenge::{
 use crate::keys::DerivedKeys;
 use crate::token::SolutionToken;
 use crate::verify::{
-    check_request_binding, ct_eq, derive_hash, final_revalidate, leading_zero_bits,
-    measurable_solve_duration_ms, signature_from_challenge, validate_record,
+    check_execution_binding, check_request_binding, ct_eq, derive_hash, final_revalidate,
+    leading_zero_bits, measurable_solve_duration_ms, signature_from_challenge, validate_record,
     RequestBindingExpectation, VerifyError, VerifyOutcome, SKEW_TOLERANCE_US,
 };
 use redis::ConnectionLike;
@@ -2387,7 +2387,6 @@ impl ProductionVerifier {
                 RuntimeState::Pending(record) | RuntimeState::Cancelled(record) => record,
                 RuntimeState::Consumed(consumed) => &consumed.record,
             };
-
             // 3. Cheap validation on the peeked record. Per the shared
             //    cross-language consumption table (PHP mirrors this), terminal
             //    cheap failures consume the record: malformed stored record,
@@ -2415,6 +2414,8 @@ impl ProductionVerifier {
                 client_ip,
                 now_ns,
                 expected_request_binding,
+                token.execution_digest.as_deref(),
+                token.execution_trace.as_deref(),
             ) {
                 // The replay-exemption split (VerifyError::is_replay_exempt):
                 // only the narrow set of failures that describe the original
@@ -2457,6 +2458,8 @@ impl ProductionVerifier {
                                 scope,
                                 now_ns,
                                 expected_request_binding,
+                                token.execution_digest.as_deref(),
+                                token.execution_trace.as_deref(),
                             ) {
                                 // A hard verdict masked by the exempt
                                 // circumstance: the evidence stays preserved
@@ -2628,14 +2631,6 @@ impl ProductionVerifier {
         //    like the PHP hash_equals) and must pass the full cheap phase
         //    again — a swapped/racing record fails closed instead of being
         //    verified against bytes that were never validated.
-        //    The consumed instance must also carry the token nonce it was
-        //    consumed under: a stored nonce that differs from the lookup
-        //    key is an impossible corrupt key-value pairing and fails
-        //    closed with the deterministic MalformedRecord before any
-        //    processing (check_cheap below re-checks it too).
-        if record.nonce != token.nonce {
-            return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
-        }
         if !ct_eq(record.challenge.as_bytes(), peek.challenge.as_bytes()) {
             return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
         }
@@ -2646,6 +2641,8 @@ impl ProductionVerifier {
             client_ip,
             now_ns,
             expected_request_binding,
+            token.execution_digest.as_deref(),
+            token.execution_trace.as_deref(),
         ) {
             return VerifyOutcome::Invalid(e);
         }
@@ -2730,7 +2727,8 @@ impl ProductionVerifier {
     /// structural integrity, protocol gate, revoked/future kid,
     /// signature, Argon ceilings; check_ttl, check_scope,
     /// check_deployment_expectations, check_request_binding,
-    /// check_ip_binding, check_min_duration), so an emergency-revoked
+    /// check_ip_binding, the execution binding, check_min_duration), so
+    /// an emergency-revoked
     /// key or a bumped policy epoch rejects the recovery exactly as it
     /// rejects a fresh verification.
     ///
@@ -2781,17 +2779,6 @@ impl ProductionVerifier {
             return VerifyOutcome::Invalid(VerifyError::AlreadyConsumed);
         }
 
-        // 3b. Nonce consistency: the retained record was loaded by the
-        //    token's nonce; a stored nonce field that differs from the
-        //    lookup key is an impossible corrupt key-value pairing and is
-        //    refused with the deterministic MalformedRecord before any
-        //    processing (the committed-result fast path and the resumed
-        //    derivation alike). Redis is a trusted control plane —
-        //    consistency hardening, not an attacker boundary.
-        if state.record.nonce != token.nonce {
-            return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
-        }
-
         // 4. Stored result first: an already-completed record resolves
         //    through the identity-gated, replication-fenced stored-result
         //    path — the recovery never re-derives a committed outcome.
@@ -2807,9 +2794,14 @@ impl ProductionVerifier {
         //    (the committed outcome was durably recorded after the
         //    original IP checks passed).
         if state.stored_result.is_some() {
-            if let Err(e) =
-                self.replay_security_check(&state.record, scope, now_ns, expected_request_binding)
-            {
+            if let Err(e) = self.replay_security_check(
+                &state.record,
+                scope,
+                now_ns,
+                expected_request_binding,
+                token.execution_digest.as_deref(),
+                token.execution_trace.as_deref(),
+            ) {
                 return VerifyOutcome::Invalid(e);
             }
 
@@ -2820,7 +2812,8 @@ impl ProductionVerifier {
         //    verification (authenticated shape incl. revocation,
         //    signature and Argon ceilings; TTL; scope; region/policy/
         //    issuer deployment expectations; request binding; IP
-        //    binding; minimum duration). Recovery is never a weaker
+        //    binding; execution binding; minimum duration). Recovery is
+        //    never a weaker
         //    verification mode than the operation it recovers.
         if let Err(e) = self.check_cheap(
             &state.record,
@@ -2829,6 +2822,8 @@ impl ProductionVerifier {
             client_ip,
             now_ns,
             expected_request_binding,
+            token.execution_digest.as_deref(),
+            token.execution_trace.as_deref(),
         ) {
             return VerifyOutcome::Invalid(e);
         }
@@ -3028,13 +3023,11 @@ impl ProductionVerifier {
         operation_identity: Option<&str>,
         _now_ns: u64,
     ) -> VerifyOutcome {
-        // Nonce consistency: the retained envelope was loaded by
-        // `token_nonce` (the token's nonce / the storage key); a stored
-        // nonce field that differs from the lookup key is an impossible
-        // corrupt key-value pairing and is refused with the deterministic
-        // MalformedRecord before any processing (Redis is a trusted
-        // control plane — consistency hardening, not an attacker
-        // boundary).
+        // The consumed envelope was loaded by the token's nonce (the
+        // storage key); a stored nonce field that differs is an
+        // impossible key-value pair and never replays the retained
+        // result — the deterministic MalformedRecord, with the
+        // envelope preserved.
         if state.record.nonce != token_nonce {
             return VerifyOutcome::Invalid(VerifyError::MalformedRecord);
         }
@@ -3088,25 +3081,26 @@ impl ProductionVerifier {
 
     /// The cheap validation phase: structural validation, the protocol-v1
     /// gate, the signature re-check, TTL, scope, the expected request
-    /// binding, IP binding, region, policy epoch, issuer, and the
-    /// server-measured minimum duration — the checks PHP runs against the
+    /// binding, IP binding, region, policy epoch, issuer, the
+    /// ExecutionChallengeV1 binding, and the server-measured minimum
+    /// duration — the checks PHP runs against the
     /// peeked record before the Argon admission gate, in the same
     /// first-error precedence as the PHP `cheapPhaseCheck` (shape →
     /// TTL → scope+request-binding → IP binding → region/policy/issuer →
-    /// floor), so a record failing several invariants reports the same
-    /// error code in both languages. Run against the peeked record and
-    /// re-run against the consumed record (race guard). Each invariant
+    /// execution binding → floor), so a record failing several invariants
+    /// reports the same error code in both languages. Run against the
+    /// peeked record and re-run against the consumed record (race
+    /// guard). Each invariant
     /// lives in its own check method, shared verbatim with
     /// [`Self::replay_security_check`] so the two paths can never diverge
     /// on what an invariant means.
     ///
-    /// The nonce-consistency check (`record.nonce == token_nonce`) runs
-    /// first: the record was loaded by the token's nonce (the storage
-    /// key), so a stored nonce field that differs from the lookup key is
-    /// an impossible corrupt key-value pairing and fails with the
-    /// deterministic [`VerifyError::MalformedRecord`] before any further
-    /// processing (Redis is a trusted control plane — consistency
-    /// hardening, not an attacker boundary).
+    /// `execution_digest` and `execution_trace` are the presented
+    /// execution fields of the decoded solution token (the optional
+    /// digest and digest:trace wire segments); the execution binding is
+    /// evaluated against the record's stored program exactly like the
+    /// [`crate::verify::verify_solution`] reference flow.
+    #[allow(clippy::too_many_arguments)]
     fn check_cheap(
         &self,
         record: &ChallengeRecord,
@@ -3115,7 +3109,16 @@ impl ProductionVerifier {
         client_ip: &str,
         now_ns: u64,
         expected_request_binding: RequestBindingExpectation<'_>,
+        execution_digest: Option<&str>,
+        execution_trace: Option<&str>,
     ) -> Result<(), VerifyError> {
+        // The record must carry the nonce it was loaded under: a stored
+        // nonce that differs from the lookup key is impossible in a
+        // correct store, and a corrupted key-value pair is the
+        // deterministic MalformedRecord before any processing (never
+        // consumed as this challenge; the caller's failure policy burns
+        // the pending record and preserves the consumed evidence,
+        // exactly like the other terminal verdicts).
         if record.nonce != token_nonce {
             return Err(VerifyError::MalformedRecord);
         }
@@ -3125,6 +3128,7 @@ impl ProductionVerifier {
         check_request_binding(record.request_binding.as_deref(), expected_request_binding)?;
         self.check_ip_binding(record, client_ip)?;
         self.check_deployment_expectations(record)?;
+        check_execution_binding(record, execution_digest, execution_trace)?;
         self.check_min_duration(record, now_ns)?;
         Ok(())
     }
@@ -3137,7 +3141,8 @@ impl ProductionVerifier {
     /// A first-error routing lets an exempt failure that sits early in
     /// the cheap-phase order shadow every later hard verdict. The expiry
     /// sits before scope, the request binding and the IP binding; the IP
-    /// binding sits before the deployment expectations and the
+    /// binding sits before the deployment expectations, the execution
+    /// binding and the
     /// minimum-duration floor (the PHP `cheapPhaseCheck` order — the
     /// shadowed verdict would never run, and the retry would route into
     /// the identity-gated consumed branch, replaying the stored success
@@ -3148,7 +3153,9 @@ impl ProductionVerifier {
     /// clean pass lets the exempt circumstance route into the consumed
     /// branch. The check methods are the same ones
     /// [`Self::check_cheap`] composes, in the PHP `replaySecurityCheck`
-    /// order. The fresh-challenge path never calls this: the public
+    /// order (the execution binding included, so a tampered execution
+    /// tail can never replay a retained success around an exempt
+    /// expiry). The fresh-challenge path never calls this: the public
     /// first-error precedence for pending records is unchanged.
     fn replay_security_check(
         &self,
@@ -3156,6 +3163,8 @@ impl ProductionVerifier {
         scope: &str,
         now_ns: u64,
         expected_request_binding: RequestBindingExpectation<'_>,
+        execution_digest: Option<&str>,
+        execution_trace: Option<&str>,
     ) -> Result<(), VerifyError> {
         self.check_authenticated_shape(record)?;
         self.check_scope(record, scope)?;
@@ -3165,6 +3174,7 @@ impl ProductionVerifier {
         // ambiguous interpretation).
         check_request_binding(record.request_binding.as_deref(), expected_request_binding)?;
         self.check_deployment_expectations(record)?;
+        check_execution_binding(record, execution_digest, execution_trace)?;
         self.check_min_duration(record, now_ns)?;
         Ok(())
     }
@@ -3478,6 +3488,7 @@ mod tests {
             duration_ms: 5000,
             telemetry: serde_json::json!({}),
             execution_digest: None,
+            execution_trace: None,
         }
         .encode()
     }
@@ -3543,7 +3554,8 @@ mod tests {
 
         // Repeated full cheap phases reuse the same allocations (each
         // check would re-derive twice without the cache — signature +
-        // IP binding).
+        // IP binding). The issued records are unarmed, so no execution
+        // evidence is presented.
         for issued in [&issued_1, &issued_2] {
             for _ in 0..5 {
                 verifier
@@ -3554,6 +3566,8 @@ mod tests {
                         IP,
                         issued.record.issued_at_ns + 1_000_000,
                         RequestBindingExpectation::Unenforced,
+                        None,
+                        None,
                     )
                     .expect("the issued record passes its own cheap phase");
             }
@@ -4218,219 +4232,6 @@ mod tests {
         }
     }
 
-    // ── stored-nonce / lookup-key consistency (corrupt key-value pairings)
-
-    /// Copy a stored record value to another key (a raw rename of the
-    /// exact stored bytes, TTL preserved): the corrupt key-value pairing
-    /// under test — a record whose stored nonce field differs from the
-    /// key it is served under.
-    fn copy_record_value_to_foreign_key(url: &str, prefix: &str, from_nonce: &str, to_nonce: &str) {
-        let mut conn = redis::Client::open(url.to_string())
-            .unwrap()
-            .get_connection()
-            .unwrap();
-        redis::cmd("RENAME")
-            .arg(format!("{prefix}{from_nonce}"))
-            .arg(format!("{prefix}{to_nonce}"))
-            .query::<()>(&mut conn)
-            .expect("the record value renames to the foreign key");
-    }
-
-    #[test]
-    fn check_cheap_rejects_a_record_whose_stored_nonce_differs_from_the_token_nonce() {
-        // The cheap phase's first invariant: the record was loaded by the
-        // token's nonce (the storage key); a self-consistent record whose
-        // stored nonce field differs from the lookup key is an impossible
-        // corrupt key-value pairing and fails with the deterministic
-        // MalformedRecord before any further processing. The store's
-        // client never needs to be reachable: `check_cheap` is pure.
-        let verifier = ProductionVerifier::new(
-            RedisChallengeStore::new(
-                redis::Client::open("redis://127.0.0.1:1/").expect("placeholder URL parses"),
-                "unused:",
-            ),
-            SECRET,
-        );
-        let issued = issue_challenge(
-            &sha_config(4),
-            "login",
-            IP,
-            now_unix(),
-            now_micros(),
-            0,
-            None,
-        )
-        .expect("issuance");
-        let foreign = issue_challenge(
-            &sha_config(4),
-            "login",
-            IP,
-            now_unix(),
-            now_micros(),
-            0,
-            None,
-        )
-        .expect("issuance of the foreign-nonce record");
-        assert_ne!(issued.record.nonce, foreign.record.nonce);
-        assert_eq!(
-            verifier.check_cheap(
-                &issued.record,
-                &foreign.record.nonce,
-                "login",
-                IP,
-                issued.record.issued_at_ns + 1_000_000,
-                RequestBindingExpectation::Unenforced,
-            ),
-            Err(VerifyError::MalformedRecord),
-            "a stored-nonce/lookup-key mismatch is the deterministic MalformedRecord"
-        );
-        assert!(
-            verifier
-                .check_cheap(
-                    &issued.record,
-                    &issued.record.nonce,
-                    "login",
-                    IP,
-                    issued.record.issued_at_ns + 1_000_000,
-                    RequestBindingExpectation::Unenforced,
-                )
-                .is_ok(),
-            "the record passes its own cheap phase under its own nonce"
-        );
-    }
-
-    #[test]
-    fn verify_rejects_a_key_value_nonce_mismatch_with_malformed_record() {
-        // At the production boundary: a record is stored under its own
-        // key, then its raw value is served under a foreign nonce's key
-        // (the corrupt pairing). The token for the foreign nonce must be
-        // refused with the deterministic MalformedRecord and never
-        // consumed — the cheap phase catches the mismatch before the
-        // record is processed.
-        let Some(url) = redis_url() else { return };
-        let prefix = format!("kiwitest:nonce-mismatch:{}:", std::process::id());
-        let store =
-            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
-        let issued = issue_challenge(
-            &sha_config(4),
-            "login",
-            IP,
-            now_unix(),
-            now_micros(),
-            0,
-            None,
-        )
-        .unwrap();
-        store.store(&issued.record).unwrap();
-        let token_nonce = issue_challenge(
-            &sha_config(4),
-            "login",
-            IP,
-            now_unix(),
-            now_micros(),
-            0,
-            None,
-        )
-        .unwrap()
-        .record
-        .nonce;
-        assert_ne!(token_nonce, issued.record.nonce);
-        copy_record_value_to_foreign_key(&url, &prefix, &issued.record.nonce, &token_nonce);
-
-        let verifier = ProductionVerifier::new(store, SECRET);
-        let outcome = verifier.verify(
-            &encode_token(&token_nonce, 0),
-            "login",
-            IP,
-            now_micros(),
-            None,
-            RequestBindingExpectation::Unenforced,
-        );
-        assert_eq!(
-            outcome,
-            VerifyOutcome::Invalid(VerifyError::MalformedRecord),
-            "a stored-nonce/lookup-key mismatch is refused deterministically"
-        );
-        // The one-shot cheap-failure cleanup deleted the corrupt pending
-        // record under the foreign key: nothing was consumed, and no
-        // derivation ever ran.
-        let verifier_store = verifier.store();
-        assert!(verifier_store.consume(&token_nonce).unwrap().is_none());
-    }
-
-    #[test]
-    fn resume_consumed_operation_rejects_a_key_value_nonce_mismatch() {
-        // The resume path: consumedState() (looked up by the token's
-        // nonce) serves a retained envelope whose stored record carries a
-        // different nonce. The identity gate alone cannot catch this —
-        // the envelope's own identity is exact — so the consistency check
-        // refuses the impossible record with the deterministic
-        // MalformedRecord before any processing: never a stored-success
-        // replay, never a resumed derivation.
-        let Some(url) = redis_url() else { return };
-        let prefix = format!("kiwitest:resume-nonce-mismatch:{}:", std::process::id());
-        let store =
-            RedisChallengeStore::new(redis::Client::open(url.clone()).unwrap(), prefix.clone());
-        let issued = issue_challenge(
-            &sha_config(4),
-            "login",
-            IP,
-            now_unix(),
-            now_micros(),
-            0,
-            None,
-        )
-        .unwrap();
-        store.store(&issued.record).unwrap();
-        let identity = "logical-op-nonce-mismatch";
-        assert!(
-            store
-                .consume_with_operation_identity(&issued.record.nonce, Some(identity))
-                .unwrap()
-                .expect("the pending record consumes")
-                .first
-        );
-        store
-            .commit_result(&issued.record.nonce, true, None)
-            .unwrap();
-        let token_nonce = issue_challenge(
-            &sha_config(4),
-            "login",
-            IP,
-            now_unix(),
-            now_micros(),
-            0,
-            None,
-        )
-        .unwrap()
-        .record
-        .nonce;
-        assert_ne!(token_nonce, issued.record.nonce);
-        copy_record_value_to_foreign_key(&url, &prefix, &issued.record.nonce, &token_nonce);
-
-        let verifier = ProductionVerifier::new(store, SECRET);
-        let outcome = verifier.resume_consumed_operation(
-            &encode_token(&token_nonce, 0),
-            identity,
-            "login",
-            IP,
-            now_micros(),
-            RequestBindingExpectation::Unenforced,
-        );
-        assert_eq!(
-            outcome,
-            VerifyOutcome::Invalid(VerifyError::MalformedRecord),
-            "a stored-nonce/lookup-key mismatch on the resume path is refused deterministically"
-        );
-        // The retained envelope was never re-derived nor re-committed:
-        // the state under the foreign key is untouched.
-        assert!(verifier
-            .store()
-            .consumed_state(&token_nonce)
-            .unwrap()
-            .is_some());
-    }
-
     #[test]
     fn deeply_nested_stored_value_hits_the_recursion_limit() {
         // serde_json's default recursion limit (128) is intact —
@@ -4908,5 +4709,141 @@ mod tests {
                 "the fenced commit rejects before any Redis interaction"
             );
         }
+    }
+
+    #[test]
+    fn verify_rejects_a_key_value_nonce_mismatch_with_malformed_record() {
+        // A storage key whose value carries a different record nonce is
+        // an impossible key-value pair in a correct store; the
+        // production verifier answers the deterministic MalformedRecord
+        // before any processing and never consumes the foreign record
+        // as this challenge.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:nonce-key-a:{}:", std::process::id());
+        let client = redis::Client::open(url.clone()).unwrap();
+        let store = RedisChallengeStore::new(client.clone(), prefix.clone());
+
+        let base = now_unix();
+        let issued_a =
+            issue_challenge(&sha_config(4), "login", IP, base, now_micros(), 0, None).unwrap();
+        let issued_b =
+            issue_challenge(&sha_config(4), "login", IP, base, now_micros(), 0, None).unwrap();
+        store.store(&issued_a.record).unwrap();
+        store.store(&issued_b.record).unwrap();
+
+        // Corrupt the key-value identity: serve record B's value under
+        // record A's key (the token still names A).
+        let key_a = format!("{}{}", prefix, issued_a.record.nonce);
+        let key_b = format!("{}{}", prefix, issued_b.record.nonce);
+        let value_b: String = redis::cmd("GET")
+            .arg(&key_b)
+            .query(&mut client.get_connection().unwrap())
+            .unwrap();
+        redis::cmd("SET")
+            .arg(&key_a)
+            .arg(&value_b)
+            .exec(&mut client.get_connection().unwrap())
+            .unwrap();
+
+        let counter_a = solve_for_test(&issued_a.record).expect("4-bit sha solves");
+        let token_a = encode_token(&issued_a.record.nonce, counter_a);
+        let verifier = ProductionVerifier::new(store, SECRET);
+        let outcome = verifier.verify(
+            &token_a,
+            "login",
+            IP,
+            issued_a.record.issued_at_ns + 1_000_000,
+            None,
+            RequestBindingExpectation::Unenforced,
+        );
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Invalid(VerifyError::MalformedRecord),
+            "a key-value nonce mismatch is the deterministic MalformedRecord"
+        );
+        // The terminal verdict burns the pending record under the key
+        // (the one-shot policy, PHP parity): a replay sees no record.
+        let outcome2 = verifier.verify(
+            &token_a,
+            "login",
+            IP,
+            issued_a.record.issued_at_ns + 1_000_000,
+            None,
+            RequestBindingExpectation::Unenforced,
+        );
+        assert_eq!(
+            outcome2,
+            VerifyOutcome::Invalid(VerifyError::RecordNotFound),
+            "the pending record is burned by the terminal verdict"
+        );
+    }
+
+    #[test]
+    fn consumed_envelope_with_a_foreign_nonce_never_replays_the_stored_result() {
+        // A consumed envelope under the token's key whose record nonce
+        // differs (key-value corruption after the original consume) must
+        // never replay the retained committed result.
+        let Some(url) = redis_url() else { return };
+        let prefix = format!("kiwitest:nonce-key-b:{}:", std::process::id());
+        let client = redis::Client::open(url.clone()).unwrap();
+        let store = RedisChallengeStore::new(client.clone(), prefix.clone());
+
+        let base = now_unix();
+        let issued_a =
+            issue_challenge(&sha_config(4), "login", IP, base, now_micros(), 0, None).unwrap();
+        let issued_b =
+            issue_challenge(&sha_config(4), "login", IP, base, now_micros(), 0, None).unwrap();
+        store.store(&issued_a.record).unwrap();
+        store.store(&issued_b.record).unwrap();
+
+        // Consume B with a committed valid result (the corrupted value).
+        let counter_b = solve_for_test(&issued_b.record).expect("4-bit sha solves");
+        let token_b = encode_token(&issued_b.record.nonce, counter_b);
+        let verifier_b = ProductionVerifier::new(
+            RedisChallengeStore::new(client.clone(), prefix.clone()),
+            SECRET,
+        );
+        let ok = verifier_b.verify(
+            &token_b,
+            "login",
+            IP,
+            issued_b.record.issued_at_ns + 1_000_000,
+            None,
+            RequestBindingExpectation::Unenforced,
+        );
+        assert!(
+            matches!(ok, VerifyOutcome::Valid { .. }),
+            "record B verifies first"
+        );
+
+        // Rename B's consumed envelope onto A's key; the token names A.
+        let key_a = format!("{}{}", prefix, issued_a.record.nonce);
+        let key_b = format!("{}{}", prefix, issued_b.record.nonce);
+        let value_b: String = redis::cmd("GET")
+            .arg(&key_b)
+            .query(&mut client.get_connection().unwrap())
+            .unwrap();
+        redis::cmd("SET")
+            .arg(&key_a)
+            .arg(&value_b)
+            .exec(&mut client.get_connection().unwrap())
+            .unwrap();
+
+        let counter_a = solve_for_test(&issued_a.record).expect("4-bit sha solves");
+        let token_a = encode_token(&issued_a.record.nonce, counter_a);
+        let verifier_a = ProductionVerifier::new(store, SECRET);
+        let outcome = verifier_a.verify(
+            &token_a,
+            "login",
+            IP,
+            issued_a.record.issued_at_ns + 1_000_000,
+            None,
+            RequestBindingExpectation::Unenforced,
+        );
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Invalid(VerifyError::MalformedRecord),
+            "a consumed envelope with a foreign nonce never replays the stored result"
+        );
     }
 }

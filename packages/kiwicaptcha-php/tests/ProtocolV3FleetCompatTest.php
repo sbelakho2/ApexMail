@@ -6,6 +6,7 @@ namespace KiwiCaptcha\Tests;
 
 use KiwiCaptcha\Challenge;
 use KiwiCaptcha\Config;
+use KiwiCaptcha\ExecutionChallengeGenerator;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\SolutionToken;
@@ -43,6 +44,9 @@ final class ProtocolV3FleetCompatTest extends TestCase
             argon2TargetBits: 8,
             ttlSecs: 120,
             minDurationMs: 0,
+            // The execution key is configured from the start so the v4
+            // leg can arm.
+            executionKey: Vectors::SECRET,
         );
     }
 
@@ -227,5 +231,65 @@ final class ProtocolV3FleetCompatTest extends TestCase
             $record->issuedAtNs + 1_000_000,
         );
         self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'a parent-revision verifier must reject the Redis-stored v3 record');
+    }
+
+    public function testV4RecordVerifiesThroughTheCurrentVerifierAndIsRejectedByOlderGenerations(): void
+    {
+        // The v4 mixed-fleet invariant: a v4-armed challenge (the
+        // execution-capable canonical with the signed commitment)
+        // verifies through the current verifier, whose acceptance set is
+        // {1, 2, 3, 4}; the same record and token are rejected as
+        // MalformedRecord by the simulated v2-only verifier AND by the
+        // simulated v3-only verifier (max protocol 3) — the exact
+        // old-binary behavior the v4 floor protects against.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer($this->shaConfig(), $storage, now: static fn (): int => Vectors::NOW);
+        $challenge = $issuer->issueWithExecutionField('login', Vectors::CLIENT_IP, true, executionAction: 'login-action', armDecoyField: true);
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+        self::assertSame(4, $record->protocolVersion, 'an execution-armed issuance writes protocol v4');
+        self::assertSame(1, $record->executionVersion);
+        self::assertSame(\KiwiCaptcha\Issuer::executionCommitment($record->executionProgram), $record->executionCommitment, 'the signed commitment mirrors the stored program');
+
+        $program = ExecutionChallengeGenerator::decode($challenge->executionProgram);
+        self::assertNotNull($program);
+        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $digest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $trace);
+        self::assertNotNull($digest);
+        $token = SolutionToken::create($challenge->nonce, $this->solveCounter($challenge), 5000, [], $digest, base64_encode($trace))->encode();
+
+        $current = $this->verifier($storage)->verify(
+            $token,
+            Vectors::SECRET,
+            'login',
+            Vectors::CLIENT_IP,
+            nowNs: $record->issuedAtNs + 1_000_000,
+        );
+        self::assertTrue($current->isOk(), sprintf('the current verifier must accept its own v4 record, got %s', $current->code()));
+
+        // The version-acceptance predicate boundary matrix for the v4
+        // generation: 4 is inside the current max, outside 2 and 3.
+        self::assertFalse(ProtocolV2OnlyVerifier::accepts(4, 2), 'protocol 4 must be outside the v2-only acceptance set');
+        self::assertFalse(ProtocolV2OnlyVerifier::accepts(4, 3), 'protocol 4 must be outside the v3-only acceptance set');
+        self::assertTrue(ProtocolV2OnlyVerifier::accepts(4, 4), 'the current generation accepts v4 (its own max protocol)');
+
+        foreach ([2, 3] as $maxProtocol) {
+            $oldStorage = new ArrayStorage();
+            $oldStorage->store($record);
+            $oldBinary = new ProtocolV2OnlyVerifier($this->verifier($oldStorage), $oldStorage);
+            $outcome = $oldBinary->verify(
+                $token,
+                Vectors::SECRET,
+                'login',
+                Vectors::CLIENT_IP,
+                $record->issuedAtNs + 1_000_000,
+                $maxProtocol,
+            );
+            self::assertSame(
+                VerifyError::MalformedRecord,
+                $outcome->error,
+                sprintf('a max-protocol-%d verifier must reject a v4 record as MalformedRecord', $maxProtocol)
+            );
+        }
     }
 }

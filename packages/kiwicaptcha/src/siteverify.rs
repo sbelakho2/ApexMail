@@ -233,6 +233,8 @@ mod tests {
             kid: 1,
             decoy_field: None,
             execution_program: None,
+            execution_version: None,
+            execution_commitment: None,
         };
         let _ = &mut record;
         let resp = siteverify_response(

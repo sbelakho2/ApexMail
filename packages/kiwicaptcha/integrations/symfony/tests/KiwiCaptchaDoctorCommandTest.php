@@ -450,17 +450,38 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         self::assertStringContainsString('high_abuse requires authenticated decoy emission, but the fleet protocol floor has not been confirmed at v3.', $display);
     }
 
-    public function testDoctorPassesOnHighAbuseWithAConfirmedV3Floor(): void
+    public function testDoctorFailsOnHighAbuseWithAConfirmedV3FloorButNoV4Floor(): void
     {
+        // The high_abuse profile arms the execution gate by
+        // default, and execution-armed emission requires the confirmed
+        // v4 floor. A floor of 3 proves only v3 readers, so the doctor
+        // must fail: high_abuse promises the execution surface the
+        // fleet cannot verify yet.
         $container = $this->containerFor(new DoctorHighAbuseV3WriterKernel('test', true));
         $this->seedProtocolFloor($container, 3);
+        $tester = $this->doctor($container);
+        $tester->execute([]);
+
+        self::assertSame(Command::FAILURE, $tester->getStatusCode(), 'a v3-only floor under high_abuse (execution gate on) must fail the deploy gate');
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[FAIL] Protocol-v3 writer', $display);
+        self::assertStringContainsString('high_abuse requires execution-armed emission, but the fleet protocol floor has not been confirmed at v4.', $display);
+        self::assertStringContainsString('raise the central security-policy min_protocol_version to 4 (the two-phase rollout, see operations.md)', $display);
+    }
+
+    public function testDoctorPassesOnHighAbuseWithAContainedV4Floor(): void
+    {
+        // The full v4 posture: floor 4 proves v4 readers, so
+        // high_abuse (decoy + execution gates on) is fully rolled out.
+        $container = $this->containerFor(new DoctorHighAbuseV3WriterKernel('test', true));
+        $this->seedProtocolFloor($container, 4);
         $tester = $this->doctor($container);
         $tester->execute([]);
 
         self::assertSame(Command::SUCCESS, $tester->getStatusCode());
         $display = $tester->getDisplay();
         self::assertStringContainsString('[PASS] Protocol-v3 writer', $display);
-        self::assertStringContainsString('decoy surface armed and the central floor confirms protocol v3 emission', $display);
+        self::assertStringContainsString('execution surface armed (risk.execution_challenge on) and the central floor confirms protocol v4 emission with the decoy surface', $display);
         self::assertStringNotContainsString('[FAIL]', $display);
     }
 

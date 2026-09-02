@@ -173,7 +173,7 @@ Under `ha_authority: pinned_primary` (derived by the `ha_safe` protection profil
     Transient probe timeouts never fail readiness on their own.
     The first failure is debounced for one cache window; two consecutive failures flip readiness;
   - the central security-policy state is compatible.
-    The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch`), when present, requires `min_protocol_version <= 3` (this binary's max protocol: the decoy-capable v3 canonical) and `min_policy_epoch <= risk.policy_version`.
+    The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch`), when present, requires `min_protocol_version <= 4` (this binary's max protocol: the execution-capable v4 canonical) and `min_policy_epoch <= risk.policy_version`.
     When absent, the binary's own configuration is authoritative;
   - the memory-budget invariant holds (only when `risk.container_memory_mib` is configured):
     `argon2_max_concurrent_verifications × the fixed Argon verification envelope (risk.argon_verification_memory_kib, the risk ladder's worst-case per-verification memory; default 16384 KiB) + 256 MiB headroom <= container_memory_mib`.
@@ -251,7 +251,7 @@ The doctor's protocol-v3 writer check keys on it:
 |---|---|---|---|
 | yes | false | normal (or absent) | **FAIL** — a forgotten override must not silently persist: "high_abuse requires authenticated decoy emission, but risk.decoy_v3_enabled is false and no protocol rollout migration mode is declared. Either enable the decoy, or declare protocol_rollout.mode: migration while the fleet floor is being established." |
 | yes | false | migration | **WARN** (exit 0) — the deliberate two-phase deferral |
-| yes | true | any | PASS once the central floor confirms v3; FAIL while the floor is absent or below 3 |
+| yes | true | any | PASS once the central floor confirms v3 AND the v4 floor confirms the execution surface (high_abuse turns `risk.execution_challenge` on by default, so a floor of 3 alone fails with the protocol-v4 message; see "Protocol v4 execution rollout"); FAIL while either floor is absent or below its rung |
 | no | any | any | unchanged (protocol v2 emission passes; the armed-but-unconfirmed floor keeps its warn) |
 
 A deployment in the migration phase declares it explicitly:
@@ -266,6 +266,45 @@ kiwi_captcha:
 ```
 
 The two-phase procedure above is preserved unchanged: raise the floor to 3, then flip `risk.decoy_v3_enabled: true`, then remove the migration declaration once v3 emission is armed. An empty `protocol_rollout` block or an absent key is `normal`; any value outside the two names is refused at compile time.
+
+## Protocol v4 execution rollout
+
+Protocol v4 is the execution-capable canonical: an execution-armed record carries the authenticated `|execution_version|execution_commitment` segments (the hex SHA-256 of the stored program) inside the HMAC-signed canonical, and a parent-revision verifier rejects protocol 4 as malformed.
+The armed/unarmed equivalence is exact and enforced on every acceptance surface: signed commitment absent ⇔ stored program absent, signed commitment present ⇔ stored program present, and SHA256(stored program) == the signed commitment (constant-time).
+Stripping, substituting or injecting a program always invalidates the challenge.
+
+The rollout is two-phase exactly like v3, on top of it: the decoy surface (protocol v3) needs the confirmed floor `min_protocol_version >= 3`, and the execution surface (`risk.execution_challenge: on`) needs the confirmed floor `min_protocol_version >= 4`.
+The floor ladder is cumulative, so the execution phase presupposes the completed v3 rollout.
+
+This release keeps the execution gate off by default: `risk.execution_challenge` is `off`, so no execution program is ever issued (the byte-identical legacy path).
+Enabling the gate alone is not enough: the challenge controller arms the execution dimension only when the confirmed central floor is `min_protocol_version >= 4`, read from the same `{kiwi:<ns>}:security-policy` hash through the SecurityEpochMonitor's cached central read.
+A floor below 4, an absent or corrupt floor, an unreadable central policy, or no security Redis at all fails safe to execution-unarmed emission.
+The fallback is protocol v3 at most, or v2 when the decoy floor is unmet too, with a once-per-process warning.
+v4 is never emitted on uncertainty, and availability is preserved.
+The doctor's protocol-writer check reports the v4 floor state: under `high_abuse` (which turns the execution gate on by default) a floor below 4 fails the deploy gate unless `protocol_rollout.mode: migration` declares the deliberate deferral.
+
+The v4 rollout procedure:
+
+```bash
+# 1. Complete the v3 rollout (floor 3 + risk.decoy_v3_enabled: true).
+# 2. Deploy the v4-capable binaries EVERYWHERE (accept v2 + v3 + v4,
+#    still emitting at most v3). Confirm no older binary remains; the
+#    readiness probe keeps any binary whose max protocol is below the
+#    floor out of the pool.
+# 3. Raise the central floor to 4 — only now may v4 be emitted.
+redis-cli HSET "{kiwi:<namespace>}:security-policy" \
+    min_protocol_version 4 min_policy_epoch 2
+# 4. Enable the execution gate on every node.
+#    risk.execution_challenge: on   (requires kiwi_captcha.execution_key)
+# 5. After >= the maximum challenge TTL (300 s) since the last v4
+#    issuance, the residual v4 records are drained and older generations
+#    may be retired; until then they keep rejecting v4 records, which is
+#    exactly why the floor must not be lowered early.
+```
+
+A node with `risk.execution_challenge: on` whose central floor is below 4 logs a warning naming the floor and keeps emitting execution-unarmed records.
+A rollback is the reverse: lower the floor (or delete the key) before any older binary can be re-admitted, and the next re-read (one cache window) stops v4 emission automatically.
+Pre-rollback v4 records keep verifying on the current generation for the remainder of their TTL.
 
 Residual bounds and failure behavior:
 - Raising the floor does not drain old binaries atomically: a v2-only binary still processing in-flight requests rejects any v3 record it receives as malformed, and the solve is burned (fail closed, the client re-requests).
@@ -406,9 +445,12 @@ The protocol's fail-closed behavior is unchanged and documented by test.
 ExecutionChallengeV1 is a Cap-style supplementary evidence layer. When
 the risk.execution_challenge gate is on and a risk trigger passes, the
 issued challenge carries an execution program the widget driver runs in
-a sandboxed ephemeral iframe. The resulting execution digest rides the
-solution token. The verifier rejects a mismatch with the deterministic
-execution_mismatch outcome.
+an ephemeral sandboxed iframe (srcdoc with the `allow-scripts` and
+`allow-same-origin` sandbox flags). The sandbox is DOM isolation for
+the first-party interpreter the content-addressed URL and the SRI
+check pin, not a hostile-code boundary. The resulting execution digest
+rides the solution token. The verifier rejects a mismatch with the
+deterministic execution_mismatch outcome.
 
 The dimension is supplementary evidence only and is never the sole
 acceptance boundary. The proof-of-work proof and the record state
@@ -419,6 +461,17 @@ eval, no new Function, no fingerprinting. A SHA-only challenge without
 a program pays zero bytes for it. The privacy_strict profile forces the
 gate off; high_abuse arms it; balanced defaults it off. See
 configuration.md "ExecutionChallengeV1" for the operator contract.
+
+The V2 causal-consistency semantics are experimental: every armed
+program opens with a guaranteed causal graph (DOM construction, a u8
+array, an observe op reading the real text metrics of the constructed
+node, then a byte read-back). The verifier replays the graph forward
+from the reported value.
+A valid trace therefore requires the full causal semantics; a short
+pure synthesis that skips the write-through is rejected. A solver
+implementing the complete public semantics can still emit a coherent
+trace, because the values are evidence, not a cryptographic proof of
+a browser.
 
 ## Graceful shutdown sequence
 

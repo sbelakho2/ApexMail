@@ -30,7 +30,7 @@ final class ExecutionChallengeTest extends TestCase
     private const NONCE = 'xAfSYcl6VyvtYZcQUhvXxin2pojnG5TmZoHg7K6NG3s=';
     private const SCOPE = 'login';
     private const ACTION = 'login-action';
-    private const VERSION = '1';
+    private const VERSION = 1;
 
     private function config(?string $executionKey = self::KEY): Config
     {
@@ -95,10 +95,31 @@ final class ExecutionChallengeTest extends TestCase
         foreach ([
             'scope' => ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, 'signup', self::ACTION, self::VERSION),
             'action' => ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, self::SCOPE, 'other-action', self::VERSION),
-            'version' => ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, self::SCOPE, self::ACTION, '2'),
             'key' => ExecutionChallengeGenerator::generate('fedcba9876543210fedcba9876543210', self::NONCE, self::SCOPE, self::ACTION, self::VERSION),
         ] as $label => $program) {
             self::assertNotSame($base, $program, sprintf('changing %s must change the program', $label));
+        }
+    }
+
+    public function testGenerationRefusesANoncanonicalVersionByte(): void
+    {
+        // The version argument during generation is the canonical
+        // numeric byte, exactly 1: a different byte is refused before
+        // any program is minted (the strict parser would reject the
+        // blob anyway, so issuance never produces an unparseable
+        // program). No string-cast ever reaches the blob.
+        foreach ([0, 2, 255] as $bad) {
+            try {
+                ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, self::SCOPE, self::ACTION, $bad);
+                self::fail('a noncanonical version byte must be refused');
+            } catch (\InvalidArgumentException $e) {
+                self::assertStringContainsString('canonical numeric byte', $e->getMessage());
+            }
+        }
+        try {
+            ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, self::SCOPE, self::ACTION, '1');
+            self::fail('a string version must never reach the generator (no string-cast)');
+        } catch (\TypeError) {
         }
     }
 
@@ -143,50 +164,6 @@ final class ExecutionChallengeTest extends TestCase
         self::assertFalse(ExecutionChallengeGenerator::isValidProgram(base64_encode(str_repeat("\x01", ExecutionChallengeGenerator::MAX_PROGRAM_BASE64))));
     }
 
-    public function testGenerateRejectsInvalidScopes(): void
-    {
-        // The generator enforces the decoder's scope grammar (1-128 bytes
-        // of [A-Za-z0-9._:-]) up front: an empty, over-long or
-        // out-of-alphabet scope must throw instead of producing a blob
-        // the module's own decode() refuses.
-        $bad = [
-            'empty' => '',
-            'whitespace' => 'log in',
-            'separator pipe' => 'login|signup',
-            'non-ascii' => "h\xC3\xA9llo",
-            '129 bytes' => str_repeat('a', 129),
-        ];
-        foreach ($bad as $label => $scope) {
-            try {
-                ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, $scope, self::ACTION, self::VERSION);
-                self::fail(sprintf('scope %s (%s) must be rejected by generate()', $label, var_export($scope, true)));
-            } catch (\InvalidArgumentException $e) {
-                self::assertSame(
-                    'execution scope must be 1-128 characters of [A-Za-z0-9._:-]',
-                    $e->getMessage(),
-                );
-            }
-        }
-        // A 256-byte scope would previously wrap the length byte (chr of
-        // strlen): refused cleanly before any stream work.
-        $this->expectException(\InvalidArgumentException::class);
-        ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, str_repeat('b', 256), self::ACTION, self::VERSION);
-    }
-
-    public function testGenerateAcceptsTheBoundary128ByteScope(): void
-    {
-        // The exact decoder boundary: 128 bytes of the alphabet generate
-        // AND decode (a >128-byte scope previously produced a blob whose
-        // length byte exceeded the decoder's bound, so decode() refused
-        // it; since the fix the generator throws instead, see
-        // testGenerateRejectsInvalidScopes).
-        $scope = str_repeat('a', 128);
-        $program = ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, $scope, self::ACTION, self::VERSION);
-        $decoded = ExecutionChallengeGenerator::decode($program);
-        self::assertNotNull($decoded, 'a boundary-length scope must round-trip through decode()');
-        self::assertSame($scope, $decoded['scope']);
-    }
-
     public function testExpectedDigestShapeAndNonceBinding(): void
     {
         $program = ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, self::SCOPE, self::ACTION, self::VERSION);
@@ -216,16 +193,34 @@ final class ExecutionChallengeTest extends TestCase
         self::assertSame($challenge->executionProgram, $record->executionProgram);
         self::assertNull($record->decoyField, 'the execution dimension does not arm the decoy surface');
 
+        // The v4 shape: an armed issuance writes protocol v4
+        // and the stored record carries the authenticated commitment
+        // triplet (version 1 + hex SHA-256 of the program), mirroring
+        // the signed canonical.
+        self::assertSame(4, $record->protocolVersion, 'an execution-armed issuance writes protocol v4');
+        self::assertSame(1, $record->executionVersion);
+        self::assertSame(Issuer::executionCommitment($record->executionProgram), $record->executionCommitment, 'the stored commitment is the hex SHA-256 of the stored program');
+        self::assertSame(64, \strlen($record->executionCommitment));
+        self::assertSame(1, preg_match('/^[0-9a-f]{64}$/D', $record->executionCommitment));
+
         // The wire shapes: the response key is present when armed and
-        // absent when unarmed; the record JSON round-trips.
+        // absent when unarmed; the record JSON round-trips the full
+        // triplet.
         self::assertArrayHasKey('execution_program', $challenge->toArray());
         $reparsed = ChallengeRecord::fromArray($record->toArray());
         self::assertSame($record->executionProgram, $reparsed->executionProgram);
+        self::assertSame($record->executionVersion, $reparsed->executionVersion);
+        self::assertSame($record->executionCommitment, $reparsed->executionCommitment);
 
         $unarmed = $issuer->issue(self::SCOPE, '198.51.100.7');
         self::assertNull($unarmed->executionProgram);
         self::assertArrayNotHasKey('execution_program', $unarmed->toArray());
-        self::assertNull($storage->find($unarmed->nonce)->executionProgram);
+        $unarmedRecord = $storage->find($unarmed->nonce);
+        self::assertNull($unarmedRecord->executionProgram);
+        self::assertNull($unarmedRecord->executionVersion, 'an unarmed record never carries execution_version');
+        self::assertNull($unarmedRecord->executionCommitment, 'an unarmed record never carries execution_commitment');
+        self::assertArrayNotHasKey('execution_version', $unarmedRecord->toArray());
+        self::assertArrayNotHasKey('execution_commitment', $unarmedRecord->toArray());
     }
 
     public function testArmingWithoutExecutionKeyRefuses(): void
@@ -244,15 +239,46 @@ final class ExecutionChallengeTest extends TestCase
         new Config(secretKey: self::KEY, executionKey: 'short');
     }
 
+    public function testGenerateRejectsInvalidScopes(): void
+    {
+        foreach (['', ' ', 'login action', 'login|action', 'h\u00e9llo', str_repeat('a', 129), str_repeat('a', 256)] as $scope) {
+            try {
+                ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, $scope, self::ACTION, 1);
+                self::fail('scope '.json_encode($scope).' must be rejected');
+            } catch (\InvalidArgumentException $e) {
+                self::assertStringContainsString('execution scope must be 1-128', $e->getMessage());
+            }
+        }
+    }
+
+    public function testGenerateAcceptsTheBoundary128ByteScope(): void
+    {
+        $scope = str_repeat('a', 128);
+        $program = ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, $scope, self::ACTION, 1);
+        $decoded = ExecutionChallengeGenerator::decode($program);
+        self::assertNotNull($decoded);
+        self::assertSame($scope, $decoded['scope']);
+    }
+
     public function testArmedEndToEndVerifyWithCorrectDigest(): void
     {
         $storage = new ArrayStorage();
         $issuer = new Issuer($this->config(), $storage);
         $challenge = $issuer->issueWithExecutionField(self::SCOPE, '198.51.100.7', true, executionAction: self::ACTION);
 
-        $expected = ExecutionChallengeGenerator::expectedDigest($challenge->executionProgram, $challenge->nonce);
-        self::assertNotNull($expected);
-        $token = SolutionToken::create($challenge->nonce, $this->winningCounter($challenge), 5000, [], $expected)->encode();
+        $program = ExecutionChallengeGenerator::decode($challenge->executionProgram);
+        self::assertNotNull($program);
+        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $digest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $trace);
+        self::assertNotNull($digest);
+        $token = SolutionToken::create(
+            $challenge->nonce,
+            $this->winningCounter($challenge),
+            5000,
+            [],
+            $digest,
+            base64_encode($trace),
+        )->encode();
 
         $verifier = new Verifier($storage, now: static fn (): int => time());
         $outcome = $verifier->verify($token, self::KEY, self::SCOPE, '198.51.100.7');
@@ -309,7 +335,7 @@ final class ExecutionChallengeTest extends TestCase
         self::assertSame(VerifyError::ExecutionMismatch, $outcome->error);
     }
 
-    public function testTamperedProgramFailsAgainstTheOriginalDigest(): void
+    public function testSubstitutedProgramFailsTheCommitmentEquivalence(): void
     {
         $storage = new ArrayStorage();
         $issuer = new Issuer($this->config(), $storage);
@@ -317,9 +343,11 @@ final class ExecutionChallengeTest extends TestCase
         $digest = ExecutionChallengeGenerator::expectedDigest($challenge->executionProgram, $challenge->nonce);
 
         // A storage-level attacker swaps the record's program for a
-        // different one; the presented digest was computed over the
-        // original program, so the recomputed expected digest (over the
-        // tampered program) can never match.
+        // different one. The signed canonical carries the original
+        // program's commitment, so the equivalence gate rejects the
+        // substituted program as MalformedRecord — before any execution
+        // work (the digest-based defense alone is no longer the
+        // boundary; the commitment is authenticated).
         $record = $storage->find($challenge->nonce);
         $tampered = ExecutionChallengeGenerator::generate(self::KEY, $challenge->nonce, self::SCOPE, 'tampered-action', self::VERSION);
         $record = new ChallengeRecord(
@@ -347,6 +375,12 @@ final class ExecutionChallengeTest extends TestCase
             hostname: $record->hostname,
             decoyField: $record->decoyField,
             executionProgram: $tampered,
+            // The stored commitment still mirrors the original program
+            // (the attacker cannot re-sign the canonical), so the
+            // equivalence check SHA256(stored program) == commitment
+            // fails deterministically.
+            executionVersion: $record->executionVersion,
+            executionCommitment: $record->executionCommitment,
         );
         $storage->store($record);
 
@@ -354,20 +388,24 @@ final class ExecutionChallengeTest extends TestCase
         $verifier = new Verifier($storage, now: static fn (): int => time());
         $outcome = $verifier->verify($token, self::KEY, self::SCOPE, '198.51.100.7');
 
-        self::assertSame(VerifyError::ExecutionMismatch, $outcome->error);
+        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'a substituted program fails the commitment equivalence as MalformedRecord');
     }
 
-    public function testNoProgramPathIsByteIdentical(): void
+    public function testNoProgramPathRejectsAStrayDigest(): void
     {
         $storage = new ArrayStorage();
         $issuer = new Issuer($this->config(), $storage);
         $challenge = $issuer->issue(self::SCOPE, '198.51.100.7');
         self::assertNull($challenge->executionProgram);
 
-        // An unarmed challenge accepts the legacy four-segment token AND
-        // a token carrying a stray digest segment (the no-program path
-        // runs no execution check — the digest is inert). Each verify
-        // consumes its own one-shot record, so two challenges are issued.
+        // An unarmed challenge accepts the legacy four-segment token.
+        // A token carrying a stray digest segment is stray execution
+        // evidence and is rejected with the deterministic
+        // ExecutionMismatch — never silently ignored.
+        // The signed canonical carries no commitment, so no digest can
+        // be legitimate for it.
+        // Each verify consumes its own one-shot record, so two
+        // challenges are issued.
         $challengePlain = $issuer->issue(self::SCOPE, '198.51.100.7');
         $challengeWithDigest = $issuer->issue(self::SCOPE, '198.51.100.7');
         $token = SolutionToken::create($challengePlain->nonce, $this->winningCounter($challengePlain), 5000, [])->encode();
@@ -378,15 +416,14 @@ final class ExecutionChallengeTest extends TestCase
         $outcome = $verifier->verify($token, self::KEY, self::SCOPE, '198.51.100.7');
         self::assertTrue($outcome->isOk(), sprintf('expected valid, got %s', $outcome->code()));
         $outcome2 = $verifier->verify($tokenWithDigest, self::KEY, self::SCOPE, '198.51.100.7');
-        self::assertSame($outcome->code(), $outcome2->code(), 'a stray digest on an unarmed challenge is inert');
-        self::assertTrue($outcome2->isOk());
+        self::assertSame(VerifyError::ExecutionMismatch, $outcome2->error, 'a stray digest on an unarmed challenge is deterministic invalid');
     }
 
     public function testMalformedRecordProgramIsRejected(): void
     {
         $storage = new ArrayStorage();
         $issuer = new Issuer($this->config(), $storage);
-        $challenge = $issuer->issue(self::SCOPE, '198.51.100.7');
+        $challenge = $issuer->issueWithExecutionField(self::SCOPE, '198.51.100.7', true, executionAction: self::ACTION);
 
         $record = $storage->find($challenge->nonce);
         $record = new ChallengeRecord(
@@ -414,6 +451,8 @@ final class ExecutionChallengeTest extends TestCase
             hostname: $record->hostname,
             decoyField: $record->decoyField,
             executionProgram: base64_encode("\x02garbage"),
+            executionVersion: $record->executionVersion,
+            executionCommitment: $record->executionCommitment,
         );
         $storage->store($record);
 
@@ -428,7 +467,8 @@ final class ExecutionChallengeTest extends TestCase
     {
         $storage = new ArrayStorage();
         $issuer = new Issuer($this->config(), $storage);
-        $data = $storage->find($issuer->issue(self::SCOPE, '198.51.100.7')->nonce)->toArray();
+        $challenge = $issuer->issueWithExecutionField(self::SCOPE, '198.51.100.7', true, executionAction: self::ACTION);
+        $data = $storage->find($challenge->nonce)->toArray();
 
         foreach (['not-base64', base64_encode("\x02short")] as $bad) {
             $mutated = $data;
@@ -443,8 +483,21 @@ final class ExecutionChallengeTest extends TestCase
 
         // A well-formed program passes the parser.
         $data['execution_program'] = ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, self::SCOPE, self::ACTION, self::VERSION);
+        // The commitment must match the substituted program (the exact
+        // armed/unarmed equivalence is enforced on the parse path too).
+        $data['execution_commitment'] = Issuer::executionCommitment($data['execution_program']);
         $record = ChallengeRecord::fromArray($data);
         self::assertSame($data['execution_program'], $record->executionProgram);
+
+        // A well-formed program whose hash does not equal the signed
+        // commitment is rejected on the parse path.
+        $data['execution_commitment'] = str_repeat('0', 64);
+        try {
+            ChallengeRecord::fromArray($data);
+            self::fail('a program not matching its commitment must throw');
+        } catch (\KiwiCaptcha\MalformedRecordException $e) {
+            self::assertStringContainsString('execution_commitment', $e->getMessage());
+        }
     }
 
     public function testTokenRoundTripWithAndWithoutDigest(): void
@@ -489,14 +542,19 @@ final class ExecutionChallengeTest extends TestCase
 
     public function testAllOpcodesExecuteDeterministically(): void
     {
-        // Every opcode of the fixed set appears across a small sample of
-        // programs, and every trace entry is a valid value (decimal,
+        // Every opcode of the fixed set appears across a deterministic
+        // corpus (nonces derived from sha256 over a label, so the same
+        // programs run on every PHP version and every CI cell — the
+        // corpus is large enough that the rarest filler opcodes
+        // (uniform over 0..27 in the filler slots) are certainly
+        // drawn), and every trace entry is a valid value (decimal,
         // "1"/"0", or base64 — never containing the ';' separator).
         $seen = [];
-        for ($i = 0; $i < 24; $i++) {
-            $nonce = base64_encode(random_bytes(32));
+        for ($i = 0; $i < 96; $i++) {
+            $nonce = base64_encode(hash('sha256', 'opcode-coverage-'.$i, true));
             $program = ExecutionChallengeGenerator::generate(self::KEY, $nonce, self::SCOPE, self::ACTION, self::VERSION);
             $decoded = ExecutionChallengeGenerator::decode($program);
+            self::assertNotNull($decoded);
             $trace = ExecutionChallengeGenerator::canonicalTrace($decoded);
             self::assertStringNotContainsString("\0", $trace);
             foreach ($decoded['ops'] as $op) {
@@ -513,17 +571,93 @@ final class ExecutionChallengeTest extends TestCase
         // reproduce the identical program blob and expected digest, so a
         // Rust-issued program verifies byte-identically in PHP (and vice
         // versa — the Rust test pins the PHP-generated vectors in
-        // tests/execution_interop.rs).
-        $program = ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, 'login', 'login-action', '1');
+        // tests/execution_interop.rs). The blob was regenerated when the
+        // dataset-key alphabet moved to `x[0-9a-z_]{0,15}` ;
+        // both mirrors pin the same bytes.
+        $program = ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, 'login', 'login-action', 1);
         self::assertSame(
-            'AQVsb2dpbgxsb2dpbi1hY3Rpb24BFgCNqxVpLB6T8gdMU7FL5ux+lQwFTXdMVUYGmFkUzg9gs4cGNoDqS0K97IkBOG+tlsscQ9cRsBlfVGNvMDN7TkgwX01xVVJwRXZ2O0VtcSE3BiXJxpHRj5W3B27w4LXd0kdkDgklYCZ4Nlw9ekP3FCQWBXJKaSNZB3CjmYxw+iyPAuRxk85f2jJZBAeyj2Cgf2bwCQkoA/Rf4OOLTV7RBiZgyZwMpiabCCgbA69WjtsHgEEvFQM1MFAaLX5reXdAKS0we1NXNFZuO3sqfmEgSDtSUEc=',
+            'AQVsb2dpbgxsb2dpbi1hY3Rpb24BFhA4D3JWcHNlVHl2TVR4TG1zKxcJVXJYczFGMllaEggUIQ9yVnBzZVR5dk1UeExtcysKCgoLYB8PclZwc2VUeXZNVHhMbXMrHw9yVnBzZVR5dk1UeExtcysaEOoOQzlzSkI0dnRXTGNEWFYI2Afyoq4QE7qNKBsSC7AZEFAPMVdiRXN3L1hhbEpHUlJQCbeTGhDgEGRTSGsyNEZBbDNXYjg1QzMUJA==',
             $program,
             'the PHP generator must reproduce the Rust program byte-for-byte',
         );
+        $decoded = ExecutionChallengeGenerator::decode($program);
+        self::assertNotNull($decoded);
         self::assertSame(
-            'c5eb55408b1973d669f6fc322b0b440958858b4ffee47a4ef411a1e0b7e8a439',
-            ExecutionChallengeGenerator::expectedDigest($program, self::NONCE),
-            'the PHP digest must reproduce the Rust digest',
+            '595d6df929e025c559ac3393c3a006283574d33f366dbdb70501ae88f177a1b9',
+            ExecutionChallengeGenerator::digestOverTrace(
+                $program,
+                self::NONCE,
+                ExecutionChallengeGenerator::executedTraceFor($decoded),
+            ),
+            'the PHP executed-trace digest must reproduce the Rust digest',
         );
+    }
+
+    public function testDatasetKeysMatchTheSafeAlphabetGrammar(): void
+    {
+        // The generator-level property test: every dataset key drawn
+        // into a generated program must match the deliberately boring
+        // safe grammar `x[0-9a-z_]{0,15}` — the literal `x` followed by
+        // 0..15 characters of [0-9a-z_]. The grammar guarantees no key
+        // can carry the `|` canonical separator, DOM punctuation,
+        // whitespace or uppercase.
+        $seen = 0;
+        for ($i = 0; $i < 64; $i++) {
+            $nonce = base64_encode(random_bytes(32));
+            $program = ExecutionChallengeGenerator::generate(self::KEY, $nonce, self::SCOPE, self::ACTION, self::VERSION);
+            $decoded = ExecutionChallengeGenerator::decode($program);
+            self::assertNotNull($decoded);
+            foreach ($decoded['ops'] as $op) {
+                if ($op['op'] !== ExecutionChallengeGenerator::OP_DOM_DATASET_SET) {
+                    continue;
+                }
+                $seen++;
+                $key = $op['operands']['s'];
+                self::assertIsString($key);
+                self::assertSame(1, preg_match(ExecutionChallengeGenerator::DATASET_KEY_PATTERN, $key), sprintf('dataset key "%s" must match x[0-9a-z_]{0,15}', $key));
+                self::assertGreaterThanOrEqual(1, \strlen($key));
+                self::assertLessThanOrEqual(16, \strlen($key));
+            }
+        }
+        self::assertGreaterThan(0, $seen, 'the sampled programs must actually exercise dataset keys');
+    }
+
+    public function testStrictParserRejectsTrailingBytesAndBadContextBytes(): void
+    {
+        // The parser strictness: exact EOF after the op list
+        // (a trailing byte is invalid), op_version exactly 1, and the
+        // embedded scope/action must match the canonical identifier
+        // grammar.
+        $good = ExecutionChallengeGenerator::decode(
+            ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, self::SCOPE, self::ACTION, self::VERSION)
+        );
+        self::assertNotNull($good);
+        $goodBytes = base64_decode(ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, self::SCOPE, self::ACTION, self::VERSION), true);
+
+        // Trailing byte after the op list: the blob is now one byte
+        // longer, the parser must refuse it.
+        self::assertFalse(ExecutionChallengeGenerator::isValidProgram(base64_encode($goodBytes."\x00")), 'a trailing byte after the op list must be rejected');
+        self::assertNull(ExecutionChallengeGenerator::decode(base64_encode($goodBytes."\x00")));
+
+        // op_version 2 (no arbitrary byte): a blob whose op-version byte
+        // (index scopeLen + actionLen + 2) is not 1 must be rejected.
+        $scopeLen = \ord($goodBytes[1]);
+        $actionLen = \ord($goodBytes[2 + $scopeLen]);
+        $badVersion = $goodBytes;
+        $badVersion[2 + $scopeLen + $actionLen + 1] = "\x02";
+        self::assertFalse(ExecutionChallengeGenerator::isValidProgram(base64_encode($badVersion)), 'an op version other than 1 must be rejected');
+        self::assertNull(ExecutionChallengeGenerator::decode(base64_encode($badVersion)));
+
+        // Scope with an out-of-grammar byte (a space): the embedded
+        // scope must match [A-Za-z0-9._:-].
+        $badScope = $goodBytes;
+        $badScope[2] = "\x20";
+        self::assertFalse(ExecutionChallengeGenerator::isValidProgram(base64_encode($badScope)), 'a scope byte outside the identifier grammar must be rejected');
+
+        // Action with a '|' byte: the canonical separator can never be
+        // smuggled through the embedded action.
+        $badAction = $goodBytes;
+        $badAction[2 + $scopeLen + 1] = "\x7c";
+        self::assertFalse(ExecutionChallengeGenerator::isValidProgram(base64_encode($badAction)), 'an action byte outside the identifier grammar must be rejected');
     }
 }

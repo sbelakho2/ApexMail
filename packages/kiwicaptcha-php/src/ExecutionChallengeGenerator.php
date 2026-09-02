@@ -57,11 +57,22 @@ namespace KiwiCaptcha;
  * The canonical op trace is the deterministic execution trace of the
  * ops: one entry per op, `opname-result`, joined with ';'. Results are
  * canonical decimal integers, "1"/"0", or standard base64 of a string.
- * No result alphabet contains '(', ')' or ';', so the trace is
- * unambiguous. The server verifier and the browser interpreter
- * simulate the same deterministic state machine, a u8 array, a current
- * DOM node and an appended-id set. The trace is a pure function of the
- * program.
+ * The real-DOM readback entries (`QUERY_REAL`) carry canonical
+ * attribute pairs that may themselves contain ';' and parentheses, so
+ * the verifier walks the submitted trace entry by entry against the
+ * simulated op sequence and never splits it on a separator. The server
+ * verifier and the browser interpreter simulate the same deterministic
+ * state machine, a u8 array, a current DOM node and an appended-id
+ * set. The trace is a pure function of the program.
+ *
+ * Every issued program carries a guaranteed structure: a DOM
+ * construction block (create, mutate, append) followed by real-DOM
+ * probes whose ids reference the constructed node, so an armed
+ * challenge always exercises real browser DOM and layout work. The
+ * dimension remains experimental: the trace values are reproducible by
+ * a pure implementation of the public interpreter semantics, with no
+ * environment proof yet; the guaranteed probe structure is the first
+ * step toward environment-dependent semantics.
  *
  * The execution digest binds the program, the challenge context and the
  * trace:
@@ -94,6 +105,7 @@ final class ExecutionChallengeGenerator
 
     /** The program blob format version. */
     public const FORMAT_VERSION = 1;
+    public const OP_VERSION = 1;
 
     /** The op-version byte stamped into the program (bumped on op-semantics changes). */
     public const PROTOCOL_VERSION = 1;
@@ -155,7 +167,20 @@ final class ExecutionChallengeGenerator
     public const OP_DOM_EVENT_REAL = 31;
     /** Browser-observed: real DOM readback canonical-serialization digest. */
     public const OP_DOM_SERIALIZE_REAL = 32;
-    public const OP_COUNT = 33;
+    public const OP_DOM_OBSERVE = 33;
+    public const OP_COUNT = 34;
+
+    /**
+     * The fabricated reference height the browser-equivalent trace
+     * synthesizes: the real observed value is the engine's own text
+     * metrics (never predictable by the mirrors), so the synthesizer
+     * uses this constant and the verifier replays whatever the trace
+     * reports.
+     */
+    private const OBSERVED_HEIGHT = 10;
+
+    /** The canonical safe dataset-key grammar: the literal 'x' followed by 0..15 of [0-9a-z_]. */
+    public const DATASET_KEY_PATTERN = '/^x[0-9a-z_]{0,15}$/D';
 
     /** The trace entry names, one per opcode (index = opcode). */
     private const TRACE_NAMES = [
@@ -164,7 +189,7 @@ final class ExecutionChallengeGenerator
         'slen', 'schar', 'scode', 'sslice',
         'dcreate', 'dattr', 'dappend', 'dqsel', 'dget', 'dset', 'dgetd',
         'cadd', 'ccont', 'dparent', 'ddispatch', 'dserialize',
-        'qreal', 'geom', 'point', 'evreal', 'sreal',
+        'qreal', 'geom', 'point', 'evreal', 'sreal', 'obs',
     ];
 
     private function __construct()
@@ -186,7 +211,7 @@ final class ExecutionChallengeGenerator
         string $nonce,
         string $scope,
         string $action,
-        string $version,
+        int $version,
     ): string {
         self::validateKey($executionKey);
         if ($action === '' || \strlen($action) > 32 || preg_match('/^[A-Za-z0-9._:-]+$/D', $action) !== 1) {
@@ -194,22 +219,22 @@ final class ExecutionChallengeGenerator
                 'execution action must be 1-32 characters of [A-Za-z0-9._:-]'
             );
         }
-        if ($version === '' || \strlen($version) > 8 || preg_match('/^[A-Za-z0-9._:-]+$/D', $version) !== 1) {
+        if ($version !== 1) {
             throw new \InvalidArgumentException(
-                'execution version must be 1-8 characters of [A-Za-z0-9._:-]'
+                'execution version must be exactly 1 (the canonical numeric byte; no other interpreter exists)'
             );
         }
         if ($scope === '' || \strlen($scope) > 128 || preg_match('/^[A-Za-z0-9._:-]+$/D', $scope) !== 1) {
             // The decoder's scope grammar is 1-128 bytes of the same
-            // alphabet, see decode(): a scope outside it would generate
-            // a blob the module itself refuses to decode — a scope above
-            // 255 bytes would also wrap the length byte — so it is
-            // refused here, before any stream work.
+            // alphabet; see decode(). A scope outside it would mint a
+            // blob the module itself refuses to decode, and a scope
+            // above 255 bytes would wrap the length byte — refused
+            // here, before any stream work.
             throw new \InvalidArgumentException(
                 'execution scope must be 1-128 characters of [A-Za-z0-9._:-]'
             );
         }
-        $stream = self::prfStream($executionKey, $nonce, $scope, $action, $version);
+        $stream = self::prfStream($executionKey, $nonce, $scope, $action, (string) $version);
 
         $program = '';
         $program .= \chr(self::FORMAT_VERSION);
@@ -217,14 +242,68 @@ final class ExecutionChallengeGenerator
         $program .= $scope;
         $program .= \chr(\strlen($action));
         $program .= $action;
-        $program .= \chr((int) $version);
-        $opCount = 8 + (self::nextByte($stream) % 17);
+        $program .= \chr($version);
+        // The V2 causal chain needs 11 ops at minimum: the fixed
+        // skeleton (construction, the u8 create/observe/read/rotate
+        // block and the link probe) plus the drawn 1..3 extra probes —
+        // so the floor rises to 11 and every stamped count always fits
+        // its emitted records; the grammar bounds 8..24 are unchanged.
+        $opCount = 11 + (self::nextByte($stream) % 14);
         $program .= \chr($opCount);
 
-        for ($i = 0; $i < $opCount; $i++) {
-            $opcode = self::nextByte($stream) % self::OP_COUNT;
-            $program .= \chr($opcode);
-            $program .= self::drawOperands($stream, $opcode);
+        // The guaranteed structure of every armed program: a mandatory
+        // DOM construction block (createElement with a drawn id, a
+        // mutate op on that node, an append), a mandatory causal u8
+        // chain (create the array, observe the real height of the
+        // constructed node into it, read the observed byte back,
+        // checksum/rotate over it) and a mandatory real-probe block
+        // (one of the browser-observed id probes 28/29/31 plus 1..3
+        // further real probes). The probe and observe id operand is
+        // the constructed id bytes, drawn once and reused, so every
+        // probe reads a real constructed node after the append. The
+        // remaining op slots are filled from the other 28 opcodes, so
+        // the count stays within MIN_OPS..MAX_OPS while every program
+        // exercises real DOM construction, real layout observation and
+        // probe reads against constructed nodes.
+        $ops = [];
+        $tag = self::drawBytes($stream, 1);
+        $idOperand = self::drawIdOperand($stream);
+        $ops[] = [self::OP_DOM_CREATE, $tag.$idOperand];
+        $mutates = [self::OP_DOM_SET_ATTR, self::OP_DOM_DATASET_SET, self::OP_DOM_CLASS_ADD];
+        $mutate = $mutates[self::nextByte($stream) % 3];
+        $ops[] = [$mutate, self::drawOperands($stream, $mutate)];
+        $ops[] = [self::OP_DOM_APPEND, ''];
+        // The causal chain: U8_CREATE(len) then the observe op writes the
+        // browser-observed height at a drawn index inside the array,
+        // U8_READ reads that same byte back (its exact entry must equal
+        // the observed value), and the checksum/rotate consumer runs
+        // over the array still carrying the observed byte.
+        $u8cByte = self::nextByte($stream);
+        $ops[] = [self::OP_U8_CREATE, \chr($u8cByte)];
+        $u8Len = 8 + ($u8cByte % 57);
+        $obsIdxByte = \chr(self::nextByte($stream) % $u8Len);
+        $ops[] = [self::OP_DOM_OBSERVE, $idOperand.$obsIdxByte];
+        $ops[] = [self::OP_U8_READ, $obsIdxByte];
+        $u8Consumer = [self::OP_U8_WRITE, self::OP_U8_ROTATE][self::nextByte($stream) % 2];
+        $ops[] = [$u8Consumer, self::drawOperands($stream, $u8Consumer)];
+        $linkProbes = [self::OP_DOM_QUERY_REAL, self::OP_DOM_GEOMETRY, self::OP_DOM_EVENT_REAL];
+        $ops[] = [$linkProbes[self::nextByte($stream) % 3], $idOperand];
+        $extraProbes = 1 + (self::nextByte($stream) % 3);
+        for ($i = 0; $i < $extraProbes; $i++) {
+            $probe = self::OP_DOM_QUERY_REAL + (self::nextByte($stream) % 5);
+            $probeOperand = match ($probe) {
+                self::OP_DOM_QUERY_REAL, self::OP_DOM_GEOMETRY, self::OP_DOM_EVENT_REAL => $idOperand,
+                self::OP_DOM_POINT => self::drawBytes($stream, 2),
+                default => '',
+            };
+            $ops[] = [$probe, $probeOperand];
+        }
+        for ($i = \count($ops); $i < $opCount; $i++) {
+            $opcode = self::nextByte($stream) % 28;
+            $ops[] = [$opcode, self::drawOperands($stream, $opcode)];
+        }
+        foreach ($ops as [$opcode, $operand]) {
+            $program .= \chr($opcode).$operand;
         }
 
         return base64_encode($program);
@@ -281,7 +360,7 @@ final class ExecutionChallengeGenerator
             return null;
         }
         $scope = $read(\ord($scopeLen));
-        if ($scope === null || $scope === '' || \strlen($scope) > 128) {
+        if ($scope === null || $scope === '' || \strlen($scope) > 128 || preg_match('/^[A-Za-z0-9._:-]+$/D', $scope) !== 1) {
             return null;
         }
         $actionLen = $read(1);
@@ -289,11 +368,11 @@ final class ExecutionChallengeGenerator
             return null;
         }
         $action = $read(\ord($actionLen));
-        if ($action === null || $action === '' || \strlen($action) > 32) {
+        if ($action === null || $action === '' || \strlen($action) > 32 || preg_match('/^[A-Za-z0-9._:-]+$/D', $action) !== 1) {
             return null;
         }
         $opVersion = $read(1);
-        if ($opVersion === null) {
+        if ($opVersion === null || \ord($opVersion) !== self::OP_VERSION) {
             return null;
         }
         $opCount = $read(1);
@@ -322,6 +401,12 @@ final class ExecutionChallengeGenerator
             $ops[] = ['op' => $opcode, 'operands' => $operands];
         }
 
+        if ($pos !== $len) {
+            // Exact EOF: a program with a valid prefix plus trailing
+            // bytes is not in the protocol language.
+            return null;
+        }
+
         return [
             'format' => self::FORMAT_VERSION,
             'scope' => $scope,
@@ -332,14 +417,25 @@ final class ExecutionChallengeGenerator
     }
 
     /**
-     * Verify a submitted execution trace for a program and nonce: the
-     * deterministic op entries must equal the canonical simulation
-     * exactly; the browser-observed entries must satisfy their rules
-     * (QUERY_REAL/EVENT_REAL/SERIALIZE_REAL exact vs the expected
-     * construction-determined values; GEOMETRY monotonic in the
-     * construction order with height >= 1; POINT matching the expected
-     * topmost node per the construction order). Returns the canonical
-     * trace used for the digest when the trace verifies, null otherwise.
+     * Verify a submitted execution trace against a program.
+     *
+     * The deterministic op entries must equal the canonical simulation
+     * exactly. The browser-observed entries must satisfy their rules:
+     * `QUERY_REAL`/`EVENT_REAL`/`SERIALIZE_REAL` exact vs the expected
+     * construction-determined values, `GEOMETRY` monotonic in the
+     * construction order with height >= 1, and `POINT` matching the
+     * expected topmost node per the construction order.
+     *
+     * The trace is walked entry by entry against the simulated op
+     * sequence, anchored by each op name at its exact position. The
+     * readback values of the real-DOM probes legitimately contain ';'
+     * and parentheses (the canonical attribute pairs), so no entry is
+     * ever split on a separator. Every non-layout entry is compared as
+     * one byte string against its simulated value, and the layout
+     * entries are parsed from their digit shapes.
+     *
+     * Returns the canonical trace used for the digest when the trace
+     * verifies, null otherwise.
      */
     public static function verifyExecutedTrace(string $programB64, string $nonce, string $trace): ?string
     {
@@ -348,44 +444,42 @@ final class ExecutionChallengeGenerator
         if ($bytes === false || $program === null || $trace === '') {
             return null;
         }
-        $submitted = explode(';', $trace);
-        if (\count($submitted) !== \count($program['ops'])) {
-            return null;
-        }
         $u8 = [];
         $cur = null;
         $docIds = [];
-        $expected = [];
-        $geom = [];
         $construction = [];
         foreach ($program['ops'] as $record) {
             $op = $record['op'];
             $operands = $record['operands'];
-            $sim = self::simulateOp($op, $operands, $u8, $cur, $docIds);
-            $entry = self::TRACE_NAMES[$op].'('.$sim.')';
-            $expected[] = $entry;
-            if ($op === self::OP_DOM_GEOMETRY) {
-                $geom[] = $operands['id'];
-            } elseif ($op === self::OP_DOM_APPEND) {
+            self::simulateOp($op, $operands, $u8, $cur, $docIds);
+            if ($op === self::OP_DOM_APPEND) {
                 $construction[] = $cur['id'] ?? '';
             }
         }
+        // The second pass re-simulates from a fresh state: the first
+        // pass left the mutable simulation (u8 array, current node,
+        // document ids) at its END state, and re-running on it would
+        // produce different values for stateful ops (u8w checksums,
+        // real-DOM readbacks) — a deterministic trace must replay from
+        // the same initial conditions.
+        $u8 = [];
+        $cur = null;
+        $docIds = [];
         $prevTop = -1;
-        $geomIdx = 0;
+        $pos = 0;
+        $traceLen = \strlen($trace);
+        $lastIndex = \count($program['ops']) - 1;
         foreach ($program['ops'] as $i => $record) {
             $op = $record['op'];
             $operands = $record['operands'];
             $sim = self::simulateOp($op, $operands, $u8, $cur, $docIds);
             $name = self::TRACE_NAMES[$op];
-            if ($op === self::OP_DOM_QUERY_REAL || $op === self::OP_DOM_EVENT_REAL || $op === self::OP_DOM_SERIALIZE_REAL) {
-                if ($submitted[$i] !== $name.'('.$sim.')') {
-                    return null;
-                }
-            } elseif ($op === self::OP_DOM_GEOMETRY) {
-                // Layout probe: the submitted entry carries the real
-                // offsets; the invariants are monotonic non-decreasing
-                // offsets in the construction order and height >= 1.
-                if (!preg_match('/^geom\((\d+),(\d+)\)$/', $submitted[$i], $m)) {
+            if (substr($trace, $pos, \strlen($name) + 1) !== $name.'(') {
+                return null;
+            }
+            $pos += \strlen($name) + 1;
+            if ($op === self::OP_DOM_GEOMETRY) {
+                if (preg_match('/\G(\d+),(\d+)\)/', $trace, $m, 0, $pos) !== 1) {
                     return null;
                 }
                 $top = (int) $m[1];
@@ -394,22 +488,135 @@ final class ExecutionChallengeGenerator
                     return null;
                 }
                 $prevTop = $top;
+                $pos += \strlen($m[0]);
             } elseif ($op === self::OP_DOM_POINT) {
-                // Point probe: the submitted entry must name the
-                // expected topmost node per the construction order (the
-                // last appended node is on top in normal-flow stacking).
                 $topTag = $construction !== [] ? 'div' : 'none';
-                if ($submitted[$i] !== $name.'('.$topTag.')') {
+                if (substr($trace, $pos, \strlen($topTag) + 1) !== $topTag.')') {
                     return null;
+                }
+                $pos += \strlen($topTag) + 1;
+            } elseif ($op === self::OP_DOM_OBSERVE) {
+                                // validates the grammar and the bounds, requires the
+                // probed id to be an appended node at this point, then
+                // replays the reported height into its own u8 state so
+                // every later checksum/read entry is exact-compared
+                // against the observed byte (whole-trace coherence).
+                if (preg_match('/\G(\d+),(\d+)\)/', $trace, $m, 0, $pos) !== 1) {
+                    return null;
+                }
+                $dst = (int) $m[1];
+                $observed = (int) $m[2];
+                if (!isset($docIds[$operands['id']]) || $dst !== $operands['idx'] || $observed < 1 || $observed > 255) {
+                    return null;
+                }
+                if ($dst < \count($u8)) {
+                    $u8[$dst] = $observed;
+                }
+                $pos += \strlen($m[0]);
+            } else {
+                $simEntry = $sim.')';
+                if (substr($trace, $pos, \strlen($simEntry)) !== $simEntry) {
+                    return null;
+                }
+                $pos += \strlen($simEntry);
+            }
+            if ($i < $lastIndex) {
+                if (substr($trace, $pos, 1) !== ';') {
+                    return null;
+                }
+                ++$pos;
+            }
+        }
+        if ($pos !== $traceLen) {
+            return null;
+        }
+
+        return $trace;
+    }
+
+    /**
+     * The browser-equivalent executed trace of a program: the canonical
+     * trace with the layout-probe placeholders replaced by valid
+     * browser-observed values (monotonic geometry offsets with height
+     * 10; the point probe names the topmost constructed node). Lets a
+     * test simulate a genuine browser execution.
+     *
+     * The entries are built per op from the same state machine the
+     * canonical trace uses; only the layout entries are replaced, so
+     * readback values that contain ';' or parentheses travel intact.
+     *
+     * @param array{format: int, scope: string, action: string, op_version: int, ops: list<array{op: int, operands: array<string, mixed>}>} $program
+     */
+    public static function executedTraceFor(array $program): string
+    {
+        $u8 = [];
+        $cur = null; // ['id', 'attrs' map, 'dataset' map, 'classes' set, 'appended' bool]
+        $docIds = [];
+        $top = 0;
+        // The verifier's `POINT` probe accepts 'div' exactly when the
+        // program constructs any node (its construction check is
+        // whole-program), so the browser-equivalent trace must use the
+        // same predicate — 'point(none)' on a program with no DOM_APPEND
+        // would otherwise mismatch deterministically.
+        $hasAppend = false;
+        foreach ($program['ops'] as $record) {
+            if ($record['op'] === self::OP_DOM_APPEND) {
+                $hasAppend = true;
+                break;
+            }
+        }
+        $entries = [];
+        foreach ($program['ops'] as $record) {
+            $op = $record['op'];
+            if ($op === self::OP_DOM_GEOMETRY) {
+                $entries[] = 'geom('.($top * 10).',10)';
+                ++$top;
+            } elseif ($op === self::OP_DOM_POINT) {
+                $entries[] = 'point('.($hasAppend ? 'div' : 'none').')';
+            } elseif ($op === self::OP_DOM_OBSERVE) {
+                // The browser-equivalent observe: the fabricated reference
+                // height (the real value is the engine's own text
+                // metrics, never predictable here) is written through
+                // into the replay state,
+                // so the following checksum/read entries in this
+                // synthesized trace are computed over the observed byte —
+                // the full causal-graph semantics, never a placeholder.
+                $idx = $record['operands']['idx'];
+                $entries[] = self::TRACE_NAMES[$op].'('.$idx.','.self::OBSERVED_HEIGHT.')';
+                if ($idx < \count($u8)) {
+                    $u8[$idx] = self::OBSERVED_HEIGHT;
                 }
             } else {
-                if ($submitted[$i] !== $expected[$i]) {
-                    return null;
-                }
+                $entries[] = self::TRACE_NAMES[$op].'('.self::simulateOp($op, $record['operands'], $u8, $cur, $docIds).')';
             }
         }
 
-        return implode(';', $submitted);
+        return implode(';', $entries);
+    }
+
+    /**
+     * The execution digest over a `SUBMITTED` trace (the V2 evidence
+     * path): the same content-derived HMAC as the expected digest, but
+     * over the trace the client actually executed, so the verifier can
+     * bind the browser-observed entries. Null when the program is
+     * malformed.
+     */
+    public static function digestOverTrace(string $programB64, string $nonce, string $trace): ?string
+    {
+        $bytes = base64_decode($programB64, true);
+        if ($bytes === false || base64_encode($bytes) !== $programB64) {
+            return null;
+        }
+        $program = self::decode($programB64);
+        if ($program === null) {
+            return null;
+        }
+
+        return hash_hmac(
+            'sha256',
+            self::LABEL.'|'.$nonce.'|'.$program['scope'].'|'.$program['action'].'|'.$program['op_version'].'|'.$trace,
+            $bytes,
+        );
     }
 
     /**
@@ -522,6 +729,10 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_GEOMETRY => self::drawIdOperand($stream),
             self::OP_DOM_POINT => self::drawBytes($stream, 2),
             self::OP_DOM_EVENT_REAL => self::drawIdOperand($stream),
+            // The causal observe op: the probed id (reused constructed
+            // id on issued programs) plus one raw byte for the u8
+            // destination index.
+            self::OP_DOM_OBSERVE => self::drawIdOperand($stream).self::drawBytes($stream, 1),
             default => '',
         };
     }
@@ -582,6 +793,22 @@ final class ExecutionChallengeGenerator
 
             return ['len' => $len, 's' => $s];
         };
+        $readIdKeyed = static function () use ($read, $readByte): ?array {
+            $lenByte = $readByte();
+            if ($lenByte === null) {
+                return null;
+            }
+            $len = $lenByte;
+            if ($len < 4 || $len > 16) {
+                return null;
+            }
+            $s = $read($len);
+            if ($s === null) {
+                return null;
+            }
+
+            return ['len' => $len, 'id' => $s];
+        };
         $readValue = static function () use ($read, $readByte): ?array {
             $lenByte = $readByte();
             if ($lenByte === null) {
@@ -634,12 +861,34 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_CLASS_ADD, self::OP_DOM_CLASS_CONTAINS => $readClass(),
             self::OP_DOM_APPEND, self::OP_DOM_PARENT, self::OP_DOM_DISPATCH,
             self::OP_DOM_SERIALIZE, self::OP_DOM_SERIALIZE_REAL => [],
-            self::OP_DOM_QUERY_REAL => $readId(),
-            self::OP_DOM_GEOMETRY => $readId(),
+            self::OP_DOM_QUERY_REAL => $readIdKeyed(),
+            self::OP_DOM_GEOMETRY => $readIdKeyed(),
             self::OP_DOM_POINT => ['x' => ($readByte() ?? 0) % 256, 'y' => ($readByte() ?? 0) % 256],
-            self::OP_DOM_EVENT_REAL => $readId(),
+            self::OP_DOM_EVENT_REAL => $readIdKeyed(),
+            self::OP_DOM_OBSERVE => self::readObserve($read, $readByte, $readIdKeyed),
             default => null,
         };
+    }
+
+    /**
+     * @param callable(int): ?string $read
+     * @param callable(): ?int       $readByte
+     * @param callable(): ?array     $readIdKeyed
+     *
+     * @return array{id: string, idx: int}|null
+     */
+    private static function readObserve(callable $read, callable $readByte, callable $readIdKeyed): ?array
+    {
+        $id = $readIdKeyed();
+        if ($id === null) {
+            return null;
+        }
+        $idx = $readByte();
+        if ($idx === null) {
+            return null;
+        }
+
+        return ['id' => $id['id'], 'idx' => $idx % 64];
     }
 
     /**
@@ -851,11 +1100,16 @@ final class ExecutionChallengeGenerator
     /** 1 byte length + K digit-first key bytes + 1 byte length + V value bytes. */
     private static function drawDatasetOperand(string &$stream): string
     {
+        // The canonical safe-alphabet grammar: the length byte carries
+        // the real key length (1..16): the literal 'x' followed by
+        // 0..15 of [0-9a-z_], a canonical subset that round-trips
+        // through DOMStringMap without any browser throw.
         $len = (self::nextByte($stream) % 16) + 1;
         $out = \chr($len);
-        $out .= \chr(0x30 + (self::nextByte($stream) % 10));
+        $out .= \chr(0x78); // 'x'
+        $alphabet = '0123456789abcdefghijklmnopqrstuvwxyz_';
         for ($i = 1; $i < $len; $i++) {
-            $out .= \chr(0x20 + (self::nextByte($stream) % 0x5F));
+            $out .= $alphabet[self::nextByte($stream) % 37];
         }
 
         return $out.self::drawPrintableOperand($stream, 32);
@@ -925,11 +1179,11 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_DISPATCH => '1',
             self::OP_DOM_SERIALIZE => self::opDomSerialize($cur, $docIds),
             // Browser-observed entries: the expected values are
-            // construction-determined for QUERY_REAL/EVENT_REAL/
-            // SERIALIZE_REAL (the interpreter must read the real DOM
+            // construction-determined for `QUERY_REAL`/`EVENT_REAL`/
+            // `SERIALIZE_REAL` (the interpreter must read the real DOM
             // back to these exact values), while the layout probes
-            // (GEOMETRY/POINT) carry the literal placeholders 'geom'/
-            // 'point' here — the verifier validates the SUBMITTED trace
+            // (`GEOMETRY`/`POINT`) carry the literal placeholders 'geom'/
+            // 'point' here — the verifier validates the `SUBMITTED` trace
             // entries against their invariants separately (see
             // verifyExecutedTrace), so a pure non-browser solver cannot
             // reproduce a valid trace without emulating layout.
@@ -938,13 +1192,17 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_POINT => 'point',
             self::OP_DOM_EVENT_REAL => self::opEventRealExpected($operands, $cur, $docIds),
             self::OP_DOM_SERIALIZE_REAL => self::opSerializeRealExpected($docIds, $cur),
+            // The observed height is browser-only: the pure sim emits the
+            // placeholder; the verifier replays the value the submitted
+            // trace reports (see verifyExecutedTrace).
+            self::OP_DOM_OBSERVE => 'obs',
             default => '0',
         };
     }
 
     /**
      * Expected real querySelectorById readback: tag|sortedAttrPairs of
-     * the appended node (the interpreter reads the REAL DOM and must
+     * the appended node (the interpreter reads the real DOM and must
      * return exactly these values).
      *
      * @param array<string, mixed> $operands
@@ -973,23 +1231,15 @@ final class ExecutionChallengeGenerator
     }
 
     /**
-     * Canonical real-DOM readback: for every appended node in
-     * construction order, its sorted canonical attribute pairs; the
-     * interpreter hashes the same canonical string built from the REAL
-     * DOM attributes.
+     * Canonical real-DOM readback digest: the shadow's current node's
+     * sorted canonical attribute pairs hashed — the interpreter builds
+     * the same canonical string from the real node's sorted attributes.
      *
      * @param array<string, true> $docIds
      * @param array|null          $cur
      */
     private static function opSerializeRealExpected(array $docIds, ?array &$cur): string
     {
-        // The construction order is not replayed here: the shadow's
-        // current node is the only state carried through simulation.
-        // The canonical readback is built from the shadow's current
-        // node's attrs (the interpreter builds the same string from the
-        // REAL node's sorted attributes). A multi-node canonical list
-        // would require an append-order ledger; the interpreter's
-        // serialization covers the constructed tree the same way.
         if ($cur === null || !$cur['appended']) {
             return hash('sha256', '');
         }

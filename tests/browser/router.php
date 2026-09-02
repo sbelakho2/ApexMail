@@ -756,7 +756,7 @@ function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm,
         // The armed issuance path: program generated from the challenge
         // context (nonce/scope/action/version), stamped on the record
         // AND the response; the driver runs it and presents the digest.
-        $challenge = $issuer->issueWithExecutionField($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), true, $binding, null, $executionAction ?? 'default', '1', $armDecoy, $pinnedDecoy);
+        $challenge = $issuer->issueWithExecutionField($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), true, $binding, null, $executionAction ?? 'default', 1, $armDecoy, $pinnedDecoy);
     } else {
         $challenge = $armDecoy
             ? $issuer->issueWithDecoyField($scope, (string) ($_SERVER['REMOTE_ADDR'] ?? '127.0.0.1'), true, $binding, null, $pinnedDecoy)

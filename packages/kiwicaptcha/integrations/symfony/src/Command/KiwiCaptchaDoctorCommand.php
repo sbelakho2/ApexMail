@@ -43,11 +43,13 @@ use Symfony\Component\Console\Output\OutputInterface;
 final class KiwiCaptchaDoctorCommand extends Command
 {
     /**
-     * The protocol set this binary can emit and verify: v1 (legacy),
-     * v2 (canonical, unarmed) and v3 (decoy-armed). Mirrors the core
-     * verifier's accepted protocol range.
+     * The binary's maximum supported challenge protocol version: 4
+     * since the execution-capable canonical (protocol v4) landed. The
+     * central floor check compares the fleet floor against this max.
+     * Mirrors the core verifier's accepted protocol range (1..4) and
+     * the readiness probe's max.
      */
-    private const SUPPORTED_PROTOCOL_MAX = 3;
+    private const SUPPORTED_PROTOCOL_MAX = 4;
 
     /**
      * The SLO safety margin (ms) between the Argon admission lease and
@@ -543,6 +545,7 @@ final class KiwiCaptchaDoctorCommand extends Command
         // reflected here.
         $profile = $this->config['protection_profile'] ?? null;
         $decoyEnabled = (bool) ($this->config['risk']['decoy_v3_enabled'] ?? false);
+        $executionOn = ($this->config['risk']['execution_challenge'] ?? 'off') === 'on';
         $rolloutMode = (string) ($this->config['protocol_rollout']['mode'] ?? 'normal');
         if ($profile === 'high_abuse' && !$decoyEnabled) {
             // Under high_abuse the profile-derived default is true, so
@@ -551,7 +554,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             // the two-phase migration state: a false switch alone does
             // not prove the deployment is intentionally in the v3
             // migration phase, so without protocol_rollout.mode
-            // "migration" the check FAILs and the deploy gate exits
+            // "migration" the check fails and the deploy gate exits
             // non-zero — a forgotten override must not silently
             // persist. With the migration mode declared, the deferral
             // is the documented two-phase rollout and the check warns
@@ -563,11 +566,26 @@ final class KiwiCaptchaDoctorCommand extends Command
             return ['WARN', 'high_abuse promises the decoy surface, but risk.decoy_v3_enabled is explicitly false with protocol_rollout.mode "migration" declared: protocol v3 emission is deliberately deferred while the fleet floor is being established (the two-phase rollout, see operations.md)'];
         }
         if (!$decoyEnabled) {
+            // The execution surface alone never emits v4 either: the
+            // execution dimension is gated by the same confirmed-floor
+            // machinery (>= 4), and without the decoy surface the
+            // fallback is protocol v2. Report the execution floor state
+            // even here, so the v4 rollout cannot be forgotten.
+            if ($executionOn) {
+                return $this->executionWriterState(false, $profile, $rolloutMode);
+            }
+
             return ['PASS', 'protocol v2 emission (decoy surface off)'];
         }
         $this->epochMonitor->refresh();
         $floor = $this->epochMonitor->minProtocolVersion();
         if ($floor !== null && $floor >= 3) {
+            if ($executionOn) {
+                // The decoy floor is confirmed; the execution surface
+                // needs the v4 floor on top of it.
+                return $this->executionWriterState(true, $profile, $rolloutMode);
+            }
+
             return ['PASS', 'decoy surface armed and the central floor confirms protocol v3 emission'];
         }
         if ($profile === 'high_abuse') {
@@ -575,6 +593,36 @@ final class KiwiCaptchaDoctorCommand extends Command
         }
 
         return ['WARN', 'decoy surface armed but the central floor is below 3 or unconfirmed: issuance falls back to protocol v2; finish the two-phase rollout before expecting decoy-armed emission'];
+    }
+
+    /**
+     * The protocol-v4 writer state : the execution surface
+     * (risk.execution_challenge on) requires the confirmed central
+     * floor >= 4 on top of the decoy floor >= 3. With the floor
+     * confirmed, the deployment is emitting (or may emit) execution-
+     * armed protocol v4 records. Without it, issuance stays
+     * execution-unarmed — under high_abuse (which turns the execution
+     * gate on) an unconfirmed v4 floor fails the gate unless the
+     * deployment declares the two-phase migration state, exactly like
+     * the v3 decoy deferral.
+     *
+     * @return array{0: string, 1: string} [status, detail]
+     */
+    private function executionWriterState(bool $decoyConfirmed, ?string $profile, string $rolloutMode): array
+    {
+        $this->epochMonitor->refresh();
+        $floor = $this->epochMonitor->minProtocolVersion();
+        if ($floor !== null && $floor >= 4) {
+            return ['PASS', sprintf('execution surface armed (risk.execution_challenge on) and the central floor confirms protocol v4 emission%s', $decoyConfirmed ? ' with the decoy surface' : '')];
+        }
+        if ($profile === 'high_abuse') {
+            return ['FAIL', 'high_abuse requires execution-armed emission, but the fleet protocol floor has not been confirmed at v4. Confirm every serving binary supports protocol v4 and raise the central security-policy min_protocol_version to 4 (the two-phase rollout, see operations.md), or declare protocol_rollout.mode: migration while the v4 floor is being established.'];
+        }
+        if ($rolloutMode === 'migration') {
+            return ['WARN', 'execution surface armed but the central floor is below 4 or unconfirmed with protocol_rollout.mode "migration" declared: issuance stays execution-unarmed while the v4 fleet floor is being established (the two-phase rollout, see operations.md)'];
+        }
+
+        return ['WARN', 'execution surface armed (risk.execution_challenge on) but the central floor is below 4 or unconfirmed: issuance stays execution-unarmed (protocol v3 at most, or v2 when the decoy floor is unmet too); finish the protocol-v4 rollout before expecting execution-armed emission'];
     }
 
     /**

@@ -91,17 +91,19 @@ final class IssuerBindingTest extends TestCase
     {
         $keys = ChallengeRecord::WIRE_KEYS;
 
-        self::assertCount(25, $keys);
+        self::assertCount(27, $keys);
         self::assertSame('issuer', $keys[20], 'issuer is appended after request_binding');
         self::assertSame('kid', $keys[21], 'kid follows the issuer');
         self::assertSame('hostname', $keys[22], 'hostname follows the kid');
         self::assertSame('decoy_field', $keys[23], 'the optional decoy_field is the penultimate wire key (omitted when null)');
-        self::assertSame('execution_program', $keys[24], 'the optional execution_program is the final wire key (omitted when null)');
+        self::assertSame('execution_program', $keys[24], 'the optional execution_program wire key (omitted when null)');
+        self::assertSame('execution_version', $keys[25], 'the optional execution_version wire key (omitted when null)');
+        self::assertSame('execution_commitment', $keys[26], 'the optional execution_commitment is the final wire key (omitted when null)');
         // An unarmed record omits the decoy and execution keys entirely
         // (the skip_serializing_if mirror), so its toArray() key set is
         // the always-present 23 keys.
         self::assertSame(
-            \array_values(\array_diff($keys, ['decoy_field', 'execution_program'])),
+            \array_values(\array_diff($keys, ['decoy_field', 'execution_program', 'execution_version', 'execution_commitment'])),
             \array_keys($this->issue('prod')[1]->toArray()),
         );
     }

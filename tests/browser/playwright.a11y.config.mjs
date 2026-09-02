@@ -1,6 +1,6 @@
 import { defineConfig } from '@playwright/test';
 
-// The cross-engine lane runs six suites in Chromium + Firefox +
+// The cross-engine lane runs eight suites in Chromium + Firefox +
 // WebKit: the WCAG 2.2 AA evidence set (axe/static checks, keyboard-only
 // scenarios, live-region assertions, 200% resize, 320px reflow, text
 // spacing, reduced motion, forced colors, RTL + long translations), the
@@ -24,11 +24,14 @@ import { defineConfig } from '@playwright/test';
 // replayed challenge responses, duplicated and redirected verify
 // submissions, DOM-mutating and page-script adversaries — engine-neutral
 // by construction, proven portable across all three engines). The
-// engine-specific torture cases stay on the chromium-only default
-// config.
+// portable execution-evidence suite (execution-portable.spec.mjs) runs
+// the armed ExecutionChallengeV1 lifecycle end to end on every engine:
+// six fresh armed solves, token minting, digest and trace shape, and
+// the ephemeral-iframe teardown. The engine-specific torture cases stay
+// on the chromium-only default config.
 export default defineConfig({
   testDir: './specs',
-  testMatch: /(a11y|crossbrowser|adversarial-portable|decoy-polymorphism|autofill-evidence|targeted-bot|extensions-adversary)\.spec\.mjs/,
+  testMatch: /(a11y|crossbrowser|adversarial-portable|decoy-polymorphism|autofill-evidence|targeted-bot|extensions-adversary|execution-portable)\.spec\.mjs/,
   timeout: 120_000,
   retries: 1,
   use: { baseURL: 'http://127.0.0.1:8087' },

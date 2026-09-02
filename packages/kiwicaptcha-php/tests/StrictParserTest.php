@@ -78,12 +78,12 @@ final class StrictParserTest extends TestCase
         self::assertNull($record->requestBinding);
         self::assertNull($record->issuer);
         self::assertSame(1, $record->kid, 'kid defaults to 1 on the wire');
-        self::assertSame(25, \count(ChallengeRecord::WIRE_KEYS));
+        self::assertSame(27, \count(ChallengeRecord::WIRE_KEYS));
         // An unarmed record omits the optional decoy_field and
-        // execution_program keys entirely (the skip_serializing_if
-        // mirror), so toArray() emits exactly the 23 always-present keys.
+        // execution keys entirely (the skip_serializing_if mirror), so
+        // toArray() emits exactly the 23 always-present keys.
         self::assertSame(
-            \array_values(\array_diff(ChallengeRecord::WIRE_KEYS, ['decoy_field', 'execution_program'])),
+            \array_values(\array_diff(ChallengeRecord::WIRE_KEYS, ['decoy_field', 'execution_program', 'execution_version', 'execution_commitment'])),
             \array_keys($record->toArray()),
         );
         self::assertNull($record->decoyField);
@@ -244,6 +244,97 @@ final class StrictParserTest extends TestCase
         yield 'decoy_field over-long rejected (alphabet)' => [self::mutate('decoy_field', str_repeat('x', 65)), 'must be 1-64 characters of [A-Za-z0-9_-]'];
 
         yield 'non-string decoy_field rejected' => [self::mutate('decoy_field', 123), 'must be a string'];
+
+        // ── The protocol-v4 execution triplet  ──
+        // execution_version / execution_commitment: types and shapes.
+        // $program is a well-formed generated program (see the helper
+        // below), so these cases isolate the triplet grammar, never the
+        // program-blob validity.
+        $program = self::validProgram();
+
+        yield 'string execution_version rejected' => [
+            self::base() + ['execution_program' => $program, 'execution_version' => '1', 'execution_commitment' => hash('sha256', $program)],
+            'must be an integer',
+        ];
+
+        yield 'execution_version not the canonical byte 1 rejected' => [
+            self::base() + ['execution_program' => $program, 'execution_version' => 2, 'execution_commitment' => hash('sha256', $program)],
+            'must be exactly 1',
+        ];
+
+        yield 'non-hex execution_commitment rejected' => [
+            self::base() + ['execution_program' => $program, 'execution_version' => 1, 'execution_commitment' => str_repeat('g', 64)],
+            'exactly 64 lowercase hex',
+        ];
+
+        yield 'short execution_commitment rejected' => [
+            self::base() + ['execution_program' => $program, 'execution_version' => 1, 'execution_commitment' => str_repeat('0', 63)],
+            'exactly 64 lowercase hex',
+        ];
+
+        yield 'uppercase hex execution_commitment rejected' => [
+            self::base() + ['execution_program' => $program, 'execution_version' => 1, 'execution_commitment' => str_repeat('A', 64)],
+            'exactly 64 lowercase hex',
+        ];
+
+        yield 'non-string execution_commitment rejected' => [
+            self::base() + ['execution_program' => $program, 'execution_version' => 1, 'execution_commitment' => 123],
+            'must be a string',
+        ];
+
+        // The exact armed/unarmed equivalence: the three execution keys
+        // are one triplet — partial sets are corrupt/foreign records.
+        yield 'execution_version without a program rejected' => [
+            self::base() + ['execution_version' => 1],
+            'present together or all absent',
+        ];
+
+        yield 'execution_commitment without a program rejected' => [
+            self::base() + ['execution_commitment' => str_repeat('0', 64)],
+            'present together or all absent',
+        ];
+
+        yield 'program without the commitment triplet rejected' => [
+            self::base() + ['execution_program' => $program],
+            'present together or all absent',
+        ];
+
+        // The protocol-vs-execution grammar: v2/v3 never carry execution.
+        yield 'protocol v2 with an execution program rejected' => [
+            self::base() + ['execution_program' => $program, 'execution_version' => 1, 'execution_commitment' => hash('sha256', $program)],
+            'protocol v4 canonical extension',
+        ];
+
+        yield 'protocol v3 with an execution program rejected' => [
+            self::mutate('protocol_version', 3) + ['decoy_field' => 'company_website', 'execution_program' => $program, 'execution_version' => 1, 'execution_commitment' => hash('sha256', $program)],
+            'protocol v4 canonical extension',
+        ];
+
+        // A v4 record without the execution triplet is malformed (the
+        // stored-version-flip window closes).
+        yield 'protocol v4 without the execution triplet rejected' => [
+            self::mutate('protocol_version', 4),
+            'must carry',
+        ];
+
+        // A program whose hash does not equal the signed commitment is
+        // a corrupt/foreign record.
+        yield 'program not matching its commitment rejected' => [
+            self::base() + ['execution_program' => $program, 'execution_version' => 1, 'execution_commitment' => str_repeat('0', 64)],
+            'does not match the signed "execution_commitment"',
+        ];
+    }
+
+    /** A well-formed generated program, so the triplet cases isolate the grammar. */
+    private static function validProgram(): string
+    {
+        return \KiwiCaptcha\ExecutionChallengeGenerator::generate(
+            '0123456789abcdef0123456789abcdef',
+            '2l0IVh1xuKNjzcCDyV+X0lrceMHlHvmqCs5MdDw8tw0=',
+            'login',
+            'login-action',
+            1,
+        );
     }
 
     public function testLegacyIpHashAliasIsAcceptedInPlaceOfBindingTag(): void
@@ -325,6 +416,51 @@ final class StrictParserTest extends TestCase
         self::assertSame(7, ChallengeRecord::fromArray($record->toArray())->kid);
     }
 
+    public function testV4RecordWithTheExecutionTripletRoundTrips(): void
+    {
+        $program = self::validProgram();
+        $data = self::base();
+        $data['protocol_version'] = 4;
+        $data['decoy_field'] = 'company_website';
+        $data['execution_program'] = $program;
+        $data['execution_version'] = 1;
+        $data['execution_commitment'] = hash('sha256', $program);
+
+        $record = ChallengeRecord::fromArray($data);
+
+        self::assertSame(4, $record->protocolVersion);
+        self::assertSame('company_website', $record->decoyField, 'a v4 record may carry the decoy (the decoy-capable canonical)');
+        self::assertSame($program, $record->executionProgram);
+        self::assertSame(1, $record->executionVersion);
+        self::assertSame(hash('sha256', $program), $record->executionCommitment);
+
+        // The round trip preserves the signed triplet byte-for-byte.
+        $roundTripped = ChallengeRecord::fromArray($record->toArray());
+        self::assertSame($record->executionProgram, $roundTripped->executionProgram);
+        self::assertSame($record->executionVersion, $roundTripped->executionVersion);
+        self::assertSame($record->executionCommitment, $roundTripped->executionCommitment);
+        self::assertSame($data['execution_program'], $roundTripped->toArray()['execution_program']);
+        self::assertSame(1, $roundTripped->toArray()['execution_version']);
+        self::assertSame($data['execution_commitment'], $roundTripped->toArray()['execution_commitment']);
+    }
+
+    public function testV4WithoutADecoyStillRoundTrips(): void
+    {
+        // The decoy is optional on v4 (execution without the decoy
+        // surface): the canonical is base|execution_version|
+        // execution_commitment.
+        $program = self::validProgram();
+        $data = self::base();
+        $data['protocol_version'] = 4;
+        $data['execution_program'] = $program;
+        $data['execution_version'] = 1;
+        $data['execution_commitment'] = hash('sha256', $program);
+
+        $record = ChallengeRecord::fromArray($data);
+        self::assertSame(4, $record->protocolVersion);
+        self::assertNull($record->decoyField);
+    }
+
     public function testProtocolVersionWithinU8RangeIsAccepted(): void
     {
         // serde accepts any u8 — 99 is within range and deserializes (the
@@ -344,17 +480,20 @@ final class StrictParserTest extends TestCase
         self::assertSame('QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVphYmNkZWY', $record->salt);
     }
 
-    public function testWireKeySetIsPinnedTo25(): void
+    public function testWireKeySetIsPinnedTo27(): void
     {
-        // decoy_field and execution_program are the two Option keys
-        // omitted from toArray() when null (the Rust
-        // skip_serializing_if mirror); every other key is always present.
+        // decoy_field, execution_program, execution_version and
+        // execution_commitment are the Option keys omitted from
+        // toArray() when null (the Rust skip_serializing_if mirror);
+        // every other key is always present. The three execution keys
+        // are present together or all absent.
         self::assertSame([
             'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
             'algorithm', 'm_kib', 't', 'p', 'target_bits', 'salt', 'prefix',
             'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
             'attempts_used', 'region', 'policy_version', 'request_binding',
             'issuer', 'kid', 'hostname', 'decoy_field', 'execution_program',
+            'execution_version', 'execution_commitment',
         ], ChallengeRecord::WIRE_KEYS);
     }
 

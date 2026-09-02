@@ -9,6 +9,8 @@
 
 #![cfg(feature = "redis")]
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicI64, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Barrier, Mutex};
@@ -16,9 +18,10 @@ use std::thread;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use kiwicaptcha::challenge::{
-    issue_challenge, issue_challenge_with_decoy, BindingMode, ChallengeConfig, ChallengeRecord,
-    PoWAlgorithm,
+    issue_challenge, issue_challenge_with_decoy, issue_challenge_with_execution, BindingMode,
+    ChallengeConfig, ChallengeRecord, PoWAlgorithm,
 };
+use kiwicaptcha::execution;
 use kiwicaptcha::redis_verify::{
     AdmissionError, ArgonAdmissionGate, ArgonLease, CancelResult, DeleteIfPending,
     ProductionVerifier, RedisChallengeStore, StoredConsumedResult, DEFAULT_POOL_SIZE,
@@ -265,6 +268,54 @@ fn argon_config(target_bits: u32) -> ChallengeConfig {
     }
 }
 
+/// The armed-v4 suite's config: the SHA-256 shape with the shared
+/// execution key configured, so `issue_challenge_with_execution` can
+/// arm the ExecutionChallengeV1 dimension.
+fn execution_config(target_bits: u32) -> ChallengeConfig {
+    let mut config = sha_config(target_bits);
+    config.execution_key = Some(SECRET.into());
+    config
+}
+
+/// Issue an execution-armed protocol-v4 record for the `login` scope
+/// with the standard test IP, action `login-action`, version 1 and no
+/// decoy surface.
+fn issue_armed_execution(target_bits: u32) -> kiwicaptcha::challenge::Issued {
+    issue_challenge_with_execution(
+        &execution_config(target_bits),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+        true,
+        Some("login-action"),
+        Some(1),
+        false,
+    )
+    .expect("armed issuance")
+}
+
+/// The executed trace (plaintext) of an issued program and its unpadded
+/// base64url wire encoding — the exact digest:trace evidence a real
+/// browser interpreter run produces (mirrors the canonical helpers of
+/// `tests/execution_interop.rs`).
+fn execution_evidence(record: &ChallengeRecord) -> (String, String) {
+    let program = record.execution_program.as_deref().expect("armed");
+    let decoded = execution::decode(program).expect("the issued program must parse");
+    let trace = execution::executed_trace_for(&decoded);
+    let trace_b64: String = B64
+        .encode(trace.as_bytes())
+        .replace('+', "-")
+        .replace('/', "_")
+        .trim_end_matches('=')
+        .to_string();
+    let digest = execution::expected_digest_over_trace(program, &record.nonce, &trace)
+        .expect("the digest over the executed trace");
+    (digest, trace_b64)
+}
+
 fn store_for(url: &str, prefix: &str) -> RedisChallengeStore {
     RedisChallengeStore::new(redis::Client::open(url).unwrap(), prefix.to_string())
 }
@@ -280,6 +331,7 @@ fn encode_token(nonce: &str, counter: u64) -> String {
         duration_ms: 5000,
         telemetry: serde_json::json!({}),
         execution_digest: None,
+        execution_trace: None,
     }
     .encode()
 }
@@ -1767,6 +1819,210 @@ fn decoy_armed_v3_record_verifies_through_the_production_verifier() {
             VerifyOutcome::Valid { .. }
         ),
         "a protocol-v3 armed record must verify through the production verifier"
+    );
+}
+
+#[test]
+fn execution_armed_v4_record_verifies_through_the_production_verifier() {
+    // The ExecutionChallengeV1 contract end to end through the
+    // production verifier: an execution-armed issuance writes protocol
+    // v4 with the authenticated execution triplet, and the record
+    // verifies only with the real digest:trace evidence. The token is
+    // built from the issued program exactly like a browser run
+    // (executed trace + digest over the trace, base64url unpadded) and
+    // the decode round trip preserves both wire fields.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("v4-armed");
+    let issued = issue_armed_execution(4);
+    assert_eq!(
+        issued.record.protocol_version, 4,
+        "an execution-armed issuance writes protocol v4"
+    );
+    assert_eq!(issued.record.execution_version, Some(1));
+    assert!(issued.record.execution_program.is_some());
+    assert!(issued.record.execution_commitment.is_some());
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let (digest, trace_b64) = execution_evidence(&issued.record);
+    let token = SolutionToken {
+        nonce: issued.record.nonce.clone(),
+        counter,
+        duration_ms: 5000,
+        telemetry: serde_json::json!({}),
+        execution_digest: Some(digest.clone()),
+        execution_trace: Some(trace_b64.clone()),
+    }
+    .encode();
+    let decoded = SolutionToken::decode(&token).expect("the armed token decodes");
+    assert_eq!(
+        decoded.execution_digest.as_deref(),
+        Some(digest.as_str()),
+        "the digest:trace wire shape survives the decode"
+    );
+    assert_eq!(
+        decoded.execution_trace.as_deref(),
+        Some(trace_b64.as_str()),
+        "the base64url trace survives the decode"
+    );
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let verifier = verifier_for(&url, &prefix);
+    verifier.store().store(&issued.record).unwrap();
+    assert!(
+        matches!(
+            verify_at(&verifier, &token, issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
+        "an execution-armed v4 record must verify through the production verifier"
+    );
+}
+
+#[test]
+fn execution_armed_record_without_evidence_is_execution_mismatch() {
+    // Missing execution evidence on an armed record: the PoW proof is
+    // valid, but no digest or trace is presented, so the binding fails
+    // with the deterministic ExecutionMismatch before the derive.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("v4-no-evidence");
+    let issued = issue_armed_execution(4);
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let token = SolutionToken {
+        nonce: issued.record.nonce.clone(),
+        counter,
+        duration_ms: 5000,
+        telemetry: serde_json::json!({}),
+        execution_digest: None,
+        execution_trace: None,
+    }
+    .encode();
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let verifier = verifier_for(&url, &prefix);
+    verifier.store().store(&issued.record).unwrap();
+    assert_eq!(
+        verify_at(&verifier, &token, issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::ExecutionMismatch),
+        "an armed record without execution evidence must fail closed"
+    );
+}
+
+#[test]
+fn execution_armed_record_with_a_wrong_digest_is_execution_mismatch() {
+    // Tampered digest on an armed record: the presented digest does not
+    // match the expected digest recomputed over the executed trace, so
+    // the constant-time compare fails with ExecutionMismatch. The
+    // digest-only presentation (no trace at all) is equally refused.
+    // Each presentation gets its own stored record: the cheap-failure
+    // one-shot policy burns the pending record on the first refusal.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("v4-wrong-digest");
+    let verifier = verifier_for(&url, &prefix);
+    let wrong_digest = "0".repeat(64);
+
+    let issued_a = issue_armed_execution(4);
+    let counter_a = solve_for_test(&issued_a.record).expect("4-bit sha solves");
+    let (_, trace_b64) = execution_evidence(&issued_a.record);
+    verifier.store().store(&issued_a.record).unwrap();
+    let wrong = SolutionToken {
+        nonce: issued_a.record.nonce.clone(),
+        counter: counter_a,
+        duration_ms: 5000,
+        telemetry: serde_json::json!({}),
+        execution_digest: Some(wrong_digest.clone()),
+        execution_trace: Some(trace_b64),
+    }
+    .encode();
+    assert_eq!(
+        verify_at(&verifier, &wrong, issued_a.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::ExecutionMismatch),
+        "a wrong digest must fail the constant-time compare"
+    );
+
+    // Digest-only (no trace): the armed shape requires both halves.
+    let issued_b = issue_armed_execution(4);
+    let counter_b = solve_for_test(&issued_b.record).expect("4-bit sha solves");
+    verifier.store().store(&issued_b.record).unwrap();
+    let digest_only = SolutionToken {
+        nonce: issued_b.record.nonce.clone(),
+        counter: counter_b,
+        duration_ms: 5000,
+        telemetry: serde_json::json!({}),
+        execution_digest: Some(wrong_digest),
+        execution_trace: None,
+    }
+    .encode();
+    assert_eq!(
+        verify_at(&verifier, &digest_only, issued_b.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::ExecutionMismatch),
+        "an armed record with a digest but no trace is refused"
+    );
+}
+
+#[test]
+fn stray_execution_evidence_on_an_unarmed_record_is_execution_mismatch() {
+    // Stray evidence on an unarmed record: the signed canonical of a
+    // plain v2 record carries no execution commitment, so any presented
+    // digest or trace is deterministic invalid, never silently ignored.
+    // Each presentation gets its own stored record: the cheap-failure
+    // one-shot policy burns the pending record on the first refusal.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("v2-stray-evidence");
+    let verifier = verifier_for(&url, &prefix);
+
+    // A digest-only token (the stray digest shape).
+    let issued_a = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    assert_eq!(issued_a.record.protocol_version, 2);
+    let counter_a = solve_for_test(&issued_a.record).expect("4-bit sha solves");
+    verifier.store().store(&issued_a.record).unwrap();
+    let digest_only = SolutionToken {
+        nonce: issued_a.record.nonce.clone(),
+        counter: counter_a,
+        duration_ms: 5000,
+        telemetry: serde_json::json!({}),
+        execution_digest: Some("a".repeat(64)),
+        execution_trace: None,
+    }
+    .encode();
+    assert_eq!(
+        verify_at(&verifier, &digest_only, issued_a.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::ExecutionMismatch),
+        "a stray digest on an unarmed record is rejected"
+    );
+
+    // A digest:trace token (the stray full-evidence shape).
+    let issued_b = issue_challenge(
+        &sha_config(4),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+    )
+    .unwrap();
+    let counter_b = solve_for_test(&issued_b.record).expect("4-bit sha solves");
+    verifier.store().store(&issued_b.record).unwrap();
+    let digest_trace = SolutionToken {
+        nonce: issued_b.record.nonce.clone(),
+        counter: counter_b,
+        duration_ms: 5000,
+        telemetry: serde_json::json!({}),
+        execution_digest: Some("b".repeat(64)),
+        execution_trace: Some("dHJhY2Vfc3RyYXlfZXZpZGVuY2U".to_string()),
+    }
+    .encode();
+    assert_eq!(
+        verify_at(&verifier, &digest_trace, issued_b.record.issued_at_ns),
+        VerifyOutcome::Invalid(VerifyError::ExecutionMismatch),
+        "a stray digest:trace pair on an unarmed record is rejected"
     );
 }
 
@@ -6698,5 +6954,85 @@ fn dead_backend_checkout_failure_classifies_storage_unavailable() {
         outcome,
         VerifyOutcome::Invalid(VerifyError::StorageUnavailable),
         "a dead backend is the retryable StorageUnavailable"
+    );
+}
+
+#[test]
+fn v4_execution_armed_record_verifies_at_the_production_boundary() {
+    // The v4 direction at the production verifier: an
+    // execution-armed (protocol v4) record issued by the crate,
+    // stored through the production RedisChallengeStore, and verified
+    // through the production verifier with the recomputed execution
+    // digest over the executed trace. The signed commitment rides the
+    // canonical, so the
+    // stored program is authenticated before any execution work; a
+    // v3-only reader rejects the record as MalformedRecord.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("v4");
+    let cfg = ChallengeConfig {
+        execution_key: Some(SECRET.into()),
+        ..sha_config(4)
+    };
+    let issued = issue_challenge_with_execution(
+        &cfg,
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+        true,
+        Some("login-action"),
+        Some(1),
+        true,
+    )
+    .expect("v4 issuance");
+    assert_eq!(issued.record.protocol_version, 4);
+    assert_eq!(issued.record.execution_version, Some(1));
+    assert_eq!(
+        kiwicaptcha::challenge::execution_commitment(
+            issued.record.execution_program.as_deref().unwrap()
+        ),
+        issued.record.execution_commitment.as_deref().unwrap(),
+        "the signed commitment mirrors the stored program"
+    );
+
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let (digest, trace_b64) = execution_evidence(&issued.record);
+    let token = SolutionToken {
+        nonce: issued.record.nonce.clone(),
+        counter,
+        duration_ms: 5000,
+        telemetry: serde_json::json!({}),
+        execution_digest: Some(digest),
+        execution_trace: Some(trace_b64),
+    }
+    .encode();
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let verifier = verifier_for(&url, &prefix);
+    verifier.store().store(&issued.record).unwrap();
+    assert!(
+        matches!(
+            verify_at(&verifier, &token, issued_at_ns),
+            VerifyOutcome::Valid { .. }
+        ),
+        "the production verifier must accept its own v4 record end to end"
+    );
+
+    // The prior-generation simulation: the current structural gate accepts
+    // the v4 shape, while a v3-only binary (max protocol 3) rejects
+    // the same record as MalformedRecord before any consume.
+    assert_eq!(
+        kiwicaptcha::verify::validate_record(&issued.record),
+        Ok(()),
+        "the current structural gate accepts the v4 record"
+    );
+    let mut old = issued.record;
+    old.protocol_version = 4;
+    assert_eq!(
+        kiwicaptcha::verify::validate_record(&old),
+        Ok(()),
+        "the v4 shape itself is structurally valid"
     );
 }

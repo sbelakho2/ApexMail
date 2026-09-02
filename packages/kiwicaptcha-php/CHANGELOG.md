@@ -3,6 +3,31 @@
 ## [Unreleased]
 
 ### Added
+- Protocol v4 (the execution-capable canonical): an execution-armed
+  issuance writes `protocol_version` 4 and signs the
+  `|execution_version|execution_commitment` segments inside the HMAC
+  canonical (`execution_commitment` = hex SHA-256 of the stored
+  program's base64 wire string). The armed/unarmed equivalence is
+  exact and enforced on every acceptance surface: signed commitment
+  absent ⇔ stored program absent, present ⇔ present, and
+  SHA256(stored program) == the signed commitment (constant-time) —
+  stripping, substituting or injecting a program always invalidates
+  the challenge. `ChallengeRecord::MAX_PROTOCOL_VERSION` = 4;
+  `ChallengeRecord` gains the `execution_version` /
+  `execution_commitment` wire keys (present together or all absent);
+  `Issuer::executionCommitment()`; `Issuer::canonicalPayload()` gains
+  the execution segments.
+- Execution-program parser strictness: exact EOF after the op list
+  (trailing bytes invalid), op version exactly 1 (no arbitrary byte),
+  and the embedded scope/action must match the canonical identifier
+  grammar `[A-Za-z0-9._:-]`. The generation version argument is the
+  canonical numeric byte (int, exactly 1 — no string-cast).
+- Dataset-key grammar: the generator's dataset keys are drawn from the
+  deliberately boring safe alphabet `x[0-9a-z_]{0,15}` (the literal
+  `x` followed by 0..15 characters of `[0-9a-z_]`).
+- Stray execution evidence: an execution digest presented for a record
+  whose signed canonical carries NO commitment is the deterministic
+  `execution_mismatch`, never silently ignored.
 - Deployment issuer binding: `ChallengeRecord.issuer` (the canonical wire
   schema's field appended after `request_binding`:
   `...|request_binding|issuer|kid`, `kid` the final field), `Config.issuer`,

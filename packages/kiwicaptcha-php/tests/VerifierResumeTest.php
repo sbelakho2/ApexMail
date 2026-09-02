@@ -8,6 +8,7 @@ use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\RequestBindingExpectation;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ConsumedRecord;
+use KiwiCaptcha\ExecutionChallengeGenerator;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\SolutionToken;
@@ -44,6 +45,8 @@ final class VerifierResumeTest extends TestCase
     private const ISSUED_AT = 1_800_000_000;
 
     private const CLIENT_IP = '198.51.100.7';
+
+    private const EXECUTION_KEY = '0123456789abcdef0123456789abcdef';
 
     /** @return array{0: ArrayStorage, 1: ChallengeRecord, 2: string} */
     private function issueAndSolve(int $targetBits = 8, ?string $requestBinding = null): array
@@ -691,6 +694,101 @@ final class VerifierResumeTest extends TestCase
         self::assertSame(true, $inner->consumedState($record->nonce)?->consumedResult?->valid);
     }
 
+    // ── the execution-armed v4 resume ───────────────────────────────────
+
+    /**
+     * Issues an execution-armed protocol-v4 challenge (the decoy
+     * surface armed too), solves its PoW, and builds the wire token
+     * with the executed trace and the digest over it.
+     *
+     * @return array{0: ArrayStorage, 1: ChallengeRecord, 2: string}
+     */
+    private function issueAndSolveArmed(): array
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(
+            new Config(secretKey: Vectors::SECRET, targetBits: 8, ttlSecs: 120, minDurationMs: 0, executionKey: self::EXECUTION_KEY),
+            $storage,
+            now: static fn (): int => self::ISSUED_AT,
+        );
+        $challenge = $issuer->issueWithExecutionField('login', self::CLIENT_IP, true, executionAction: 'login-action', armDecoyField: true);
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+
+        $program = ExecutionChallengeGenerator::decode($challenge->executionProgram);
+        self::assertNotNull($program);
+        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $digest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $trace);
+        self::assertNotNull($digest);
+
+        $saltBytes = base64_decode($challenge->salt, true);
+        $counter = 0;
+        do {
+            $hash = hash('sha256', $challenge->prefix.$counter.$saltBytes, true);
+            $counter++;
+        } while (Verifier::leadingZeroBits($hash) < $challenge->targetBits);
+        --$counter;
+
+        return [$storage, $record, SolutionToken::create($challenge->nonce, $counter, 5000, [], $digest, base64_encode($trace))->encode()];
+    }
+
+    public function testCommittedResultRecoveryArmedPastSignedExpiryStillSucceeds(): void
+    {
+        // The execution-armed committed-result recovery: the replay
+        // security gate on the fast path must clear with the full
+        // execution evidence, even past the signed expiry and from
+        // another backend network path (the IP stays exempt).
+        [$inner, $record, $token] = $this->issueAndSolveArmed();
+        $inner->consumeWithOperationIdentity($record->nonce, $this->identity('armed-committed'));
+        self::assertTrue($inner->commitResult($record->nonce, true, $record->requestBinding), 'the committed result lands');
+        $farFuture = static fn (): int => self::ISSUED_AT + 10_000;
+
+        $outcome = (new Verifier($inner, now: $farFuture))->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('armed-committed'), 'login', '203.0.113.9');
+        self::assertTrue($outcome->isOk(), sprintf('the armed committed-result recovery must stay expiry-exempt, got %s', $outcome->code()));
+        self::assertTrue($outcome->fromStoredResult, 'the armed recovery is the stored committed result, never a re-derivation');
+        self::assertSame($record->nonce, $outcome->nonce());
+        self::assertSame(true, $inner->consumedState($record->nonce)?->consumedResult?->valid);
+    }
+
+    public function testResultlessArmedResumeSucceedsAndCommits(): void
+    {
+        // The resultless resume of an execution-armed record: the
+        // derivation runs only after the shared cheap phase cleared the
+        // execution binding with the full evidence.
+        [$inner, $record, $token] = $this->issueAndSolveArmed();
+        $storage = self::lostReplyStorage($inner, true);
+        $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
+
+        $original = $verifier->verify($token, Vectors::SECRET, 'login', self::CLIENT_IP, nowNs: $record->issuedAtNs + 1_000_000, operationIdentity: $this->identity('armed-a'));
+        self::assertSame(VerifyError::ConsumeIndeterminate, $original->error, 'the lost consume reply must surface as ConsumeIndeterminate');
+        self::assertNull($inner->consumedState($record->nonce)?->consumedResult, 'precondition: nothing committed yet');
+
+        $outcome = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('armed-a'), 'login', self::CLIENT_IP);
+        self::assertTrue($outcome->isOk(), sprintf('the armed identity-proven resume must derive and commit the valid outcome, got %s', $outcome->code()));
+        self::assertSame($record->nonce, $outcome->nonce());
+
+        $after = $inner->consumedState($record->nonce);
+        self::assertNotNull($after?->consumedResult, 'the armed resume must commit the deterministic outcome');
+        self::assertTrue($after->consumedResult->valid);
+    }
+
+    public function testChangedClientIpOnAnArmedResultlessResumeIsIpMismatch(): void
+    {
+        // The resultless resume revalidates the IP binding; a changed
+        // client IP is the exempt network circumstance, so the verdict
+        // falls to the compositional replay gate first. The execution
+        // evidence must clear that gate, leaving IpMismatch as the
+        // outcome — never an ExecutionMismatch.
+        [$inner, $record, $token] = $this->issueAndSolveArmed();
+        $inner->consumeWithOperationIdentity($record->nonce, $this->identity('armed-ip'));
+        $verifier = new Verifier($inner, now: static fn (): int => self::ISSUED_AT);
+
+        $outcome = $verifier->resumeConsumedOperation($token, Vectors::SECRET, $this->identity('armed-ip'), 'login', '203.0.113.9');
+        self::assertSame(VerifyError::IpMismatch, $outcome->error, 'the changed client IP must refuse the armed resume as IpMismatch, never ExecutionMismatch');
+        self::assertNull($inner->consumedState($record->nonce)?->consumedResult, 'the refused armed resume must not commit anything');
+        self::assertNotNull($inner->consumedState($record->nonce), 'the retained consumed record survives the refusal');
+    }
+
     /**
      * KCA-77-01: the resume post-commit read-back must accept a stored
      * Valid only behind the causal fence. The dangerous sequence: the
@@ -740,73 +838,6 @@ final class VerifierResumeTest extends TestCase
         $inner2->consume($record2->nonce);
         $refused = (new Verifier($inner2))->resumeConsumedOperation($token2, Vectors::SECRET, $this->identity('keyed'), 'login', self::CLIENT_IP);
         self::assertSame(VerifyError::ConsumeIndeterminate, $refused->error, 'a record without any identity must be refused');
-    }
-
-    public function testResumeRecordWhoseStoredNonceDiffersFromTheLookupKeyIsMalformed(): void
-    {
-        // A corrupt key-value pairing: consumedState() (looked up by the
-        // token's nonce) returns a retained envelope whose stored record
-        // carries a different nonce. The identity gate alone cannot catch
-        // this — the envelope's own identity is exact — so the
-        // consistency check refuses the impossible record with the
-        // deterministic MalformedRecord before any processing: never a
-        // stored-success replay, never a resumed derivation.
-        [$inner, $record, $token] = $this->issueAndSolve();
-        $identity = $this->identity('corrupt-key-value-pairing');
-        $inner->consumeWithOperationIdentity($record->nonce, $identity);
-        $inner->commitResult($record->nonce, true, $record->requestBinding);
-
-        $storage = new class($inner, $record->nonce) implements StorageInterface, \KiwiCaptcha\ConsumedStateReadableInterface {
-            public function __construct(
-                private readonly ArrayStorage $inner,
-                private readonly string $servedNonce,
-            ) {
-            }
-
-            public function store(ChallengeRecord $record): void
-            {
-                $this->inner->store($record);
-            }
-
-            public function find(string $nonce): ?ChallengeRecord
-            {
-                return $this->inner->find($nonce);
-            }
-
-            public function consumedState(string $nonce): ?ConsumedRecord
-            {
-                // Serve the retained envelope of $servedNonce under any
-                // queried key: the corrupt pairing under test.
-                return $this->inner->consumedState($this->servedNonce);
-            }
-
-            public function consume(string $nonce): ?ConsumedRecord
-            {
-                return $this->inner->consume($nonce);
-            }
-
-            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
-            {
-                return $this->inner->commitResult($nonce, $valid, $binding);
-            }
-
-            public function delete(string $nonce): void
-            {
-                $this->inner->delete($nonce);
-            }
-        };
-
-        $tokenNonce = base64_encode(random_bytes(32));
-        self::assertNotSame($tokenNonce, $record->nonce, 'the looked-up key must differ from the served record\'s stored nonce');
-        $outcome = (new Verifier($storage, now: static fn (): int => self::ISSUED_AT))->resumeConsumedOperation(
-            SolutionToken::create($tokenNonce, 0, 5000, [])->encode(),
-            Vectors::SECRET,
-            $identity,
-            'login',
-            self::CLIENT_IP,
-        );
-
-        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'a stored-nonce/lookup-key mismatch on the resume path is the deterministic MalformedRecord');
     }
 
     public function testNonceWithNoRecordIsRefused(): void

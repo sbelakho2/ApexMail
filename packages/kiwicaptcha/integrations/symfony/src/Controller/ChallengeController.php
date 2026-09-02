@@ -136,12 +136,14 @@ final class ChallengeController
     private JsonDuplicateKeyScanner $jsonDuplicateKeyScanner;
 
     /**
-     * The once-per-process decoy-v3-gate warning guard: when
-     * risk.decoy_v3_enabled is true but the confirmed central
-     * min_protocol_version floor is below 3 (or unconfirmed), issuance
-     * falls back to protocol v2. This flag makes the actionable warning
-     * fire exactly once per process instead of once per issuance, so an
-     * issuance-rate log flood can never drown the signal.
+     * The once-per-process gate warning guard: when risk.decoy_v3_enabled
+     * is true but the confirmed central min_protocol_version floor is
+     * below 3 (or unconfirmed), or when risk.execution_challenge is on
+     * but the floor is below 4 (or unconfirmed).
+     * Issuance then falls back to the safe unarmed emission.
+     * This flag makes the actionable warning fire exactly once per
+     * process instead of once per issuance, so an issuance-rate log
+     * flood never drowns the signal.
      */
     private bool $decoyV3WarningLogged = false;
 
@@ -242,14 +244,17 @@ final class ChallengeController
          * The ExecutionChallengeV1 gate (risk.execution_challenge,
          * default off). When true, issuance may arm the browser-
          * execution dimension, see
-         * {@see self::executionArmingEnabled()}. The issued challenge
-         * then carries an execution program the driver must run, and
-         * the presented execution digest is verified server-side, the
-         * deterministic execution-mismatch failure on a missing or
-         * wrong digest. The dimension is supplementary evidence only,
-         * never the sole acceptance boundary. The PoW proof and the
-         * record state machinery always gate. The gate is inert
-         * without an execution_key (never a breakage, never an arm).
+         * {@see self::executionArmingEnabled()}.
+         * The issued challenge then carries an execution program the
+         * driver must run, and the presented execution digest is
+         * verified server-side.
+         * A missing or wrong digest is the deterministic
+         * execution-mismatch failure.
+         * The dimension is supplementary evidence only, never the sole
+         * acceptance boundary. The PoW proof and the record state
+         * machinery always gate.
+         * The gate is inert without an execution_key (never a
+         * breakage, never an arm).
          */
         private readonly bool $executionGate = false,
         /**
@@ -267,13 +272,15 @@ final class ChallengeController
     /**
      * Whether this issuance arms the ExecutionChallengeV1 dimension,
      * the cleanest seam for the risk gate. The dimension is armed when
-     * the risk.execution_challenge gate is on and a risk trigger
-     * passes. With the risk engine wired, the trigger is a non-Allow
-     * pre-issue decision, the same population the decoy surface
-     * targets. Without the risk engine, the gate itself is the
-     * trigger, so a deployment that turned the gate on arms every
-     * issuance. The program is generated from the challenge context
-     * inside the issuer, see
+     * the risk.execution_challenge gate is on, a risk trigger passes,
+     * and the two-phase protocol-v4 rollout gate confirms the central
+     * security-policy floor is >= 4, see
+     * {@see self::executionV4EmissionEnabled()}.
+     * With the risk engine wired, the trigger is a non-Allow pre-issue
+     * decision, the same population the decoy surface targets.
+     * Without the risk engine, the gate itself is the trigger, so a
+     * deployment that turned the gate on arms every issuance. The program is generated from the challenge
+     * context inside the issuer, see
      * {@see \KiwiCaptcha\Issuer::issueWithExecutionField()}.
      *
      * @param array{decision: \KiwiCaptcha\Risk\RiskDecision, action: \KiwiCaptcha\Risk\RiskAction}|null $riskDecision the resolved pre-issue decision, null when risk declined or was not wired
@@ -290,6 +297,16 @@ final class ChallengeController
         if ($this->issuer->config()->executionKey === null) {
             return false;
         }
+        // The two-phase protocol-v4 rollout gate: execution arming
+        // requires the confirmed central min_protocol_version floor
+        // >= 4 (the decoy surface separately requires >= 3). A floor
+        // below 4, an absent/corrupt/unreadable floor or no central
+        // policy at all fails safe to execution-unarmed emission — the
+        // writer never emits v4 until the fleet floor proves readers
+        // support it.
+        if (!$this->executionV4EmissionEnabled()) {
+            return false;
+        }
         if ($this->risk === null || $riskDecision === null) {
             // The risk engine is off (or declined to evaluate): the gate
             // alone is the trigger.
@@ -297,6 +314,53 @@ final class ChallengeController
         }
 
         return $riskDecision['action'] !== RiskAction::Allow;
+    }
+
+    /**
+     * The protocol-v4 emission gate implements the two-phase rollout
+     * invariant for the execution dimension: execution arming
+     * (risk.execution_challenge on) requires the confirmed central
+     * security-policy floor ({kiwi:<ns>}:security-policy
+     * min_protocol_version, read through the SecurityEpochMonitor's
+     * cached central-policy snapshot) to be >= 4.
+     * The floor establishes that every serving binary accepts protocol
+     * v4 (the execution-capable canonical with the signed commitment)
+     * before any node emits it.
+     * A floor below 4, an absent or corrupt floor,
+     * an unreadable central policy or no central policy at all (null
+     * epoch monitor / null security Redis) all fail safe to
+     * execution-unarmed emission: v4 is never armed on uncertainty.
+     * The actionable warning fires once per process. The
+     * SecurityEpochMonitor's refresh() runs earlier in the pipeline
+     * (the max-stale check), so this read is the freshest cached
+     * central state.
+     */
+    private function executionV4EmissionEnabled(): bool
+    {
+        $floor = $this->epochMonitor?->minProtocolVersion();
+        if ($floor !== null && $floor >= 4) {
+            return true;
+        }
+        if (!$this->decoyV3WarningLogged) {
+            $this->decoyV3WarningLogged = true;
+            $detail = $floor === null
+                ? 'no confirmed central min_protocol_version (the policy hash is absent, corrupt, unreadable, or no security Redis is configured)'
+                : sprintf('the central min_protocol_version is %d', $floor);
+            $message = sprintf(
+                'kiwicaptcha: risk.execution_challenge is on but protocol-v4 emission stays DISABLED — %s (below 4). '.
+                'Raise the central {kiwi:<ns>}:security-policy min_protocol_version to 4 only after every serving binary accepts protocol v4 '.
+                '(deploy the new binaries fleet-wide and confirm no old binary remains); until then issuance stays execution-unarmed '.
+                '(protocol v3 at most, or v2 when the decoy floor is unmet too).',
+                $detail,
+            );
+            try {
+                $this->logger?->warning($message);
+            } catch (\Throwable) {
+                // A raising logger must never break issuance.
+            }
+        }
+
+        return false;
     }
 
     /**
@@ -1371,17 +1435,18 @@ final class ChallengeController
             $armDecoy = $this->risk !== null && $this->protocolV3EmissionEnabled();
             // The ExecutionChallengeV1 seam: the dimension is armed when
             // the risk.execution_challenge gate is on AND a risk trigger
-            // passes, see {@see self::executionArmingEnabled()}; the
-            // program is generated from the challenge context
-            // inside the issuer. The
-            // provider-style action of the request rides the program
-            // (bounded 1..32 chars, already validated above) so the
-            // digest binds the action; the dimension protocol version is
-            // the fixed v1.
+            // passes AND the confirmed central floor is >= 4, see
+            // {@see self::executionArmingEnabled()}; the program is
+            // generated from the challenge context inside the issuer
+            // (an armed issuance writes protocol v4 with the signed
+            // commitment). The provider-style action of the request
+            // rides the program (bounded 1..32 chars, already validated
+            // above) so the digest binds the action; the dimension
+            // protocol version is the fixed canonical byte 1.
             $armExecution = $this->executionArmingEnabled($executionRiskDecision);
             $challenge = $profile !== null
-                ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname, armDecoyField: $armDecoy, armExecution: $armExecution, executionAction: $action, executionVersion: '1')
-                : $issuer->issueWithExecutionField($scope, $clientIp, $armExecution, $requestBinding, $hostname, $action, '1', $armDecoy);
+                ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname, armDecoyField: $armDecoy, armExecution: $armExecution, executionAction: $action, executionVersion: 1)
+                : $issuer->issueWithExecutionField($scope, $clientIp, $armExecution, $requestBinding, $hostname, $action, 1, $armDecoy);
             // Chain stage binding: the newly minted challenge nonce must
             // differ from the chain's verified stage-1 nonce (server-held
             // in the state record). The nonces are server-minted random

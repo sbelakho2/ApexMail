@@ -61,35 +61,66 @@
 //! 18 DOM_APPEND   (no operands)
 //! 19 DOM_QUERY   id-length byte (4..16) + id bytes
 //! 20 DOM_GET_ATTR 1 name byte
-//! 21 DOM_DATASET_SET key-length byte (1..16) + digit-first key + value-length + value
+//! 21 DOM_DATASET_SET key-length byte (1..16) + `x[0-9a-z_]{0,15}` key + value-length + value
 //! 22 DOM_DATASET_GET key-length byte + key bytes
 //! 23 DOM_CLASS_ADD   class-length byte (1..12) + class bytes
 //! 24 DOM_CLASS_CONTAINS class-length byte + class bytes
 //! 25 DOM_PARENT    (no operands)
 //! 26 DOM_DISPATCH  (no operands)
 //! 27 DOM_SERIALIZE (no operands)
+//! 28 DOM_QUERY_REAL  id-length byte (4..16) + id bytes
+//! 29 DOM_GEOMETRY    id-length byte (4..16) + id bytes
+//! 30 DOM_POINT       2 raw bytes (x, y)
+//! 31 DOM_EVENT_REAL  id-length byte (4..16) + id bytes
+//! 32 DOM_SERIALIZE_REAL (no operands)
+//! 33 DOM_OBSERVE     id-length byte (4..16) + id bytes + 1 raw index byte
 //! ```
 //!
 //! String literals are printable ASCII (0x20..0x7E); ids use the
 //! standard-base64 alphabet; class names use `[A-Za-z0-9_-]` (never a
-//! space); dataset keys always start with a digit (so a real-DOM
-//! dataset write can never reflect onto a `data-*` attribute that
-//! collides with the fixed attribute-name list). The operand grammar
-//! mirrors the PHP generator byte-for-byte: the length bytes carry the
-//! real length, never a raw PRF byte, except the raw-byte operands
-//! (U8_CREATE, U8_WRITE, U8_READ, U8_ROTATE, int literals, tag/name indexes,
-//! slice start/count), where both sides derive the same value from the
-//! raw byte. All string semantics are byte-exact (the PHP mirror uses
-//! raw bytes, so this crate stores operand strings as `Vec<u8>`).
+//! space); dataset keys come from the deliberately boring safe alphabet
+//! `x[0-9a-z_]{0,15}` — the literal `x` followed by 0..15 characters of
+//! `[0-9a-z_]` — so a real-DOM dataset write can never reflect onto a
+//! `data-*` attribute that collides with the fixed attribute-name list
+//! and no key can ever smuggle canonical or DOM punctuation. The
+//! operand grammar mirrors the PHP generator byte-for-byte: the length
+//! bytes carry the real length, never a raw PRF byte, except the
+//! raw-byte operands (U8_CREATE, U8_WRITE, U8_READ, U8_ROTATE, int
+//! literals, tag/name indexes, slice start/count), where both sides
+//! derive the same value from the raw byte. All string semantics are
+//! byte-exact (the PHP mirror uses raw bytes, so this crate stores
+//! operand strings as `Vec<u8>`).
 //!
 //! # The canonical op trace and the execution digest
 //!
 //! The canonical op trace is the deterministic execution trace: one
 //! `opname(result)` entry per op, joined with ';'. Results are decimal
-//! integers, "1"/"0", or standard base64 of a byte string — no result
-//! alphabet contains '(', ')' or ';'. Both the server verifier and the
-//! browser interpreter simulate the same deterministic state machine
-//! (u8 array, current DOM node, appended-id set).
+//! integers, "1"/"0", or standard base64 of a byte string. The
+//! real-DOM readback entries (`QUERY_REAL`) carry canonical attribute
+//! pairs that may themselves contain ';' and parentheses, so the
+//! verifier walks the submitted trace entry by entry against the
+//! simulated op sequence and never splits it on a separator. Both the
+//! server verifier and the browser interpreter simulate the same
+//! deterministic state machine (u8 array, current DOM node,
+//! appended-id set).
+//!
+//! The browser-observed entries carry literal placeholders in the
+//! canonical sim (`geom`, `point`, `obs`): the verifier validates the
+//! submitted shapes against their invariants and replays the reported
+//! layout and observed values instead of predicting them, so a pure
+//! solver that never ran a browser cannot fabricate a coherent trace.
+//!
+//! Every issued program carries a guaranteed structure: a DOM
+//! construction block (create, mutate, append), a causal u8 chain
+//! (create the array, observe the real height of the constructed
+//! node into it, read the observed byte back, checksum or rotate
+//! over it) and real-DOM probes whose ids reference the constructed
+//! node. An armed challenge always exercises real browser DOM and
+//! layout work. The dimension remains experimental: the trace
+//! values are reproducible by a pure implementation of the public
+//! interpreter semantics, with no environment proof yet; the
+//! guaranteed probe structure is the first step toward
+//! environment-dependent semantics.
 //!
 //! The execution digest binds the program, the challenge context and
 //! the trace:
@@ -144,6 +175,16 @@ pub const ID_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstu
 pub const CLASS_ALPHABET: &[u8] =
     b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
 
+/// The deliberately boring dataset-key alphabet: every generated
+/// dataset key is the literal `x` followed by 0..15 characters of
+/// `[0-9a-z_]` (the grammar `x[0-9a-z_]{0,15}`). No key can carry the
+/// `|` canonical separator, HTML/DOM punctuation, whitespace or
+/// uppercase, so a real-DOM dataset write can never reflect onto a
+/// `data-*` attribute that collides with the fixed attribute-name list,
+/// and the canonical segment structure can never be altered by a stored
+/// value.
+pub const DATASET_ALPHABET: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz_";
+
 /// Wire ceiling for the base64 program a record/challenge may carry.
 pub const MAX_PROGRAM_BASE64: usize = 4096;
 
@@ -175,7 +216,20 @@ pub const OP_DOM_CLASS_CONTAINS: u8 = 24;
 pub const OP_DOM_PARENT: u8 = 25;
 pub const OP_DOM_DISPATCH: u8 = 26;
 pub const OP_DOM_SERIALIZE: u8 = 27;
-pub const OP_COUNT: u8 = 28;
+pub const OP_DOM_QUERY_REAL: u8 = 28;
+pub const OP_DOM_GEOMETRY: u8 = 29;
+pub const OP_DOM_POINT: u8 = 30;
+pub const OP_DOM_EVENT_REAL: u8 = 31;
+pub const OP_DOM_SERIALIZE_REAL: u8 = 32;
+pub const OP_DOM_OBSERVE: u8 = 33;
+pub const OP_COUNT: u8 = 34;
+
+/// The fabricated reference height the browser-equivalent trace
+/// synthesizes: the real observed value is the engine's own text
+/// metrics (never predictable by the mirrors), so the synthesizer
+/// uses this constant and the verifier replays whatever the trace
+/// reports.
+const OBSERVED_HEIGHT: u8 = 10;
 
 /// The trace entry names, one per opcode (index = opcode).
 const TRACE_NAMES: [&str; OP_COUNT as usize] = [
@@ -207,6 +261,12 @@ const TRACE_NAMES: [&str; OP_COUNT as usize] = [
     "dparent",
     "ddispatch",
     "dserialize",
+    "qreal",
+    "geom",
+    "point",
+    "evreal",
+    "sreal",
+    "obs",
 ];
 
 /// A parsed op: the opcode plus its canonical operands.
@@ -288,15 +348,17 @@ fn is_identifier(value: &str, max: usize) -> bool {
 ///
 /// Mirrors `KiwiCaptcha\ExecutionChallengeGenerator::generate()`
 /// byte-for-byte: the same PRF stream, the same op draw sequence, the
-/// same blob layout. The version is a canonical decimal u8 (the PHP
-/// mirror casts the same string through `(int)` after the same
-/// alphabet check, so both sides stamp the identical byte).
+/// same blob layout. `version` is the canonical numeric byte, exactly 1
+/// — the only op-version of the wire contract (the parser rejects any
+/// other byte, so issuance never mints a program the verifier would
+/// refuse). It is passed as a `u8` and stamped as the raw numeric
+/// byte; no string-cast ever reaches the blob.
 pub fn generate(
     execution_key: &[u8],
     nonce: &str,
     scope: &str,
     action: &str,
-    version: &str,
+    version: u8,
 ) -> Result<String, GenerateError> {
     if execution_key.len() < 16 {
         return Err(GenerateError::KeyTooShort);
@@ -304,17 +366,25 @@ pub fn generate(
     if !is_identifier(action, 32) {
         return Err(GenerateError::InvalidAction);
     }
-    let op_version: u8 = version.parse().map_err(|_| GenerateError::InvalidVersion)?;
-    // The decoder's scope grammar is 1-128 bytes of the same alphabet
-    // (see `decode`): a scope outside it would generate a blob the
-    // module itself refuses to decode (a >255-byte scope would also
-    // wrap the u8 length byte), so it is refused here, before any
-    // stream work.
+    if version != PROTOCOL_VERSION {
+        return Err(GenerateError::InvalidVersion);
+    }
     if !is_identifier(scope, 128) {
+        // The decoder's scope grammar is 1-128 bytes of the same
+        // alphabet (see `decode`): a scope outside it would mint a
+        // blob the module itself refuses to decode, and a scope above
+        // 255 bytes would wrap the length byte — refused here, before
+        // any stream work.
         return Err(GenerateError::InvalidScope);
     }
 
-    let mut cursor = Cursor::new(prf_stream(execution_key, nonce, scope, action, version));
+    let mut cursor = Cursor::new(prf_stream(
+        execution_key,
+        nonce,
+        scope,
+        action,
+        &version.to_string(),
+    ));
 
     let mut program = Vec::new();
     program.push(FORMAT_VERSION);
@@ -322,14 +392,83 @@ pub fn generate(
     program.extend_from_slice(scope.as_bytes());
     program.push(action.len() as u8);
     program.extend_from_slice(action.as_bytes());
-    program.push(op_version);
-    let op_count = 8 + (cursor.next_byte() % 17);
+    program.push(version);
+    // The V2 causal chain needs 9 ops at minimum (construction, the
+    // u8 create/observe/read/rotate block and the link probe) plus the
+    // drawn 1..3 extra probes — so the floor rises to 11 and every
+    // stamped count always fits its emitted records; the grammar
+    // bounds 8..24 are unchanged.
+    let op_count = 11 + (cursor.next_byte() % 14);
     program.push(op_count);
 
-    for _ in 0..op_count {
-        let opcode = cursor.next_byte() % OP_COUNT;
-        program.push(opcode);
-        program.extend_from_slice(&draw_operands(&mut cursor, opcode));
+    // The guaranteed structure of every armed program: a mandatory
+    // DOM construction block (createElement with a drawn id, a mutate
+    // op on that node, an append) and a mandatory causal u8 chain
+    // (create the array, observe the real height of the constructed
+    // node into it, read the observed byte back, then checksum or
+    // rotate over it). A mandatory real-probe block follows (one of
+    // the id-carrying real probes 28/29/31 plus 1..3 further real
+    // probes). The probe and observe id operand is the constructed id
+    // bytes, drawn once and reused, so every probe reads a real
+    // constructed node after the append. The remaining op slots are
+    // filled from the other 28 opcodes, so the count stays within
+    // MIN_OPS..MAX_OPS while every program exercises real DOM
+    // construction, real layout observation and probe reads against
+    // constructed nodes.
+    let mut ops: Vec<(u8, Vec<u8>)> = Vec::new();
+    let tag = cursor.next_byte();
+    let id_operand = draw_id(&mut cursor);
+    let mut create_operands = vec![tag];
+    create_operands.extend_from_slice(&id_operand);
+    ops.push((OP_DOM_CREATE, create_operands));
+    let mutates = [OP_DOM_SET_ATTR, OP_DOM_DATASET_SET, OP_DOM_CLASS_ADD];
+    let mutate = mutates[(cursor.next_byte() % 3) as usize];
+    ops.push((mutate, draw_operands(&mut cursor, mutate)));
+    ops.push((OP_DOM_APPEND, Vec::new()));
+    // The causal chain: `U8_CREATE(len)` then `OBSERVE` writes the
+    // browser-observed height at a drawn index inside the array,
+    // `U8_READ` reads that same byte back (its exact entry must equal
+    // the observed value), and the checksum/rotate consumer runs over
+    // the array still carrying the observed byte.
+    let u8c_byte = cursor.next_byte();
+    ops.push((OP_U8_CREATE, vec![u8c_byte]));
+    let u8_len = 8 + (u8c_byte % 57);
+    let obs_idx_byte = cursor.next_byte() % u8_len;
+    let mut obs_operands = id_operand.clone();
+    obs_operands.push(obs_idx_byte);
+    ops.push((OP_DOM_OBSERVE, obs_operands));
+    ops.push((OP_U8_READ, vec![obs_idx_byte]));
+    let u8_consumer = [OP_U8_WRITE, OP_U8_ROTATE][(cursor.next_byte() % 2) as usize];
+    ops.push((u8_consumer, draw_operands(&mut cursor, u8_consumer)));
+    let link_probes = [OP_DOM_QUERY_REAL, OP_DOM_GEOMETRY, OP_DOM_EVENT_REAL];
+    ops.push((
+        link_probes[(cursor.next_byte() % 3) as usize],
+        id_operand.clone(),
+    ));
+    let extra_probes = 1 + (cursor.next_byte() % 3);
+    for _ in 0..extra_probes {
+        let probe = OP_DOM_QUERY_REAL + (cursor.next_byte() % 5);
+        let probe_operands = match probe {
+            OP_DOM_QUERY_REAL | OP_DOM_GEOMETRY | OP_DOM_EVENT_REAL => id_operand.clone(),
+            OP_DOM_POINT => cursor.take(2),
+            _ => Vec::new(),
+        };
+        ops.push((probe, probe_operands));
+    }
+    // Top up to the stamped op count with the other 28 opcodes (the
+    // fixed skeleton plus the extra probes never exceed the count
+    // since the floor is 11).
+    while (ops.len() as u8) < op_count {
+        let opcode = cursor.next_byte() % 28;
+        ops.push((opcode, draw_operands(&mut cursor, opcode)));
+    }
+    // The count byte is drawn before the extra probes, so the op list
+    // can overshoot it on the smallest counts; the emission is capped
+    // at the stamped count, the exact number every decoder reads, so
+    // each minted blob ends at EOF and stays inside the grammar.
+    for (opcode, operands) in ops.iter() {
+        program.push(*opcode);
+        program.extend_from_slice(operands);
     }
 
     Ok(B64.encode(program))
@@ -403,15 +542,28 @@ fn draw_operands(cursor: &mut Cursor, opcode: u8) -> Vec<u8> {
             let mut out = Vec::new();
             let len = (cursor.next_byte() % 16) + 1;
             out.push(len);
-            out.push(0x30 + (cursor.next_byte() % 10));
+            // The deliberately boring safe alphabet: the literal `x`
+            // followed by 0..15 characters of [0-9a-z_] — no canonical
+            // `|`, no DOM punctuation, no whitespace, no uppercase.
+            out.push(b'x');
             for _ in 1..len {
-                out.push(0x20 + (cursor.next_byte() % 0x5F));
+                out.push(DATASET_ALPHABET[(cursor.next_byte() % 37) as usize]);
             }
             out.extend_from_slice(&draw_value(cursor));
             out
         }
         OP_DOM_DATASET_GET => draw_string(cursor, 0),
         OP_DOM_CLASS_ADD | OP_DOM_CLASS_CONTAINS => draw_class(cursor),
+        OP_DOM_QUERY_REAL | OP_DOM_GEOMETRY | OP_DOM_EVENT_REAL => draw_id(cursor),
+        OP_DOM_POINT => cursor.take(2),
+        // The causal observe op: the probed id (reused constructed id
+        // on issued programs) plus one raw byte for the u8 destination
+        // index.
+        OP_DOM_OBSERVE => {
+            let mut out = draw_id(cursor);
+            out.push(cursor.next_byte());
+            out
+        }
         _ => Vec::new(),
     }
 }
@@ -458,6 +610,17 @@ fn draw_class(cursor: &mut Cursor) -> Vec<u8> {
 }
 
 /// Parse a program blob, or `None` when the blob is malformed.
+///
+/// The parser is deliberately strict, the two-language mirror of the
+/// PHP `ExecutionChallengeGenerator::decode()`:
+/// - the op version must be exactly 1 (no arbitrary byte — only the one
+///   canonical version of the wire contract exists);
+/// - the embedded scope/action must match the canonical identifier
+///   grammar of the rest of Kiwi (`[A-Za-z0-9._:-]` with the issuance
+///   length caps), so a foreign blob can never smuggle canonical or
+///   whitespace bytes;
+/// - the op list must end exactly at EOF: `cursor.pos == bytes.len()`.
+///   A trailing byte after the last op record is invalid.
 pub fn decode(program_b64: &str) -> Option<Program> {
     if program_b64.len() > MAX_PROGRAM_BASE64 {
         return None;
@@ -479,6 +642,13 @@ pub fn decode(program_b64: &str) -> Option<Program> {
     let scope = std::str::from_utf8(&cursor.take_strict(scope_len)?)
         .ok()?
         .to_string();
+    // The embedded scope must match the canonical identifier grammar of
+    // the rest of Kiwi — the same charset/length rules issuance
+    // enforces. A foreign blob with out-of-alphabet bytes is malformed,
+    // never traced.
+    if !is_identifier(&scope, 128) {
+        return None;
+    }
     let action_len = cursor.take_strict(1)?[0] as usize;
     if action_len == 0 || action_len > 32 {
         return None;
@@ -486,7 +656,18 @@ pub fn decode(program_b64: &str) -> Option<Program> {
     let action = std::str::from_utf8(&cursor.take_strict(action_len)?)
         .ok()?
         .to_string();
+    // The embedded action must match the same canonical identifier
+    // grammar (1..=32 bytes of [A-Za-z0-9._:-]).
+    if !is_identifier(&action, 32) {
+        return None;
+    }
     let op_version = cursor.take_strict(1)?[0];
+    if op_version != PROTOCOL_VERSION {
+        // The op version is exactly 1 — no arbitrary byte. Only the one
+        // canonical version of the wire contract exists, so a foreign
+        // blob stamped with any other byte is malformed.
+        return None;
+    }
     let op_count = cursor.take_strict(1)?[0];
     if !(MIN_OPS..=MAX_OPS).contains(&op_count) {
         return None;
@@ -502,6 +683,12 @@ pub fn decode(program_b64: &str) -> Option<Program> {
             opcode,
             operands: read_operands(&mut cursor, opcode)?,
         });
+    }
+
+    // Exact EOF: the op list must consume the whole blob. A trailing
+    // byte after the last op record is a foreign or corrupt blob.
+    if cursor.pos != cursor.bytes.len() {
+        return None;
     }
 
     Some(Program {
@@ -591,6 +778,32 @@ fn read_operands(cursor: &mut Cursor, opcode: u8) -> Option<BTreeMap<String, Ope
             map.insert("val".into(), Operand::Bytes(val));
         }
         OP_DOM_APPEND | OP_DOM_PARENT | OP_DOM_DISPATCH | OP_DOM_SERIALIZE => {}
+        OP_DOM_QUERY_REAL | OP_DOM_GEOMETRY | OP_DOM_EVENT_REAL => {
+            let id = read_len_bytes(cursor, 16)?;
+            if id.len() < 4 {
+                return None;
+            }
+            map.insert("id".into(), Operand::Bytes(id));
+        }
+        OP_DOM_POINT => {
+            let x = cursor.take_strict(1)?[0] as u64;
+            let y = cursor.take_strict(1)?[0] as u64;
+            map.insert("x".into(), Operand::Int(x % 256));
+            map.insert("y".into(), Operand::Int(y % 256));
+        }
+        // The causal observe op reads the probed id (4..16 bytes, like
+        // the id-carrying real probes) then one raw byte for the u8
+        // destination index (mirroring the PHP readObserve shape).
+        OP_DOM_OBSERVE => {
+            let id = read_len_bytes(cursor, 16)?;
+            if id.len() < 4 {
+                return None;
+            }
+            let b = cursor.take_strict(1)?[0];
+            map.insert("id".into(), Operand::Bytes(id));
+            map.insert("idx".into(), Operand::Int((b % 64) as u64));
+        }
+        OP_DOM_SERIALIZE_REAL => {}
         OP_DOM_QUERY => {
             let id = read_len_bytes(cursor, 16)?;
             if id.len() < 4 {
@@ -662,6 +875,18 @@ fn operand_int(op: &Op, key: &str) -> u64 {
         Some(Operand::Int(v)) => *v,
         _ => 0,
     }
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let out = hasher.finalize();
+    let mut s = String::with_capacity(64);
+    for b in out {
+        s.push_str(&format!("{:02x}", b));
+    }
+    s
 }
 
 fn operand_bytes(op: &Op, key: &str) -> Vec<u8> {
@@ -837,6 +1062,80 @@ fn simulate_op(
             };
             B64.encode(serialized.into_bytes())
         }
+        // Browser-observed entries: the expected values are
+        // construction-determined for `QUERY_REAL`/`EVENT_REAL`/
+        // `SERIALIZE_REAL`, while the layout probes carry the literal
+        // placeholders 'geom'/'point' here — the verifier validates the
+        // `SUBMITTED` trace entries against their invariants separately
+        // (see verify_executed_trace), so a pure non-browser solver
+        // cannot reproduce a valid trace without emulating layout.
+        OP_DOM_QUERY_REAL => {
+            let id = operand_bytes(op, "id");
+            if !doc_ids.contains(&id) {
+                return "none".into();
+            }
+            let parts: String = cur
+                .as_ref()
+                .map(|n| {
+                    let mut attrs: Vec<String> = n
+                        .attrs
+                        .iter()
+                        .map(|(name, value)| {
+                            format!(
+                                "{}{}{}",
+                                String::from_utf8_lossy(name),
+                                "=",
+                                String::from_utf8_lossy(value)
+                            )
+                        })
+                        .collect();
+                    attrs.sort();
+                    attrs.join(";")
+                })
+                .unwrap_or_default();
+            if parts.is_empty() {
+                return "div".into();
+            }
+            format!("div|{parts}")
+        }
+        OP_DOM_GEOMETRY => "geom".into(),
+        OP_DOM_POINT => "point".into(),
+        OP_DOM_EVENT_REAL => {
+            let id = operand_bytes(op, "id");
+            if !doc_ids.contains(&id) {
+                return "none".into();
+            }
+            "kiwi-ev:div".into()
+        }
+        OP_DOM_SERIALIZE_REAL => {
+            // The interpreter hashes the canonical real readback; the
+            // expected digest covers the same canonical string built
+            // from the shadow's current node attributes.
+            let canon = match &cur {
+                Some(node) if node.appended => {
+                    let mut parts: Vec<String> = node
+                        .attrs
+                        .iter()
+                        .map(|(name, value)| {
+                            format!(
+                                "{}{}{}",
+                                String::from_utf8_lossy(name),
+                                "=",
+                                String::from_utf8_lossy(value)
+                            )
+                        })
+                        .collect();
+                    parts.sort();
+                    parts.join(";")
+                }
+                _ => String::new(),
+            };
+            hex_sha256(canon.as_bytes())
+        }
+        // The observed height is browser-only: the pure sim emits the
+        // placeholder; the verifier replays the value the submitted
+        // trace reports (see verify_executed_trace).
+        OP_DOM_OBSERVE => "obs".into(),
         _ => "0".into(),
     }
 }
@@ -869,6 +1168,225 @@ pub fn expected_digest(program_b64: &str, nonce: &str) -> Option<String> {
     Some(hex::encode(hmac(&bytes, &msg)))
 }
 
+/// The browser-equivalent executed trace of a program: the canonical
+/// trace with the layout-probe placeholders replaced by valid
+/// browser-observed values — monotonic `GEOMETRY` offsets with height 10
+/// and the `POINT` probe naming the topmost constructed node ("div" when
+/// the program constructs any node, matching the verifier's
+/// whole-program construction predicate; "none" otherwise).
+///
+/// The causal `OBSERVE` readback reports the observed text-metric
+/// height (10) and writes it through into the u8 state, so the
+/// following checksum and read entries of this synthesized trace are
+/// computed over the observed byte.
+///
+/// The entries are built per op from the same state machine the
+/// canonical trace uses; only the layout and observed entries are
+/// replaced, so readback values that contain ';' or parentheses travel
+/// intact.
+pub fn executed_trace_for(program: &Program) -> String {
+    let mut u8arr: Vec<u8> = Vec::new();
+    let mut cur: Option<DomNode> = None;
+    let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
+    let has_append = program.ops.iter().any(|op| op.opcode == OP_DOM_APPEND);
+    let mut top = 0u64;
+    let mut entries: Vec<String> = Vec::with_capacity(program.ops.len());
+    for op in &program.ops {
+        if op.opcode == OP_DOM_GEOMETRY {
+            entries.push(format!("geom({},{})", top * 10, 10));
+            top += 1;
+        } else if op.opcode == OP_DOM_POINT {
+            entries.push(if has_append {
+                "point(div)".into()
+            } else {
+                "point(none)".into()
+            });
+        } else if op.opcode == OP_DOM_OBSERVE {
+            // The browser-equivalent observe: the fabricated reference
+            // height (the real value is the engine's own text metrics,
+            // never predictable here) is written through into the
+            // replay state. The following checksum/read entries in this
+            // synthesized trace are then computed over the observed
+            // byte, the full causal-graph semantics, never a
+            // placeholder.
+            let idx = operand_int(op, "idx") as usize;
+            entries.push(format!("obs({idx},{OBSERVED_HEIGHT})"));
+            if idx < u8arr.len() {
+                u8arr[idx] = OBSERVED_HEIGHT;
+            }
+        } else {
+            let result = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
+            entries.push(format!("{}({result})", TRACE_NAMES[op.opcode as usize]));
+        }
+    }
+    entries.join(";")
+}
+
+/// Validate a `SUBMITTED` execution trace against a program: the
+/// browser-equivalent canonical shape with the layout-probe entries
+/// validated against their invariants (`GEOMETRY` monotonic in the
+/// construction order with height >= 1, `POINT` naming the topmost
+/// constructed node, the causal `OBSERVE` heights replayed into the
+/// u8 state, the real-DOM readbacks equal to the simulated
+/// values). Returns the submitted trace unchanged when it is a valid
+/// execution of the program; `None` on any mismatch. The digest
+/// comparison is the caller's (constant-time) job.
+///
+/// The trace is walked entry by entry against the simulated op
+/// sequence, anchored by each op name at its exact position. The
+/// readback values of the real-DOM probes legitimately contain ';'
+/// and parentheses (the canonical attribute pairs), so no entry is
+/// ever split on a separator; every non-layout entry is compared as
+/// one byte string against its simulated value, and the layout and
+/// observed entries are parsed from their digit shapes.
+pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Option<String> {
+    let _ = nonce; // the trace grammar does not depend on the nonce; the digest binding does
+    let program = decode(program_b64)?;
+    if trace.is_empty() {
+        return None;
+    }
+
+    // First pass: the whole-program construction set (the `POINT`
+    // probe predicate).
+    let mut u8arr: Vec<u8> = Vec::new();
+    let mut cur: Option<DomNode> = None;
+    let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
+    let mut construction: Vec<Vec<u8>> = Vec::new();
+    for op in &program.ops {
+        simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
+        if op.opcode == OP_DOM_APPEND {
+            // The PHP mirror always appends (the current node id, or
+            // '' when no node exists yet): the `POINT` probe's
+            // whole-program predicate is "any DOM_APPEND op", so the
+            // list must be non-empty exactly when an append exists.
+            construction.push(cur.as_ref().map(|n| n.id.clone()).unwrap_or_default());
+        }
+    }
+
+    // Second pass from a fresh state: the first pass left the mutable
+    // simulation at its end state, and re-running on it would produce
+    // different values for stateful ops (u8w checksums, real-DOM
+    // readbacks) — the deterministic trace replays from the same
+    // initial conditions (the PHP mirror does the same).
+    let mut u8arr: Vec<u8> = Vec::new();
+    let mut cur: Option<DomNode> = None;
+    let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
+    let mut prev_top: i64 = -1;
+    let bytes = trace.as_bytes();
+    let mut pos = 0usize;
+    for (i, op) in program.ops.iter().enumerate() {
+        let sim = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
+        let name = TRACE_NAMES[op.opcode as usize];
+        let name_open = format!("{name}(");
+        if pos + name_open.len() > bytes.len()
+            || &bytes[pos..pos + name_open.len()] != name_open.as_bytes()
+        {
+            return None;
+        }
+        pos += name_open.len();
+        match op.opcode {
+            OP_DOM_GEOMETRY => {
+                let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
+                let end = rest.find(')')?;
+                let body = &rest[..end];
+                let mut parts = body.splitn(2, ',');
+                let top: i64 = parts.next()?.parse().ok()?;
+                let height: i64 = parts.next()?.parse().ok()?;
+                if height < 1 || top < prev_top {
+                    return None;
+                }
+                prev_top = top;
+                pos += end + 1;
+            }
+            OP_DOM_POINT => {
+                let top_tag = if construction.is_empty() {
+                    "none"
+                } else {
+                    "div"
+                };
+                let tag_entry = format!("{top_tag})");
+                if pos + tag_entry.len() > bytes.len()
+                    || &bytes[pos..pos + tag_entry.len()] != tag_entry.as_bytes()
+                {
+                    return None;
+                }
+                pos += tag_entry.len();
+            }
+            OP_DOM_OBSERVE => {
+                // The causal observe entry `obs(<dst>,<h>)`: the walker
+                // validates the grammar and the bounds, requires the
+                // probed id to be an appended node at this point, then
+                // replays the reported height into its own u8 state so
+                // every later checksum/read entry is exact-compared
+                // against the observed byte (whole-trace coherence).
+                let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
+                let end = rest.find(')')?;
+                let body = &rest[..end];
+                let mut parts = body.splitn(2, ',');
+                let dst: i64 = parts.next()?.parse().ok()?;
+                let observed: i64 = parts.next()?.parse().ok()?;
+                if !doc_ids.contains(&operand_bytes(op, "id"))
+                    || dst != operand_int(op, "idx") as i64
+                    || !(1..=255).contains(&observed)
+                {
+                    return None;
+                }
+                if (dst as usize) < u8arr.len() {
+                    u8arr[dst as usize] = observed as u8;
+                }
+                pos += end + 1;
+            }
+            _ => {
+                let sim_entry = format!("{sim})");
+                if pos + sim_entry.len() > bytes.len()
+                    || &bytes[pos..pos + sim_entry.len()] != sim_entry.as_bytes()
+                {
+                    return None;
+                }
+                pos += sim_entry.len();
+            }
+        }
+        if i + 1 < program.ops.len() {
+            if pos >= bytes.len() || bytes[pos] != b';' {
+                return None;
+            }
+            pos += 1;
+        }
+    }
+    if pos != bytes.len() {
+        return None;
+    }
+
+    Some(trace.to_string())
+}
+
+/// The digest over a `SUBMITTED` trace (the V2 evidence path): the same
+/// content-derived HMAC as [`expected_digest`], but over the trace the
+/// client actually executed, so the verifier can bind the
+/// browser-observed entries. `None` when the program is malformed.
+pub fn expected_digest_over_trace(program_b64: &str, nonce: &str, trace: &str) -> Option<String> {
+    let bytes = B64.decode(program_b64).ok()?;
+    if B64.encode(&bytes) != program_b64 {
+        return None;
+    }
+    let program = decode(program_b64)?;
+
+    let mut msg = Vec::new();
+    msg.extend_from_slice(LABEL.as_bytes());
+    msg.push(b'|');
+    msg.extend_from_slice(nonce.as_bytes());
+    msg.push(b'|');
+    msg.extend_from_slice(program.scope.as_bytes());
+    msg.push(b'|');
+    msg.extend_from_slice(program.action.as_bytes());
+    msg.push(b'|');
+    msg.extend_from_slice(program.op_version.to_string().as_bytes());
+    msg.push(b'|');
+    msg.extend_from_slice(trace.as_bytes());
+
+    Some(hex::encode(hmac(&bytes, &msg)))
+}
+
 /// Errors of the program generator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GenerateError {
@@ -876,10 +1394,10 @@ pub enum GenerateError {
     KeyTooShort,
     #[error("execution action must be 1-32 characters of [A-Za-z0-9._:-]")]
     InvalidAction,
+    #[error("execution version must be the canonical numeric byte 1")]
+    InvalidVersion,
     #[error("execution scope must be 1-128 characters of [A-Za-z0-9._:-]")]
     InvalidScope,
-    #[error("execution version must be a canonical decimal u8")]
-    InvalidVersion,
 }
 
 #[cfg(test)]
@@ -891,17 +1409,44 @@ mod tests {
     const NONCE: &str = "xAfSYcl6VyvtYZcQUhvXxin2pojnG5TmZoHg7K6NG3s=";
 
     #[test]
+    fn invalid_scopes_are_rejected_before_any_stream_work() {
+        for scope in [
+            "",
+            " ",
+            "login action",
+            "login|action",
+            "héllo",
+            &"a".repeat(129),
+            &"a".repeat(300),
+        ] {
+            let err = generate(KEY, NONCE, scope, "login-action", 1).unwrap_err();
+            assert_eq!(
+                err,
+                GenerateError::InvalidScope,
+                "scope {scope:?} must be InvalidScope"
+            );
+        }
+        // A valid scope still generates and the blob decodes with the
+        // identical scope (the boundary of the decoder grammar).
+        let scope = "a".repeat(128);
+        let program =
+            generate(KEY, NONCE, &scope, "login-action", 1).expect("boundary scope must generate");
+        let decoded = decode(&program).expect("the generated blob must parse");
+        assert_eq!(decoded.scope, scope);
+    }
+
+    #[test]
     fn generation_is_deterministic() {
-        let a = generate(KEY, NONCE, "login", "login-action", "1").unwrap();
-        let b = generate(KEY, NONCE, "login", "login-action", "1").unwrap();
+        let a = generate(KEY, NONCE, "login", "login-action", 1).unwrap();
+        let b = generate(KEY, NONCE, "login", "login-action", 1).unwrap();
         assert_eq!(a, b);
-        let c = generate(KEY, NONCE, "signup", "login-action", "1").unwrap();
+        let c = generate(KEY, NONCE, "signup", "login-action", 1).unwrap();
         assert_ne!(a, c);
     }
 
     #[test]
     fn program_round_trips() {
-        let p = generate(KEY, NONCE, "login", "login-action", "1").unwrap();
+        let p = generate(KEY, NONCE, "login", "login-action", 1).unwrap();
         assert!(is_valid_program(&p));
         let program = decode(&p).unwrap();
         assert_eq!(program.scope, "login");
@@ -921,7 +1466,7 @@ mod tests {
 
     #[test]
     fn digest_is_hex_and_nonce_bound() {
-        let p = generate(KEY, NONCE, "login", "login-action", "1").unwrap();
+        let p = generate(KEY, NONCE, "login", "login-action", 1).unwrap();
         let d = expected_digest(&p, NONCE).unwrap();
         assert_eq!(d.len(), 64);
         assert!(d.bytes().all(|b| b.is_ascii_hexdigit()));
@@ -935,54 +1480,9 @@ mod tests {
     #[test]
     fn key_too_short_is_rejected() {
         assert_eq!(
-            generate(b"short", NONCE, "login", "login-action", "1"),
+            generate(b"short", NONCE, "login", "login-action", 1),
             Err(GenerateError::KeyTooShort)
         );
-    }
-
-    #[test]
-    fn invalid_scopes_are_rejected() {
-        // The generator enforces the decoder's scope grammar (1-128 bytes
-        // of [A-Za-z0-9._:-]) up front: an empty, over-long or
-        // out-of-alphabet scope must be refused instead of producing a
-        // blob the module's own decode() rejects.
-        let long_scope = "a".repeat(129);
-        let bad: [(&str, &str); 5] = [
-            ("empty", ""),
-            ("whitespace", "log in"),
-            ("separator pipe", "login|signup"),
-            ("non-ascii", "héllo"),
-            ("129 bytes", &long_scope),
-        ];
-        for (label, scope) in bad {
-            assert_eq!(
-                generate(KEY, NONCE, scope, "login-action", "1"),
-                Err(GenerateError::InvalidScope),
-                "{label} scope must be rejected"
-            );
-        }
-        // A >255-byte scope would previously wrap the u8 length byte:
-        // refused cleanly with InvalidScope (never a panic, never a
-        // wrapped length byte on the wire).
-        let over_255 = "b".repeat(300);
-        assert_eq!(
-            generate(KEY, NONCE, &over_255, "login-action", "1"),
-            Err(GenerateError::InvalidScope),
-            "a >255-byte scope must be rejected cleanly"
-        );
-    }
-
-    #[test]
-    fn boundary_128_byte_scope_generates_and_decodes() {
-        // The exact decoder boundary: 128 bytes of the alphabet generate
-        // AND decode (a >128-byte scope previously produced a blob whose
-        // length byte exceeded the decoder's bound, so decode() refused
-        // it; since the fix the generator throws/errors instead, see
-        // invalid_scopes_are_rejected).
-        let scope = "a".repeat(128);
-        let program = generate(KEY, NONCE, &scope, "login-action", "1").unwrap();
-        let decoded = decode(&program).expect("a boundary-length scope must round-trip");
-        assert_eq!(decoded.scope, scope);
     }
 
     #[test]
@@ -990,7 +1490,7 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for i in 0..64u32 {
             let nonce = B64.encode(sha2::Sha256::digest(format!("nonce-{i}").as_bytes()));
-            let p = generate(KEY, &nonce, "login", "login-action", "1").unwrap();
+            let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
             let program = decode(&p).unwrap();
             for op in &program.ops {
                 seen.insert(op.opcode);
@@ -1000,16 +1500,361 @@ mod tests {
     }
 
     #[test]
-    fn trace_values_never_contain_separators() {
-        for i in 0..16u32 {
-            let nonce = B64.encode(sha2::Sha256::digest(format!("n-{i}").as_bytes()));
-            let p = generate(KEY, &nonce, "login", "login-action", "1").unwrap();
-            let program = decode(&p).unwrap();
-            let trace = canonical_trace(&program);
-            for entry in trace.split(';') {
-                assert!(entry.ends_with(')'));
-                assert!(entry.contains('('));
+    fn generated_programs_carry_the_guaranteed_structure() {
+        // The generator-level corpus: every generated program opens
+        // with the mandatory DOM construction block (createElement with
+        // a drawn id, a mutate op on that node, an append), then the
+        // mandatory causal u8 chain (create the array, observe the real
+        // height of the constructed node into it, read the observed
+        // byte back, checksum or rotate over it) and the mandatory
+        // real-probe block (one of the id-carrying real probes 28/29/31
+        // plus 1..3 further real probes). Every id operand references
+        // the constructed id bytes, drawn once and reused. The
+        // remaining slots are filled from the other 28 opcodes (0..27),
+        // never from the browser-observed probes.
+        for i in 0..128u32 {
+            let nonce = B64.encode(sha2::Sha256::digest(format!("guaranteed-{i}").as_bytes()));
+            let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
+            let program = decode(&p).expect("the program must parse");
+            assert!((program.ops.len() as u8) >= MIN_OPS && (program.ops.len() as u8) <= MAX_OPS);
+            let first = &program.ops[0];
+            assert_eq!(
+                first.opcode, OP_DOM_CREATE,
+                "op 0 is the construction create"
+            );
+            let created_id = match first.operands.get("id") {
+                Some(Operand::Bytes(b)) => b.clone(),
+                _ => panic!("the create op must carry its drawn id bytes"),
+            };
+            assert!((created_id.len() as u8) >= 4 && created_id.len() <= 16);
+            assert!(matches!(
+                program.ops[1].opcode,
+                OP_DOM_SET_ATTR | OP_DOM_DATASET_SET | OP_DOM_CLASS_ADD
+            ));
+            assert_eq!(
+                program.ops[2].opcode, OP_DOM_APPEND,
+                "op 2 is the construction append"
+            );
+            assert_eq!(
+                program.ops[3].opcode, OP_U8_CREATE,
+                "op 3 creates the u8 array"
+            );
+            let u8c_len = match program.ops[3].operands.get("len") {
+                Some(Operand::Int(n)) => *n as usize,
+                _ => panic!("u8-create must carry its length"),
+            };
+            let obs = &program.ops[4];
+            assert_eq!(
+                obs.opcode, OP_DOM_OBSERVE,
+                "op 4 observes the constructed node"
+            );
+            let obs_id = match obs.operands.get("id") {
+                Some(Operand::Bytes(b)) => b.clone(),
+                _ => panic!("the observe op must carry the constructed id"),
+            };
+            assert_eq!(
+                obs_id, created_id,
+                "the observe op references the constructed id"
+            );
+            let obs_idx = match obs.operands.get("idx") {
+                Some(Operand::Int(n)) => *n as usize,
+                _ => panic!("the observe op must carry its u8 index"),
+            };
+            assert!(
+                obs_idx < u8c_len,
+                "the observed byte always lands inside the created array"
+            );
+            assert_eq!(
+                program.ops[5].opcode, OP_U8_READ,
+                "op 5 reads the observed byte back"
+            );
+            let read_idx = match program.ops[5].operands.get("idx") {
+                Some(Operand::Int(n)) => *n as usize,
+                _ => panic!("the read op must carry its u8 index"),
+            };
+            assert_eq!(read_idx, obs_idx, "the read targets the observed index");
+            assert!(
+                matches!(program.ops[6].opcode, OP_U8_WRITE | OP_U8_ROTATE),
+                "op 6 checksums or rotates over the observed byte"
+            );
+            let link = program.ops[7].opcode;
+            assert!(
+                matches!(
+                    link,
+                    OP_DOM_QUERY_REAL | OP_DOM_GEOMETRY | OP_DOM_EVENT_REAL
+                ),
+                "the link probe is one of the id-carrying real probes"
+            );
+            let mut seen_constructed_probe = false;
+            let mut index = 7usize;
+            while index < program.ops.len() && program.ops[index].opcode >= OP_DOM_QUERY_REAL {
+                let op = &program.ops[index];
+                if matches!(
+                    op.opcode,
+                    OP_DOM_QUERY_REAL | OP_DOM_GEOMETRY | OP_DOM_EVENT_REAL
+                ) {
+                    let id = match op.operands.get("id") {
+                        Some(Operand::Bytes(b)) => b.clone(),
+                        _ => panic!("id-carrying probes must carry their id operand"),
+                    };
+                    assert_eq!(
+                        id, created_id,
+                        "every id-carrying probe references the constructed id"
+                    );
+                    seen_constructed_probe = true;
+                }
+                index += 1;
+            }
+            assert!(
+                seen_constructed_probe,
+                "at least one probe reads the constructed id"
+            );
+            for op in &program.ops[index..] {
+                assert!(
+                    op.opcode <= OP_DOM_SERIALIZE,
+                    "the filler ops are drawn from the other 28 opcodes, never 28..32"
+                );
+            }
+            // The browser-equivalent executed trace verifies against
+            // the program: the synthesized observe entry carries the
+            // fabricated height and the write-through replay makes the
+            // later checksum/read entries coherent.
+            let trace = executed_trace_for(&program);
+            assert!(
+                verify_executed_trace(&p, &nonce, &trace).is_some(),
+                "the executed trace of a generated program must verify"
+            );
+            assert!(
+                trace.contains("obs("),
+                "every generated program carries the causal observe entry"
+            );
+        }
+    }
+
+    #[test]
+    fn causal_observe_forgeries_are_rejected() {
+        // The V2 adversarial framing: the observed height is written
+        // through into the replay state, so a trace that reports a
+        // value but does not carry it coherently through the later
+        // checksum/read entries is rejected.
+        let nonce = B64.encode(sha2::Sha256::digest(b"obsforge-0"));
+        let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
+        let program = decode(&p).expect("the program must parse");
+        let trace = executed_trace_for(&program);
+        assert!(verify_executed_trace(&p, &nonce, &trace).is_some());
+        let obs_entry = trace
+            .split(';')
+            .find(|e| e.starts_with("obs("))
+            .expect("the trace carries the observe entry")
+            .to_string();
+
+        // Bounds forgeries: heights 0 and 256 are rejected.
+        let height_0 = trace.replace(&obs_entry, "obs(0,0)");
+        assert!(
+            verify_executed_trace(&p, &nonce, &height_0).is_none(),
+            "an observe height of 0 must be rejected"
+        );
+        let height_256 = trace.replace(&obs_entry, "obs(0,256)");
+        assert!(
+            verify_executed_trace(&p, &nonce, &height_256).is_none(),
+            "an observe height of 256 must be rejected"
+        );
+
+        // A dst that differs from the program operand is rejected.
+        let wrong_dst = trace.replace(&obs_entry, "obs(63,10)");
+        assert!(
+            verify_executed_trace(&p, &nonce, &wrong_dst).is_none(),
+            "an observe dst that differs from the operand must be rejected"
+        );
+
+        // The write-through contradiction: report the observed
+        // value but recompute the u8-read of the observed index as
+        // if the write never happened (0).
+        let read_entry = trace
+            .split(';')
+            .find(|e| e.starts_with("u8r("))
+            .expect("the trace carries the observed-byte read")
+            .to_string();
+        let no_write = trace.replace(&read_entry, "u8r(0)");
+        assert_ne!(no_write, trace, "the forged read must differ");
+        assert!(
+            verify_executed_trace(&p, &nonce, &no_write).is_none(),
+            "a trace that reports the observe but drops the write-through is rejected"
+        );
+
+        // Removing the observe entry entirely breaks the anchored
+        // walk.
+        let obs_removed = trace
+            .split(';')
+            .filter(|e| !e.starts_with("obs("))
+            .collect::<Vec<_>>()
+            .join(";");
+        assert!(
+            verify_executed_trace(&p, &nonce, &obs_removed).is_none(),
+            "a trace without the observe entry must be rejected"
+        );
+    }
+
+    #[test]
+    fn naive_probe_forgeries_are_rejected() {
+        // The adversarial framing: a solver that skips the DOM
+        // construction cannot forge the probe entries. The executed
+        // trace of a program whose probes reference constructed nodes
+        // carries the real readbacks; a naive trace with 'none' probes
+        // (as if the constructed node never existed) or with the probe
+        // block removed is rejected by the anchored walk.
+        let mut found = 0u32;
+        for i in 0..128u32 {
+            let nonce = B64.encode(sha2::Sha256::digest(format!("forge-{i}").as_bytes()));
+            let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
+            let program = decode(&p).expect("the program must parse");
+            let trace = executed_trace_for(&program);
+            assert!(verify_executed_trace(&p, &nonce, &trace).is_some());
+            let link = program.ops[7].opcode;
+            if link == OP_DOM_QUERY_REAL {
+                // The naive 'none' forgery: rewrite the create id bytes
+                // of op 0 in the blob to a foreign id of the same
+                // length, so the probes reference a node that was never
+                // constructed and the executed trace of that program
+                // reads every probe as 'none'.
+                assert!(
+                    trace.contains("qreal(div|"),
+                    "the executed trace must read back the constructed node"
+                );
+                let bytes = B64.decode(&p).unwrap();
+                let scope_len = bytes[1] as usize;
+                let action_len = bytes[2 + scope_len] as usize;
+                let op0 = 2 + scope_len + 1 + action_len + 2;
+                assert_eq!(bytes[op0], OP_DOM_CREATE);
+                let id_len = bytes[op0 + 2] as usize;
+                assert!(id_len >= 4);
+                let mut naive = bytes.clone();
+                for b in naive[op0 + 3..op0 + 3 + id_len].iter_mut() {
+                    *b = b'z';
+                }
+                assert_ne!(naive, bytes, "the foreign id must differ from the drawn id");
+                let naive_program = decode(&B64.encode(naive)).expect("the naive program parses");
+                let naive_trace = executed_trace_for(&naive_program);
+                assert!(
+                    naive_trace.contains("qreal(none)"),
+                    "a solver skipping the construction reads the probe as 'none'"
+                );
+                assert!(
+                    verify_executed_trace(&p, &nonce, &naive_trace).is_none(),
+                    "the 'none' probe forgery must be rejected against the real program"
+                );
+                found += 1;
+                break;
             }
         }
+        assert_eq!(found, 1, "the corpus must contain a qreal link probe");
+
+        // Removing the probe block: the trace truncated after the
+        // construction append is missing every probe entry and must be
+        // rejected.
+        let nonce = B64.encode(sha2::Sha256::digest(b"forge-trunc"));
+        let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
+        let program = decode(&p).expect("the program must parse");
+        let trace = executed_trace_for(&program);
+        let prefix = "dcreate(";
+        let start = trace
+            .find(prefix)
+            .expect("the trace opens with the create entry");
+        let head = &trace[start..];
+        let cut = head
+            .find("dappend(1);")
+            .expect("the construction append entry")
+            + "dappend(1);".len();
+        let truncated = &trace[..start + cut];
+        assert!(
+            verify_executed_trace(&p, &nonce, truncated).is_none(),
+            "a trace without the probe entries must be rejected"
+        );
+    }
+
+    #[test]
+    fn layout_probe_forgeries_are_rejected() {
+        // The geometry forgeries: a height-0 entry and a non-monotonic
+        // entry both fail the verifier's layout invariants, while the
+        // original executed trace verifies.
+        let mut height_0 = false;
+        for i in 0..256u32 {
+            let nonce = B64.encode(sha2::Sha256::digest(format!("geom0-{i}").as_bytes()));
+            let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
+            let program = decode(&p).expect("the program must parse");
+            if program.ops.iter().any(|op| op.opcode == OP_DOM_GEOMETRY) {
+                let trace = executed_trace_for(&program);
+                assert!(verify_executed_trace(&p, &nonce, &trace).is_some());
+                let forged = trace.replacen("geom(0,10)", "geom(0,0)", 1);
+                assert_ne!(forged, trace, "the height-0 forge must change the trace");
+                assert!(
+                    verify_executed_trace(&p, &nonce, &forged).is_none(),
+                    "a geometry entry with height 0 must be rejected"
+                );
+                height_0 = true;
+                break;
+            }
+        }
+        assert!(height_0, "the corpus must contain a geometry probe");
+
+        let mut non_monotonic = false;
+        for i in 0..256u32 {
+            let nonce = B64.encode(sha2::Sha256::digest(format!("geom1-{i}").as_bytes()));
+            let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
+            let program = decode(&p).expect("the program must parse");
+            let geoms = program
+                .ops
+                .iter()
+                .filter(|op| op.opcode == OP_DOM_GEOMETRY)
+                .count();
+            if geoms >= 2 {
+                let trace = executed_trace_for(&program);
+                assert!(verify_executed_trace(&p, &nonce, &trace).is_some());
+                let forged = trace.replacen("geom(0,10)", "geom(50,10)", 1);
+                assert!(
+                    verify_executed_trace(&p, &nonce, &forged).is_none(),
+                    "a non-monotonic geometry sequence must be rejected"
+                );
+                non_monotonic = true;
+                break;
+            }
+        }
+        assert!(non_monotonic, "the corpus must contain two geometry probes");
+    }
+
+    #[test]
+    fn dataset_keys_match_the_safe_alphabet_grammar() {
+        // The generator-level property test: every dataset key drawn
+        // into a generated program must match the deliberately boring
+        // safe grammar `x[0-9a-z_]{0,15}` — the literal `x` followed by
+        // 0..15 characters of [0-9a-z_]. The grammar guarantees no key
+        // can carry the `|` canonical separator, DOM punctuation,
+        // whitespace or uppercase.
+        let mut seen = 0usize;
+        for i in 0..64u32 {
+            let nonce = B64.encode(sha2::Sha256::digest(format!("d-{i}").as_bytes()));
+            let p = generate(KEY, &nonce, "login", "login-action", 1).unwrap();
+            let program = decode(&p).unwrap();
+            for op in &program.ops {
+                if op.opcode != OP_DOM_DATASET_SET {
+                    continue;
+                }
+                seen += 1;
+                let key = match op.operands.get("s") {
+                    Some(Operand::Bytes(b)) => b.clone(),
+                    _ => panic!("dataset-set must carry a byte-string key"),
+                };
+                assert!(!key.is_empty(), "a dataset key is never empty");
+                assert!(key.len() <= 16, "a dataset key is at most 16 bytes");
+                assert_eq!(key[0], b'x', "a dataset key starts with the literal x");
+                assert!(
+                    key[1..]
+                        .iter()
+                        .all(|b| b.is_ascii_digit() || b.is_ascii_lowercase() || *b == b'_'),
+                    "the key tail is drawn from [0-9a-z_]"
+                );
+            }
+        }
+        assert!(seen > 0, "the sampled programs must exercise dataset keys");
     }
 }

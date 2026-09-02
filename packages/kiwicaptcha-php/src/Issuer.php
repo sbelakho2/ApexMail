@@ -18,18 +18,32 @@ namespace KiwiCaptcha;
  *                {algorithm}|{m_kib}|{t}|{p}|{target_bits}|{salt}|
  *                {min_duration_ms}|{region}|{policy_version}|
   *                {request_binding}|{issuer}|{kid}". Region,
-  *                request_binding and issuer render as the empty segment
-  *                when unset; policy_version as the configured
-  *                security-policy epoch; kid as the configured signing
-  *                key id, the final canonical field. Protocol v3 is the
-  *                decoy-capable canonical: when a decoy (honeypot) field
-  *                is armed, see {@see self::issueWithDecoyField()},
-  *                exactly one more segment is appended after the kid,
-  *                ...|{issuer}|{kid}|{decoy_field}, and the stored
-  *                record's protocol_version is 3 — see
-  *                {@see self::canonicalPayload()}. Unarmed issuance
-  *                stays protocol v2, byte-identical to the pre-decoy
-  *                format.
+ *                request_binding and issuer render as the empty segment
+ *                when unset; policy_version as the configured
+ *                security-policy epoch; kid as the configured signing
+ *                key id, the final canonical field. Protocol v3 is the
+ *                decoy-capable canonical: when a decoy (honeypot) field
+ *                is armed, see {@see self::issueWithDecoyField()},
+ *                exactly one more segment is appended after the kid,
+ *                ...|{issuer}|{kid}|{decoy_field}, and the stored
+ *                record's protocol_version is 3 — see
+ *                {@see self::canonicalPayload()}. Unarmed issuance
+ *                stays protocol v2, byte-identical to the pre-decoy
+ *                format. Protocol v4 is the execution-capable
+ *                canonical: when the ExecutionChallengeV1 dimension is
+ *                armed, see {@see self::issueWithExecutionField()}, the
+ *                execution commitment segments are appended after the
+ *                decoy segment (or after the kid when no decoy is
+ *                armed).
+ *                Then the canonical ends
+ *                ...|{kid}|{decoy_field}|
+ *                {execution_version}|{execution_commitment}, and the
+ *                stored record's protocol_version is 4.
+ *                The commitment is the hex SHA-256 of the program's
+ *                base64 wire string, so the signed canonical is the
+ *                exact mirror of the stored program. Stripping,
+ *                substituting or injecting a program always breaks the
+ *                signature.
  *   signature  = hex(H), where H = hmac_sha256(K_challenge, canonical),
  *                an `HKDF`-derived purpose key, see {@see DerivedKeys}.
  *                The master secret is never used directly as the signing
@@ -228,6 +242,10 @@ final class Issuer
      * `[A-Za-z0-9_-]{1,64}` alphabet) instead of a fresh random pick.
      * Production callers omit it.
      *
+     * `$executionVersion` is the execution-dimension protocol version,
+     * the canonical numeric byte: exactly 1 (the only version of the
+     * wire contract), passed as an int — never a string that is cast.
+     *
      * @throws \InvalidArgumentException when `$decoyNameOverride` is set
      *                                   but not a valid decoy field name
      */
@@ -240,7 +258,7 @@ final class Issuer
         ?string $decoyNameOverride = null,
         bool $armExecution = false,
         ?string $executionAction = null,
-        string $executionVersion = '1',
+        int $executionVersion = 1,
     ): Challenge {
         if ($decoyNameOverride !== null && !Config::isValidDecoyFieldName($decoyNameOverride)) {
             throw new \InvalidArgumentException('decoy name override must be 1-64 characters of [A-Za-z0-9_-]');
@@ -280,8 +298,17 @@ final class Issuer
      * dimension by accident. `$executionAction` is the provider-style
      * action of the request, 1..32 chars of [A-Za-z0-9._:-], default
      * "default", and `$executionVersion` the dimension protocol
-     * version, default 1. Both are embedded in the program and bound by
-     * the digest.
+     * version, the canonical numeric byte: exactly 1 (int, never a
+     * string that is cast). Both are embedded in the program and bound
+     * by the commitment.
+     *
+     * An armed issuance writes protocol v4: the stored record carries
+     * `execution_program` plus the authenticated `execution_version`
+     * and `execution_commitment` (hex SHA-256 of the program) signed
+     * into the canonical payload as the final
+     * `|execution_version|execution_commitment` segments.
+     * Stripping, substituting or injecting a program always breaks the
+     * signature.
      *
      * @throws \InvalidArgumentException when arming without an
      *                                   execution_key, or with an invalid
@@ -294,7 +321,7 @@ final class Issuer
         ?string $requestBinding = null,
         ?string $hostname = null,
         ?string $executionAction = null,
-        string $executionVersion = '1',
+        int $executionVersion = 1,
         bool $armDecoyField = false,
         ?string $decoyNameOverride = null,
         ?ChallengeProfile $profile = null,
@@ -465,7 +492,7 @@ final class Issuer
         ?string $decoyField,
         bool $armExecution = false,
         ?string $executionAction = null,
-        string $executionVersion = '1',
+        int $executionVersion = 1,
     ): Challenge {
         $scopeLen = \strlen($scope);
         if ($scopeLen < 1 || $scopeLen > 128) {
@@ -501,8 +528,37 @@ final class Issuer
 
         // The decoy (honeypot) field name, when armed, was picked before
         // the canonical input is built: it is an authenticated issuance
-        // parameter (the final `|<decoy_field>` segment), signed like
-        // every other.
+        // parameter (the `|<decoy_field>` segment), signed like every
+        // other.
+        //
+        // The ExecutionChallengeV1 program is minted before the canonical
+        // input too: the commitment segments are part of the signed
+        // canonical, and the commitment is a function of the program (the
+        // program itself binds the nonce, which exists by now). Arming
+        // without the configured execution_key is a misconfiguration and
+        // refuses the issuance: the execution dimension can never be
+        // armed by accident.
+        $executionProgram = null;
+        if ($armExecution) {
+            if ($this->config->executionKey === null) {
+                throw new \InvalidArgumentException(
+                    'execution challenges are armed but no execution_key is configured'
+                );
+            }
+            $executionProgram = ExecutionChallengeGenerator::generate(
+                $this->config->executionKey,
+                $nonce,
+                $scope,
+                $executionAction ?? 'default',
+                $executionVersion,
+            );
+        }
+        // The authenticated commitment is the hex SHA-256 of the stored
+        // program's base64 wire string — the exact mirror of the stored
+        // program, signed into the canonical below.
+        $executionCommitment = $executionProgram !== null
+            ? self::executionCommitment($executionProgram)
+            : null;
         $payload = self::canonicalPayload(
             $nonce,
             $scope,
@@ -522,32 +578,18 @@ final class Issuer
             $this->config->issuer,
             $this->config->kid,
             $decoyField,
+            // The canonical execution segments ride only an armed
+            // issuance: the version and the commitment are passed
+            // together (or both null for the unarmed path), so the
+            // signed canonical can never carry a partial execution
+            // segment.
+            $executionProgram !== null ? $executionVersion : null,
+            $executionCommitment,
         );
         $signature = self::signPayloadV2($payload, $this->config->secretKey);
 
         $challenge = base64_encode($payload).'.'.$signature;
         $prefix = $challenge.'|'.$salt.'|';
-
-        // The ExecutionChallengeV1 program, minted from the challenge
-        // context once the nonce exists (the program binds the nonce).
-        // Arming without the configured execution_key is a
-        // misconfiguration and refuses the issuance: the execution
-        // dimension can never be armed by accident.
-        $executionProgram = null;
-        if ($armExecution) {
-            if ($this->config->executionKey === null) {
-                throw new \InvalidArgumentException(
-                    'execution challenges are armed but no execution_key is configured'
-                );
-            }
-            $executionProgram = ExecutionChallengeGenerator::generate(
-                $this->config->executionKey,
-                $nonce,
-                $scope,
-                $executionAction ?? 'default',
-                $executionVersion,
-            );
-        }
 
         $record = new ChallengeRecord(
             nonce: $nonce,
@@ -569,11 +611,15 @@ final class Issuer
             // persisted to shared storage). The name/JSON key stay
             // issuedAtNs for ChallengeRecord serialization stability.
             issuedAtNs: (int) (microtime(true) * 1_000_000),
-            // Protocol version by decoy arm: an armed record carries the
-            // decoy-capable canonical (the `|decoy_field` segment after
-            // the kid), so it is protocol v3; an unarmed record keeps
-            // protocol v2 with the byte-identical 18-field canonical.
-            protocolVersion: $decoyField !== null ? 3 : 2,
+            // Protocol version by arm: an execution-armed record carries
+            // the execution-capable canonical (the
+            // `|execution_version|execution_commitment` segments after
+            // the decoy/kid), so it is protocol v4; a decoy-only record
+            // carries the decoy-capable canonical (the `|decoy_field`
+            // segment after the kid), so it is protocol v3; an unarmed
+            // record keeps protocol v2 with the byte-identical 18-field
+            // canonical.
+            protocolVersion: $executionProgram !== null ? 4 : ($decoyField !== null ? 3 : 2),
             region: $this->region,
             policyVersion: $this->config->policyVersion,
             requestBinding: $requestBinding,
@@ -582,6 +628,13 @@ final class Issuer
             kid: $this->config->kid,
             decoyField: $decoyField,
             executionProgram: $executionProgram,
+            // The authenticated v4 execution triplet: the version and
+            // the commitment ride the stored record exactly as they were
+            // signed (never recomputed), so the equivalence between the
+            // signed canonical and the stored program is preserved
+            // byte-for-byte through storage round-trips.
+            executionVersion: $executionProgram !== null ? $executionVersion : null,
+            executionCommitment: $executionCommitment,
         );
         $this->storage->store($record);
 
@@ -618,8 +671,10 @@ final class Issuer
      * format, signing, and storage are identical to a regular issue; only
      * the parameters differ. When `$armDecoyField` is true the issuance
      * is the armed variant, {@see self::issueWithDecoyField()}: a
-     * random pool name is picked per issuance, the record is protocol v3
-     * and the authenticated name rides the challenge response.
+     * random pool name is picked per issuance.
+     * The record is protocol v3 (or v4 when the execution dimension is
+     * armed too) and the authenticated name rides the challenge
+     * response.
      *
      * @throws \InvalidArgumentException when the profile is invalid (or the
      *                                   scope is invalid, per issue())
@@ -634,7 +689,7 @@ final class Issuer
         bool $armDecoyField = false,
         bool $armExecution = false,
         ?string $executionAction = null,
-        string $executionVersion = '1',
+        int $executionVersion = 1,
     ): Challenge {
         $profile->validate();
 
@@ -814,6 +869,39 @@ final class Issuer
      * malformed, and a v3 record without one is malformed too. The
      * decoy is mandatory on v3, so a stored version flip can never
      * change the effective protocol.
+     *
+     * # The execution-commitment extension (protocol v4)
+     *
+     * When the issuer arms the ExecutionChallengeV1 dimension, the
+     * execution version and the program commitment are appended as two
+     * more final segments after the decoy segment (or after the `kid`
+     * when no decoy is armed).
+     * See {@see self::issueWithExecutionField()}.
+     * Execution-armed records are protocol v4.
+     *
+     * ```text
+     * v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
+     *   target_bits|salt|min_duration_ms|region|policy_version|request_binding|
+     *   issuer|kid[|decoy_field]|execution_version|execution_commitment
+     * ```
+     *
+     * - `execution_version` is the canonical numeric byte 1 (decimal on
+     *   the wire; never `|`-capable).
+     * - `execution_commitment` is the hex SHA-256 of the stored
+     *   program's base64 wire string: 64 lowercase hex characters,
+     *   never `|`-capable.
+     * - The segments are appended only when the record carries an
+     *   execution program, and the protocol-vs-execution grammar is
+     *   total: v2/v3 => no execution, v4 => execution present. The
+     *   signed commitment is therefore the exact mirror of the stored
+     *   program: a stored/tampered record cannot strip, substitute or
+     *   inject a program without breaking the signature (the
+     *   equivalence is additionally enforced by the verifier's
+     *   SHA256(stored program) == commitment check).
+     * - Wire compatibility: unarmed and decoy-only records are
+     *   byte-identical in both directions; execution-armed records are
+     *   protocol v4 and require a v4-capable verifier (an old verifier
+     *   rejects version 4 as unknown).
      */
     public static function canonicalPayload(
         string $nonce,
@@ -834,6 +922,8 @@ final class Issuer
         ?string $issuer = null,
         int $kid = 1,
         ?string $decoyField = null,
+        ?int $executionVersion = null,
+        ?string $executionCommitment = null,
     ): string {
         $base = sprintf(
             'v2|%s|%s|%s|%d|%d|%s|%d|%d|%d|%d|%s|%d|%s|%d|%s|%s|%d',
@@ -859,7 +949,38 @@ final class Issuer
         // The decoy segment is appended only when armed: null renders
         // nothing extra, so the unarmed canonical stays byte-identical to
         // the legacy 18-field format.
-        return $decoyField !== null ? $base.'|'.$decoyField : $base;
+        if ($decoyField !== null) {
+            $base .= '|'.$decoyField;
+        }
+        // The execution commitment segments are appended only when the
+        // record carries an execution program — and only as the exact
+        // pair. The issuer always passes both; a caller passing exactly
+        // one is a programming error that must never reach a signed
+        // payload (the canonical would be ambiguous across languages).
+        if ($executionVersion !== null || $executionCommitment !== null) {
+            if ($executionVersion === null || $executionCommitment === null) {
+                throw new \InvalidArgumentException(
+                    'execution_version and execution_commitment must be passed together'
+                );
+            }
+            $base .= '|'.$executionVersion.'|'.$executionCommitment;
+        }
+
+        return $base;
+    }
+
+    /**
+     * The authenticated execution commitment of a stored program: hex
+     * SHA-256 of the program's base64 wire string, 64 lowercase hex
+     * characters. This is the value signed into the protocol v4
+     * canonical (the final `|execution_commitment` segment), so the
+     * verifier's constant-time equivalence check
+     * `SHA256(stored program) == signed commitment` is byte-exact in
+     * both languages. Mirrors the Rust `execution_commitment` helper.
+     */
+    public static function executionCommitment(string $executionProgram): string
+    {
+        return hash('sha256', $executionProgram);
     }
 
     /**

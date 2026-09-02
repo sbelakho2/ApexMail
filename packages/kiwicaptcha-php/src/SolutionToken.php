@@ -20,14 +20,13 @@ final class SolutionToken
         public readonly int $counter,
         public readonly int $durationMs,
         public readonly array $telemetry,
-        // The ExecutionChallengeV2 execution evidence: the 64-hex digest
-        // (computed by the browser interpreter from the issued program
-        // over its executed trace) plus the executed trace itself
-        // (base64url), submitted so the server can verify the
-        // browser-observed entries; null on the unarmed shape. The
-        // verifier verifies the trace and recomputes the digest over
-        // the submitted trace; a mismatch is the deterministic
-        // ExecutionMismatch outcome.
+        // The ExecutionChallengeV1 execution digest (64 lowercase hex
+        // characters) presented for an execution-armed challenge; null
+        // on the unarmed shape. The digest is computed by the browser
+        // interpreter from the issued program and binds the submission
+        // to the challenge context; the verifier recomputes the expected
+        // digest from the stored program and rejects a mismatch with the
+        // deterministic ExecutionMismatch outcome.
         public readonly ?string $executionDigest = null,
         public readonly ?string $executionTrace = null,
     ) {
@@ -56,9 +55,9 @@ final class SolutionToken
      *                                              digest, or null for the
      *                                              legacy four-segment shape
      */
-    public static function create(string $nonce, int $counter, int $durationMs, array $telemetry, ?string $executionDigest = null): self
+    public static function create(string $nonce, int $counter, int $durationMs, array $telemetry, ?string $executionDigest = null, ?string $executionTrace = null): self
     {
-        return new self($nonce, $counter, $durationMs, $telemetry, $executionDigest);
+        return new self($nonce, $counter, $durationMs, $telemetry, $executionDigest, $executionTrace);
     }
 
     public function encode(): string
@@ -76,7 +75,12 @@ final class SolutionToken
         // The execution digest is an optional fifth segment: an unarmed
         // token stays byte-identical to the four-segment shape.
         if ($this->executionDigest !== null) {
-            $plain .= '.'.$this->executionDigest;
+            // The trace travels on the wire as base64url, unpadded — the
+            // driver's format (btoa + url-safe translation): the field
+            // already holds the standard base64 of the plain trace, so
+            // only the alphabet/padding translation applies ('+'/'-',
+            // '/'/'_', '=' stripped) — never a second encode.
+            $plain .= '.'.$this->executionDigest.($this->executionTrace !== null ? ':'.rtrim(strtr($this->executionTrace, '+/', '-_'), '=') : '');
         }
 
         return base64_encode($plain);
@@ -115,15 +119,13 @@ final class SolutionToken
 
         // The wire grammar splits on ALL dots: the first three segments
         // are nonce/counter/duration, and the final segment is the
-        // execution evidence exactly when it is the
-        // `<64-hex-digest>:<base64url-trace>` shape (V2: the browser
-        // submits the executed trace with the digest so the server can
-        // verify the browser-observed entries) — the telemetry is
-        // everything between. A JSON telemetry object can never end
-        // with that shape (it must close with '}'), so the
-        // discriminator is unambiguous, and a malformed evidence tail
-        // on an armed token fails the telemetry JSON parse below (fail
-        // closed). The legacy four-segment shape stays byte-identical.
+        // execution digest exactly when it is 64 lowercase hex characters
+        // (the shape the driver's interpreter produces) — the telemetry
+        // is everything between. A JSON telemetry object can never end
+        // with a 64-hex tail (it must close with '}'), so the
+        // discriminator is unambiguous, and a malformed digest tail on
+        // an armed token fails the telemetry JSON parse below (fail
+        // closed).
         $parts = explode('.', $plain);
         if (\count($parts) < 4) {
             throw DecodeError::malformed();
@@ -131,9 +133,35 @@ final class SolutionToken
         $last = $parts[\count($parts) - 1];
         $executionDigest = null;
         $executionTrace = null;
-        if (\count($parts) >= 5 && preg_match('/^[0-9a-f]{64}:[A-Za-z0-9_-]+$/', $last) === 1) {
-            [$executionDigest, $executionTrace] = explode(':', $last, 2);
-            $telemetryStr = implode('.', \array_slice($parts, 3, -1));
+        if (\count($parts) >= 5) {
+            // The optional fifth segment is `digest` or `digest:trace`:
+            // the digest is exactly 64 lowercase hex and the trace is
+            // canonical base64 (whose alphabet carries neither '.' nor
+            // ':'), so the split is total and the discriminator
+            // unambiguous. A malformed digest tail on an armed token
+            // falls through to the telemetry JSON parse below (fail
+            // closed).
+            $colon = strpos($last, ':');
+            $digestPart = $colon === false ? $last : substr($last, 0, $colon);
+            if (preg_match('/^[0-9a-f]{64}$/D', $digestPart) === 1) {
+                $executionDigest = $digestPart;
+                if ($colon !== false) {
+                    $executionTrace = substr($last, $colon + 1);
+                    // The driver emits base64url, unpadded; translate
+                    // back to canonical standard base64 (re-pad) before
+                    // the strict decode + re-encode check.
+                    $standard = strtr($executionTrace, '-_', '+/');
+                    $standard = str_pad($standard, (int) ceil(\strlen($standard) / 4) * 4, '=');
+                    if ($executionTrace === '' || \strlen($executionTrace) > 10924
+                        || base64_decode($standard, true) === false
+                        || rtrim(strtr(base64_encode((string) base64_decode($standard, true)), '+/', '-_'), '=') !== $executionTrace) {
+                        throw DecodeError::malformed();
+                    }
+                }
+                $telemetryStr = implode('.', \array_slice($parts, 3, -1));
+            } else {
+                $telemetryStr = implode('.', \array_slice($parts, 3));
+            }
         } else {
             $telemetryStr = implode('.', \array_slice($parts, 3));
         }
@@ -187,6 +215,6 @@ final class SolutionToken
             throw DecodeError::malformed();
         }
 
-        return new self($nonce, $counter, $durationMs, (array) $telemetry, $executionDigest);
+        return new self($nonce, $counter, $durationMs, (array) $telemetry, $executionDigest, $executionTrace);
     }
 }

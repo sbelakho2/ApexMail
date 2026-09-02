@@ -27,16 +27,20 @@ use PHPUnit\Framework\TestCase;
 use Psr\Log\LoggerInterface;
 
 /**
- * The protocol-v3 two-phase rollout gate: the challenge
+ * The protocol-v3/v4 two-phase rollout gate: the challenge
  * controller arms the authenticated decoy (protocol v3 emission) only
  * when risk.decoy_v3_enabled is true AND the central security-policy
  * floor ({kiwi:<ns>}:security-policy min_protocol_version, read through
  * the SecurityEpochMonitor's cached central read) is confirmed >= 3.
- * The default (decoy_v3_enabled false) emits protocol v2 even with the
- * risk engine wired, so a new binary never emits a challenge a
- * parent-revision verifier rejects. Every uncertainty (floor 2,
- * absent/corrupt/unreadable central policy) fails safe to v2 with a
- * once-per-process actionable warning.
+ * The execution dimension (risk.execution_challenge) is armed only
+ * when the floor is additionally confirmed >= 4, so an armed issuance
+ * is protocol v4 with the signed execution commitment.
+ * A floor of 3 with the execution gate on emits a decoy-armed v3
+ * record with no execution commitment. The default (decoy_v3_enabled false, execution_challenge
+ * off) emits protocol v2 even with the risk engine wired, so a new
+ * binary never emits a challenge a parent-revision verifier rejects.
+ * Every uncertainty (floor 2, absent/corrupt/unreadable central policy)
+ * fails safe to v2 with a once-per-process actionable warning.
  */
 final class ProtocolV3EmissionGateTest extends TestCase
 {
@@ -45,37 +49,40 @@ final class ProtocolV3EmissionGateTest extends TestCase
     private const POLICY_KEY = '{kiwi:test-ns}:security-policy';
 
     /**
-     * A risk-wired controller over one ArrayStorage, with the v3 gate
+     * A risk-wired controller over one ArrayStorage, with the gate
      * parameters injected: the risk.decoy_v3_enabled writer switch, the
-     * central floor reported by the fake security Redis, and an optional
-     * monitor clock (a callable returning float ms). The clock lets
-     * tests cross the cache window. A null floor leaves the fake policy
-     * hash empty; a test can then hset the epoch field alone (the
-     * absent-floor matrix cell) or a corrupt floor value. With
-     * $wireEpochMonitor false no SecurityEpochMonitor is injected at all
-     * (the no-security-Redis matrix cell: the floor can never be
-     * confirmed).
+     * risk.execution_challenge gate, and the central floor reported by
+     * the fake security Redis, plus an optional monitor clock (a
+     * callable returning float ms). The clock lets tests cross the
+     * cache window. A null floor leaves the fake policy hash empty; a
+     * test can then hset the epoch field alone (the absent-floor matrix
+     * cell) or a corrupt floor value. With $wireEpochMonitor false no
+     * SecurityEpochMonitor is injected at all (the no-security-Redis
+     * matrix cell: the floor can never be confirmed).
      *
      * @param callable(): float|null $nowMs
      *
      * @return array{controller: ChallengeController, storage: ArrayStorage, redis: FakePredisClient, monitor: SecurityEpochMonitor, logger: LoggerSpy}
      */
-    private function stack(bool $decoyV3Enabled, ?int $floor, $nowMs = null, bool $wireEpochMonitor = true): array
+    private function stack(bool $decoyV3Enabled, ?int $floor, $nowMs = null, bool $wireEpochMonitor = true, bool $executionGate = false, bool $wireRisk = true, string $minimum = 'allow'): array
     {
         $storage = new ArrayStorage();
-        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120), $storage);
-        $keys = RiskKeys::fromMaster(self::SECRET);
-        $classifier = new CidrNetworkClassifier([]);
-        $policy = RiskPolicy::fromConfig([
-            'version' => RiskPolicy::CONTRACT_VERSION,
-            'weights' => [],
-            'scopes' => [
-                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
-            ],
-        ]);
-        $store = new FakeRiskStateStore();
-        $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
-        $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], policy: $policy);
+        $issuer = new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: 120, executionKey: $executionGate ? self::SECRET : null), $storage);
+        $gateway = null;
+        if ($wireRisk) {
+            $keys = RiskKeys::fromMaster(self::SECRET);
+            $classifier = new CidrNetworkClassifier([]);
+            $policy = RiskPolicy::fromConfig([
+                'version' => RiskPolicy::CONTRACT_VERSION,
+                'weights' => [],
+                'scopes' => [
+                    1 => ['base_risk' => 100, 'minimum' => $minimum, 'post_solve_check' => false, 'degraded' => 'allow'],
+                ],
+            ]);
+            $store = new FakeRiskStateStore();
+            $engine = new AdaptiveRiskEngine($store, $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $policy, $keys);
+            $gateway = new RiskGateway($engine, $classifier, new RiskProfileResolver(PoWAlgorithm::Sha256, 8), ['login' => 1], policy: $policy);
+        }
 
         $redis = new FakePredisClient();
         if ($floor !== null) {
@@ -92,6 +99,7 @@ final class ProtocolV3EmissionGateTest extends TestCase
             new ContinuityCookie(),
             epochMonitor: $wireEpochMonitor ? $monitor : null,
             decoyV3Enabled: $decoyV3Enabled,
+            executionGate: $executionGate,
             logger: $logger,
         );
 
@@ -332,6 +340,113 @@ final class ProtocolV3EmissionGateTest extends TestCase
         self::assertSame(2, $record->protocolVersion);
         self::assertCount(1, $stack['logger']->warnings, 'the corrupt-floor warning fires once');
         self::assertStringContainsString('no confirmed central min_protocol_version', $stack['logger']->warnings[0]);
+    }
+
+    // ── The protocol-v4 execution gate matrix  ─────────────
+
+    public function testExecutionGateOnWithFloorThreeEmitsV3WithoutACommitment(): void
+    {
+        // The two-phase v4 rollout: the execution gate is on but the
+        // fleet floor only proves v3 readers. Execution arming requires
+        // the v4 floor, so the emission is the decoy-armed v3 record —
+        // no execution program, no signed commitment (the writer never
+        // emits v4 until the floor proves readers support it). The risk
+        // engine is wired with a non-Allow minimum, so the execution
+        // trigger would fire at floor 4 — the floor alone is the gate.
+        $stack = $this->stack(true, 3, null, true, true, true, 'sha16');
+        [$status, $data] = $this->issue($stack['controller']);
+        self::assertSame(200, $status);
+        self::assertIsString($data['decoy_field'] ?? null, 'the decoy surface is armed at floor 3');
+        self::assertArrayNotHasKey('execution_program', $data, 'floor 3 must not arm the execution dimension');
+
+        $record = $stack['storage']->find($data['nonce']);
+        self::assertNotNull($record);
+        self::assertSame(3, $record->protocolVersion, 'a floor of 3 emits protocol v3, never v4');
+        self::assertNull($record->executionProgram);
+        self::assertNull($record->executionCommitment, 'no signed commitment on a v3 emission');
+        self::assertNull($record->executionVersion);
+
+        // The v4-floor warning fires once per process.
+        self::assertCount(1, $stack['logger']->warnings);
+        self::assertStringContainsString('min_protocol_version', $stack['logger']->warnings[0]);
+        self::assertStringContainsString('protocol-v4 emission stays DISABLED', $stack['logger']->warnings[0]);
+        [$status2, $data2] = $this->issue($stack['controller']);
+        self::assertSame(200, $status2);
+        self::assertCount(1, $stack['logger']->warnings, 'the v4-floor warning fires once per process');
+        self::assertSame(3, $stack['storage']->find($data2['nonce'])->protocolVersion);
+    }
+
+    public function testExecutionGateOnWithFloorFourArmsProtocolV4(): void
+    {
+        // The fleet floor proves v4 readers: the execution dimension is
+        // armed and the issuance writes protocol v4 with the signed
+        // execution commitment (the decoy rides along — the full
+        // decoy-capable canonical). The risk trigger is a non-Allow
+        // pre-issue decision (minimum sha16), the same population the
+        // decoy surface targets.
+        $stack = $this->stack(true, 4, null, true, true, true, 'sha16');
+        [$status, $data] = $this->issue($stack['controller']);
+        self::assertSame(200, $status);
+        self::assertIsString($data['execution_program'] ?? null, 'floor 4 arms the execution dimension');
+        self::assertIsString($data['decoy_field'] ?? null, 'the decoy surface stays armed');
+
+        $record = $stack['storage']->find($data['nonce']);
+        self::assertNotNull($record);
+        self::assertSame(4, $record->protocolVersion, 'an execution-armed issuance writes protocol v4');
+        self::assertSame(1, $record->executionVersion, 'execution_version is the canonical byte 1');
+        self::assertSame(\KiwiCaptcha\Issuer::executionCommitment($record->executionProgram), $record->executionCommitment, 'the signed commitment mirrors the stored program');
+        self::assertSame([], $stack['logger']->warnings, 'a fully rolled-out v4 emission logs no warning');
+    }
+
+    public function testExecutionGateOnWithFloorTwoEmitsV2(): void
+    {
+        // Neither floor is met: no decoy (floor < 3) and no execution
+        // (floor < 4) — plain protocol v2 emission, availability
+        // preserved.
+        $stack = $this->stack(true, 2, null, true, true, true, 'sha16');
+        [$status, $data] = $this->issue($stack['controller']);
+        self::assertSame(200, $status);
+        self::assertArrayNotHasKey('decoy_field', $data);
+        self::assertArrayNotHasKey('execution_program', $data);
+
+        $record = $stack['storage']->find($data['nonce']);
+        self::assertNotNull($record);
+        self::assertSame(2, $record->protocolVersion, 'a floor of 2 emits protocol v2');
+        self::assertCount(1, $stack['logger']->warnings, 'the decoy gate warning fires once');
+        self::assertStringContainsString('protocol-v3 emission stays DISABLED', $stack['logger']->warnings[0]);
+    }
+
+    public function testExecutionGateOnWithoutSecurityRedisStaysUnarmed(): void
+    {
+        // No security Redis: the v4 floor can never be confirmed, so
+        // the execution dimension stays unarmed even with the gate on.
+        $stack = $this->stack(false, null, null, false, true, true, 'sha16');
+        [$status, $data] = $this->issue($stack['controller']);
+        self::assertSame(200, $status);
+        self::assertArrayNotHasKey('execution_program', $data);
+
+        $record = $stack['storage']->find($data['nonce']);
+        self::assertNotNull($record);
+        self::assertSame(2, $record->protocolVersion);
+        self::assertNull($record->executionCommitment);
+        self::assertCount(1, $stack['logger']->warnings, 'the unconfirmed-floor warning fires once');
+        self::assertStringContainsString('protocol-v4 emission stays DISABLED', $stack['logger']->warnings[0]);
+    }
+
+    public function testExecutionGateOffNeverArmsEvenWithFloorFour(): void
+    {
+        // The gate itself is the independent switch: floor 4 without
+        // risk.execution_challenge stays decoy-armed v3.
+        $stack = $this->stack(true, 4);
+        [$status, $data] = $this->issue($stack['controller']);
+        self::assertSame(200, $status);
+        self::assertArrayNotHasKey('execution_program', $data, 'the execution gate off never arms, even with floor 4');
+
+        $record = $stack['storage']->find($data['nonce']);
+        self::assertNotNull($record);
+        self::assertSame(3, $record->protocolVersion);
+        self::assertNull($record->executionProgram);
+        self::assertSame([], $stack['logger']->warnings, 'the off gate needs no warning');
     }
 }
 

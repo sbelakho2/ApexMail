@@ -133,6 +133,18 @@ pub enum BindingMode {
 ///   `decoy_field` is rejected by validation too — the v2 canonical never
 ///   includes the segment, so v2 => no decoy and v3 => decoy present is
 ///   the total grammar.
+/// - `protocol_version == 4` (execution-capable): the decoy-capable
+///   canonical plus the `|execution_version|execution_commitment`
+///   segments appended after the decoy (or after `kid` when no decoy is
+///   armed). The execution segments are mandatory on v4 and present iff
+///   the record carries an execution program — the signed commitment is
+///   the exact mirror of the stored program (absent <=> absent, present
+///   <=> present, SHA256(stored program) == commitment, constant-time).
+///   A v4 record without the execution triplet and a v2/v3 record
+///   carrying any execution field are both rejected by validation, so a
+///   stored version flip can never change the effective protocol and a
+///   stripped, substituted or injected program always invalidates the
+///   challenge. An old verifier rejects version 4 as unknown.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChallengeRecord {
@@ -276,14 +288,28 @@ pub struct ChallengeRecord {
     /// execution dimension (the legacy shape — the JSON key is absent
     /// when `None`, byte-identical to the pre-execution wire format).
     /// The program is never sent in the challenge payload (it rides the
-    /// challenge response for the driver) and never signed into the
-    /// canonical payload: its integrity is bound by the execution
-    /// digest, which the verifier recomputes from this stored program
-    /// and the record's nonce — a substituted program changes both the
-    /// digest key and the expected trace, so it can never verify
-    /// against a digest computed from the original program.
+    /// challenge response for the driver). Its integrity is bound by the
+    /// execution commitment, an authenticated protocol v4 canonical
+    /// segment (SHA-256 of this stored program, see
+    /// `execution_commitment`): a substituted or stripped program breaks
+    /// the signature, and a stored program whose hash does not match the
+    /// signed commitment is rejected before any execution work.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_program: Option<String>,
+    /// The execution-dimension protocol version: the canonical numeric
+    /// byte 1 (u8 on the wire, rendered as decimal in the canonical
+    /// input). Authenticated as the `|execution_version` protocol v4
+    /// canonical segment. Present iff the record carries an execution
+    /// program; the JSON key is absent when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_version: Option<u8>,
+    /// The authenticated mirror of the stored execution program: hex
+    /// SHA-256 of the program's base64 wire string (64 lowercase hex),
+    /// the final `|execution_commitment` protocol v4 canonical segment.
+    /// Present iff the record carries an execution program; the JSON key
+    /// is absent when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_commitment: Option<String>,
     /// Key identifier of the signing secret this challenge was issued with.
     /// The final v2 canonical field (`|<kid>` after the issuer);
     /// a verifier configured with a `secrets_by_kid` map selects the signing
@@ -556,7 +582,7 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
     )
 }
 
-/// Protocol v2/v3 canonical input: the full parameter
+/// Protocol v2/v3/v4 canonical input: the full parameter
 /// set so no issuance parameter can be tampered with without breaking the
 /// signature:
 /// `v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|target_bits|salt|min_duration_ms|region|policy_version|request_binding|issuer|kid`.
@@ -583,7 +609,8 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 ///   can never contain the `|` separator (the alphabet is `[a-z_0-9]`;
 ///   validation accepts `[A-Za-z0-9_-]` only, 1..=64 bytes).
 /// - The segment is appended only when a decoy is armed, and an armed
-///   record is issued as `protocol_version == 3`. `None` renders
+///   record is issued as `protocol_version == 3` (or 4 when the execution
+///   dimension is armed too). `None` renders
 ///   nothing extra — the canonical string is byte-identical to the
 ///   pre-extension format and the record stays `protocol_version == 2`,
 ///   so unarmed records and cross-language records keep verifying
@@ -604,7 +631,43 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 ///   (absent when null — not a JSON `null` key); the client-facing
 ///   challenge response carries the optional key `decoy_field` with the
 ///   same value.
-pub(crate) fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
+///
+/// # The execution-commitment extension (protocol v4)
+///
+/// When the issuer arms the ExecutionChallengeV1 dimension
+/// (`issue_challenge_with_execution`), the execution version and the
+/// program commitment are appended as two more final segments after the
+/// decoy segment (or after the `kid` when no decoy is armed):
+///
+/// ```text
+/// v2|nonce|scope|binding_tag|issued_at|expires_at|algorithm|m_kib|t|p|
+///   target_bits|salt|min_duration_ms|region|policy_version|request_binding|
+///   issuer|kid[|decoy_field]|execution_version|execution_commitment
+/// ```
+///
+/// - `execution_version` is the canonical numeric byte 1 (decimal on the
+///   wire; never `|`-capable).
+/// - `execution_commitment` is the hex SHA-256 of the stored program's
+///   base64 wire string: 64 lowercase hex characters, never
+///   `|`-capable.
+/// - The segments are appended only when the record carries an execution
+///   program, and the protocol-vs-execution grammar is total: v2/v3 =>
+///   no execution, v4 => execution present. The signed commitment is
+///   therefore the exact mirror of the stored program: a
+///   stored/tampered record cannot strip, substitute or inject a program
+///   without breaking the signature (the equivalence is additionally
+///   enforced by the verifier's SHA256(stored program) == commitment
+///   check).
+/// - Wire compatibility: unarmed and decoy-only records are byte-identical
+///   in both directions; execution-armed records are protocol v4 and
+///   require a v4-capable verifier (an old verifier rejects version 4 as
+///   unknown).
+///
+/// The canonical signing input of a record — public so cross-language
+/// tests and integrations can pin the byte-exact reconstruction against
+/// the client-visible challenge string (the PHP mirror exposes the same
+/// helper as `Issuer::canonicalPayload()`).
+pub fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
     let base = format!(
         "v2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         record.nonce,
@@ -625,10 +688,33 @@ pub(crate) fn canonical_signing_input_v2(record: &ChallengeRecord) -> String {
         record.issuer.as_deref().unwrap_or(""),
         record.kid
     );
-    match record.decoy_field.as_deref() {
+    let mut canonical = match record.decoy_field.as_deref() {
         Some(decoy) => format!("{base}|{decoy}"),
         None => base,
+    };
+    // The execution commitment segments are appended only when the
+    // record carries an execution program — and only as the exact pair.
+    // The issuer always sets both; the verifier's structural gate
+    // rejects a record carrying exactly one, so the canonical
+    // reconstruction is byte-exact in both languages.
+    if let Some(version) = record.execution_version {
+        canonical.push('|');
+        canonical.push_str(&version.to_string());
+        canonical.push('|');
+        canonical.push_str(record.execution_commitment.as_deref().unwrap_or(""));
     }
+    canonical
+}
+
+/// The authenticated execution commitment of a stored program: hex
+/// SHA-256 of the program's base64 wire string, 64 lowercase hex
+/// characters. This is the value signed into the protocol v4 canonical
+/// (the final `|execution_commitment` segment), so the verifier's
+/// constant-time equivalence check
+/// `SHA256(stored program) == signed commitment` is byte-exact in both
+/// languages. Mirrors the PHP `Issuer::executionCommitment`.
+pub fn execution_commitment(program_b64: &str) -> String {
+    hex::encode(&Sha256::digest(program_b64.as_bytes()))
 }
 
 /// Sign a canonical input with the secret key, returning a hex HMAC tag
@@ -830,6 +916,15 @@ pub const SOLVER_MAX_HASHES: u64 = 5_000_000;
 /// `expires_at - issued_at` above this are malformed (they could otherwise
 /// pin expensive server state for an unbounded window).
 pub const MAX_TTL_SECS: u64 = 300;
+
+/// The binary's maximum challenge protocol version, mirrored by the PHP
+/// core (`ChallengeRecord::MAX_PROTOCOL_VERSION`) and the extension's
+/// readiness probe (KiwiHealthController): 4 since the execution-capable
+/// canonical (protocol v4) landed — armed issuance writes version 4 and
+/// the verifier accepts versions 1..=4. A central security-policy floor
+/// above this means the binary cannot verify the challenges the fleet
+/// now issues.
+pub const MAX_PROTOCOL_VERSION: u8 = 4;
 
 /// Maximum tolerated clock skew (seconds) between the issuer and verifier
 /// clocks. The TTL check rejects challenges whose `issued_at` is
@@ -1373,8 +1468,17 @@ pub fn issue_challenge_with_decoy(
 /// with [`SignError::ExecutionKeyNotConfigured`]. `execution_action` is
 /// the provider-style action of the request (1..32 chars of
 /// `[A-Za-z0-9._:-]`, default "default") and `execution_version` the
-/// dimension protocol version (default "1"); both are embedded in the
-/// program and bound by the digest.
+/// dimension protocol version, the canonical numeric byte (default 1,
+/// exactly 1 — the only version of the wire contract; passed as a u8,
+/// never a string that is parsed). Both are embedded in the program and
+/// bound by the commitment.
+///
+/// An armed issuance writes `protocol_version == 4`: the stored record
+/// carries `execution_program` plus the authenticated
+/// `execution_version` and `execution_commitment` (hex SHA-256 of the
+/// program) signed into the canonical input as the final
+/// `|execution_version|execution_commitment` segments — stripping,
+/// substituting or injecting a program always breaks the signature.
 #[allow(clippy::too_many_arguments)]
 pub fn issue_challenge_with_execution(
     config: &ChallengeConfig,
@@ -1386,7 +1490,7 @@ pub fn issue_challenge_with_execution(
     request_binding: Option<&str>,
     arm_execution: bool,
     execution_action: Option<&str>,
-    execution_version: Option<&str>,
+    execution_version: Option<u8>,
     arm_decoy_field: bool,
 ) -> Result<Issued, SignError> {
     issue_challenge_inner(
@@ -1417,7 +1521,7 @@ fn issue_challenge_inner(
     arm_decoy_field: bool,
     arm_execution: bool,
     execution_action: Option<&str>,
-    execution_version: Option<&str>,
+    execution_version: Option<u8>,
 ) -> Result<Issued, SignError> {
     if !valid_identifier(scope, 128) {
         return Err(SignError::InvalidScope);
@@ -1539,42 +1643,58 @@ fn issue_challenge_inner(
     //
     // The decoy (honeypot) field name, when armed, is picked before the
     // canonical input is built: it is an authenticated issuance parameter
-    // (the final `|<decoy_field>` segment), signed like every other, and
-    // the record is issued as protocol v3.
+    // (the `|<decoy_field>` segment), signed like every other, and the
+    // record is issued as protocol v3.
     let decoy_field: Option<String> = if arm_decoy_field {
         Some(pick_decoy_field()?)
     } else {
         None
     };
     // The ExecutionChallengeV1 program, minted from the challenge
-    // context once the nonce exists (the program binds the nonce).
-    // Arming without the configured execution_key is a
+    // context once the nonce exists (the program binds the nonce), and
+    // before the canonical input is built: the commitment segments are
+    // part of the signed canonical and the commitment is a function of
+    // the program. Arming without the configured execution_key is a
     // misconfiguration and refuses the issuance: the execution
     // dimension can never be armed by accident.
     let execution_program: Option<String> = if arm_execution {
         match &config.execution_key {
             None => return Err(SignError::ExecutionKeyNotConfigured),
-            Some(key) => Some(
-                crate::execution::generate(
-                    key.as_bytes(),
-                    &nonce,
-                    scope,
-                    execution_action.unwrap_or("default"),
-                    execution_version.unwrap_or("1"),
+            Some(key) => {
+                let version = execution_version.unwrap_or(1);
+                Some(
+                    crate::execution::generate(
+                        key.as_bytes(),
+                        &nonce,
+                        scope,
+                        execution_action.unwrap_or("default"),
+                        version,
+                    )
+                    .map_err(|e| match e {
+                        crate::execution::GenerateError::KeyTooShort => {
+                            SignError::ExecutionKeyNotConfigured
+                        }
+                        crate::execution::GenerateError::InvalidAction => {
+                            SignError::InvalidIdentifier
+                        }
+                        crate::execution::GenerateError::InvalidVersion => {
+                            SignError::InvalidIdentifier
+                        }
+                        crate::execution::GenerateError::InvalidScope => {
+                            SignError::InvalidIdentifier
+                        }
+                    })?,
                 )
-                .map_err(|e| match e {
-                    crate::execution::GenerateError::KeyTooShort => {
-                        SignError::ExecutionKeyNotConfigured
-                    }
-                    crate::execution::GenerateError::InvalidAction => SignError::InvalidIdentifier,
-                    crate::execution::GenerateError::InvalidScope => SignError::InvalidIdentifier,
-                    crate::execution::GenerateError::InvalidVersion => SignError::InvalidIdentifier,
-                })?,
-            ),
+            }
         }
     } else {
         None
     };
+    // The authenticated commitment is the hex SHA-256 of the stored
+    // program's base64 wire string — the exact mirror of the stored
+    // program, signed into the canonical below.
+    let execution_commitment: Option<String> =
+        execution_program.as_deref().map(execution_commitment);
     let mut record = ChallengeRecord {
         nonce: nonce.clone(),
         scope: scope.to_string(),
@@ -1593,10 +1713,18 @@ fn issue_challenge_inner(
         min_duration_ms,
         issued_at_ns: now_ns,
         attempts_used: 0,
-        // Armed issuance writes protocol v3 (the decoy-capable canonical,
-        // signed with the decoy segment when present); unarmed issuance
-        // stays v2, byte-identical to the pre-decoy format.
-        protocol_version: if arm_decoy_field { 3 } else { 2 },
+        // Armed issuance writes protocol v4 (the execution-capable
+        // canonical, signed with the execution commitment segments when
+        // the dimension is armed); decoy-only issuance writes protocol
+        // v3 (the decoy-capable canonical); unarmed issuance stays v2,
+        // byte-identical to the pre-decoy format.
+        protocol_version: if execution_program.is_some() {
+            4
+        } else if arm_decoy_field {
+            3
+        } else {
+            2
+        },
         region: config.region.clone(),
         policy_version: config.policy_version,
         request_binding: request_binding.map(str::to_string),
@@ -1604,6 +1732,15 @@ fn issue_challenge_inner(
         kid: config.kid,
         decoy_field: decoy_field.clone(),
         execution_program: execution_program.clone(),
+        // The authenticated v4 execution triplet: the version and the
+        // commitment ride the stored record exactly as they were signed
+        // (never recomputed), so the equivalence between the signed
+        // canonical and the stored program is preserved byte-for-byte
+        // through storage round-trips.
+        execution_version: execution_program
+            .as_ref()
+            .map(|_| execution_version.unwrap_or(1)),
+        execution_commitment: execution_commitment.clone(),
     };
     let canonical = canonical_signing_input_v2(&record);
     let signature = sign_canonical_v2(&canonical, &config.secret_key)?;
@@ -2989,6 +3126,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3083,6 +3221,7 @@ mod tests {
                 expected_request_binding: RequestBindingExpectation::Unenforced,
                 client_ip: Some("1.2.3.4"),
                 execution_digest: None,
+                execution_trace: None,
                 expected_region: None,
                 expected_issuer: None,
                 expected_policy_version: None,
@@ -3137,6 +3276,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,

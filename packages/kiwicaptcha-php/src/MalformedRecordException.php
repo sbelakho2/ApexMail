@@ -141,13 +141,85 @@ final class MalformedRecordException extends \RuntimeException
     /**
      * The optional ExecutionChallengeV1 program is not a well-formed
      * program blob: non-canonical base64, an unknown format version, an
-     * out-of-bound scope/action/op count, an unknown opcode or a
-     * truncated operand section. A record carrying it cannot be
-     * verified against its execution dimension, so it is a corrupt or
-     * foreign record.
+     * out-of-bound scope/action/op count, an unknown opcode, or a
+     * truncated operand section.
+     * Trailing bytes after the op list, an op version other than 1, or
+     * a scope/action outside the identifier alphabet are also rejected.
+     * A record carrying it cannot be verified against its execution
+     * dimension, so it is a corrupt or foreign record.
      */
     public static function invalidExecutionProgram(): self
     {
         return new self('record field "execution_program" must be a well-formed ExecutionChallengeV1 program blob (canonical base64 of a parseable program)');
+    }
+
+    /**
+     * A partial protocol-v4 execution field set: the three execution
+     * keys (`execution_program`, `execution_version`,
+     * `execution_commitment`) are present together or all absent. A
+     * partial set cannot come from a conforming issuer and is a corrupt
+     * or foreign record — the signed commitment is the exact mirror of
+     * the stored program, never a separate field that can be stripped
+     * or injected independently.
+     */
+    public static function incompleteExecutionFields(): self
+    {
+        return new self('record execution fields must be present together or all absent: "execution_program", "execution_version" and "execution_commitment" are one triplet');
+    }
+
+    /**
+     * The protocol-v4 `execution_version` is not the canonical numeric
+     * byte 1. Only version 1 exists in the wire contract; anything else
+     * is a corrupt or foreign record.
+     */
+    public static function invalidExecutionVersion(int $version): self
+    {
+        return new self(sprintf('record field "execution_version" must be exactly 1 (the canonical execution-dimension version), got %d', $version));
+    }
+
+    /**
+     * The protocol-v4 `execution_commitment` is not 64 lowercase hex
+     * characters — the canonical shape of SHA-256. A malformed
+     * commitment is a corrupt or foreign record.
+     */
+    public static function invalidExecutionCommitment(): self
+    {
+        return new self('record field "execution_commitment" must be exactly 64 lowercase hex characters (the SHA-256 of the execution program)');
+    }
+
+    /**
+     * The stored execution program's SHA-256 does not equal the signed
+     * `execution_commitment`: the authenticated mirror was stripped,
+     * substituted or desynchronized. The record is corrupt or foreign.
+     */
+    public static function executionCommitmentMismatch(): self
+    {
+        return new self('record "execution_program" does not match the signed "execution_commitment" (SHA-256 of the stored program must equal the commitment)');
+    }
+
+    /**
+     * A protocol-v2 or protocol-v3 record carrying the protocol-v4
+     * execution triplet: the execution segments are a protocol v4
+     * canonical extension and neither the v2 nor the v3 canonical ever
+     * includes them. A conforming execution-armed issuance writes
+     * protocol v4, so the combination is a corrupt or foreign record.
+     */
+    public static function executionOnLegacyProtocol(int $protocolVersion): self
+    {
+        return new self(sprintf('record protocol_version %d must not carry execution_program/execution_version/execution_commitment (the execution segments are a protocol v4 canonical extension)', $protocolVersion));
+    }
+
+    /**
+     * A protocol-v4 record without the execution triplet: the
+     * execution_version + execution_commitment segments are mandatory on
+     * the v4 canonical, so a v4 record without them cannot have come
+     * from a conforming issuer (an execution-armed issuance always
+     * writes the segments). The rejection closes the stored-version-flip
+     * window: a signed v2/v3 record with its stored protocol_version
+     * flipped to 4 keeps the plain canonical bytes and is refused here.
+     */
+    public static function executionlessV4Record(): self
+    {
+        return new self('record protocol_version 4 must carry "execution_program" with "execution_version" and "execution_commitment" (the execution commitment is mandatory on the protocol v4 canonical)');
     }
 }

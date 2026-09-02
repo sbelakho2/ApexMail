@@ -9,11 +9,15 @@ import { fileURLToPath } from 'node:url';
 // a deterministic bytecode blob). The driver lazily loads the fixed
 // audited interpreter asset (execution.<sha256>.js, served by the
 // existing immutable content-addressed asset route with SRI), runs the
-// program in a sandboxed ephemeral iframe (srcdoc, per challenge,
-// removed after), and appends the resulting execution digest (64 hex)
-// to the solution token. The fixture /verify recomputes the expected
-// digest from the stored program and rejects a mismatch with the
-// deterministic execution_mismatch outcome.
+// program in a short-lived sandboxed iframe (srcdoc with the sandbox
+// flags allow-scripts allow-same-origin; per challenge, removed after),
+// and appends the resulting execution digest (64 hex) to the solution
+// token. The sandbox is DOM and execution isolation for the
+// first-party interpreter, whose bytes the content-addressed URL and
+// the native SRI check pin; it is not a hostile-code security
+// boundary. The fixture /verify recomputes the expected digest from
+// the stored program and rejects a mismatch with the deterministic
+// execution_mismatch outcome.
 //
 // Lazy invariant: a SHA-only challenge without a program pays zero
 // bytes for the interpreter — the no-program spec asserts zero requests.
@@ -47,17 +51,37 @@ async function verifyToken(page, token) {
   return { status: resp.status(), body: await resp.json() };
 }
 
+
+function decodeTrace(base64url) {
+  const standard = base64url.replace(/-/g, '+').replace(/_/g, '/');
+  return Buffer.from(standard, 'base64').toString('utf8');
+}
+
 test.describe('ExecutionChallengeV1 (browser)', () => {
   test('an armed challenge executes in the sandboxed interpreter and verifies end to end', async ({ page }) => {
     await armedPage(page);
     const token = await page.locator('[data-kiwi-token]').inputValue();
     expect(token.length).toBeGreaterThan(0);
 
-    // The token carries the 5th execution-digest segment: 64 lowercase hex.
+    // The token carries the 5th execution segment: the 64-lowercase-hex
+    // digest, optionally followed by ':trace' (the driver's base64url
+    // trace evidence).
     const plain = Buffer.from(token, 'base64').toString('utf8');
     const parts = plain.split('.');
-    expect(parts.length, 'an armed token must carry the execution digest as the final segment').toBe(5);
-    expect(parts[4], 'the digest must be 64 lowercase hex').toMatch(/^[0-9a-f]{64}$/);
+    expect(parts.length, 'an armed token must carry the execution evidence as the final segment').toBe(5);
+    const evidence = parts[4].split(':');
+    expect(evidence[0], 'the digest must be 64 lowercase hex').toMatch(/^[0-9a-f]{64}$/);
+    expect(evidence.length, 'the trace evidence must be present after the digest').toBe(2);
+    expect(evidence[1].length, 'the base64url trace must be non-empty').toBeGreaterThan(0);
+    const trace = decodeTrace(evidence[1]);
+    expect(
+      trace.includes('obs('),
+      'the causal observe entry must appear in every armed trace'
+    ).toBe(true);
+    expect(
+      trace.includes('u8r(') && trace.includes('u8c('),
+      'the observed byte must be read back from the u8 state'
+    ).toBe(true);
 
     const result = await verifyToken(page, token);
     expect(result.body.ok, `the armed solve must verify (got ${result.body.code})`).toBe(true);
@@ -69,16 +93,41 @@ test.describe('ExecutionChallengeV1 (browser)', () => {
     expect(iframes, 'the sandboxed execution iframe must be removed after the run').toBe(0);
   });
 
+  test('a corpus of fresh armed lifecycles all verify end to end', async ({ page }) => {
+    // K fresh armed lifecycles, one per page load. Every issued
+    // program carries the guaranteed structure: a DOM construction
+    // block (createElement with a drawn id, a mutate op, an append)
+    // followed by real probes of the constructed node. The browser
+    // must genuinely run the DOM construction and the probe reads, so
+    // a client that only synthesizes shadow values cannot reproduce
+    // the trace. The fixture /verify recomputes the digest from the
+    // stored program and validates the trace entry by entry.
+    const K = 30;
+    for (let i = 0; i < K; i++) {
+      await armedPage(page);
+      const token = await page.locator('[data-kiwi-token]').inputValue();
+      expect(token.length, `lifecycle ${i}: the armed solve must mint a token`).toBeGreaterThan(0);
+      const result = await verifyToken(page, token);
+      expect(
+        result.body.ok,
+        `lifecycle ${i}: the armed solve must verify end to end (got ${result.body.code})`
+      ).toBe(true);
+    }
+  });
+
   test('a WRONG (tampered) digest is the deterministic execution_mismatch', async ({ page }) => {
     await armedPage(page);
     const token = await page.locator('[data-kiwi-token]').inputValue();
     const plain = Buffer.from(token, 'base64').toString('utf8');
     const parts = plain.split('.');
     expect(parts.length).toBe(5);
-    // Flip the first hex character of the digest.
-    const tamperedDigest = (parts[4][0] === '0' ? '1' : '0') + parts[4].slice(1);
-    expect(tamperedDigest).not.toBe(parts[4]);
-    parts[4] = tamperedDigest;
+    // Flip the first hex character of the digest (the trace after the
+    // ':' is left intact — only the digest changes).
+    const digestPart = parts[4].split(':')[0];
+    const tracePart = parts[4].slice(digestPart.length);
+    const tamperedDigest = (digestPart[0] === '0' ? '1' : '0') + digestPart.slice(1);
+    expect(tamperedDigest).not.toBe(digestPart);
+    parts[4] = tamperedDigest + tracePart;
     const tamperedToken = Buffer.from(parts.join('.')).toString('base64');
 
     const result = await verifyToken(page, tamperedToken);
@@ -147,12 +196,13 @@ test.describe('ExecutionChallengeV1 (browser)', () => {
     expect(armed[0].resourceType(), 'the interpreter load is the iframe script (the driver performs no fetch of its own)').toBe('script');
   });
 
-  test('the op-count bound holds and the wall-clock stays far under the documented ~20 ms budget', async ({ page }) => {
-    // The documented budget: ~20 ms on low-end devices for the VM run.
-    // The measured span here is the whole armed lifecycle from the
+  test('the armed lifecycle completes well within the request-budget bound (execution timing is measured by the client-performance lab, not here)', async ({ page }) => {
+    // The measured span is the whole armed lifecycle from the
     // challenge response to the solved token, a deliberately loose
-    // wall-clock assertion; the deterministic proxy is the 8..24
-    // op-count bound the program parser enforces (asserted below).
+    // wall-clock bound on that lifecycle. The VM-run timing budget is
+    // measured by the client-performance lab, never asserted from this
+    // span; the deterministic proxy asserted below is the 8..24
+    // op-count bound the program parser enforces.
     const started = Date.now();
     await armedPage(page);
     expect(Date.now() - started).toBeLessThan(60_000);

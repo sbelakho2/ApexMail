@@ -133,7 +133,8 @@ The widget lifecycle is issue, solve, submit. Preserve it end to end:
 ### Decoys are probabilistic evidence
 
 The bundle can arm an authenticated, challenge-bound decoy field
-(protocol v3) that a generic automation pipeline may fill. The decoy
+(protocol v3, or v4 when the execution dimension rides along) that a
+generic automation pipeline may fill. The decoy
 is signed into the challenge record and verified with it. Three
 properties are deliberate:
 
@@ -166,6 +167,20 @@ The writer emits v3 only when the central floor confirms; on
 uncertainty it falls back to v2, the safe direction. The full
 procedure and its failure modes are maintainer material in
 [operations.md](operations.md#protocol-v3-two-phase-rollout).
+
+### Execution-armed emission is protocol v4, gated at the v4 floor
+
+Execution-armed issuance (`risk.execution_challenge: on`) writes
+protocol v4 — the decoy-capable canonical plus the signed
+`|execution_version|execution_commitment` segments (hex SHA-256 of the
+stored program) inside the HMAC canonical, so stripping, substituting
+or injecting a program always invalidates the challenge.
+Older binaries reject protocol 4 as unknown, so the same two-phase
+gate applies one rung higher: the execution surface arms only when
+the confirmed central floor is `min_protocol_version >= 4`.
+Below 4 or on uncertainty it stays execution-unarmed: protocol v3 at
+most, or v2 when the decoy floor is unmet too.
+See [operations.md](operations.md#protocol-v4-execution-rollout).
 
 ## Same-origin enforcement
 

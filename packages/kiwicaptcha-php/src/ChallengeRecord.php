@@ -30,9 +30,27 @@ namespace KiwiCaptcha;
  * can never verify, so the protocol capability is fully inferable from
  * the authenticated canonical shape. An old verifier rejects version 3
  * as unknown.
- * `fromArray()` accepts protocol versions 1, 2 and 3 and rejects both
- * forbidden combinations (v2-plus-decoy and decoyless-v3); the
- * verifier's malformed-record path enforces the same split.
+ *
+ * Protocol v4 is the execution-capable canonical: the decoy-capable
+ * canonical plus the `|execution_version|execution_commitment` segments
+ * appended after the decoy (or after `kid` when no decoy is armed). The
+ * execution segments are mandatory on v4 and are present iff the record
+ * carries an execution program.
+ * The signed commitment is therefore the exact mirror of the stored
+ * program: commitment absent = program absent, commitment present =
+ * program present, and SHA256(stored program) must equal the signed
+ * commitment (constant time).
+ * A v4 record without the commitment triplet, or a v2/v3 record
+ * carrying any execution field, is rejected explicitly.
+ * Stripping, substituting or injecting a program always invalidates
+ * the challenge, because the canonical bytes are signed and the
+ * tamper breaks the HMAC or the structural gate.
+ * An old verifier rejects version 4 as unknown.
+ * `fromArray()` accepts protocol versions 1, 2, 3 and 4 and rejects
+ * every forbidden combination (v2-plus-decoy, decoyless-v3,
+ * v2/v3-with-execution, executionless-v4 and any partial execution
+ * field set); the verifier's malformed-record path enforces the same
+ * split.
  *
  * `attempts_used` is emitted by {@see self::toArray()} as 0 for schema
  * symmetry with the Rust record, which has `#[serde(default)]` and
@@ -105,12 +123,33 @@ namespace KiwiCaptcha;
  * unarmed records are byte-identical to the pre-decoy format. The JSON
  * key is absent when null (`skip_serializing_if`), so pre-decoy writers
  * and readers keep their exact byte format. A decoy-armed record is
- * protocol v3 and requires a v3-capable verifier: an old verifier
- * rejects version 3 as unknown, so the capability becomes inferable
- * from protocol_version, which is the point. Absent in
- * legacy stored records; a present value must match the decoy alphabet
- * `[A-Za-z0-9_-]{1,64}`, see {@see Config::isValidDecoyFieldName()},
- * and is enforced on read and by the verifier's malformed-record path.
+ * protocol v3 (or v4 when the execution dimension is armed too) and
+ * requires a v3-capable verifier: an old verifier rejects version 3 as
+ * unknown, so the capability becomes inferable from protocol_version,
+ * which is the point. Absent in legacy stored records; a present value
+ * must match the decoy alphabet `[A-Za-z0-9_-]{1,64}`, see
+ * {@see Config::isValidDecoyFieldName()}, and is enforced on read and
+ * by the verifier's malformed-record path.
+ *
+ * `executionVersion` is the execution-dimension protocol version,
+ * always 1 (the only canonical version; an old record without the field
+ * is an unarmed record). It is an authenticated canonical field of
+ * protocol v4: the `|execution_version` segment, see
+ * {@see Issuer::canonicalPayload()}, so a stored/tampered record cannot
+ * change or drop it without breaking the signature. The JSON key is
+ * absent when null (`skip_serializing_if`).
+ *
+ * `executionCommitment` is the authenticated mirror of the stored
+ * execution program: hex SHA-256 of the program's base64 wire string,
+ * 64 lowercase hex characters. It is an authenticated canonical field
+ * of protocol v4 (the final `|execution_commitment` segment), so a
+ * stored/tampered record cannot strip, substitute or inject a program
+ * without breaking the signature. The equivalence is exact and
+ * enforced on every acceptance surface: signed commitment absent =
+ * stored program absent, signed commitment present = stored program
+ * present, and SHA256(stored program) == the signed commitment
+ * (constant-time compare). The JSON key is absent when null
+ * (`skip_serializing_if`).
  *
  * `fromArray()` is the strict serde-mirror parser: it accepts exactly
  * what the Rust `serde_json::from_str::<ChallengeRecord>` accepts.
@@ -130,9 +169,12 @@ final class ChallengeRecord
      * `binding_tag` (serde alias attribute). `issuer`
      * is the deployment identity, always present, null when
      * unset. `kid` is the signing key id, always present,
-     * default 1. `decoy_field` is the optional honeypot name —
-     * unlike the always-present Option keys it is omitted from
-     * `toArray()` when null (the Rust `skip_serializing_if` mirror).
+     * default 1. `decoy_field`, `execution_program`,
+     * `execution_version` and `execution_commitment` are the optional
+     * Option keys — unlike the always-present Option keys they are
+     * omitted from `toArray()` when null (the Rust
+     * `skip_serializing_if` mirror). The three execution keys are
+     * present together or all absent.
      */
     public const WIRE_KEYS = [
         'nonce', 'scope', 'binding_tag', 'issued_at', 'expires_at',
@@ -140,6 +182,7 @@ final class ChallengeRecord
         'challenge', 'min_duration_ms', 'issued_at_ns', 'protocol_version',
         'attempts_used', 'region', 'policy_version', 'request_binding',
         'issuer', 'kid', 'hostname', 'decoy_field', 'execution_program',
+        'execution_version', 'execution_commitment',
     ];
 
     /**
@@ -153,6 +196,17 @@ final class ChallengeRecord
 
     /** Maximum byte length of any wire string, mirroring the serde parse ceiling. */
     public const MAX_STRING_BYTES = 4096;
+
+    /**
+     * The binary's maximum challenge protocol version, mirrored by the
+     * Rust crate (`challenge::MAX_PROTOCOL_VERSION`) and the extension's
+     * readiness probe (KiwiHealthController): 4 since the
+     * execution-capable canonical (protocol v4) landed — armed issuance
+     * writes version 4 and the verifier accepts versions 1..4. A
+     * central security-policy floor above this means the binary cannot
+     * verify the challenges the fleet now issues.
+     */
+    public const MAX_PROTOCOL_VERSION = 4;
 
     public function __construct(
         public readonly string $nonce,
@@ -190,14 +244,25 @@ final class ChallengeRecord
         // null = no execution dimension (the legacy shape, byte-identical
         // to the pre-execution wire format). The JSON key is omitted when
         // null. The program is never sent in the challenge payload; it
-        // rides the challenge response for the driver and it is never
-        // signed into the canonical payload: its integrity is bound by
-        // the execution digest, which the verifier recomputes from this
-        // stored program and the record's nonce — a substituted program
-        // changes both the digest key and the expected trace, so it can
-        // never verify against a digest computed from the original
-        // program.
+        // rides the challenge response for the driver. Its integrity is
+        // bound by the execution commitment, an authenticated protocol v4
+        // canonical segment (SHA-256 of this stored program, see
+        // `executionCommitment`): a substituted or stripped program
+        // breaks the signature, and a stored program whose hash does not
+        // match the signed commitment is rejected before any execution
+        // work.
         public readonly ?string $executionProgram = null,
+        // The execution-dimension protocol version (the canonical
+        // numeric byte 1), authenticated as the `|execution_version`
+        // protocol v4 canonical segment. Present iff the record carries
+        // an execution program; the JSON key is omitted when null.
+        public readonly ?int $executionVersion = null,
+        // The authenticated mirror of the stored execution program: hex
+        // SHA-256 of the program's base64 wire string (64 lowercase hex),
+        // the final `|execution_commitment` protocol v4 canonical
+        // segment. Present iff the record carries an execution program;
+        // the JSON key is omitted when null.
+        public readonly ?string $executionCommitment = null,
     ) {
     }
 
@@ -301,9 +366,24 @@ final class ChallengeRecord
         }
         // The execution program is omitted when unarmed, the same
         // skip_serializing_if mirror: an unarmed record is byte-identical
-        // to the pre-execution format in both directions.
+        // to the pre-execution format in both directions. The
+        // execution_version and execution_commitment keys ride the same
+        // presence rule (all three execution keys are present together or
+        // all absent — the issuer always sets the triplet and fromArray()
+        // rejects any partial set), so a record that carries a program
+        // always carries its authenticated commitment and a record
+        // without one never leaks a commitment key. toArray() emits the
+        // exact stored values: a hand-rolled record with a partial set
+        // serializes its partial set and is rejected by fromArray() on
+        // the next read, never silently repaired.
         if ($this->executionProgram !== null) {
             $data['execution_program'] = $this->executionProgram;
+        }
+        if ($this->executionVersion !== null) {
+            $data['execution_version'] = $this->executionVersion;
+        }
+        if ($this->executionCommitment !== null) {
+            $data['execution_commitment'] = $this->executionCommitment;
         }
 
         return $data;
@@ -322,12 +402,21 @@ final class ChallengeRecord
      *   (`issued_at_ns` 0, `attempts_used` 0, `protocol_version` 1,
      *   `region` null, `policy_version` 1, `request_binding` null,
      *   `issuer` null, `kid` 1).
-     * - Protocol versions 1, 2 and 3 are accepted. The protocol-vs-decoy
-     *   grammar is total: a protocol-v2 record that carries `decoy_field`
-     *   is rejected explicitly, and a protocol-v3 record without one
-     *   (absent key or explicit JSON null) is rejected too. The decoy
-     *   segment is a protocol v3 canonical extension that v3 requires;
-     *   see the class docblock for the wire-compatibility statement.
+     * - Protocol versions 1, 2, 3 and 4 are accepted. The
+     *   protocol-vs-decoy-vs-execution grammar is total: a protocol-v2
+     *   record that carries `decoy_field` is rejected explicitly, and a
+     *   protocol-v3 record without one is rejected too (the decoy
+     *   segment is a protocol v3/v4 canonical extension that v3
+     *   requires). A v2/v3 record carrying any execution field is
+     *   rejected (the execution segments are a protocol v4 canonical
+     *   extension), and a protocol-v4 record without the execution
+     *   triplet (`execution_program` + `execution_version` +
+     *   `execution_commitment`, present together) is rejected too. The
+     *   execution triplet must be exact: version 1, a 64-lowercase-hex
+     *   commitment, and SHA256(program) == commitment (constant time).
+     *   The capability is fully inferable from the authenticated
+     *   canonical shape; see the class docblock for the
+     *   wire-compatibility statement.
      * - Integers must be real JSON integers within the Rust type ranges
      *   (u8 for protocol_version, u32 for m_kib/t/p/target_bits/
      *   attempts_used/policy_version/kid, u64 for the timestamps).
@@ -477,18 +566,50 @@ final class ChallengeRecord
             }
         }
 
-        // The protocol-vs-decoy grammar: the decoy segment is a protocol
-        // v3 canonical extension, and the grammar is total: v2 => no
-        // decoy, v3 => decoy present. A v2 record that carries
-        // decoy_field is rejected explicitly (the v2 canonical never
-        // includes the segment, so such a record cannot have come from a
-        // conforming issuer — an armed issuance writes protocol v3); a
-        // v3 record without one (absent key or explicit JSON null) is
-        // rejected too: the decoy is mandatory on v3, so a signed v2
-        // record with its stored version flipped to 3 keeps the plain
-        // 18-field canonical bytes and is refused here. v1 (legacy,
-        // migration window) and v2 (unarmed) accept a null decoy; the
-        // verifier's malformed-record path enforces the same split.
+        // The protocol-v4 execution triplet: execution_program,
+        // execution_version (u8) and execution_commitment (exactly 64
+        // lowercase hex) are present together or all absent — a partial
+        // set cannot have come from a conforming issuer and is rejected.
+        $executionProgram = isset($data['execution_program']) && $data['execution_program'] !== null
+            ? $data['execution_program']
+            : null;
+        $hasExecutionVersion = \array_key_exists('execution_version', $data) && $data['execution_version'] !== null;
+        $hasExecutionCommitment = \array_key_exists('execution_commitment', $data) && $data['execution_commitment'] !== null;
+        if ($executionProgram !== null || $hasExecutionVersion || $hasExecutionCommitment) {
+            if ($executionProgram === null || !$hasExecutionVersion || !$hasExecutionCommitment) {
+                throw MalformedRecordException::incompleteExecutionFields();
+            }
+            self::requireInt($data['execution_version'], 'execution_version', 0, 255);
+            if ($data['execution_version'] !== 1) {
+                throw MalformedRecordException::invalidExecutionVersion($data['execution_version']);
+            }
+            self::requireString($data['execution_commitment'], 'execution_commitment');
+            if (preg_match('/^[0-9a-f]{64}$/D', $data['execution_commitment']) !== 1) {
+                throw MalformedRecordException::invalidExecutionCommitment();
+            }
+            if (!hash_equals(Issuer::executionCommitment($executionProgram), $data['execution_commitment'])) {
+                throw MalformedRecordException::executionCommitmentMismatch();
+            }
+        }
+
+        // The protocol-vs-decoy-vs-execution grammar is total: the decoy
+        // segment is a protocol v3/v4 canonical extension (v2 => no
+        // decoy, v3 => decoy present, v4 => decoy optional) and the
+        // execution commitment is a protocol v4 canonical extension
+        // (v2/v3 => no execution, v4 => execution present). A v2 record
+        // that carries decoy_field is rejected explicitly (the v2
+        // canonical never includes the segment, so such a record cannot
+        // have come from a conforming issuer — an armed issuance writes
+        // protocol v3); a v3 record without one is rejected too (the
+        // decoy is mandatory on v3). A v2/v3 record carrying any
+        // execution field is rejected (the execution segments are a v4
+        // canonical extension), and a v4 record without the execution
+        // triplet is rejected (the commitment is mandatory on v4, so a
+        // signed v3 record with its stored version flipped to 4 keeps
+        // the plain canonical bytes and is refused here). v1 (legacy,
+        // migration window), v2 (unarmed) and v3 (decoy) accept a null
+        // execution triplet; the verifier's malformed-record path
+        // enforces the same split.
         $protocolVersion = (int) ($data['protocol_version'] ?? 1);
         $decoyField = \array_key_exists('decoy_field', $data) ? $data['decoy_field'] : null;
         if ($protocolVersion === 2 && $decoyField !== null) {
@@ -496,6 +617,12 @@ final class ChallengeRecord
         }
         if ($protocolVersion === 3 && $decoyField === null) {
             throw MalformedRecordException::decoylessV3Record();
+        }
+        if (($protocolVersion === 2 || $protocolVersion === 3) && $executionProgram !== null) {
+            throw MalformedRecordException::executionOnLegacyProtocol($protocolVersion);
+        }
+        if ($protocolVersion === 4 && $executionProgram === null) {
+            throw MalformedRecordException::executionlessV4Record();
         }
 
         return new self(
@@ -529,7 +656,13 @@ final class ChallengeRecord
             decoyField: $data['decoy_field'] ?? null,
             // The armed ExecutionChallengeV1 program, or null for the
             // legacy shape (absent key / JSON null).
-            executionProgram: $data['execution_program'] ?? null,
+            executionProgram: $executionProgram,
+            // The authenticated protocol v4 execution triplet mirrors
+            // the stored program: present together or all absent (the
+            // partial-set rejection above already established the exact
+            // equivalence).
+            executionVersion: $hasExecutionVersion ? $data['execution_version'] : null,
+            executionCommitment: $hasExecutionCommitment ? $data['execution_commitment'] : null,
         );
     }
 

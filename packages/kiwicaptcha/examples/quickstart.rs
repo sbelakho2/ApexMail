@@ -67,6 +67,7 @@ fn quickstart() -> Result<(), String> {
         duration_ms: 1,
         telemetry: serde_json::json!({}), // telemetry is OFF by default -> empty object
         execution_digest: None,
+        execution_trace: None,
     };
     let raw = token.encode();
     let decoded = SolutionToken::decode(&raw).map_err(|e| format!("token decode failed: {e}"))?;
@@ -95,6 +96,7 @@ fn quickstart() -> Result<(), String> {
         expected_policy_version: Some(1),
         client_ip: Some("203.0.113.7"), // must match the issuance IP (Bound mode)
         execution_digest: None,
+        execution_trace: None,
         telemetry: Some(&decoded.telemetry),
         enforce_telemetry: false, // default widget sends no telemetry — never reject on it
         accept_legacy_v1: false,  // v2 is the only issued format

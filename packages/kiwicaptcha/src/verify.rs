@@ -245,6 +245,10 @@ pub struct VerifyContext<'a> {
     /// [`VerifyError::ExecutionMismatch`]. An unarmed record runs no
     /// execution check (byte-identical legacy behavior).
     pub execution_digest: Option<&'a str>,
+    /// ExecutionChallengeV2 executed trace (base64url) submitted with the
+    /// digest so the server can verify the browser-observed entries;
+    /// `None` on the unarmed token shape.
+    pub execution_trace: Option<&'a str>,
     /// Browser/environment telemetry gathered by the widget (client-controlled
     /// and forgeable — treated strictly as a supplementary signal).
     pub telemetry: Option<&'a serde_json::Value>,
@@ -526,7 +530,8 @@ impl VerifyError {
     /// The exemption is deliberately narrow. Every security verdict —
     /// wrong scope, request-binding mismatch, policy epoch, region,
     /// issuer, kid revocation/resolution, signature, record shape, the
-    /// unsupported protocol/profile, and the receipt-timing floor —
+    /// execution binding, the unsupported protocol/profile, and the
+    /// receipt-timing floor —
     /// stands even when the operation identity matches: the stored
     /// success never replays around it (the record is kept intact and
     /// the failure is returned).
@@ -559,7 +564,13 @@ impl VerifyError {
 /// - `prefix` is exactly `challenge|salt|`;
 /// - `target_bits` within the explicit difficulty bounds for both algorithms
 ///   (the Argon2id issuance ceiling stays stricter at the solver's argon2
-///   target-bits cap, exactly like the t=7..=16 verifier-vs-issuer split).
+///   target-bits cap, exactly like the t=7..=16 verifier-vs-issuer split);
+/// - the protocol-vs-decoy-vs-execution grammar: v2 => no decoy, v3 =>
+///   decoy present, v2/v3 => no execution, v4 => execution present (the
+///   exact armed/unarmed equivalence: signed commitment absent <=> stored
+///   program absent, present <=> present, `execution_version` exactly 1,
+///   commitment exactly 64 lowercase hex, and SHA256(stored program) ==
+///   the signed commitment, constant-time).
 ///
 /// Argon2id memory/time/parallelism are deliberately NOT bounded here —
 /// the absolute process ceilings apply to the signed parameters after
@@ -574,25 +585,67 @@ impl VerifyError {
 /// Returns [`VerifyError::MalformedRecord`] on any violation.
 pub fn validate_record(record: &ChallengeRecord) -> Result<(), VerifyError> {
     // Protocol version is part of the wire contract: 1 (legacy, migration
-    // window), 2 (unarmed) and 3 (decoy-capable) exist — anything else is
-    // a corrupt/foreign record. The protocol-vs-decoy grammar is explicit
-    // and total: the `|decoy_field` segment is a protocol v3 canonical
-    // extension, so a v2 record carrying a `decoy_field` is rejected here
-    // (the v2 canonical never includes the segment and such a record
-    // cannot have been signed by a conforming issuer — an armed issuance
-    // writes protocol v3), and a v3 record without a decoy is rejected
-    // too: the decoy is mandatory on v3, so a signed v2 record with its
-    // stored version flipped to 3 can never verify (the canonical shape
-    // itself authenticates the protocol capability). v1 and v2 accept a
-    // null decoy; v3 requires a present decoy; v2 + decoy and v3 without
-    // one are malformed.
-    if !(1..=3).contains(&record.protocol_version) {
+    // window), 2 (unarmed), 3 (decoy-capable) and 4 (execution-capable)
+    // exist — anything else is a corrupt/foreign record. The
+    // protocol-vs-decoy-vs-execution grammar is explicit and total: the
+    // `|decoy_field` segment is a protocol v3/v4 canonical extension, so
+    // a v2 record carrying a `decoy_field` is rejected here (the v2
+    // canonical never includes the segment and such a record cannot have
+    // been signed by a conforming issuer — an armed issuance writes
+    // protocol v3), and a v3 record without a decoy is rejected too: the
+    // decoy is mandatory on v3, so a signed v2 record with its stored
+    // version flipped to 3 can never verify (the canonical shape itself
+    // authenticates the protocol capability). The execution segments are
+    // a v4 canonical extension: a v2/v3 record carrying any execution
+    // field is rejected, and a v4 record without the execution triplet
+    // (program + version + commitment) is rejected too, so a signed v2/v3
+    // record with its stored version flipped to 4 keeps the plain
+    // canonical bytes and is refused here. v1 and v2 accept a null decoy
+    // and a null execution triplet; v3 requires a present decoy; v4
+    // requires the execution triplet.
+    if !(1..=crate::challenge::MAX_PROTOCOL_VERSION).contains(&record.protocol_version) {
         return Err(VerifyError::MalformedRecord);
     }
     if record.protocol_version == 2 && record.decoy_field.is_some() {
         return Err(VerifyError::MalformedRecord);
     }
     if record.protocol_version == 3 && record.decoy_field.is_none() {
+        return Err(VerifyError::MalformedRecord);
+    }
+    let execution_present = record.execution_program.is_some();
+    if (record.protocol_version == 2 || record.protocol_version == 3) && execution_present {
+        return Err(VerifyError::MalformedRecord);
+    }
+    if record.protocol_version == 4 && !execution_present {
+        return Err(VerifyError::MalformedRecord);
+    }
+    // The exact armed/unarmed equivalence, the armed/unarmed equivalence fix: the
+    // signed commitment is the exact mirror of the stored program.
+    // A hand-rolled record that carries a program without the commitment
+    // triplet, a commitment without the program, or a program whose hash
+    // does not match the signed commitment is a corrupt or foreign
+    // record — stripping, substituting or injecting a program always
+    // invalidates the challenge. The commitment compare is constant-time
+    // (ct_eq).
+    if execution_present {
+        if record.execution_version != Some(1) || record.execution_commitment.is_none() {
+            return Err(VerifyError::MalformedRecord);
+        }
+        let commitment = record.execution_commitment.as_deref().unwrap_or("");
+        if commitment.len() != 64
+            || !commitment
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(VerifyError::MalformedRecord);
+        }
+        let expected = crate::challenge::execution_commitment(
+            record.execution_program.as_deref().unwrap_or(""),
+        );
+        if !ct_eq(expected.as_bytes(), commitment.as_bytes()) {
+            return Err(VerifyError::MalformedRecord);
+        }
+    } else if record.execution_version.is_some() || record.execution_commitment.is_some() {
         return Err(VerifyError::MalformedRecord);
     }
     if !crate::challenge::valid_identifier(&record.scope, 128) {
@@ -799,6 +852,95 @@ pub(crate) fn measurable_solve_duration_ms(
     Some((receipt_ns - record.issued_at_ns) / 1_000)
 }
 
+/// The ExecutionChallengeV1 binding (hard), shared verbatim by
+/// [`verify_solution`] and the Redis-backed production verifier (see
+/// `crate::redis_verify`): an armed record demands a presented execution
+/// digest that matches the expected digest recomputed from the stored
+/// program and the presented trace; a missing or mismatched digest is
+/// the deterministic [`VerifyError::ExecutionMismatch`]. An unarmed
+/// record (no stored program, no signed commitment) demands no
+/// evidence: a presented digest or trace is stray execution evidence
+/// and is rejected with the deterministic
+/// [`VerifyError::ExecutionMismatch`] — never silently ignored, because
+/// the signed canonical carries no commitment, so no digest can be
+/// legitimate for it. The expected digest is a pure function of
+/// (program, nonce): the program embeds the scope/action/version
+/// context and the trace is deterministic, so the verifier needs no
+/// secret to recompute it. The comparison is constant-time (ct_eq).
+pub(crate) fn check_execution_binding(
+    record: &ChallengeRecord,
+    execution_digest: Option<&str>,
+    execution_trace: Option<&str>,
+) -> Result<(), VerifyError> {
+    match record.execution_program.as_deref() {
+        Some(program) => match (execution_digest, execution_trace) {
+            (None, _) | (_, None) => Err(VerifyError::ExecutionMismatch),
+            (Some(presented), Some(trace_b64)) => {
+                // The trace travels on the wire as base64url, unpadded
+                // (the driver's format); translate back to canonical
+                // standard base64 (re-pad) before the strict decode.
+                let standard: String = trace_b64
+                    .chars()
+                    .map(|c| match c {
+                        '-' => '+',
+                        '_' => '/',
+                        c => c,
+                    })
+                    .collect();
+                let padded = format!("{}{}", standard, "=".repeat((4 - standard.len() % 4) % 4));
+                let trace = match B64.decode(padded) {
+                    Ok(bytes)
+                        if {
+                            let out: String = B64
+                                .encode(&bytes)
+                                .replace('+', "-")
+                                .replace('/', "_")
+                                .trim_end_matches('=')
+                                .to_string();
+                            out == *trace_b64
+                        } =>
+                    {
+                        String::from_utf8(bytes).ok()
+                    }
+                    _ => None,
+                };
+                let verified = match trace {
+                    Some(t) => crate::execution::verify_executed_trace(program, &record.nonce, &t),
+                    None => None,
+                };
+                let verified = match verified {
+                    Some(v) => v,
+                    None => return Err(VerifyError::ExecutionMismatch),
+                };
+                let expected = match crate::execution::expected_digest_over_trace(
+                    program,
+                    &record.nonce,
+                    &verified,
+                ) {
+                    Some(digest) => digest,
+                    // The record's program failed the parse
+                    // (validate_record already rejects this shape;
+                    // defense in depth).
+                    None => return Err(VerifyError::MalformedRecord),
+                };
+                if !ct_eq(expected.as_bytes(), presented.as_bytes()) {
+                    return Err(VerifyError::ExecutionMismatch);
+                }
+                Ok(())
+            }
+        },
+        // Stray execution evidence: a digest presented for a record
+        // whose signed canonical carries NO commitment is deterministic
+        // invalid, never silently ignored.
+        None => {
+            if execution_digest.is_some() || execution_trace.is_some() {
+                return Err(VerifyError::ExecutionMismatch);
+            }
+            Ok(())
+        }
+    }
+}
+
 pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     // 0. Attempt accounting — counted on every verification call, correct or
     //    not, so a wrong-candidate loop cannot burn unbounded server-side
@@ -977,29 +1119,19 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
     //     demands a presented execution digest that matches the expected
     //     digest recomputed from the stored program; a missing or
     //     mismatched digest is the deterministic ExecutionMismatch. An
-    //     unarmed record skips the check entirely (byte-identical
-    //     current behavior — a stray digest on an unarmed token is
-    //     inert). The expected digest is a pure function of (program,
-    //     nonce): the program embeds the scope/action/version context
-    //     and the trace is deterministic, so the verifier needs no
-    //     secret to recompute it. The comparison is constant-time
-    //     (ct_eq).
-    if let Some(program) = &ctx.record.execution_program {
-        match ctx.execution_digest {
-            None => return VerifyOutcome::Invalid(VerifyError::ExecutionMismatch),
-            Some(presented) => {
-                let expected = match crate::execution::expected_digest(program, &ctx.record.nonce) {
-                    Some(digest) => digest,
-                    // The record's program failed the parse
-                    // (validate_record already rejects this shape;
-                    // defense in depth).
-                    None => return VerifyOutcome::Invalid(VerifyError::MalformedRecord),
-                };
-                if !ct_eq(expected.as_bytes(), presented.as_bytes()) {
-                    return VerifyOutcome::Invalid(VerifyError::ExecutionMismatch);
-                }
-            }
-        }
+    //     unarmed record (no stored program, no signed commitment)
+    //     demands no digest: a presented digest is stray execution
+    //     evidence and is rejected with the deterministic
+    //     ExecutionMismatch — never silently ignored, because the signed
+    //     canonical carries no commitment, so no digest can be
+    //     legitimate for it. The expected digest is a pure function of
+    //     (program, nonce): the program embeds the scope/action/version
+    //     context and the trace is deterministic, so the verifier needs
+    //     no secret to recompute it. The comparison is constant-time
+    //     (ct_eq). The shared [`check_execution_binding`] carries the
+    //     exact same semantics on the Redis-backed production path.
+    if let Err(e) = check_execution_binding(ctx.record, ctx.execution_digest, ctx.execution_trace) {
+        return VerifyOutcome::Invalid(e);
     }
 
     // 3. Minimum duration — server-measured. The client-reported duration_ms
@@ -1478,6 +1610,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -1536,6 +1669,7 @@ mod tests {
                 expected_policy_version: Some(2),
                 client_ip,
                 execution_digest: None,
+                execution_trace: None,
                 telemetry: None,
                 enforce_telemetry: false,
                 max_attempts: 0,
@@ -2004,12 +2138,79 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_four_is_malformed() {
-        // Only protocol versions 1 (legacy migration), 2 (unarmed) and 3
-        // (decoy-capable) exist in the wire contract — anything else is a
-        // corrupt/foreign record.
+    fn protocol_version_four_without_the_execution_triplet_is_malformed() {
+        // Protocol v4 is the execution-capable canonical and the
+        // execution commitment is mandatory on v4: a signed v2/v3 record
+        // re-versioned to 4 (the stored-version-flip forgery — the same
+        // canonical bytes, the same valid signature) must be rejected as
+        // malformed, before any signature work. The canonical shape
+        // itself authenticates the protocol capability: v4 without the
+        // execution triplet cannot come from a conforming issuer.
         let mut record = make_record(8);
         record.protocol_version = 4;
+        let counter = solve_for_test(&record).unwrap();
+        let outcome = verify(&mut record, counter, 5000);
+        assert_eq!(
+            outcome,
+            VerifyOutcome::Invalid(VerifyError::MalformedRecord)
+        );
+    }
+
+    #[test]
+    fn protocol_version_two_or_three_with_execution_is_malformed() {
+        // The protocol-vs-execution grammar: the
+        // `|execution_version|execution_commitment` segments are a
+        // protocol v4 canonical extension, so a v2 or v3 record carrying
+        // any execution field is malformed — the v2/v3 canonical never
+        // includes the segments, and such a record cannot have been
+        // signed by a conforming issuer (an execution-armed issuance
+        // writes protocol v4). The rejection is explicit, before any
+        // signature work.
+        for version in [2u8, 3u8] {
+            let mut record = make_record(8);
+            record.protocol_version = version;
+            if version == 3 {
+                record.decoy_field = Some("company_website".to_string());
+            }
+            record.execution_program = Some(
+                crate::execution::generate(
+                    b"0123456789abcdef0123456789abcdef",
+                    &record.nonce,
+                    "login",
+                    "login-action",
+                    1,
+                )
+                .unwrap(),
+            );
+            let counter = solve_for_test(&record).unwrap();
+            assert_eq!(
+                verify(&mut record, counter, 5000),
+                VerifyOutcome::Invalid(VerifyError::MalformedRecord)
+            );
+        }
+    }
+
+    #[test]
+    fn protocol_version_four_with_a_tampered_commitment_is_malformed() {
+        // The exact armed/unarmed equivalence: a stored program whose
+        // hash does not match the signed commitment is rejected before
+        // any execution work — substituting the program after signing
+        // always invalidates the challenge.
+        let mut record = make_record(8);
+        record.protocol_version = 4;
+        let program = crate::execution::generate(
+            b"0123456789abcdef0123456789abcdef",
+            &record.nonce,
+            "login",
+            "login-action",
+            1,
+        )
+        .unwrap();
+        record.execution_program = Some(program);
+        record.execution_version = Some(1);
+        // The commitment does not match the stored program's hash.
+        record.execution_commitment = Some("0".repeat(64));
+        resign_v2(&mut record, "test-key-16-bytes!");
         let counter = solve_for_test(&record).unwrap();
         let outcome = verify(&mut record, counter, 5000);
         assert_eq!(
@@ -2048,6 +2249,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2085,6 +2287,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2122,6 +2325,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2167,6 +2371,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2202,6 +2407,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2237,6 +2443,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("9.9.9.9"), // different from issuance IP 1.2.3.4
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2272,6 +2479,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: None,
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2327,6 +2535,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
 
             expected_region: None,
             expected_issuer: None,
@@ -2362,6 +2571,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2389,6 +2599,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2424,6 +2635,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2449,6 +2661,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2485,6 +2698,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2519,6 +2733,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2555,6 +2770,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2583,6 +2799,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2617,6 +2834,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2652,6 +2870,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2687,6 +2906,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2724,6 +2944,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2760,6 +2981,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2795,6 +3017,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -2971,6 +3194,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3006,6 +3230,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3046,6 +3271,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3159,6 +3385,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3192,6 +3419,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3225,6 +3453,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3327,6 +3556,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3353,6 +3583,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3622,6 +3853,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3654,6 +3886,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("9.9.9.9"), // different from issuance IP 1.2.3.4
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -3700,6 +3933,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3735,6 +3969,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3770,6 +4005,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3798,6 +4034,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3837,6 +4074,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3873,6 +4111,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3908,6 +4147,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -3936,6 +4176,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4023,6 +4264,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4054,6 +4296,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4082,6 +4325,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4122,6 +4366,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4150,6 +4395,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4193,6 +4439,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4225,6 +4472,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4257,6 +4505,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4304,6 +4553,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4333,6 +4583,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4376,6 +4627,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4616,6 +4868,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4650,6 +4903,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4691,6 +4945,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4743,6 +4998,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4856,6 +5112,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4895,6 +5152,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -4939,6 +5197,7 @@ mod tests {
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -5118,6 +5377,8 @@ mod tests {
             issuer: None,
             kid: 1,
             execution_program: None,
+            execution_version: None,
+            execution_commitment: None,
             hostname: None,
             decoy_field: None,
         }
@@ -5139,6 +5400,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("192.168.1.5"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
@@ -5228,6 +5490,7 @@ mod tests {
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
+            execution_trace: None,
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,

@@ -63,6 +63,7 @@ fn byte_mutations_never_panic_on_any_parse_path() {
         duration_ms: 5000,
         telemetry: serde_json::json!({"v": 2, "mode": "full", "wd": false, "me": 1, "ke": 2}),
         execution_digest: None,
+        execution_trace: None,
     }
     .encode()
     .into_bytes();
@@ -108,6 +109,7 @@ fn byte_mutations_never_panic_on_any_parse_path() {
                 expected_policy_version: None,
                 client_ip: Some(IP),
                 execution_digest: None,
+                execution_trace: None,
                 telemetry: None,
                 enforce_telemetry: false,
                 max_attempts: 0,

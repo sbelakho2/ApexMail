@@ -205,7 +205,7 @@ bin/console kiwicaptcha:doctor
 The doctor validates the production environment against the wiring the
 extension actually built. It covers storage atomicity, Redis
 reachability, secret and keyring state, the canonical public origin,
-the client-IP policy, the central protocol floor and the protocol-v3
+the client-IP policy, the central protocol floor and the protocol-v3/v4
 writer consistency, the Argon envelope and concurrency invariants,
 SiteVerify and chained-challenge wiring, and the installed versions.
 Each check reports pass, warn or fail; a failed check exits non-zero.

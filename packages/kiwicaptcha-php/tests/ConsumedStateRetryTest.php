@@ -8,7 +8,9 @@ use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ConsumedRecord;
 use KiwiCaptcha\ConsumedResult;
+use KiwiCaptcha\ExecutionChallengeGenerator;
 use KiwiCaptcha\Issuer;
+use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Storage\ArrayStorage;
@@ -34,6 +36,8 @@ use PHPUnit\Framework\TestCase;
 final class ConsumedStateRetryTest extends TestCase
 {
     private const ISSUED_AT = 1_800_000_000;
+
+    private const EXECUTION_KEY = '0123456789abcdef0123456789abcdef';
 
     /** @return array{0: ArrayStorage, 1: ChallengeRecord, 2: string} */
     private function issueAndSolve(int $targetBits = 8): array
@@ -151,6 +155,103 @@ final class ConsumedStateRetryTest extends TestCase
         self::assertTrue($retry->fromStoredResult, 'the replay must come from the stored result');
         self::assertSame($record->nonce, $retry->nonce());
         self::assertNotNull($storage->find($record->nonce), 'the consumed record is kept until its TTL');
+    }
+
+    /**
+     * Issues and solves an execution-armed protocol-v4 challenge with
+     * the executed trace and the digest over it on the wire token.
+     *
+     * @return array{0: ArrayStorage, 1: ChallengeRecord, 2: string}
+     */
+    private function issueAndSolveArmed(): array
+    {
+        $storage = new ArrayStorage();
+        $issuer = new Issuer(
+            new Config(secretKey: Vectors::SECRET, targetBits: 8, ttlSecs: 120, minDurationMs: 0, executionKey: self::EXECUTION_KEY),
+            $storage,
+            now: static fn (): int => self::ISSUED_AT,
+        );
+        $challenge = $issuer->issueWithExecutionField('login', '198.51.100.7', true, executionAction: 'login-action', armDecoyField: true);
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+
+        $program = ExecutionChallengeGenerator::decode($challenge->executionProgram);
+        self::assertNotNull($program);
+        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $digest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $trace);
+        self::assertNotNull($digest);
+
+        $saltBytes = base64_decode($challenge->salt, true);
+        $counter = 0;
+        do {
+            $hash = hash('sha256', $challenge->prefix.$counter.$saltBytes, true);
+            $counter++;
+        } while (Verifier::leadingZeroBits($hash) < $challenge->targetBits);
+        --$counter;
+
+        return [$storage, $record, SolutionToken::create($challenge->nonce, $counter, 5000, [], $digest, base64_encode($trace))->encode()];
+    }
+
+    public function testArmedConcurrentLoserResolvesTheWinnersCommittedOutcome(): void
+    {
+        // The concurrent-loser recovery on an execution-armed record:
+        // the loser's peek raced ahead of the winner's consume (a
+        // storage without the runtime-state capability reads the plain
+        // find, exactly the first-race window), so its fused consume
+        // reports consumedBefore and the loser resolves the winner's
+        // committed outcome behind the matching operation identity.
+        [$inner, $record, $token] = $this->issueAndSolveArmed();
+        $storage = new class($inner) implements StorageInterface, OperationIdentityAwareStorageInterface {
+            public function __construct(private readonly ArrayStorage $inner)
+            {
+            }
+
+            public function store(ChallengeRecord $record): void
+            {
+                $this->inner->store($record);
+            }
+
+            public function find(string $nonce): ?ChallengeRecord
+            {
+                return $this->inner->find($nonce);
+            }
+
+            public function consumedState(string $nonce): ?ConsumedRecord
+            {
+                return $this->inner->consumedState($nonce);
+            }
+
+            public function consume(string $nonce): ?ConsumedRecord
+            {
+                return $this->inner->consume($nonce);
+            }
+
+            public function consumeWithOperationIdentity(string $nonce, ?string $operationIdentity): ?ConsumedRecord
+            {
+                return $this->inner->consumeWithOperationIdentity($nonce, $operationIdentity);
+            }
+
+            public function commitResult(string $nonce, bool $valid, ?string $binding): bool
+            {
+                return $this->inner->commitResult($nonce, $valid, $binding);
+            }
+
+            public function delete(string $nonce): void
+            {
+                $this->inner->delete($nonce);
+            }
+        };
+        $identity = 'op-'.hash('sha256', 'armed-concurrent');
+        $verifier = new Verifier($storage, now: static fn (): int => self::ISSUED_AT);
+
+        $winner = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7', operationIdentity: $identity);
+        self::assertTrue($winner->isOk(), sprintf('the winner must verify fresh, got %s', $winner->code()));
+        self::assertNotNull($inner->consumedState($record->nonce)?->consumedResult, 'the winner committed the valid result');
+
+        $loser = $verifier->verify($token, Vectors::SECRET, 'login', '198.51.100.7', operationIdentity: $identity);
+        self::assertTrue($loser->isOk(), sprintf('the losing retry must resolve the winner committed outcome, got %s', $loser->code()));
+        self::assertTrue($loser->fromStoredResult, 'the loser replays the stored result, never a second derivation');
+        self::assertSame($record->nonce, $loser->nonce());
     }
 
     public function testReplayOfAnInvalidOutcomeReturnsInsufficientWork(): void

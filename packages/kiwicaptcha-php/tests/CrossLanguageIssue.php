@@ -17,6 +17,16 @@ declare(strict_types=1);
  * the Rust-side harness verifies with its own clock, and the future
  * skew bound requires the clocks to agree (default: the real clock).
  *
+ * The KC_PHP_EXECUTION env (1) arms the ExecutionChallengeV1 dimension:
+ * the issuance is protocol v4 and the record JSON carries the
+ * authenticated execution triplet (execution_program + the signed
+ * execution_version/execution_commitment).
+ * The Rust job then exercises the v4 cross-language canonical
+ * reconstruction and the commitment equivalence.
+ * The KC_PHP_EXECUTION_ACTION env pins the program action (default
+ * "login-action"); the fixed execution key mirrors the Rust harness
+ * secret.
+ *
  * Run: php tests/CrossLanguageIssue.php
  */
 
@@ -47,8 +57,15 @@ $config = $algo === 'argon2id'
         argon2TargetBits: 4,
         ttlSecs: 120,
         minDurationMs: 0,
+        executionKey: '0123456789abcdef0123456789abcdef',
     )
-    : new Config(secretKey: '0123456789abcdef0123456789abcdef', targetBits: 8, ttlSecs: 120, minDurationMs: 0);
+    : new Config(
+        secretKey: '0123456789abcdef0123456789abcdef',
+        targetBits: 8,
+        ttlSecs: 120,
+        minDurationMs: 0,
+        executionKey: '0123456789abcdef0123456789abcdef',
+    );
 $storage = new ArrayStorage();
 $region = getenv('KC_PHP_REGION');
 $issuer = new Issuer(
@@ -57,8 +74,26 @@ $issuer = new Issuer(
     now: $now !== null ? static fn (): int => $now : null,
     region: $region !== false && $region !== '' ? $region : null,
 );
-$challenge = $issuer->issue('login', '198.51.100.7');
+$execution = getenv('KC_PHP_EXECUTION') === '1';
+$action = getenv('KC_PHP_EXECUTION_ACTION');
+$challenge = $execution
+    ? $issuer->issueWithExecutionField(
+        'login',
+        '198.51.100.7',
+        true,
+        executionAction: $action !== false && $action !== '' ? $action : 'login-action',
+        armDecoyField: getenv('KC_PHP_EXECUTION_DECOY') === '1',
+    )
+    : $issuer->issue('login', '198.51.100.7');
 $record = $storage->find($challenge->nonce);
+if ($execution) {
+    // The v4 equivalence is enforced on the writing side too: the
+    // emitted record must carry the full authenticated triplet.
+    if ($record->protocolVersion !== 4 || $record->executionVersion !== 1 || $record->executionCommitment === null) {
+        fwrite(STDERR, "PHP v4 issuance must write protocol 4 with the execution triplet\n");
+        exit(3);
+    }
+}
 file_put_contents($target, json_encode($record->toArray(), JSON_UNESCAPED_SLASHES));
 
 echo "PHP_ISSUED {$algo} nonce={$challenge->nonce}\n";

@@ -111,7 +111,18 @@ final class KiwiHealthControllerTest extends TestCase
         $this->setPolicy($client, 3, 1);
         $controller = $this->controller($client, policyVersion: 1);
 
-        self::assertSame(200, $controller->ready()->getStatusCode(), 'min_protocol_version 3 <= the binary max (3, the decoy-capable v3 canonical) and min_policy_epoch 1 <= the configured epoch 1');
+        self::assertSame(200, $controller->ready()->getStatusCode(), 'min_protocol_version 3 <= the binary max (4, the execution-capable v4 canonical) and min_policy_epoch 1 <= the configured epoch 1');
+    }
+
+    public function testReadyOkWithTheExecutionCapableFloorFour(): void
+    {
+        // The binary's max protocol is now 4, so a central
+        // floor of 4 (the execution-capable canonical) is compatible.
+        $client = $this->requirePredis();
+        $this->setPolicy($client, 4, 1);
+        $controller = $this->controller($client, policyVersion: 1);
+
+        self::assertSame(200, $controller->ready()->getStatusCode(), 'min_protocol_version 4 <= the binary max (4) — the v4-capable binary stays in the pool');
     }
 
     public function testReadyOkWithEpochExactlyAtTheConfiguredVersion(): void
@@ -123,14 +134,14 @@ final class KiwiHealthControllerTest extends TestCase
         self::assertSame(200, $controller->ready()->getStatusCode(), 'min_policy_epoch equal to the configured policy_version is compatible');
     }
 
-    public function testNotReadyWhenCentralPolicyDemandsProtocol4(): void
+    public function testNotReadyWhenCentralPolicyDemandsProtocol5(): void
     {
         $client = $this->requirePredis();
-        $this->setPolicy($client, 4, 1);
+        $this->setPolicy($client, 5, 1);
         $controller = $this->controller($client);
 
         $response = $controller->ready();
-        self::assertSame(503, $response->getStatusCode(), 'a central min_protocol_version of 4 exceeds this binary\'s max (3) — it must leave the pool (mixed-version rolling deployment)');
+        self::assertSame(503, $response->getStatusCode(), 'a central min_protocol_version of 5 exceeds this binary\'s max (4) — it must leave the pool (mixed-version rolling deployment)');
         self::assertStringContainsString('min_protocol_version', (string) $response->getContent());
     }
 
@@ -159,10 +170,10 @@ final class KiwiHealthControllerTest extends TestCase
     public function testLiveStaysOkWhileReadyFails(): void
     {
         $client = $this->requirePredis();
-        $this->setPolicy($client, 4, 1);
+        $this->setPolicy($client, 5, 1);
         $controller = $this->controller($client);
 
-        self::assertSame(503, $controller->ready()->getStatusCode(), 'ready fails: central protocol 4');
+        self::assertSame(503, $controller->ready()->getStatusCode(), 'ready fails: central protocol 5');
         self::assertSame(200, $controller->live()->getStatusCode(), 'live must stay 200 while ready fails (the process is up, the pool just must not route to it)');
     }
 
@@ -388,7 +399,7 @@ final class KiwiHealthControllerTest extends TestCase
         // ha_authority none (the default): the leg passes silently and
         // the existing readiness legs decide.
         $client = $this->requirePredis();
-        $this->setPolicy($client, 4, 1);
+        $this->setPolicy($client, 5, 1);
         $controller = $this->controller($client);
         $response = $controller->ready();
         self::assertSame(503, $response->getStatusCode(), 'the other legs still decide');

@@ -538,15 +538,20 @@
         }
         if (data.type === "kiwi-execution-result" && data.payload && data.payload.id === runId) {
           var digest = data.payload.digest;
+          var trace = data.payload.trace;
           if (typeof digest !== "string" || !/^[0-9a-f]{64}$/.test(digest)) {
             fail("execution-digest-malformed");
+            return;
+          }
+          if (typeof trace !== "string" || trace.length < 1 || trace.length > 8192) {
+            fail("execution-trace-malformed");
             return;
           }
           if (settled) return;
           settled = true;
           clearTimeout(timeout);
           cleanup();
-          resolve(digest);
+          resolve({ digest: digest, trace: trace });
           return;
         }
         if (data.type === "kiwi-execution-error" && data.payload && data.payload.id === runId) {
@@ -1978,6 +1983,7 @@
         // silent success, never a weaker-profile fallback. A SHA-only
         // challenge without a program pays zero bytes for the interpreter.
         var executionDigest = null;
+        var executionTrace = null;
         if (data.execution_program) {
           var execResult = null;
           try {
@@ -1989,10 +1995,15 @@
           }
           if (!kiwiGenerationCurrent(widgetId, gen)) return;
           if (!execResult) { executionUnavailable("execution-failed"); return; }
-          executionDigest = execResult;
+          executionDigest = execResult.digest;
+          executionTrace = execResult.trace;
         }
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
-        tokenEl.value = btoa(data.nonce + "." + result.counter + "." + result.duration + "." + JSON.stringify(telemetry.build()) + (executionDigest ? "." + executionDigest : ""));
+        var execEvidence = null;
+        if (executionDigest && executionTrace) {
+          execEvidence = executionDigest + ":" + btoa(executionTrace).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+        }
+        tokenEl.value = btoa(data.nonce + "." + result.counter + "." + result.duration + "." + JSON.stringify(telemetry.build()) + (execEvidence ? "." + execEvidence : ""));
         setBinding(requestBinding || "");
         // The deferred decoy strategy creates its input after the first
         // solve completes (see kiwiRenderDecoy / kiwiFlushDecoy).

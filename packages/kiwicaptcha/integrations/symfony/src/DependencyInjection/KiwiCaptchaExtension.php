@@ -1646,8 +1646,11 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             ->setArgument('$decoyV3Enabled', $config['risk']['decoy_v3_enabled'])
             // The ExecutionChallengeV1 gate (risk.execution_challenge,
             // default off): when on, issuance MAY arm the browser-
-            // execution dimension when a risk trigger passes. The gate
-            // on without execution_key was refused at compile time above.
+            // execution dimension when a risk trigger passes AND the
+            // SecurityEpochMonitor confirms the central
+            // min_protocol_version floor >= 4 (the protocol-v4 rollout
+            // gate). The gate on without execution_key was refused at
+            // compile time above.
             ->setArgument('$executionGate', $config['risk']['execution_challenge'] === 'on')
             // The issuance-side logger (when the app has one) receives
             // the once-per-process decoy_v3_enabled-but-floor-too-low

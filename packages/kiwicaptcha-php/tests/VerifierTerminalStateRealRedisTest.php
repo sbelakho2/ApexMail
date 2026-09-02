@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Tests;
 
 use KiwiCaptcha\Config;
+use KiwiCaptcha\ExecutionChallengeGenerator;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\SolutionToken;
@@ -29,6 +30,8 @@ use PHPUnit\Framework\TestCase;
 final class VerifierTerminalStateRealRedisTest extends TestCase
 {
     private const ISSUED_AT = 1_800_000_000;
+
+    private const EXECUTION_KEY = '0123456789abcdef0123456789abcdef';
 
     /** @return \Predis\Client|null null when Redis is unreachable */
     private function redisOrSkip(): ?\Predis\Client
@@ -258,5 +261,102 @@ final class VerifierTerminalStateRealRedisTest extends TestCase
         self::assertSame(0, $counters['acquires'], 'the resultless replay must never acquire an Argon admission slot');
         self::assertSame(0, $counters['releases']);
         self::assertSame(0, $counters['live']);
+    }
+
+    /**
+     * Issues and solves an execution-armed protocol-v4 SHA-256
+     * challenge on a fresh real-Redis storage, with the executed
+     * trace and the digest over it on the wire token.
+     *
+     * @return array{0: RedisStorage, 1: \KiwiCaptcha\ChallengeRecord, 2: string}
+     */
+    private function issueAndSolveArmedSha(\Predis\Client $client): array
+    {
+        $storage = new RedisStorage($client, 'terminal-state-exec-'.bin2hex(random_bytes(4)).'-');
+        $issuer = new Issuer(
+            new Config(
+                secretKey: Vectors::SECRET,
+                targetBits: 8,
+                ttlSecs: 120,
+                minDurationMs: 0,
+                executionKey: self::EXECUTION_KEY,
+            ),
+            $storage,
+            now: static fn (): int => self::ISSUED_AT,
+        );
+        $challenge = $issuer->issueWithExecutionField('login', '198.51.100.7', true, executionAction: 'login-action', armDecoyField: true);
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+        self::assertSame(4, $record->protocolVersion, 'the armed issuance writes protocol v4');
+
+        $program = ExecutionChallengeGenerator::decode($challenge->executionProgram);
+        self::assertNotNull($program);
+        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $digest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $trace);
+        self::assertNotNull($digest);
+
+        $saltBytes = base64_decode($challenge->salt, true);
+        $counter = 0;
+        do {
+            $hash = hash('sha256', $challenge->prefix.$counter.$saltBytes, true);
+            $counter++;
+        } while (Verifier::leadingZeroBits($hash) < $challenge->targetBits);
+        --$counter;
+        $token = SolutionToken::create($challenge->nonce, $counter, 5000, [], $digest, base64_encode($trace))->encode();
+
+        return [$storage, $record, $token];
+    }
+
+    public function testConsumedExecutionArmedRecordOnRealRedisReplayResolvesTheStoredSuccess(): void
+    {
+        // The same-operation identity replay of an already-consumed
+        // execution-armed record on real Redis: the pre-admission
+        // terminal-state check resolves the stored success without a
+        // second derivation.
+        $client = $this->redisOrSkip();
+        self::assertNotNull($client);
+        [$storage, $record, $token] = $this->issueAndSolveArmedSha($client);
+        $identity = 'op-'.hash('sha256', 'real-redis-armed-replay');
+        $storage->consumeWithOperationIdentity($record->nonce, $identity);
+        self::assertTrue($storage->commitResult($record->nonce, true, null), 'the committed stored success lands');
+
+        $outcome = (new Verifier($storage, now: static fn (): int => self::ISSUED_AT))->verify(
+            $token,
+            Vectors::SECRET,
+            'login',
+            '198.51.100.7',
+            operationIdentity: $identity,
+        );
+
+        self::assertTrue($outcome->isOk(), sprintf('the identity-proven armed replay must resolve the stored success, got %s', $outcome->code()));
+        self::assertTrue($outcome->fromStoredResult, 'the armed replay comes from the stored result, never a second derivation');
+        self::assertNotNull($storage->find($record->nonce), 'the consumed record is retained on real Redis');
+    }
+
+    public function testExpiredExecutionArmedReplayOnRealRedisResolvesTheStoredSuccess(): void
+    {
+        // The expired-consumed recovery on real Redis: the signed
+        // expiry passes after the armed record was consumed and
+        // committed, and the identity-proven retry resolves the stored
+        // success through the fused atomic cleanup and the replay
+        // security gate with the full execution evidence.
+        $client = $this->redisOrSkip();
+        self::assertNotNull($client);
+        [$storage, $record, $token] = $this->issueAndSolveArmedSha($client);
+        $identity = 'op-'.hash('sha256', 'real-redis-armed-expired');
+        $storage->consumeWithOperationIdentity($record->nonce, $identity);
+        self::assertTrue($storage->commitResult($record->nonce, true, null), 'the committed stored success lands');
+
+        $outcome = (new Verifier($storage, now: static fn (): int => self::ISSUED_AT + 121))->verify(
+            $token,
+            Vectors::SECRET,
+            'login',
+            '198.51.100.7',
+            operationIdentity: $identity,
+        );
+
+        self::assertTrue($outcome->isOk(), sprintf('the expired identity-proven armed replay must resolve the stored success on real Redis, got %s', $outcome->code()));
+        self::assertTrue($outcome->fromStoredResult, 'the committed outcome is expiry-exempt');
+        self::assertNotNull($storage->find($record->nonce), 'the consumed recovery evidence survives on real Redis');
     }
 }

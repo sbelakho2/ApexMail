@@ -31,7 +31,8 @@ KiwiCaptcha does and does not protect against.
 ## Decoys
 
 The adaptive layer can arm an authenticated, challenge-bound decoy
-field (protocol v3) that generic automation may fill. The decoy is
+field (protocol v3, or v4 when the execution dimension rides along)
+that generic automation may fill. The decoy is
 signed into the challenge record, and the verification checks it
 together with the record. It is probabilistic automation evidence, not
 a sole security boundary: the security property of the product is the

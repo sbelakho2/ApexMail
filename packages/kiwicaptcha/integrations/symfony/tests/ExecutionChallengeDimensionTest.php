@@ -150,13 +150,23 @@ final class ExecutionChallengeDimensionTest extends TestCase
         $container = $this->load([[
             'secret_key' => self::SECRET,
             'execution_key' => self::EXECUTION_KEY,
+            // The storage/limiter Redis: the SecurityEpochMonitor's
+            // central security-policy read rides this client, so the
+            // test can seed the v4 floor.
+            'redis_service' => 'fake_redis',
             'risk' => ['enabled' => true, 'redis_service' => 'fake_redis', 'execution_challenge' => 'on'],
             'storage' => 'kiwi_captcha.storage.array',
-            'difficulty_bits' => 8,
             'difficulty_bits' => 8,
         ]]);
         $controller = $container->get(ChallengeController::class);
         self::assertTrue($container->getDefinition(ChallengeController::class)->getArgument('$executionGate'));
+
+        // The two-phase protocol-v4 rollout gate: execution arming
+        // requires the confirmed central floor >= 4, so the fake
+        // security Redis is seeded with the v4 floor first.
+        $redis = $container->get('fake_redis');
+        $monitor = $container->get(\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::class);
+        $redis->hset($monitor->policyKey(), 'min_protocol_version', 4);
 
         // Without the risk engine deciding, the gate itself is the
         // trigger: every issuance is armed.
@@ -180,9 +190,12 @@ final class ExecutionChallengeDimensionTest extends TestCase
         self::assertNotNull($record);
         self::assertSame($payload['execution_program'], $record->executionProgram);
 
-        // Verify: correct digest -> valid; wrong digest -> the
+        // Verify: correct digest+trace -> valid; wrong digest -> the
         // deterministic execution_mismatch; missing digest -> mismatch.
-        $expected = ExecutionChallengeGenerator::expectedDigest($payload['execution_program'], $payload['nonce']);
+        $program = ExecutionChallengeGenerator::decode($payload['execution_program']);
+        self::assertNotNull($program);
+        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $expected = ExecutionChallengeGenerator::digestOverTrace($payload['execution_program'], $payload['nonce'], $trace);
         self::assertNotNull($expected);
 
         // The risk engine escalates the issued difficulty above the
@@ -194,7 +207,7 @@ final class ExecutionChallengeDimensionTest extends TestCase
 
         $verifier = new Verifier($storage, now: static fn (): int => time());
 
-        $good = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected)->encode();
+        $good = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected, base64_encode($trace))->encode();
         self::assertTrue($verifier->verify($good, self::SECRET, 'login', '127.0.0.1')->isOk());
 
         $wrong = SolutionToken::create($payload['nonce'], $counter, 5000, [], str_repeat('0', 64))->encode();

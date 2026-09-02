@@ -175,8 +175,10 @@ Profile rationale:
   outvotes trust signals sooner. Per-source limits tighten and the
   aggregate issuance bounds widen in lockstep. The decoy surface arms
   with protocol-v3 emission, which only engages once the central
-  `min_protocol_version` floor confirms. The ExecutionChallengeV1 gate
-  arms (see the "ExecutionChallengeV1" section below). Chained-
+  `min_protocol_version` floor confirms (>= 3). The ExecutionChallengeV1 gate
+  arms (see the "ExecutionChallengeV1" section below) once the floor
+  confirms >= 4, writing protocol-v4 records with the signed execution
+  commitment. Chained-
   challenge step-up engages automatically when
   `risk.request_binding_authority` is wired in any configuration layer
   (the conditional runs on the final merged configuration).
@@ -311,11 +313,34 @@ the challenge stack. When armed, the challenge response carries an
 `execution_program`, a deterministic bytecode blob. The widget driver
 lazily loads the fixed audited interpreter asset,
 `execution.<sha256>.js`, served by the immutable content-addressed
-asset route with SRI. It runs the program in a sandboxed ephemeral
-iframe and appends the resulting execution digest to the solution
-token. The verifier recomputes the expected digest from the stored
+asset route with SRI. It runs the program in an ephemeral sandboxed
+iframe (srcdoc with the `allow-scripts` and `allow-same-origin`
+sandbox flags) and appends the resulting execution digest to the
+solution token. The sandbox is DOM and execution isolation for the
+first-party interpreter, whose bytes the content-addressed URL and
+the native SRI check pin; it is not a hostile-code security
+boundary. The verifier recomputes the expected digest from the stored
 program and rejects a mismatch with the deterministic
 `execution_mismatch` outcome.
+
+Current status: the dimension is experimental and now carries the
+V2 causal-consistency semantics. Every issued program opens with a
+guaranteed causal graph: DOM construction (createElement, a mutate op,
+an append), a u8 array, and an observe op measuring the real layout
+height of the constructed node. The observed byte lands in the u8
+state, is read back, and is checksummed or rotated over, so later
+exact entries and the final digest depend on the browser-observed
+value. The verifier replays the whole graph
+forward from the reported value, checking bounds, structure and
+whole-trace coherence; a short pure synthesis that skips the
+write-through is rejected. The observed height is a genuine browser
+measurement: the interpreter styles the probed node as a fixed-width
+block rendering a canonical text line, so the value is the engine's
+own default-font metrics. The mirrors never predict it; their
+browser-equivalent traces use a fabricated reference value. A solver
+that implements the full public semantics can still fabricate a
+coherent trace: the values are evidence, not a cryptographic proof of
+a browser.
 
 Two knobs control the dimension:
 
@@ -326,19 +351,29 @@ Two knobs control the dimension:
   itself as its content-derived key, so rotating the key does not
   invalidate outstanding challenges.
 - `risk.execution_challenge` (enum, default off): the issuance gate.
-  When on, issuance arms the dimension when a risk trigger passes, a
+  When on, issuance arms the dimension when a risk trigger passes: a
   non-Allow risk decision, or every issuance when the risk engine is
-  not wired. The gate is inert without an `execution_key`, so turning
-  it on before configuring the key never breaks issuance and never
-  arms anything.
+  not wired. The two-phase protocol-v4 rollout gate applies: the
+  confirmed central `min_protocol_version` floor must be >= 4 (the
+  decoy surface separately requires >= 3), otherwise issuance stays
+  execution-unarmed with a once-per-process warning. An armed issuance
+  writes protocol v4: the record carries the signed execution
+  commitment (hex SHA-256 of the stored program) inside the HMAC
+  canonical, so stripping, substituting or injecting a program always
+  invalidates the challenge. The gate is inert without an
+  `execution_key`, so turning it on before configuring the key never
+  breaks issuance and never arms anything.
 
 The dimension is supplementary evidence only. It is never the sole
 acceptance boundary: the proof-of-work proof and the record state
 machinery always gate, and a missing or wrong digest fails with the
 deterministic `execution_mismatch`, never a silent success. The
 interpreter is a fixed audited bytecode VM with no eval, no new
-Function and no fingerprinting; the DOM ops run in a sandboxed
-ephemeral iframe created per challenge and removed after the run. A
+Function and no fingerprinting; the DOM ops run in an ephemeral
+sandboxed iframe (srcdoc with the `allow-scripts` and
+`allow-same-origin` sandbox flags) created per challenge and removed
+after the run. The iframe is containment for the first-party pinned
+interpreter, not a hostile-code security boundary. A
 SHA-only challenge without a program pays zero bytes for the
 interpreter: the asset is fetched only when an armed challenge
 arrives.
@@ -765,22 +800,24 @@ is never forced) are the privacy contract; see
 ### Protocol rollout mode
 
 ```yaml
-    # ── Protocol v3 rollout state ──────────────────────────────────────
+    # ── Protocol rollout state (v3/v4) ─────────────────────────────────
     # protocol_rollout:
     #     mode: normal                  # normal | migration (default normal)
     #
     # The explicit migration state: the deployment declares whether it is
-    # deliberately in the two-phase protocol-v3 rollout. mode "normal"
-    # means no deliberate exception — under protection_profile:
-    # high_abuse with risk.decoy_v3_enabled: false the doctor FAILS the
-    # protocol-v3 writer check, because a false security switch alone
-    # does not prove the deployment is intentionally deferring v3
+    # deliberately in a two-phase protocol rollout (v3 and v4). mode
+    # "normal" means no deliberate exception — under protection_profile:
+    # high_abuse with risk.decoy_v3_enabled: false (or with the execution
+    # gate on while the v4 floor is unconfirmed) the doctor FAILS the
+    # protocol-writer check, because a false security switch alone
+    # does not prove the deployment is intentionally deferring v3/v4
     # emission (a forgotten override must not silently persist). mode
-    # "migration" declares the deliberate two-phase migration (v3
+    # "migration" declares the deliberate two-phase migration (v3/v4
     # emission deferred until the fleet floor is confirmed); the doctor
     # records the same high_abuse deferral as a WARN (exit 0). The
-    # two-phase rollout procedure itself is unchanged; see operations.md
-    # "Protocol v3 two-phase rollout".
+    # two-phase rollout procedures themselves are unchanged; see
+    # operations.md "Protocol v3 two-phase rollout" and "Protocol v4
+    # execution rollout".
 ```
 
 ### Risk configuration
@@ -957,8 +994,12 @@ kiwi_captcha:
         #                                   # confirmed >= 3; a lower or
         #                                   # unreadable floor falls back to
         #                                   # v2 with a once-per-process
-        #                                   # warning. See operations.md
-        #                                   # "Protocol v3 two-phase rollout".
+        #                                   # warning. The execution surface
+        #                                   # is gated separately at the v4
+        #                                   # floor (risk.execution_challenge).
+        #                                   # See operations.md "Protocol v3
+        #                                   # two-phase rollout" and
+        #                                   # "Protocol v4 execution rollout".
         #     result_receipt_signing_key: null  # OPTIONAL base64
         #                                   # 32-byte Ed25519 seed; when set,
         #                                   # valid verifications export

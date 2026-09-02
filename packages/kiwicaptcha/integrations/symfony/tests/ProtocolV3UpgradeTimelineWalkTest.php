@@ -16,6 +16,7 @@ use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\ProtocolV2OnlyVerifier;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\Config;
+use KiwiCaptcha\ExecutionChallengeGenerator;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Risk\AdaptiveRiskEngine;
@@ -35,21 +36,25 @@ use Symfony\Component\HttpFoundation\Request;
 
 /**
  * The long-horizon stateful walk over the documented two-phase
- * protocol-v3 upgrade timeline (operations.md, "Protocol v3 two-phase
- * rollout").
+ * protocol upgrade timeline (operations.md, "Protocol v3 two-phase
+ * rollout" and "Protocol v4 execution rollout").
  *
- * The walk advances a simulated clock through six phases. The phases
- * are a v2-only fleet, a mixed fleet of new binaries still emitting
- * v2, the central floor raised to 3 with the writer switch still
- * disabled, the writer enabled, a rollback mid-upgrade, and the
- * retirement of the residual records. Every issuance enters a ledger
- * tracking its simulated TTL, and every phase boundary asserts the
- * documented invariants. v2 emission serves both verifier
- * generations. v3 emission needs the confirmed floor plus the writer
- * switch. The operator's drain window is at least the maximum
- * challenge TTL. A rollback re-admits v2 emission while v3 records
- * keep verifying on the new generation for the remainder of their
- * TTL.
+ * The walk advances a simulated clock through the phases.
+ * The phases are a v2-only fleet, a mixed fleet of new binaries still
+ * emitting v2, the central floor raised to 3 with the writer switch
+ * still disabled, the writer enabled, a rollback mid-upgrade, and the
+ * retirement of the residual records.
+ * The v4 execution phase follows: the central floor raised to 4
+ * with the execution gate on, emitting protocol v4 records the v2-only
+ * and v3-only simulators reject.
+ * Every issuance enters a ledger tracking its simulated TTL, and every
+ * phase boundary asserts the documented invariants.
+ * v2 emission serves both verifier generations.
+ * v3 emission needs the confirmed floor plus the writer switch.
+ * v4 emission needs the v4 floor plus the execution gate.
+ * The operator's drain window is at least the maximum challenge TTL.
+ * A rollback re-admits v2 emission while v3 records keep verifying on
+ * the new generation for the remainder of their TTL.
  *
  * The gate side (the writer switch and the central floor) uses the
  * FakePredisClient stack with a fake monitor clock, exactly like the
@@ -102,6 +107,14 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
     private const T_ROLLBACK = 600;
 
     private const T_F = 900;
+
+    // The execution phase : the v4 floor is raised only
+    // after the documented wait since the v3 retirement.
+    private const T_V4_FLOOR_RAISED = 1200;
+
+    private const T_G = 1300;
+
+    private const T_H = 1650;
 
     private \Predis\Client $client;
 
@@ -156,15 +169,16 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
 
     /**
      * The emission-gate stack over the fake security Redis: the writer
-     * switch, the central floor, and the fake monitor clock. The issuer
-     * serves the real Redis storage, so issuance and verification phases
-     * run against real Redis while the gate stays fully deterministic.
+     * switch, the central floor, the execution gate and the fake
+     * monitor clock. The issuer serves the real Redis storage, so
+     * issuance and verification phases run against real Redis while the
+     * gate stays fully deterministic.
      *
      * @param callable(): float $nowMs the fake monitor clock
      *
      * @return array{controller: ChallengeController, monitor: SecurityEpochMonitor, redis: FakePredisClient, gateway: RiskGateway, logger: UpgradeWalkLoggerSpy}
      */
-    private function gateStack(bool $decoyV3Enabled, int $floor, $nowMs): array
+    private function gateStack(bool $decoyV3Enabled, int $floor, $nowMs, bool $executionGate = false, string $minimum = 'allow'): array
     {
         $keys = RiskKeys::fromMaster(self::SECRET);
         $classifier = new CidrNetworkClassifier([]);
@@ -172,7 +186,7 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
             'version' => RiskPolicy::CONTRACT_VERSION,
             'weights' => [],
             'scopes' => [
-                1 => ['base_risk' => 100, 'minimum' => 'allow', 'post_solve_check' => false, 'degraded' => 'allow'],
+                1 => ['base_risk' => 100, 'minimum' => $minimum, 'post_solve_check' => false, 'degraded' => 'allow'],
             ],
         ]);
         $store = new FakeRiskStateStore();
@@ -184,7 +198,7 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
         $redis->hset(self::POLICY_KEY, SecurityEpochMonitor::MIN_POLICY_EPOCH_FIELD, '1');
         $monitor = new SecurityEpochMonitor(new Verifier(new ArrayStorage()), $redis, self::NAMESPACE, 1, 1, $nowMs);
         $logger = new UpgradeWalkLoggerSpy();
-        $controller = $this->controllerFor($this->issuer(), $monitor, $gateway, $decoyV3Enabled, $logger);
+        $controller = $this->controllerFor($this->issuer(), $monitor, $gateway, $decoyV3Enabled, $logger, $executionGate);
 
         return ['controller' => $controller, 'monitor' => $monitor, 'redis' => $redis, 'gateway' => $gateway, 'logger' => $logger];
     }
@@ -193,11 +207,13 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
      * One issuer over the real Redis storage serves the whole walk.
      * The records carry the documented maximum TTL (300 s), so every
      * real Redis TTL is a bounded number of seconds and every real
-     * verification within the walk happens inside a live record.
+     * verification within the walk happens inside a live record. The
+     * execution key is configured from the start so the execution phase
+     * can arm (the gate decides, never the key).
      */
     private function issuer(): Issuer
     {
-        return new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: self::MAX_TTL, minDurationMs: 0), $this->storage);
+        return new Issuer(new Config(secretKey: self::SECRET, targetBits: 8, ttlSecs: self::MAX_TTL, minDurationMs: 0, executionKey: self::SECRET), $this->storage);
     }
 
     /**
@@ -215,6 +231,7 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
         RiskGateway $gateway,
         bool $decoyV3Enabled,
         UpgradeWalkLoggerSpy $logger,
+        bool $executionGate = false,
     ): ChallengeController {
         return new ChallengeController(
             $issuer,
@@ -224,6 +241,7 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
             new ContinuityCookie(),
             epochMonitor: $monitor,
             decoyV3Enabled: $decoyV3Enabled,
+            executionGate: $executionGate,
             storage: $this->storage,
             logger: $logger,
         );
@@ -270,8 +288,10 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
             'nonce' => $data['nonce'],
             'token' => $this->solve($record),
             'decoyField' => $data['decoy_field'] ?? null,
+            'executionProgram' => $data['execution_program'] ?? null,
             'currentOk' => null,
             'v2onlyOk' => null,
+            'v3onlyOk' => null,
         ];
     }
 
@@ -285,7 +305,23 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
         } while (Verifier::leadingZeroBits($hash) < $record->targetBits);
         --$counter;
 
-        return SolutionToken::create($record->nonce, $counter, 5000, [])->encode();
+        // An execution-armed (protocol v4) record demands the execution
+        // digest and trace with the token; the digest is a pure
+        // function of the stored program and the nonce over the
+        // executed trace, recomputed here exactly like the driver
+        // computes it.
+        $digest = null;
+        $traceB64 = null;
+        if ($record->executionProgram !== null) {
+            $program = ExecutionChallengeGenerator::decode($record->executionProgram);
+            self::assertNotNull($program, 'the walk-issued execution program must be parseable');
+            $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+            $traceB64 = base64_encode($trace);
+            $digest = ExecutionChallengeGenerator::digestOverTrace($record->executionProgram, $record->nonce, $trace);
+            self::assertNotNull($digest, 'the walk-issued execution digest must compute');
+        }
+
+        return SolutionToken::create($record->nonce, $counter, 5000, [], $digest, $traceB64)->encode();
     }
 
     /**
@@ -325,10 +361,23 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
         self::fail('no ledger entry for nonce '.$nonce);
     }
 
+    private function markV3Only(string $nonce, bool $ok): void
+    {
+        foreach ($this->ledger as $i => $entry) {
+            if ($entry['nonce'] === $nonce) {
+                $this->ledger[$i]['v3onlyOk'] = $ok;
+
+                return;
+            }
+        }
+        self::fail('no ledger entry for nonce '.$nonce);
+    }
+
     /**
      * The new-generation verification probe: the current verifier over
      * the real Redis storage. The outcome is recorded on the ledger and
-     * asserted valid, since a v3-capable binary accepts both generations.
+     * asserted valid, since a v4-capable binary accepts every
+     * generation.
      */
     private function probeCurrent(string $nonce, string $what): void
     {
@@ -341,7 +390,7 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
     /**
      * The parent-revision probe: the simulated v2-only binary over the
      * same real storage. The outcome is recorded and asserted to be the
-     * deterministic MalformedRecord for protocol v3 (the gate fires
+     * deterministic MalformedRecord for protocol v3/v4 (the gate fires
      * before any consume, so the record stays pending).
      */
     private function probeV2Only(string $nonce, string $what): void
@@ -351,6 +400,26 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
         self::assertSame(VerifyError::MalformedRecord, $outcome->error, $what.' must be rejected by a v2-only binary');
         $this->markV2Only($nonce, false);
         self::assertNull($this->storage->consumedState($nonce), $what.' must stay pending: the version gate fires before any consume');
+    }
+
+    /**
+     * The decoy-generation probe: the simulated v3-only binary (max
+     * protocol 3) over the same real storage. A v3 record verifies; a
+     * v4 record is rejected as MalformedRecord — the explicit
+     * capability rule the v4 rollout protects against.
+     */
+    private function probeV3Only(string $nonce, string $what): void
+    {
+        $entry = $this->entry($nonce);
+        $outcome = $this->simulator->verify($entry['token'], self::SECRET, 'login', '198.51.100.7', null, 3);
+        if ($entry['protocol'] === 4) {
+            self::assertSame(VerifyError::MalformedRecord, $outcome->error, $what.' must be rejected by a v3-only binary');
+            $this->markV3Only($nonce, false);
+        } else {
+            self::assertTrue($outcome->isOk(), $what.' must verify on a v3-only binary, got '.$outcome->code());
+            $this->markV3Only($nonce, true);
+        }
+        self::assertNull($this->storage->consumedState($nonce), $what.' must stay pending after the rejection probe');
     }
 
     private function probeV2OnlyAcceptingV2(string $nonce, string $what): void
@@ -399,11 +468,13 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
     /**
      * The global ledger invariants are asserted at every phase
      * boundary. The simulated expiry is the issuance time plus the
-     * TTL. A v2 record carries no decoy while a v3 record carries the
-     * grammar-valid authenticated name. Every recorded generation
-     * observation matches the protocol: both generations accept v2,
-     * the current verifier accepts v3, and a v2-only binary rejects
-     * it.
+     * TTL. A v2 record carries no decoy and no execution surface while
+     * a v3 record carries the grammar-valid authenticated name; a v4
+     * record carries the authenticated execution program and commitment
+     * (the exact armed/unarmed equivalence). Every recorded generation
+     * observation matches the protocol: both older generations accept
+     * v2, the current verifier accepts every generation, a v2-only
+     * binary rejects v3/v4, and a v3-only binary rejects v4.
      */
     private function assertLedgerConsistency(): void
     {
@@ -415,14 +486,21 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
             );
             if ($entry['protocol'] === 2) {
                 self::assertNull($entry['decoyField'], 'a v2 record never carries the decoy');
+                self::assertNull($entry['executionProgram'], 'a v2 record never carries the execution program');
                 self::assertNotFalse($entry['currentOk'], 'a v2 record is never refused by the current verifier');
                 self::assertNotFalse($entry['v2onlyOk'], 'a v2 record is never refused by a v2-only binary');
-            } else {
-                self::assertSame(3, $entry['protocol'], 'the walk only ever emits protocol v2 or v3');
+            } elseif ($entry['protocol'] === 3) {
                 self::assertIsString($entry['decoyField'], 'a v3 record always carries the authenticated decoy');
                 self::assertTrue(Issuer::isGrammarDecoyName($entry['decoyField']), 'the armed name comes from the combinatorial grammar');
+                self::assertNull($entry['executionProgram'], 'a v3 record never carries the execution program');
                 self::assertNotFalse($entry['currentOk'], 'the current verifier always accepts its own v3 records');
                 self::assertNotTrue($entry['v2onlyOk'], 'a v2-only binary always rejects v3 records');
+            } else {
+                self::assertSame(4, $entry['protocol'], 'the walk only ever emits protocol v2, v3 or v4');
+                self::assertIsString($entry['executionProgram'], 'a v4 record always carries the execution program');
+                self::assertNotFalse($entry['currentOk'], 'the current verifier always accepts its own v4 records');
+                self::assertNotTrue($entry['v2onlyOk'], 'a v2-only binary always rejects v4 records');
+                self::assertNotTrue($entry['v3onlyOk'], 'a v3-only binary always rejects v4 records');
             }
         }
     }
@@ -606,6 +684,97 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
         sleep(2);
         self::assertNull($this->storage->find($probe['nonce']), 'a lapsed real TTL removes the record from Redis');
         self::assertSame(0, $this->client->exists(self::PREFIX.$probe['nonce']), 'the lapsed key is gone');
+
+        // ── The execution phase : the protocol-v4 rollout ──
+        // The v4 floor is raised only after the documented drain window
+        // since the v3 era ended. The execution gate is then enabled
+        // with the decoy writer: issuance arms both surfaces and writes
+        // protocol v4 records carrying the signed execution commitment.
+        // The current verifier accepts them; the v2-only and v3-only
+        // simulators reject them deterministically, the exact
+        // capability rule the v4 floor protects against.
+        $this->assertDrainWindowComplete(self::T_V4_FLOOR_RAISED, self::T_F, 'the v4 floor must not be raised before the drain window since the v3 era ended');
+        $stack['redis']->hset(self::POLICY_KEY, SecurityEpochMonitor::MIN_PROTOCOL_VERSION_FIELD, '4');
+        $clock[0] += self::WALK_CACHE_MS;
+        $stack['monitor']->refresh();
+        self::assertSame(4, $stack['monitor']->minProtocolVersion(), 'the confirmed floor is now 4');
+
+        // Phase g: floor 4 with the execution gate still disabled. The
+        // raised floor permits v4 emission, but the disabled gate keeps
+        // the fleet at decoy-armed v3.
+        $gController = $this->controllerFor($this->issuer(), $stack['monitor'], $stack['gateway'], true, $stack['logger']);
+        $this->issue($gController, self::T_G, self::MAX_TTL, 'g');
+        $this->issue($gController, self::T_G, self::DEFAULT_TTL, 'g');
+        [$g1, $g2] = $this->phaseRecords('g');
+        self::assertSame(3, $g1['protocol'], 'the raised v4 floor alone never arms v4 emission');
+        self::assertSame(3, $g2['protocol'], 'the execution gate is the independent emission switch');
+        $this->probeCurrent($g1['nonce'], 'a floor-4 record emitted with the execution gate disabled');
+        $this->probeV2Only($g2['nonce'], 'a floor-4 v3 record presented to a v2-only binary');
+        $this->assertLedgerConsistency();
+        $this->assertNoWarnings($stack['logger'], 'g');
+
+        // Phase h: the execution gate enabled with the confirmed v4
+        // floor. Issuance arms the execution dimension AND the decoy,
+        // writing protocol v4 with the signed commitment (the full
+        // decoy-capable canonical). The risk trigger is a non-Allow
+        // pre-issue decision (minimum sha16), the same population the
+        // decoy surface targets.
+        $keys = RiskKeys::fromMaster(self::SECRET);
+        $classifier = new CidrNetworkClassifier([]);
+        $hPolicy = RiskPolicy::fromConfig([
+            'version' => RiskPolicy::CONTRACT_VERSION,
+            'weights' => [],
+            'scopes' => [
+                1 => ['base_risk' => 100, 'minimum' => 'sha16', 'post_solve_check' => false, 'degraded' => 'allow'],
+            ],
+        ]);
+        $hGateway = new RiskGateway(
+            new AdaptiveRiskEngine(new FakeRiskStateStore(), $classifier, new RiskIdentityFactory($keys), new RiskScorer(), $hPolicy, $keys),
+            $classifier,
+            new RiskProfileResolver(PoWAlgorithm::Sha256, 8),
+            ['login' => 1],
+            policy: $hPolicy,
+        );
+        $hController = $this->controllerFor($this->issuer(), $stack['monitor'], $hGateway, true, $stack['logger'], true);
+        $clock[0] += self::WALK_CACHE_MS;
+        $this->issue($hController, self::T_H, self::DEFAULT_TTL, 'h');
+        $this->issue($hController, self::T_H, self::MAX_TTL, 'h');
+        $this->issue($hController, self::T_H, self::DEFAULT_TTL, 'h');
+        [$h1, $h2, $h3] = $this->phaseRecords('h');
+        foreach ([$h1, $h2, $h3] as $record) {
+            self::assertSame(4, $record['protocol'], 'the execution phase writes protocol v4');
+            self::assertIsString($record['executionProgram'], 'every v4 record carries the execution program');
+            self::assertIsString($record['decoyField'], 'the v4 record carries the decoy segment too');
+        }
+        $storedH = $this->storage->find($h1['nonce']);
+        self::assertNotNull($storedH);
+        self::assertSame(1, $storedH->executionVersion, 'execution_version is the canonical byte 1');
+        self::assertSame(
+            \KiwiCaptcha\Issuer::executionCommitment($storedH->executionProgram),
+            $storedH->executionCommitment,
+            'the signed commitment mirrors the stored program',
+        );
+        $this->probeCurrent($h1['nonce'], 'a v4 record issued with the execution gate enabled');
+        $this->probeV2Only($h2['nonce'], 'a v4 record presented to a v2-only binary');
+        $this->probeV3Only($h3['nonce'], 'a v4 record presented to a v3-only binary');
+        $this->assertLedgerConsistency();
+        $this->assertNoWarnings($stack['logger'], 'h');
+
+        // The v4 residual window: v4 records stay verifiable on the
+        // current generation for the remainder of their TTL, and a
+        // re-admitted older binary rejects them for that whole window.
+        $v4Residual = $this->outstanding(self::T_H, 4);
+        self::assertCount(3, $v4Residual, 'all three v4 records are outstanding at the issuance instant');
+        $this->probeV3Only($h2['nonce'], 'a v4 record re-presented to a v3-only binary');
+
+        // The v4 retirement: after at least the maximum challenge TTL
+        // since the last v4 issuance, no v4 record can still be
+        // outstanding — the whole ledger is drained, so the v4 support
+        // floor may stand alone.
+        $this->assertDrainWindowComplete(self::T_H + self::MAX_TTL, self::T_H, 'the v4 residual drain since the last v4 issuance');
+        $walkEnd = self::T_H + self::MAX_TTL;
+        self::assertSame([], $this->outstanding($walkEnd, 4), 'no v4 record can still be outstanding at the v4 retirement');
+        $this->assertLedgerConsistency();
     }
 }
 

@@ -6,6 +6,7 @@ namespace KiwiCaptcha\Tests;
 
 use KiwiCaptcha\Challenge;
 use KiwiCaptcha\Config;
+use KiwiCaptcha\ExecutionChallengeGenerator;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\SolutionToken;
@@ -74,6 +75,9 @@ final class MixedFleetScaleTest extends TestCase
             argon2TargetBits: 8,
             ttlSecs: 120,
             minDurationMs: 0,
+            // The execution key is configured from the start so the v4
+            // batch can arm (the issuance path decides, never the key).
+            executionKey: Vectors::SECRET,
         );
     }
 
@@ -188,8 +192,68 @@ final class MixedFleetScaleTest extends TestCase
             );
         }
 
+        // The v4 batch: execution-armed records through the
+        // production RedisStorage. Every v4 record verifies through the
+        // current verifier (with the recomputed execution digest), and
+        // is rejected deterministically by both older generations: the
+        // v2-only simulator and the v3-only simulator (max protocol 3),
+        // each answering MalformedRecord.
+        $v4 = [];
+        for ($i = 0; $i < self::PER_VERSION; $i++) {
+            $challenge = $issuer->issueWithExecutionField('login', Vectors::CLIENT_IP, true, executionAction: 'login-action', armDecoyField: true);
+            $record = $storage->find($challenge->nonce);
+            self::assertNotNull($record, 'every v4 issuance must round-trip through Redis');
+            self::assertSame(4, $record->protocolVersion, 'an execution-armed issuance writes protocol v4');
+            self::assertNotNull($record->decoyField);
+            self::assertSame(1, $record->executionVersion);
+            self::assertSame(\KiwiCaptcha\Issuer::executionCommitment($record->executionProgram), $record->executionCommitment, 'the signed commitment mirrors the stored program at scale');
+            $program = ExecutionChallengeGenerator::decode($challenge->executionProgram);
+            self::assertNotNull($program);
+            $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+            $digest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $trace);
+            self::assertNotNull($digest);
+            $v4[] = [
+                'challenge' => $challenge,
+                'record' => $record,
+                'token' => SolutionToken::create($challenge->nonce, $this->solveCounter($challenge), 5000, [], $digest, base64_encode($trace))->encode(),
+            ];
+        }
+        foreach ($v4 as $entry) {
+            $record = $entry['record'];
+            $outcome = $current->verify(
+                $entry['token'],
+                Vectors::SECRET,
+                'login',
+                Vectors::CLIENT_IP,
+                nowNs: $record->issuedAtNs + 1_000_000,
+            );
+            self::assertTrue($outcome->isOk(), sprintf('the current verifier must accept its own v4 record at scale, got %s', $outcome->code()));
+
+            $oldStorage = new ArrayStorage();
+            $oldStorage->store($record);
+            $simulator = new ProtocolV2OnlyVerifier($this->verifier($oldStorage), $oldStorage);
+            $v2Only = $simulator->verify(
+                $entry['token'],
+                Vectors::SECRET,
+                'login',
+                Vectors::CLIENT_IP,
+                $record->issuedAtNs + 1_000_000,
+            );
+            self::assertSame(VerifyError::MalformedRecord, $v2Only->error, 'a v2-only binary must reject every v4 record at scale');
+            $v3Only = $simulator->verify(
+                $entry['token'],
+                Vectors::SECRET,
+                'login',
+                Vectors::CLIENT_IP,
+                $record->issuedAtNs + 1_000_000,
+                ProtocolV2OnlyVerifier::MAX_SUPPORTED_PROTOCOL + 1,
+            );
+            self::assertSame(VerifyError::MalformedRecord, $v3Only->error, 'a v3-only binary must reject every v4 record at scale as MalformedRecord');
+        }
+
         self::assertCount(self::PER_VERSION, $v2, 'the v2 batch must be complete');
         self::assertCount(self::PER_VERSION, $v3, 'the v3 batch must be complete');
+        self::assertCount(self::PER_VERSION, $v4, 'the v4 batch must be complete');
     }
 
     public function testV3ConsumptionIsAtomicAndDoubleSpendIsDeterministic(): void
