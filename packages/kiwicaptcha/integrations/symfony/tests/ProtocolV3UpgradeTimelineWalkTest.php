@@ -17,7 +17,7 @@ use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ExecutionChallengeGenerator;
-use KiwiCaptcha\TestSupport\ExecutionTraceFixture;
+use KiwiCaptcha\Tests\Support\ExecutionTraceFixture;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Risk\AdaptiveRiskEngine;

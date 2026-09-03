@@ -183,25 +183,25 @@ final class KiwiHealthControllerTest extends TestCase
         // 3 is compatible, like a protocol floor exactly at the
         // binary's max.
         $client = $this->requirePredis();
-        $this->setPolicy($client, 4, 1, 3);
-        $controller = $this->controller($client, policyVersion: 1);
-
-        self::assertSame(200, $controller->ready()->getStatusCode(), 'min_execution_version 3 <= the binary max (3) — the execution-v3-capable binary stays in the pool');
-    }
-
-    public function testNotReadyWhenCentralPolicyDemandsExecutionVersion4(): void
-    {
-        // The execution floor is a reader floor exactly like the
-        // protocol floor: a central min_execution_version above this
-        // binary's max (3) must take it out of the pool, or a mixed
-        // fleet could hand it version-3 programs it cannot honor.
-        $client = $this->requirePredis();
         $this->setPolicy($client, 4, 1, 4);
         $controller = $this->controller($client, policyVersion: 1);
 
+        self::assertSame(200, $controller->ready()->getStatusCode(), 'min_execution_version 4 <= the binary max (4) — the execution-v4-capable binary stays in the pool');
+    }
+
+    public function testNotReadyWhenCentralPolicyDemandsExecutionVersion5(): void
+    {
+        // The execution floor is a reader floor exactly like the
+        // protocol floor: a central min_execution_version above this
+        // binary's max (4) must take it out of the pool, or a mixed
+        // fleet could hand it version-4 programs it cannot honor.
+        $client = $this->requirePredis();
+        $this->setPolicy($client, 4, 1, 5);
+        $controller = $this->controller($client, policyVersion: 1);
+
         $response = $controller->ready();
-        self::assertSame(503, $response->getStatusCode(), 'a central min_execution_version of 4 exceeds this binary\'s max (3) — it must leave the pool (mixed-version rolling deployment)');
-        self::assertSame('security_policy_incompatible:min_execution_version_4', json_decode((string) $response->getContent(), true)['reason'], 'the machine-readable reason names the execution floor with its numeric suffix');
+        self::assertSame(503, $response->getStatusCode(), 'a central min_execution_version of 5 exceeds this binary\'s max (4) — it must leave the pool (mixed-version rolling deployment)');
+        self::assertSame('security_policy_incompatible:min_execution_version_5', json_decode((string) $response->getContent(), true)['reason'], 'the machine-readable reason names the execution floor with its numeric suffix');
     }
 
     public function testNotReadyWhenCentralPolicyCarriesACorruptExecutionFloor(): void

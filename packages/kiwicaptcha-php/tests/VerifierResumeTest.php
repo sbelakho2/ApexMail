@@ -9,7 +9,7 @@ use KiwiCaptcha\RequestBindingExpectation;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ConsumedRecord;
 use KiwiCaptcha\ExecutionChallengeGenerator;
-use KiwiCaptcha\TestSupport\ExecutionTraceFixture;
+use KiwiCaptcha\Tests\Support\ExecutionTraceFixture;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\SolutionToken;

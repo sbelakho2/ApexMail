@@ -23,7 +23,7 @@ const NONCE: &str = "xAfSYcl6VyvtYZcQUhvXxin2pojnG5TmZoHg7K6NG3s=";
 /// over the browser-equivalent executed trace of the program, the
 /// trace a real browser execution submits. It is computed as
 /// `digestOverTrace` over the trace built by the PHP test-fixture
-/// `KiwiCaptcha\TestSupport\ExecutionTraceFixture::executedTraceFor` on
+/// `KiwiCaptcha\Tests\Support\ExecutionTraceFixture::executedTraceFor` on
 /// the decoded program, and re-derived here over the same trace.
 /// `PROGRAM`/`DIGEST` pin the version-2 pair (the causal observe
 /// grammar, opcode 33); `PROGRAM_V1`/`DIGEST_V1` pin the version-1
@@ -41,10 +41,37 @@ mod php_vectors {
     /// traversal grammar with two constructed nodes): the N-1-fence
     /// vector for the newest generation.
     pub const PROGRAM_V3: &str = "AQVsb2dpbgxsb2dpbi1hY3Rpb24DFBDBDnVPWlRTamU1a2ltTk9vFwU4QWF1TBIQkQ9YeWJUOTdpQXI4bWEvN3AVDHh6MnJmcWNqZzFqcgNXcyUSCNIhDnVPWlRTamU1a2ltTk9vIAogCebGHQ51T1pUU2plNWtpbU5PbyIPWHliVDk3aUFyOG1hLzdwIBwOdU9aVFNqZTVraW1OT28YCFRuRHZOUG9sFQZ4bWg3Nm4XKVghWD44OXY9K1s1bH0wUjtOX1AkQl8AZCz2ep3N8tYJAYwTC1Q3R0h3dEcxYUV0EVMRM1k+UyJVXWgkPDFaWDdbe0s=";
+    pub const PROGRAM_V4: &str = "AQVsb2dpbgxsb2dpbi1hY3Rpb24EExCjDWxzM0JqblJlVG92Rk4VBHh6b2EcR0EvalpQVmZWSi9DZUsoYVlvPUIzJnNbaUBZYhIQuQdXTXZ2SXZXEfUDPHdLEiPWDGhKMTlmOGtDeW9keCN8B2JHT0NtU1IIYCENbHMzQmpuUmVUb3ZGThMKEwlW3B8NbHMzQmpuUmVUb3ZGTiIHV012dkl2VyQHYkdPQ21TUh8NbHMzQmpuUmVUb3ZGTiAgAHgKyiaEMcDn";
+    pub const DIGEST_V4: &str = "0961591245fcd407aebd70bf125bf61c11c74519e0cfa31fe8cb9797b969a143";
+
     pub const DIGEST_V3: &str = "2dda24554c22f43ed405b1e2bea67997e27c849b0d6dbca930c7f2d497e85951";
 
     pub const PROGRAM_V1: &str = "AQVsb2dpbgxsb2dpbi1hY3Rpb24BFhA4D3JWcHNlVHl2TVR4TG1zKxcJVXJYczFGMllaEh8PclZwc2VUeXZNVHhMbXMrHA9yVnBzZVR5dk1UeExtcysdD3JWcHNlVHl2TVR4TG1zKyAXCzJBcUxDOXNKQjR2BZbLHEPX1bDYB/KirhATuo0oGxILsBkQUA8xV2JFc3cvWGFsSkdSUlAJt5MaEOAQZFNIazI0RkFsM1diODVDMxQkFgVySmkjWQdwo5mMcPosjwLkcZPOX9oyWQ==";
     pub const DIGEST_V1: &str = "1a8bcf129537218346d5e2dc0f636af10d4ea81db0cb9ca91a96cbbd9efc6f64";
+}
+
+#[test]
+fn rust_mirror_reproduces_the_php_version_four_program() {
+    // The pinned version-4 program (the nested-tree grammar) generated
+    // by the PHP core: the Rust mirror must reproduce the identical
+    // blob and the executed-trace digest.
+    let program = execution::generate(KEY, NONCE, "login", "login-action", 4).unwrap();
+    assert_eq!(
+        program,
+        php_vectors::PROGRAM_V4,
+        "the Rust generator must reproduce the PHP version-4 program byte-for-byte"
+    );
+    let decoded = execution::decode(&program).expect("the version-4 program must parse");
+    let trace = execution::fixtures::executed_trace_for(&decoded);
+    assert!(
+        trace.contains("ddepth("),
+        "the version-4 grammar carries the nested-tree depth entry"
+    );
+    assert_eq!(
+        execution::expected_digest_over_trace(&program, NONCE, &trace).unwrap(),
+        php_vectors::DIGEST_V4,
+        "the Rust version-4 executed-trace digest must reproduce the PHP digest"
+    );
 }
 
 #[test]

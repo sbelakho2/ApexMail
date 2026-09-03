@@ -770,6 +770,42 @@ final class ConfigurationTest extends TestCase
         self::assertSame(3, $this->process(['argon2_max_concurrent_verifications' => 0, 'argon2_max_per_tenant' => 3])['argon2_max_per_tenant']);
     }
 
+    public function testExecutionRequiredVersionAboveTheNodeCapIsRefused(): void
+    {
+        // The node's execution_version cap bounds the strongest
+        // grammar the deployment can emit, and the required tier
+        // refuses (never downgrades) a client below it, so a required
+        // tier above the cap can never be satisfied: every armed
+        // request would deterministically fail with
+        // `CLIENT_EXECUTION_VERSION_UNSUPPORTED` — refused with the
+        // exact actionable message at compile time.
+        $expected = 'Invalid configuration for path "kiwi_captcha": kiwi_captcha.execution_required_version must not exceed kiwi_captcha.execution_version (the node execution-program cap): the required tier is a solve mandate the node must be able to emit, and a client below it is refused with CLIENT_EXECUTION_VERSION_UNSUPPORTED, never downgraded — so a required tier above the cap makes every armed request deterministically fail. Raise kiwi_captcha.execution_version to at least the required tier (and confirm the fleet min_execution_version floor reaches it) or lower the required tier';
+        try {
+            $this->process(['execution_version' => 1, 'execution_required_version' => 2]);
+            self::fail('required tier 2 with the node cap 1 must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertSame($expected, $e->getMessage());
+        }
+        try {
+            $this->process(['execution_version' => 2, 'execution_required_version' => 3]);
+            self::fail('required tier 3 with the node cap 2 must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertSame($expected, $e->getMessage());
+        }
+
+        // The default (both 1) and every required tier at or below the
+        // node cap stay valid.
+        $defaults = $this->process();
+        self::assertSame(1, $defaults['execution_version']);
+        self::assertSame(1, $defaults['execution_required_version']);
+        $tierThree = $this->process(['execution_version' => 3, 'execution_required_version' => 3]);
+        self::assertSame(3, $tierThree['execution_version']);
+        self::assertSame(3, $tierThree['execution_required_version']);
+        $belowCap = $this->process(['execution_version' => 3, 'execution_required_version' => 2]);
+        self::assertSame(3, $belowCap['execution_version']);
+        self::assertSame(2, $belowCap['execution_required_version']);
+    }
+
     public function testArgon2MaxVerificationRuntimeMsDefaultsAndBounds(): void
     {
         // The deployment bound on a single verification derivation: below

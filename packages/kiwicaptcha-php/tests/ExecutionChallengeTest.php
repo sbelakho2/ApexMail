@@ -7,7 +7,7 @@ namespace KiwiCaptcha\Tests;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ExecutionChallengeGenerator;
-use KiwiCaptcha\TestSupport\ExecutionTraceFixture;
+use KiwiCaptcha\Tests\Support\ExecutionTraceFixture;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\SolutionToken;
@@ -33,6 +33,9 @@ final class ExecutionChallengeTest extends TestCase
     // mirrors reproduce the same program and executed-trace digest.
     private const PROGRAM_V3 = 'AQVsb2dpbgxsb2dpbi1hY3Rpb24DFBDBDnVPWlRTamU1a2ltTk9vFwU4QWF1TBIQkQ9YeWJUOTdpQXI4bWEvN3AVDHh6MnJmcWNqZzFqcgNXcyUSCNIhDnVPWlRTamU1a2ltTk9vIAogCebGHQ51T1pUU2plNWtpbU5PbyIPWHliVDk3aUFyOG1hLzdwIBwOdU9aVFNqZTVraW1OT28YCFRuRHZOUG9sFQZ4bWg3Nm4XKVghWD44OXY9K1s1bH0wUjtOX1AkQl8AZCz2ep3N8tYJAYwTC1Q3R0h3dEcxYUV0EVMRM1k+UyJVXWgkPDFaWDdbe0s=';
     private const DIGEST_V3 = '2dda24554c22f43ed405b1e2bea67997e27c849b0d6dbca930c7f2d497e85951';
+    private const PROGRAM_V4 = 'AQVsb2dpbgxsb2dpbi1hY3Rpb24EExCjDWxzM0JqblJlVG92Rk4VBHh6b2EcR0EvalpQVmZWSi9DZUsoYVlvPUIzJnNbaUBZYhIQuQdXTXZ2SXZXEfUDPHdLEiPWDGhKMTlmOGtDeW9keCN8B2JHT0NtU1IIYCENbHMzQmpuUmVUb3ZGThMKEwlW3B8NbHMzQmpuUmVUb3ZGTiIHV012dkl2VyQHYkdPQ21TUh8NbHMzQmpuUmVUb3ZGTiAgAHgKyiaEMcDn';
+    private const DIGEST_V4 = '0961591245fcd407aebd70bf125bf61c11c74519e0cfa31fe8cb9797b969a143';
+
     private const NONCE = 'xAfSYcl6VyvtYZcQUhvXxin2pojnG5TmZoHg7K6NG3s=';
     private const SCOPE = 'login';
     private const ACTION = 'login-action';
@@ -114,12 +117,12 @@ final class ExecutionChallengeTest extends TestCase
         // before any program is minted (the strict parser would reject
         // the blob anyway, so issuance never produces an unparseable
         // program). No string-cast ever reaches the blob.
-        foreach ([0, 4, 255] as $bad) {
+        foreach ([0, 5, 255] as $bad) {
             try {
                 ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, self::SCOPE, self::ACTION, $bad);
                 self::fail('a noncanonical version byte must be refused');
             } catch (\InvalidArgumentException $e) {
-                self::assertStringContainsString('1, 2 or 3', $e->getMessage());
+                self::assertStringContainsString('execution version must be', $e->getMessage());
             }
         }
         // Both canonical bytes generate and stamp their own version:
@@ -612,7 +615,7 @@ final class ExecutionChallengeTest extends TestCase
         // see the structure corpus tests).
         $seen = [];
         for ($i = 0; $i < 160; $i++) {
-            $version = ($i % 2) + 2;
+            $version = 3 + ($i % 2);
             $nonce = base64_encode(hash('sha256', 'opcode-coverage-'.$i, true));
             $program = ExecutionChallengeGenerator::generate(self::KEY, $nonce, self::SCOPE, self::ACTION, $version);
             $decoded = ExecutionChallengeGenerator::decode($program);
@@ -650,6 +653,7 @@ final class ExecutionChallengeTest extends TestCase
                 'AQVsb2dpbgxsb2dpbi1hY3Rpb24BFhA4D3JWcHNlVHl2TVR4TG1zKxcJVXJYczFGMllaEh8PclZwc2VUeXZNVHhMbXMrHA9yVnBzZVR5dk1UeExtcysdD3JWcHNlVHl2TVR4TG1zKyAXCzJBcUxDOXNKQjR2BZbLHEPX1bDYB/KirhATuo0oGxILsBkQUA8xV2JFc3cvWGFsSkdSUlAJt5MaEOAQZFNIazI0RkFsM1diODVDMxQkFgVySmkjWQdwo5mMcPosjwLkcZPOX9oyWQ==',
                 '1a8bcf129537218346d5e2dc0f636af10d4ea81db0cb9ca91a96cbbd9efc6f64',
             ],
+            4 => [self::PROGRAM_V4, self::DIGEST_V4],
         ];
         foreach ($pairs as $version => [$program, $digest]) {
             self::assertSame(

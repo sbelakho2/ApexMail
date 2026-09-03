@@ -366,7 +366,7 @@ Three knobs control the dimension:
   invalidates the challenge. The gate is inert without an
   `execution_key`, so turning it on before configuring the key never
   breaks issuance and never arms anything.
-- `kiwi_captcha.execution_required_version` (int 1 or 2, default 1):
+- `kiwi_captcha.execution_required_version` (int 1..4, default 1):
   the server-owned required execution tier. When 2, an execution-armed
   request from a client below version 2 is refused with the
   deterministic `CLIENT_EXECUTION_VERSION_UNSUPPORTED` outcome and is
@@ -378,7 +378,7 @@ Three knobs control the dimension:
   the eventual hardened posture is required 2, with staged profiles a
   future option.
 
-- `kiwi_captcha.execution_version` (int 1 or 2, default 1): the
+- `kiwi_captcha.execution_version` (int 1..4, default 1): the
   node's execution-program grammar cap. Version 3 is the
   sibling-index traversal grammar (opcode 34); version 2 is the
   causal observe grammar (opcode 33); version 1 is the

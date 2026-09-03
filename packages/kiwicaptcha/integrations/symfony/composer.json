@@ -55,7 +55,10 @@
             "type": "path",
             "url": "../../../kiwicaptcha-php",
             "options": {
-                "symlink": false
+                "symlink": false,
+                "versions": {
+                    "kiwicaptcha/kiwicaptcha-php": "1.0.0"
+                }
             }
         },
         {
@@ -76,7 +79,8 @@
     },
     "autoload-dev": {
         "psr-4": {
-            "BelConsulting\\KiwiCaptchaBundle\\Tests\\": "tests/"
+            "BelConsulting\\KiwiCaptchaBundle\\Tests\\": "tests/",
+            "KiwiCaptcha\\Tests\\Support\\": "vendor/kiwicaptcha/kiwicaptcha-php/tests/Support/"
         }
     },
     "extra": {

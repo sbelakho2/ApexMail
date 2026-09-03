@@ -5,7 +5,7 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Tests;
 
 use KiwiCaptcha\ExecutionChallengeGenerator;
-use KiwiCaptcha\TestSupport\ExecutionTraceFixture;
+use KiwiCaptcha\Tests\Support\ExecutionTraceFixture;
 use PHPUnit\Framework\TestCase;
 
 /**

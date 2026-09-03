@@ -61,7 +61,7 @@ final class ChallengeController
      * {@see self::effectiveExecutionVersion()}; the capability a client
      * advertises is capped at this ceiling.
      */
-    private const MAX_EXECUTION_VERSION = 3;
+    private const MAX_EXECUTION_VERSION = 4;
 
     /** Turnstile-compatible shapes, per Cloudflare's docs. */
     private const ACTION_PATTERN = '/^[a-z0-9_-]{1,32}$/i';

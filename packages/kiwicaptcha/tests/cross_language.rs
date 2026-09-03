@@ -999,7 +999,7 @@ do {{ $hash = hash('sha256', $record->prefix . $counter . base64_decode($record-
 --$counter;
 $program = KiwiCaptcha\ExecutionChallengeGenerator::decode($ch->executionProgram);
 if ($program === null) {{ fwrite(STDERR, 'the issued program must parse'); exit(4); }}
-$trace = KiwiCaptcha\TestSupport\ExecutionTraceFixture::executedTraceFor($program);
+$trace = KiwiCaptcha\Tests\Support\ExecutionTraceFixture::executedTraceFor($program);
 $digest = KiwiCaptcha\ExecutionChallengeGenerator::digestOverTrace($ch->executionProgram, $ch->nonce, $trace);
 if ($digest === null) {{ fwrite(STDERR, 'the digest over the executed trace must compute'); exit(5); }}
 if ('{tamper}' === '1') {{ $digest[0] = $digest[0] === '0' ? '1' : '0'; }}

@@ -110,10 +110,12 @@ final class ExecutionChallengeGenerator
      * The highest execution version this generator can emit. Version 2
      * adds the observe opcode and the causal u8 chain. Version 3 adds a
      * second constructed node and the sibling-index traversal probe
-     * (dsib): its value is the actual previousElementSibling walk, and
-     * the server computes it exactly from the append order.
+     * (dsib). Version 4 builds a real nested tree (a child node created
+     * under a constructed parent) and probes its depth with an actual
+     * ancestor walk whose exact value the server derives from the
+     * construction order.
      */
-    public const MAX_EXECUTION_VERSION = 3;
+    public const MAX_EXECUTION_VERSION = 4;
 
     /** The op-version byte stamped into the program (bumped on op-semantics changes). */
     public const PROTOCOL_VERSION = 1;
@@ -177,7 +179,9 @@ final class ExecutionChallengeGenerator
     public const OP_DOM_SERIALIZE_REAL = 32;
     public const OP_DOM_OBSERVE = 33;
     public const OP_DOM_SIBLING_INDEX = 34;
-    public const OP_COUNT = 35;
+    public const OP_DOM_CHILD = 35;
+    public const OP_DOM_DEPTH = 36;
+    public const OP_COUNT = 37;
 
     /** The canonical safe dataset-key grammar: the literal 'x' followed by 0..15 of [0-9a-z_]. */
     public const DATASET_KEY_PATTERN = '/^x[0-9a-z_]{0,15}$/D';
@@ -189,7 +193,7 @@ final class ExecutionChallengeGenerator
         'slen', 'schar', 'scode', 'sslice',
         'dcreate', 'dattr', 'dappend', 'dqsel', 'dget', 'dset', 'dgetd',
         'cadd', 'ccont', 'dparent', 'ddispatch', 'dserialize',
-        'qreal', 'geom', 'point', 'evreal', 'sreal', 'obs', 'dsib',
+        'qreal', 'geom', 'point', 'evreal', 'sreal', 'obs', 'dsib', 'dchild', 'ddepth',
     ];
 
     private function __construct()
@@ -219,9 +223,9 @@ final class ExecutionChallengeGenerator
                 'execution action must be 1-32 characters of [A-Za-z0-9._:-]'
             );
         }
-        if ($version !== 1 && $version !== 2 && $version !== 3) {
+        if ($version < 1 || $version > 4) {
             throw new \InvalidArgumentException(
-                'execution version must be 1, 2 or 3 (version 2 adds the observe opcode and the causal u8 chain; version 3 adds the sibling-index traversal probe)'
+                'execution version must be 1..4 (2 adds the observe opcode; 3 the sibling-index probe; 4 the nested-tree depth probe)'
             );
         }
         if ($scope === '' || \strlen($scope) > 128 || preg_match('/^[A-Za-z0-9._:-]+$/D', $scope) !== 1) {
@@ -253,6 +257,7 @@ final class ExecutionChallengeGenerator
         $opCount = match ($version) {
             2 => 11 + (self::nextByte($stream) % 14),
             3 => 15 + (self::nextByte($stream) % 10),
+            4 => 18 + (self::nextByte($stream) % 7),
             default => 8 + (self::nextByte($stream) % 17),
         };
         $program .= \chr($opCount);
@@ -296,6 +301,19 @@ final class ExecutionChallengeGenerator
             $ops[] = [$mutateB, self::drawOperands($stream, $mutateB)];
             $ops[] = [self::OP_DOM_APPEND, ''];
         }
+        $depthOperand = $siblingOperand;
+        if ($version >= 4) {
+            // The version-4 nested tree: two children created under the
+            // current node in sequence (the second under the first), so
+            // the program builds a real ancestor chain whose depth the
+            // browser walks for the ddepth probe.
+            for ($n = 0; $n < 2; $n++) {
+                $tagC = self::drawBytes($stream, 1);
+                $childOperand = self::drawIdOperand($stream);
+                $ops[] = [self::OP_DOM_CHILD, $tagC.$childOperand];
+                $depthOperand = $childOperand;
+            }
+        }
         if ($version >= 2) {
             // The causal chain: U8_CREATE(len) then the observe op
             // writes the browser-observed height at a drawn index
@@ -319,15 +337,33 @@ final class ExecutionChallengeGenerator
             // second constructed node (a real DOM walk, exact value).
             $ops[] = [self::OP_DOM_SIBLING_INDEX, $siblingOperand];
         }
+        if ($version >= 4) {
+            // The mandatory depth probe of the deepest nested child: an
+            // actual ancestor walk whose exact value the verifier
+            // derives from the construction order.
+            $ops[] = [self::OP_DOM_DEPTH, $depthOperand];
+        }
         $extraProbes = 1 + (self::nextByte($stream) % 3);
-        $probePool = $version >= 3 ? 7 : 5;
+        $probePool = match ($version) {
+            2 => 5,
+            3 => 7,
+            4 => 9,
+            default => 5,
+        };
         for ($i = 0; $i < $extraProbes; $i++) {
             $probe = self::OP_DOM_QUERY_REAL + (self::nextByte($stream) % $probePool);
+            if ($version >= 4 && $probe === self::OP_DOM_CHILD) {
+                // The nested-tree opcode never appears in extra slots
+                // (it would mutate the tree mid-run); the draw maps to
+                // the depth probe of the deepest child.
+                $probe = self::OP_DOM_DEPTH;
+            }
             $probeOperand = match ($probe) {
                 self::OP_DOM_QUERY_REAL, self::OP_DOM_GEOMETRY, self::OP_DOM_EVENT_REAL => $idOperand,
                 self::OP_DOM_SIBLING_INDEX => $siblingOperand,
                 self::OP_DOM_POINT => self::drawBytes($stream, 2),
                 self::OP_DOM_OBSERVE => $idOperand.self::drawBytes($stream, 1),
+                self::OP_DOM_DEPTH => $depthOperand,
                 default => '',
             };
             $ops[] = [$probe, $probeOperand];
@@ -409,7 +445,7 @@ final class ExecutionChallengeGenerator
         // Execution versions 1, 2 and 3 are accepted (the compat
         // window: old challenges stay verifiable for their whole TTL);
         // each version bounds its own opcode space below.
-        if ($opVersion === null || (\ord($opVersion) < 1 || \ord($opVersion) > 3)) {
+        if ($opVersion === null || (\ord($opVersion) < 1 || \ord($opVersion) > self::MAX_EXECUTION_VERSION)) {
             return null;
         }
         $opCount = $read(1);
@@ -433,7 +469,12 @@ final class ExecutionChallengeGenerator
             // opcode 34): the interpreter of a mixed fleet must be
             // able to reject a newer grammar by the declared version
             // byte alone.
-            $maxOpcode = self::OP_COUNT - (3 - \ord($opVersion));
+            $maxOpcode = match (\ord($opVersion)) {
+                1 => 33,
+                2 => 34,
+                3 => 35,
+                default => self::OP_COUNT,
+            };
             if ($opcode >= $maxOpcode) {
                 return null;
             }
@@ -510,6 +551,7 @@ final class ExecutionChallengeGenerator
         $docIds = [];
         $prevTop = -1;
         $appendRank = [];
+        $parent = [];
         $pos = 0;
         $traceLen = \strlen($trace);
         $lastIndex = \count($program['ops']) - 1;
@@ -521,6 +563,12 @@ final class ExecutionChallengeGenerator
                 // among the body children the program built (the real
                 // sibling order the dsib probe walks).
                 $appendRank[$cur['id']] = \count($appendRank);
+            }
+            if ($op === self::OP_DOM_CHILD && $cur !== null) {
+                // The verifier's tree model: the child id is created
+                // under the current node (the parent bookkeeping the
+                // ddepth probe's ancestor walk mirrors).
+                $parent[$operands['id']] = $cur['id'];
             }
             $sim = self::simulateOp($op, $operands, $u8, $cur, $docIds);
             $name = self::TRACE_NAMES[$op];
@@ -560,6 +608,21 @@ final class ExecutionChallengeGenerator
                 if ($expectedRank === null
                     || preg_match('/\G(\d+)\)/', $trace, $m, 0, $pos) !== 1
                     || (int) $m[1] !== $expectedRank + 1) {
+                    return null;
+                }
+                $pos += \strlen($m[0]);
+            } elseif ($op === self::OP_DOM_DEPTH) {
+                // The depth probe: the number of ancestor elements up
+                // to (excluding) the document body, derived from the
+                // verifier's tree model — the exact value of a real
+                // parentElement walk over the program-built tree.
+                $depth = 0;
+                $cursorId = $operands['id'] ?? null;
+                while ($cursorId !== null && isset($parent[$cursorId])) {
+                    ++$depth;
+                    $cursorId = $parent[$cursorId];
+                }
+                if (preg_match('/\G(\d+)\)/', $trace, $m, 0, $pos) !== 1 || (int) $m[1] !== $depth) {
                     return null;
                 }
                 $pos += \strlen($m[0]);
@@ -745,6 +808,11 @@ final class ExecutionChallengeGenerator
             // (the second constructed node on issued version-3
             // programs).
             self::OP_DOM_SIBLING_INDEX => self::drawIdOperand($stream),
+            // The nested-tree ops: dchild draws a tag byte then the new
+            // child's id (created under the current node); ddepth draws
+            // the probed id.
+            self::OP_DOM_CHILD => self::drawBytes($stream, 1).self::drawIdOperand($stream),
+            self::OP_DOM_DEPTH => self::drawIdOperand($stream),
             default => '',
         };
     }
@@ -879,6 +947,8 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_EVENT_REAL => $readIdKeyed(),
             self::OP_DOM_OBSERVE => self::readObserve($read, $readByte, $readIdKeyed),
             self::OP_DOM_SIBLING_INDEX => $readIdKeyed(),
+            self::OP_DOM_DEPTH => $readIdKeyed(),
+            self::OP_DOM_CHILD => self::readChild($read, $readByte, $readIdKeyed),
             default => null,
         };
     }
@@ -890,6 +960,20 @@ final class ExecutionChallengeGenerator
      *
      * @return array{id: string, idx: int}|null
      */
+    private static function readChild(callable $read, callable $readByte, callable $readIdKeyed): ?array
+    {
+        $tag = $readByte();
+        if ($tag === null) {
+            return null;
+        }
+        $id = $readIdKeyed();
+        if ($id === null) {
+            return null;
+        }
+
+        return ['tag' => $tag % 4, 'id' => $id['id']];
+    }
+
     private static function readObserve(callable $read, callable $readByte, callable $readIdKeyed): ?array
     {
         $id = $readIdKeyed();
@@ -1213,6 +1297,14 @@ final class ExecutionChallengeGenerator
             // computes exactly from the append order (see
             // verifyExecutedTrace); the pure sim emits the placeholder.
             self::OP_DOM_SIBLING_INDEX => 'dsib',
+            // dchild creates the child under the current node and moves
+            // cur onto it (matching the interpreter); its entry is the
+            // child's canonical id, exactly like dcreate.
+            self::OP_DOM_CHILD => self::opDomChild($operands, $cur),
+            // The depth is a real ancestor walk the verifier derives
+            // from the construction order; the sim emits the
+            // placeholder.
+            self::OP_DOM_DEPTH => 'ddepth',
             default => '0',
         };
     }
@@ -1353,6 +1445,29 @@ final class ExecutionChallengeGenerator
      * @param array<string, mixed> $operands
      * @param array|null           $cur
      */
+    private static function opDomChild(array $operands, ?array &$cur): string
+    {
+        $id = $operands['id'];
+        $newCur = [
+            'id' => $id,
+            'attrs' => ['id' => $id],
+            'dataset' => [],
+            'classes' => [],
+            'appended' => true,
+        ];
+        // The child is created under the current node and becomes the
+        // new current node (its parent is the previous cur; the tree
+        // topology is tracked by the verifier's replay, see
+        // verifyExecutedTrace).
+        $parentId = $cur['id'] ?? null;
+        if ($cur !== null && $parentId !== $id) {
+            $newCur['parent'] = $parentId;
+        }
+        $cur = $newCur;
+
+        return base64_encode($id);
+    }
+
     private static function opDomCreate(array $operands, ?array &$cur): string
     {
         $id = $operands['id'];

@@ -66,6 +66,16 @@ final class KiwiCaptchaDoctorCommand extends Command
     private const ARGON_MEMORY_CEILING_KIB = 65536;
 
     /**
+     * This binary's maximum supported execution-program version: 3,
+     * the strongest grammar the core generator emits (the sibling-index
+     * traversal grammar). Mirrors the core's
+     * `ExecutionChallengeGenerator::MAX_EXECUTION_VERSION` and the
+     * challenge controller's max, the rung that caps the strongest
+     * grammar any emission gate can confirm on this node.
+     */
+    private const MAX_EXECUTION_VERSION = 3;
+
+    /**
      * @param array<string, mixed>                     $config the effective processed
      *        configuration (profile-derived defaults included), the
      *        same array the extension consumed
@@ -629,17 +639,20 @@ final class KiwiCaptchaDoctorCommand extends Command
     /**
      * The execution-required-tier posture check. The high_abuse
      * protection profile models an abuse-heavy production deployment.
-     * A node there can hold the full version-2 capability: the
-     * execution_key configured, the execution_version cap raised to 2,
-     * and the confirmed central min_execution_version floor at 2. With
-     * execution_required_version still at the default 1, a client that
-     * cannot solve version 2 is downgraded to version 1, so the strong
-     * grammar stays client-downgradeable. The default must stay during
-     * the fleet transition, so this check warns (exit 0) on that
-     * posture and never fails the deploy gate. Raise the required tier
-     * to 2 once every serving page is on the version-2 generation. A
-     * required tier of 2 under the same full capability passes: the
-     * strong grammar is then server-required.
+     * The strongest available execution grammar is the minimum of the
+     * three emission-gate rungs: the node's execution_version cap, the
+     * confirmed central min_execution_version floor, and this binary's
+     * maximum ({@see self::MAX_EXECUTION_VERSION}). An unconfirmed
+     * floor keeps the gate at version 1. While the configured required
+     * tier sits below that strongest available grammar, a client that
+     * cannot solve the strong grammar is downgraded to the weaker one,
+     * so the strong grammar stays client-downgradeable. The required
+     * tier must stay at the default during the fleet transition, so
+     * this check warns (exit 0) on that posture and never fails the
+     * deploy gate. Raise the required tier to the strongest available
+     * grammar once every serving page is on that generation. A
+     * required tier at or above the strongest available grammar
+     * passes: the strong grammar is then server-required.
      *
      * @return array{0: string, 1: string} [status, detail]
      */
@@ -656,14 +669,34 @@ final class KiwiCaptchaDoctorCommand extends Command
         $required = (int) ($this->config['execution_required_version'] ?? 1);
         $this->epochMonitor->refresh();
         $floor = $this->epochMonitor->minExecutionVersion();
-        if ($cap < 2 || $floor === null || $floor < 2) {
-            return ['PASS', sprintf('high_abuse without the full version-2 capability (execution_version cap %d, confirmed central min_execution_version floor %s): execution_required_version 1 stays the safe transition default', $cap, $floor === null ? 'unconfirmed' : (string) $floor)];
+        $floorLabel = $floor === null ? 'unconfirmed' : (string) $floor;
+        // The strongest available grammar: the emission-gate minimum
+        // (node cap, confirmed fleet floor, this binary's max), with an
+        // unconfirmed floor pinning the gate at version 1.
+        $strongest = min($cap, $floor ?? 1, self::MAX_EXECUTION_VERSION);
+        if ($strongest < 2) {
+            return ['PASS', sprintf('high_abuse with the emission gate below version 2 (execution_version cap %d, confirmed central min_execution_version floor %s): the strongest available execution grammar is version 1, so execution_required_version %d cannot leave a strong grammar client-downgradeable', $cap, $floorLabel, $required)];
         }
-        if ($required === 1) {
-            return ['WARN', 'high_abuse with the full version-2 capability (execution_key configured, execution_version 2, confirmed central min_execution_version floor 2) but execution_required_version still at the default 1: the strong grammar stays client-downgradeable until the required tier is raised to 2. Raise execution_required_version to 2 once every serving page is on the version-2 generation (reason execution_required_version_1_with_v2_capability, see operations.md "Execution versioning")'];
+        if ($required < $strongest) {
+            // The gap the audit exists for: the strongest grammar the
+            // fleet can emit is not the server-required tier, so a
+            // client that cannot solve it is downgraded to the weaker
+            // grammar. The reason code names both tiers, so a deploy
+            // gate can key on the exact posture.
+            $requiredClause = $required === 1 ? 'still at the default 1' : (string) $required;
+
+            return ['WARN', sprintf('high_abuse with the full version-%d capability (execution_key configured, execution_version %d, confirmed central min_execution_version floor %d) but execution_required_version %s: the strong grammar stays client-downgradeable until the required tier is raised to %d. Raise execution_required_version to %d once every serving page is on the version-%d generation (reason execution_required_version_%d_with_v%d_capability, see operations.md "Execution versioning")', $strongest, $cap, $floor, $requiredClause, $strongest, $strongest, $strongest, $required, $strongest)];
+        }
+        if ($required > $strongest) {
+            // The required tier is server-enforced above the grammar
+            // the confirmed fleet floor currently allows the gate to
+            // emit: never downgradeable, and every armed request
+            // refuses a client below the required tier until the floor
+            // reaches it.
+            return ['PASS', sprintf('execution_required_version %d is above the strongest available grammar version %d (high_abuse, execution_key configured, cap %d, confirmed central min_execution_version floor %d): the required tier is server-required, never client-downgradeable, once the fleet floor reaches it', $required, $strongest, $cap, $floor)];
         }
 
-        return ['PASS', 'execution_required_version 2 under the full version-2 capability (high_abuse, execution_key configured, cap and floor 2): the strong grammar is server-required, never client-downgradeable'];
+        return ['PASS', sprintf('execution_required_version %d under the full version-%d capability (high_abuse, execution_key configured, cap %d and floor %d): the strong grammar is server-required, never client-downgradeable', $required, $strongest, $cap, $floor)];
     }
 
     /**

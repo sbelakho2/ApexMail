@@ -97,7 +97,7 @@ final class KiwiHealthController
      * (`ExecutionChallengeGenerator::MAX_EXECUTION_VERSION`) and the
      * Rust crate (`execution::MAX_EXECUTION_VERSION`).
      */
-    public const MAX_EXECUTION_VERSION = 3;
+    public const MAX_EXECUTION_VERSION = 4;
 
     /** Fixed headroom of the memory-budget invariant, in MiB. */
     public const MEMORY_HEADROOM_MIB = 256;

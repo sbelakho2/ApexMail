@@ -87,7 +87,7 @@
  var KIWI_EXECUTION_ERROR = "kiwi-execution-error";
  var MIN_OPS = 8;
  var MAX_OPS = 24;
- var OP_COUNT = 35;
+ var OP_COUNT = 37;
  var FORMAT_VERSION = 1;
  var ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
  var CLASS_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
@@ -99,7 +99,7 @@
   "slen", "schar", "scode", "sslice",
   "dcreate", "dattr", "dappend", "dqsel", "dget", "dset", "dgetd",
   "cadd", "ccont", "dparent", "ddispatch", "dserialize",
-  "qreal", "geom", "point", "evreal", "sreal", "obs", "dsib"
+  "qreal", "geom", "point", "evreal", "sreal", "obs", "dsib", "dchild", "ddepth"
  ];
  // ── Minimal SHA-256 (FIPS 180-4), deterministic ─────────────────────
  var K = [
@@ -263,7 +263,7 @@
   // bounds its own opcode space below — version 1 never carries the
   // version-2 observe opcode (33), versions below 3 never carry the
   // version-3 sibling-index opcode (34).
-  if (opVersion < 1 || opVersion > 3) return null;
+  if (opVersion < 1 || opVersion > 4) return null;
   var opCount = byte();
   if (opCount === null || opCount < MIN_OPS || opCount > MAX_OPS) return null;
   function readLenBytes(maxLen) {
@@ -278,7 +278,8 @@
    var opcode = byte();
    if (opcode === null) return null;
    // Version 1 programs never carry the version-2 observe opcode.
-   if (opcode >= OP_COUNT - (3 - opVersion)) return null;
+   var maxOpcode = opVersion === 1 ? 33 : (opVersion === 2 ? 34 : (opVersion === 3 ? 35 : OP_COUNT));
+   if (opcode >= maxOpcode) return null;
    var operands = [];
    switch (opcode) {
     case 0: case 1: case 2: case 3: case 4: case 5: case 6: case 7: {
@@ -428,6 +429,24 @@
      var dsibId = readLenBytes(16);
      if (!dsibId || dsibId.length < 4) return null;
      operands.push({ k: "id", v: dsibId });
+     break;
+    }
+    case 35: {
+     // DCHILD: a tag byte then the new child's id (created under the
+     // current node).
+     var chTag = byte();
+     if (chTag === null) return null;
+     var chId = readLenBytes(16);
+     if (!chId || chId.length < 4) return null;
+     operands.push({ k: "tag", v: chTag % 4 });
+     operands.push({ k: "id", v: chId });
+     break;
+    }
+    case 36: {
+     // DDEPTH: the constructed id (4..16 bytes).
+     var ddId = readLenBytes(16);
+     if (!ddId || ddId.length < 4) return null;
+     operands.push({ k: "id", v: ddId });
      break;
     }
     default:
@@ -735,6 +754,30 @@
        if (dsibEl) dsibIdx++;
      }
      value = "" + dsibIdx;
+     break;
+    }
+    case 35: {
+     // DCHILD: create a new element as a real child of the current
+     // node and make it current (a real nested tree edge).
+     var chId = bytesToAscii(opValue(ops, "id"));
+     var chEl = doc.createElement(TAG_NAMES[opValue(ops, "tag")]);
+     chEl.id = chId;
+     if (cur && cur.el) cur.el.appendChild(chEl);
+     cur = { el: chEl, id: chId, attrs: { id: chId }, dataset: {}, classes: {}, appended: true };
+     value = b64Encode(asciiBytes(chId));
+     break;
+    }
+    case 36: {
+     // DDEPTH: the real ancestor-chain length of the probed node up
+     // to (excluding) the document body.
+     var ddId = bytesToAscii(opValue(ops, "id"));
+     var ddEl = doc.getElementById(ddId);
+     var ddDepth = 0;
+     while (ddEl && ddEl.parentElement && ddEl.parentElement !== doc.body) {
+       ddDepth++;
+       ddEl = ddEl.parentElement;
+     }
+     value = "" + ddDepth;
      break;
     }
     default:

@@ -19,7 +19,10 @@
             "type": "path",
             "url": "../kiwicaptcha-php",
             "options": {
-                "symlink": true
+                "symlink": true,
+                "versions": {
+                    "kiwicaptcha/kiwicaptcha-php": "1.0.0"
+                }
             }
         }
     ],

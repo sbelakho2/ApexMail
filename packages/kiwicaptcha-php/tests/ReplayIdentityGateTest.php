@@ -8,7 +8,7 @@ use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\ConsumedRecord;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ExecutionChallengeGenerator;
-use KiwiCaptcha\TestSupport\ExecutionTraceFixture;
+use KiwiCaptcha\Tests\Support\ExecutionTraceFixture;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\RequestBindingExpectation;
 use KiwiCaptcha\SolutionToken;

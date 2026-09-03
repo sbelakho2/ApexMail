@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-namespace KiwiCaptcha\TestSupport;
+namespace KiwiCaptcha\Tests\Support;
 
 use KiwiCaptcha\ExecutionChallengeGenerator;
 
@@ -21,10 +21,12 @@ use KiwiCaptcha\ExecutionChallengeGenerator;
  * non-browser equivalent of a real execution. The former
  * `ExecutionChallengeGenerator::executedTraceFor` entry point is gone.
  * The fabrication lives here, behind the explicitly test-only
- * `KiwiCaptcha\TestSupport` namespace. Never call this class from a
- * production path. Test suites, cross-language fixtures and the
- * browser fixture router are its only callers. The verifier's own
- * machinery (`verifyExecutedTrace`, `digestOverTrace`,
+ * `KiwiCaptcha\Tests\Support` namespace (autoload-dev only: a
+ * production Composer install never ships this class, matching the
+ * Rust crate's default-off `test-fixtures` feature). Never call this
+ * class from a production path. Test suites, cross-language fixtures
+ * and the browser fixture router are its only callers. The verifier's
+ * own machinery (`verifyExecutedTrace`, `digestOverTrace`,
  * `expectedDigest`) stays on the generator and operates over
  * submitted evidence, replaying whatever the trace reports.
  *
@@ -60,7 +62,7 @@ final class ExecutionTraceFixture
         'slen', 'schar', 'scode', 'sslice',
         'dcreate', 'dattr', 'dappend', 'dqsel', 'dget', 'dset', 'dgetd',
         'cadd', 'ccont', 'dparent', 'ddispatch', 'dserialize',
-        'qreal', 'geom', 'point', 'evreal', 'sreal', 'obs', 'dsib',
+        'qreal', 'geom', 'point', 'evreal', 'sreal', 'obs', 'dsib', 'dchild', 'ddepth',
     ];
 
     private function __construct()
@@ -101,17 +103,32 @@ final class ExecutionTraceFixture
         }
         $entries = [];
         $appendRank = [];
+        $parent = [];
         $cur = null;
         foreach ($program['ops'] as $record) {
             $op = $record['op'];
             if ($op === ExecutionChallengeGenerator::OP_DOM_APPEND && $cur !== null && !isset($appendRank[$cur['id']])) {
                 $appendRank[$cur['id']] = \count($appendRank);
             }
+            if ($op === ExecutionChallengeGenerator::OP_DOM_CHILD && $cur !== null) {
+                $parent[$record['operands']['id']] = $cur['id'];
+            }
             if ($op === ExecutionChallengeGenerator::OP_DOM_GEOMETRY) {
                 $entries[] = 'geom('.($top * 10).',10)';
                 ++$top;
             } elseif ($op === ExecutionChallengeGenerator::OP_DOM_POINT) {
                 $entries[] = 'point('.($hasAppend ? 'div' : 'none').')';
+            } elseif ($op === ExecutionChallengeGenerator::OP_DOM_DEPTH) {
+                // The browser-equivalent ancestor walk: the number of
+                // ancestors up to (excluding) the body — the exact
+                // value the verifier derives from the tree model.
+                $depth = 0;
+                $cursorId = $record['operands']['id'] ?? null;
+                while ($cursorId !== null && isset($parent[$cursorId])) {
+                    ++$depth;
+                    $cursorId = $parent[$cursorId];
+                }
+                $entries[] = self::TRACE_NAMES[$op].'('.$depth.')';
             } elseif ($op === ExecutionChallengeGenerator::OP_DOM_SIBLING_INDEX) {
                 // The browser-equivalent sibling traversal: the rank of
                 // the probed node's append (its real index among the
@@ -152,6 +169,26 @@ final class ExecutionTraceFixture
      * @param array|null           $cur   the current DOM node state
      * @param array<string, true>  $docIds appended ids
      */
+    private static function simChild(array $operands, ?array &$cur): string
+    {
+        // Behavior-exact copy of the generator's opDomChild: the child
+        // id entry and cur moves onto the new node.
+        $id = $operands['id'];
+        $parentId = $cur['id'] ?? null;
+        $cur = [
+            'id' => $id,
+            'attrs' => ['id' => $id],
+            'dataset' => [],
+            'classes' => [],
+            'appended' => true,
+        ];
+        if ($parentId !== null && $parentId !== $id) {
+            $cur['parent'] = $parentId;
+        }
+
+        return base64_encode($id);
+    }
+
     private static function simulateOp(int $op, array $operands, array &$u8, ?array &$cur, array &$docIds): string
     {
         $u32 = static fn (int $v): int => $v & 0xFFFFFFFF;
@@ -213,6 +250,9 @@ final class ExecutionTraceFixture
             // placeholder; the verifier replays the value the submitted
             // trace reports (see ExecutionChallengeGenerator::verifyExecutedTrace).
             ExecutionChallengeGenerator::OP_DOM_OBSERVE => 'obs',
+            ExecutionChallengeGenerator::OP_DOM_SIBLING_INDEX => 'dsib',
+            ExecutionChallengeGenerator::OP_DOM_DEPTH => 'ddepth',
+            ExecutionChallengeGenerator::OP_DOM_CHILD => self::simChild($operands, $cur),
             default => '0',
         };
     }

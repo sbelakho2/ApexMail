@@ -34,14 +34,14 @@
             "note": "The widget stylesheet (widget.css), three byte-identical copies at 13863 bytes; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
         },
         "widget_execution": {
-            "raw_bytes": 31676,
-            "gzip_bytes": 9994,
-            "brotli_bytes": 8599,
-            "raw_cap_bytes": 34000,
-            "gzip_cap_bytes": 10200,
-            "brotli_cap_bytes": 8800,
+            "raw_bytes": 33259,
+            "gzip_bytes": 10343,
+            "brotli_bytes": 8913,
+            "raw_cap_bytes": 36000,
+            "gzip_cap_bytes": 11200,
+            "brotli_cap_bytes": 9500,
             "copies_identical": true,
-            "note": "Execution interpreter: raw 31,676 / gzip 9,994 / brotli 8,599 bytes (measured 2026-09-03 after the execution-version-3 grammar and the compaction); hard caps 34,000 / 10,200 / 8,800 with the doc-integrity guard syncing the narrative record."
+            "note": "Execution interpreter: raw 33,259 / gzip 10,343 / brotli 8,913 bytes (measured 2026-09-03 after the execution-version-4 nested-tree grammar); hard caps 36,000 / 11,200 / 9,500 with the doc-integrity guard syncing the narrative record."
         },
         "challenge_response_json": {
             "sha256_bytes_min": 1014,

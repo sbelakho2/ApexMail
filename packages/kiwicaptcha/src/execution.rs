@@ -161,7 +161,7 @@ pub const PROTOCOL_VERSION: u8 = 1;
 /// The highest execution version this generator can emit. Version 2
 /// adds the observe opcode and the causal u8 chain; version 3 adds a
 /// second constructed node and the sibling-index traversal probe.
-pub const MAX_EXECUTION_VERSION: u8 = 3;
+pub const MAX_EXECUTION_VERSION: u8 = 4;
 
 /// The deterministic op-count bounds of every issued program.
 pub const MIN_OPS: u8 = 8;
@@ -228,7 +228,9 @@ pub const OP_DOM_EVENT_REAL: u8 = 31;
 pub const OP_DOM_SERIALIZE_REAL: u8 = 32;
 pub const OP_DOM_OBSERVE: u8 = 33;
 pub const OP_DOM_SIBLING_INDEX: u8 = 34;
-pub const OP_COUNT: u8 = 35;
+pub const OP_DOM_CHILD: u8 = 35;
+pub const OP_DOM_DEPTH: u8 = 36;
+pub const OP_COUNT: u8 = 37;
 
 /// The trace entry names, one per opcode (index = opcode).
 const TRACE_NAMES: [&str; OP_COUNT as usize] = [
@@ -267,6 +269,8 @@ const TRACE_NAMES: [&str; OP_COUNT as usize] = [
     "sreal",
     "obs",
     "dsib",
+    "dchild",
+    "ddepth",
 ];
 
 /// A parsed op: the opcode plus its canonical operands.
@@ -401,6 +405,7 @@ pub fn generate(
     let op_count = match version {
         2 => 11 + (cursor.next_byte() % 14),
         3 => 15 + (cursor.next_byte() % 10),
+        4 => 18 + (cursor.next_byte() % 7),
         _ => 8 + (cursor.next_byte() % 17),
     };
     program.push(op_count);
@@ -443,6 +448,21 @@ pub fn generate(
         ops.push((mutate_b, draw_operands(&mut cursor, mutate_b)));
         ops.push((OP_DOM_APPEND, Vec::new()));
     }
+    let mut depth_operand = sibling_operand.clone();
+    if version >= 4 {
+        // The version-4 nested tree: two children created under the
+        // current node in sequence (the second under the first), so the
+        // program builds a real ancestor chain whose depth the browser
+        // walks for the ddepth probe.
+        for _ in 0..2 {
+            let tag_c = cursor.next_byte();
+            let child_operand = draw_id(&mut cursor);
+            let mut operands_c = vec![tag_c];
+            operands_c.extend_from_slice(&child_operand);
+            ops.push((OP_DOM_CHILD, operands_c));
+            depth_operand = child_operand;
+        }
+    }
     if version >= 2 {
         // The causal chain: `U8_CREATE(len)` then `OBSERVE` writes the
         // browser-observed height at a drawn index inside the array,
@@ -470,10 +490,26 @@ pub fn generate(
         // constructed node.
         ops.push((OP_DOM_SIBLING_INDEX, sibling_operand.clone()));
     }
+    if version >= 4 {
+        // The mandatory depth probe of the deepest nested child.
+        ops.push((OP_DOM_DEPTH, depth_operand.clone()));
+    }
     let extra_probes = 1 + (cursor.next_byte() % 3);
-    let probe_pool = if version >= 3 { 7 } else { 5 };
+    let probe_pool = match version {
+        3 => 7,
+        4 => 9,
+        _ => 5,
+    };
     for _ in 0..extra_probes {
         let probe = OP_DOM_QUERY_REAL + (cursor.next_byte() % probe_pool);
+        let probe = if version >= 4 && probe == OP_DOM_CHILD {
+            // The nested-tree opcode never appears in extra slots (it
+            // would mutate the tree mid-run); the draw maps to the
+            // depth probe of the deepest child.
+            OP_DOM_DEPTH
+        } else {
+            probe
+        };
         let probe_operands = match probe {
             OP_DOM_QUERY_REAL | OP_DOM_GEOMETRY | OP_DOM_EVENT_REAL => id_operand.clone(),
             OP_DOM_SIBLING_INDEX => sibling_operand.clone(),
@@ -483,6 +519,7 @@ pub fn generate(
                 o.push(cursor.next_byte());
                 o
             }
+            OP_DOM_DEPTH => depth_operand.clone(),
             _ => Vec::new(),
         };
         ops.push((probe, probe_operands));
@@ -597,6 +634,12 @@ fn draw_operands(cursor: &mut Cursor, opcode: u8) -> Vec<u8> {
             out
         }
         OP_DOM_SIBLING_INDEX => draw_id(cursor),
+        OP_DOM_DEPTH => draw_id(cursor),
+        OP_DOM_CHILD => {
+            let mut out = vec![cursor.next_byte()];
+            out.extend_from_slice(&draw_id(cursor));
+            out
+        }
         _ => Vec::new(),
     }
 }
@@ -713,7 +756,12 @@ pub fn decode(program_b64: &str) -> Option<Program> {
         // version-2 observe opcode 33, the version-3 sibling-index
         // opcode 34): an old interpreter must be able to reject a
         // newer grammar by the declared version byte alone.
-        let max_opcode = OP_COUNT - (3 - op_version);
+        let max_opcode = match op_version {
+            1 => 33,
+            2 => 34,
+            3 => 35,
+            _ => OP_COUNT,
+        };
         if opcode >= max_opcode {
             return None;
         }
@@ -841,11 +889,20 @@ fn read_operands(cursor: &mut Cursor, opcode: u8) -> Option<BTreeMap<String, Ope
             map.insert("id".into(), Operand::Bytes(id));
             map.insert("idx".into(), Operand::Int((b % 64) as u64));
         }
-        OP_DOM_SIBLING_INDEX => {
+        OP_DOM_SIBLING_INDEX | OP_DOM_DEPTH => {
             let id = read_len_bytes(cursor, 16)?;
             if id.len() < 4 {
                 return None;
             }
+            map.insert("id".into(), Operand::Bytes(id));
+        }
+        OP_DOM_CHILD => {
+            let tag = cursor.take_strict(1)?[0] % 4;
+            let id = read_len_bytes(cursor, 16)?;
+            if id.len() < 4 {
+                return None;
+            }
+            map.insert("tag".into(), Operand::Int(tag as u64));
             map.insert("id".into(), Operand::Bytes(id));
         }
         OP_DOM_SERIALIZE_REAL => {}
@@ -909,6 +966,7 @@ struct DomNode {
     dataset: BTreeMap<Vec<u8>, Vec<u8>>,
     classes: HashSet<Vec<u8>>,
     appended: bool,
+    parent: Option<Vec<u8>>,
 }
 
 fn checksum(u8arr: &[u8]) -> u64 {
@@ -1020,6 +1078,7 @@ fn simulate_op(
                 dataset: BTreeMap::new(),
                 classes: HashSet::new(),
                 appended: false,
+                parent: None,
             });
             B64.encode(id)
         }
@@ -1151,10 +1210,18 @@ fn simulate_op(
         OP_DOM_POINT => "point".into(),
         OP_DOM_EVENT_REAL => {
             let id = operand_bytes(op, "id");
+            // The readback names the current node's tag only when the
+            // probed id IS the current node; any other constructed node
+            // reads 'span' (the PHP mirror's exact nodeTag rule).
             if !doc_ids.contains(&id) {
                 return "none".into();
             }
-            "kiwi-ev:div".into()
+            let tag = if cur.as_ref().is_some_and(|n| n.id == id) {
+                "div"
+            } else {
+                "span"
+            };
+            format!("kiwi-ev:{tag}")
         }
         OP_DOM_SERIALIZE_REAL => {
             // The interpreter hashes the canonical real readback; the
@@ -1189,6 +1256,32 @@ fn simulate_op(
         // computes exactly from the append order (see
         // verify_executed_trace); the pure sim emits the placeholder.
         OP_DOM_SIBLING_INDEX => "dsib".into(),
+        OP_DOM_DEPTH => "ddepth".into(),
+        OP_DOM_CHILD => {
+            // The child is created under the current node and becomes
+            // the new current node (the PHP mirror's exact rule).
+            let id = operand_bytes(op, "id");
+            let parent_id = cur.as_ref().map(|n| n.id.clone());
+            let mut node = DomNode {
+                id: id.clone(),
+                attrs: {
+                    let mut m = BTreeMap::new();
+                    m.insert(b"id".to_vec(), id.clone());
+                    m
+                },
+                dataset: BTreeMap::new(),
+                classes: HashSet::new(),
+                appended: true,
+                parent: None,
+            };
+            if let Some(p) = parent_id {
+                if p != id {
+                    node.parent = Some(p);
+                }
+            }
+            *cur = Some(node);
+            B64.encode(&id)
+        }
         _ => "0".into(),
     }
 }
@@ -1278,12 +1371,18 @@ pub mod fixtures {
         let has_append = program.ops.iter().any(|op| op.opcode == OP_DOM_APPEND);
         let mut top = 0u64;
         let mut append_rank: HashMap<Vec<u8>, usize> = HashMap::new();
+        let mut tree_parent: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
         let mut entries: Vec<String> = Vec::with_capacity(program.ops.len());
         for op in &program.ops {
             if op.opcode == OP_DOM_APPEND {
                 if let Some(node) = &cur {
                     let rank = append_rank.len();
                     append_rank.entry(node.id.clone()).or_insert(rank);
+                }
+            }
+            if op.opcode == OP_DOM_CHILD {
+                if let Some(node) = &cur {
+                    tree_parent.insert(operand_bytes(op, "id"), node.id.clone());
                 }
             }
             if op.opcode == OP_DOM_GEOMETRY {
@@ -1295,6 +1394,16 @@ pub mod fixtures {
                 } else {
                     "point(none)".into()
                 });
+            } else if op.opcode == OP_DOM_DEPTH {
+                // The browser-equivalent ancestor walk: the number of
+                // ancestors up to (excluding) the body.
+                let mut depth = 0usize;
+                let mut cursor = tree_parent.get(&operand_bytes(op, "id")).cloned();
+                while let Some(pid) = cursor {
+                    depth += 1;
+                    cursor = tree_parent.get(&pid).cloned();
+                }
+                entries.push(format!("ddepth({depth})"));
             } else if op.opcode == OP_DOM_SIBLING_INDEX {
                 // The browser-equivalent sibling traversal: the rank of
                 // the probed node's append (its real index among the
@@ -1381,6 +1490,7 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
     let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
     let mut prev_top: i64 = -1;
     let mut append_rank: HashMap<Vec<u8>, usize> = HashMap::new();
+    let mut tree_parent: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
     let bytes = trace.as_bytes();
     let mut pos = 0usize;
     for (i, op) in program.ops.iter().enumerate() {
@@ -1388,6 +1498,11 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
             if let Some(node) = &cur {
                 let rank = append_rank.len();
                 append_rank.entry(node.id.clone()).or_insert(rank);
+            }
+        }
+        if op.opcode == OP_DOM_CHILD {
+            if let Some(node) = &cur {
+                tree_parent.insert(operand_bytes(op, "id"), node.id.clone());
             }
         }
         let sim = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
@@ -1426,6 +1541,25 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
                     return None;
                 }
                 pos += tag_entry.len();
+            }
+            OP_DOM_DEPTH => {
+                // The depth probe: the number of ancestor elements up
+                // to (excluding) the document body, derived from the
+                // verifier's tree model — the exact value of a real
+                // parentElement walk over the program-built tree.
+                let mut depth = 0usize;
+                let mut cursor = tree_parent.get(&operand_bytes(op, "id")).cloned();
+                while let Some(pid) = cursor {
+                    depth += 1;
+                    cursor = tree_parent.get(&pid).cloned();
+                }
+                let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
+                let end = rest.find(')')?;
+                let value: usize = rest[..end].parse().ok()?;
+                if value != depth {
+                    return None;
+                }
+                pos += end + 1;
             }
             OP_DOM_SIBLING_INDEX => {
                 // The sibling-index traversal: the value is the rank of
@@ -1645,7 +1779,7 @@ mod tests {
         }
         assert_eq!(
             seen_v1.len(),
-            (OP_COUNT - 2) as usize,
+            (OP_COUNT - 4) as usize,
             "the version-1 opcode space is 0..32 (the observe opcode never appears)"
         );
         assert!(!seen_v1.contains(&OP_DOM_OBSERVE));
@@ -1661,7 +1795,7 @@ mod tests {
         }
         assert_eq!(
             seen_v2.len(),
-            OP_COUNT as usize - 1,
+            (OP_COUNT - 3) as usize,
             "the version-2 corpus reaches 34 of the 35 fixed opcodes"
         );
         assert!(seen_v2.contains(&OP_DOM_OBSERVE));
@@ -1678,11 +1812,28 @@ mod tests {
         }
         assert_eq!(
             seen_v3.len(),
-            OP_COUNT as usize,
+            (OP_COUNT - 2) as usize,
             "the version-3 corpus reaches the full fixed opcode set"
         );
         assert!(seen_v3.contains(&OP_DOM_SIBLING_INDEX));
         assert!(seen_v3.contains(&OP_DOM_OBSERVE));
+
+        let mut seen_v4 = std::collections::HashSet::new();
+        for i in 0..64u32 {
+            let nonce = B64.encode(sha2::Sha256::digest(format!("nonce-v4-{i}").as_bytes()));
+            let p = generate(KEY, &nonce, "login", "login-action", 4).unwrap();
+            let program = decode(&p).expect("the version-4 program must parse");
+            for op in &program.ops {
+                seen_v4.insert(op.opcode);
+            }
+        }
+        assert_eq!(
+            seen_v4.len(),
+            OP_COUNT as usize,
+            "the version-4 corpus reaches the full fixed opcode set"
+        );
+        assert!(seen_v4.contains(&OP_DOM_DEPTH));
+        assert!(seen_v4.contains(&OP_DOM_CHILD));
     }
 
     #[test]

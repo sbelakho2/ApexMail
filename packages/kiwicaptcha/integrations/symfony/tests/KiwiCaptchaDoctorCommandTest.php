@@ -548,6 +548,70 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         self::assertStringNotContainsString('[FAIL]', $display);
     }
 
+    public function testDoctorWarnsOnHighAbuseWithFullV3CapabilityWhileTheRequiredTierStaysTwo(): void
+    {
+        // The version-3 shape of the same hardened-posture gap: cap
+        // and confirmed central execution floor 3 (the strongest
+        // available grammar is version 3) with
+        // execution_required_version at 2: a client that cannot solve
+        // version 3 is downgraded to version 2, so the strongest
+        // grammar stays client-downgradeable and the doctor warns
+        // (exit 0) with the machine-readable reason naming the v3
+        // capability.
+        $container = $this->containerFor(new DoctorExecutionRequiredVersionKernel('test', true, 3, 2));
+        $this->seedFloors($container, 4, 3);
+        $tester = $this->doctor($container);
+        $tester->execute([]);
+
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode(), 'the sub-strongest required tier under full V3 capability must warn, never fail the deploy gate');
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[WARN] Execution versioning', $display);
+        self::assertStringContainsString('execution_required_version_2_with_v3_capability', $display, 'the WARN must carry the machine-readable reason code naming the strongest (v3) capability');
+        self::assertStringContainsString('the strong grammar stays client-downgradeable until the required tier is raised to 3', $display);
+        self::assertStringContainsString('Raise execution_required_version to 3 once every serving page is on the version-3 generation', $display);
+        self::assertStringNotContainsString('[FAIL]', $display);
+    }
+
+    public function testDoctorPassesOnHighAbuseWithFullV3CapabilityAndTheRequiredTierAtThree(): void
+    {
+        // The hardened v3 posture: execution_required_version 3 under
+        // cap and confirmed floor 3 makes the version-3 strong grammar
+        // server-required, so the execution-versioning check passes and
+        // the deploy gate stays green.
+        $container = $this->containerFor(new DoctorExecutionRequiredVersionKernel('test', true, 3, 3));
+        $this->seedFloors($container, 4, 3);
+        $tester = $this->doctor($container);
+        $tester->execute([]);
+
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[PASS] Execution versioning', $display);
+        self::assertStringContainsString('execution_required_version 3 under the full version-3 capability', $display);
+        self::assertStringContainsString('the strong grammar is server-required, never client-downgradeable', $display);
+        self::assertStringNotContainsString('[WARN] Execution versioning', $display);
+        self::assertStringNotContainsString('[FAIL]', $display);
+    }
+
+    public function testDoctorDoesNotWarnWhenTheNodeCapGatesBelowTheConfirmedV3Floor(): void
+    {
+        // No version-2+ capability on the node (cap 1) even under a
+        // confirmed version-3 central execution floor: the strongest
+        // available grammar is version 1, so the required-tier audit
+        // stays silent regardless of how high the fleet floor has
+        // climbed.
+        $container = $this->containerFor(new DoctorExecutionRequiredVersionKernel('test', true, 1, 1));
+        $this->seedFloors($container, 4, 3);
+        $tester = $this->doctor($container);
+        $tester->execute([]);
+
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[PASS] Execution versioning', $display);
+        self::assertStringNotContainsString('[WARN] Execution versioning', $display, 'a node cap of 1 must not trigger the required-tier warning even under a v3 floor');
+        self::assertStringNotContainsString('execution_required_version_', $display);
+        self::assertStringNotContainsString('[FAIL]', $display);
+    }
+
     public function testDoctorDoesNotWarnOnHighAbuseWithTheNodeCapAtOne(): void
     {
         // No version-2 capability (node cap 1 despite the confirmed
