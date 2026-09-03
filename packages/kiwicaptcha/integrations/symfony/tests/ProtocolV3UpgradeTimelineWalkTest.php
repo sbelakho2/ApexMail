@@ -17,6 +17,7 @@ use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\RedisTestUrl;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ExecutionChallengeGenerator;
+use KiwiCaptcha\TestSupport\ExecutionTraceFixture;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Risk\AdaptiveRiskEngine;
@@ -315,7 +316,7 @@ final class ProtocolV3UpgradeTimelineWalkTest extends TestCase
         if ($record->executionProgram !== null) {
             $program = ExecutionChallengeGenerator::decode($record->executionProgram);
             self::assertNotNull($program, 'the walk-issued execution program must be parseable');
-            $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+            $trace = ExecutionTraceFixture::executedTraceFor($program);
             $traceB64 = base64_encode($trace);
             $digest = ExecutionChallengeGenerator::digestOverTrace($record->executionProgram, $record->nonce, $trace);
             self::assertNotNull($digest, 'the walk-issued execution digest must compute');

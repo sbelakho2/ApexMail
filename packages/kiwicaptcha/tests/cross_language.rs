@@ -999,7 +999,7 @@ do {{ $hash = hash('sha256', $record->prefix . $counter . base64_decode($record-
 --$counter;
 $program = KiwiCaptcha\ExecutionChallengeGenerator::decode($ch->executionProgram);
 if ($program === null) {{ fwrite(STDERR, 'the issued program must parse'); exit(4); }}
-$trace = KiwiCaptcha\ExecutionChallengeGenerator::executedTraceFor($program);
+$trace = KiwiCaptcha\TestSupport\ExecutionTraceFixture::executedTraceFor($program);
 $digest = KiwiCaptcha\ExecutionChallengeGenerator::digestOverTrace($ch->executionProgram, $ch->nonce, $trace);
 if ($digest === null) {{ fwrite(STDERR, 'the digest over the executed trace must compute'); exit(5); }}
 if ('{tamper}' === '1') {{ $digest[0] = $digest[0] === '0' ? '1' : '0'; }}
@@ -1311,7 +1311,7 @@ fn digest_trace_token(record: &kiwicaptcha::challenge::ChallengeRecord, counter:
         .expect("the execution-armed record carries the program");
     let decoded =
         kiwicaptcha::execution::decode(program).expect("the issued program must decode in Rust");
-    let trace = kiwicaptcha::execution::executed_trace_for(&decoded);
+    let trace = kiwicaptcha::execution::fixtures::executed_trace_for(&decoded);
     let digest = kiwicaptcha::execution::expected_digest_over_trace(program, &record.nonce, &trace)
         .expect("the digest over the executed trace must compute in Rust");
     kiwicaptcha::token::SolutionToken {

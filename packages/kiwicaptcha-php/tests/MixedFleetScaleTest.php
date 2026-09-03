@@ -7,6 +7,7 @@ namespace KiwiCaptcha\Tests;
 use KiwiCaptcha\Challenge;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ExecutionChallengeGenerator;
+use KiwiCaptcha\TestSupport\ExecutionTraceFixture;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\SolutionToken;
@@ -209,7 +210,7 @@ final class MixedFleetScaleTest extends TestCase
             self::assertSame(\KiwiCaptcha\Issuer::executionCommitment($record->executionProgram), $record->executionCommitment, 'the signed commitment mirrors the stored program at scale');
             $program = ExecutionChallengeGenerator::decode($challenge->executionProgram);
             self::assertNotNull($program);
-            $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+            $trace = ExecutionTraceFixture::executedTraceFor($program);
             $digest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $trace);
             self::assertNotNull($digest);
             $v4[] = [

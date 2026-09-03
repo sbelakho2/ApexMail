@@ -8,6 +8,7 @@ use BelConsulting\KiwiCaptchaBundle\Command\KiwiCaptchaDoctorCommand;
 use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorBestEffortSentinelTestKernel;
+use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorExecutionRequiredVersionKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorExplicitV3WriterKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorFailClosedClusterTestKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorFailClosedSentinelTestKernel;
@@ -416,6 +417,25 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         ];
     }
 
+    /**
+     * Seed the fake security Redis' central policy hash with both
+     * confirmed floors: `min_protocol_version` (the protocol-v3/v4
+     * writer gate) and `min_execution_version` (the execution-version
+     * writer gate), the same `{kiwi:<ns>}:security-policy` read the
+     * doctor's protocol-floor, protocol-v3 writer and
+     * execution-versioning checks consume through the
+     * SecurityEpochMonitor.
+     */
+    private function seedFloors(ContainerInterface $container, int $protocolFloor, int $executionFloor): void
+    {
+        $fake = $container->get(DoctorV3WriterTestKernel::FAKE_REDIS_ID);
+        self::assertInstanceOf(FakePredisClient::class, $fake);
+        $fake->hashes[DoctorV3WriterTestKernel::POLICY_KEY] = [
+            'min_protocol_version' => (string) $protocolFloor,
+            'min_execution_version' => (string) $executionFloor,
+        ];
+    }
+
     public function testDoctorFailsOnHighAbuseWithAnAbsentProtocolFloor(): void
     {
         // high_abuse promises the decoy surface; without a confirmed
@@ -482,6 +502,68 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         $display = $tester->getDisplay();
         self::assertStringContainsString('[PASS] Protocol-v3 writer', $display);
         self::assertStringContainsString('execution surface armed (risk.execution_challenge on) and the central floor confirms protocol v4 emission with the decoy surface', $display);
+        self::assertStringNotContainsString('[FAIL]', $display);
+    }
+
+    public function testDoctorWarnsOnHighAbuseWithFullV2CapabilityWhileTheRequiredTierStaysOne(): void
+    {
+        // The hardened-posture gap: high_abuse with the full version-2
+        // capability (execution_key configured, node cap 2, confirmed
+        // central execution floor 2) but execution_required_version at
+        // the default 1 keeps the strong grammar client-downgradeable.
+        // The default must stay during the fleet transition, so the
+        // doctor warns (exit 0), never fails the deploy gate, and the
+        // warning row carries the machine-readable reason code.
+        $container = $this->containerFor(new DoctorExecutionRequiredVersionKernel('test', true, 2, 1));
+        $this->seedFloors($container, 4, 2);
+        $tester = $this->doctor($container);
+        $tester->execute([]);
+
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode(), 'the required-tier default under full V2 capability must warn, never fail the deploy gate');
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[WARN] Execution versioning', $display);
+        self::assertStringContainsString('execution_required_version_1_with_v2_capability', $display, 'the WARN must carry the machine-readable reason code');
+        self::assertStringContainsString('the strong grammar stays client-downgradeable until the required tier is raised to 2', $display);
+        self::assertStringContainsString('Raise execution_required_version to 2 once every serving page is on the version-2 generation', $display);
+        self::assertStringNotContainsString('[FAIL]', $display);
+    }
+
+    public function testDoctorPassesOnHighAbuseWithFullV2CapabilityAndTheRequiredTierAtTwo(): void
+    {
+        // The hardened posture: execution_required_version 2 under the
+        // same full capability makes the strong grammar server-required,
+        // so the execution-versioning check passes and the deploy gate
+        // stays green.
+        $container = $this->containerFor(new DoctorExecutionRequiredVersionKernel('test', true, 2, 2));
+        $this->seedFloors($container, 4, 2);
+        $tester = $this->doctor($container);
+        $tester->execute([]);
+
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[PASS] Execution versioning', $display);
+        self::assertStringContainsString('execution_required_version 2 under the full version-2 capability', $display);
+        self::assertStringContainsString('the strong grammar is server-required, never client-downgradeable', $display);
+        self::assertStringNotContainsString('[WARN] Execution versioning', $display);
+        self::assertStringNotContainsString('[FAIL]', $display);
+    }
+
+    public function testDoctorDoesNotWarnOnHighAbuseWithTheNodeCapAtOne(): void
+    {
+        // No version-2 capability (node cap 1 despite the confirmed
+        // central execution floor): the node only ever emits version 1,
+        // so the default required tier stays safe and the check passes
+        // without any warning, unchanged from the pre-check behavior.
+        $container = $this->containerFor(new DoctorExecutionRequiredVersionKernel('test', true, 1, 1));
+        $this->seedFloors($container, 4, 2);
+        $tester = $this->doctor($container);
+        $tester->execute([]);
+
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[PASS] Execution versioning', $display);
+        self::assertStringNotContainsString('[WARN] Execution versioning', $display, 'a node cap of 1 must not trigger the required-tier warning');
+        self::assertStringNotContainsString('execution_required_version_1_with_v2_capability', $display);
         self::assertStringNotContainsString('[FAIL]', $display);
     }
 

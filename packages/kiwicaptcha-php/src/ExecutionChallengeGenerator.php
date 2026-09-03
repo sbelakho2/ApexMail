@@ -171,15 +171,6 @@ final class ExecutionChallengeGenerator
     public const OP_DOM_OBSERVE = 33;
     public const OP_COUNT = 34;
 
-    /**
-     * The fabricated reference height the browser-equivalent trace
-     * synthesizes: the real observed value is the engine's own text
-     * metrics (never predictable by the mirrors), so the synthesizer
-     * uses this constant and the verifier replays whatever the trace
-     * reports.
-     */
-    private const OBSERVED_HEIGHT = 10;
-
     /** The canonical safe dataset-key grammar: the literal 'x' followed by 0..15 of [0-9a-z_]. */
     public const DATASET_KEY_PATTERN = '/^x[0-9a-z_]{0,15}$/D';
 
@@ -546,66 +537,6 @@ final class ExecutionChallengeGenerator
         }
 
         return $trace;
-    }
-
-    /**
-     * The browser-equivalent executed trace of a program: the canonical
-     * trace with the layout-probe placeholders replaced by valid
-     * browser-observed values (monotonic geometry offsets with height
-     * 10; the point probe names the topmost constructed node). Lets a
-     * test simulate a genuine browser execution.
-     *
-     * The entries are built per op from the same state machine the
-     * canonical trace uses; only the layout entries are replaced, so
-     * readback values that contain ';' or parentheses travel intact.
-     *
-     * @param array{format: int, scope: string, action: string, op_version: int, ops: list<array{op: int, operands: array<string, mixed>}>} $program
-     */
-    public static function executedTraceFor(array $program): string
-    {
-        $u8 = [];
-        $cur = null; // ['id', 'attrs' map, 'dataset' map, 'classes' set, 'appended' bool]
-        $docIds = [];
-        $top = 0;
-        // The verifier's `POINT` probe accepts 'div' exactly when the
-        // program constructs any node (its construction check is
-        // whole-program), so the browser-equivalent trace must use the
-        // same predicate — 'point(none)' on a program with no DOM_APPEND
-        // would otherwise mismatch deterministically.
-        $hasAppend = false;
-        foreach ($program['ops'] as $record) {
-            if ($record['op'] === self::OP_DOM_APPEND) {
-                $hasAppend = true;
-                break;
-            }
-        }
-        $entries = [];
-        foreach ($program['ops'] as $record) {
-            $op = $record['op'];
-            if ($op === self::OP_DOM_GEOMETRY) {
-                $entries[] = 'geom('.($top * 10).',10)';
-                ++$top;
-            } elseif ($op === self::OP_DOM_POINT) {
-                $entries[] = 'point('.($hasAppend ? 'div' : 'none').')';
-            } elseif ($op === self::OP_DOM_OBSERVE) {
-                // The browser-equivalent observe: the fabricated reference
-                // height (the real value is the engine's own text
-                // metrics, never predictable here) is written through
-                // into the replay state,
-                // so the following checksum/read entries in this
-                // synthesized trace are computed over the observed byte —
-                // the full causal-graph semantics, never a placeholder.
-                $idx = $record['operands']['idx'];
-                $entries[] = self::TRACE_NAMES[$op].'('.$idx.','.self::OBSERVED_HEIGHT.')';
-                if ($idx < \count($u8)) {
-                    $u8[$idx] = self::OBSERVED_HEIGHT;
-                }
-            } else {
-                $entries[] = self::TRACE_NAMES[$op].'('.self::simulateOp($op, $record['operands'], $u8, $cur, $docIds).')';
-            }
-        }
-
-        return implode(';', $entries);
     }
 
     /**

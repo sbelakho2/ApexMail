@@ -8,6 +8,7 @@ use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\ConsumedRecord;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ExecutionChallengeGenerator;
+use KiwiCaptcha\TestSupport\ExecutionTraceFixture;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\RequestBindingExpectation;
 use KiwiCaptcha\SolutionToken;
@@ -563,7 +564,7 @@ final class ReplayIdentityGateTest extends TestCase
     {
         $program = ExecutionChallengeGenerator::decode($record->executionProgram);
         self::assertNotNull($program);
-        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $trace = ExecutionTraceFixture::executedTraceFor($program);
         $digest = ExecutionChallengeGenerator::digestOverTrace($record->executionProgram, $record->nonce, $trace);
         self::assertNotNull($digest);
 
@@ -575,7 +576,7 @@ final class ReplayIdentityGateTest extends TestCase
     {
         $program = ExecutionChallengeGenerator::decode($record->executionProgram);
         self::assertNotNull($program);
-        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $trace = ExecutionTraceFixture::executedTraceFor($program);
         $wrong = str_repeat('0', 64);
         $digest = ExecutionChallengeGenerator::digestOverTrace($record->executionProgram, $record->nonce, $trace);
         self::assertNotSame($wrong, $digest, 'precondition: the tampered digest differs from the expected one');

@@ -118,6 +118,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             'Risk Redis' => $this->checkRiskRedis(),
             'Protocol floor' => $this->checkProtocolFloor(),
             'Protocol-v3 writer' => $this->checkV3Writer(),
+            'Execution versioning' => $this->checkExecutionVersioning(),
             'Argon memory envelope' => $this->checkArgonEnvelope(),
             'Argon concurrency' => $this->checkArgonConcurrency(),
             'CSP compatibility' => $this->checkCsp(),
@@ -623,6 +624,46 @@ final class KiwiCaptchaDoctorCommand extends Command
         }
 
         return ['WARN', 'execution surface armed (risk.execution_challenge on) but the central floor is below 4 or unconfirmed: issuance stays execution-unarmed (protocol v3 at most, or v2 when the decoy floor is unmet too); finish the protocol-v4 rollout before expecting execution-armed emission'];
+    }
+
+    /**
+     * The execution-required-tier posture check. The high_abuse
+     * protection profile models an abuse-heavy production deployment.
+     * A node there can hold the full version-2 capability: the
+     * execution_key configured, the execution_version cap raised to 2,
+     * and the confirmed central min_execution_version floor at 2. With
+     * execution_required_version still at the default 1, a client that
+     * cannot solve version 2 is downgraded to version 1, so the strong
+     * grammar stays client-downgradeable. The default must stay during
+     * the fleet transition, so this check warns (exit 0) on that
+     * posture and never fails the deploy gate. Raise the required tier
+     * to 2 once every serving page is on the version-2 generation. A
+     * required tier of 2 under the same full capability passes: the
+     * strong grammar is then server-required.
+     *
+     * @return array{0: string, 1: string} [status, detail]
+     */
+    private function checkExecutionVersioning(): array
+    {
+        $profile = $this->config['protection_profile'] ?? null;
+        if ($profile !== 'high_abuse') {
+            return ['PASS', sprintf('no high_abuse required-tier audit applies (protection_profile %s): execution_required_version is operator-owned', $profile === null ? 'none' : $profile)];
+        }
+        if (!\is_string($this->config['execution_key'] ?? null)) {
+            return ['PASS', 'high_abuse without execution_key: the execution dimension is not armed, so execution_required_version has no effect'];
+        }
+        $cap = (int) ($this->config['execution_version'] ?? 1);
+        $required = (int) ($this->config['execution_required_version'] ?? 1);
+        $this->epochMonitor->refresh();
+        $floor = $this->epochMonitor->minExecutionVersion();
+        if ($cap < 2 || $floor === null || $floor < 2) {
+            return ['PASS', sprintf('high_abuse without the full version-2 capability (execution_version cap %d, confirmed central min_execution_version floor %s): execution_required_version 1 stays the safe transition default', $cap, $floor === null ? 'unconfirmed' : (string) $floor)];
+        }
+        if ($required === 1) {
+            return ['WARN', 'high_abuse with the full version-2 capability (execution_key configured, execution_version 2, confirmed central min_execution_version floor 2) but execution_required_version still at the default 1: the strong grammar stays client-downgradeable until the required tier is raised to 2. Raise execution_required_version to 2 once every serving page is on the version-2 generation (reason execution_required_version_1_with_v2_capability, see operations.md "Execution versioning")'];
+        }
+
+        return ['PASS', 'execution_required_version 2 under the full version-2 capability (high_abuse, execution_key configured, cap and floor 2): the strong grammar is server-required, never client-downgradeable'];
     }
 
     /**

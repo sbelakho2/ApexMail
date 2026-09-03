@@ -21,6 +21,11 @@ categories = ["web-programming", "cryptography", "authentication"]
 [features]
 default = []
 redis = ["dep:redis", "dep:r2d2"]
+# TEST-ONLY: gates the `execution::fixtures` module (the
+# browser-equivalent executed-trace synthesizer the test suites and
+# cross-language fixtures use). Never enabled for production builds:
+# only the self dev-dependency below turns it on for test targets.
+test-fixtures = []
 
 [dependencies]
 sha2 = "0.10"
@@ -39,4 +44,8 @@ redis = { version = "0.27", optional = true }
 r2d2 = { version = "0.8", optional = true }
 
 [dev-dependencies]
+# The cyclic self dev-dependency enables the TEST-ONLY `test-fixtures`
+# feature for every test target (unit + integration), while production
+# and consumer builds stay feature-clean.
+kiwicaptcha = { path = ".", features = ["test-fixtures"] }
 redis = "0.27"

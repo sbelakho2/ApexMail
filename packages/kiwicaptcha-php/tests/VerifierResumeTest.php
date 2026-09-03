@@ -9,6 +9,7 @@ use KiwiCaptcha\RequestBindingExpectation;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ConsumedRecord;
 use KiwiCaptcha\ExecutionChallengeGenerator;
+use KiwiCaptcha\TestSupport\ExecutionTraceFixture;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\SolutionToken;
@@ -717,7 +718,7 @@ final class VerifierResumeTest extends TestCase
 
         $program = ExecutionChallengeGenerator::decode($challenge->executionProgram);
         self::assertNotNull($program);
-        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $trace = ExecutionTraceFixture::executedTraceFor($program);
         $digest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $trace);
         self::assertNotNull($digest);
 

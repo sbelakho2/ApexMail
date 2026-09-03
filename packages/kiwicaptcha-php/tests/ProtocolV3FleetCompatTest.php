@@ -7,6 +7,7 @@ namespace KiwiCaptcha\Tests;
 use KiwiCaptcha\Challenge;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ExecutionChallengeGenerator;
+use KiwiCaptcha\TestSupport\ExecutionTraceFixture;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\SolutionToken;
@@ -253,7 +254,7 @@ final class ProtocolV3FleetCompatTest extends TestCase
 
         $program = ExecutionChallengeGenerator::decode($challenge->executionProgram);
         self::assertNotNull($program);
-        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $trace = ExecutionTraceFixture::executedTraceFor($program);
         $digest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $trace);
         self::assertNotNull($digest);
         $token = SolutionToken::create($challenge->nonce, $this->solveCounter($challenge), 5000, [], $digest, base64_encode($trace))->encode();

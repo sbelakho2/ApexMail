@@ -7,6 +7,7 @@ namespace KiwiCaptcha\Tests;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ExecutionChallengeGenerator;
+use KiwiCaptcha\TestSupport\ExecutionTraceFixture;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\SolutionToken;
@@ -285,7 +286,7 @@ final class ExecutionChallengeTest extends TestCase
 
         $program = ExecutionChallengeGenerator::decode($challenge->executionProgram);
         self::assertNotNull($program);
-        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $trace = ExecutionTraceFixture::executedTraceFor($program);
         $digest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $trace);
         self::assertNotNull($digest);
         $token = SolutionToken::create(
@@ -318,7 +319,7 @@ final class ExecutionChallengeTest extends TestCase
         $program = ExecutionChallengeGenerator::decode($challenge->executionProgram);
         self::assertNotNull($program);
         self::assertSame(2, $program['op_version']);
-        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $trace = ExecutionTraceFixture::executedTraceFor($program);
         self::assertStringContainsString('obs(', $trace, 'the version-2 executed trace carries the causal observe entry');
         $digest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $trace);
         self::assertNotNull($digest);
@@ -646,7 +647,7 @@ final class ExecutionChallengeTest extends TestCase
             ExecutionChallengeGenerator::digestOverTrace(
                 $program,
                 self::NONCE,
-                ExecutionChallengeGenerator::executedTraceFor($decoded),
+                ExecutionTraceFixture::executedTraceFor($decoded),
             ),
             'the PHP executed-trace digest must reproduce the Rust digest',
         );
@@ -669,7 +670,7 @@ final class ExecutionChallengeTest extends TestCase
             ExecutionChallengeGenerator::digestOverTrace(
                 $programV1,
                 self::NONCE,
-                ExecutionChallengeGenerator::executedTraceFor($decodedV1),
+                ExecutionTraceFixture::executedTraceFor($decodedV1),
             ),
             'the PHP version-1 executed-trace digest must reproduce the Rust digest',
         );

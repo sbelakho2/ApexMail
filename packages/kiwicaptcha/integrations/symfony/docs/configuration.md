@@ -370,6 +370,10 @@ Three knobs control the dimension:
   never downgraded to the weaker version-1 grammar. Raise it to 2 only
   after the fleet is fully on the version-2 generation (the cap above
   and the central `min_execution_version` floor at 2 everywhere).
+  The doctor warns when a `high_abuse` profile holds the full
+  version-2 capability while the required tier stays at the default 1;
+  the eventual hardened posture is required 2, with staged profiles a
+  future option.
 
 - `kiwi_captcha.execution_version` (int 1 or 2, default 1): the
   node's execution-program grammar cap. Version 2 is the causal

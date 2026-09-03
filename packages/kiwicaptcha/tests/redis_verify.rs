@@ -304,7 +304,7 @@ fn issue_armed_execution(target_bits: u32) -> kiwicaptcha::challenge::Issued {
 fn execution_evidence(record: &ChallengeRecord) -> (String, String) {
     let program = record.execution_program.as_deref().expect("armed");
     let decoded = execution::decode(program).expect("the issued program must parse");
-    let trace = execution::executed_trace_for(&decoded);
+    let trace = execution::fixtures::executed_trace_for(&decoded);
     let trace_b64: String = B64
         .encode(trace.as_bytes())
         .replace('+', "-")

@@ -340,6 +340,10 @@ transition. Keep it at 1 while the fleet moves to the version-2
 generation (this node's `execution_version` cap = 2 everywhere and
 the central `min_execution_version` = 2), then raise it to 2 once
 every serving page can solve version 2.
+The doctor warns on a `high_abuse` profile that holds the full
+version-2 capability while `execution_required_version` stays at 1;
+the eventual hardened posture is required 2, and staged profiles are a
+future option.
 
 The issuance-side gate is three-way. A node emits version 2 only when
 every rung is up:

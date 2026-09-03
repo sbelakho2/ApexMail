@@ -9,6 +9,7 @@ use BelConsulting\KiwiCaptchaBundle\DependencyInjection\KiwiCaptchaExtension;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ExecutionChallengeGenerator;
+use KiwiCaptcha\TestSupport\ExecutionTraceFixture;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\SolutionToken;
@@ -194,7 +195,7 @@ final class ExecutionChallengeDimensionTest extends TestCase
         // deterministic execution_mismatch; missing digest -> mismatch.
         $program = ExecutionChallengeGenerator::decode($payload['execution_program']);
         self::assertNotNull($program);
-        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $trace = ExecutionTraceFixture::executedTraceFor($program);
         $expected = ExecutionChallengeGenerator::digestOverTrace($payload['execution_program'], $payload['nonce'], $trace);
         self::assertNotNull($expected);
 
@@ -327,7 +328,7 @@ final class ExecutionChallengeDimensionTest extends TestCase
         // entry, and the full solve verifies end to end.
         $program = ExecutionChallengeGenerator::decode($payload['execution_program']);
         self::assertNotNull($program);
-        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $trace = ExecutionTraceFixture::executedTraceFor($program);
         self::assertStringContainsString('obs(', $trace, 'the version-2 grammar writes the causal observe entry');
         $expected = ExecutionChallengeGenerator::digestOverTrace($payload['execution_program'], $payload['nonce'], $trace);
         self::assertNotNull($expected);
@@ -366,7 +367,7 @@ final class ExecutionChallengeDimensionTest extends TestCase
         self::assertSame(2, $this->programVersion($payload['execution_program']), 'the required tier issues version 2 to a capable client');
         $program = ExecutionChallengeGenerator::decode($payload['execution_program']);
         self::assertNotNull($program);
-        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $trace = ExecutionTraceFixture::executedTraceFor($program);
         $expected = ExecutionChallengeGenerator::digestOverTrace($payload['execution_program'], $payload['nonce'], $trace);
         self::assertNotNull($expected);
         $counter = $this->winningCounter($payload);

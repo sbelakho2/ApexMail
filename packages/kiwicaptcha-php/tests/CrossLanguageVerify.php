@@ -13,7 +13,7 @@ declare(strict_types=1);
  *
  * A Rust-issued protocol v4 record (execution_armed) is verified with
  * the real execution evidence the PHP core recomputes from the stored
- * program: the executed trace via executedTraceFor, and the digest via
+ * program: the executed trace via the test fixture ExecutionTraceFixture::executedTraceFor, and the digest via
  * digestOverTrace over that trace. The evidence rides the solution
  * token as the digest:trace pair, exactly like the browser driver. The
  * verifier demands both halves of the evidence for an armed record.
@@ -38,6 +38,7 @@ require __DIR__.'/../vendor/autoload.php';
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\DecodeError;
 use KiwiCaptcha\ExecutionChallengeGenerator;
+use KiwiCaptcha\TestSupport\ExecutionTraceFixture;
 use KiwiCaptcha\SolutionToken;
 use KiwiCaptcha\Storage\ArrayStorage;
 use KiwiCaptcha\Verifier;
@@ -88,7 +89,7 @@ if ($record->algorithm === \KiwiCaptcha\PoWAlgorithm::Argon2id) {
 // A Rust-issued execution-armed record is protocol v4 and carries the
 // authenticated program. The PHP core recomputes the real execution
 // evidence, exactly like the browser driver: the program parses, the
-// executed trace is produced via executedTraceFor, the digest via
+// executed trace is produced via the test fixture ExecutionTraceFixture::executedTraceFor, the digest via
 // digestOverTrace over that trace, and the digest:trace pair rides the
 // solution token. A v4 record must never verify with a digest-only
 // token: the verifier demands both halves of the evidence.
@@ -109,7 +110,7 @@ if ($record->executionProgram !== null) {
         fwrite(STDERR, "the Rust-issued execution program must parse in PHP\n");
         exit(5);
     }
-    $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+    $trace = ExecutionTraceFixture::executedTraceFor($program);
     $digest = ExecutionChallengeGenerator::digestOverTrace($record->executionProgram, $record->nonce, $trace);
     if ($digest === null) {
         fwrite(STDERR, "the digest over the executed trace must compute in PHP\n");

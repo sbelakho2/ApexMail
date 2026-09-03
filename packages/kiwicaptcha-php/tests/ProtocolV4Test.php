@@ -7,6 +7,7 @@ namespace KiwiCaptcha\Tests;
 use KiwiCaptcha\ChallengeRecord;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ExecutionChallengeGenerator;
+use KiwiCaptcha\TestSupport\ExecutionTraceFixture;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\SolutionToken;
@@ -171,7 +172,7 @@ final class ProtocolV4Test extends TestCase
         $issuer = new Issuer($this->config(), $storage);
         $challenge = $issuer->issueWithExecutionField('login', '198.51.100.7', true, executionAction: 'login-action');
         $program = ExecutionChallengeGenerator::decode($challenge->executionProgram);
-        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $trace = ExecutionTraceFixture::executedTraceFor($program);
         $digest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $trace);
         $token = SolutionToken::create($challenge->nonce, $this->winningCounter($challenge), 5000, [], $digest, base64_encode($trace))->encode();
 
@@ -191,7 +192,7 @@ final class ProtocolV4Test extends TestCase
         $issuer = new Issuer($this->config(), $storage);
         $challenge = $issuer->issueWithExecutionField('login', '198.51.100.7', true, executionAction: 'login-action');
                 $program = ExecutionChallengeGenerator::decode($challenge->executionProgram);
-        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $trace = ExecutionTraceFixture::executedTraceFor($program);
         $digest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $trace);
         $token = SolutionToken::create($challenge->nonce, $this->winningCounter($challenge), 5000, [], $digest, base64_encode($trace))->encode();
 
@@ -477,7 +478,7 @@ final class ProtocolV4Test extends TestCase
         $issuer = new Issuer($this->config(), $storage);
         $challenge = $issuer->issueWithExecutionField('login', '198.51.100.7', true, executionAction: 'a', armDecoyField: true);
                 $program = ExecutionChallengeGenerator::decode($challenge->executionProgram);
-        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $trace = ExecutionTraceFixture::executedTraceFor($program);
         $digest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $trace);
         $token = SolutionToken::create($challenge->nonce, $this->winningCounter($challenge), 5000, [], $digest, base64_encode($trace))->encode();
 

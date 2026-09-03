@@ -22,7 +22,8 @@ const NONCE: &str = "xAfSYcl6VyvtYZcQUhvXxin2pojnG5TmZoHg7K6NG3s=";
 /// "login-action"). The digest is the executed-trace evidence digest
 /// over the browser-equivalent executed trace of the program, the
 /// trace a real browser execution submits. It is computed as
-/// `digestOverTrace` over the trace built by `executedTraceFor` on
+/// `digestOverTrace` over the trace built by the PHP test-fixture
+/// `KiwiCaptcha\TestSupport\ExecutionTraceFixture::executedTraceFor` on
 /// the decoded program, and re-derived here over the same trace.
 /// `PROGRAM`/`DIGEST` pin the version-2 pair (the causal observe
 /// grammar, opcode 33); `PROGRAM_V1`/`DIGEST_V1` pin the version-1
@@ -54,7 +55,7 @@ fn rust_mirror_reproduces_php_generated_program() {
     );
     let decoded = execution::decode(&program).expect("the pinned program must parse");
     assert_eq!(decoded.op_version, 2);
-    let trace = execution::executed_trace_for(&decoded);
+    let trace = execution::fixtures::executed_trace_for(&decoded);
     assert_eq!(
         execution::expected_digest_over_trace(&program, NONCE, &trace).unwrap(),
         php_vectors::DIGEST,
@@ -81,7 +82,7 @@ fn rust_mirror_reproduces_the_php_version_one_vector() {
         decoded.ops.iter().all(|op| op.opcode != 33),
         "a version-1 program never carries the observe opcode"
     );
-    let trace = execution::executed_trace_for(&decoded);
+    let trace = execution::fixtures::executed_trace_for(&decoded);
     assert!(
         !trace.contains("obs("),
         "a version-1 executed trace never carries the observe entry"
@@ -245,7 +246,7 @@ fn armed_issuance_verifies_with_correct_digest() {
 
     let mut record = issued.record;
     let decoded = execution::decode(program).expect("the issued program must parse");
-    let trace = execution::executed_trace_for(&decoded);
+    let trace = execution::fixtures::executed_trace_for(&decoded);
     let trace_b64: String = B64
         .encode(trace.as_bytes())
         .replace('+', "-")

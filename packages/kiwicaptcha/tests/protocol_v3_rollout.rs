@@ -266,7 +266,7 @@ fn v4_execution_armed_record_verifies_current_and_fails_both_older_generations()
     // digest.
     let program = issued.record.execution_program.as_deref().unwrap();
     let decoded = kiwicaptcha::execution::decode(program).expect("program parses");
-    let trace = kiwicaptcha::execution::executed_trace_for(&decoded);
+    let trace = kiwicaptcha::execution::fixtures::executed_trace_for(&decoded);
     let trace_b64: String = kiwicaptcha_verify_base64(&trace);
     let digest =
         kiwicaptcha::execution::expected_digest_over_trace(program, &issued.record.nonce, &trace)

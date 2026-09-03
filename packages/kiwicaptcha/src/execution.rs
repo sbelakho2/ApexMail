@@ -228,13 +228,6 @@ pub const OP_DOM_SERIALIZE_REAL: u8 = 32;
 pub const OP_DOM_OBSERVE: u8 = 33;
 pub const OP_COUNT: u8 = 34;
 
-/// The fabricated reference height the browser-equivalent trace
-/// synthesizes: the real observed value is the engine's own text
-/// metrics (never predictable by the mirrors), so the synthesizer
-/// uses this constant and the verifier replays whatever the trace
-/// reports.
-const OBSERVED_HEIGHT: u8 = 10;
-
 /// The trace entry names, one per opcode (index = opcode).
 const TRACE_NAMES: [&str; OP_COUNT as usize] = [
     "add",
@@ -1189,58 +1182,93 @@ pub fn expected_digest(program_b64: &str, nonce: &str) -> Option<String> {
     Some(hex::encode(hmac(&bytes, &msg)))
 }
 
-/// The browser-equivalent executed trace of a program: the canonical
-/// trace with the layout-probe placeholders replaced by valid
-/// browser-observed values — monotonic `GEOMETRY` offsets with height 10
-/// and the `POINT` probe naming the topmost constructed node ("div" when
-/// the program constructs any node, matching the verifier's
-/// whole-program construction predicate; "none" otherwise).
+/// Test-only trace-fixture support, gated behind the crate's
+/// `test-fixtures` cargo feature (enabled only for test builds via the
+/// self dev-dependency in `Cargo.toml`, never for production
+/// consumers).
 ///
-/// The causal `OBSERVE` readback reports the observed text-metric
-/// height (10) and writes it through into the u8 state, so the
-/// following checksum and read entries of this synthesized trace are
-/// computed over the observed byte.
-///
-/// The entries are built per op from the same state machine the
-/// canonical trace uses; only the layout and observed entries are
-/// replaced, so readback values that contain ';' or parentheses travel
-/// intact.
-pub fn executed_trace_for(program: &Program) -> String {
-    let mut u8arr: Vec<u8> = Vec::new();
-    let mut cur: Option<DomNode> = None;
-    let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
-    let has_append = program.ops.iter().any(|op| op.opcode == OP_DOM_APPEND);
-    let mut top = 0u64;
-    let mut entries: Vec<String> = Vec::with_capacity(program.ops.len());
-    for op in &program.ops {
-        if op.opcode == OP_DOM_GEOMETRY {
-            entries.push(format!("geom({},{})", top * 10, 10));
-            top += 1;
-        } else if op.opcode == OP_DOM_POINT {
-            entries.push(if has_append {
-                "point(div)".into()
+/// This module is `#[doc(hidden)]` and exists so test suites and the
+/// cross-language fixtures can synthesize a browser-equivalent
+/// executed trace of a program without a browser. It is never a
+/// production API: the synthesized trace fabricates the
+/// browser-observed layout values (the fixed reference height below)
+/// that only a real engine can measure, so nothing in the crate's
+/// production surface promises a non-browser equivalent of a real
+/// execution. Production verification works only over `SUBMITTED`
+/// evidence (`verify_executed_trace` /
+/// [`expected_digest_over_trace`](crate::execution::expected_digest_over_trace)),
+/// which replays whatever the trace reports.
+#[cfg(feature = "test-fixtures")]
+#[doc(hidden)]
+pub mod fixtures {
+    use super::*;
+
+    /// The fabricated reference height the browser-equivalent trace
+    /// synthesizes: the real observed value is the engine's own text
+    /// metrics (never predictable by the mirrors), so the synthesizer
+    /// uses this constant and the verifier replays whatever the trace
+    /// reports. A fabricated reference value, never a browser's
+    /// measurement.
+    pub const OBSERVED_HEIGHT: u8 = 10;
+
+    /// The browser-equivalent executed trace of a program: the canonical
+    /// trace with the layout-probe placeholders replaced by valid
+    /// browser-observed values — monotonic `GEOMETRY` offsets with height
+    /// [`OBSERVED_HEIGHT`] and the `POINT` probe naming the topmost
+    /// constructed node ("div" when the program constructs any node,
+    /// matching the verifier's whole-program construction predicate;
+    /// "none" otherwise).
+    ///
+    /// The causal `OBSERVE` readback reports the observed text-metric
+    /// height and writes it through into the u8 state, so the
+    /// following checksum and read entries of this synthesized trace are
+    /// computed over the observed byte.
+    ///
+    /// The entries are built per op from the same state machine the
+    /// canonical trace uses; only the layout and observed entries are
+    /// replaced, so readback values that contain ';' or parentheses travel
+    /// intact.
+    ///
+    /// Test-only: fabricates a verifier-accepted trace without a
+    /// browser. Test suites and cross-language fixtures only, never
+    /// call from a production path.
+    pub fn executed_trace_for(program: &Program) -> String {
+        let mut u8arr: Vec<u8> = Vec::new();
+        let mut cur: Option<DomNode> = None;
+        let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
+        let has_append = program.ops.iter().any(|op| op.opcode == OP_DOM_APPEND);
+        let mut top = 0u64;
+        let mut entries: Vec<String> = Vec::with_capacity(program.ops.len());
+        for op in &program.ops {
+            if op.opcode == OP_DOM_GEOMETRY {
+                entries.push(format!("geom({},{})", top * 10, 10));
+                top += 1;
+            } else if op.opcode == OP_DOM_POINT {
+                entries.push(if has_append {
+                    "point(div)".into()
+                } else {
+                    "point(none)".into()
+                });
+            } else if op.opcode == OP_DOM_OBSERVE {
+                // The browser-equivalent observe: the fabricated reference
+                // height (the real value is the engine's own text metrics,
+                // never predictable here) is written through into the
+                // replay state. The following checksum/read entries in this
+                // synthesized trace are then computed over the observed
+                // byte, the full causal-graph semantics, never a
+                // placeholder.
+                let idx = operand_int(op, "idx") as usize;
+                entries.push(format!("obs({idx},{OBSERVED_HEIGHT})"));
+                if idx < u8arr.len() {
+                    u8arr[idx] = OBSERVED_HEIGHT;
+                }
             } else {
-                "point(none)".into()
-            });
-        } else if op.opcode == OP_DOM_OBSERVE {
-            // The browser-equivalent observe: the fabricated reference
-            // height (the real value is the engine's own text metrics,
-            // never predictable here) is written through into the
-            // replay state. The following checksum/read entries in this
-            // synthesized trace are then computed over the observed
-            // byte, the full causal-graph semantics, never a
-            // placeholder.
-            let idx = operand_int(op, "idx") as usize;
-            entries.push(format!("obs({idx},{OBSERVED_HEIGHT})"));
-            if idx < u8arr.len() {
-                u8arr[idx] = OBSERVED_HEIGHT;
+                let result = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
+                entries.push(format!("{}({result})", TRACE_NAMES[op.opcode as usize]));
             }
-        } else {
-            let result = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
-            entries.push(format!("{}({result})", TRACE_NAMES[op.opcode as usize]));
         }
+        entries.join(";")
     }
-    entries.join(";")
 }
 
 /// Validate a `SUBMITTED` execution trace against a program: the
@@ -1425,6 +1453,11 @@ pub enum GenerateError {
 mod tests {
     use super::*;
     use sha2::Digest;
+    // The browser-equivalent trace synthesizer moved to the
+    // feature-gated test-fixtures module (see `fixtures`); the self
+    // dev-dependency in Cargo.toml enables `test-fixtures` for every
+    // test build, so the unit tests reach it here.
+    use super::fixtures::executed_trace_for;
 
     const KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
     const NONCE: &str = "xAfSYcl6VyvtYZcQUhvXxin2pojnG5TmZoHg7K6NG3s=";

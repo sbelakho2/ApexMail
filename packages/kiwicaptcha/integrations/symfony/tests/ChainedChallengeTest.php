@@ -299,7 +299,7 @@ final class ChainedChallengeTest extends TestCase
     {
         $program = \KiwiCaptcha\ExecutionChallengeGenerator::decode($challenge['execution_program']);
         self::assertNotNull($program, 'the issued program must decode');
-        $trace = \KiwiCaptcha\ExecutionChallengeGenerator::executedTraceFor($program);
+        $trace = \KiwiCaptcha\TestSupport\ExecutionTraceFixture::executedTraceFor($program);
         $digest = \KiwiCaptcha\ExecutionChallengeGenerator::digestOverTrace($challenge['execution_program'], $challenge['nonce'], $trace);
         self::assertNotNull($digest, 'the digest over the canonical trace must compute');
         $counter = $this->winningCounter($challenge);

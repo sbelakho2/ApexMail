@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace KiwiCaptcha\Tests;
 
 use KiwiCaptcha\ExecutionChallengeGenerator;
+use KiwiCaptcha\TestSupport\ExecutionTraceFixture;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -47,7 +48,7 @@ final class ExecutionChallengeGuaranteeTest extends TestCase
         $programB64 = $this->blobFor($label);
         $decoded = ExecutionChallengeGenerator::decode($programB64);
         self::assertNotNull($decoded);
-        $trace = ExecutionChallengeGenerator::executedTraceFor($decoded);
+        $trace = ExecutionTraceFixture::executedTraceFor($decoded);
         self::assertNotNull(ExecutionChallengeGenerator::verifyExecutedTrace($programB64, $nonce, $trace));
 
         $obsEntry = null;
@@ -240,7 +241,7 @@ final class ExecutionChallengeGuaranteeTest extends TestCase
 
             // The browser-equivalent executed trace verifies against
             // the program, and the digest machinery accepts it.
-            $trace = ExecutionChallengeGenerator::executedTraceFor($decoded);
+            $trace = ExecutionTraceFixture::executedTraceFor($decoded);
             self::assertNotNull(
                 ExecutionChallengeGenerator::verifyExecutedTrace($programB64, $this->nonceFor($label), $trace),
                 'the executed trace of a generated program must verify',
@@ -273,7 +274,7 @@ final class ExecutionChallengeGuaranteeTest extends TestCase
                 continue;
             }
             $seenQreal = true;
-            $trace = ExecutionChallengeGenerator::executedTraceFor($decoded);
+            $trace = ExecutionTraceFixture::executedTraceFor($decoded);
             self::assertStringContainsString('qreal(div|', $trace, 'the qreal probe reads back the constructed node');
             self::assertStringNotContainsString('qreal(none)', $trace, 'a constructed probe never reads as absent');
             break;
@@ -288,7 +289,7 @@ final class ExecutionChallengeGuaranteeTest extends TestCase
                 continue;
             }
             $seenEvent = true;
-            $trace = ExecutionChallengeGenerator::executedTraceFor($decoded);
+            $trace = ExecutionTraceFixture::executedTraceFor($decoded);
             self::assertStringContainsString('evreal(kiwi-ev:div)', $trace, 'the event probe reads back the constructed node');
             self::assertStringNotContainsString('evreal(none)', $trace, 'a constructed probe never reads as absent');
             break;
@@ -318,7 +319,7 @@ final class ExecutionChallengeGuaranteeTest extends TestCase
         self::assertNotNull($programB64, 'the corpus must contain a qreal link probe');
         $program = ExecutionChallengeGenerator::decode($programB64);
         self::assertNotNull($program);
-        $genuine = ExecutionChallengeGenerator::executedTraceFor($program);
+        $genuine = ExecutionTraceFixture::executedTraceFor($program);
         self::assertNotNull(ExecutionChallengeGenerator::verifyExecutedTrace($programB64, $nonce, $genuine));
 
         // The naive trace of the same program shape with a foreign
@@ -326,7 +327,7 @@ final class ExecutionChallengeGuaranteeTest extends TestCase
         $naiveB64 = $this->blobWithForeignCreateId($programB64);
         $naiveProgram = ExecutionChallengeGenerator::decode($naiveB64);
         self::assertNotNull($naiveProgram, 'the foreign-id program must parse');
-        $naiveTrace = ExecutionChallengeGenerator::executedTraceFor($naiveProgram);
+        $naiveTrace = ExecutionTraceFixture::executedTraceFor($naiveProgram);
         self::assertStringContainsString('qreal(none)', $naiveTrace, 'a solver skipping the construction reads the probe as absent');
         self::assertNull(
             ExecutionChallengeGenerator::verifyExecutedTrace($programB64, $nonce, $naiveTrace),
@@ -407,7 +408,7 @@ final class ExecutionChallengeGuaranteeTest extends TestCase
             // The executed trace of a version-1 program verifies on the
             // current verifier (the compat window) and is a pure
             // construction-to-probe trace: no causal observe entry.
-            $trace = ExecutionChallengeGenerator::executedTraceFor($decoded);
+            $trace = ExecutionTraceFixture::executedTraceFor($decoded);
             self::assertStringNotContainsString('obs(', $trace, 'a version-1 trace never carries an observe entry');
             self::assertNotNull(
                 ExecutionChallengeGenerator::verifyExecutedTrace($programB64, $nonce, $trace),
@@ -440,7 +441,7 @@ final class ExecutionChallengeGuaranteeTest extends TestCase
                 continue;
             }
             $seenHeight0 = true;
-            $genuine = ExecutionChallengeGenerator::executedTraceFor($program);
+            $genuine = ExecutionTraceFixture::executedTraceFor($program);
             self::assertNotNull(ExecutionChallengeGenerator::verifyExecutedTrace($programB64, $this->nonceFor($label), $genuine));
             $forged = preg_replace('/geom\(0,10\)/', 'geom(0,0)', $genuine, 1);
             self::assertIsString($forged);
@@ -469,7 +470,7 @@ final class ExecutionChallengeGuaranteeTest extends TestCase
                 continue;
             }
             $seenNonMonotonic = true;
-            $genuine = ExecutionChallengeGenerator::executedTraceFor($program);
+            $genuine = ExecutionTraceFixture::executedTraceFor($program);
             self::assertNotNull(ExecutionChallengeGenerator::verifyExecutedTrace($programB64, $this->nonceFor($label), $genuine));
             $forged = preg_replace('/geom\(0,10\)/', 'geom(50,10)', $genuine, 1);
             self::assertIsString($forged);
