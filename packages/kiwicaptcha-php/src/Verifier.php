@@ -223,6 +223,16 @@ final class Verifier
     private readonly ?VerificationAdmissionGate $argonGate;
 
     /**
+     * The decoded rsw trapdoor of this verifier (modulus + secret
+     * lambda), or null when the deployment does not verify rsw records.
+     * A signed rsw record then fails with UnsupportedRswParams: the
+     * record is authentic but this verifier cannot represent the
+     * trapdoor computation, exactly the Argon2id configuration-mismatch
+     * semantics.
+     */
+    private readonly ?Rsw $rsw;
+
+    /**
      * @var bool whether the one-time non-atomic-storage warning already
      *            fired in this process (the misconfiguration is a
      *            deployment property, not a per-verification event)
@@ -317,6 +327,22 @@ final class Verifier
          * x {@see self::MAX_ARGON_TIME}; operators may raise it.
          */
         private readonly int $resumeClaimTtlSecs = self::RESUME_CLAIM_TTL_SECS,
+        /**
+         * The rsw modulus n (canonical standard base64 of the 2048-bit
+         * composite), the public half of the time-lock trapdoor. When
+         * set together with rswLambda, rsw records verify through the
+         * trapdoor; when both are null (the default), a signed rsw
+         * record is authentic but unsupported (UnsupportedRswParams).
+         * Setting exactly one of the pair is refused at construction.
+         */
+        private readonly ?string $rswModulusN = null,
+        /**
+         * The rsw secret lambda = lcm(p-1, q-1) (canonical standard
+         * base64), the trapdoor that lets this verifier compute the
+         * expected final value without the T sequential squarings. Never
+         * stored on the record and never sent to the client.
+         */
+        private readonly ?string $rswLambda = null,
     ) {
         // Backward-compatibility shim: callers may pass the clock override
         // positionally in the second slot. A Closure there is $now, not an
@@ -351,6 +377,14 @@ final class Verifier
                 'resumeClaimTtlSecs must be >= 1'
             );
         }
+        if (($rswModulusN === null) !== ($rswLambda === null)) {
+            throw new \InvalidArgumentException(
+                'rswModulusN and rswLambda must be configured together (the rsw trapdoor pair)'
+            );
+        }
+        $this->rsw = $rswModulusN !== null && $rswLambda !== null
+            ? new Rsw($rswModulusN, $rswLambda)
+            : null;
         // A non-atomic storage (the {@see NonAtomicStorageInterface}
         // capability marker, e.g. the PSR-6 backend) keeps best-effort
         // single-use only: two racing requests can both win the consume.
@@ -863,6 +897,13 @@ final class Verifier
             if (!$this->argon2CeilingsOk($record)) {
                 return VerifyOutcome::invalid(VerifyError::UnsupportedArgon2Params);
             }
+            // The rsw process bound sits at the computation site too,
+            // mirrored with the Argon2id gate: the consumed instance's
+            // signed sequential cost must stay within the issuance
+            // range before the trapdoor check runs.
+            if (!$this->rswParamsOk($record)) {
+                return VerifyOutcome::invalid(VerifyError::UnsupportedRswParams);
+            }
 
             // Security-policy epoch on the consumed instance: a
             // racing swap that replaced the record between peek and consume
@@ -878,16 +919,19 @@ final class Verifier
                 return VerifyOutcome::invalid(VerifyError::WrongIssuer);
             }
 
-            $hash = $this->deriveHash($record, $token->counter);
-            if ($hash === null) {
+            $valid = $this->recomputeValidProof($record, $token);
+            if ($valid === null) {
                 // An Argon2id record whose parameters are within the ceilings
                 // but cannot be represented by the libsodium-backed verifier
                 // (p != 1) is authentic but unsupported. A SHA-256 null can
                 // only be a salt-decode failure (already shape-validated),
-                // hence malformed.
-                return VerifyOutcome::invalid($record->algorithm === PoWAlgorithm::Argon2id
-                    ? VerifyError::UnsupportedArgon2Params
-                    : VerifyError::MalformedRecord);
+                // hence malformed. An rsw record without a configured
+                // trapdoor is authentic but unsupported.
+                return VerifyOutcome::invalid(match ($record->algorithm) {
+                    PoWAlgorithm::Rsw => VerifyError::UnsupportedRswParams,
+                    PoWAlgorithm::Argon2id => VerifyError::UnsupportedArgon2Params,
+                    PoWAlgorithm::Sha256 => VerifyError::MalformedRecord,
+                });
             }
 
             // 10. Post-derive final revalidation: re-check against the
@@ -919,7 +963,7 @@ final class Verifier
                 return VerifyOutcome::invalid(VerifyError::WrongIssuer);
             }
 
-            if (self::leadingZeroBits($hash) < $record->targetBits) {
+            if (!$valid) {
                 // Commit the deterministic invalid outcome (best-effort) so
                 // a retry sees the same InsufficientWork without re-deriving.
                 $this->bestEffortCommit($record->nonce, false, $record->requestBinding);
@@ -949,6 +993,40 @@ final class Verifier
                 }
             }
         }
+    }
+
+    /**
+     * The deterministic proof verdict of a presented token against a
+     * record, per algorithm. SHA-256 and Argon2id re-derive the hash
+     * and compare the leading zero bits; the rsw record compares the
+     * presented final value, the optional final token segment, against
+     * the trapdoor expectation in constant time over the fixed 512-hex
+     * wire form. Returns null when the derivation cannot be computed:
+     * an Argon2id profile libsodium cannot represent, a salt decode
+     * failure, or a verifier without the rsw trapdoor. The caller maps
+     * null per algorithm exactly like the legacy path.
+     */
+    private function recomputeValidProof(ChallengeRecord $record, SolutionToken $token): ?bool
+    {
+        if ($record->algorithm === PoWAlgorithm::Rsw) {
+            if ($this->rsw === null) {
+                return null;
+            }
+            if ($token->rswProof === null) {
+                return false;
+            }
+
+            return hash_equals(
+                $this->rsw->expectedProofHex($record->prefix, $record->nonce, $record->t),
+                $token->rswProof
+            );
+        }
+        $hash = $this->deriveHash($record, $token->counter);
+        if ($hash === null) {
+            return null;
+        }
+
+        return self::leadingZeroBits($hash) >= $record->targetBits;
     }
 
     /**
@@ -1382,19 +1460,21 @@ final class Verifier
                 }
             }
 
-            $hash = $this->deriveHash($record, $token->counter);
-            if ($hash === null) {
+            $valid = $this->recomputeValidProof($record, $token);
+            if ($valid === null) {
                 // An Argon2id record whose parameters are within the
                 // ceilings but cannot be represented by the
                 // libsodium-backed verifier (p != 1) is
                 // authentic but unsupported. A SHA-256 null can only be a
                 // salt-decode failure (already shape-validated), hence
-                // malformed.
-                return VerifyOutcome::invalid($record->algorithm === PoWAlgorithm::Argon2id
-                    ? VerifyError::UnsupportedArgon2Params
-                    : VerifyError::MalformedRecord);
+                // malformed. An rsw record without a configured trapdoor
+                // is authentic but unsupported.
+                return VerifyOutcome::invalid(match ($record->algorithm) {
+                    PoWAlgorithm::Rsw => VerifyError::UnsupportedRswParams,
+                    PoWAlgorithm::Argon2id => VerifyError::UnsupportedArgon2Params,
+                    PoWAlgorithm::Sha256 => VerifyError::MalformedRecord,
+                });
             }
-            $valid = self::leadingZeroBits($hash) >= $record->targetBits;
 
             // Post-derive final revalidation: the same current-clock and
             // current-expectation re-check the ordinary verify() runs
@@ -2047,6 +2127,17 @@ final class Verifier
         if (!$this->argon2CeilingsOk($record)) {
             return VerifyError::UnsupportedArgon2Params;
         }
+        // 2b. The rsw process bound: a signed rsw record's sequential
+        //     cost T (the time-cost slot) must sit within the issuance
+        //     range 10,000..300,000. Any value outside it is authentic
+        //     but unsupported — UnsupportedRswParams, exactly the
+        //     Argon2id ceiling split. The verifier-side cost of the
+        //     trapdoor check does not depend on T, so the bound exists
+        //     to keep the recorded parameter space canonical, not to cap
+        //     server work.
+        if (!$this->rswParamsOk($record)) {
+            return VerifyError::UnsupportedRswParams;
+        }
 
         return null;
     }
@@ -2276,6 +2367,23 @@ final class Verifier
     }
 
     /**
+     * The rsw process bound: a signed rsw record's sequential cost T,
+     * carried in the time-cost slot, must sit within the issuance range
+     * (10,000..300,000). The verifier-side trapdoor check costs one
+     * modular exponentiation regardless of T, so the bound keeps the
+     * signed parameter space canonical rather than capping server work.
+     * Returns true for every non-rsw record.
+     */
+    private function rswParamsOk(ChallengeRecord $record): bool
+    {
+        if ($record->algorithm !== PoWAlgorithm::Rsw) {
+            return true;
+        }
+
+        return $record->t >= Config::MIN_RSW_T && $record->t <= Config::MAX_RSW_T;
+    }
+
+    /**
      * Terminal cheap-failure cleanup. Deletion is not security-critical
      * once the challenge has been rejected, and a storage outage must not
      * turn a cheap invalid submission into an application exception; the
@@ -2380,7 +2488,9 @@ final class Verifier
      *
      * Returns null when the record is malformed or the algorithm cannot be
      * computed (e.g. Argon2id parameters outside KiwiCaptcha's protocol
-     * profile: t < 3 or p != 1).
+     * profile: t < 3 or p != 1). An rsw record derives no hash: the
+     * proof is the client's final value, checked through the trapdoor
+     * by {@see self::recomputeValidProof()} instead.
      */
     private function deriveHash(ChallengeRecord $record, int $counter): ?string
     {
@@ -2393,6 +2503,7 @@ final class Verifier
         return match ($record->algorithm) {
             PoWAlgorithm::Sha256 => hash('sha256', $password.$saltBytes, true),
             PoWAlgorithm::Argon2id => $this->argon2id($password, $saltBytes, $record),
+            PoWAlgorithm::Rsw => null,
         };
     }
 

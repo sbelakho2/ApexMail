@@ -6,8 +6,10 @@ declare(strict_types=1);
  * Browser-test fixture server (php -S 127.0.0.1:8085 router.php).
  *
  * Serves the widget page and real challenge/verify endpoints backed by the
- * pure PHP core (no Symfony needed): SHA-256 and Argon2id issuance + local
- * verification, so Playwright can exercise the actual browser solver.
+ * pure PHP core (no Symfony needed): SHA-256, Argon2id and the optional
+ * rsw time-lock issuance + local verification, so Playwright can exercise
+ * the actual browser solver. The rsw algorithm is issued only under an
+ * explicit request, so the historical endpoints stay byte-identical.
  */
 
 $repo = dirname(__DIR__, 2); // tests/browser -> repo root
@@ -30,6 +32,12 @@ use KiwiCaptcha\Verifier;
 
 $secret = '0123456789abcdef0123456789abcdef';
 $GLOBALS['kiwi_secret'] = $secret;
+// The fixture rsw trapdoor pair, the same fixed 2048-bit fixture keys
+// the PHP core tests embed (tests/Support/RswFixture.php): the fixture
+// server issues and verifies rsw challenges only when the test page
+// requests the algorithm, so the default endpoints stay byte-identical.
+$GLOBALS['kiwi_rsw_modulus_n'] = 'sL1Mk2YZ4BnznBgWe2YB3uOZ+KFN/VETl1T0H9zuWkP54/nAN8sgPhqozDrRCVQxdJc5IDgkh9EemAGzYjku+zqv2fdryfy5iHbtQEhkHJVt+5f/6yxrZDvHUMhgDRAmLe7rRjEIZC8GqcfcbQyVECgxzNfd3FE+ATeuxc8wKafjUtQ/rvizFBJCo5L0r4U67JDooXVt4yTLtRsoFK3WZBOKIOSZ+E0vZJDt2ddeDSluS/qaqZ5C3dSVeaSyaelX8dGpmovr8xClC+9SKsFnMc+6m9WBo2CsCSpJGk3LZM2847HM5/r2gfmNdN5zRecjEY5MLLEQ/34JinuMtMJpuw==';
+$GLOBALS['kiwi_rsw_lambda'] = 'WF6mSbMM8Az5zgwLPbMA73HM/FCm/qiJy6p6D+53LSH88fzgG+WQHw1UZh1ohKoYukuckBwSQ+iPTADZsRyXfZ1X7Pu15P5cxDt2oCQyDkq2/cv/9ZY1sh3jqGQwBogTFvd1oxiEMheDVOPuNoZKiBQY5mvu7iifAJvXYueYFNMcEwMJdHQi8lgNFBJMwNN+267oViuNdvXRtCLx0MeOSiIPOvDNnLU0Ba4bJg5mTXLY9llIMPtOuHU5BiN8E7IY8kKCdYlpJTgGqv+uu5aNS/SPQl3sMR8dIo3zn7wZhcsMyzJ1n/dLZHNSwXs3QX6XQU+Bx8OVz5pmJYPTJUdsEA==';
 // The ExecutionChallengeV1 fixture key (a dedicated key, mirroring the
 // bundle's kiwi_captcha.execution_key): armed only under ?execution=1.
 $GLOBALS['kiwi_execution_secret'] = 'fedcba9876543210fedcba9876543210';
@@ -743,11 +751,12 @@ function recoverIssuedResponse(string $stage2Nonce): ?array
  * core enforces, so a malformed override falls back to the default
  * instead of crashing the fixture.
  */
-function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm, bool $armDecoy = false, ?int $ttlOverride = null, ?string $pinnedDecoy = null, int $shaBits = 8, int $argonBits = 4, int $argonMKib = 64, bool $armExecution = false, ?string $executionAction = null, int $executionVersion = 1): ?array
+function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm, bool $armDecoy = false, ?int $ttlOverride = null, ?string $pinnedDecoy = null, int $shaBits = 8, int $argonBits = 4, int $argonMKib = 64, bool $armExecution = false, ?string $executionAction = null, int $executionVersion = 1, int $rswT = 10000): ?array
 {
     $shaBits = min(max($shaBits, 1), Config::MAX_SHA_TARGET_BITS);
     $argonBits = min(max($argonBits, 1), Config::MAX_ARGON2_TARGET_BITS);
     $argonMKib = min(max($argonMKib, 8), 65536);
+    $rswT = min(max($rswT, Config::MIN_RSW_T), Config::MAX_RSW_T);
     $config = new Config(
         secretKey: $GLOBALS['kiwi_secret'],
         algorithm: $algorithm,
@@ -763,6 +772,12 @@ function mintChallenge(string $scope, ?string $binding, PoWAlgorithm $algorithm,
         // the execution dimension is armed only under ?execution=1 and
         // never by accident.
         executionKey: $GLOBALS['kiwi_execution_secret'],
+        // The rsw trapdoor pair: present only when the challenge
+        // algorithm is rsw, and inert otherwise (the fixture mirrors
+        // the operator opt-in).
+        rswModulusN: $algorithm === PoWAlgorithm::Rsw ? $GLOBALS['kiwi_rsw_modulus_n'] : null,
+        rswLambda: $algorithm === PoWAlgorithm::Rsw ? $GLOBALS['kiwi_rsw_lambda'] : null,
+        rswT: $rswT,
     );
     $storage = new ArrayStorage();
     $issuer = new Issuer($config, $storage, now: static fn (): int => time());
@@ -976,7 +991,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     // lazily fetches the WASM runtime in files mode).
     $escalated = ($_GET['escalate'] ?? '') === 'argon';
     $requestedArgon = ($body['algorithm'] ?? 'sha256') === 'argon2id';
-    $algorithm = $escalated || $requestedArgon ? PoWAlgorithm::Argon2id : PoWAlgorithm::Sha256;
+    // The rsw fixture knob (?rsw=1 or a body algorithm request): the
+    // mirror of an operator-armed deployment — an rsw challenge is
+    // issued only when explicitly requested.
+    $requestedRsw = ($body['algorithm'] ?? 'sha256') === 'rsw';
+    $algorithm = $requestedRsw
+        ? PoWAlgorithm::Rsw
+        : ($escalated || $requestedArgon ? PoWAlgorithm::Argon2id : PoWAlgorithm::Sha256);
     $ttlOverride = isset($_GET['ttl']) ? max(1, (int) $_GET['ttl']) : null;
     // The bundle maps incumbent sitekeys -> policy scopes server-side
     // (sitekey_allowlist); the fixture mirrors that mapping so compat
@@ -1051,6 +1072,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     $shaBits = ctype_digit((string) ($_GET['bits'] ?? '')) ? (int) $_GET['bits'] : 8;
     $argonBits = ctype_digit((string) ($_GET['argon_bits'] ?? '')) ? (int) $_GET['argon_bits'] : 4;
     $argonMKib = ctype_digit((string) ($_GET['m_kib'] ?? '')) ? (int) $_GET['m_kib'] : 64;
+    // The rsw sequential-cost knob (?rsw_t=<10000..300000>): the mirror
+    // of the operator's rsw_t configuration; malformed values fall back
+    // to the fixture default 10000 inside mintChallenge.
+    $rswT = ctype_digit((string) ($_GET['rsw_t'] ?? '')) ? (int) $_GET['rsw_t'] : 10000;
     // The ExecutionChallengeV1 fixture seam (?execution=1): the mirror
     // of the bundle's risk.execution_challenge gate — the challenge
     // response carries an execution program the driver must run (the
@@ -1080,7 +1105,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     if (preg_match('/^(?:0|[1-9][0-9]*)$/D', $headerCapability) === 1) {
         $executionMaxVersion = min(3, (int) $headerCapability);
     }
-    $challenge = mintChallenge($scope, $presentedBinding, $algorithm, ($_GET['decoy'] ?? '') === 'pool', $ttlOverride, $pinnedDecoy, $shaBits, $argonBits, $argonMKib, $armExecution, $executionAction, $executionMaxVersion);
+    $challenge = mintChallenge($scope, $presentedBinding, $algorithm, ($_GET['decoy'] ?? '') === 'pool', $ttlOverride, $pinnedDecoy, $shaBits, $argonBits, $argonMKib, $armExecution, $executionAction, $executionMaxVersion, $rswT);
     if ($challenge === null) {
         http_response_code(500);
         echo '{"error":"record missing"}';
@@ -1473,7 +1498,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && $path === '/verify') {
     $storage = new ArrayStorage();
     $record = \KiwiCaptcha\ChallengeRecord::fromArray(json_decode((string) file_get_contents(recordFile($nonce)), true));
     $storage->store($record);
-    $verifier = new Verifier($storage);
+    // The rsw trapdoor rides the verifier whenever the fixture holds
+    // one: an rsw record verifies only when the deployment configures
+    // the matching pair (the fixture always does).
+    $verifier = $record->algorithm === PoWAlgorithm::Rsw
+        ? new Verifier($storage, rswModulusN: $GLOBALS['kiwi_rsw_modulus_n'], rswLambda: $GLOBALS['kiwi_rsw_lambda'])
+        : new Verifier($storage);
     $scope = (string) ($body['scope'] ?? 'login');
     // The exact-binding contract: a challenge minted bound to a
     // transaction must be redeemed against that same binding (the stored
@@ -1508,7 +1538,7 @@ if ($path === '/kiwi-worker.js' || $path === '/kiwicaptcha-wasm.js' || $path ===
     // rewritten: the driver must refuse it with the controlled
     // kiwi:solver-mismatch state instead of accepting a stale worker.
     if ($path === '/kiwi-worker-stale.js') {
-        $body = str_replace('2026-08-r2', '2026-08-r0', (string) $body);
+        $body = str_replace('2026-09-r1', '2026-08-r0', (string) $body);
     }
     echo $body;
 
@@ -1632,7 +1662,8 @@ if ($path === '/' || $path === '/index.html') {
     $csp = ($_GET['csp'] ?? '') === 'strict'
         ? '<meta http-equiv="Content-Security-Policy" content="script-src \'unsafe-inline\'; style-src \'unsafe-inline\'">'
         : '';
-    $algorithm = ($_GET['algorithm'] ?? '') === 'argon2id' ? 'argon2id' : 'sha256';
+    $algorithmParam = (string) ($_GET['algorithm'] ?? '');
+    $algorithm = $algorithmParam === 'argon2id' || $algorithmParam === 'rsw' ? $algorithmParam : 'sha256';
     $workerAttr = '';
     if (($_GET['worker'] ?? '') === '1') $workerAttr = ' data-kiwi-worker-src="/kiwi-worker.js"';
     if (($_GET['worker-stale'] ?? '') === '1') $workerAttr = ' data-kiwi-worker-src="/kiwi-worker-stale.js"';
@@ -1655,6 +1686,11 @@ if ($path === '/' || $path === '/index.html') {
     if (($_GET['capture'] ?? '') !== '') $endpointQuery[] = 'capture='.rawurlencode((string) $_GET['capture']);
     if (($_GET['escalate'] ?? '') === 'argon') $endpointQuery[] = 'escalate=argon';
     if (($_GET['execution'] ?? '') === '1') $endpointQuery[] = 'execution=1';
+    // The rsw fixture knob: ?rsw_t=<T> forwards the sequential cost to
+    // the challenge endpoint (default 10000, the smallest allowed T).
+    if (($_GET['rsw_t'] ?? '') !== '' && ctype_digit((string) $_GET['rsw_t'])) {
+        $endpointQuery[] = 'rsw_t='.rawurlencode((string) $_GET['rsw_t']);
+    }
     // The execution-capability lever never rides the page or the query
     // string: the fixture reads the Kiwi-Execution-Max-Version request
     // header like the bundle controller, so a spec that simulates a

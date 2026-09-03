@@ -121,6 +121,35 @@ final class ConfigurationTest extends TestCase
         $this->process(['argon_m_kib' => 1]);
     }
 
+    public function testRswNodesAcceptAnArmedTrapdoorConfiguration(): void
+    {
+        $processed = $this->process([
+            'algorithm' => 'rsw',
+            'rsw_modulus_n' => \KiwiCaptcha\Tests\Support\RswFixture::MODULUS_N_B64,
+            'rsw_lambda' => \KiwiCaptcha\Tests\Support\RswFixture::LAMBDA_B64,
+            'rsw_t' => 10_000,
+        ]);
+        self::assertSame('rsw', $processed['algorithm']);
+        self::assertSame(10_000, $processed['rsw_t']);
+        self::assertSame(\KiwiCaptcha\Tests\Support\RswFixture::MODULUS_N_B64, $processed['rsw_modulus_n']);
+    }
+
+    public function testRswNodesDefaultToUnconfigured(): void
+    {
+        $processed = $this->process([]);
+        self::assertSame('sha256', $processed['algorithm']);
+        self::assertNull($processed['rsw_modulus_n']);
+        self::assertNull($processed['rsw_lambda']);
+        self::assertSame(75_000, $processed['rsw_t']);
+    }
+
+    public function testRswTAboveTheIssuanceCeilingIsRejectedByTheTree(): void
+    {
+        $this->expectException(InvalidConfigurationException::class);
+
+        $this->process(['algorithm' => 'rsw', 'rsw_t' => \KiwiCaptcha\Config::MAX_RSW_T + 1]);
+    }
+
     public function testRateLimitWindowSecsDefaultsAndBounds(): void
     {
         self::assertSame(60, $this->process()['rate_limit_window_secs'], 'rate_limit_window_secs defaults to 60');

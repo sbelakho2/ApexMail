@@ -82,6 +82,13 @@ pub struct IssuedChallenge {
     /// resulting execution digest with the solution token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_program: Option<String>,
+    /// The rsw modulus n (canonical standard base64 of the 2048-bit
+    /// composite), present only when the challenge algorithm is rsw:
+    /// the client solver squares modulo n. The key is omitted when
+    /// `None`, so every other response keeps its exact byte shape. The
+    /// trapdoor lambda never rides this surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rsw_modulus: Option<String>,
 }
 
 /// The client-submitted solution, decoded from the `kiwi__token` hidden input.
@@ -126,6 +133,10 @@ pub struct SolutionToken {
     /// appends it unchanged and [`SolutionToken::decode`] returns it
     /// unchanged.
     pub execution_trace: Option<String>,
+    /// The rsw final value (512 lowercase hex) presented for an rsw
+    /// challenge; `None` on every other shape. The verifier compares it
+    /// constant-time against the trapdoor expectation.
+    pub rsw_proof: Option<String>,
 }
 
 impl SolutionToken {
@@ -148,6 +159,13 @@ impl SolutionToken {
                 plain.push(':');
                 plain.push_str(trace);
             }
+        }
+        // The rsw final value rides as the final segment, after the
+        // execution evidence: an rsw challenge never carries execution
+        // evidence, and the 512-hex discriminator reads the last part.
+        if let Some(proof) = &self.rsw_proof {
+            plain.push('.');
+            plain.push_str(proof);
         }
         B64.encode(plain)
     }
@@ -193,55 +211,75 @@ impl SolutionToken {
         let last = parts[parts.len() - 1];
         let execution_digest;
         let execution_trace;
+        let rsw_proof;
         let telemetry_str;
         if parts.len() >= 5 {
-            // The optional fifth segment is `digest` or `digest:trace`:
-            // the digest is exactly 64 lowercase hex characters (the
-            // shape the driver's interpreter produces) and the trace is
-            // canonical unpadded base64url ([A-Za-z0-9_-], non-empty,
-            // at most 10924 characters — the base64 of an 8 KiB trace,
-            // and byte-exact with the re-encode of its own decoded
-            // bytes, the PHP trace gate). A malformed trace on an
-            // armed token is rejected outright, exactly like the PHP
-            // decoder throws for the same shape; a tail that is not
-            // digest-shaped falls through to the telemetry JSON parse
-            // below (fail closed).
-            let colon = last.find(':');
-            let digest_part = match colon {
-                Some(i) => &last[..i],
-                None => last,
-            };
-            let digest_ok = digest_part.len() == 64
-                && digest_part
+            // The rsw final value is the last segment exactly when it is
+            // 512 lowercase hex (the shape the sequential solver
+            // produces): the wire discriminator reads the last part, and
+            // a JSON telemetry object can never end with a hex tail (it
+            // must close with '}'), so the split is unambiguous.
+            let rsw_ok = last.len() == 512
+                && last
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-            if digest_ok {
-                execution_digest = Some(digest_part.to_string());
-                execution_trace = match colon {
-                    Some(i) => {
-                        let trace = &last[i + 1..];
-                        let trace_ok = !trace.is_empty()
-                            && trace.len() <= 10924
-                            && trace
-                                .bytes()
-                                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-                            && trace_is_canonical_base64url(trace);
-                        if !trace_ok {
-                            return Err(DecodeError::Malformed);
-                        }
-                        Some(trace.to_string())
-                    }
-                    None => None,
-                };
-                telemetry_str = parts[3..parts.len() - 1].join(".");
-            } else {
+            if rsw_ok {
+                rsw_proof = Some(last.to_string());
                 execution_digest = None;
                 execution_trace = None;
-                telemetry_str = parts[3..].join(".");
+                telemetry_str = parts[3..parts.len() - 1].join(".");
+            } else {
+                // The optional fifth segment is `digest` or
+                // `digest:trace`: the digest is exactly 64 lowercase hex
+                // characters (the shape the driver's interpreter
+                // produces) and the trace is canonical unpadded base64url
+                // ([A-Za-z0-9_-], non-empty, at most 10924 characters —
+                // the base64 of an 8 KiB trace, and byte-exact with the
+                // re-encode of its own decoded bytes, the PHP trace
+                // gate). A malformed trace on an armed token is rejected
+                // outright, exactly like the PHP decoder throws for the
+                // same shape; a tail that is not digest-shaped falls
+                // through to the telemetry JSON parse below (fail
+                // closed).
+                rsw_proof = None;
+                let colon = last.find(':');
+                let digest_part = match colon {
+                    Some(i) => &last[..i],
+                    None => last,
+                };
+                let digest_ok = digest_part.len() == 64
+                    && digest_part
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+                if digest_ok {
+                    execution_digest = Some(digest_part.to_string());
+                    execution_trace = match colon {
+                        Some(i) => {
+                            let trace = &last[i + 1..];
+                            let trace_ok = !trace.is_empty()
+                                && trace.len() <= 10924
+                                && trace
+                                    .bytes()
+                                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                                && trace_is_canonical_base64url(trace);
+                            if !trace_ok {
+                                return Err(DecodeError::Malformed);
+                            }
+                            Some(trace.to_string())
+                        }
+                        None => None,
+                    };
+                    telemetry_str = parts[3..parts.len() - 1].join(".");
+                } else {
+                    execution_digest = None;
+                    execution_trace = None;
+                    telemetry_str = parts[3..].join(".");
+                }
             }
         } else {
             execution_digest = None;
             execution_trace = None;
+            rsw_proof = None;
             telemetry_str = parts[3..].join(".");
         }
 
@@ -294,6 +332,7 @@ impl SolutionToken {
             telemetry,
             execution_digest,
             execution_trace,
+            rsw_proof,
         })
     }
 }
@@ -392,6 +431,7 @@ mod tests {
             telemetry: serde_json::json!({"wd": true, "hc": 8}),
             execution_digest: None,
             execution_trace: None,
+            rsw_proof: None,
         };
         let encoded = token.encode();
         let decoded = SolutionToken::decode(&encoded).unwrap();
@@ -417,6 +457,7 @@ mod tests {
             telemetry: serde_json::json!({"ua": "Mozilla/5.0 (X11; Linux x86_64)"}),
             execution_digest: None,
             execution_trace: None,
+            rsw_proof: None,
         };
         let encoded = token.encode();
         let decoded = SolutionToken::decode(&encoded).unwrap();
@@ -469,6 +510,7 @@ mod tests {
             telemetry,
             execution_digest: None,
             execution_trace: None,
+            rsw_proof: None,
         };
         assert!(
             matches!(
@@ -496,6 +538,7 @@ mod tests {
                 telemetry: serde_json::json!({}),
                 execution_digest: None,
                 execution_trace: None,
+                rsw_proof: None,
             };
             assert!(
                 matches!(
@@ -516,6 +559,7 @@ mod tests {
             telemetry: serde_json::json!({}),
             execution_digest: None,
             execution_trace: None,
+            rsw_proof: None,
         };
         assert!(SolutionToken::decode(&token.encode()).is_ok());
     }
@@ -538,6 +582,7 @@ mod tests {
                 telemetry: bad,
                 execution_digest: None,
                 execution_trace: None,
+                rsw_proof: None,
             };
             assert!(
                 matches!(
@@ -558,6 +603,7 @@ mod tests {
             telemetry: serde_json::json!({}),
             execution_digest: None,
             execution_trace: None,
+            rsw_proof: None,
         };
         assert!(
             matches!(
@@ -573,6 +619,7 @@ mod tests {
             telemetry: serde_json::json!({}),
             execution_digest: None,
             execution_trace: None,
+            rsw_proof: None,
         };
         assert!(SolutionToken::decode(&ok.encode()).is_ok());
     }
@@ -586,6 +633,7 @@ mod tests {
             telemetry: serde_json::json!({}),
             execution_digest: None,
             execution_trace: None,
+            rsw_proof: None,
         };
         assert!(
             matches!(
@@ -608,6 +656,7 @@ mod tests {
             telemetry: serde_json::json!({}),
             execution_digest: None,
             execution_trace: None,
+            rsw_proof: None,
         };
         assert!(
             matches!(
@@ -632,6 +681,7 @@ mod tests {
             telemetry: serde_json::json!({}),
             execution_digest: None,
             execution_trace: None,
+            rsw_proof: None,
         };
         assert!(
             matches!(
@@ -660,6 +710,7 @@ mod tests {
             telemetry: serde_json::json!({"wd": true}),
             execution_digest: None,
             execution_trace: None,
+            rsw_proof: None,
         }
     }
 
@@ -698,6 +749,7 @@ mod tests {
             telemetry: serde_json::json!({"a": 1}),
             execution_digest: None,
             execution_trace: None,
+            rsw_proof: None,
         };
         let encoded = token.encode();
         assert_eq!(encoded.len() % 4, 0);
@@ -722,6 +774,7 @@ mod tests {
             telemetry: serde_json::json!({"a": 1}),
             execution_digest: None,
             execution_trace: None,
+            rsw_proof: None,
         };
         let encoded = token.encode();
         assert!(encoded.ends_with('='));
@@ -791,6 +844,7 @@ mod tests {
             telemetry: serde_json::json!({"wd": true}),
             execution_digest: Some(digest.clone()),
             execution_trace: None,
+            rsw_proof: None,
         };
         let encoded = token.encode();
         let plain = B64.decode(&encoded).unwrap();
@@ -813,6 +867,7 @@ mod tests {
             telemetry: serde_json::json!({"ua": "Mozilla/5.0 (X11; Linux x86_64)"}),
             execution_digest: Some(digest.clone()),
             execution_trace: None,
+            rsw_proof: None,
         };
         let decoded = SolutionToken::decode(&token.encode()).unwrap();
         assert_eq!(decoded.execution_digest.as_deref(), Some(digest.as_str()));
@@ -831,6 +886,7 @@ mod tests {
             telemetry: serde_json::json!({}),
             execution_digest: Some("XYZ".to_string()),
             execution_trace: None,
+            rsw_proof: None,
         };
         assert!(matches!(
             SolutionToken::decode(&token.encode()),
@@ -856,6 +912,7 @@ mod tests {
             telemetry: serde_json::json!({"wd": true}),
             execution_digest: Some(digest.to_string()),
             execution_trace: None,
+            rsw_proof: None,
         };
         let encoded = token.encode();
         let decoded = SolutionToken::decode(&encoded).unwrap();
@@ -886,6 +943,7 @@ mod tests {
             telemetry: serde_json::json!({"wd": true}),
             execution_digest: Some(digest.clone()),
             execution_trace: Some(trace_b64.to_string()),
+            rsw_proof: None,
         };
         let encoded = token.encode();
         let plain = String::from_utf8(B64.decode(&encoded).unwrap()).unwrap();
@@ -921,6 +979,7 @@ mod tests {
             telemetry: serde_json::json!({"ua": "Mozilla/5.0 (X11; Linux x86_64)"}),
             execution_digest: Some(digest.clone()),
             execution_trace: Some(trace_b64.to_string()),
+            rsw_proof: None,
         };
         let decoded = SolutionToken::decode(&token.encode()).unwrap();
         assert_eq!(decoded.execution_digest.as_deref(), Some(digest.as_str()));
@@ -944,6 +1003,7 @@ mod tests {
                 telemetry: serde_json::json!({}),
                 execution_digest: Some(digest.clone()),
                 execution_trace: Some(bad_trace.to_string()),
+                rsw_proof: None,
             };
             assert!(
                 matches!(
@@ -968,6 +1028,7 @@ mod tests {
             telemetry: serde_json::json!({}),
             execution_digest: Some(digest.clone()),
             execution_trace: Some("a".repeat(10925)),
+            rsw_proof: None,
         };
         assert!(matches!(
             SolutionToken::decode(&token.encode()),
@@ -981,6 +1042,7 @@ mod tests {
             telemetry: serde_json::json!({}),
             execution_digest: Some(digest),
             execution_trace: Some("a".repeat(10924)),
+            rsw_proof: None,
         };
         assert!(SolutionToken::decode(&at_cap.encode()).is_ok());
     }
@@ -1012,6 +1074,7 @@ mod tests {
             telemetry: serde_json::json!({}),
             execution_digest: Some("A".repeat(64)),
             execution_trace: None,
+            rsw_proof: None,
         };
         assert!(matches!(
             SolutionToken::decode(&token.encode()),
@@ -1136,11 +1199,122 @@ mod tests {
                 telemetry: serde_json::json!({}),
                 execution_digest: Some(VECTOR_DIGEST.to_string()),
                 execution_trace: Some(trace.to_string()),
+                rsw_proof: None,
             };
             let wire = token.encode();
             let decoded = SolutionToken::decode(&wire).unwrap();
             assert_eq!(decoded.execution_trace.as_deref(), Some(*trace));
             assert_eq!(decoded.encode(), wire);
         }
+    }
+    // ── rsw proof segment (the optional 512-hex final segment) ────────
+
+    #[test]
+    fn rsw_proof_round_trips_as_the_final_segment() {
+        let proof = "a".repeat(512);
+        let token = SolutionToken {
+            nonce: VALID_NONCE.to_string(),
+            counter: 0,
+            duration_ms: 1234,
+            telemetry: serde_json::json!({"wd": true}),
+            execution_digest: None,
+            execution_trace: None,
+            rsw_proof: Some(proof.clone()),
+        };
+        let encoded = token.encode();
+        let plain = String::from_utf8(B64.decode(&encoded).unwrap()).unwrap();
+        assert_eq!(
+            plain,
+            format!("{}.0.1234.{{\"wd\":true}}.{proof}", VALID_NONCE),
+            "the proof is the final wire segment"
+        );
+        let decoded = SolutionToken::decode(&encoded).unwrap();
+        assert_eq!(decoded.counter, 0, "an rsw token has no search counter");
+        assert_eq!(decoded.rsw_proof.as_deref(), Some(proof.as_str()));
+        assert_eq!(decoded.execution_digest, None);
+        assert_eq!(decoded.telemetry["wd"], true);
+    }
+
+    #[test]
+    fn rsw_proof_survives_dotted_telemetry() {
+        let proof = "0".repeat(512);
+        let token = SolutionToken {
+            nonce: VALID_NONCE.to_string(),
+            counter: 0,
+            duration_ms: 2,
+            telemetry: serde_json::json!({"ua": "Mozilla/5.0 (X11; Linux x86_64)"}),
+            execution_digest: None,
+            execution_trace: None,
+            rsw_proof: Some(proof.clone()),
+        };
+        let decoded = SolutionToken::decode(&token.encode()).unwrap();
+        assert_eq!(decoded.rsw_proof.as_deref(), Some(proof.as_str()));
+        assert_eq!(decoded.telemetry["ua"], "Mozilla/5.0 (X11; Linux x86_64)");
+    }
+
+    #[test]
+    fn rsw_proof_shape_is_exactly_512_lowercase_hex() {
+        // Uppercase hex and wrong lengths are not the wire language: the
+        // tail falls through to the telemetry JSON parse and fails
+        // closed (PHP parity).
+        for bad_tail in [
+            "A".repeat(512),
+            "a".repeat(511),
+            "a".repeat(513),
+            "g".repeat(512),
+        ] {
+            let plain = format!("{}.0.2.{{}}.{bad_tail}", VALID_NONCE);
+            let wrapped = B64.encode(plain.into_bytes());
+            assert!(
+                matches!(SolutionToken::decode(&wrapped), Err(DecodeError::Malformed)),
+                "a {}-char non-lowercase-hex tail must be rejected",
+                bad_tail.len()
+            );
+        }
+        let ok = SolutionToken {
+            nonce: VALID_NONCE.to_string(),
+            counter: 0,
+            duration_ms: 2,
+            telemetry: serde_json::json!({}),
+            execution_digest: None,
+            execution_trace: None,
+            rsw_proof: Some("0".repeat(512)),
+        };
+        assert!(SolutionToken::decode(&ok.encode()).is_ok());
+    }
+
+    #[test]
+    fn rsw_proof_and_execution_shapes_do_not_collide() {
+        // The digest shape is 64 hex and the proof shape 512 hex: the
+        // discriminator reads the last part, so the two stay disjoint.
+        let digest = "f".repeat(64);
+        let token = SolutionToken {
+            nonce: VALID_NONCE.to_string(),
+            counter: 42,
+            duration_ms: 850,
+            telemetry: serde_json::json!({}),
+            execution_digest: Some(digest),
+            execution_trace: None,
+            rsw_proof: None,
+        };
+        let decoded = SolutionToken::decode(&token.encode()).unwrap();
+        assert_eq!(decoded.execution_digest.as_deref().map(str::len), Some(64));
+        assert_eq!(decoded.rsw_proof, None);
+    }
+
+    #[test]
+    fn plain_tokens_carry_no_proof_segment() {
+        let token = SolutionToken {
+            nonce: VALID_NONCE.to_string(),
+            counter: 3,
+            duration_ms: 1234,
+            telemetry: serde_json::json!({}),
+            execution_digest: None,
+            execution_trace: None,
+            rsw_proof: None,
+        };
+        let decoded = SolutionToken::decode(&token.encode()).unwrap();
+        assert_eq!(decoded.rsw_proof, None);
+        assert_eq!(decoded.counter, 3);
     }
 }

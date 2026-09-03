@@ -57,6 +57,9 @@ fn sha256_config() -> ChallengeConfig {
         secret_key: SECRET.into(),
         kid: 1,
         execution_key: None,
+        rsw_modulus_n: None,
+        rsw_lambda: None,
+        rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
         algorithm: PoWAlgorithm::Sha256,
         m_kib: 0,
         t: 1,
@@ -104,6 +107,9 @@ fn verify_ctx<'a>(
         enforce_telemetry: false,
         max_attempts: 0,
         accept_legacy_v1: false,
+        rsw_proof: None,
+        rsw_modulus_n: None,
+        rsw_lambda: None,
     }
 }
 

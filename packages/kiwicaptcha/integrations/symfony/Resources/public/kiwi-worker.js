@@ -21,7 +21,9 @@
  *   in : { type: "solve", algorithm, prefix, prefixLen, salt, saltLen,
  *          targetBits, mKib, t, p, startCounter, maxHashes }
  *        prefix/salt are base64 strings (the driver passes the decoded byte
- *        lengths alongside); the worker decodes them itself.
+ *        lengths alongside); the worker decodes them itself. An rsw solve
+ *        adds the nonce and the base64 modulus (the solver derives the
+ *        base from prefix||nonce and squares modulo the modulus).
  *   in : { type: "glue", runtimeSrc } (every URL-constructed worker) —
  *        the driver supplies the runtime asset URL (same-origin; in
  *        files mode the driver hashes the fetched bytes and compares
@@ -32,12 +34,18 @@
  *        importScripts it, verifies the wasm protocol version and only
  *        then announces ready.
  *   out: { type: "ready", buildId } on startup (solver protocol id)
- *        { type: "progress", counter } every 1000 hashes
- *        { type: "done", counter, buildId }  |  { type: "failed", reason }
+ *        { type: "progress", counter } every 1000 hashes (every 1024
+ *        squarings for an rsw solve)
+ *        { type: "done", counter, buildId }  |  { type: "done", proof,
+ *        buildId } for an rsw solve (the final value as 512 hex)
+ *        |  { type: "failed", reason }
  *
  * SHA-256 is solved via the wasm exports (solve_sha256_chunk) with a
  * pure-JS SHA-256 fallback; Argon2id is solved via solve_argon2_chunk (the
- * same wasm the main thread uses — no pure-JS Argon2 exists).
+ * same wasm the main thread uses — no pure-JS Argon2 exists). The
+ * optional rsw time-lock is solved in pure JS BigInt (T sequential
+ * 2048-bit modular squarings): no wasm export exists for it, and the
+ * solver never needs one, since BigInt is a first-class browser type.
  */
 (function () {
   "use strict";
@@ -50,7 +58,7 @@
   // they prove driver+worker+wasm speak the same protocol generation —
   // exact artifact identity is guaranteed by the release tag +
   // SHA256SUMS + SRI + attestation, not by these values.
-  var KIWI_SOLVER_PROTOCOL_ID = "2026-08-r2";
+  var KIWI_SOLVER_PROTOCOL_ID = "2026-09-r1";
   var KIWI_SOLVER_PROTOCOL_VERSION = 2;
 
   // The wasm glue exposes itself as `window.__kiwiCaptchaWasm`, so the
@@ -237,7 +245,7 @@
   }
 
   function solveMessage(m) {
-    var algorithm = m.algorithm === "argon2id" ? "argon2id" : "sha256";
+    var algorithm = m.algorithm === "argon2id" ? "argon2id" : (m.algorithm === "rsw" ? "rsw" : "sha256");
     var prefix = new TextEncoder().encode(String(m.prefix));
     var salt = b64decode(m.salt);
     if (prefix.length !== (m.prefixLen | 0) || salt.length !== (m.saltLen | 0)) {
@@ -260,10 +268,78 @@
           solveArgon(w, prefix, salt, targetBits, mKib, t, p, counter, maxHashes);
           return;
         }
+        if (algorithm === "rsw") {
+          // The rsw solver is pure JS BigInt: the wasm module is never
+          // consulted (a null w is fine), but the glue handshake still
+          // gates the solve so driver and worker stay in protocol lock.
+          solveRsw(prefix, String(m.nonce), m.modulus, t);
+          return;
+        }
         solveSha(w, prefix, salt, targetBits, counter, maxHashes);
       }).catch(function () {
         post({ type: "failed", reason: "error" });
       });
+  }
+
+  // ── Pure-JS rsw sequential squaring (BigInt) ───────────────────────
+  // The optional time-lock solver: T sequential modular squarings of
+  // the challenge-derived base over the 2048-bit composite. The base
+  // is SHA-256(prefix || nonce) reduced modulo n (identical to the
+  // server-side derivation), and the final value renders as the fixed
+  // 512-hex wire form. No wasm export exists: BigInt is a first-class
+  // browser type, and a 2048-bit modmul runs natively in the engine.
+  // The loop is synchronous like the Argon worker's, with a progress
+  // post every 1024 squarings so the driver can animate the track.
+  var RSW_PROGRESS_INTERVAL = 1024;
+  function bigintFromBytes(bytes) {
+    var hex = "";
+    for (var i = 0; i < bytes.length; i++) {
+      var nib = bytes[i].toString(16);
+      if (nib.length === 1) hex += "0";
+      hex += nib;
+    }
+    return BigInt("0x" + hex);
+  }
+  function rswProofHex(value) {
+    var hex = value.toString(16);
+    while (hex.length < 512) hex = "0" + hex;
+    return hex;
+  }
+  function solveRsw(prefixBytes, nonce, modulusB64, t) {
+    if (typeof BigInt === "undefined") {
+      post({ type: "failed", reason: "no_bigint" });
+      return;
+    }
+    var modulusBytes;
+    try {
+      modulusBytes = b64decode(modulusB64);
+    } catch (e) {
+      post({ type: "failed", reason: "length_mismatch" });
+      return;
+    }
+    if (modulusBytes.length !== 256 || t < 1) {
+      post({ type: "failed", reason: "length_mismatch" });
+      return;
+    }
+    var combined = new Uint8Array(prefixBytes.length + nonce.length);
+    combined.set(prefixBytes, 0);
+    for (var i = 0; i < nonce.length; i++) combined[prefixBytes.length + i] = nonce.charCodeAt(i);
+    var digest = new Uint8Array(32);
+    sha256sync(combined, digest);
+    var n = bigintFromBytes(modulusBytes);
+    var value = bigintFromBytes(digest) % n;
+    var done = 0;
+    try {
+      while (done < t) {
+        value = (value * value) % n;
+        done++;
+        if ((done & (RSW_PROGRESS_INTERVAL - 1)) === 0) post({ type: "progress", counter: done });
+      }
+    } catch (e) {
+      post({ type: "failed", reason: "solve_error" });
+      return;
+    }
+    post({ type: "done", proof: rswProofHex(value), buildId: KIWI_SOLVER_PROTOCOL_ID });
   }
 
   function solveArgon(w, prefix, salt, targetBits, mKib, t, p, start, maxHashes) {
@@ -390,6 +466,7 @@
     if (typeof m.targetBits !== "number" || typeof m.mKib !== "number") return;
     if (typeof m.t !== "number" || typeof m.p !== "number") return;
     if (typeof m.startCounter !== "number" || typeof m.maxHashes !== "number") return;
+    if (m.algorithm === "rsw" && (typeof m.nonce !== "string" || typeof m.modulus !== "string")) return;
     try {
       solveMessage(m);
     } catch (e) {

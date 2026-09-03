@@ -59,11 +59,41 @@ if (\array_key_exists('solution_token', $data)) {
     $rustToken = $data['solution_token'];
     unset($data['solution_token']);
 }
+// An rsw record file carries the trapdoor pair as top-level siblings
+// (the record itself keeps the exact serde key set); pop them before
+// the strict parse and hand them to the verifier below.
+$rswModulusN = null;
+$rswLambda = null;
+if (isset($data['rsw_modulus_n'], $data['rsw_lambda'])) {
+    $rswModulusN = $data['rsw_modulus_n'];
+    $rswLambda = $data['rsw_lambda'];
+    unset($data['rsw_modulus_n'], $data['rsw_lambda']);
+}
 $record = ChallengeRecord::fromArray($data);
 $storage = new ArrayStorage();
 $storage->store($record);
 
 $counter = 0;
+if ($record->algorithm === \KiwiCaptcha\PoWAlgorithm::Rsw) {
+    if ($rswModulusN === null || $rswLambda === null) {
+        fwrite(STDERR, "an rsw record file must carry the rsw_modulus_n/rsw_lambda siblings\n");
+        exit(9);
+    }
+    if (!extension_loaded('gmp')) {
+        fwrite(STDERR, "the rsw cross-language solve needs the gmp extension\n");
+        exit(9);
+    }
+    $proof = \KiwiCaptcha\Tests\Support\RswFixture::sequentialProof($record->prefix, $record->nonce, $record->t);
+    $token = SolutionToken::create($record->nonce, 0, 5000, [], null, null, $proof)->encode();
+    $outcome = (new Verifier($storage, rswModulusN: $rswModulusN, rswLambda: $rswLambda))
+        ->verify($token, '0123456789abcdef0123456789abcdef', 'login', '198.51.100.7', $record->issuedAtNs + 1_000_000);
+    if (!$outcome->isOk()) {
+        fwrite(STDERR, 'PHP_VERIFIES_RUST_RSW FAILED: '.$outcome->code()."\n");
+        exit(1);
+    }
+    echo "PHP_VERIFIES_RUST_RSW OK\n";
+    exit(0);
+}
 if ($record->algorithm === \KiwiCaptcha\PoWAlgorithm::Argon2id) {
     // Solve with libsodium (t>=3, p==1 are guaranteed by Rust issuance).
     do {

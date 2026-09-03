@@ -20,6 +20,7 @@ use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorHighAbuseV3WriterKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorNullClearedProfileV3WriterKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorOperatorManagedSentinelTestKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorPinnedPrimaryTestKernel;
+use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorRswArmedTestKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorHaSafeTestKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorRedisStorageNoWaitKernel;
 use BelConsulting\KiwiCaptchaBundle\Tests\Kernel\DoctorRedisStorageNoWaitOperatorManagedKernel;
@@ -90,6 +91,7 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         self::assertStringContainsString('[PASS] Protocol-v3 writer', $display);
         self::assertStringContainsString('[PASS] Argon memory envelope', $display);
         self::assertStringContainsString('[PASS] Argon concurrency', $display);
+        self::assertStringContainsString('[PASS] RSW time-lock', $display, 'rsw is off by default and the doctor notes the unconfigured state as PASS');
         self::assertStringContainsString('[PASS] SiteVerify status', $display);
         self::assertStringContainsString('[PASS] Chained challenges', $display);
 
@@ -707,4 +709,20 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         self::assertStringNotContainsString('high_abuse requires authenticated decoy emission', $display, 'a null-cleared profile must not trigger the high_abuse FAIL');
         self::assertStringNotContainsString('[FAIL]', $display);
     }
+
+
+    public function testDoctorPassesOnAnArmedRswConfiguration(): void
+    {
+        if (!\extension_loaded('gmp')) {
+            self::markTestSkipped('the rsw doctor scenario needs the gmp extension');
+        }
+        $tester = $this->doctor($this->containerFor(new DoctorRswArmedTestKernel('test', true)));
+        $tester->execute([]);
+
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[PASS] RSW time-lock: rsw armed', $display);
+        self::assertStringNotContainsString('[FAIL]', $display, 'a valid armed rsw configuration must not fail any check');
+    }
+
 }

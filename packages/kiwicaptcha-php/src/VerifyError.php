@@ -38,6 +38,7 @@ enum VerifyError: string
     case AlreadyConsumed = 'already_consumed';
     case RequestBindingMismatch = 'request_binding_mismatch';
     case ExecutionMismatch = 'execution_mismatch';
+    case UnsupportedRswParams = 'unsupported_rsw_params';
 
     /**
      * Whether this failure is exempt from the one-shot policy on a
@@ -96,6 +97,7 @@ enum VerifyError: string
             self::AlreadyConsumed => 'the challenge was already consumed by a different logical operation',
             self::RequestBindingMismatch => 'the challenge is not bound to the expected application transaction',
             self::ExecutionMismatch => 'the execution digest does not match the expected program trace of the challenge',
+            self::UnsupportedRswParams => 'the rsw challenge cannot be verified: this verifier is not configured with the matching rsw trapdoor, or the signed sequential cost is outside the supported bounds',
         };
     }
 }

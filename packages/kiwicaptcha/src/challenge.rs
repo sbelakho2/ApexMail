@@ -51,6 +51,12 @@ pub enum PoWAlgorithm {
     /// specialized solving, difficulty capped at the argon2 solver target
     /// ceiling because every hash is expensive.
     Argon2id,
+    /// The optional sequential time-lock proof (Rivest-Shamir-Wagner):
+    /// the client performs T sequential modular squarings over a 2048-bit
+    /// composite, and the server verifies instantly through the
+    /// factorization trapdoor. Issued only when the operator configures
+    /// the modulus secrets and selects the algorithm.
+    Rsw,
 }
 
 impl PoWAlgorithm {
@@ -58,6 +64,7 @@ impl PoWAlgorithm {
         match self {
             PoWAlgorithm::Sha256 => "sha256",
             PoWAlgorithm::Argon2id => "argon2id",
+            PoWAlgorithm::Rsw => "rsw",
         }
     }
 }
@@ -415,6 +422,23 @@ pub struct ChallengeConfig {
     /// only feeds the program generator; the browser digest uses the
     /// program blob itself as its content-derived key.
     pub execution_key: Option<String>,
+    /// The rsw modulus n = p*q as canonical standard base64 of exactly
+    /// 256 bytes (top bit set, odd), the public half of the time-lock
+    /// trapdoor. Required when the algorithm is [`PoWAlgorithm::Rsw`];
+    /// ignored otherwise. `None` (the default) = the rsw algorithm is
+    /// not configured.
+    pub rsw_modulus_n: Option<String>,
+    /// The rsw secret lambda = lcm(p-1, q-1) as canonical standard
+    /// base64 of 1..=256 even bytes, the trapdoor that lets the server
+    /// verify without the T squarings. Required when the algorithm is
+    /// [`PoWAlgorithm::Rsw`]; ignored otherwise. Never stored on the
+    /// record and never sent to the client.
+    pub rsw_lambda: Option<String>,
+    /// The rsw sequential-squaring cost T (default 75,000; validated
+    /// to 10,000..=300,000 when the algorithm is [`PoWAlgorithm::Rsw`]).
+    /// The client performs T sequential modular squarings; the server
+    /// verifies instantly through lambda.
+    pub rsw_t: u32,
 }
 
 impl ChallengeConfig {
@@ -451,7 +475,21 @@ impl ChallengeConfig {
         match self.algorithm {
             PoWAlgorithm::Sha256 => self.tuned_target_bits(active_solves),
             PoWAlgorithm::Argon2id => self.argon2_target_bits.min(SOLVER_MAX_ARGON2_TARGET_BITS),
+            // RSW has no leading-zero target: the canonical always
+            // renders the field, so issuance pins the protocol floor.
+            PoWAlgorithm::Rsw => RSW_TARGET_BITS_PIN,
         }
+    }
+
+    /// The minimum plausible solve time (ms) for the rsw sequential
+    /// cost: even a native-optimized squarer cannot finish T 2048-bit
+    /// squarings below `T / RSW_SOLVER_SQUARINGS_PER_SEC` seconds (the
+    /// browser BigInt solver is slower), so a faster receipt is a
+    /// timing anomaly. The 50 ms absolute floor mirrors the Argon2id
+    /// rule.
+    pub fn rsw_min_duration_ms(&self) -> u64 {
+        let ms = (self.rsw_t as f64 / RSW_SOLVER_SQUARINGS_PER_SEC * 1000.0).ceil() as u64;
+        ms.max(50)
     }
 
     /// Derive the minimum plausible solve time (ms) for the issued difficulty.
@@ -475,6 +513,7 @@ impl ChallengeConfig {
                 let ms = (expected_hashes as f64 / 5e5 * 1000.0).ceil() as u64;
                 ms.max(50)
             }
+            PoWAlgorithm::Rsw => self.rsw_min_duration_ms(),
         }
     }
 }
@@ -978,6 +1017,33 @@ pub const MIN_PARALLELISM: u32 = 1;
 /// Hard ceiling on the Argon2id parallelism the verifier accepts in a signed
 /// record.
 pub const MAX_PARALLELISM: u32 = 4;
+
+/// The floor for the rsw sequential-squaring cost T. Below it the
+/// challenge would finish too fast to carry meaningful sequential cost,
+/// so issuance refuses the value. Shared with the PHP core.
+pub const MIN_RSW_T: u32 = 10_000;
+
+/// The ceiling for the rsw sequential-squaring cost T. The browser
+/// BigInt solver completes 300,000 squarings in about a second on a
+/// mid-range device, so the ceiling keeps a legitimate solve inside
+/// the challenge lifetime while the sequential cost stays material.
+/// Shared with the PHP core.
+pub const MAX_RSW_T: u32 = 300_000;
+
+/// The default rsw sequential-squaring cost T. Shared with the PHP core.
+pub const DEFAULT_RSW_T: u32 = 75_000;
+
+/// The rsw canonical target_bits pin. The v2 canonical always carries a
+/// target_bits value within the uniform protocol bounds 1..=20, and rsw
+/// has no leading-zero target, so issuance pins the protocol floor. The
+/// rsw proof check never reads the field. Shared with the PHP core.
+pub const RSW_TARGET_BITS_PIN: u32 = 1;
+
+/// Expected squarings a browser solver can complete per second (native
+/// BigInt 2048-bit modmul). Used to derive the per-challenge minimum
+/// solve duration; the bound is generous, since a specialized native
+/// implementation stays far below the assumed rate.
+pub const RSW_SOLVER_SQUARINGS_PER_SEC: f64 = 5e6;
 
 /// Expected hashes a browser solver can attempt per second (SHA-256, WASM).
 /// Used to derive the per-challenge minimum solve duration.
@@ -1594,6 +1660,26 @@ fn issue_challenge_inner(
             return Err(SignError::InvalidArgon2Params);
         }
     }
+    // The rsw algorithm is opt-in and requires the full trapdoor
+    // configuration: the modulus and lambda are mandatory and valid
+    // (validated by the shared RswTrapdoor decode), and the sequential
+    // cost T must sit within the issuance bounds. With any other
+    // algorithm the rsw fields are inert and unvalidated, so the
+    // default deployment never touches them.
+    if algorithm == PoWAlgorithm::Rsw {
+        let (Some(modulus), Some(lambda)) = (
+            config.rsw_modulus_n.as_deref(),
+            config.rsw_lambda.as_deref(),
+        ) else {
+            return Err(SignError::InvalidRswParams);
+        };
+        if crate::rsw::RswTrapdoor::new(modulus, lambda).is_err() {
+            return Err(SignError::InvalidRswParams);
+        }
+        if config.rsw_t < MIN_RSW_T || config.rsw_t > MAX_RSW_T {
+            return Err(SignError::InvalidRswParams);
+        }
+    }
 
     // Issuance must never mint a record the verifier would reject: the
     // verifier's validate_record rejects any lifetime above the TTL cap
@@ -1651,6 +1737,19 @@ fn issue_challenge_inner(
     } else {
         None
     };
+    // The rsw canonical parameter mapping: the fixed v2 slots carry the
+    // time-lock's knobs, since no canonical segment changes. The
+    // sequential-squaring cost T rides the time-cost slot t; the memory
+    // slot m_kib is 0, the parallelism slot p is 1, and the difficulty
+    // slot carries the rsw target_bits pin (RSW_TARGET_BITS_PIN, the
+    // protocol floor) because the canonical always renders the field
+    // and rsw has no leading-zero target. The verifier's rsw path reads
+    // t and never consults the other slots. Any other algorithm keeps
+    // the exact historical parameter mapping.
+    let is_rsw = algorithm == PoWAlgorithm::Rsw;
+    let record_m_kib = if is_rsw { 0 } else { config.m_kib };
+    let record_t = if is_rsw { config.rsw_t } else { config.t };
+    let record_p = if is_rsw { 1 } else { config.p };
     // The ExecutionChallengeV1 program, minted from the challenge
     // context once the nonce exists (the program binds the nonce), and
     // before the canonical input is built: the commitment segments are
@@ -1704,9 +1803,9 @@ fn issue_challenge_inner(
         issued_at: now_unix,
         expires_at,
         algorithm,
-        m_kib: config.m_kib,
-        t: config.t,
-        p: config.p,
+        m_kib: record_m_kib,
+        t: record_t,
+        p: record_p,
         target_bits,
         salt: salt.clone(),
         prefix: String::new(),    // computed below once the challenge is signed
@@ -1754,9 +1853,9 @@ fn issue_challenge_inner(
         nonce: nonce.clone(),
         challenge,
         salt,
-        m_kib: config.m_kib,
-        t: config.t,
-        p: config.p,
+        m_kib: record_m_kib,
+        t: record_t,
+        p: record_p,
         target_bits,
         ttl_secs: config.ttl_secs,
         prefix: record.prefix.clone(),
@@ -1764,6 +1863,13 @@ fn issue_challenge_inner(
         min_duration_ms,
         decoy_field,
         execution_program,
+        // The rsw modulus rides the client-facing response (the solver
+        // squares modulo n); lambda never leaves the server.
+        rsw_modulus: if is_rsw {
+            config.rsw_modulus_n.clone()
+        } else {
+            None
+        },
     };
 
     Ok(Issued {
@@ -1872,6 +1978,12 @@ pub enum SignError {
     /// be armed by accident.
     #[error("execution challenges are armed but no execution_key is configured")]
     ExecutionKeyNotConfigured,
+    /// The rsw algorithm was selected without the full trapdoor
+    /// configuration: the modulus and lambda are mandatory, valid
+    /// (canonical base64 of the documented shapes) and within the
+    /// issuance bounds, and T must sit within 10,000..=300,000.
+    #[error("the rsw algorithm requires a valid rsw_modulus_n and rsw_lambda trapdoor pair with rsw_t within 10_000..=300_000")]
+    InvalidRswParams,
 }
 
 // Minimal hex encode/decode to avoid pulling in a `hex` crate dependency —
@@ -1926,6 +2038,9 @@ mod tests {
             secret_key: "super-secret-key".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             argon2_target_bits: 8,
@@ -2062,6 +2177,9 @@ mod tests {
                 secret_key: key.into(),
                 kid: 1,
                 execution_key: None,
+                rsw_modulus_n: None,
+                rsw_lambda: None,
+                rsw_t: crate::challenge::DEFAULT_RSW_T,
                 algorithm: PoWAlgorithm::Sha256,
                 m_kib: 0,
                 t: 1,
@@ -2116,6 +2234,9 @@ mod tests {
             secret_key: "0123456789abcdef0123456789abcdef".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2188,6 +2309,9 @@ mod tests {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2234,6 +2358,9 @@ mod tests {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2280,6 +2407,9 @@ mod tests {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2321,6 +2451,9 @@ mod tests {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2355,6 +2488,9 @@ mod tests {
                 secret_key: "test-key-16-bytes!".into(),
                 kid: 1,
                 execution_key: None,
+                rsw_modulus_n: None,
+                rsw_lambda: None,
+                rsw_t: crate::challenge::DEFAULT_RSW_T,
                 algorithm: PoWAlgorithm::Sha256,
                 m_kib: 65_536,
                 argon2_target_bits: 8,
@@ -2403,6 +2539,9 @@ mod tests {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2447,6 +2586,9 @@ mod tests {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2498,6 +2640,9 @@ mod tests {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2538,6 +2683,9 @@ mod tests {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 65_536,
             t: 2,
@@ -2575,6 +2723,9 @@ mod tests {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -2592,6 +2743,259 @@ mod tests {
 
             policy_version: 1,
         }
+    }
+
+    /// The rsw fixture issuance config: the shared test modulus and
+    /// lambda with the smallest allowed sequential cost (fast solves).
+    fn rsw_config(t: u32) -> ChallengeConfig {
+        ChallengeConfig {
+            secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
+            execution_key: None,
+            rsw_modulus_n: Some(crate::rsw::fixtures::MODULUS_N_B64.into()),
+            rsw_lambda: Some(crate::rsw::fixtures::LAMBDA_B64.into()),
+            rsw_t: t,
+            algorithm: PoWAlgorithm::Rsw,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 8,
+            argon2_target_bits: 8,
+            min_duration_ms: Some(0),
+            ttl_secs: 120,
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 20,
+            binding_mode: BindingMode::Bound,
+            region: None,
+            issuer: None,
+            policy_version: 1,
+        }
+    }
+
+    // ── rsw (sequential time-lock) issuance ───────────────────────────
+
+    #[test]
+    fn rsw_issuance_carries_the_canonical_parameter_mapping() {
+        let issued = issue_challenge(
+            &rsw_config(MIN_RSW_T),
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+        // The canonical v2 slots carry the time-lock knobs: T rides the
+        // time-cost slot, m_kib is 0, p is 1, and target_bits is pinned
+        // to the protocol floor (rsw has no leading-zero target).
+        assert_eq!(issued.record.algorithm, PoWAlgorithm::Rsw);
+        assert_eq!(issued.record.t, MIN_RSW_T);
+        assert_eq!(issued.record.m_kib, 0);
+        assert_eq!(issued.record.p, 1);
+        assert_eq!(issued.record.target_bits, RSW_TARGET_BITS_PIN);
+        assert_eq!(issued.challenge.t, MIN_RSW_T);
+        assert_eq!(
+            issued.challenge.rsw_modulus.as_deref(),
+            Some(crate::rsw::fixtures::MODULUS_N_B64),
+            "the modulus rides the client-facing response"
+        );
+        assert_eq!(
+            issued.record.protocol_version, 2,
+            "rsw issuance stays protocol v2"
+        );
+        assert_eq!(
+            issued.record.decoy_field, None,
+            "rsw issuance never arms the decoy surface"
+        );
+        // The canonical payload really says rsw in the algorithm slot:
+        // the challenge is base64 of the signed canonical, so decode the
+        // payload half before matching the segment structure.
+        let payload = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(issued.record.challenge.split('.').next().unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(payload.contains("|rsw|0|10000|1|1|"), "{payload}");
+        // A sha256 issuance never carries the modulus on the wire.
+        let sha_issued = issue_challenge(
+            &profile_base_config(),
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(sha_issued.challenge.rsw_modulus, None);
+        let sha_json = serde_json::to_value(&sha_issued.challenge).unwrap();
+        assert!(
+            sha_json.get("rsw_modulus").is_none(),
+            "the key is absent unless the challenge is rsw"
+        );
+        let rsw_json = serde_json::to_value(&issued.challenge).unwrap();
+        assert!(
+            rsw_json.get("rsw_modulus").is_some(),
+            "an rsw challenge carries the modulus"
+        );
+    }
+
+    #[test]
+    fn rsw_min_duration_floor_derives_from_t() {
+        let mut min_t = rsw_config(MIN_RSW_T);
+        min_t.min_duration_ms = None;
+        let issued = issue_challenge(
+            &min_t,
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            issued.record.min_duration_ms, 50,
+            "the 50 ms absolute floor applies at the smallest T"
+        );
+        let mut max_t = rsw_config(MAX_RSW_T);
+        max_t.min_duration_ms = None;
+        let issued = issue_challenge(
+            &max_t,
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            issued.record.min_duration_ms, 60,
+            "T=300,000 derives ceil(300000 / 5e6 * 1000) = 60 ms"
+        );
+        // An operator override still wins over the derived floor.
+        let mut overridden = rsw_config(MAX_RSW_T);
+        overridden.min_duration_ms = Some(1234);
+        let issued = issue_challenge(
+            &overridden,
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(issued.record.min_duration_ms, 1234);
+    }
+
+    #[test]
+    fn rsw_issuance_requires_the_full_trapdoor() {
+        let mut missing = rsw_config(MIN_RSW_T);
+        missing.rsw_lambda = None;
+        assert!(matches!(
+            issue_challenge(
+                &missing,
+                "login",
+                "1.2.3.4",
+                1_000_000,
+                1_700_000_000_000_000,
+                0,
+                None
+            )
+            .unwrap_err(),
+            SignError::InvalidRswParams
+        ));
+        let mut missing_modulus = rsw_config(MIN_RSW_T);
+        missing_modulus.rsw_modulus_n = None;
+        assert!(matches!(
+            issue_challenge(
+                &missing_modulus,
+                "login",
+                "1.2.3.4",
+                1_000_000,
+                1_700_000_000_000_000,
+                0,
+                None
+            )
+            .unwrap_err(),
+            SignError::InvalidRswParams
+        ));
+        let mut malformed = rsw_config(MIN_RSW_T);
+        malformed.rsw_modulus_n = Some("not-base64!".into());
+        assert!(matches!(
+            issue_challenge(
+                &malformed,
+                "login",
+                "1.2.3.4",
+                1_000_000,
+                1_700_000_000_000_000,
+                0,
+                None
+            )
+            .unwrap_err(),
+            SignError::InvalidRswParams
+        ));
+        // A zero modulus lacks the top bit and the odd parity: the shared
+        // shape validation refuses it at issuance.
+        let mut bad_shape = rsw_config(MIN_RSW_T);
+        bad_shape.rsw_modulus_n =
+            Some(base64::engine::general_purpose::STANDARD.encode([0u8; 256]));
+        assert!(matches!(
+            issue_challenge(
+                &bad_shape,
+                "login",
+                "1.2.3.4",
+                1_000_000,
+                1_700_000_000_000_000,
+                0,
+                None
+            )
+            .unwrap_err(),
+            SignError::InvalidRswParams
+        ));
+    }
+
+    #[test]
+    fn rsw_issuance_validates_t_bounds() {
+        for t in [MIN_RSW_T - 1, MAX_RSW_T + 1, 0] {
+            let config = rsw_config(t);
+            assert!(matches!(
+                issue_challenge(
+                    &config,
+                    "login",
+                    "1.2.3.4",
+                    1_000_000,
+                    1_700_000_000_000_000,
+                    0,
+                    None
+                )
+                .unwrap_err(),
+                SignError::InvalidRswParams
+            ));
+        }
+        // The rsw fields are inert for sha256: garbage is carried, never
+        // validated, and the sha challenge issues normally.
+        let mut sha = profile_base_config();
+        sha.rsw_modulus_n = Some("garbage".into());
+        sha.rsw_lambda = Some("garbage".into());
+        sha.rsw_t = 1;
+        let issued = issue_challenge(
+            &sha,
+            "login",
+            "1.2.3.4",
+            1_000_000,
+            1_700_000_000_000_000,
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(issued.record.algorithm, PoWAlgorithm::Sha256);
+        assert_eq!(issued.challenge.rsw_modulus, None);
     }
 
     // ── decoy (honeypot) field issuance ──────────────────────────────
@@ -3135,6 +3539,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(
             matches!(
@@ -3230,6 +3637,9 @@ mod tests {
                 enforce_telemetry: false,
                 max_attempts: 0,
                 accept_legacy_v1: false,
+                rsw_proof: None,
+                rsw_modulus_n: None,
+                rsw_lambda: None,
             };
             assert!(
                 matches!(
@@ -3285,6 +3695,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(matches!(
             crate::verify::verify_solution(&mut ctx),

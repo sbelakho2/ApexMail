@@ -125,7 +125,7 @@ final class Configuration implements ConfigurationInterface
                     ->defaultFalse()
                 ->end()
                 ->enumNode('algorithm')
-                    ->values(['sha256', 'argon2id'])
+                    ->values(['sha256', 'argon2id', 'rsw'])
                     ->defaultValue('sha256')
                 ->end()
                 ->enumNode('privacy_mode')
@@ -242,6 +242,23 @@ final class Configuration implements ConfigurationInterface
                     ->min(1)
                     // Same ceiling as the core's Argon2id target-bits max.
                     ->max(10)
+                ->end()
+                ->scalarNode('rsw_modulus_n')
+                    ->info('The optional rsw time-lock modulus n = p*q as canonical standard base64 of exactly 256 bytes (top bit set, odd). The rsw algorithm (Rivest-Shamir-Wagner style) is an experimental optional rung: the client performs T sequential modular squarings over the 2048-bit composite, and the server verifies instantly through the factorization trapdoor. Required together with rsw_lambda when algorithm is rsw; ignored otherwise (null default = the rsw algorithm is not configured). The modulus is public; the secret lambda below is the trapdoor and must never leave the server configuration.')
+                    ->defaultNull()
+                ->end()
+                ->scalarNode('rsw_lambda')
+                    ->info('The rsw secret lambda = lcm(p-1, q-1) as canonical standard base64 of 1..256 even bytes, the trapdoor that lets the server verify without the T squarings. Required together with rsw_modulus_n when algorithm is rsw; ignored otherwise. Never stored on the record and never sent to the client.')
+                    ->defaultNull()
+                ->end()
+                ->integerNode('rsw_t')
+                    ->info('The rsw sequential-squaring cost T (default 75,000; validated to 10,000..300,000 when algorithm is rsw). The client performs T sequential modular squarings; the server verifies instantly through lambda.')
+                    ->defaultValue(75_000)
+                    ->min(10_000)
+                    // The issuance ceiling is the single source of truth
+                    // (Config::MAX_RSW_T); the tree refuses it at
+                    // configuration time.
+                    ->max(Config::MAX_RSW_T)
                 ->end()
                 ->integerNode('challenge_ttl_secs')
                     ->defaultValue(120)

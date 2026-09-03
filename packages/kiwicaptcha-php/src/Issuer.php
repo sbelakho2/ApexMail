@@ -193,6 +193,9 @@ final class Issuer
             issuer: $c->issuer,
             kid: $c->kid,
             executionKey: $c->executionKey,
+            rswModulusN: $c->rswModulusN,
+            rswLambda: $c->rswLambda,
+            rswT: $c->rswT,
         );
 
         return new self($clone, $this->storage, $this->now, $this->region);
@@ -522,6 +525,20 @@ final class Issuer
         $algorithm = $this->config->algorithm;
         $targetBits = $this->effectiveTargetBits();
 
+        // The rsw canonical parameter mapping: the fixed v2 slots carry
+        // the time-lock's knobs, since no canonical segment changes. The
+        // sequential-squaring cost T rides the time-cost slot t; the
+        // memory slot m_kib is 0, the parallelism slot p is 1, and the
+        // difficulty slot carries the rsw target_bits pin (1, the
+        // protocol floor) because the canonical always renders the field
+        // and rsw has no leading-zero target. The verifier's rsw path
+        // reads t and never consults the other slots. Any other
+        // algorithm keeps the exact historical parameter mapping.
+        $isRsw = $algorithm === PoWAlgorithm::Rsw;
+        $issuedMKib = $isRsw ? 0 : $this->config->mKib;
+        $issuedT = $isRsw ? $this->config->rswT : $this->config->t;
+        $issuedP = $isRsw ? 1 : $this->config->p;
+
         $expiresAt = $now + $this->config->ttlSecs;
         $minDurationMs = $this->config->minDurationMs
             ?? $this->deriveMinDurationMs($targetBits);
@@ -566,9 +583,9 @@ final class Issuer
             $now,
             $expiresAt,
             $algorithm,
-            $this->config->mKib,
-            $this->config->t,
-            $this->config->p,
+            $issuedMKib,
+            $issuedT,
+            $issuedP,
             $targetBits,
             $salt,
             $minDurationMs,
@@ -598,9 +615,9 @@ final class Issuer
             issuedAt: $now,
             expiresAt: $expiresAt,
             algorithm: $algorithm,
-            mKib: $this->config->mKib,
-            t: $this->config->t,
-            p: $this->config->p,
+            mKib: $issuedMKib,
+            t: $issuedT,
+            p: $issuedP,
             targetBits: $targetBits,
             salt: $salt,
             prefix: $prefix,
@@ -643,15 +660,18 @@ final class Issuer
             challenge: $challenge,
             salt: $salt,
             algorithm: $algorithm,
-            mKib: $this->config->mKib,
-            t: $this->config->t,
-            p: $this->config->p,
+            mKib: $issuedMKib,
+            t: $issuedT,
+            p: $issuedP,
             targetBits: $targetBits,
             ttlSecs: $this->config->ttlSecs,
             minDurationMs: $minDurationMs,
             prefix: $prefix,
             decoyField: $decoyField,
             executionProgram: $executionProgram,
+            // The rsw modulus rides the client-facing response (the
+            // solver squares modulo n); lambda never leaves the server.
+            rswModulus: $isRsw ? $this->config->rswModulusN : null,
         );
     }
 
@@ -741,6 +761,9 @@ final class Issuer
             issuer: $this->config->issuer,
             kid: $this->config->kid,
             executionKey: $this->config->executionKey,
+            rswModulusN: $this->config->rswModulusN,
+            rswLambda: $this->config->rswLambda,
+            rswT: $this->config->rswT,
         );
         $nowFn = $now !== null ? static fn (): int => $now : $this->now;
 
@@ -1022,10 +1045,12 @@ final class Issuer
         // Defensive clamp: Config already rejects out-of-range values at
         // construction, but a hand-rolled ChallengeRecord (or a future
         // config path) must not reach the solver with an unsolvable
-        // difficulty.
+        // difficulty. RSW has no leading-zero target: the canonical
+        // always renders the field, so issuance pins the protocol floor.
         return match ($this->config->algorithm) {
             PoWAlgorithm::Sha256 => min($this->config->targetBits, Config::MAX_SHA_TARGET_BITS),
             PoWAlgorithm::Argon2id => min($this->config->argon2TargetBits, Config::MAX_ARGON2_TARGET_BITS),
+            PoWAlgorithm::Rsw => Config::RSW_TARGET_BITS_PIN,
         };
     }
 
@@ -1035,6 +1060,14 @@ final class Issuer
      */
     private function deriveMinDurationMs(int $targetBits): int
     {
+        // The rsw floor derives from the sequential cost T: even a
+        // native-optimized squarer cannot finish T 2048-bit squarings
+        // below T / 5e6 seconds (the browser BigInt solver is slower),
+        // so a faster receipt is a timing anomaly. The 50 ms absolute
+        // floor mirrors the Argon2id rule.
+        if ($this->config->algorithm === PoWAlgorithm::Rsw) {
+            return max(50, (int) ceil($this->config->rswT / 5e6 * 1000));
+        }
         $expected = 1 << min($targetBits, 31);
         if ($this->config->algorithm === PoWAlgorithm::Argon2id) {
             return max(50, (int) ceil($expected / 5e5 * 1000));

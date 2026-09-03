@@ -46,8 +46,18 @@ $nowEnv = getenv('KC_PHP_NOW');
 $now = $nowEnv !== false && $nowEnv !== '' ? (int) $nowEnv : null;
 
 $algo = getenv('KC_PHP_ALGO') ?: 'sha256';
-$config = $algo === 'argon2id'
-    ? new Config(
+if ($algo === 'rsw') {
+    $config = new Config(
+        secretKey: '0123456789abcdef0123456789abcdef',
+        algorithm: \KiwiCaptcha\PoWAlgorithm::Rsw,
+        ttlSecs: 120,
+        minDurationMs: 0,
+        rswModulusN: \KiwiCaptcha\Tests\Support\RswFixture::MODULUS_N_B64,
+        rswLambda: \KiwiCaptcha\Tests\Support\RswFixture::LAMBDA_B64,
+        rswT: \KiwiCaptcha\Config::MIN_RSW_T,
+    );
+} elseif ($algo === 'argon2id') {
+    $config = new Config(
         secretKey: '0123456789abcdef0123456789abcdef',
         algorithm: \KiwiCaptcha\PoWAlgorithm::Argon2id,
         mKib: 64,
@@ -58,14 +68,16 @@ $config = $algo === 'argon2id'
         ttlSecs: 120,
         minDurationMs: 0,
         executionKey: '0123456789abcdef0123456789abcdef',
-    )
-    : new Config(
+    );
+} else {
+    $config = new Config(
         secretKey: '0123456789abcdef0123456789abcdef',
         targetBits: 8,
         ttlSecs: 120,
         minDurationMs: 0,
         executionKey: '0123456789abcdef0123456789abcdef',
     );
+}
 $storage = new ArrayStorage();
 $region = getenv('KC_PHP_REGION');
 $issuer = new Issuer(
@@ -95,5 +107,15 @@ if ($execution) {
     }
 }
 file_put_contents($target, json_encode($record->toArray(), JSON_UNESCAPED_SLASHES));
+if ($algo === 'rsw') {
+    // The rsw trapdoor pair rides as top-level siblings of the record
+    // JSON (the record itself keeps the exact serde key set): the Rust
+    // harness pops them and configures its verifier, exactly like the
+    // reverse v4 record file carries its solution_token sibling.
+    $data = json_decode((string) file_get_contents($target), true);
+    $data['rsw_modulus_n'] = \KiwiCaptcha\Tests\Support\RswFixture::MODULUS_N_B64;
+    $data['rsw_lambda'] = \KiwiCaptcha\Tests\Support\RswFixture::LAMBDA_B64;
+    file_put_contents($target, json_encode($data, JSON_UNESCAPED_SLASHES));
+}
 
 echo "PHP_ISSUED {$algo} nonce={$challenge->nonce}\n";

@@ -419,6 +419,72 @@ override cannot re-arm it under the profile), and it defaults on under
 config layer always wins over the balanced and high_abuse derived
 defaults; only privacy_strict keeps the force.
 
+## RSW time-lock: the optional sequential proof (experimental)
+
+The rsw algorithm is an optional Rivest-Shamir-Wagner style time
+lock, a sequential-cost rung of the proof ladder. The widget worker
+performs T sequential modular squarings of a challenge-derived base
+over a 2048-bit composite modulus. The server verifies instantly
+through the factorization trapdoor, so verification cost stays
+constant while the client cost scales linearly with T. The rung is
+off by default: the algorithm stays sha256, no deployment needs the
+rsw options, and every existing issuance path keeps its exact byte
+shape. Issue rsw challenges only when the operator generated a
+modulus and configured both secret fields below.
+
+```yaml
+# config/packages/kiwi_captcha.yaml
+kiwi_captcha:
+    secret_key: '%env(KIWI_SECRET)%'
+    algorithm: rsw            # opt-in: sha256 (default) | argon2id | rsw
+    rsw_modulus_n: '%env(RSW_MODULUS_N)%'   # base64 of n = p*q, 256 bytes
+    rsw_lambda: '%env(RSW_LAMBDA)%'         # base64 of lcm(p-1, q-1)
+    rsw_t: 75000             # sequential squarings, 10000..300000
+```
+
+### Modulus setup
+
+Generate two 1024-bit primes p and q, form n = p*q, and precompute
+lambda = lcm(p-1, q-1). Configure n as rsw_modulus_n and lambda as
+rsw_lambda, both canonical standard base64 of the big-endian bytes.
+The modulus is public: it rides the challenge response, because the
+client squares modulo it. Lambda is the trapdoor and must never leave
+the server configuration. The primes themselves are not stored
+anywhere in KiwiCaptcha, so keep them offline or delete them once
+lambda is computed. Validation is shape-only, exactly like an RSA
+public key: the modulus must be exactly 256 bytes with its top bit
+set and odd, and lambda must be even. The lcm relation cannot be
+verified without the primes.
+
+### The sequential cost T
+
+rsw_t is the number of modular squarings the client performs, the
+time-lock's difficulty knob. The default 75,000 completes in a
+fraction of a second in the worker's native BigInt solver on a
+mid-range device. The validated range is 10,000..300,000: below the
+floor the cost is immaterial, and above the ceiling a legitimate
+solve can approach the challenge lifetime. There is no target-bits
+concept: the proof is deterministic, so the signed canonical carries
+the pinned protocol-floor value in the difficulty slot, and the
+verifier checks the exact final value instead of leading zeros.
+
+### Where the rung sits
+
+The proof ladder keeps its ordinary rungs: probabilistic SHA-256 at
+the floor, memory-hard Argon2id above it, and the optional
+execution dimension as supplementary Cap-style evidence. The rsw rung
+adds a different axis: fully sequential work with deterministic
+verification. It resists the precomputation that weakens
+difficulty-based proof when the same challenge prefix repeats, since
+every challenge derives a fresh base from its signed prefix and
+nonce. It is not memory-hard and not probabilistic, so it is a
+complement to the other rungs, never a replacement for them. The
+verifier needs the matching modulus and lambda configuration; an rsw
+record redeemed against a verifier without the pair fails with the
+deterministic unsupported_rsw_params outcome, and the risk layer
+(risk-engine.md) does not combine with the rung. Expect the rung to
+stay optional with sha256 as the default.
+
 ## Advanced configuration
 
 

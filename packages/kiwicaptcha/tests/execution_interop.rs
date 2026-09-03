@@ -246,6 +246,9 @@ fn config() -> ChallengeConfig {
         issuer: None,
         kid: 1,
         execution_key: Some(String::from_utf8_lossy(KEY).into_owned()),
+        rsw_modulus_n: None,
+        rsw_lambda: None,
+        rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
     }
 }
 
@@ -332,6 +335,9 @@ fn armed_issuance_verifies_with_correct_digest() {
         telemetry: None,
         enforce_telemetry: false,
         accept_legacy_v1: false,
+        rsw_proof: None,
+        rsw_modulus_n: None,
+        rsw_lambda: None,
         max_attempts: 0,
     };
     assert!(matches!(
@@ -382,6 +388,9 @@ fn armed_record_without_digest_is_execution_mismatch() {
         telemetry: None,
         enforce_telemetry: false,
         accept_legacy_v1: false,
+        rsw_proof: None,
+        rsw_modulus_n: None,
+        rsw_lambda: None,
         max_attempts: 0,
     };
     assert_eq!(
@@ -455,6 +464,9 @@ fn wrong_digest_and_digest_from_another_challenge_are_execution_mismatch() {
             telemetry: None,
             enforce_telemetry: false,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
             max_attempts: 0,
         };
         assert_eq!(
@@ -537,6 +549,9 @@ fn unarmed_issuance_rejects_a_stray_digest() {
         telemetry: None,
         enforce_telemetry: false,
         accept_legacy_v1: false,
+        rsw_proof: None,
+        rsw_modulus_n: None,
+        rsw_lambda: None,
         max_attempts: 0,
     };
     assert_eq!(

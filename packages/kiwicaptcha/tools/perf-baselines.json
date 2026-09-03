@@ -9,24 +9,24 @@
     },
     "budgets": {
         "widget_driver": {
-            "raw_bytes": 155837,
-            "gzip_bytes": 44229,
-            "brotli_bytes": 37147,
+            "raw_bytes": 159751,
+            "gzip_bytes": 45259,
+            "brotli_bytes": 38055,
             "raw_cap_bytes": 160000,
             "gzip_cap_bytes": 50000,
             "brotli_cap_bytes": 45000,
             "copies_identical": true,
-            "note": "The three copies (the canonical WASM asset, the core crate resources and the bundle public copy) are byte-identical at 155837 bytes, re-recorded on 2026-09-02 after moving the execution capability advertisement from the challenge body into the ignorable Kiwi-Execution-Max-Version request header (the driver now declares execution version 2 through that header, and only when the execution tier is configured; the challenge body stays the closed field set); perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes (an equality gate, not just the cap)."
+            "note": "The three copies (the canonical WASM asset, the core crate resources and the bundle public copy) are byte-identical at 159751 bytes, re-recorded on 2026-09-03 after the optional rsw solver rung: the widget driver now dispatches the sequential time-lock challenge to the worker and validates the rsw response contract (algorithm rsw, the base64 modulus and the sequential cost T). perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes (an equality gate, not just the cap)."
         },
         "widget_worker": {
-            "raw_bytes": 20233,
+            "raw_bytes": 23547,
             "copies_identical": true,
-            "note": "The Argon worker asset (kiwi-worker.js), three byte-identical copies at 20233 bytes; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
+            "note": "The worker asset (kiwi-worker.js), three byte-identical copies at 23547 bytes; the rsw sequential time-lock solver lives inside it (pure JS BigInt, exactly the Argon worker's loading and message pattern); perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
         },
         "widget_runtime": {
-            "raw_bytes": 93093,
+            "raw_bytes": 96528,
             "copies_identical": true,
-            "note": "The wasm glue runtime asset (kiwicaptcha-wasm.js), three byte-identical copies at 93093 bytes; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
+            "note": "The wasm glue runtime asset (kiwicaptcha-wasm.js), three byte-identical copies at 96528 bytes; the embedded worker source is regenerated from assets/kiwi-worker.js by the embed-worker tool, so the rsw solver rides the glue copy too; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
         },
         "widget_css": {
             "raw_bytes": 13863,

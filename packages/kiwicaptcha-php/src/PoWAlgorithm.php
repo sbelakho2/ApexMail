@@ -18,4 +18,14 @@ enum PoWAlgorithm: string
 
     /** Memory-hard Argon2id proof-of-work (asic/gpu resistant). */
     case Argon2id = 'argon2id';
+
+    /**
+     * The optional sequential time-lock proof (Rivest-Shamir-Wagner):
+     * the client performs T sequential modular squarings over a 2048-bit
+     * composite, and the server verifies instantly through the
+     * factorization trapdoor. Issued only when the operator configures
+     * the modulus secrets and selects the algorithm; see
+     * {@see Config::$rswModulusN}.
+     */
+    case Rsw = 'rsw';
 }

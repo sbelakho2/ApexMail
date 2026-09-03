@@ -37,6 +37,9 @@ fn config() -> ChallengeConfig {
         issuer: None,                     // Some("auth-gateway") to pin the issuer
         kid: 1,                           // single-key deployment
         execution_key: None,              // ExecutionChallengeV1 off (no key)
+        rsw_modulus_n: None,
+        rsw_lambda: None,
+        rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
     }
 }
 
@@ -68,6 +71,7 @@ fn quickstart() -> Result<(), String> {
         telemetry: serde_json::json!({}), // telemetry is OFF by default -> empty object
         execution_digest: None,
         execution_trace: None,
+        rsw_proof: None,
     };
     let raw = token.encode();
     let decoded = SolutionToken::decode(&raw).map_err(|e| format!("token decode failed: {e}"))?;
@@ -100,6 +104,9 @@ fn quickstart() -> Result<(), String> {
         telemetry: Some(&decoded.telemetry),
         enforce_telemetry: false, // default widget sends no telemetry — never reject on it
         accept_legacy_v1: false,  // v2 is the only issued format
+        rsw_proof: None,
+        rsw_modulus_n: None,
+        rsw_lambda: None,
         max_attempts: 10,
     };
 

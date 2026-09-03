@@ -423,7 +423,12 @@ final class ChallengeRecord
      *   Negatives, floats, booleans, numeric strings, and overflow are
      *   rejected.
      * - Strings must be JSON strings of at most 4096 bytes.
-     * - `algorithm` must be exactly `sha256` or `argon2id` (no aliases).
+     * - `algorithm` must be exactly `sha256`, `argon2id` or `rsw` (no
+     *   aliases). An rsw record carries its sequential-squaring cost T
+     *   in the signed time-cost slot `t`. No rsw-specific key exists on
+     *   the record: the canonical 18-field grammar carries every
+     *   authenticated parameter, and the trapdoor secrets live in the
+     *   issuer and verifier configuration, never in storage.
      * - Null is only legal for `region`, `request_binding`, `issuer` and
      *   `decoy_field` (Option fields).
      * - The deployment-bound identifiers `region`, `request_binding` and
@@ -515,7 +520,7 @@ final class ChallengeRecord
         );
 
         $algorithm = $data['algorithm'];
-        if ($algorithm !== 'sha256' && $algorithm !== 'argon2id') {
+        if ($algorithm !== 'sha256' && $algorithm !== 'argon2id' && $algorithm !== 'rsw') {
             throw MalformedRecordException::invalidAlgorithm($algorithm);
         }
 

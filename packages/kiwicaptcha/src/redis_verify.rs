@@ -180,10 +180,11 @@ use crate::challenge::{
     verify_signature, verify_signature_v2_with_keys, ChallengeRecord, PoWAlgorithm,
 };
 use crate::keys::DerivedKeys;
+use crate::rsw::RswTrapdoor;
 use crate::token::SolutionToken;
 use crate::verify::{
-    check_execution_binding, check_request_binding, ct_eq, derive_hash, final_revalidate,
-    leading_zero_bits, measurable_solve_duration_ms, signature_from_challenge, validate_record,
+    check_execution_binding, check_request_binding, check_rsw_params, ct_eq, final_revalidate,
+    measurable_solve_duration_ms, proof_is_valid, signature_from_challenge, validate_record,
     RequestBindingExpectation, VerifyError, VerifyOutcome, SKEW_TOLERANCE_US,
 };
 use redis::ConnectionLike;
@@ -2036,6 +2037,14 @@ pub struct ProductionVerifier {
     /// returns the current Unix time in seconds used by the TTL checks and
     /// the post-derive final re-validation. Defaults to the real clock.
     now_unix: fn() -> u64,
+    /// The decoded rsw trapdoor of this verifier (modulus + secret
+    /// lambda), or `None` when the deployment does not verify rsw
+    /// records. A signed rsw record then fails with
+    /// [`VerifyError::UnsupportedRswParams`] at the proof site: the
+    /// record is authentic but this verifier cannot represent the
+    /// trapdoor computation, exactly the Argon2id configuration-mismatch
+    /// semantics of the PHP core.
+    rsw: Option<RswTrapdoor>,
 }
 
 fn real_now_unix() -> u64 {
@@ -2086,7 +2095,26 @@ impl ProductionVerifier {
             expected_issuer: None,
             derived_keys: OnceLock::new(),
             now_unix: real_now_unix,
+            rsw: None,
         }
+    }
+
+    /// Configure the rsw time-lock trapdoor: the modulus n and the
+    /// secret lambda = lcm(p-1, q-1), both canonical standard base64
+    /// (validated at build time with the shared decode). When set, rsw
+    /// records verify through the trapdoor; the default (unset) treats
+    /// a signed rsw record as authentic but unsupported
+    /// ([`VerifyError::UnsupportedRswParams`]).
+    pub fn with_rsw_trapdoor(
+        mut self,
+        modulus_b64: impl Into<String>,
+        lambda_b64: impl Into<String>,
+    ) -> Self {
+        self.rsw = Some(
+            RswTrapdoor::new(&modulus_b64.into(), &lambda_b64.into())
+                .expect("rsw trapdoor configuration is validated at build time"),
+        );
+        self
     }
 
     /// Configure key rotation: the `kid → master secret` map
@@ -2647,9 +2675,17 @@ impl ProductionVerifier {
             return VerifyOutcome::Invalid(e);
         }
 
-        // 8. Single derive.
-        let hash = match derive_hash(&record, token.counter) {
-            Ok(hash) => hash,
+        // 8. Single proof verdict. SHA-256/Argon2id derive the hash; an
+        //    rsw record compares the presented final value against the
+        //    trapdoor expectation (the verifier's own decoded trapdoor,
+        //    never a record field).
+        let valid = match proof_is_valid(
+            &record,
+            token.counter,
+            token.rsw_proof.as_deref(),
+            self.rsw.as_ref(),
+        ) {
+            Ok(valid) => valid,
             Err(e) => return VerifyOutcome::Invalid(e),
         };
 
@@ -2675,7 +2711,7 @@ impl ProductionVerifier {
             return VerifyOutcome::Invalid(e);
         }
 
-        // 9. Leading-zero check + best-effort outcome commit:
+        // 9. Proof verdict + best-effort outcome commit:
         //    the winner stores the proof verdict so concurrent/retried
         //    consumers return the same outcome without re-deriving. The
         //    commit is best-effort — a storage failure must never change
@@ -2684,7 +2720,7 @@ impl ProductionVerifier {
         //    the connection is released as soon as the commit returns; a
         //    checkout failure is treated exactly like a commit failure
         //    (best-effort, the outcome stands).
-        if leading_zero_bits(&hash) >= record.target_bits {
+        if valid {
             let outcome = VerifyOutcome::Valid {
                 nonce: record.nonce.clone(),
                 request_binding: record.request_binding.clone(),
@@ -2907,15 +2943,37 @@ impl ProductionVerifier {
         //    resultless recovery whose fresh mutation was not proven
         //    durable cannot authorize anything, exactly like the
         //    original consume whose WAIT failed).
-        let hash = match derive_hash(&state.record, token.counter) {
-            Ok(h) => h,
+        // 10. Re-derive the proof from the presented token and commit
+        //    the deterministic outcome. SHA-256/Argon2id derive the hash;
+        //    an rsw record compares the presented final value against
+        //    the trapdoor expectation (the verifier's own decoded
+        //    trapdoor, never a record field). The commit is a fenced
+        //    mutation: the
+        //    claim must still be held (ownership-lost refuses before any
+        //    write), the result write clears the claim atomically, and
+        //    the verified replica wait covers the fresh mutation. A
+        //    failed commit or WAIT is never discarded before a Valid is
+        //    returned: the PHP recovery model rereads the retained
+        //    state and accepts a now-present deterministic result only
+        //    through the identity-gated, replication-fenced stored-result
+        //    path; otherwise the retry stays ConsumeIndeterminate (a
+        //    resultless recovery whose fresh mutation was not proven
+        //    durable cannot authorize anything, exactly like the
+        //    original consume whose WAIT failed).
+        let valid = match proof_is_valid(
+            &state.record,
+            token.counter,
+            token.rsw_proof.as_deref(),
+            self.rsw.as_ref(),
+        ) {
+            Ok(valid) => valid,
             Err(e) => return VerifyOutcome::Invalid(e),
         };
         let final_now = (self.now_unix)();
         if final_now >= state.record.expires_at {
             return VerifyOutcome::Invalid(VerifyError::Expired);
         }
-        let outcome = if leading_zero_bits(&hash) >= state.record.target_bits {
+        let outcome = if valid {
             VerifyOutcome::Valid {
                 nonce: state.record.nonce.clone(),
                 request_binding: state.record.request_binding.clone(),
@@ -3237,6 +3295,13 @@ impl ProductionVerifier {
         if record.algorithm == PoWAlgorithm::Argon2id {
             crate::verify::check_argon2_ceilings(record)?;
         }
+        // 3c2. The rsw process bound — a signed rsw record whose
+        //      sequential cost T sits outside the issuance range is
+        //      authentic but unsupported, exactly the Argon2id ceiling
+        //      split.
+        if record.algorithm == PoWAlgorithm::Rsw {
+            check_rsw_params(record)?;
+        }
 
         Ok(())
     }
@@ -3463,6 +3528,9 @@ mod tests {
             secret_key: SECRET.into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -3489,6 +3557,7 @@ mod tests {
             telemetry: serde_json::json!({}),
             execution_digest: None,
             execution_trace: None,
+            rsw_proof: None,
         }
         .encode()
     }

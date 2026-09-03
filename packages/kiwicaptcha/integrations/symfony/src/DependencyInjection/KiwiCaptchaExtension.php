@@ -826,8 +826,22 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // refused below, so an armed deployment always carries the
             // key.
             ->setArgument('$executionKey', $config['execution_key'])
+            // The optional rsw time-lock trapdoor: the modulus and the
+            // secret lambda ride the core Config, which validates them
+            // (with the sequential cost rsw_t) when the algorithm is
+            // rsw, so an invalid pair refuses the container compile.
+            // Null (the default) leaves the algorithm unconfigured and
+            // the fields inert. Wired only when the installed core
+            // Config declares the parameters (a core addition), so an
+            // older pinned core keeps its constructor defaults.
             ->setPublic(true);
         $container->setDefinition('kiwi_captcha.config', $configDef);
+        if (self::coreConfigAcceptsRsw()) {
+            $container->getDefinition('kiwi_captcha.config')
+                ->setArgument('$rswModulusN', $config['rsw_modulus_n'])
+                ->setArgument('$rswLambda', $config['rsw_lambda'])
+                ->setArgument('$rswT', $config['rsw_t']);
+        }
 
         $container->setDefinition('kiwi_captcha.issuer', (new Definition(Issuer::class, [
             new Reference('kiwi_captcha.config'),
@@ -967,6 +981,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         if ($config['risk']['region'] !== null) {
             $container->getDefinition('kiwi_captcha.verifier')
                 ->setArgument('$region', $config['risk']['region']);
+        }
+        // The rsw time-lock trapdoor rides the verifier too, so rsw
+        // records redeem through the bundle (the core Verifier refuses
+        // them without the pair). Wired only when the installed core
+        // Verifier declares the parameters (a core addition).
+        if (self::coreVerifierAcceptsRsw()) {
+            $container->getDefinition('kiwi_captcha.verifier')
+                ->setArgument('$rswModulusN', $config['rsw_modulus_n'])
+                ->setArgument('$rswLambda', $config['rsw_lambda']);
         }
         $container->setAlias(StorageInterface::class, (string) $storageRef);
 
@@ -3037,6 +3060,36 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
      * because Symfony's ResolveNamedArgumentsPass refuses named arguments
      * the class does not declare, at container compile time.
      */
+    private static function coreConfigAcceptsRsw(): bool
+    {
+        $constructor = (new \ReflectionClass(Config::class))->getConstructor();
+        if ($constructor === null) {
+            return false;
+        }
+        foreach ($constructor->getParameters() as $parameter) {
+            if ($parameter->getName() === 'rswModulusN') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static function coreVerifierAcceptsRsw(): bool
+    {
+        $constructor = (new \ReflectionClass(Verifier::class))->getConstructor();
+        if ($constructor === null) {
+            return false;
+        }
+        foreach ($constructor->getParameters() as $parameter) {
+            if ($parameter->getName() === 'rswModulusN') {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     private static function coreVerifierAcceptsResumeClaimTtlSecs(): bool
     {
         $constructor = (new \ReflectionClass(Verifier::class))->getConstructor();

@@ -137,6 +137,11 @@ impl ChallengeProfile {
                     return Err(ProfileError::InvalidArgonMKib(self.m_kib));
                 }
             }
+            // The rsw algorithm carries no profile knobs (T and the
+            // trapdoor live on the ChallengeConfig), so an rsw profile
+            // has nothing to validate; issuance still enforces the
+            // configured trapdoor and T bounds.
+            PoWAlgorithm::Rsw => {}
         }
         Ok(())
     }

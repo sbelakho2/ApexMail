@@ -66,6 +66,63 @@ The bundle treats a slow or failed Redis command as a typed refusal (429 / `temp
 Run it with `maxmemory-policy noeviction` so challenge/replay state can never be evicted mid-window, and size `maxmemory` for the outstanding/rate windows (`max_outstanding_challenges_global` records + the sliding windows; the consumed-state records persist until their TTL).
 The noeviction contract, the `WAIT` durability barriers and the script-versioning rules are authoritative in [SECURITY.md](../../../../../SECURITY.md#redis-requirements).
 
+## RSW time-lock (optional experimental rung)
+
+The rsw algorithm issues sequential time-lock challenges: the client
+worker squares a challenge-derived base T times modulo a 2048-bit
+composite, and the server checks the final value through the
+factorization trapdoor in one modular exponentiation. The rung is
+opt-in and experimental, exactly like the execution dimension: the
+algorithm stays sha256 by default, and unconfigured deployments never
+touch the rsw machinery. See configuration.md for the modulus setup
+and the rsw_t bounds. This section covers the operational posture.
+
+### Verification cost and capacity
+
+Server verification is one 2048-bit modular exponentiation with the
+secret lambda, about 2,048 squarings regardless of T. The Argon2id
+admission gate does not apply, because the rsw check is not
+memory-hard; rate limiting and the challenge TTL bound the aggregate
+load as usual. The solve-time floor derives from T, so a receipt
+faster than the sequential minimum is a timing anomaly.
+
+### The sequential-cost rationale
+
+The cost axis is wall-clock sequence, not hashes: no parallelism or
+precomputation can shorten T squarings of a fresh base. The base
+derives from the signed prefix and nonce of every challenge, so a
+solved value never repeats across challenges. This complements the
+probabilistic SHA-256 and memory-hard Argon2id rungs, whose cost is
+amortizable per challenge only through search or memory, and the
+Cap-style execution evidence, which is supplementary. Compare with a
+provider proof: no third party, no persistent identity, and no
+oracle round trip after issuance. The trade-off is a strict lower
+bound on legitimate solve time, so the rung fits flows where a
+sub-second sequential delay is acceptable.
+
+### Verification rollout
+
+A verifier must carry the same modulus and lambda as the issuer that
+minted the record. The pair never rides the stored record, so a
+redeployment that loses the lambda configuration rejects every rsw
+record with unsupported_rsw_params until it is restored. Deploy the
+new binaries everywhere before arming the algorithm, mirroring the
+protocol-floor rollouts: an old binary rejects the rsw algorithm as
+malformed, which is the same fail-closed shape as an unknown protocol
+version. kiwicaptcha:doctor reports the armed posture, so a deploy
+gate can confirm every node verifies the rung before traffic is
+routed to it.
+
+### Budget guidance
+
+The worker asset carries the rsw solver inside the existing worker
+file, so files-tier pages pay the solver bytes only when an rsw
+challenge arrives. The widget driver dispatches rsw challenges to the
+same same-origin worker it uses for Argon2id, and a missing worker
+enters the same controlled worker-unavailable state. There is no
+main-thread fallback and no weaker-profile retry, exactly like the
+memory-hard path.
+
 ## Argon2id verification concurrency cap
 
 When `algorithm: argon2id`, the core `KiwiCaptcha\Verifier` is constructed with a `KiwiCaptcha\VerificationAdmissionGate` enforcing `argon2_max_concurrent_verifications` (default 2) concurrent verifications.

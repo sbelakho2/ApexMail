@@ -541,21 +541,25 @@ test.describe('KiwiCaptcha no wasm-downgrade fallback', () => {
     // audit-#62 profile normalization itself (pinned by both assertions
     // below) — no failure path may assign a different, weaker algorithm.
     expect(src.match(/algorithm\s*=\s*["']/g) ?? []).toHaveLength(1);
-    expect(src).toMatch(/if \(algorithm !== "sha256" && algorithm !== "argon2id"\) algorithm = "sha256";/);
+    expect(src).toMatch(/if \(algorithm !== "sha256" && algorithm !== "argon2id" && algorithm !== "rsw"\) algorithm = "sha256";/);
     // The request body algorithm is exactly the attribute-derived variable.
     expect(src).toMatch(/var algorithm\s*=\s*W\.getAttribute\("data-kiwi-algorithm"\) \|\| container\.getAttribute\("data-kiwi-algorithm"\) \|\| "sha256"/);
     expect(src).toMatch(/reqBody\.algorithm\s*=\s*algorithm/);
-    // Only the two server-offered profiles are selectable — anything else is
-    // normalized to the default; the client can never invent parameters.
-    expect(src).toMatch(/algorithm !== "sha256" && algorithm !== "argon2id"/);
+    // Only the three server-offered profiles are selectable — anything
+    // else is normalized to the default; the client can never invent
+    // parameters (rsw is the optional time-lock rung, issued only when
+    // the server offers it).
+    expect(src).toMatch(/algorithm !== "sha256" && algorithm !== "argon2id" && algorithm !== "rsw"/);
     // Solver selection is driven only by the server's response algorithm —
     // never by a client capability probe (no navigator capability gating).
     expect(src).toMatch(/\(data\.algorithm \|\| "sha256"\) === "argon2id"/);
+    expect(src).toMatch(/\(data\.algorithm \|\| "sha256"\) === "rsw"/);
     expect(src, 'no capability probe may gate the algorithm choice').not.toMatch(/navigator\.[\w.]*[Cc]apab/);
-    // A server-side downgrade (argon2id requested, weaker returned) is a
-    // failed challenge, never accepted and never solved.
+    // A server-side downgrade (argon2id or rsw requested, weaker
+    // returned) is a failed challenge, never accepted and never solved.
     expect(src).toMatch(/Challenge downgraded/);
-    expect(src).toMatch(/\(data\.algorithm \|\| "sha256"\) !== "argon2id"/);
+    expect(src).toMatch(/returnedAlgorithm !== "argon2id"/);
+    expect(src).toMatch(/algorithm === "rsw" && returnedAlgorithm !== "rsw"/);
   });
 
   test('a stale worker leaves the widget in the mismatch state without ever re-requesting a weaker challenge (runtime)', async ({ page }) => {

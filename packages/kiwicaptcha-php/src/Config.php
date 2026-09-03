@@ -76,6 +76,29 @@ final class Config
     public const MAX_TTL_SECS = 300;
 
     /**
+     * The floor for the rsw sequential-squaring cost T. Below it the
+     * challenge would finish too fast to carry meaningful sequential
+     * cost, so issuance refuses the value at configuration time.
+     */
+    public const MIN_RSW_T = 10_000;
+
+    /**
+     * The ceiling for the rsw sequential-squaring cost T. The browser
+     * BigInt solver completes 300,000 squarings in about a second on a
+     * mid-range device, so the ceiling keeps a legitimate solve inside
+     * the challenge lifetime while the sequential cost stays material.
+     */
+    public const MAX_RSW_T = 300_000;
+
+    /**
+     * The rsw canonical target_bits pin. The v2 canonical always carries
+     * a target_bits value within the uniform protocol bounds 1..20, and
+     * rsw has no leading-zero target, so issuance pins the protocol
+     * floor. The rsw proof check never reads the field.
+     */
+    public const RSW_TARGET_BITS_PIN = 1;
+
+    /**
      * Ceiling for Argon2id time cost at issuance (browser-solver policy):
      * the browser solver caps at 6, so higher values would be unsolvable
      * for legit clients and issuance refuses them. This is distinct from
@@ -127,6 +150,22 @@ final class Config
      *                                      only feeds the program generator; the browser
      *                                      digest uses the program blob itself as its
      *                                      content-derived key.
+     * @param string|null $rswModulusN      The rsw modulus n = p*q as canonical
+     *                                      standard base64 of exactly 256 bytes (top bit
+     *                                      set, odd), the public half of the time-lock
+     *                                      trapdoor. Required when algorithm is rsw;
+     *                                      ignored otherwise (null default = the rsw
+     *                                      algorithm is not configured).
+     * @param string|null $rswLambda        The rsw secret lambda = lcm(p-1, q-1) as
+     *                                      canonical standard base64 of 1..256 even
+     *                                      bytes, the trapdoor that lets the server
+     *                                      verify without the T squarings. Required
+     *                                      when algorithm is rsw; ignored otherwise.
+     * @param int      $rswT                The rsw sequential-squaring cost T
+     *                                      (default 75,000; validated to 10,000..300,000
+     *                                      when algorithm is rsw). The client performs T
+     *                                      sequential modular squarings; the server
+     *                                      verifies instantly through lambda.
      */
     public function __construct(
         public readonly string $secretKey,
@@ -144,6 +183,9 @@ final class Config
         public readonly ?string $issuer = null,
         public readonly int $kid = 1,
         public readonly ?string $executionKey = null,
+        public readonly ?string $rswModulusN = null,
+        public readonly ?string $rswLambda = null,
+        public readonly int $rswT = 75_000,
     ) {
         if (\strlen($secretKey) < 16) {
             throw new \InvalidArgumentException('KiwiCaptcha secret key must be at least 16 bytes');
@@ -224,6 +266,34 @@ final class Config
                     $p
                 )
             );
+        }
+        // The rsw algorithm is opt-in and requires the full trapdoor
+        // configuration: the modulus and lambda are mandatory, valid and
+        // consistent (validated by the shared Rsw decode), and the
+        // sequential cost T must sit within the issuance bounds. With any
+        // other algorithm the rsw fields are inert and unvalidated, so
+        // the default deployment never touches them.
+        if ($algorithm === PoWAlgorithm::Rsw) {
+            if ($rswModulusN === null || $rswLambda === null) {
+                throw new \InvalidArgumentException(
+                    'the rsw algorithm requires rsw_modulus_n and rsw_lambda (base64, see Rsw)'
+                );
+            }
+            try {
+                new Rsw($rswModulusN, $rswLambda);
+            } catch (\InvalidArgumentException $e) {
+                throw new \InvalidArgumentException('invalid rsw trapdoor configuration: '.$e->getMessage());
+            }
+            if ($rswT < self::MIN_RSW_T || $rswT > self::MAX_RSW_T) {
+                throw new \InvalidArgumentException(
+                    sprintf(
+                        'rsw_t (sequential squarings) must be within %d..%d (got %d)',
+                        self::MIN_RSW_T,
+                        self::MAX_RSW_T,
+                        $rswT
+                    )
+                );
+            }
         }
     }
 

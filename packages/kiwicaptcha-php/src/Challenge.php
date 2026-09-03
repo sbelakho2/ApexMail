@@ -30,6 +30,11 @@ namespace KiwiCaptcha;
  * verifier: an old verifier rejects version 3 as unknown. The grammar
  * is total: v2 => no decoy, v3 => decoy present. A stored version flip
  * can never change the effective protocol.
+ *
+ * An rsw challenge carries the optional `rsw_modulus` key: the public
+ * 2048-bit composite in canonical base64, absent for every other
+ * algorithm. The solver squares modulo it, and the value is not a
+ * secret, since n is public by design.
  */
 final class Challenge
 {
@@ -55,6 +60,12 @@ final class Challenge
         // the driver runs it and presents the resulting digest with the
         // solution token.
         public readonly ?string $executionProgram = null,
+        // The rsw modulus n (canonical standard base64 of the 2048-bit
+        // composite), present only when the challenge algorithm is rsw:
+        // the client solver squares modulo n. The key is omitted when
+        // null, so every other response keeps its exact byte shape. The
+        // trapdoor lambda never rides this surface.
+        public readonly ?string $rswModulus = null,
     ) {
     }
 
@@ -86,6 +97,12 @@ final class Challenge
         // keep the exact pre-execution byte format.
         if ($this->executionProgram !== null) {
             $data['execution_program'] = $this->executionProgram;
+        }
+        // The rsw modulus key is absent unless the challenge is an rsw
+        // challenge, the same skip-when-null rule: a sha256/argon2id
+        // response keeps its exact byte format.
+        if ($this->rswModulus !== null) {
+            $data['rsw_modulus'] = $this->rswModulus;
         }
 
         return $data;

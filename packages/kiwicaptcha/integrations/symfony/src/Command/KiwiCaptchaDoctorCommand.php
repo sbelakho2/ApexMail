@@ -131,6 +131,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             'Execution versioning' => $this->checkExecutionVersioning(),
             'Argon memory envelope' => $this->checkArgonEnvelope(),
             'Argon concurrency' => $this->checkArgonConcurrency(),
+            'RSW time-lock' => $this->checkRsw(),
             'CSP compatibility' => $this->checkCsp(),
             'SiteVerify status' => $this->checkSiteVerify(),
             'Chained challenges' => $this->checkChaining(),
@@ -776,6 +777,35 @@ final class KiwiCaptchaDoctorCommand extends Command
     private function checkCsp(): array
     {
         return ['WARN', 'the page CSP cannot be verified from the CLI; ensure script-src allows the widget (nonce or unsafe-inline) plus wasm-unsafe-eval, style-src covers the styles, worker-src covers the Argon worker (files mode: \'self\'; inline compatibility mode: blob:), and connect-src covers the challenge API (see getting-started.md Content-Security-Policy)'];
+    }
+
+    /**
+     * The rsw time-lock posture: the optional experimental algorithm
+     * is armed only when the operator configures the full trapdoor
+     * pair with the algorithm rsw selected. The core Config validates
+     * the pair at construction, so this check notes the armed posture.
+     * A verifier-side trapdoor is required wherever an rsw record may
+     * be redeemed, and the algorithm stays off by default.
+     *
+     * @return array{0: string, 1: string} [status, detail]
+     */
+    private function checkRsw(): array
+    {
+        $algorithm = (string) $this->config['algorithm'];
+        $modulus = $this->config['rsw_modulus_n'];
+        $lambda = $this->config['rsw_lambda'];
+        if ($algorithm === 'rsw') {
+            if (!\is_string($modulus) || !\is_string($lambda)) {
+                return ['FAIL', 'algorithm rsw requires the full trapdoor pair (rsw_modulus_n and rsw_lambda): the core Config refuses an incomplete pair, so this state means the wiring is broken'];
+            }
+
+            return ['PASS', sprintf('rsw armed: sequential time-lock challenges (T=%d squarings, see the operations.md "RSW time-lock" section for the sequential-cost rationale) are issued; every verifier that may redeem them must configure the same modulus and lambda', $this->config['rsw_t'])];
+        }
+        if (\is_string($modulus) || \is_string($lambda)) {
+            return ['WARN', sprintf('rsw_modulus_n/rsw_lambda are configured but algorithm %s is selected: the fields are inert until the algorithm flips to rsw (the operator may pre-stage them)', $algorithm)];
+        }
+
+        return ['PASS', 'rsw not configured (the default deployment keeps the sha256 issuance path unchanged; the rsw rung stays optional)'];
     }
 
     /**

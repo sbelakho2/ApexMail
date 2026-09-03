@@ -12,7 +12,7 @@
   // release tag + SHA256SUMS + SRI + attestation, never by this string.
   // Integrators must serve the driver, worker and wasm from the SAME
   // release (see SECURITY.md — versioned-resource expectation).
-  var KIWI_SOLVER_PROTOCOL_ID = "2026-08-r2";
+  var KIWI_SOLVER_PROTOCOL_ID = "2026-09-r1";
 
   // ── Challenge fetch timeout ─────────────────────────────────────────
   // A hung challenge endpoint must never leave the widget stuck: the fetch
@@ -41,7 +41,7 @@
   // per-source limited server-side too).
   var KIWI_CANCEL_COOLDOWN_MS = 5000;
 
-  // ── Argon2id worker source (the wasm glue carries it) ────────
+  // ── Argon2id / rsw worker source (the wasm glue carries it) ──
   // Same-origin Web Worker for the memory-hard Argon2id solver. The worker
   // must run off the main thread (each 64 MiB hash blocks the UI for tens of
   // ms). The worker source is NO LONGER embedded in this driver: the wasm
@@ -690,7 +690,12 @@
         };
         window.__kiwiWorkerUsed = true;
         var workerStart = performance.now();
-        var expectedHashes = Math.pow(2, data.targetBits);
+        // The progress denominator: an rsw solve reports squarings done
+        // (the proof has no probabilistic target), every other solve
+        // reports hashes tried against the 2^target_bits expectation.
+        var expectedUnits = (data.algorithm || "sha256") === "rsw"
+          ? (data.t || 1)
+          : Math.pow(2, data.targetBits);
         var settled = false;
         // Blob-URL cleanup: the object URL is revoked exactly once on EVERY
         // terminal path — done, failed, build-id mismatch, worker error, and
@@ -747,18 +752,31 @@
           }
           if (msg.type === "progress") {
             if (typeof msg.counter !== "number" || !isFinite(msg.counter)) return;
-            onProgress(Math.min(95, (msg.counter * 100) / expectedHashes));
+            onProgress(Math.min(95, (msg.counter * 100) / expectedUnits));
           } else if (msg.type === "done") {
-            if (typeof msg.counter !== "number" || !isFinite(msg.counter)) return;
             if (typeof msg.buildId !== "string" || msg.buildId !== KIWI_SOLVER_PROTOCOL_ID) {
               if (!settled) { settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ mismatch: true }); }
+              return;
+            }
+            var isRsw = (data.algorithm || "sha256") === "rsw";
+            // An rsw solve reports the final value (proof), never a
+            // counter: a stale worker answering with a counter is a
+            // protocol failure, not a solution.
+            if (isRsw) {
+              if (typeof msg.proof !== "string" || !/^[0-9a-f]{512}$/.test(msg.proof)) {
+                if (!settled) { settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ mismatch: true }); }
+                return;
+              }
+            } else if (typeof msg.counter !== "number" || !isFinite(msg.counter)) {
               return;
             }
             settled = true;
             clearTimeout(deadlineTimer);
             worker.terminate();
             teardown();
-            resolve({ counter: msg.counter, duration: Math.round(performance.now() - workerStart) });
+            resolve(isRsw
+              ? { proof: msg.proof, duration: Math.round(performance.now() - workerStart) }
+              : { counter: msg.counter, duration: Math.round(performance.now() - workerStart) });
           } else if (msg.type === "failed") {
             if (typeof msg.reason !== "string") return;
             // The worker verifies the wasm glue's exported protocol version
@@ -793,6 +811,7 @@
         };
         var prefixBytes = encoder.encode(data.prefix);
         var saltBytes = b64decode(data.salt);
+        var isRsw = (data.algorithm || "sha256") === "rsw";
         try {
           // Hand the runtime URL to the worker BEFORE the solve — the
           // worker importScripts it, verifies the wasm protocol version
@@ -808,21 +827,31 @@
           if (glueRuntimeSrc) {
             worker.postMessage({ v: 1, type: "glue", runtimeSrc: glueRuntimeSrc });
           }
-          worker.postMessage({
+          // The solve message carries the full field set for every
+          // algorithm; an rsw solve adds the nonce and the base64
+          // modulus (the worker derives the base from prefix||nonce and
+          // squares modulo the modulus). The rsw solver never touches
+          // the wasm module, so a missing glue still solves.
+          var solveMsg = {
             v: 1,
             type: "solve",
-            algorithm: "argon2id",
+            algorithm: isRsw ? "rsw" : "argon2id",
             prefix: data.prefix,
             prefixLen: prefixBytes.length,
             salt: data.salt,
             saltLen: saltBytes.length,
             targetBits: data.targetBits,
             mKib: data.mKib || 0,
-            t: data.t || 1,
+            t: isRsw ? (data.t || 1) : (data.t || 1),
             p: data.p || 1,
             startCounter: 0,
             maxHashes: MAX_SHA_HASHES,
-          });
+          };
+          if (isRsw) {
+            solveMsg.nonce = data.nonce;
+            solveMsg.modulus = data.rsw_modulus;
+          }
+          worker.postMessage(solveMsg);
         } catch (e) {
           if (!settled) { settled = true; clearTimeout(deadlineTimer); worker.terminate(); teardown(); resolve({ unavailable: true, reason: "post-failed" }); }
         }
@@ -898,12 +927,15 @@
   // The endpoint is same-origin, but the response bytes are still
   // untrusted input: the widget must never solve a forged or malformed
   // challenge. The issuance contract (the ChallengeController response
-  // shape) is: algorithm sha256|argon2id, nonce a non-empty server-minted
-  // string, prefix a non-empty string, salt a non-empty base64 string
-  // that decodes to at least one byte, targetBits an integer within the
-  // algorithm's issuance ceiling (sha256 1..20, argon2id 1..10), the
-  // argon2id parameters in their issuance ranges (t 3..6, p 1,
-  // mKib 8*p..65536), and ttlSecs an integer 1..300 when present. A
+  // shape) is: algorithm sha256|argon2id|rsw, nonce a non-empty
+  // server-minted string, prefix a non-empty string, salt a non-empty
+  // base64 string that decodes to at least one byte, targetBits an
+  // integer within the algorithm's issuance ceiling (sha256 1..20,
+  // argon2id 1..10, rsw 1..20), the argon2id parameters in their
+  // issuance ranges (t 3..6, p 1, mKib 8*p..65536), and ttlSecs an
+  // integer 1..300 when present. An rsw challenge additionally carries
+  // the base64 modulus (exactly 256 bytes) and its sequential cost T in
+  // the time-cost slot t (10,000..300,000). A
   // response that violates the contract is a challenge-content failure:
   // the widget enters the controlled bounded-retry failure state instead
   // of ever solving the response. Without the shape gate a forged
@@ -913,7 +945,7 @@
   function kiwiValidateChallenge(data) {
     if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error("Challenge malformed");
     var alg = data.algorithm === undefined ? "sha256" : data.algorithm;
-    if (alg !== "sha256" && alg !== "argon2id") throw new Error("Challenge malformed");
+    if (alg !== "sha256" && alg !== "argon2id" && alg !== "rsw") throw new Error("Challenge malformed");
     if (typeof data.nonce !== "string" || data.nonce.length < 1) throw new Error("Challenge malformed");
     if (typeof data.prefix !== "string" || data.prefix.length < 1) throw new Error("Challenge malformed");
     if (typeof data.salt !== "string" || data.salt.length < 1) throw new Error("Challenge malformed");
@@ -933,6 +965,24 @@
       if (typeof t !== "number" || !isFinite(t) || Math.floor(t) !== t || t < 3 || t > 6) throw new Error("Challenge malformed");
       if (typeof p !== "number" || !isFinite(p) || Math.floor(p) !== p || p !== 1) throw new Error("Challenge malformed");
       if (mKib < 8 * p) throw new Error("Challenge malformed");
+    }
+    if (alg === "rsw") {
+      // The rsw contract: the base64 modulus decodes to exactly 256
+      // bytes (the 2048-bit composite), and the sequential cost T rides
+      // the time-cost slot within the issuance range. The pinned
+      // target_bits (1) passes the uniform gate above and is never
+      // consulted by the solver.
+      var rswT = data.t, rswP = data.p, rswM = data.mKib;
+      if (typeof rswT !== "number" || !isFinite(rswT) || Math.floor(rswT) !== rswT || rswT < 10000 || rswT > 300000) throw new Error("Challenge malformed");
+      if (typeof rswP !== "number" || rswP !== 1) throw new Error("Challenge malformed");
+      if (typeof rswM !== "number" || rswM !== 0) throw new Error("Challenge malformed");
+      if (typeof data.rsw_modulus !== "string" || data.rsw_modulus.length < 1) throw new Error("Challenge malformed");
+      try {
+        var rswBytes = b64decode(data.rsw_modulus);
+        if (!rswBytes || rswBytes.length !== 256) throw new Error("Challenge malformed");
+      } catch (e) {
+        throw new Error("Challenge malformed");
+      }
     }
     if (data.ttlSecs !== undefined && (typeof data.ttlSecs !== "number" || !isFinite(data.ttlSecs) || Math.floor(data.ttlSecs) !== data.ttlSecs || data.ttlSecs < 1 || data.ttlSecs > 300)) throw new Error("Challenge malformed");
     // The optional ExecutionChallengeV1 program (base64 of the bytecode
@@ -1823,14 +1873,15 @@
         setStatus(kiwiT("statusConnecting"), kiwiT("badgeWait"), "connecting");
         var endpoint = kiwiEndpoint(W.getAttribute("data-kiwi-endpoint") || container.getAttribute("data-kiwi-endpoint") || "/api/kcaptcha/challenge");
         // Algorithm selection: the client may only select among the
-        // solver profiles the server offers (sha256 / argon2id). Any
-        // other attribute value is normalized back to the default — the
-        // driver can never invent an algorithm, and a solver failure must
-        // never downgrade a challenge request (there is no capability-based
-        // fallback anywhere: a failed worker/WASM path retries with the SAME
-        // profile, and difficulty parameters come from the server alone).
+        // solver profiles the server offers (sha256 / argon2id / rsw).
+        // Any other attribute value is normalized back to the default —
+        // the driver can never invent an algorithm, and a solver failure
+        // must never downgrade a challenge request (there is no
+        // capability-based fallback anywhere: a failed worker/WASM path
+        // retries with the SAME profile, and difficulty parameters come
+        // from the server alone).
         var algorithm = W.getAttribute("data-kiwi-algorithm") || container.getAttribute("data-kiwi-algorithm") || "sha256";
-        if (algorithm !== "sha256" && algorithm !== "argon2id") algorithm = "sha256";
+        if (algorithm !== "sha256" && algorithm !== "argon2id" && algorithm !== "rsw") algorithm = "sha256";
         var requestBinding = W.getAttribute("data-kiwi-request-binding") || container.getAttribute("data-kiwi-request-binding");
         var reqBody = { scope: scope };
         // EXECUTION CAPABILITY ADVERTISEMENT: when the widget container or
@@ -1944,11 +1995,14 @@
         }
         if (!kiwiGenerationCurrent(widgetId, gen)) return;
         // No weaker challenge: the response algorithm may only be equal
-        // or stronger than requested — a server downgrade (argon2id
-        // requested, sha256 returned) is a FAILED challenge, never a
+        // or stronger than requested — a server downgrade (argon2id or
+        // rsw requested, sha256 returned) is a FAILED challenge, never a
         // weaker solve. The client may only ever accept what it asked
-        // for or more.
-        if (algorithm === "argon2id" && (data.algorithm || "sha256") !== "argon2id") throw new Error("Challenge downgraded");
+        // for or more; an rsw request demands an rsw response exactly
+        // (the sequential and memory-hard rungs are incomparable).
+        var returnedAlgorithm = data.algorithm || "sha256";
+        if ((algorithm === "argon2id" && returnedAlgorithm !== "argon2id")
+          || (algorithm === "rsw" && returnedAlgorithm !== "rsw")) throw new Error("Challenge downgraded");
         // The response shape gate: a forged or malformed challenge is a
         // challenge-content failure (the controlled bounded-retry state),
         // never a solve. The widget may only solve a well-formed issuance.
@@ -1971,8 +2025,9 @@
         // anyway. 0 = no deadline (missing ttl).
         var deadline = data.ttlSecs > 0 ? performance.now() + data.ttlSecs * 1000 - KIWI_SOLVE_DEADLINE_MARGIN_MS : 0;
         var result = null;
-        if ((data.algorithm || "sha256") === "argon2id") {
-          // Memory-hard challenges ALWAYS run in the same-origin worker:
+        if ((data.algorithm || "sha256") === "argon2id" || (data.algorithm || "sha256") === "rsw") {
+          // Memory-hard (argon2id) and sequential time-lock (rsw)
+          // challenges ALWAYS run in the same-origin worker:
           // there is no synchronous fallback and no weaker-profile retry
           // — a missing or failed worker enters the controlled
           // kiwi:worker-unavailable state. The worker handle is stored on
@@ -2024,7 +2079,16 @@
         if (executionDigest && executionTrace) {
           execEvidence = executionDigest + ":" + btoa(executionTrace).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
         }
-        tokenEl.value = btoa(data.nonce + "." + result.counter + "." + result.duration + "." + JSON.stringify(telemetry.build()) + (execEvidence ? "." + execEvidence : ""));
+        // The token shape: an rsw proof has no search counter, so the
+        // counter segment holds 0 and the final value rides as the final
+        // 512-hex segment (the server's wire discriminator); every other
+        // algorithm keeps the counter-segment proof.
+        var counterSegment = (data.algorithm || "sha256") === "rsw" ? 0 : result.counter;
+        var proofSegment = (data.algorithm || "sha256") === "rsw"
+          ? (typeof result.proof === "string" && /^[0-9a-f]{512}$/.test(result.proof) ? "." + result.proof : null)
+          : null;
+        if ((data.algorithm || "sha256") === "rsw" && !proofSegment) throw new Error("Exhausted");
+        tokenEl.value = btoa(data.nonce + "." + counterSegment + "." + result.duration + "." + JSON.stringify(telemetry.build()) + (execEvidence ? "." + execEvidence : "") + (proofSegment || ""));
         setBinding(requestBinding || "");
         // The deferred decoy strategy creates its input after the first
         // solve completes (see kiwiRenderDecoy / kiwiFlushDecoy).

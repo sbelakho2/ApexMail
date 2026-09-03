@@ -65,6 +65,9 @@ fn sha_config(secret: &str, kid: u32) -> ChallengeConfig {
         issuer: None,
         policy_version: 1,
         execution_key: None,
+        rsw_modulus_n: None,
+        rsw_lambda: None,
+        rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
     }
 }
 
@@ -76,6 +79,7 @@ fn encode_token(nonce: &str, counter: u64) -> String {
         telemetry: serde_json::json!({}),
         execution_digest: None,
         execution_trace: None,
+        rsw_proof: None,
     }
     .encode()
 }

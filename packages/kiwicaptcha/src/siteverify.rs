@@ -101,6 +101,7 @@ fn map_error(reason: &VerifyError) -> String {
         | VerifyError::InsufficientWork
         | VerifyError::MalformedRecord
         | VerifyError::UnsupportedArgon2Params
+        | VerifyError::UnsupportedRswParams
         | VerifyError::BotDetected
         | VerifyError::MalformedToken
         | VerifyError::RecordNotFound

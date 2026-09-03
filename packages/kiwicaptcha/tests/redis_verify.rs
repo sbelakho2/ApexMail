@@ -227,6 +227,9 @@ fn sha_config(target_bits: u32) -> ChallengeConfig {
         secret_key: SECRET.into(),
         kid: 1,
         execution_key: None,
+        rsw_modulus_n: None,
+        rsw_lambda: None,
+        rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
         algorithm: PoWAlgorithm::Sha256,
         m_kib: 0,
         t: 1,
@@ -250,6 +253,9 @@ fn argon_config(target_bits: u32) -> ChallengeConfig {
         secret_key: SECRET.into(),
         kid: 1,
         execution_key: None,
+        rsw_modulus_n: None,
+        rsw_lambda: None,
+        rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
         algorithm: PoWAlgorithm::Argon2id,
         m_kib: 128,
         t: 3,
@@ -332,6 +338,7 @@ fn encode_token(nonce: &str, counter: u64) -> String {
         telemetry: serde_json::json!({}),
         execution_digest: None,
         execution_trace: None,
+        rsw_proof: None,
     }
     .encode()
 }
@@ -1850,6 +1857,7 @@ fn execution_armed_v4_record_verifies_through_the_production_verifier() {
         telemetry: serde_json::json!({}),
         execution_digest: Some(digest.clone()),
         execution_trace: Some(trace_b64.clone()),
+        rsw_proof: None,
     }
     .encode();
     let decoded = SolutionToken::decode(&token).expect("the armed token decodes");
@@ -1892,6 +1900,7 @@ fn execution_armed_record_without_evidence_is_execution_mismatch() {
         telemetry: serde_json::json!({}),
         execution_digest: None,
         execution_trace: None,
+        rsw_proof: None,
     }
     .encode();
     let issued_at_ns = issued.record.issued_at_ns;
@@ -1928,6 +1937,7 @@ fn execution_armed_record_with_a_wrong_digest_is_execution_mismatch() {
         duration_ms: 5000,
         telemetry: serde_json::json!({}),
         execution_digest: Some(wrong_digest.clone()),
+        rsw_proof: None,
         execution_trace: Some(trace_b64),
     }
     .encode();
@@ -1948,6 +1958,7 @@ fn execution_armed_record_with_a_wrong_digest_is_execution_mismatch() {
         telemetry: serde_json::json!({}),
         execution_digest: Some(wrong_digest),
         execution_trace: None,
+        rsw_proof: None,
     }
     .encode();
     assert_eq!(
@@ -1987,6 +1998,7 @@ fn stray_execution_evidence_on_an_unarmed_record_is_execution_mismatch() {
         counter: counter_a,
         duration_ms: 5000,
         telemetry: serde_json::json!({}),
+        rsw_proof: None,
         execution_digest: Some("a".repeat(64)),
         execution_trace: None,
     }
@@ -2017,6 +2029,7 @@ fn stray_execution_evidence_on_an_unarmed_record_is_execution_mismatch() {
         telemetry: serde_json::json!({}),
         execution_digest: Some("b".repeat(64)),
         execution_trace: Some("dHJhY2Vfc3RyYXlfZXZpZGVuY2U".to_string()),
+        rsw_proof: None,
     }
     .encode();
     assert_eq!(
@@ -7006,6 +7019,7 @@ fn v4_execution_armed_record_verifies_at_the_production_boundary() {
         telemetry: serde_json::json!({}),
         execution_digest: Some(digest),
         execution_trace: Some(trace_b64),
+        rsw_proof: None,
     }
     .encode();
     let issued_at_ns = issued.record.issued_at_ns;

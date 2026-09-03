@@ -18,6 +18,7 @@ use crate::challenge::{
     binding_tag, hash_ip, payload_from_record, verify_signature, verify_signature_v2,
     ChallengeRecord, PoWAlgorithm,
 };
+use crate::rsw::RswTrapdoor;
 
 /// Clock-skew tolerance (microseconds) for the server-side minimum-duration
 /// check. When the issuer host's clock is ahead of the verifier host
@@ -33,6 +34,10 @@ pub const SKEW_TOLERANCE_US: u64 = 5_000_000;
 /// 1. [`PoWAlgorithm::Sha256`] — `SHA-256(prefix || counter || salt)`
 /// 2. [`PoWAlgorithm::Argon2id`] — `Argon2id(prefix || counter, salt)` with
 ///    the record's m_kib/t/p parameters.
+///
+/// An rsw record derives no hash: the proof is the client's final
+/// value, checked through the trapdoor by the verification paths
+/// instead, so this helper is never called for one.
 pub(crate) fn derive_hash(record: &ChallengeRecord, counter: u64) -> Result<[u8; 32], VerifyError> {
     let salt = B64
         .decode(&record.salt)
@@ -73,6 +78,9 @@ pub(crate) fn derive_hash(record: &ChallengeRecord, counter: u64) -> Result<[u8;
             out.copy_from_slice(&result);
             Ok(out)
         }
+        // Never reached: the rsw verification paths check the presented
+        // final value through the trapdoor instead of deriving a hash.
+        PoWAlgorithm::Rsw => Err(VerifyError::MalformedRecord),
     }
 }
 
@@ -269,6 +277,24 @@ pub struct VerifyContext<'a> {
     /// verification call (correct or not), bounding the server-side cost of
     /// wrong candidates — particularly memory-hard Argon2id verifications.
     pub max_attempts: u32,
+    /// The rsw final value the solution token presents for an
+    /// rsw record (512 lowercase hex); `None` on every other token
+    /// shape. When the record's algorithm is rsw, the presented value
+    /// must equal the trapdoor expectation (constant-time compare) — a
+    /// missing or mismatched value is the deterministic
+    /// [`VerifyError::InsufficientWork`].
+    pub rsw_proof: Option<&'a str>,
+    /// The verifier's configured rsw modulus n (canonical standard
+    /// base64 of the 2048-bit composite). Together with `rsw_lambda` it
+    /// forms the time-lock trapdoor; a signed rsw record then verifies
+    /// through it. When both are `None` (the default), an rsw record is
+    /// authentic but unsupported
+    /// ([`VerifyError::UnsupportedRswParams`]).
+    pub rsw_modulus_n: Option<&'a str>,
+    /// The verifier's configured rsw secret lambda = lcm(p-1, q-1)
+    /// (canonical standard base64). Never stored on the record and
+    /// never sent to the client.
+    pub rsw_lambda: Option<&'a str>,
 }
 
 /// Outcome of a verification.
@@ -423,6 +449,16 @@ pub enum VerifyError {
     /// it is distinguished from a malformed record.
     #[error("Argon2id parameters exceed the supported process ceilings")]
     UnsupportedArgon2Params,
+    /// The record is authentic (its signature verifies) but this
+    /// verifier cannot check it: the deployment holds no rsw trapdoor
+    /// (the modulus/lambda pair is unconfigured), or the record's
+    /// signed sequential cost T sits outside the supported range
+    /// (10,000..=300,000). The PHP core's exact twin
+    /// (`unsupported_rsw_params`): the record really came from an
+    /// issuer holding the trapdoor; this verifier simply cannot
+    /// represent the computation.
+    #[error("the rsw challenge cannot be verified (no configured trapdoor, or the signed sequential cost is outside the supported bounds)")]
+    UnsupportedRswParams,
     #[error("automated or headless client detected via telemetry")]
     BotDetected,
     #[error("solution token is malformed or undecodable")]
@@ -504,6 +540,7 @@ impl VerifyError {
             Self::InsufficientWork => "insufficient_work",
             Self::MalformedRecord => "malformed_record",
             Self::UnsupportedArgon2Params => "unsupported_argon2_params",
+            Self::UnsupportedRswParams => "unsupported_rsw_params",
             // PHP's `telemetry_rejected` — the same failure class: the
             // client-side telemetry evidence rejected this client. The
             // variant name is Rust-idiomatic; the wire code is shared.
@@ -757,6 +794,62 @@ pub(crate) fn check_argon2_ceilings(record: &ChallengeRecord) -> Result<(), Veri
         return Err(VerifyError::UnsupportedArgon2Params);
     }
     Ok(())
+}
+
+/// The rsw process bound: a signed rsw record's sequential cost T,
+/// carried in the time-cost slot, must sit within the issuance range
+/// (10,000..=300,000). The verifier-side trapdoor check costs one
+/// modular exponentiation regardless of T, so the bound keeps the
+/// signed parameter space canonical rather than capping server work.
+/// Returns [`VerifyError::UnsupportedRswParams`] for an out-of-range
+/// signed record, the authentic-but-unsupported Argon2id ceiling
+/// split, and succeeds for every non-rsw record. Mirrors the
+/// PHP `Verifier::rswParamsOk`.
+pub(crate) fn check_rsw_params(record: &ChallengeRecord) -> Result<(), VerifyError> {
+    use crate::challenge::{MAX_RSW_T, MIN_RSW_T};
+    if record.algorithm != PoWAlgorithm::Rsw {
+        return Ok(());
+    }
+    if record.t < MIN_RSW_T || record.t > MAX_RSW_T {
+        return Err(VerifyError::UnsupportedRswParams);
+    }
+    Ok(())
+}
+
+/// The per-algorithm proof verdict of a presented token against a
+/// record. SHA-256 and Argon2id re-derive the hash and compare the
+/// leading zero bits; an rsw record compares the presented final value
+/// (the optional final token segment) against the trapdoor expectation
+/// in constant time over the fixed 512-hex wire form. `trapdoor` is the
+/// verifier's configured rsw pair, `None` when the deployment does not
+/// verify rsw records (an rsw record then yields
+/// [`VerifyError::UnsupportedRswParams`], the authentic-but-unsupported
+/// semantics the PHP core mirrors). Returns
+/// [`VerifyError::UnsupportedArgon2Params`] for an Argon2id parameter
+/// set the verifier refuses to represent.
+pub(crate) fn proof_is_valid(
+    record: &ChallengeRecord,
+    counter: u64,
+    rsw_proof: Option<&str>,
+    trapdoor: Option<&RswTrapdoor>,
+) -> Result<bool, VerifyError> {
+    match record.algorithm {
+        PoWAlgorithm::Rsw => {
+            let Some(trapdoor) = trapdoor else {
+                return Err(VerifyError::UnsupportedRswParams);
+            };
+            let Some(proof) = rsw_proof else {
+                return Ok(false);
+            };
+            let expected =
+                trapdoor.expected_proof_hex(&record.prefix, &record.nonce, record.t as u64);
+            Ok(ct_eq(expected.as_bytes(), proof.as_bytes()))
+        }
+        PoWAlgorithm::Sha256 | PoWAlgorithm::Argon2id => {
+            let hash = derive_hash(record, counter)?;
+            Ok(leading_zero_bits(&hash) >= record.target_bits)
+        }
+    }
 }
 
 /// Verify a solution against its stored challenge record.
@@ -1027,6 +1120,14 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
             return VerifyOutcome::Invalid(e);
         }
     }
+    // 1c. The rsw process bound — the same authentic-but-unsupported
+    //     split: a signed rsw record whose sequential cost T sits outside
+    //     the issuance range is refused before any trapdoor work.
+    if ctx.record.algorithm == PoWAlgorithm::Rsw {
+        if let Err(e) = check_rsw_params(ctx.record) {
+            return VerifyOutcome::Invalid(e);
+        }
+    }
 
     // 2. TTL. The challenge is invalid outside its validity window
     //    [issued_at, expires_at): expired once now reaches expires_at, and
@@ -1192,9 +1293,22 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         }
     }
 
-    // 5. Re-derive and check leading zero bits.
-    let hash = match derive_hash(ctx.record, ctx.counter) {
-        Ok(h) => h,
+    // 5. Re-derive and check the proof. The rsw record derives no hash:
+    //    the presented final value is compared against the trapdoor
+    //    expectation (constant-time over the fixed 512-hex wire form);
+    //    the trapdoor pair is the verifier's own configuration, decoded
+    //    per verification on this generic path (the production verifier
+    //    holds the decoded pair). A verifier without the pair refuses
+    //    the authentic record with UnsupportedRswParams.
+    let trapdoor = match (ctx.rsw_modulus_n, ctx.rsw_lambda) {
+        (Some(modulus), Some(lambda)) => match RswTrapdoor::new(modulus, lambda) {
+            Ok(trapdoor) => Some(trapdoor),
+            Err(_) => return VerifyOutcome::Invalid(VerifyError::UnsupportedRswParams),
+        },
+        _ => None,
+    };
+    let valid = match proof_is_valid(ctx.record, ctx.counter, ctx.rsw_proof, trapdoor.as_ref()) {
+        Ok(valid) => valid,
         Err(e) => return VerifyOutcome::Invalid(e),
     };
 
@@ -1219,7 +1333,7 @@ pub fn verify_solution(ctx: &mut VerifyContext<'_>) -> VerifyOutcome {
         return VerifyOutcome::Invalid(e);
     }
 
-    if leading_zero_bits(&hash) >= ctx.record.target_bits {
+    if valid {
         // The outcome carries the consumed canonical nonce (jti) so callers
         // can correlate the result without re-decoding the solution. The
         // server-measured solve duration is computed from the same receipt
@@ -1545,6 +1659,9 @@ mod tests {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 100,
             t: 1,
@@ -1569,6 +1686,9 @@ mod tests {
 
     fn make_argon2_record(target_bits: u32, m_kib: u32) -> ChallengeRecord {
         let config = ChallengeConfig {
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
@@ -1611,6 +1731,9 @@ mod tests {
             expected_issuer: None,
             expected_policy_version: None,
             client_ip: Some("1.2.3.4"),
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
             execution_digest: None,
             execution_trace: None,
             telemetry: None,
@@ -1667,6 +1790,9 @@ mod tests {
                 expected_scope: None,
                 expected_request_binding: RequestBindingExpectation::Unenforced,
                 expected_region: Some("eu"), // the record is region-unbound → WrongRegion would fire later
+                rsw_proof: None,
+                rsw_modulus_n: None,
+                rsw_lambda: None,
                 expected_issuer: Some("prod"),
                 expected_policy_version: Some(2),
                 client_ip,
@@ -1797,6 +1923,9 @@ mod tests {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 4,
             t: 3,
@@ -1826,6 +1955,9 @@ mod tests {
                 secret_key: "test-key-16-bytes!".into(),
                 kid: 1,
                 execution_key: None,
+                rsw_modulus_n: None,
+                rsw_lambda: None,
+                rsw_t: crate::challenge::DEFAULT_RSW_T,
                 algorithm: PoWAlgorithm::Argon2id,
                 m_kib: 128,
                 t,
@@ -1859,6 +1991,9 @@ mod tests {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -1898,6 +2033,9 @@ mod tests {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -1937,6 +2075,9 @@ mod tests {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 128,
             t: 7,
@@ -1966,6 +2107,9 @@ mod tests {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 128,
             t: 3,
@@ -1994,6 +2138,9 @@ mod tests {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: crate::challenge::SOLVER_MAX_ARGON2_M_KIB + 1,
             t: 3,
@@ -2035,6 +2182,9 @@ mod tests {
         // the solver ceiling — both must fail at issuance.
         for bits in [0u32, 11] {
             let config = ChallengeConfig {
+                rsw_modulus_n: None,
+                rsw_lambda: None,
+                rsw_t: crate::challenge::DEFAULT_RSW_T,
                 secret_key: "test-key-16-bytes!".into(),
                 kid: 1,
                 execution_key: None,
@@ -2068,6 +2218,9 @@ mod tests {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Argon2id,
             m_kib: 128,
             t: 3,
@@ -2258,6 +2411,9 @@ mod tests {
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
             accept_legacy_v1: false,
         };
         assert_eq!(
@@ -2293,6 +2449,9 @@ mod tests {
             expected_region: None,
             expected_issuer: None,
             expected_policy_version: None,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
             telemetry: None,
             enforce_telemetry: false,
             max_attempts: 0,
@@ -2335,6 +2494,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -2369,6 +2531,9 @@ mod tests {
             now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
             client_ip: Some("1.2.3.4"),
@@ -2402,6 +2567,9 @@ mod tests {
             revoked_kids: None,
             counter,
             duration_ms: 5000,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
             now_unix: Some(&mut || NOW_UNIX + 1),
             now_ns: NOW_NS + 5_000_000,
             min_duration_ms: 0,
@@ -2453,6 +2621,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -2489,6 +2660,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -2502,6 +2676,9 @@ mod tests {
             secret_key: "test-key-16-bytes!".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -2527,6 +2704,9 @@ mod tests {
             record: &mut unbound,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
             revoked_kids: None,
             counter: counter2,
             duration_ms: 5000,
@@ -2581,6 +2761,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 1,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -2609,6 +2792,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 1,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx2),
@@ -2645,12 +2831,18 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 3,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         verify_solution(&mut ctx); // wrong counter
         let attempts = record.attempts_used;
         assert_eq!(attempts, 1);
         let mut ctx2 = VerifyContext {
             record: &mut record,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
             revoked_kids: None,
@@ -2708,6 +2900,9 @@ mod tests {
             enforce_telemetry: true,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -2743,6 +2938,9 @@ mod tests {
             enforce_telemetry: true,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -2778,6 +2976,9 @@ mod tests {
             expected_policy_version: None,
             telemetry: Some(&json!({})),
             enforce_telemetry: true,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
             max_attempts: 0,
             accept_legacy_v1: false,
         };
@@ -2788,6 +2989,9 @@ mod tests {
         // An empty array is equally empty.
         let mut ctx_array = VerifyContext {
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
             record: &mut record,
             secret_key: "test-key-16-bytes!",
             secrets_by_kid: None,
@@ -2844,6 +3048,9 @@ mod tests {
             enforce_telemetry: true,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -2882,6 +3089,9 @@ mod tests {
             enforce_telemetry: true,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -2916,6 +3126,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -2954,6 +3167,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -2991,6 +3207,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -3027,6 +3246,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3201,6 +3423,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3237,6 +3462,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx2),
@@ -3278,6 +3506,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(
             matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
@@ -3395,6 +3626,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3429,6 +3663,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3463,6 +3700,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -3566,6 +3806,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -3593,6 +3836,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx_fast),
@@ -3739,6 +3985,9 @@ mod tests {
             secret_key: "0123456789abcdef0123456789abcdef".into(),
             kid: 1,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
             algorithm: PoWAlgorithm::Sha256,
             m_kib: 0,
             t: 1,
@@ -3814,6 +4063,9 @@ mod tests {
                 secret_key: "test-key-16-bytes!".into(),
                 kid: 1,
                 execution_key: None,
+                rsw_modulus_n: None,
+                rsw_lambda: None,
+                rsw_t: crate::challenge::DEFAULT_RSW_T,
                 algorithm: PoWAlgorithm::Sha256,
                 m_kib: 100,
                 t: 1,
@@ -3853,6 +4105,9 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
             client_ip: Some("1.2.3.4"),
             execution_digest: None,
             execution_trace: None,
@@ -3886,6 +4141,9 @@ mod tests {
             min_duration_ms: 0,
             expected_scope: None,
             expected_request_binding: RequestBindingExpectation::Unenforced,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
             client_ip: Some("9.9.9.9"), // different from issuance IP 1.2.3.4
             execution_digest: None,
             execution_trace: None,
@@ -3940,6 +4198,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -3976,6 +4237,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4012,6 +4276,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx_match),
@@ -4022,6 +4289,9 @@ mod tests {
         let mut ctx_none = VerifyContext {
             record: &mut record,
             secret_key: "test-key-16-bytes!",
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
             secrets_by_kid: None,
             revoked_kids: None,
             counter,
@@ -4081,6 +4351,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4118,6 +4391,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4154,6 +4430,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx_match),
@@ -4183,6 +4462,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx_none),
@@ -4227,6 +4509,9 @@ mod tests {
             policy_version: 1,
             kid,
             execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: crate::challenge::DEFAULT_RSW_T,
         };
         issue_challenge(&config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None)
             .unwrap()
@@ -4271,6 +4556,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(
             matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
@@ -4303,6 +4591,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx_wrong),
@@ -4332,6 +4623,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx_plain),
@@ -4373,6 +4667,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4402,6 +4699,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx_empty),
@@ -4446,6 +4746,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4479,6 +4782,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx_boundary),
@@ -4512,6 +4818,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx_rolled),
@@ -4560,6 +4869,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4590,6 +4902,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx_plain),
@@ -4634,6 +4949,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(
             matches!(verify_solution(&mut ctx), VerifyOutcome::Valid { .. }),
@@ -4875,6 +5193,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -4910,6 +5231,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -4952,6 +5276,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -5005,6 +5332,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert!(matches!(
             verify_solution(&mut ctx),
@@ -5119,6 +5449,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         match verify_solution(&mut ctx) {
             VerifyOutcome::Valid {
@@ -5159,6 +5492,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         match verify_solution(&mut ctx) {
             VerifyOutcome::Valid {
@@ -5204,6 +5540,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         match verify_solution(&mut ctx) {
             VerifyOutcome::Valid {
@@ -5392,6 +5731,9 @@ mod tests {
             record,
             secret_key: FIXTURE_SECRET,
             secrets_by_kid: None,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
             revoked_kids: None,
             counter,
             duration_ms: 5000,
@@ -5500,6 +5842,9 @@ mod tests {
             enforce_telemetry: false,
             max_attempts: 0,
             accept_legacy_v1: false,
+            rsw_proof: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
         };
         assert_eq!(
             verify_solution(&mut ctx),
@@ -5539,5 +5884,175 @@ mod tests {
             ),
             "v1 record read via the ip_hash alias must verify with the migration flag"
         );
+    }
+    // ── rsw (sequential time-lock) verification ───────────────────────
+
+    fn make_rsw_record(t: u32) -> ChallengeRecord {
+        let mut config = crate::challenge::ChallengeConfig {
+            secret_key: "test-key-16-bytes!".into(),
+            kid: 1,
+            execution_key: None,
+            rsw_modulus_n: Some(crate::rsw::fixtures::MODULUS_N_B64.into()),
+            rsw_lambda: Some(crate::rsw::fixtures::LAMBDA_B64.into()),
+            rsw_t: t,
+            algorithm: PoWAlgorithm::Rsw,
+            m_kib: 0,
+            t: 1,
+            p: 1,
+            target_bits: 8,
+            argon2_target_bits: 8,
+            ttl_secs: 120,
+            min_duration_ms: Some(0),
+            auto_tune: false,
+            auto_tune_min_bits: 8,
+            auto_tune_max_bits: 20,
+            binding_mode: BindingMode::Bound,
+            region: None,
+            issuer: None,
+            policy_version: 1,
+        };
+        if t == 0 {
+            // A signed out-of-range record: keep a canonical range T for
+            // the issuance, then re-sign with the out-of-range slot.
+            config.rsw_t = crate::challenge::MIN_RSW_T;
+        }
+        let issued = crate::challenge::issue_challenge(
+            &config, "login", "1.2.3.4", NOW_UNIX, NOW_NS, 0, None,
+        )
+        .unwrap();
+        let mut record = issued.record;
+        if t == 0 {
+            record.t = 0;
+            resign_v2(&mut record, "test-key-16-bytes!");
+        }
+        record
+    }
+
+    /// Verify a record against a presented rsw proof through the shared
+    /// `verify_solution` flow.
+    fn verify_rsw(
+        record: &mut ChallengeRecord,
+        proof: Option<&str>,
+        trapdoor: bool,
+    ) -> VerifyOutcome {
+        let mut ctx = VerifyContext {
+            record,
+            secret_key: "test-key-16-bytes!",
+            secrets_by_kid: None,
+            revoked_kids: None,
+            counter: 0,
+            duration_ms: 5000,
+            now_unix: Some(&mut || NOW_UNIX + 1),
+            now_ns: NOW_NS + 5_000_000,
+            min_duration_ms: 0,
+            expected_scope: Some("login"),
+            expected_request_binding: RequestBindingExpectation::Unenforced,
+            expected_region: None,
+            expected_issuer: None,
+            expected_policy_version: None,
+            client_ip: Some("1.2.3.4"),
+            rsw_proof: proof,
+            rsw_modulus_n: trapdoor.then_some(crate::rsw::fixtures::MODULUS_N_B64),
+            rsw_lambda: trapdoor.then_some(crate::rsw::fixtures::LAMBDA_B64),
+            execution_digest: None,
+            execution_trace: None,
+            telemetry: None,
+            enforce_telemetry: false,
+            max_attempts: 0,
+            accept_legacy_v1: false,
+        };
+        verify_solution(&mut ctx)
+    }
+
+    #[test]
+    fn rsw_sequential_solve_round_trip_verifies() {
+        let mut record = make_rsw_record(crate::challenge::MIN_RSW_T);
+        let proof =
+            crate::rsw::fixtures::sequential_proof(&record.prefix, &record.nonce, record.t as u64);
+        assert!(
+            matches!(
+                verify_rsw(&mut record, Some(&proof), true),
+                VerifyOutcome::Valid { .. }
+            ),
+            "the sequential solve must verify through the trapdoor"
+        );
+    }
+
+    #[test]
+    fn rsw_wrong_or_missing_proof_is_insufficient_work() {
+        let mut record = make_rsw_record(crate::challenge::MIN_RSW_T);
+        let proof =
+            crate::rsw::fixtures::sequential_proof(&record.prefix, &record.nonce, record.t as u64);
+        let mut wrong = proof.clone();
+        wrong.replace_range(0..1, if &proof[0..1] == "0" { "1" } else { "0" });
+        assert_eq!(
+            verify_rsw(&mut record, Some(&wrong), true),
+            VerifyOutcome::Invalid(VerifyError::InsufficientWork)
+        );
+        let mut record2 = make_rsw_record(crate::challenge::MIN_RSW_T);
+        assert_eq!(
+            verify_rsw(&mut record2, None, true),
+            VerifyOutcome::Invalid(VerifyError::InsufficientWork),
+            "a missing proof segment is a wrong proof"
+        );
+    }
+
+    #[test]
+    fn rsw_proof_of_another_challenge_is_insufficient_work() {
+        let mut record_a = make_rsw_record(crate::challenge::MIN_RSW_T);
+        let record_b = make_rsw_record(crate::challenge::MIN_RSW_T);
+        let proof_of_b = crate::rsw::fixtures::sequential_proof(
+            &record_b.prefix,
+            &record_b.nonce,
+            record_b.t as u64,
+        );
+        assert_eq!(
+            verify_rsw(&mut record_a, Some(&proof_of_b), true),
+            VerifyOutcome::Invalid(VerifyError::InsufficientWork)
+        );
+    }
+
+    #[test]
+    fn rsw_without_a_configured_trapdoor_is_unsupported() {
+        let mut record = make_rsw_record(crate::challenge::MIN_RSW_T);
+        let proof =
+            crate::rsw::fixtures::sequential_proof(&record.prefix, &record.nonce, record.t as u64);
+        assert_eq!(
+            verify_rsw(&mut record, Some(&proof), false),
+            VerifyOutcome::Invalid(VerifyError::UnsupportedRswParams)
+        );
+    }
+
+    #[test]
+    fn rsw_signed_record_outside_the_t_ceiling_is_unsupported() {
+        // A zero time-cost slot is inside the u32 space but far outside
+        // the issuance range 10,000..=300,000: the cheap-phase process
+        // bound refuses the authentic record before any trapdoor work.
+        let mut record = make_rsw_record(0);
+        let proof =
+            crate::rsw::fixtures::sequential_proof(&record.prefix, &record.nonce, record.t as u64);
+        assert_eq!(
+            verify_rsw(&mut record, Some(&proof), true),
+            VerifyOutcome::Invalid(VerifyError::UnsupportedRswParams)
+        );
+    }
+
+    #[test]
+    fn rsw_trapdoor_expectation_equals_sequential_squaring() {
+        let rsw = crate::rsw::RswTrapdoor::new(
+            crate::rsw::fixtures::MODULUS_N_B64,
+            crate::rsw::fixtures::LAMBDA_B64,
+        )
+        .unwrap();
+        for t in [1u64, 2, 7, 10_000] {
+            let record = make_rsw_record(crate::challenge::MIN_RSW_T);
+            let sequential =
+                crate::rsw::fixtures::sequential_proof(&record.prefix, &record.nonce, t);
+            let expected = rsw.expected_proof_hex(&record.prefix, &record.nonce, t);
+            assert_eq!(
+                expected, sequential,
+                "the trapdoor shortcut must equal {t} squarings"
+            );
+        }
     }
 }
