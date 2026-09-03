@@ -328,12 +328,26 @@ measurement. Older binaries and stale open pages only know version 1,
 so version 2 must never reach them: a mixed fleet cannot tell the two
 grammars apart by protocol_version alone, since both are protocol v4.
 
+The client capability declaration is never an authority over the
+grammar a hostile solver must solve. With
+`kiwi_captcha.execution_required_version` set to 2 (default 1), an
+execution-armed request from a client that cannot solve version 2 is
+refused with the deterministic
+`CLIENT_EXECUTION_VERSION_UNSUPPORTED` outcome: reload or upgrade the
+widget. The server never downgrades to version 1 and never issues an
+unarmed challenge. The required tier is the final step of the
+transition. Keep it at 1 while the fleet moves to the version-2
+generation (this node's `execution_version` cap = 2 everywhere and
+the central `min_execution_version` = 2), then raise it to 2 once
+every serving page can solve version 2.
+
 The issuance-side gate is three-way. A node emits version 2 only when
 every rung is up:
 
-1. the client advertised `execution_max_version` >= 2 with the
-   challenge request. The current widget driver sends the field when
-   the deployment configured the execution tier; an older driver never
+1. the client advertised execution version 2 with the challenge
+   request, carried by the `Kiwi-Execution-Max-Version` request
+   header. The current widget driver sends the header when the
+   deployment configured the execution tier; an older driver never
    advertises and the server treats absence as version 1.
 2. the node's `kiwi_captcha.execution_version` cap is raised to 2
    (default 1). The cap is the writer switch: no node emits version 2

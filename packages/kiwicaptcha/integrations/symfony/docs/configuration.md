@@ -363,15 +363,24 @@ Three knobs control the dimension:
   invalidates the challenge. The gate is inert without an
   `execution_key`, so turning it on before configuring the key never
   breaks issuance and never arms anything.
+- `kiwi_captcha.execution_required_version` (int 1 or 2, default 1):
+  the server-owned required execution tier. When 2, an execution-armed
+  request from a client below version 2 is refused with the
+  deterministic `CLIENT_EXECUTION_VERSION_UNSUPPORTED` outcome and is
+  never downgraded to the weaker version-1 grammar. Raise it to 2 only
+  after the fleet is fully on the version-2 generation (the cap above
+  and the central `min_execution_version` floor at 2 everywhere).
+
 - `kiwi_captcha.execution_version` (int 1 or 2, default 1): the
   node's execution-program grammar cap. Version 2 is the causal
   observe grammar (opcode 33); version 1 is the construction-to-probe
   grammar every interpreter generation runs. A node emits version 2
-  only when the client advertised `execution_max_version` >= 2 with
-  the challenge request, this cap is raised to 2, and the confirmed
-  central security-policy floor (`{kiwi:<ns>}:security-policy`
-  `min_execution_version`) is >= 2. The current widget driver
-  advertises the field when the execution tier is configured.
+  only when the client advertised execution version 2 with the
+  challenge request (the `Kiwi-Execution-Max-Version` request header),
+  this cap is raised to 2, and the confirmed central security-policy
+  floor (`{kiwi:<ns>}:security-policy` `min_execution_version`) is
+  >= 2. The current widget driver sends the header when the execution
+  tier is configured.
   Every other combination emits version 1, so a mixed fleet of older
   binaries and stale open pages is never handed the newer grammar.
   The cap defaults to 1: raising it declares the node ready to write

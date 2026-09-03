@@ -1659,6 +1659,7 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // and the SecurityEpochMonitor confirms the central
             // min_execution_version floor >= 2.
             ->setArgument('$executionVersionCap', $config['execution_version'])
+            ->setArgument('$executionRequiredVersion', $config['execution_required_version'])
             // The issuance-side logger (when the app has one) receives
             // the once-per-process decoy_v3_enabled-but-floor-too-low
             // warning.

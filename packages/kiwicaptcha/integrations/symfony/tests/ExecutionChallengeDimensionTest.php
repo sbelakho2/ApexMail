@@ -257,12 +257,13 @@ final class ExecutionChallengeDimensionTest extends TestCase
      *
      * @return array{0: \Symfony\Component\HttpFoundation\Response, 1: \KiwiCaptcha\Storage\ArrayStorage}
      */
-    private function armedIssuance(string $json, ?string $capabilityHeader = null): array
+    private function armedIssuance(string $json, ?string $capabilityHeader = null, int $requiredVersion = 1): array
     {
         $container = $this->load([[
             'secret_key' => self::SECRET,
             'execution_key' => self::EXECUTION_KEY,
             'execution_version' => 2,
+            'execution_required_version' => $requiredVersion,
             'redis_service' => 'fake_redis',
             'risk' => ['enabled' => true, 'redis_service' => 'fake_redis', 'execution_challenge' => 'on'],
             'storage' => 'kiwi_captcha.storage.array',
@@ -333,6 +334,56 @@ final class ExecutionChallengeDimensionTest extends TestCase
         $counter = $this->winningCounter($payload);
         $token = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected, base64_encode($trace))->encode();
         self::assertTrue($this->verifyWithRecord($storage, $payload['nonce'], $token), 'the version-2 solve must verify');
+    }
+
+    public function testRequiredExecutionVersionTwoRefusesIncapableClientsNeverDowngrades(): void
+    {
+        // The server-owned required tier: with execution_required_version
+        // 2, a client that does not advertise execution version 2 must
+        // be refused with the deterministic client-unsupported code
+        // below — never issued the weaker version-1 grammar, never
+        // issued an unarmed challenge. The client capability
+        // declaration is never an authority over the grammar a hostile
+        // solver must solve.
+        foreach ([null, '1', 'abc', '0', '-1'] as $capability) {
+            [$response, $storage] = $this->armedIssuance('{"scope":"login","action":"login-action"}', $capability, 2);
+            self::assertSame(422, $response->getStatusCode(), 'the incapable client must be refused');
+            $body = json_decode((string) $response->getContent(), true);
+            self::assertSame('CLIENT_EXECUTION_VERSION_UNSUPPORTED', $body['error']['code'] ?? null, 'the refusal code is deterministic');
+            self::assertArrayNotHasKey('execution_program', $body, 'no weaker grammar is ever handed out');
+            self::assertArrayNotHasKey('challenge', $body, 'no challenge is handed out');
+        }
+    }
+
+    public function testRequiredExecutionVersionTwoIssuesVersionTwoToCapableClients(): void
+    {
+        // A capable client under the required tier still receives the
+        // version-2 grammar and the full solve verifies end to end.
+        [$response, $storage] = $this->armedIssuance('{"scope":"login","action":"login-action"}', '2', 2);
+        self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+        $payload = json_decode((string) $response->getContent(), true);
+        self::assertArrayHasKey('execution_program', $payload);
+        self::assertSame(2, $this->programVersion($payload['execution_program']), 'the required tier issues version 2 to a capable client');
+        $program = ExecutionChallengeGenerator::decode($payload['execution_program']);
+        self::assertNotNull($program);
+        $trace = ExecutionChallengeGenerator::executedTraceFor($program);
+        $expected = ExecutionChallengeGenerator::digestOverTrace($payload['execution_program'], $payload['nonce'], $trace);
+        self::assertNotNull($expected);
+        $counter = $this->winningCounter($payload);
+        $token = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected, base64_encode($trace))->encode();
+        self::assertTrue($this->verifyWithRecord($storage, $payload['nonce'], $token), 'the required-tier version-2 solve must verify');
+    }
+
+    public function testRequiredExecutionVersionDefaultOneKeepsTheTransitionBehavior(): void
+    {
+        // The safe transition default: required tier 1 keeps the
+        // capability-negotiated behavior — a headerless request still
+        // receives version 1 (stale clients keep working until the
+        // operator raises the required tier fleet-wide).
+        [$response, $storage] = $this->armedIssuance('{"scope":"login","action":"login-action"}', null, 1);
+        self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+        $payload = json_decode((string) $response->getContent(), true);
+        self::assertSame(1, $this->programVersion($payload['execution_program']), 'default tier 1 emits version 1 to a headerless client');
     }
 
     public function testClientWithoutTheCapabilityHeaderReceivesVersion1(): void

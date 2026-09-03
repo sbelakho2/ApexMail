@@ -289,6 +289,7 @@ final class ChallengeController
          * grammar of earlier releases.
          */
         private readonly int $executionVersionCap = 1,
+        private readonly int $executionRequiredVersion = 1,
     ) {
         $this->jsonDuplicateKeyScanner = new JsonDuplicateKeyScanner();
     }
@@ -1547,6 +1548,25 @@ final class ChallengeController
             // floor is >= 2; every other issuance stamps version 1.
             $armExecution = $this->executionArmingEnabled($executionRiskDecision);
             $executionVersion = $this->effectiveExecutionVersion($clientExecutionCapability);
+            // The server-owned required execution tier: the client
+            // capability declaration is never an authority over the
+            // grammar a hostile solver must solve. When the deployment
+            // requires execution version 2 and this request would be
+            // execution-armed, a client that cannot solve version 2 is
+            // refused with the deterministic client-unsupported
+            // outcome (code below) — never downgraded to the weaker
+            // version-1 grammar, never issued an unarmed challenge.
+            // The refusal happens before any admission slot or record
+            // commit, so nothing is minted or held.
+            if ($armExecution && $this->executionRequiredVersion >= 2 && $executionVersion < 2) {
+                return $this->privateJson(
+                    ['error' => ['code' => 'CLIENT_EXECUTION_VERSION_UNSUPPORTED', 'message' => 'This deployment requires the execution version 2 client; reload the page or upgrade the widget.']],
+                    Response::HTTP_UNPROCESSABLE_ENTITY,
+                    $request,
+                    $riskSession,
+                    $mintedCookie,
+                );
+            }
             $challenge = $profile !== null
                 ? $issuer->issueWithProfile($scope, $clientIp, $profile, requestBinding: $requestBinding, hostname: $hostname, armDecoyField: $armDecoy, armExecution: $armExecution, executionAction: $action, executionVersion: $executionVersion)
                 : $issuer->issueWithExecutionField($scope, $clientIp, $armExecution, $requestBinding, $hostname, $action, $executionVersion, $armDecoy);
