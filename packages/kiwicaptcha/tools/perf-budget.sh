@@ -272,6 +272,34 @@ if [ "$largest_v4" -gt "$CHALLENGE_JSON_V4_CAP" ]; then
   FAILED=1
 fi
 
+# The single-source-of-truth guard: the narrative performance
+# document (docs/performance-analysis.md) quotes the equality-gated
+# asset sizes. If those figures drift from the machine-readable
+# record, the check fails — human-readable prose must be regenerated
+# from the JSON, never copied by hand. The figures are matched as
+# plain digit strings with thousand separators exactly as the record
+# stores them.
+dr_raw=$(json_get "$BASELINES_FILE" "budgets.widget_driver.raw_bytes")
+dr_gz=$(json_get "$BASELINES_FILE" "budgets.widget_driver.gzip_bytes")
+dr_br=$(json_get "$BASELINES_FILE" "budgets.widget_driver.brotli_bytes")
+ex_raw=$(json_get "$BASELINES_FILE" "budgets.widget_execution.raw_bytes")
+ex_gz=$(json_get "$BASELINES_FILE" "budgets.widget_execution.gzip_bytes")
+ex_br=$(json_get "$BASELINES_FILE" "budgets.widget_execution.brotli_bytes")
+DOC_NORM=$(cat "docs/performance-analysis.md" 2>/dev/null | tr -d ',' || true)
+MISSING=""
+# The locale-independent comparison: the doc may format the figures
+# with or without thousand separators, so the guard strips the commas
+# and matches the bare digit strings from the record.
+for fig in "$dr_raw" "$dr_gz" "$dr_br" "$ex_raw" "$ex_gz" "$ex_br"; do
+  if [ -n "$DOC_NORM" ] && ! printf '%s' "$DOC_NORM" | grep -qF "$fig"; then
+    MISSING="$MISSING $fig"
+  fi
+done
+if [ -n "$MISSING" ]; then
+  echo "perf-budget FAILED: docs/performance-analysis.md does not quote the recorded asset figures:$MISSING — regenerate the prose from perf-baselines.json" >&2
+  FAILED=1
+fi
+
 if [ "$FAILED" = "1" ]; then
   echo "perf-budget: byte budget exceeded — a regression or an intentional growth that needs a re-baselined cap" >&2
   exit 1

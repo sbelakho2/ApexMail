@@ -337,10 +337,13 @@ write-through is rejected. The observed height is a genuine browser
 measurement: the interpreter styles the probed node as a fixed-width
 block rendering a canonical text line, so the value is the engine's
 own default-font metrics. The mirrors never predict it; their
-browser-equivalent traces use a fabricated reference value. A solver
-that implements the full public semantics can still fabricate a
-coherent trace: the values are evidence, not a cryptographic proof of
-a browser.
+browser-equivalent traces use a fabricated reference value. In short:
+the first-party client exercises real browser layout during execution
+version 2, while verification currently establishes causal trace
+consistency with the claimed observation, not cryptographic
+provenance of the layout value itself. A solver that implements the
+full public semantics can still fabricate a coherent trace: the
+values are evidence, not a cryptographic proof of a browser.
 
 Three knobs control the dimension:
 
