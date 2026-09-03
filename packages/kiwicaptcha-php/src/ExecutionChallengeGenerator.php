@@ -106,7 +106,14 @@ final class ExecutionChallengeGenerator
     /** The program blob format version. */
     public const FORMAT_VERSION = 1;
     /** The highest execution version this generator can emit (2 adds the observe opcode and the causal u8 chain). */
-    public const MAX_EXECUTION_VERSION = 2;
+    /**
+     * The highest execution version this generator can emit. Version 2
+     * adds the observe opcode and the causal u8 chain. Version 3 adds a
+     * second constructed node and the sibling-index traversal probe
+     * (dsib): its value is the actual previousElementSibling walk, and
+     * the server computes it exactly from the append order.
+     */
+    public const MAX_EXECUTION_VERSION = 3;
 
     /** The op-version byte stamped into the program (bumped on op-semantics changes). */
     public const PROTOCOL_VERSION = 1;
@@ -169,7 +176,8 @@ final class ExecutionChallengeGenerator
     /** Browser-observed: real DOM readback canonical-serialization digest. */
     public const OP_DOM_SERIALIZE_REAL = 32;
     public const OP_DOM_OBSERVE = 33;
-    public const OP_COUNT = 34;
+    public const OP_DOM_SIBLING_INDEX = 34;
+    public const OP_COUNT = 35;
 
     /** The canonical safe dataset-key grammar: the literal 'x' followed by 0..15 of [0-9a-z_]. */
     public const DATASET_KEY_PATTERN = '/^x[0-9a-z_]{0,15}$/D';
@@ -181,7 +189,7 @@ final class ExecutionChallengeGenerator
         'slen', 'schar', 'scode', 'sslice',
         'dcreate', 'dattr', 'dappend', 'dqsel', 'dget', 'dset', 'dgetd',
         'cadd', 'ccont', 'dparent', 'ddispatch', 'dserialize',
-        'qreal', 'geom', 'point', 'evreal', 'sreal', 'obs',
+        'qreal', 'geom', 'point', 'evreal', 'sreal', 'obs', 'dsib',
     ];
 
     private function __construct()
@@ -211,9 +219,9 @@ final class ExecutionChallengeGenerator
                 'execution action must be 1-32 characters of [A-Za-z0-9._:-]'
             );
         }
-        if ($version !== 1 && $version !== 2) {
+        if ($version !== 1 && $version !== 2 && $version !== 3) {
             throw new \InvalidArgumentException(
-                'execution version must be 1 or 2 (the canonical numeric bytes; version 2 adds the observe opcode and the causal u8 chain)'
+                'execution version must be 1, 2 or 3 (version 2 adds the observe opcode and the causal u8 chain; version 3 adds the sibling-index traversal probe)'
             );
         }
         if ($scope === '' || \strlen($scope) > 128 || preg_match('/^[A-Za-z0-9._:-]+$/D', $scope) !== 1) {
@@ -236,29 +244,36 @@ final class ExecutionChallengeGenerator
         $program .= $action;
         $program .= \chr($version);
         // Version 1 carries the construction-to-probe skeleton with no
-        // observe opcode; version 2 adds the causal u8 chain, so its
-        // floor rises to 11 (the fixed chain plus the 1..3 extra
-        // probes) while the grammar bounds 8..24 stay unchanged and
-        // every stamped count always fits its emitted records.
-        $opCount = $version === 2
-            ? 11 + (self::nextByte($stream) % 14)
-            : 8 + (self::nextByte($stream) % 17);
+        // observe opcode; version 2 adds the causal u8 chain (floor
+        // 11); version 3 adds a second constructed node and the
+        // sibling-index traversal probe — its fixed 12-op skeleton
+        // plus the drawn 1..3 extra probes needs floor 15. Every
+        // stamped count always fits its emitted records and the
+        // grammar bounds 8..24 stay unchanged.
+        $opCount = match ($version) {
+            2 => 11 + (self::nextByte($stream) % 14),
+            3 => 15 + (self::nextByte($stream) % 10),
+            default => 8 + (self::nextByte($stream) % 17),
+        };
         $program .= \chr($opCount);
 
         // The guaranteed structure of every armed program: a mandatory
         // DOM construction block (createElement with a drawn id, a
-        // mutate op on that node, an append), on version 2 a mandatory
-        // causal u8 chain (create the array, observe the real layout
-        // height of the constructed node into it, read the observed
-        // byte back, checksum/rotate over it) and a mandatory
-        // real-probe block (one of the browser-observed id probes
-        // 28/29/31 plus 1..3 further real probes). The probe and
-        // observe id operand is the constructed id bytes, drawn once
-        // and reused, so every probe reads a real constructed node
-        // after the append. The remaining op slots are filled from the
-        // other 28 opcodes, so the count stays within MIN_OPS..MAX_OPS
-        // while every program exercises real DOM construction, real
-        // layout observation and probe reads against constructed nodes.
+        // mutate op on that node, an append); version 3 adds a second
+        // constructed node so the traversal probe reads a real sibling
+        // relationship; versions 2+ carry the mandatory causal u8
+        // chain (create the array, observe the real layout height of
+        // the constructed node into it, read the observed byte back,
+        // checksum/rotate over it) and a mandatory real-probe block
+        // (one of the id probes 28/29/31, plus on version 3 the
+        // sibling-index probe 34, plus 1..3 further real probes). The
+        // probe and observe id operands are the constructed id bytes,
+        // drawn once and reused, so every probe reads a real
+        // constructed node after the append. The remaining op slots
+        // are filled from the other 28 opcodes, so the count stays
+        // within MIN_OPS..MAX_OPS while every program exercises real
+        // DOM construction, real layout observation and probe reads
+        // against constructed nodes.
         $ops = [];
         $tag = self::drawBytes($stream, 1);
         $idOperand = self::drawIdOperand($stream);
@@ -267,7 +282,21 @@ final class ExecutionChallengeGenerator
         $mutate = $mutates[self::nextByte($stream) % 3];
         $ops[] = [$mutate, self::drawOperands($stream, $mutate)];
         $ops[] = [self::OP_DOM_APPEND, ''];
-        if ($version === 2) {
+        $siblingOperand = $idOperand;
+        if ($version >= 3) {
+            // The second constructed node: the sibling-index probe
+            // walks the actual previousElementSibling chain of this node
+            // (its index among the body children the program built),
+            // a value the server computes exactly from the append
+            // order — never a free scalar.
+            $tagB = self::drawBytes($stream, 1);
+            $siblingOperand = self::drawIdOperand($stream);
+            $ops[] = [self::OP_DOM_CREATE, $tagB.$siblingOperand];
+            $mutateB = $mutates[self::nextByte($stream) % 3];
+            $ops[] = [$mutateB, self::drawOperands($stream, $mutateB)];
+            $ops[] = [self::OP_DOM_APPEND, ''];
+        }
+        if ($version >= 2) {
             // The causal chain: U8_CREATE(len) then the observe op
             // writes the browser-observed height at a drawn index
             // inside the array, U8_READ reads that same byte back (its
@@ -285,12 +314,20 @@ final class ExecutionChallengeGenerator
         }
         $linkProbes = [self::OP_DOM_QUERY_REAL, self::OP_DOM_GEOMETRY, self::OP_DOM_EVENT_REAL];
         $ops[] = [$linkProbes[self::nextByte($stream) % 3], $idOperand];
+        if ($version >= 3) {
+            // The mandatory sibling-index traversal probe of the
+            // second constructed node (a real DOM walk, exact value).
+            $ops[] = [self::OP_DOM_SIBLING_INDEX, $siblingOperand];
+        }
         $extraProbes = 1 + (self::nextByte($stream) % 3);
+        $probePool = $version >= 3 ? 7 : 5;
         for ($i = 0; $i < $extraProbes; $i++) {
-            $probe = self::OP_DOM_QUERY_REAL + (self::nextByte($stream) % 5);
+            $probe = self::OP_DOM_QUERY_REAL + (self::nextByte($stream) % $probePool);
             $probeOperand = match ($probe) {
                 self::OP_DOM_QUERY_REAL, self::OP_DOM_GEOMETRY, self::OP_DOM_EVENT_REAL => $idOperand,
+                self::OP_DOM_SIBLING_INDEX => $siblingOperand,
                 self::OP_DOM_POINT => self::drawBytes($stream, 2),
+                self::OP_DOM_OBSERVE => $idOperand.self::drawBytes($stream, 1),
                 default => '',
             };
             $ops[] = [$probe, $probeOperand];
@@ -369,10 +406,10 @@ final class ExecutionChallengeGenerator
             return null;
         }
         $opVersion = $read(1);
-        // Execution versions 1 and 2 are both accepted (the compat
+        // Execution versions 1, 2 and 3 are accepted (the compat
         // window: old challenges stay verifiable for their whole TTL);
         // each version bounds its own opcode space below.
-        if ($opVersion === null || (\ord($opVersion) !== 1 && \ord($opVersion) !== 2)) {
+        if ($opVersion === null || (\ord($opVersion) < 1 || \ord($opVersion) > 3)) {
             return null;
         }
         $opCount = $read(1);
@@ -391,11 +428,12 @@ final class ExecutionChallengeGenerator
                 return null;
             }
             $opcode = \ord($opcode);
-            // Version 1 programs never carry the version-2 observe
-            // opcode (33): the interpreter of a mixed fleet must be
+            // Older-version programs never carry newer opcodes (the
+            // version-2 observe opcode 33, the version-3 sibling-index
+            // opcode 34): the interpreter of a mixed fleet must be
             // able to reject a newer grammar by the declared version
             // byte alone.
-            $maxOpcode = \ord($opVersion) === 1 ? self::OP_COUNT - 1 : self::OP_COUNT;
+            $maxOpcode = self::OP_COUNT - (3 - \ord($opVersion));
             if ($opcode >= $maxOpcode) {
                 return null;
             }
@@ -471,12 +509,19 @@ final class ExecutionChallengeGenerator
         $cur = null;
         $docIds = [];
         $prevTop = -1;
+        $appendRank = [];
         $pos = 0;
         $traceLen = \strlen($trace);
         $lastIndex = \count($program['ops']) - 1;
         foreach ($program['ops'] as $i => $record) {
             $op = $record['op'];
             $operands = $record['operands'];
+            if ($op === self::OP_DOM_APPEND && $cur !== null && !isset($appendRank[$cur['id']])) {
+                // The append rank of each constructed node: its index
+                // among the body children the program built (the real
+                // sibling order the dsib probe walks).
+                $appendRank[$cur['id']] = \count($appendRank);
+            }
             $sim = self::simulateOp($op, $operands, $u8, $cur, $docIds);
             $name = self::TRACE_NAMES[$op];
             if (substr($trace, $pos, \strlen($name) + 1) !== $name.'(') {
@@ -500,6 +545,24 @@ final class ExecutionChallengeGenerator
                     return null;
                 }
                 $pos += \strlen($topTag) + 1;
+            } elseif ($op === self::OP_DOM_SIBLING_INDEX) {
+                // The sibling-index traversal: the value is the rank of
+                // the probed node's append among the appends replayed
+                // so far (its real index among the body children the
+                // program built). The walker computes the exact
+                // expected value from the append order — never an
+                // invariant, never a free scalar.
+                $expectedRank = $appendRank[$operands['id']] ?? null;
+                // The sandboxed document's first body child is the
+                // interpreter's own script element, so a constructed
+                // node's real sibling index is its append rank plus
+                // one (deterministic across engines).
+                if ($expectedRank === null
+                    || preg_match('/\G(\d+)\)/', $trace, $m, 0, $pos) !== 1
+                    || (int) $m[1] !== $expectedRank + 1) {
+                    return null;
+                }
+                $pos += \strlen($m[0]);
             } elseif ($op === self::OP_DOM_OBSERVE) {
                                 // validates the grammar and the bounds, requires the
                 // probed id to be an appended node at this point, then
@@ -678,6 +741,10 @@ final class ExecutionChallengeGenerator
             // id on issued programs) plus one raw byte for the u8
             // destination index.
             self::OP_DOM_OBSERVE => self::drawIdOperand($stream).self::drawBytes($stream, 1),
+            // The sibling-index traversal probe carries the probed id
+            // (the second constructed node on issued version-3
+            // programs).
+            self::OP_DOM_SIBLING_INDEX => self::drawIdOperand($stream),
             default => '',
         };
     }
@@ -811,6 +878,7 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_POINT => ['x' => ($readByte() ?? 0) % 256, 'y' => ($readByte() ?? 0) % 256],
             self::OP_DOM_EVENT_REAL => $readIdKeyed(),
             self::OP_DOM_OBSERVE => self::readObserve($read, $readByte, $readIdKeyed),
+            self::OP_DOM_SIBLING_INDEX => $readIdKeyed(),
             default => null,
         };
     }
@@ -1141,6 +1209,10 @@ final class ExecutionChallengeGenerator
             // placeholder; the verifier replays the value the submitted
             // trace reports (see verifyExecutedTrace).
             self::OP_DOM_OBSERVE => 'obs',
+            // The sibling index is a real traversal result the verifier
+            // computes exactly from the append order (see
+            // verifyExecutedTrace); the pure sim emits the placeholder.
+            self::OP_DOM_SIBLING_INDEX => 'dsib',
             default => '0',
         };
     }

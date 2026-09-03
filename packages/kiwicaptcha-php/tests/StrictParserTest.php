@@ -257,10 +257,12 @@ final class StrictParserTest extends TestCase
             'must be an integer',
         ];
 
-        yield 'execution_version not the canonical byte 1|2 rejected' => [
-            self::mutate('protocol_version', 4) + ['execution_program' => $program, 'execution_version' => 3, 'execution_commitment' => hash('sha256', $program)],
-            'must be exactly 1',
+        yield 'execution_version outside the canonical set 1|2|3 rejected' => [
+            self::mutate('protocol_version', 4) + ['execution_program' => $program, 'execution_version' => 9, 'execution_commitment' => hash('sha256', $program)],
+            'must be one of the canonical execution-dimension versions 1, 2 or 3',
         ];
+
+
 
         yield 'non-hex execution_commitment rejected' => [
             self::base() + ['execution_program' => $program, 'execution_version' => 1, 'execution_commitment' => str_repeat('g', 64)],
@@ -442,6 +444,23 @@ final class StrictParserTest extends TestCase
         self::assertSame($data['execution_program'], $roundTripped->toArray()['execution_program']);
         self::assertSame(1, $roundTripped->toArray()['execution_version']);
         self::assertSame($data['execution_commitment'], $roundTripped->toArray()['execution_commitment']);
+    }
+
+    public function testV4RecordWithExecutionVersionThreeRoundTrips(): void
+    {
+        // The version-3 grammar is a canonical record version: a
+        // protocol-v4 record carrying execution_version 3 with a
+        // matching program and commitment parses and round-trips.
+        $program = \KiwiCaptcha\ExecutionChallengeGenerator::generate('0123456789abcdef0123456789abcdef', '2l0IVh1xuKNjzcCDyV+X0lrceMHlHvmqCs5MdDw8tw0=', 'login', 'login-action', 3);
+        $record = ChallengeRecord::fromArray(self::mutate('protocol_version', 4) + [
+            'execution_program' => $program,
+            'execution_version' => 3,
+            'execution_commitment' => hash('sha256', $program),
+        ]);
+        self::assertSame(3, $record->executionVersion);
+        self::assertSame($program, $record->executionProgram);
+        $reparsed = ChallengeRecord::fromArray($record->toArray());
+        self::assertSame($program, $reparsed->executionProgram, 'the version-3 record round-trips');
     }
 
     public function testV4RecordWithExecutionVersionTwoRoundTrips(): void

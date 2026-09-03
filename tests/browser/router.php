@@ -1060,15 +1060,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     $executionAction = isset($body['action']) && is_string($body['action']) ? $body['action'] : null;
     // Execution version selection, the mirror of the bundle controller's
     // effectiveExecutionVersion rule. The fixture simulates a current
-    // deployment of the v2-capable generation, so it assumes its own
+    // deployment of the v3-capable generation, so it assumes its own
     // execution-version cap and the central fleet floor are confirmed
-    // at 2: ?execution=1 stands in for the whole execution rollout
+    // at 3: ?execution=1 stands in for the whole execution rollout
     // state, and no SecurityEpochMonitor or {kiwi:<ns>}:security-policy
-    // hash is wired in the fixture. The effective grammar version is
-    // therefore 2 exactly when the client advertised
-    // Kiwi-Execution-Max-Version: 2 on the challenge request; the
-    // current driver sends that header when the execution tier is
-    // configured. Absence, an empty value, garbage or a value below 2
+    // hash is wired in the fixture. The effective grammar version
+    // therefore equals the client's advertised maximum (capped at 3)
+    // when the client advertised Kiwi-Execution-Max-Version on the
+    // challenge request; the current driver sends that header when the
+    // execution tier is configured. Absence, an empty value or garbage
     // issues version 1, since an older driver never sends the header,
     // and a header value never 422s (the same rule as the bundle
     // controller). The capability is read only from the header: the
@@ -1078,7 +1078,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($path === '/challenge' || $path ==
     $executionMaxVersion = 1;
     $headerCapability = (string) ($_SERVER['HTTP_KIWI_EXECUTION_MAX_VERSION'] ?? '');
     if (preg_match('/^(?:0|[1-9][0-9]*)$/D', $headerCapability) === 1) {
-        $executionMaxVersion = (int) $headerCapability >= 2 ? 2 : 1;
+        $executionMaxVersion = min(3, (int) $headerCapability);
     }
     $challenge = mintChallenge($scope, $presentedBinding, $algorithm, ($_GET['decoy'] ?? '') === 'pool', $ttlOverride, $pinnedDecoy, $shaBits, $argonBits, $argonMKib, $armExecution, $executionAction, $executionMaxVersion);
     if ($challenge === null) {

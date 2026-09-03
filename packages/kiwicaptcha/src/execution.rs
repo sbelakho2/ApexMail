@@ -142,7 +142,7 @@
 //! execution dimension is supplementary evidence only — never the sole
 //! acceptance boundary.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
@@ -158,9 +158,10 @@ pub const FORMAT_VERSION: u8 = 1;
 /// The op-version byte stamped into the program.
 pub const PROTOCOL_VERSION: u8 = 1;
 
-/// The highest execution version this generator can emit (2 adds the
-/// observe opcode and the causal u8 chain).
-pub const MAX_EXECUTION_VERSION: u8 = 2;
+/// The highest execution version this generator can emit. Version 2
+/// adds the observe opcode and the causal u8 chain; version 3 adds a
+/// second constructed node and the sibling-index traversal probe.
+pub const MAX_EXECUTION_VERSION: u8 = 3;
 
 /// The deterministic op-count bounds of every issued program.
 pub const MIN_OPS: u8 = 8;
@@ -226,7 +227,8 @@ pub const OP_DOM_POINT: u8 = 30;
 pub const OP_DOM_EVENT_REAL: u8 = 31;
 pub const OP_DOM_SERIALIZE_REAL: u8 = 32;
 pub const OP_DOM_OBSERVE: u8 = 33;
-pub const OP_COUNT: u8 = 34;
+pub const OP_DOM_SIBLING_INDEX: u8 = 34;
+pub const OP_COUNT: u8 = 35;
 
 /// The trace entry names, one per opcode (index = opcode).
 const TRACE_NAMES: [&str; OP_COUNT as usize] = [
@@ -264,6 +266,7 @@ const TRACE_NAMES: [&str; OP_COUNT as usize] = [
     "evreal",
     "sreal",
     "obs",
+    "dsib",
 ];
 
 /// A parsed op: the opcode plus its canonical operands.
@@ -363,7 +366,7 @@ pub fn generate(
     if !is_identifier(action, 32) {
         return Err(GenerateError::InvalidAction);
     }
-    if version != 1 && version != 2 {
+    if !(1..=MAX_EXECUTION_VERSION).contains(&version) {
         return Err(GenerateError::InvalidVersion);
     }
     if !is_identifier(scope, 128) {
@@ -395,10 +398,10 @@ pub fn generate(
     // its floor rises to 11 (the fixed chain plus the 1..3 extra
     // probes) while the grammar bounds 8..24 stay unchanged and every
     // stamped count always fits its emitted records.
-    let op_count = if version == 2 {
-        11 + (cursor.next_byte() % 14)
-    } else {
-        8 + (cursor.next_byte() % 17)
+    let op_count = match version {
+        2 => 11 + (cursor.next_byte() % 14),
+        3 => 15 + (cursor.next_byte() % 10),
+        _ => 8 + (cursor.next_byte() % 17),
     };
     program.push(op_count);
 
@@ -426,7 +429,21 @@ pub fn generate(
     let mutate = mutates[(cursor.next_byte() % 3) as usize];
     ops.push((mutate, draw_operands(&mut cursor, mutate)));
     ops.push((OP_DOM_APPEND, Vec::new()));
-    if version == 2 {
+    let mut sibling_operand = id_operand.clone();
+    if version >= 3 {
+        // The second constructed node: the sibling-index probe walks
+        // the real previousElementSibling chain of this node (its
+        // index among the body children the program built).
+        let tag_b = cursor.next_byte();
+        sibling_operand = draw_id(&mut cursor);
+        let mut create_b = vec![tag_b];
+        create_b.extend_from_slice(&sibling_operand);
+        ops.push((OP_DOM_CREATE, create_b));
+        let mutate_b = mutates[(cursor.next_byte() % 3) as usize];
+        ops.push((mutate_b, draw_operands(&mut cursor, mutate_b)));
+        ops.push((OP_DOM_APPEND, Vec::new()));
+    }
+    if version >= 2 {
         // The causal chain: `U8_CREATE(len)` then `OBSERVE` writes the
         // browser-observed height at a drawn index inside the array,
         // `U8_READ` reads that same byte back (its exact entry must equal
@@ -448,12 +465,24 @@ pub fn generate(
         link_probes[(cursor.next_byte() % 3) as usize],
         id_operand.clone(),
     ));
+    if version >= 3 {
+        // The mandatory sibling-index traversal probe of the second
+        // constructed node.
+        ops.push((OP_DOM_SIBLING_INDEX, sibling_operand.clone()));
+    }
     let extra_probes = 1 + (cursor.next_byte() % 3);
+    let probe_pool = if version >= 3 { 7 } else { 5 };
     for _ in 0..extra_probes {
-        let probe = OP_DOM_QUERY_REAL + (cursor.next_byte() % 5);
+        let probe = OP_DOM_QUERY_REAL + (cursor.next_byte() % probe_pool);
         let probe_operands = match probe {
             OP_DOM_QUERY_REAL | OP_DOM_GEOMETRY | OP_DOM_EVENT_REAL => id_operand.clone(),
+            OP_DOM_SIBLING_INDEX => sibling_operand.clone(),
             OP_DOM_POINT => cursor.take(2),
+            OP_DOM_OBSERVE => {
+                let mut o = id_operand.clone();
+                o.push(cursor.next_byte());
+                o
+            }
             _ => Vec::new(),
         };
         ops.push((probe, probe_operands));
@@ -567,6 +596,7 @@ fn draw_operands(cursor: &mut Cursor, opcode: u8) -> Vec<u8> {
             out.push(cursor.next_byte());
             out
         }
+        OP_DOM_SIBLING_INDEX => draw_id(cursor),
         _ => Vec::new(),
     }
 }
@@ -665,13 +695,10 @@ pub fn decode(program_b64: &str) -> Option<Program> {
         return None;
     }
     let op_version = cursor.take_strict(1)?[0];
-    // Execution versions 1 and 2 are both accepted (the compat window:
-    // old challenges stay verifiable for their whole TTL); each version
-    // bounds its own opcode space below.
-    if op_version != 1 && op_version != 2 {
-        // The op version is exactly 1 — no arbitrary byte. Only the one
-        // canonical version of the wire contract exists, so a foreign
-        // blob stamped with any other byte is malformed.
+    // Execution versions 1, 2 and 3 are accepted (the compat window:
+    // old challenges stay verifiable for their whole TTL); each
+    // version bounds its own opcode space below.
+    if !(1..=MAX_EXECUTION_VERSION).contains(&op_version) {
         return None;
     }
     let op_count = cursor.take_strict(1)?[0];
@@ -682,14 +709,11 @@ pub fn decode(program_b64: &str) -> Option<Program> {
     let mut ops = Vec::with_capacity(op_count as usize);
     for _ in 0..op_count {
         let opcode = cursor.take_strict(1)?[0];
-        // Version 1 programs never carry the version-2 observe opcode
-        // (33): an old interpreter must be able to reject a newer
-        // grammar by the declared version byte alone.
-        let max_opcode = if op_version == 1 {
-            OP_COUNT - 1
-        } else {
-            OP_COUNT
-        };
+        // Older-version programs never carry newer opcodes (the
+        // version-2 observe opcode 33, the version-3 sibling-index
+        // opcode 34): an old interpreter must be able to reject a
+        // newer grammar by the declared version byte alone.
+        let max_opcode = OP_COUNT - (3 - op_version);
         if opcode >= max_opcode {
             return None;
         }
@@ -816,6 +840,13 @@ fn read_operands(cursor: &mut Cursor, opcode: u8) -> Option<BTreeMap<String, Ope
             let b = cursor.take_strict(1)?[0];
             map.insert("id".into(), Operand::Bytes(id));
             map.insert("idx".into(), Operand::Int((b % 64) as u64));
+        }
+        OP_DOM_SIBLING_INDEX => {
+            let id = read_len_bytes(cursor, 16)?;
+            if id.len() < 4 {
+                return None;
+            }
+            map.insert("id".into(), Operand::Bytes(id));
         }
         OP_DOM_SERIALIZE_REAL => {}
         OP_DOM_QUERY => {
@@ -1085,7 +1116,11 @@ fn simulate_op(
         // cannot reproduce a valid trace without emulating layout.
         OP_DOM_QUERY_REAL => {
             let id = operand_bytes(op, "id");
-            if !doc_ids.contains(&id) {
+            // The readback is authoritative only when the probed id IS
+            // the current node (the PHP mirror's exact rule): a
+            // constructed-but-not-current node reads 'none'.
+            let current_is_probe = cur.as_ref().is_some_and(|n| n.id == id);
+            if !doc_ids.contains(&id) || !current_is_probe {
                 return "none".into();
             }
             let parts: String = cur
@@ -1150,6 +1185,10 @@ fn simulate_op(
         // placeholder; the verifier replays the value the submitted
         // trace reports (see verify_executed_trace).
         OP_DOM_OBSERVE => "obs".into(),
+        // The sibling index is a real traversal result the verifier
+        // computes exactly from the append order (see
+        // verify_executed_trace); the pure sim emits the placeholder.
+        OP_DOM_SIBLING_INDEX => "dsib".into(),
         _ => "0".into(),
     }
 }
@@ -1238,8 +1277,15 @@ pub mod fixtures {
         let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
         let has_append = program.ops.iter().any(|op| op.opcode == OP_DOM_APPEND);
         let mut top = 0u64;
+        let mut append_rank: HashMap<Vec<u8>, usize> = HashMap::new();
         let mut entries: Vec<String> = Vec::with_capacity(program.ops.len());
         for op in &program.ops {
+            if op.opcode == OP_DOM_APPEND {
+                if let Some(node) = &cur {
+                    let rank = append_rank.len();
+                    append_rank.entry(node.id.clone()).or_insert(rank);
+                }
+            }
             if op.opcode == OP_DOM_GEOMETRY {
                 entries.push(format!("geom({},{})", top * 10, 10));
                 top += 1;
@@ -1249,6 +1295,19 @@ pub mod fixtures {
                 } else {
                     "point(none)".into()
                 });
+            } else if op.opcode == OP_DOM_SIBLING_INDEX {
+                // The browser-equivalent sibling traversal: the rank of
+                // the probed node's append (its real index among the
+                // body children the program built) — the exact value
+                // the verifier computes from the append order.
+                entries.push(format!(
+                    "dsib({})",
+                    append_rank
+                        .get(&operand_bytes(op, "id"))
+                        .copied()
+                        .map(|rank| rank + 1)
+                        .unwrap_or(usize::MAX)
+                ));
             } else if op.opcode == OP_DOM_OBSERVE {
                 // The browser-equivalent observe: the fabricated reference
                 // height (the real value is the engine's own text metrics,
@@ -1321,9 +1380,16 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
     let mut cur: Option<DomNode> = None;
     let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
     let mut prev_top: i64 = -1;
+    let mut append_rank: HashMap<Vec<u8>, usize> = HashMap::new();
     let bytes = trace.as_bytes();
     let mut pos = 0usize;
     for (i, op) in program.ops.iter().enumerate() {
+        if op.opcode == OP_DOM_APPEND {
+            if let Some(node) = &cur {
+                let rank = append_rank.len();
+                append_rank.entry(node.id.clone()).or_insert(rank);
+            }
+        }
         let sim = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
         let name = TRACE_NAMES[op.opcode as usize];
         let name_open = format!("{name}(");
@@ -1360,6 +1426,25 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
                     return None;
                 }
                 pos += tag_entry.len();
+            }
+            OP_DOM_SIBLING_INDEX => {
+                // The sibling-index traversal: the value is the rank of
+                // the probed node's append among the appends replayed
+                // so far (its real index among the body children the
+                // program built). The walker computes the exact
+                // expected value from the append order — never an
+                // invariant, never a free scalar.
+                let expected = append_rank
+                    .get(&operand_bytes(op, "id"))
+                    .copied()
+                    .map(|rank| rank + 1);
+                let rest = std::str::from_utf8(&bytes[pos..]).ok()?;
+                let end = rest.find(')')?;
+                let value: usize = rest[..end].parse().ok()?;
+                if expected != Some(value) {
+                    return None;
+                }
+                pos += end + 1;
             }
             OP_DOM_OBSERVE => {
                 // The causal observe entry `obs(<dst>,<h>)`: the walker
@@ -1560,7 +1645,7 @@ mod tests {
         }
         assert_eq!(
             seen_v1.len(),
-            (OP_COUNT - 1) as usize,
+            (OP_COUNT - 2) as usize,
             "the version-1 opcode space is 0..32 (the observe opcode never appears)"
         );
         assert!(!seen_v1.contains(&OP_DOM_OBSERVE));
@@ -1576,10 +1661,28 @@ mod tests {
         }
         assert_eq!(
             seen_v2.len(),
-            OP_COUNT as usize,
-            "the version-2 corpus reaches the full fixed opcode set"
+            OP_COUNT as usize - 1,
+            "the version-2 corpus reaches 34 of the 35 fixed opcodes"
         );
         assert!(seen_v2.contains(&OP_DOM_OBSERVE));
+        assert!(!seen_v2.contains(&OP_DOM_SIBLING_INDEX));
+
+        let mut seen_v3 = std::collections::HashSet::new();
+        for i in 0..64u32 {
+            let nonce = B64.encode(sha2::Sha256::digest(format!("nonce-v3-{i}").as_bytes()));
+            let p = generate(KEY, &nonce, "login", "login-action", 3).unwrap();
+            let program = decode(&p).expect("the version-3 program must parse");
+            for op in &program.ops {
+                seen_v3.insert(op.opcode);
+            }
+        }
+        assert_eq!(
+            seen_v3.len(),
+            OP_COUNT as usize,
+            "the version-3 corpus reaches the full fixed opcode set"
+        );
+        assert!(seen_v3.contains(&OP_DOM_SIBLING_INDEX));
+        assert!(seen_v3.contains(&OP_DOM_OBSERVE));
     }
 
     #[test]
@@ -1994,13 +2097,30 @@ mod tests {
             "opcode 33 inside a version-1 blob must be rejected"
         );
 
-        // A version byte outside the canonical set 1|2 is refused at
-        // the decode fence, never interpreted as either grammar.
+        // A version byte outside the canonical set 1|2|3 is refused at
+        // the decode fence, never interpreted as any grammar, and the
+        // fences are one-way: a version-3 program rewritten to version
+        // 2 must decode to null (its sibling-index opcode 34 is a
+        // version-3 extension), and a version-2 program rewritten to
+        // version 3 must decode to null too (version 3 requires the
+        // second constructed node in its fixed skeleton? no — decode
+        // does not enforce the skeleton, but the opcode bound does: a
+        // version-3 rewrite of a version-2 blob is structurally legal
+        // only if no opcode 34 appears — the fence test pins the
+        // downward direction, which is the fleet-relevant one).
+        let v3_b64 = generate(KEY, NONCE, "login", "login-action", 3).unwrap();
+        let mut v3_down = B64.decode(&v3_b64).unwrap();
+        assert_eq!(v3_down[version_at], 3);
+        v3_down[version_at] = 2;
+        assert!(
+            decode(&B64.encode(v3_down)).is_none(),
+            "a version-3 program with opcode 34 must never decode as version 2"
+        );
         let mut foreign_version = v2_bytes;
-        foreign_version[version_at] = 3;
+        foreign_version[version_at] = 9;
         assert!(
             decode(&B64.encode(foreign_version)).is_none(),
-            "a version byte other than 1 or 2 must decode to null"
+            "a version byte outside 1..3 must decode to null"
         );
     }
 

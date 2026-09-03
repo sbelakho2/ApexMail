@@ -702,12 +702,13 @@ test.describe('KiwiCaptcha narrow request shape', () => {
     // header keeps a server that never heard of it working unchanged.
     // The header is attached only under the same condition that arms
     // the execution surface (data-kiwi-execution-src + integrity) and
-    // with the exact integer-string value 2, and the fetch carries the
-    // header object built right next to the body.
+    // with the exact integer-string value 3 (the newest execution
+    // grammar the widget can solve), and the fetch carries the header
+    // object built right next to the body.
     expect(src.match(/Kiwi-Execution-Max-Version/g) ?? []).not.toEqual([]);
     expect(src).toMatch(/var reqHeaders = \{ "Accept": "application\/json", "Content-Type": "application\/json" \};/);
-    expect(src).toMatch(/if \(execSrcAttr && execIntegrityAttr\) reqHeaders\["Kiwi-Execution-Max-Version"\] = "2";/);
-    expect(src.match(/reqHeaders\["Kiwi-Execution-Max-Version"\] = "2";/g) ?? []).toHaveLength(1);
+    expect(src).toMatch(/if \(execSrcAttr && execIntegrityAttr\) reqHeaders\["Kiwi-Execution-Max-Version"\] = "3";/);
+    expect(src.match(/reqHeaders\["Kiwi-Execution-Max-Version"\] = "3";/g) ?? []).toHaveLength(1);
     expect(src).toMatch(/headers: reqHeaders,/);
     // The narrow request shape holds: the capability must never exist
     // as a body field anywhere in the driver.

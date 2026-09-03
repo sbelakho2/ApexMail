@@ -580,7 +580,7 @@ final class ChallengeRecord
                 throw MalformedRecordException::incompleteExecutionFields();
             }
             self::requireInt($data['execution_version'], 'execution_version', 0, 255);
-            if ($data['execution_version'] !== 1 && $data['execution_version'] !== 2) {
+            if ($data['execution_version'] < 1 || $data['execution_version'] > 3) {
                 throw MalformedRecordException::invalidExecutionVersion($data['execution_version']);
             }
             self::requireString($data['execution_commitment'], 'execution_commitment');

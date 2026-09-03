@@ -34,9 +34,9 @@
             "note": "The widget stylesheet (widget.css), three byte-identical copies at 13863 bytes; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes."
         },
         "widget_execution": {
-            "raw_bytes": 33452,
-            "gzip_bytes": 9933,
-            "brotli_bytes": 8518,
+            "raw_bytes": 31676,
+            "gzip_bytes": 9994,
+            "brotli_bytes": 8599,
             "raw_cap_bytes": 34000,
             "gzip_cap_bytes": 10200,
             "brotli_cap_bytes": 8800,

@@ -169,12 +169,12 @@ final class MalformedRecordException extends \RuntimeException
 
     /**
      * The protocol-v4 `execution_version` is not the canonical numeric
-     * byte 1. Only version 1 exists in the wire contract; anything else
-     * is a corrupt or foreign record.
+     * byte 1, 2 or 3. Only those canonical versions exist in the wire
+     * contract; anything else is a corrupt or foreign record.
      */
     public static function invalidExecutionVersion(int $version): self
     {
-        return new self(sprintf('record field "execution_version" must be exactly 1 (the canonical execution-dimension version), got %d', $version));
+        return new self(sprintf('record field "execution_version" must be one of the canonical execution-dimension versions 1, 2 or 3, got %d', $version));
     }
 
     /**

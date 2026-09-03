@@ -387,6 +387,44 @@ final class ExecutionChallengeDimensionTest extends TestCase
         self::assertSame(1, $this->programVersion($payload['execution_program']), 'default tier 1 emits version 1 to a headerless client');
     }
 
+    public function testVersion3GrammarIsIssuedWhenClientConfigAndFloorAllReachThree(): void
+    {
+        // The version ladder reaches 3 (the sibling-index traversal
+        // grammar with two constructed nodes) when the client header,
+        // the node cap and the confirmed central floor all reach 3.
+        $container = $this->load([[
+            'secret_key' => self::SECRET,
+            'execution_key' => self::EXECUTION_KEY,
+            'execution_version' => 3,
+            'redis_service' => 'fake_redis',
+            'risk' => ['enabled' => true, 'redis_service' => 'fake_redis', 'execution_challenge' => 'on'],
+            'storage' => 'kiwi_captcha.storage.array',
+            'difficulty_bits' => 8,
+        ]]);
+        $controller = $container->get(ChallengeController::class);
+        $redis = $container->get('fake_redis');
+        $monitor = $container->get(\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::class);
+        $redis->hset($monitor->policyKey(), 'min_policy_epoch', '1');
+        $redis->hset($monitor->policyKey(), 'min_protocol_version', '4');
+        $redis->hset($monitor->policyKey(), 'min_execution_version', '3');
+        $server = ['CONTENT_TYPE' => 'application/json', 'REMOTE_ADDR' => '127.0.0.1', 'HTTP_ORIGIN' => 'http://localhost', 'HTTP_Kiwi_Execution_Max_Version' => '3'];
+        $response = $controller->challenge(Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], $server, '{"scope":"login","action":"login-action"}'));
+        self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+        $payload = json_decode((string) $response->getContent(), true);
+        self::assertArrayHasKey('execution_program', $payload);
+        self::assertSame(3, $this->programVersion($payload['execution_program']), 'the version-3 grammar is issued when all three rungs reach 3');
+        $program = ExecutionChallengeGenerator::decode($payload['execution_program']);
+        self::assertNotNull($program);
+        $trace = ExecutionTraceFixture::executedTraceFor($program);
+        self::assertStringContainsString('dsib(', $trace, 'the version-3 grammar carries the sibling-index traversal entry');
+        $expected = ExecutionChallengeGenerator::digestOverTrace($payload['execution_program'], $payload['nonce'], $trace);
+        self::assertNotNull($expected);
+        $counter = $this->winningCounter($payload);
+        $storage = $container->get('kiwi_captcha.storage.array');
+        $token = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected, base64_encode($trace))->encode();
+        self::assertTrue($this->verifyWithRecord($storage, $payload['nonce'], $token), 'the version-3 solve must verify');
+    }
+
     public function testClientWithoutTheCapabilityHeaderReceivesVersion1(): void
     {
         // No Kiwi-Execution-Max-Version header on the request: an older

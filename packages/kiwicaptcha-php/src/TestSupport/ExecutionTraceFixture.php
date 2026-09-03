@@ -60,7 +60,7 @@ final class ExecutionTraceFixture
         'slen', 'schar', 'scode', 'sslice',
         'dcreate', 'dattr', 'dappend', 'dqsel', 'dget', 'dset', 'dgetd',
         'cadd', 'ccont', 'dparent', 'ddispatch', 'dserialize',
-        'qreal', 'geom', 'point', 'evreal', 'sreal', 'obs',
+        'qreal', 'geom', 'point', 'evreal', 'sreal', 'obs', 'dsib',
     ];
 
     private function __construct()
@@ -100,13 +100,26 @@ final class ExecutionTraceFixture
             }
         }
         $entries = [];
+        $appendRank = [];
+        $cur = null;
         foreach ($program['ops'] as $record) {
             $op = $record['op'];
+            if ($op === ExecutionChallengeGenerator::OP_DOM_APPEND && $cur !== null && !isset($appendRank[$cur['id']])) {
+                $appendRank[$cur['id']] = \count($appendRank);
+            }
             if ($op === ExecutionChallengeGenerator::OP_DOM_GEOMETRY) {
                 $entries[] = 'geom('.($top * 10).',10)';
                 ++$top;
             } elseif ($op === ExecutionChallengeGenerator::OP_DOM_POINT) {
                 $entries[] = 'point('.($hasAppend ? 'div' : 'none').')';
+            } elseif ($op === ExecutionChallengeGenerator::OP_DOM_SIBLING_INDEX) {
+                // The browser-equivalent sibling traversal: the rank of
+                // the probed node's append (its real index among the
+                // body children the program built) — the exact value
+                // the verifier computes from the append order.
+                // The interpreter's own script element is the first
+                // body child, so the real index is the append rank + 1.
+                $entries[] = self::TRACE_NAMES[$op].'('.($appendRank[$record['operands']['id']] ?? -2) + 1 .')';
             } elseif ($op === ExecutionChallengeGenerator::OP_DOM_OBSERVE) {
                 // The browser-equivalent observe: the fabricated reference
                 // height (the real value is the engine's own text

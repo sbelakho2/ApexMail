@@ -60,7 +60,7 @@ final class ChallengeController
      * selected by {@see self::effectiveExecutionVersion()}; the capability
      * a client advertises is capped at this ceiling.
      */
-    private const MAX_EXECUTION_VERSION = 2;
+    private const MAX_EXECUTION_VERSION = 3;
 
     /** Turnstile-compatible shapes, per Cloudflare's docs. */
     private const ACTION_PATTERN = '/^[a-z0-9_-]{1,32}$/i';
@@ -424,15 +424,19 @@ final class ChallengeController
      */
     private function effectiveExecutionVersion(int $clientCapability): int
     {
-        if ($clientCapability < 2 || $this->executionVersionCap < 2) {
-            return 1;
-        }
         $floor = $this->epochMonitor?->minExecutionVersion();
-        if ($floor === null || $floor < 2) {
-            return 1;
+        // The version ladder: 3 when the client, the node cap and the
+        // confirmed central floor all reach 3; 2 when they all reach 2;
+        // otherwise 1. The floor is null when no central policy is
+        // confirmed, which never permits the newer grammars.
+        if ($clientCapability >= 3 && $this->executionVersionCap >= 3 && $floor !== null && $floor >= 3) {
+            return 3;
+        }
+        if ($clientCapability >= 2 && $this->executionVersionCap >= 2 && $floor !== null && $floor >= 2) {
+            return 2;
         }
 
-        return 2;
+        return 1;
     }
 
     /**
@@ -836,9 +840,7 @@ final class ChallengeController
         if (\is_string($rawCapability) && preg_match('/^(?:0|[1-9][0-9]*)$/D', $rawCapability) === 1) {
             $clientExecutionCapability = (int) $rawCapability;
         }
-        $clientExecutionCapability = $clientExecutionCapability >= self::MAX_EXECUTION_VERSION
-            ? self::MAX_EXECUTION_VERSION
-            : 1;
+        $clientExecutionCapability = max(1, min($clientExecutionCapability, self::MAX_EXECUTION_VERSION));
 
 
         // Identifier validation: scopes and request bindings must match
@@ -1558,9 +1560,9 @@ final class ChallengeController
             // version-1 grammar, never issued an unarmed challenge.
             // The refusal happens before any admission slot or record
             // commit, so nothing is minted or held.
-            if ($armExecution && $this->executionRequiredVersion >= 2 && $executionVersion < 2) {
+            if ($armExecution && $executionVersion < $this->executionRequiredVersion) {
                 return $this->privateJson(
-                    ['error' => ['code' => 'CLIENT_EXECUTION_VERSION_UNSUPPORTED', 'message' => 'This deployment requires the execution version 2 client; reload the page or upgrade the widget.']],
+                    ['error' => ['code' => 'CLIENT_EXECUTION_VERSION_UNSUPPORTED', 'message' => sprintf('This deployment requires the execution version %d client; reload the page or upgrade the widget.', $this->executionRequiredVersion)]],
                     Response::HTTP_UNPROCESSABLE_ENTITY,
                     $request,
                     $riskSession,
