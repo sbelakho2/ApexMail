@@ -55,10 +55,11 @@ final class ChallengeController
     /**
      * The highest execution-program grammar version this node can emit.
      * Mirrors the core's ExecutionChallengeGenerator::MAX_EXECUTION_VERSION
-     * (2 = the causal observe grammar; 1 = the construction-to-probe
-     * grammar without opcode 33). The effective per-issuance version is
-     * selected by {@see self::effectiveExecutionVersion()}; the capability
-     * a client advertises is capped at this ceiling.
+     * (3 = the sibling-index traversal grammar; 2 = the causal observe
+     * grammar; 1 = the construction-to-probe grammar). The effective
+     * per-issuance version is selected by
+     * {@see self::effectiveExecutionVersion()}; the capability a client
+     * advertises is capped at this ceiling.
      */
     private const MAX_EXECUTION_VERSION = 3;
 
@@ -278,11 +279,12 @@ final class ChallengeController
         /**
          * The node's execution-program version cap (kiwi_captcha.
          * execution_version, default 1): the operator-side ceiling of the
-         * grammar this deployment emits. Version 2 (the causal observe
-         * grammar) is never emitted unless this cap is >= 2, the client
-         * advertised the `Kiwi-Execution-Max-Version` header with a value
-         * >= 2, and the confirmed central security-policy floor
-         * ({kiwi:<ns>}:security-policy min_execution_version) is >= 2, see
+         * grammar this deployment emits. A version above 1 is never
+         * emitted unless the client advertised the
+         * `Kiwi-Execution-Max-Version` header with a value at least that
+         * high, the cap is raised to it, and the confirmed central
+         * security-policy floor ({kiwi:<ns>}:security-policy
+         * min_execution_version) reaches it, see
          * {@see self::effectiveExecutionVersion()}. A node that never
          * raised the cap keeps emitting version-1 programs to every
          * client, byte-compatible with the construction-to-probe
@@ -392,24 +394,17 @@ final class ChallengeController
      * The effective execution-program grammar version of this issuance,
      * the real execution-versioning gate of the dimension.
      *
-     * Version 2 (the causal observe grammar, opcode 33) is emitted only
-     * when every rung of the gate is up:
-     *
-     *  1. the client advertised the `Kiwi-Execution-Max-Version` header
-     *     with a value >= 2, and an older client never advertises, so it
-     *     receives version 1;
-     *  2. the node cap kiwi_captcha.execution_version is >= 2, so the
-     *     operator never emits v2 without raising the cap;
-     *  3. the confirmed central security-policy hash
-     *     {kiwi:<ns>}:security-policy carries min_execution_version
-     *     >= 2, the fleet floor.
-     *
+     * The effective grammar is the strongest version whose rungs are
+     * all up. Version 3 (the sibling-index traversal grammar) needs
+     * the client header, the node cap and the confirmed central floor
+     * at 3; version 2 (the causal observe grammar) needs them at 2.
+     * An older client never advertises and receives version 1.
      * A policy that is absent, unreadable or unconfirmed reads null,
      * so only version 1 may be emitted: the mirror of the protocol-v4
      * rule, where no confirmed central policy means no arming. A
      * confirmed policy without the key reads 0, a permissive state
-     * with no declared floor that is still below 2, so version 2 is
-     * never emitted until the operator declares the floor explicitly.
+     * with no declared floor, so the newer grammars are never emitted
+     * until the operator declares the floor explicitly.
      *
      * Everything else emits version 1, the construction-to-probe
      * grammar with opcodes 0..32 and no observe opcode, which every

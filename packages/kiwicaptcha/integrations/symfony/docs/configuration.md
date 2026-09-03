@@ -379,15 +379,17 @@ Three knobs control the dimension:
   future option.
 
 - `kiwi_captcha.execution_version` (int 1 or 2, default 1): the
-  node's execution-program grammar cap. Version 2 is the causal
-  observe grammar (opcode 33); version 1 is the construction-to-probe
-  grammar every interpreter generation runs. A node emits version 2
-  only when the client advertised execution version 2 with the
-  challenge request (the `Kiwi-Execution-Max-Version` request header),
-  this cap is raised to 2, and the confirmed central security-policy
-  floor (`{kiwi:<ns>}:security-policy` `min_execution_version`) is
-  >= 2. The current widget driver sends the header when the execution
-  tier is configured.
+  node's execution-program grammar cap. Version 3 is the
+  sibling-index traversal grammar (opcode 34); version 2 is the
+  causal observe grammar (opcode 33); version 1 is the
+  construction-to-probe grammar every interpreter generation runs. A
+  node emits a version above 1 only when the client advertised at
+  least that version with the challenge request (the
+  `Kiwi-Execution-Max-Version` request header), this cap is raised to
+  it, and the confirmed central security-policy floor
+  (`{kiwi:<ns>}:security-policy` `min_execution_version`) reaches it.
+  The current widget driver sends the header when the execution tier
+  is configured.
   Every other combination emits version 1, so a mixed fleet of older
   binaries and stale open pages is never handed the newer grammar.
   The cap defaults to 1: raising it declares the node ready to write

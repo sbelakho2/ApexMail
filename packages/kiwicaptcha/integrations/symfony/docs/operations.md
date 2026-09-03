@@ -345,20 +345,22 @@ version-2 capability while `execution_required_version` stays at 1;
 the eventual hardened posture is required 2, and staged profiles are a
 future option.
 
-The issuance-side gate is three-way. A node emits version 2 only when
-every rung is up:
+The issuance-side gate is three-way per grammar version. A node emits
+version N above 1 only when every rung for that N is up (the ladder
+reaches 3 when the client, the cap and the floor all reach 3, else 2
+when they all reach 2, else 1):
 
-1. the client advertised execution version 2 with the challenge
+1. the client advertised at least version N with the challenge
    request, carried by the `Kiwi-Execution-Max-Version` request
    header. The current widget driver sends the header when the
    deployment configured the execution tier; an older driver never
    advertises and the server treats absence as version 1.
-2. the node's `kiwi_captcha.execution_version` cap is raised to 2
-   (default 1). The cap is the writer switch: no node emits version 2
-   until the operator declares it ready.
+2. the node's `kiwi_captcha.execution_version` cap is raised to N
+   (default 1). The cap is the writer switch: no node emits the newer
+   grammars until the operator declares it ready.
 3. the confirmed central security-policy hash
    (`{kiwi:<ns>}:security-policy`) carries `min_execution_version`
-   >= 2, the fleet floor. The key is optional: a policy without it
+   >= N, the fleet floor. The key is optional: a policy without it
    reads as a permissive 0, and a policy that is absent, corrupt or
    unreadable reads as unconfirmed. Both keep the writer at version 1,
    exactly like the `min_protocol_version` rule keeps an unconfirmed

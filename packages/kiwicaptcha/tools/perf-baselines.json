@@ -1,6 +1,6 @@
 {
     "schema": 1,
-    "generated": "2026-09-02",
+    "generated": "2026-09-03",
     "environment": {
         "machine": "Apple silicon Mac, quiet local machine",
         "php": "8.5.4 (bench recording; the core and bundle suites also pass on 8.2.33)",
@@ -41,7 +41,7 @@
             "gzip_cap_bytes": 10200,
             "brotli_cap_bytes": 8800,
             "copies_identical": true,
-            "note": "The execution interpreter asset (execution-interpreter.js), three byte-identical copies at 33452 bytes raw, 9933 gzip and 8518 brotli, recorded on 2026-09-02; perf-budget.sh verifies the recorded raw_bytes equals the current measured bytes (the equality gate) and enforces the raw/gzip/brotli caps exactly like the widget driver."
+            "note": "Execution interpreter: raw 31,676 / gzip 9,994 / brotli 8,599 bytes (measured 2026-09-03 after the execution-version-3 grammar and the compaction); hard caps 34,000 / 10,200 / 8,800 with the doc-integrity guard syncing the narrative record."
         },
         "challenge_response_json": {
             "sha256_bytes_min": 1014,
