@@ -639,21 +639,25 @@ final class KiwiCaptchaDoctorCommand extends Command
 
     /**
      * The execution-required-tier posture check. The high_abuse
-     * protection profile models an abuse-heavy production deployment.
-     * The strongest available execution grammar is the minimum of the
-     * three emission-gate rungs: the node's execution_version cap, the
-     * confirmed central min_execution_version floor, and this binary's
-     * maximum ({@see self::MAX_EXECUTION_VERSION}). An unconfirmed
-     * floor keeps the gate at version 1. While the configured required
-     * tier sits below that strongest available grammar, a client that
-     * cannot solve the strong grammar is downgraded to the weaker one,
-     * so the strong grammar stays client-downgradeable. The required
-     * tier must stay at the default during the fleet transition, so
-     * this check warns (exit 0) on that posture and never fails the
-     * deploy gate. Raise the required tier to the strongest available
-     * grammar once every serving page is on that generation. A
-     * required tier at or above the strongest available grammar
-     * passes: the strong grammar is then server-required.
+     * protection profile models an abuse-heavy production deployment,
+     * and it arms the execution dimension by default
+     * (risk.execution_challenge on). The config tree therefore refuses
+     * an execution_required_version below the execution_version cap
+     * under that posture, unless the deployment explicitly accepts the
+     * downgrade window with kiwi_captcha.execution_allow_downgrade:
+     * true. The strongest abuse profile must never silently end up on
+     * the weakest experimental grammar. This check reports the posture
+     * of the compiled deployment. A required tier equal to the
+     * strongest available grammar passes: the strong grammar is then
+     * server-required, never client-downgradeable. A lower required
+     * tier compiles only as a deliberate downgrade window, and warns
+     * with the explicit flag that permits it named. The strongest
+     * available grammar is the minimum of the three emission-gate
+     * rungs: the node's execution_version cap, the confirmed central
+     * min_execution_version floor, and this binary's maximum
+     * ({@see self::MAX_EXECUTION_VERSION}). An unconfirmed floor keeps
+     * the gate at version 1. Balanced and privacy_strict deployments
+     * are unaffected: their required tier stays operator-owned.
      *
      * @return array{0: string, 1: string} [status, detail]
      */
@@ -663,11 +667,14 @@ final class KiwiCaptchaDoctorCommand extends Command
         if ($profile !== 'high_abuse') {
             return ['PASS', sprintf('no high_abuse required-tier audit applies (protection_profile %s): execution_required_version is operator-owned', $profile === null ? 'none' : $profile)];
         }
-        if (!\is_string($this->config['execution_key'] ?? null)) {
-            return ['PASS', 'high_abuse without execution_key: the execution dimension is not armed, so execution_required_version has no effect'];
+        if (!\is_string($this->config['execution_key'] ?? null)
+            || ($this->config['risk']['execution_challenge'] ?? 'off') !== 'on'
+        ) {
+            return ['PASS', 'high_abuse without the armed execution dimension (no execution_key, or risk.execution_challenge off): execution_required_version has no effect'];
         }
         $cap = (int) ($this->config['execution_version'] ?? 1);
         $required = (int) ($this->config['execution_required_version'] ?? 1);
+        $allowDowngrade = (bool) ($this->config['execution_allow_downgrade'] ?? false);
         $this->epochMonitor->refresh();
         $floor = $this->epochMonitor->minExecutionVersion();
         $floorLabel = $floor === null ? 'unconfirmed' : (string) $floor;
@@ -679,14 +686,21 @@ final class KiwiCaptchaDoctorCommand extends Command
             return ['PASS', sprintf('high_abuse with the emission gate below version 2 (execution_version cap %d, confirmed central min_execution_version floor %s): the strongest available execution grammar is version 1, so execution_required_version %d cannot leave a strong grammar client-downgradeable', $cap, $floorLabel, $required)];
         }
         if ($required < $strongest) {
-            // The gap the audit exists for: the strongest grammar the
-            // fleet can emit is not the server-required tier, so a
-            // client that cannot solve it is downgraded to the weaker
-            // grammar. The reason code names both tiers, so a deploy
-            // gate can key on the exact posture.
-            $requiredClause = $required === 1 ? 'still at the default 1' : (string) $required;
+            // The gap the compile-time gate exists for: the strongest
+            // grammar the fleet can emit is not the server-required
+            // tier. Under the armed high_abuse posture the config tree
+            // refuses the gap unless execution_allow_downgrade: true
+            // accepts the window, so this branch warns (exit 0) with
+            // the explicit flag named, never a silent pass.
+            if ($allowDowngrade) {
+                $requiredClause = $required === 1 ? 'still at the default 1' : (string) $required;
 
-            return ['WARN', sprintf('high_abuse with the full version-%d capability (execution_key configured, execution_version %d, confirmed central min_execution_version floor %d) but execution_required_version %s: the strong grammar stays client-downgradeable until the required tier is raised to %d. Raise execution_required_version to %d once every serving page is on the version-%d generation (reason execution_required_version_%d_with_v%d_capability, see operations.md "Execution versioning")', $strongest, $cap, $floor, $requiredClause, $strongest, $strongest, $strongest, $required, $strongest)];
+                return ['WARN', sprintf('high_abuse with the full version-%d capability (execution_key configured, execution_version %d, confirmed central min_execution_version floor %d) but execution_required_version %s: the strong grammar stays client-downgradeable until the required tier is raised to %d, and the downgrade window is accepted only through the explicit kiwi_captcha.execution_allow_downgrade: true flag. Raise execution_required_version to %d once every serving page is on the version-%d generation (reason execution_required_version_%d_with_v%d_capability, see operations.md "Execution versioning")', $strongest, $cap, $floor, $requiredClause, $strongest, $strongest, $strongest, $required, $strongest)];
+            }
+            // An armed high_abuse deployment with the gap and no flag
+            // cannot compile: the config tree refuses it, so a doctor
+            // that observes it means the wiring is broken.
+            return ['FAIL', 'high_abuse arms the execution dimension (risk.execution_challenge on) with execution_required_version below the execution_version cap, but kiwi_captcha.execution_allow_downgrade: true is not set: the config tree refuses this posture at compile time, so the wiring is broken. Set the explicit flag to accept the downgrade window or raise the required tier to the cap'];
         }
         if ($required > $strongest) {
             // The required tier is server-enforced above the grammar

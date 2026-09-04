@@ -28,6 +28,13 @@ final class Configuration implements ConfigurationInterface
         $root = $treeBuilder->getRootNode();
 
         $root
+            // The execution-versioning aliases canonicalize before any
+            // other processing, so both spellings of one concept set the
+            // same value regardless of the layer that carries them.
+            ->beforeNormalization()
+                ->always()
+                ->then(static fn (mixed $v): mixed => \is_array($v) ? self::canonicalizeExecutionVersioningAliases($v) : $v)
+            ->end()
             ->children()
                 ->scalarNode('protection_profile')
                     ->info('Policy-level posture preset (default null = every knob at its individual default; current behavior preserved byte-identically). The profile is the LOWEST-precedence configuration layer: it fills SAFE DERIVED DEFAULTS for the safety-relevant knobs, and an explicit value in ANY config file always wins (the profile defaults are merged first, so later layers — including a prod overlay that only sets protection_profile — can never override an explicit setting). Profiles: "balanced" = the current defaults, explicitly documented as such; "privacy_strict" = strongest first-party privacy (no IP-derived binding tag, every behavioral evidence surface off, timing heuristic off); "high_abuse" = stronger abuse posture (risk enabled with raised abuse-evidence weights, stricter per-source limits, wider aggregate issuance bounds, decoy surface on, chained step-up engages when a request-binding authority is wired in any layer — requires a Predis client); "compatibility" = maximal integration compatibility (sha256, conservative 300 s TTL, binding off, risk off, protocol v2 emission); "ha_safe" = the replay-safe HA posture (replay_durability operator_managed + ha_authority pinned_primary, the other defaults mirror balanced) — the mechanical pinned-primary authority guard makes the operator contract a real guarantee; the guard refuses on any authority change and the doctor reports its state. See docs/configuration.md "Protection profiles" for the full matrix and the layering semantics.')
@@ -980,16 +987,20 @@ final class Configuration implements ConfigurationInterface
                     ->end()
                 ->end()
                 ->integerNode('execution_version')
-                    ->info('THE NODE\'S EXECUTION-PROGRAM VERSION CAP (1..4, default 1): the operator-side ceiling of the grammar this deployment emits. Version 2 (the causal observe grammar, opcode 33) is emitted ONLY when every rung of the three-way gate is up: the client advertised execution_max_version >= 2 with the challenge request (the current widget driver does when the deployment configured the execution tier; an older driver never advertises), this cap is raised to 2, AND the confirmed central security-policy floor ({kiwi:<ns>}:security-policy min_execution_version) is >= 2. Any other combination emits version 1, the construction-to-probe grammar every interpreter generation runs, so a mixed fleet of old binaries and stale open pages can never be handed the newer grammar. The cap defaults to 1: raising it is the explicit operator step that declares this node ready to write version-2 programs, mirroring risk.decoy_v3_enabled as a writer switch. See operations.md "Execution versioning" for the rollout procedure.')
+                    ->info('THE NODE\'S EXECUTION-PROGRAM VERSION CAP (1..4, default 1): the operator-side ceiling of the grammar this deployment emits. Version 2 (the causal observe grammar, opcode 33) is emitted ONLY when every rung of the three-way gate is up: the client advertised execution_max_version >= 2 with the challenge request (the current widget driver does when the deployment configured the execution tier; an older driver never advertises), this cap is raised to 2, AND the confirmed central security-policy floor ({kiwi:<ns>}:security-policy min_execution_version) is >= 2. Any other combination emits version 1, the construction-to-probe grammar every interpreter generation runs, so a mixed fleet of old binaries and stale open pages can never be handed the newer grammar. The cap defaults to 1: raising it is the explicit operator step that declares this node ready to write version-2 programs, mirroring risk.decoy_v3_enabled as a writer switch. The semantic spelling kiwi_captcha.execution_max_version is a canonicalized alias of this option: Symfony Config folds both names onto one processed value, and setting both to different values is refused. The legacy name stays valid through the one-major-version compatibility window. See operations.md "Execution versioning" for the rollout procedure.')
                     ->min(1)
                     ->max(4)
                     ->defaultValue(1)
                 ->end()
                 ->integerNode('execution_required_version')
-                    ->info('THE SERVER-OWNED REQUIRED EXECUTION VERSION (1..4, default 1): the tier a challenge MUST be solved at when the deployment arms the execution dimension. The client capability declaration is never an authority over this value: a client that advertises less than the required tier is refused with CLIENT_EXECUTION_VERSION_UNSUPPORTED, never downgraded to a weaker grammar. The safe transition: keep the default 1 while the fleet moves to the execution-version-2 generation (this node cap kiwi_captcha.execution_version = 2 everywhere and the central min_execution_version = 2), and only then raise this knob to 2 — at which point an old page that cannot solve version 2 must reload against current assets.')
+                    ->info('THE SERVER-OWNED REQUIRED EXECUTION VERSION (1..4, default 1): the tier a challenge MUST be solved at when the deployment arms the execution dimension. The client capability declaration is never an authority over this value: a client that advertises less than the required tier is refused with CLIENT_EXECUTION_VERSION_UNSUPPORTED, never downgraded to a weaker grammar. The safe transition: keep the default 1 while the fleet moves to the execution-version-2 generation (this node cap kiwi_captcha.execution_version = 2 everywhere and the central min_execution_version = 2), and only then raise this knob to 2 — at which point an old page that cannot solve version 2 must reload against current assets. The semantic spelling kiwi_captcha.execution_min_required_version is a canonicalized alias of this option: both names fold onto one processed value, and setting both to different values is refused. Under the high_abuse protection profile with risk.execution_challenge on, a required tier below the node cap is refused at compile time unless the deployment explicitly accepts the downgrade window with kiwi_captcha.execution_allow_downgrade: true (see operations.md "Execution versioning").')
                     ->min(1)
                     ->max(4)
                     ->defaultValue(1)
+                ->end()
+                ->booleanNode('execution_allow_downgrade')
+                    ->info('THE EXPLICIT DOWNGRADE-WINDOW ESCAPE HATCH (default false): under the high_abuse protection profile with risk.execution_challenge on, the tree refuses kiwi_captcha.execution_required_version below kiwi_captcha.execution_version unless this flag is explicitly true — the strongest abuse profile must not silently serve the weakest experimental grammar to a client that cannot solve the stronger one. true accepts the documented downgrade window (the required tier below the node cap while the fleet transitions); the doctor then warns that the downgrade is permitted only through this flag. Non-high_abuse deployments and high_abuse deployments without the execution gate on are unaffected and may keep any required tier at or below the node cap.')
+                    ->defaultFalse()
                 ->end()
                 ->variableNode('ha_authority_expected')
                     ->info('THE OPERATOR-PROVISIONED EXPECTED AUTHORITY IDENTITY (default null): the "role|run_id" identity the pinned-primary guard must observe, the same shape as the pin value (e.g. "master|5f8d..."). Two forms are accepted. The scalar string form applies the ONE identity to EVERY authority (storage and, when distinct, risk). The per-authority map form {"storage": "master|...", "risk": "master|..."} applies a DIFFERENT expected identity to each authority — a deployment whose storage Redis and risk Redis are different servers cannot share one run_id, and the map is the contract that says so; when only one Redis is used the storage entry covers the shared authority, and an authority without an entry falls back to the pin key (it must be initialized). When set, the guard compares the serving authority against this value INSTEAD of the `{kiwi:<ns>}:authority:pin:<suffix>` key — the configuration is the pin, so an immutable-identity deployment can skip the Redis pin entirely. The guard refuses when the serving identity differs, and kiwicaptcha:ha-initialize refuses when the configured identity disagrees with the connected server. Production never auto-pins: without this option the deployment must run kiwicaptcha:ha-initialize to record the pin before the guard serves. See docs/ha-authority.md.')
@@ -1097,9 +1108,74 @@ final class Configuration implements ConfigurationInterface
             ->validate()
                 ->ifTrue(static fn (array $v): bool => $v['execution_required_version'] > $v['execution_version'])
                 ->thenInvalid('kiwi_captcha.execution_required_version must not exceed kiwi_captcha.execution_version (the node execution-program cap): the required tier is a solve mandate the node must be able to emit, and a client below it is refused with CLIENT_EXECUTION_VERSION_UNSUPPORTED, never downgraded — so a required tier above the cap makes every armed request deterministically fail. Raise kiwi_captcha.execution_version to at least the required tier (and confirm the fleet min_execution_version floor reaches it) or lower the required tier')
+            ->end()
+            // Cross-field high_abuse execution-versioning invariant: the
+            // high_abuse protection profile arms the execution dimension
+            // by default (risk.execution_challenge on) while the required
+            // tier defaults to 1, so raising the node cap alone would put
+            // the strongest abuse profile on a silently client-
+            // downgradeable grammar. Refused here at compile time unless
+            // the operator explicitly accepts the downgrade window with
+            // kiwi_captcha.execution_allow_downgrade: true. balanced,
+            // privacy_strict and profile-less deployments are unaffected:
+            // their required tier stays operator-owned (the existing
+            // required-tier at-or-below-cap rule above is their only
+            // bound).
+            ->validate()
+                ->ifTrue(static fn (array $v): bool => ($v['protection_profile'] ?? null) === 'high_abuse'
+                    && ($v['risk']['execution_challenge'] ?? 'off') === 'on'
+                    && $v['execution_required_version'] < $v['execution_version']
+                    && !($v['execution_allow_downgrade'] ?? false))
+                ->thenInvalid('kiwi_captcha.execution_required_version must not be below kiwi_captcha.execution_version under the high_abuse protection profile with risk.execution_challenge on: the profile arms the execution dimension by default, and a required tier below the node cap would let the strongest abuse profile silently hand the weaker grammar to any client that cannot solve the stronger one. Raise the required tier to the node cap (the hardened posture), or accept the deliberate downgrade window with an explicit kiwi_captcha.execution_allow_downgrade: true (see operations.md "Execution versioning")')
             ->end();
 
         return $treeBuilder;
+    }
+
+    /**
+     * The execution-versioning alias fold: the semantic names
+     * kiwi_captcha.execution_max_version and
+     * kiwi_captcha.execution_min_required_version are canonicalized
+     * onto the legacy names execution_version and
+     * execution_required_version before any other tree processing.
+     * Symfony Config then merges both spellings of one concept into a
+     * single value, no matter which layer carries which spelling.
+     * Setting both spellings to different values is refused here: the
+     * merge winner would otherwise depend on the spelling, never on
+     * the operator. The legacy names stay valid through the
+     * one-major-version compatibility window, so an existing
+     * deployment never needs to touch its config.
+     *
+     * @return array<string, mixed>
+     */
+    private static function canonicalizeExecutionVersioningAliases(array $config): array
+    {
+        foreach ([
+            'execution_version' => 'execution_max_version',
+            'execution_required_version' => 'execution_min_required_version',
+        ] as $canonical => $alias) {
+            if (!\array_key_exists($alias, $config)) {
+                continue;
+            }
+            $aliasValue = $config[$alias];
+            if ($aliasValue !== null && \array_key_exists($canonical, $config)
+                && $config[$canonical] !== null && $config[$canonical] !== $aliasValue
+            ) {
+                throw new InvalidConfigurationException(sprintf(
+                    'kiwi_captcha.%s and kiwi_captcha.%s are aliases of the same execution-versioning option (the semantic name and the legacy name canonicalize to one value), but both are configured with different values (%s and %s): Symfony Config folds the aliases onto the single processed option, so the winner would silently depend on the spelling. Configure only one spelling, or set both to the same value',
+                    $canonical,
+                    $alias,
+                    \is_scalar($config[$canonical]) ? (string) $config[$canonical] : \gettype($config[$canonical]),
+                    \is_scalar($aliasValue) ? (string) $aliasValue : \gettype($aliasValue),
+                ));
+            }
+            if ($aliasValue !== null) {
+                $config[$canonical] = $aliasValue;
+            }
+            unset($config[$alias]);
+        }
+
+        return $config;
     }
 
     /**

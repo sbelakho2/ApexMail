@@ -11,11 +11,15 @@ use Symfony\Component\DependencyInjection\ContainerBuilder;
  * execution dimension fully armed on the node. The execution_key is
  * configured and the execution_version cap is raised to 2 or 3
  * (whatever the strongest grammar under audit is). The cap can also
- * stay at 1 for the no-capability scenario. The doctor's
- * protocol-v3 writer check passes once the test seeds the central
- * policy floors (protocol 4 + execution 2 or 3). The variants differ
- * in the node cap and the execution_required_version knob, so each
- * variant boots its own cached container.
+ * stay at 1 for the no-capability scenario. The compile-time gate
+ * refuses an execution_required_version below the cap under this
+ * posture unless the deployment accepts the downgrade window, so the
+ * mismatch variants (required below the cap) boot with
+ * execution_allow_downgrade: true. The doctor's protocol-v3 writer
+ * check passes once the test seeds the central policy floors
+ * (protocol 4 + execution 2 or 3). The variants differ in the node
+ * cap, the execution_required_version knob and the downgrade flag, so
+ * each variant boots its own cached container.
  */
 final class DoctorExecutionRequiredVersionKernel extends DoctorV3WriterTestKernel
 {
@@ -24,6 +28,7 @@ final class DoctorExecutionRequiredVersionKernel extends DoctorV3WriterTestKerne
         bool $debug,
         private readonly int $executionVersion = 1,
         private readonly int $requiredVersion = 1,
+        private readonly bool $allowDowngrade = false,
     ) {
         parent::__construct($environment, $debug);
     }
@@ -39,6 +44,7 @@ final class DoctorExecutionRequiredVersionKernel extends DoctorV3WriterTestKerne
             'execution_key' => '0123456789abcdef0123456789abcdef',
             'execution_version' => $this->executionVersion,
             'execution_required_version' => $this->requiredVersion,
+            'execution_allow_downgrade' => $this->allowDowngrade,
             'risk' => [
                 'namespace' => 'doctor-v3',
                 'redis_service' => self::FAKE_REDIS_ID,
@@ -51,6 +57,6 @@ final class DoctorExecutionRequiredVersionKernel extends DoctorV3WriterTestKerne
         // The kernel cache is keyed on the class + environment, so each
         // knob variant must carve its own cache directory or a later
         // variant would reuse the first variant's compiled container.
-        return parent::getCacheDir().'-exec-req-'.$this->executionVersion.'-'.$this->requiredVersion;
+        return parent::getCacheDir().'-exec-req-'.$this->executionVersion.'-'.$this->requiredVersion.'-allow-'.($this->allowDowngrade ? '1' : '0');
     }
 }

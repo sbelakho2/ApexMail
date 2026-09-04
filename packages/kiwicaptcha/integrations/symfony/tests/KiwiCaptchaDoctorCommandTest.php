@@ -513,21 +513,42 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         // capability (execution_key configured, node cap 2, confirmed
         // central execution floor 2) but execution_required_version at
         // the default 1 keeps the strong grammar client-downgradeable.
-        // The default must stay during the fleet transition, so the
-        // doctor warns (exit 0), never fails the deploy gate, and the
-        // warning row carries the machine-readable reason code.
-        $container = $this->containerFor(new DoctorExecutionRequiredVersionKernel('test', true, 2, 1));
+        // The compile-time gate refuses that gap unless the deployment
+        // explicitly accepts the downgrade window, so the kernel boots
+        // with execution_allow_downgrade: true and the doctor warns
+        // (exit 0), naming the flag as the only thing that permits the
+        // downgrade — never a silent pass, never a deploy-gate failure.
+        $container = $this->containerFor(new DoctorExecutionRequiredVersionKernel('test', true, 2, 1, true));
         $this->seedFloors($container, 4, 2);
         $tester = $this->doctor($container);
         $tester->execute([]);
 
-        self::assertSame(Command::SUCCESS, $tester->getStatusCode(), 'the required-tier default under full V2 capability must warn, never fail the deploy gate');
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode(), 'the flag-accepted downgrade window must warn, never fail the deploy gate');
         $display = $tester->getDisplay();
         self::assertStringContainsString('[WARN] Execution versioning', $display);
+        self::assertStringContainsString('execution_allow_downgrade: true flag', $display, 'the WARN must name the explicit flag that permits the downgrade');
         self::assertStringContainsString('execution_required_version_1_with_v2_capability', $display, 'the WARN must carry the machine-readable reason code');
         self::assertStringContainsString('the strong grammar stays client-downgradeable until the required tier is raised to 2', $display);
         self::assertStringContainsString('Raise execution_required_version to 2 once every serving page is on the version-2 generation', $display);
         self::assertStringNotContainsString('[FAIL]', $display);
+    }
+
+    public function testHighAbuseArmedMismatchWithoutTheFlagIsRefusedAtContainerCompile(): void
+    {
+        // The invariant the flag unlocks: high_abuse arms the execution
+        // gate by default, so an execution_required_version below the
+        // execution_version cap with no explicit
+        // execution_allow_downgrade: true must refuse the container
+        // compile with the config-tree error, never boot into a
+        // silently client-downgradeable deployment.
+        $kernel = new DoctorExecutionRequiredVersionKernel('test', true, 2, 1, false);
+        try {
+            $kernel->boot();
+            self::fail('high_abuse with an armed required tier below the node cap and no downgrade flag must refuse the container compile');
+        } catch (\Symfony\Component\Config\Definition\Exception\InvalidConfigurationException $e) {
+            self::assertStringContainsString('execution_required_version must not be below', $e->getMessage());
+            self::assertStringContainsString('execution_allow_downgrade: true', $e->getMessage());
+        }
     }
 
     public function testDoctorPassesOnHighAbuseWithFullV2CapabilityAndTheRequiredTierAtTwo(): void
@@ -552,22 +573,23 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
 
     public function testDoctorWarnsOnHighAbuseWithFullV3CapabilityWhileTheRequiredTierStaysTwo(): void
     {
-        // The version-3 shape of the same hardened-posture gap: cap
-        // and confirmed central execution floor 3 (the strongest
-        // available grammar is version 3) with
+        // The version-3 shape of the same flag-accepted downgrade
+        // window: cap and confirmed central execution floor 3 (the
+        // strongest available grammar is version 3) with
         // execution_required_version at 2: a client that cannot solve
         // version 3 is downgraded to version 2, so the strongest
         // grammar stays client-downgradeable and the doctor warns
-        // (exit 0) with the machine-readable reason naming the v3
-        // capability.
-        $container = $this->containerFor(new DoctorExecutionRequiredVersionKernel('test', true, 3, 2));
+        // (exit 0) with the explicit flag named and the
+        // machine-readable reason naming the v3 capability.
+        $container = $this->containerFor(new DoctorExecutionRequiredVersionKernel('test', true, 3, 2, true));
         $this->seedFloors($container, 4, 3);
         $tester = $this->doctor($container);
         $tester->execute([]);
 
-        self::assertSame(Command::SUCCESS, $tester->getStatusCode(), 'the sub-strongest required tier under full V3 capability must warn, never fail the deploy gate');
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode(), 'the flag-accepted sub-strongest required tier under full V3 capability must warn, never fail the deploy gate');
         $display = $tester->getDisplay();
         self::assertStringContainsString('[WARN] Execution versioning', $display);
+        self::assertStringContainsString('execution_allow_downgrade: true flag', $display, 'the WARN must name the explicit flag that permits the downgrade');
         self::assertStringContainsString('execution_required_version_2_with_v3_capability', $display, 'the WARN must carry the machine-readable reason code naming the strongest (v3) capability');
         self::assertStringContainsString('the strong grammar stays client-downgradeable until the required tier is raised to 3', $display);
         self::assertStringContainsString('Raise execution_required_version to 3 once every serving page is on the version-3 generation', $display);

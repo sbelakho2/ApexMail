@@ -345,7 +345,7 @@ provenance of the layout value itself. A solver that implements the
 full public semantics can still fabricate a coherent trace: the
 values are evidence, not a cryptographic proof of a browser.
 
-Three knobs control the dimension:
+The dimension is controlled by these knobs:
 
 - `kiwi_captcha.execution_key` (string, default null): the keyed-PRF
   secret that generates the programs. Null means execution challenges
@@ -373,10 +373,11 @@ Three knobs control the dimension:
   never downgraded to the weaker version-1 grammar. Raise it to 2 only
   after the fleet is fully on the version-2 generation (the cap above
   and the central `min_execution_version` floor at 2 everywhere).
-  The doctor warns when a `high_abuse` profile holds the full
-  version-2 capability while the required tier stays at the default 1;
-  the eventual hardened posture is required 2, with staged profiles a
-  future option.
+  `kiwi_captcha.execution_min_required_version` is the semantic alias
+  of this option: both spellings set the same value, and setting both
+  to different values is refused as a configuration error. The legacy
+  spelling stays valid through the one-major-version compatibility
+  window, so an existing deployment never needs to change its config.
 
 - `kiwi_captcha.execution_version` (int 1..4, default 1): the
   node's execution-program grammar cap. Version 3 is the
@@ -395,6 +396,20 @@ Three knobs control the dimension:
   The cap defaults to 1: raising it declares the node ready to write
   version-2 programs, and the counterpart central floor is declared by
   the operator, see operations.md "Execution versioning".
+  `kiwi_captcha.execution_max_version` is the semantic alias of this
+  option, with the same both-spellings rule as above.
+
+- `kiwi_captcha.execution_allow_downgrade` (bool, default false): the
+  explicit downgrade-window escape hatch. The `high_abuse` profile
+  arms the execution gate by default while the required tier defaults
+  to 1, so raising the node cap alone would put the strongest abuse
+  profile on a silently client-downgradeable grammar. When the
+  profile is `high_abuse`, `risk.execution_challenge` is on and the
+  required tier is below the node cap, the configuration is refused at
+  compile time unless this flag is explicitly true. Set it to true
+  only to accept the deliberate downgrade window during the fleet
+  transition. The doctor then warns that the downgrade is permitted
+  only through this flag.
 
 The dimension is supplementary evidence only. It is never the sole
 acceptance boundary: the proof-of-work proof and the record state
@@ -417,7 +432,11 @@ Profiles: the gate defaults off under `balanced` and
 override cannot re-arm it under the profile), and it defaults on under
 `high_abuse`. An explicit `risk.execution_challenge` value in any
 config layer always wins over the balanced and high_abuse derived
-defaults; only privacy_strict keeps the force.
+defaults; only privacy_strict keeps the force. Under `high_abuse`
+with the gate on, an armed required tier below the node cap is
+refused at compile time unless `execution_allow_downgrade` is
+explicitly true; the balanced and privacy_strict profiles never apply
+that invariant, so their required tier stays operator-owned.
 
 ## RSW time-lock: the optional sequential proof (experimental)
 

@@ -397,10 +397,35 @@ transition. Keep it at 1 while the fleet moves to the version-2
 generation (this node's `execution_version` cap = 2 everywhere and
 the central `min_execution_version` = 2), then raise it to 2 once
 every serving page can solve version 2.
-The doctor warns on a `high_abuse` profile that holds the full
-version-2 capability while `execution_required_version` stays at 1;
-the eventual hardened posture is required 2, and staged profiles are a
-future option.
+
+The grammar knobs carry two spellings each. The semantic names
+`kiwi_captcha.execution_max_version` and
+`kiwi_captcha.execution_min_required_version` are aliases of the
+legacy `kiwi_captcha.execution_version` and
+`kiwi_captcha.execution_required_version` options: Symfony Config
+folds both spellings onto one processed value, and setting both
+spellings of one knob to different values is refused as a
+configuration error. The legacy names stay valid through the
+one-major-version compatibility window, so an existing deployment
+never needs to change its config.
+
+Raising the node cap alone is no longer a silent act under the
+`high_abuse` profile. The profile arms `risk.execution_challenge` by
+default, and `execution_required_version` defaults to 1, so a cap
+raised above the required tier would leave the strongest abuse
+profile on a grammar a hostile client can negotiate its way out of.
+The bundle refuses that combination at compile time: `high_abuse`
+with the execution gate on and `execution_required_version` below
+`execution_version` is a configuration error. Two ways out exist. The
+hardened posture raises the required tier to the cap, the destination
+of every rollout. The explicit escape hatch,
+`kiwi_captcha.execution_allow_downgrade: true`, accepts the deliberate
+downgrade window while the fleet transitions. The doctor reports the
+resulting posture: it passes when the required tier equals the node
+cap, and it warns (exit 0) when the window is open, naming the flag
+as the only thing that permits the downgrade. Balanced and
+privacy_strict deployments never apply the invariant: their required
+tier stays operator-owned.
 
 The issuance-side gate is three-way per grammar version. A node emits
 version N above 1 only when every rung for that N is up (the ladder

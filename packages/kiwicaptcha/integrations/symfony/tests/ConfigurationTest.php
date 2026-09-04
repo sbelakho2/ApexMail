@@ -835,6 +835,151 @@ final class ConfigurationTest extends TestCase
         self::assertSame(2, $belowCap['execution_required_version']);
     }
 
+    public function testExecutionVersioningAliasesCanonicalizeOntoTheLegacyNames(): void
+    {
+        // The semantic names are canonicalized aliases: Symfony Config
+        // folds both spellings of one concept onto the single legacy
+        // processed key, so execution_max_version alone sets
+        // execution_version and the alias never survives the
+        // processing. An existing deployment that keeps the legacy
+        // spelling is byte-identical.
+        $maxAlias = $this->process(['execution_max_version' => 3]);
+        self::assertSame(3, $maxAlias['execution_version'], 'execution_max_version is an alias of execution_version');
+        self::assertArrayNotHasKey('execution_max_version', $maxAlias, 'the alias spelling never survives into the processed config');
+
+        $requiredAlias = $this->process(['execution_max_version' => 3, 'execution_min_required_version' => 2]);
+        self::assertSame(2, $requiredAlias['execution_required_version'], 'execution_min_required_version is an alias of execution_required_version');
+        self::assertSame(3, $requiredAlias['execution_version']);
+        self::assertArrayNotHasKey('execution_min_required_version', $requiredAlias, 'the alias spelling never survives into the processed config');
+
+        // Both spellings of one concept set to the same value are not a
+        // conflict: the merged value is the configured one.
+        $both = $this->process([
+            'execution_version' => 3,
+            'execution_max_version' => 3,
+            'execution_required_version' => 2,
+            'execution_min_required_version' => 2,
+        ]);
+        self::assertSame(3, $both['execution_version']);
+        self::assertSame(2, $both['execution_required_version']);
+
+        // The defaults stay 1/1 when only the aliases are configured.
+        $defaults = $this->process(['execution_max_version' => 1, 'execution_min_required_version' => 1]);
+        self::assertSame(1, $defaults['execution_version']);
+        self::assertSame(1, $defaults['execution_required_version']);
+    }
+
+    public function testExecutionVersioningAliasConflictsAreRefused(): void
+    {
+        // Two conflicting spellings of one concept are refused: Symfony
+        // Config canonicalizes the aliases onto one processed value, so
+        // the winner would silently depend on the spelling, never on
+        // the operator.
+        try {
+            $this->process(['execution_version' => 2, 'execution_max_version' => 3]);
+            self::fail('execution_version 2 next to execution_max_version 3 must be refused as an alias conflict');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('execution_version and kiwi_captcha.execution_max_version are aliases of the same execution-versioning option', $e->getMessage());
+            self::assertStringContainsString('different values (2 and 3)', $e->getMessage());
+        }
+        try {
+            $this->process(['execution_version' => 3, 'execution_max_version' => 2]);
+            self::fail('execution_version 3 next to execution_max_version 2 must be refused as an alias conflict');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('are aliases of the same execution-versioning option', $e->getMessage());
+        }
+        try {
+            $this->process(['execution_required_version' => 1, 'execution_min_required_version' => 3]);
+            self::fail('execution_required_version 1 next to execution_min_required_version 3 must be refused as an alias conflict');
+        } catch (InvalidConfigurationException $e) {
+            self::assertStringContainsString('execution_required_version and kiwi_captcha.execution_min_required_version are aliases of the same execution-versioning option', $e->getMessage());
+            self::assertStringContainsString('different values (1 and 3)', $e->getMessage());
+        }
+    }
+
+    public function testExecutionAllowDowngradeDefaultsToFalse(): void
+    {
+        self::assertFalse($this->process()['execution_allow_downgrade'], 'the downgrade-window escape hatch defaults to false');
+        self::assertFalse($this->process(['execution_allow_downgrade' => false])['execution_allow_downgrade']);
+        self::assertTrue($this->process(['execution_allow_downgrade' => true])['execution_allow_downgrade']);
+    }
+
+    public function testHighAbuseArmedExecutionMismatchIsRefusedUnlessTheFlagAcceptsTheWindow(): void
+    {
+        // The weak-version deployment footgun: high_abuse arms the
+        // execution gate by default while execution_required_version
+        // defaults to 1, so raising the node cap alone would put the
+        // strongest abuse profile on a silently client-downgradeable
+        // grammar. The tree refuses the armed mismatch at compile time
+        // unless the operator explicitly accepts the downgrade window.
+        $expected = 'Invalid configuration for path "kiwi_captcha": kiwi_captcha.execution_required_version must not be below kiwi_captcha.execution_version under the high_abuse protection profile with risk.execution_challenge on: the profile arms the execution dimension by default, and a required tier below the node cap would let the strongest abuse profile silently hand the weaker grammar to any client that cannot solve the stronger one. Raise the required tier to the node cap (the hardened posture), or accept the deliberate downgrade window with an explicit kiwi_captcha.execution_allow_downgrade: true (see operations.md "Execution versioning")';
+        try {
+            $this->process([
+                'protection_profile' => 'high_abuse',
+                'execution_version' => 3,
+                'execution_required_version' => 1,
+            ]);
+            self::fail('high_abuse with the required tier 1 below the node cap 3 and the gate armed must be refused');
+        } catch (InvalidConfigurationException $e) {
+            self::assertSame($expected, $e->getMessage());
+        }
+
+        // An explicit risk.execution_challenge: off under high_abuse
+        // does not arm the dimension, so the mismatch compiles without
+        // the flag.
+        $deferred = $this->process([
+            'protection_profile' => 'high_abuse',
+            'risk' => ['execution_challenge' => 'off'],
+            'execution_version' => 3,
+            'execution_required_version' => 1,
+        ]);
+        self::assertSame(3, $deferred['execution_version']);
+        self::assertSame(1, $deferred['execution_required_version']);
+        self::assertFalse($deferred['execution_allow_downgrade']);
+
+        // The flag is the escape hatch: the same armed mismatch
+        // compiles with an explicit execution_allow_downgrade: true.
+        $accepted = $this->process([
+            'protection_profile' => 'high_abuse',
+            'execution_version' => 3,
+            'execution_required_version' => 1,
+            'execution_allow_downgrade' => true,
+        ]);
+        self::assertTrue($accepted['execution_allow_downgrade']);
+        self::assertSame(3, $accepted['execution_version']);
+        self::assertSame(1, $accepted['execution_required_version']);
+
+        // The hardened posture (required tier at the cap) compiles
+        // without the flag.
+        $hardened = $this->process([
+            'protection_profile' => 'high_abuse',
+            'execution_version' => 3,
+            'execution_required_version' => 3,
+        ]);
+        self::assertSame(3, $hardened['execution_version']);
+        self::assertSame(3, $hardened['execution_required_version']);
+
+        // balanced and privacy_strict profiles are unaffected: their
+        // required tier stays operator-owned and the mismatch compiles.
+        $balanced = $this->process([
+            'protection_profile' => 'balanced',
+            'execution_version' => 3,
+            'execution_required_version' => 1,
+        ]);
+        self::assertSame(1, $balanced['execution_required_version']);
+        $privacyStrict = $this->process([
+            'protection_profile' => 'privacy_strict',
+            'execution_version' => 3,
+            'execution_required_version' => 1,
+        ]);
+        self::assertSame(1, $privacyStrict['execution_required_version']);
+
+        // The default 1/1 combination under high_abuse stays valid.
+        $defaults = $this->process(['protection_profile' => 'high_abuse']);
+        self::assertSame(1, $defaults['execution_version']);
+        self::assertSame(1, $defaults['execution_required_version']);
+    }
+
     public function testArgon2MaxVerificationRuntimeMsDefaultsAndBounds(): void
     {
         // The deployment bound on a single verification derivation: below

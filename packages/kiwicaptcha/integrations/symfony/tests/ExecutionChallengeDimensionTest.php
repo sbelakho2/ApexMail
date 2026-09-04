@@ -249,21 +249,22 @@ final class ExecutionChallengeDimensionTest extends TestCase
     /**
      * A full armed-issuance controller request (the container wiring of
      * {@see self::testArmedIssuanceAndVerificationThroughTheController()},
-     * with the node's execution_version cap raised to 2 and the central
-     * execution floor seeded). The capability advertisement rides the
-     * `Kiwi-Execution-Max-Version` request header exactly like the
-     * widget driver sends it; passing null means the request carries no
-     * header (an older client that never advertises). Returns the
-     * response and the shared in-memory challenge storage.
+     * with the node's execution_version cap raised to the requested
+     * version and the central execution floor seeded to match). The
+     * capability advertisement rides the `Kiwi-Execution-Max-Version`
+     * request header exactly like the widget driver sends it; passing
+     * null means the request carries no header (an older client that
+     * never advertises). Returns the response and the shared in-memory
+     * challenge storage.
      *
      * @return array{0: \Symfony\Component\HttpFoundation\Response, 1: \KiwiCaptcha\Storage\ArrayStorage}
      */
-    private function armedIssuance(string $json, ?string $capabilityHeader = null, int $requiredVersion = 1): array
+    private function armedIssuance(string $json, ?string $capabilityHeader = null, int $requiredVersion = 1, int $capVersion = 2): array
     {
         $container = $this->load([[
             'secret_key' => self::SECRET,
             'execution_key' => self::EXECUTION_KEY,
-            'execution_version' => 2,
+            'execution_version' => $capVersion,
             'execution_required_version' => $requiredVersion,
             'redis_service' => 'fake_redis',
             'risk' => ['enabled' => true, 'redis_service' => 'fake_redis', 'execution_challenge' => 'on'],
@@ -273,7 +274,7 @@ final class ExecutionChallengeDimensionTest extends TestCase
         $controller = $container->get(ChallengeController::class);
         $redis = $container->get('fake_redis');
         $monitor = $container->get(\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::class);
-        $this->seedExecutionPolicy($redis, $monitor);
+        $this->seedExecutionPolicy($redis, $monitor, executionFloor: $capVersion);
 
         $server = [
             'CONTENT_TYPE' => 'application/json',
@@ -373,6 +374,73 @@ final class ExecutionChallengeDimensionTest extends TestCase
         $counter = $this->winningCounter($payload);
         $token = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected, base64_encode($trace))->encode();
         self::assertTrue($this->verifyWithRecord($storage, $payload['nonce'], $token), 'the required-tier version-2 solve must verify');
+    }
+
+    public function testRequiredExecutionVersionThreeRefusesClientsBelowTheTier(): void
+    {
+        // The version-3 required tier mirrors the v2 refusal: with the
+        // cap and the confirmed central execution floor at 3, a client
+        // whose capability header is absent, below 3 or unparseable must
+        // be refused with the deterministic client-unsupported code —
+        // never issued the weaker version-2 or version-1 grammar, never
+        // issued an unarmed challenge. The config is spelled with the
+        // semantic alias names (execution_max_version 3 and
+        // execution_min_required_version 3), which canonicalize onto the
+        // legacy options before the container is built.
+        $container = $this->load([[
+            'secret_key' => self::SECRET,
+            'execution_key' => self::EXECUTION_KEY,
+            'execution_max_version' => 3,
+            'execution_min_required_version' => 3,
+            'redis_service' => 'fake_redis',
+            'risk' => ['enabled' => true, 'redis_service' => 'fake_redis', 'execution_challenge' => 'on'],
+            'storage' => 'kiwi_captcha.storage.array',
+            'difficulty_bits' => 8,
+        ]]);
+        $controller = $container->get(ChallengeController::class);
+        self::assertSame(3, $container->getDefinition(ChallengeController::class)->getArgument('$executionVersionCap'), 'the execution_max_version alias wires the node cap');
+        self::assertSame(3, $container->getDefinition(ChallengeController::class)->getArgument('$executionRequiredVersion'), 'the execution_min_required_version alias wires the required tier');
+        $redis = $container->get('fake_redis');
+        $monitor = $container->get(\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::class);
+        $this->seedExecutionPolicy($redis, $monitor, executionFloor: 3);
+
+        foreach ([null, '1', '2', 'abc', '0', '-1'] as $capability) {
+            $server = [
+                'CONTENT_TYPE' => 'application/json',
+                'REMOTE_ADDR' => '127.0.0.1',
+                'HTTP_ORIGIN' => 'http://localhost',
+            ];
+            if ($capability !== null) {
+                $server['HTTP_Kiwi_Execution_Max_Version'] = $capability;
+            }
+            $response = $controller->challenge(Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], $server, '{"scope":"login","action":"login-action"}'));
+            self::assertSame(422, $response->getStatusCode(), 'the incapable client (capability '.var_export($capability, true).') must be refused');
+            $body = json_decode((string) $response->getContent(), true);
+            self::assertSame('CLIENT_EXECUTION_VERSION_UNSUPPORTED', $body['error']['code'] ?? null, 'the refusal code is deterministic');
+            self::assertArrayNotHasKey('execution_program', $body, 'no weaker grammar is ever handed out');
+            self::assertArrayNotHasKey('challenge', $body, 'no challenge is handed out');
+        }
+    }
+
+    public function testRequiredExecutionVersionThreeIssuesVersionThreeToCapableClients(): void
+    {
+        // A client that advertises version 3 under the same required
+        // tier receives the version-3 grammar (the sibling-index
+        // traversal) and the full solve verifies end to end.
+        [$response, $storage] = $this->armedIssuance('{"scope":"login","action":"login-action"}', '3', 3, 3);
+        self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
+        $payload = json_decode((string) $response->getContent(), true);
+        self::assertArrayHasKey('execution_program', $payload);
+        self::assertSame(3, $this->programVersion($payload['execution_program']), 'the required tier issues version 3 to a capable client');
+        $program = ExecutionChallengeGenerator::decode($payload['execution_program']);
+        self::assertNotNull($program);
+        $trace = ExecutionTraceFixture::executedTraceFor($program);
+        self::assertStringContainsString('dsib(', $trace, 'the version-3 grammar carries the sibling-index traversal entry');
+        $expected = ExecutionChallengeGenerator::digestOverTrace($payload['execution_program'], $payload['nonce'], $trace);
+        self::assertNotNull($expected);
+        $counter = $this->winningCounter($payload);
+        $token = SolutionToken::create($payload['nonce'], $counter, 5000, [], $expected, base64_encode($trace))->encode();
+        self::assertTrue($this->verifyWithRecord($storage, $payload['nonce'], $token), 'the required-tier version-3 solve must verify');
     }
 
     public function testRequiredExecutionVersionDefaultOneKeepsTheTransitionBehavior(): void
