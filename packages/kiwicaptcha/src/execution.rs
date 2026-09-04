@@ -1363,8 +1363,28 @@ pub mod fixtures {
     ///
     /// Test-only: fabricates a verifier-accepted trace without a
     /// browser. Test suites and cross-language fixtures only, never
-    /// call from a production path.
+    /// call from a production path. The observe choice is the fixed
+    /// reference height above; the adversarial oracle makes that choice
+    /// explicit through [`browserless_forgery_solver`].
     pub fn executed_trace_for(program: &Program) -> String {
+        executed_trace_for_with_observed_height(program, OBSERVED_HEIGHT)
+    }
+
+    /// The browser-equivalent trace with an explicit fabricated observe
+    /// choice: any legal observed height 1..=255 is written through the
+    /// u8 state exactly as the verifier replays it, so the later
+    /// checksum and read entries stay coherent with that choice. This
+    /// entry exists for the adversarial shadow solver, the mirror of
+    /// the PHP BrowserlessForgerySolver. Test-only, never a
+    /// production API.
+    pub fn executed_trace_for_with_observed_height(
+        program: &Program,
+        observed_height: u8,
+    ) -> String {
+        assert!(
+            (1..=255).contains(&observed_height),
+            "the fabricated observed height must stay within 1..255"
+        );
         let mut u8arr: Vec<u8> = Vec::new();
         let mut cur: Option<DomNode> = None;
         let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
@@ -1418,17 +1438,16 @@ pub mod fixtures {
                         .unwrap_or(usize::MAX)
                 ));
             } else if op.opcode == OP_DOM_OBSERVE {
-                // The browser-equivalent observe: the fabricated reference
-                // height (the real value is the engine's own text metrics,
-                // never predictable here) is written through into the
-                // replay state. The following checksum/read entries in this
-                // synthesized trace are then computed over the observed
-                // byte, the full causal-graph semantics, never a
-                // placeholder.
+                // The browser-equivalent observe: the caller-chosen
+                // height (the engine's own text metrics would measure
+                // it) is written through into the replay state. The
+                // following checksum/read entries in this synthesized
+                // trace are then computed over the observed byte, the
+                // full causal-graph semantics, never a placeholder.
                 let idx = operand_int(op, "idx") as usize;
-                entries.push(format!("obs({idx},{OBSERVED_HEIGHT})"));
+                entries.push(format!("obs({idx},{observed_height})"));
                 if idx < u8arr.len() {
-                    u8arr[idx] = OBSERVED_HEIGHT;
+                    u8arr[idx] = observed_height;
                 }
             } else {
                 let result = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
@@ -1436,6 +1455,29 @@ pub mod fixtures {
             }
         }
         entries.join(";")
+    }
+
+    /// The mirror of the PHP BrowserlessForgerySolver class: a pure
+    /// shadow solver that forges verifier-accepted executed traces for
+    /// the v1, v2 and v3 grammars without a browser. The observe
+    /// choice is the explicit parameter, any value 1..=255 works, and
+    /// every other trace entry reuses the shared state machine above,
+    /// so the solver carries no second copy of the VM.
+    ///
+    /// The oracle is the forgeability regression benchmark, preserved
+    /// on purpose: the tests sweep 100 generated programs of each
+    /// version and assert every forged trace verifies and digests. A
+    /// future version-4 object-graph grammar tests real Web Platform
+    /// semantics (classList, selectors, traversal, fragments, clone
+    /// and reparent, event ordering). Extending this solver to that
+    /// grammar must fail until those semantics are implemented, so
+    /// the future gate is real semantics, never a shadow-model fix.
+    pub fn browserless_forgery_solver(program: &Program, observed_height: u8) -> String {
+        assert!(
+            (1..=255).contains(&observed_height),
+            "the fabricated observed height must stay within 1..255"
+        );
+        executed_trace_for_with_observed_height(program, observed_height)
     }
 }
 
@@ -1676,7 +1718,7 @@ mod tests {
     // feature-gated test-fixtures module (see `fixtures`); the self
     // dev-dependency in Cargo.toml enables `test-fixtures` for every
     // test build, so the unit tests reach it here.
-    use super::fixtures::executed_trace_for;
+    use super::fixtures::{browserless_forgery_solver, executed_trace_for};
 
     const KEY: &[u8] = b"0123456789abcdef0123456789abcdef";
     const NONCE: &str = "xAfSYcl6VyvtYZcQUhvXxin2pojnG5TmZoHg7K6NG3s=";
@@ -2359,5 +2401,76 @@ mod tests {
             }
         }
         assert!(seen > 0, "the sampled programs must exercise dataset keys");
+    }
+
+    #[test]
+    fn browserless_shadow_solver_forges_v1_v2_v3_traces() {
+        // The adversarial regression oracle: a pure shadow solver must
+        // forge verifier-accepted traces for the v1, v2 and v3
+        // grammars at several chosen observed heights. The future
+        // version-4 gate sits on this test: an object-graph grammar
+        // tests real Web Platform semantics (classList, selectors,
+        // traversal, fragments, clone and reparent, event ordering),
+        // so extending this solver to version 4 must fail until those
+        // semantics are implemented. The mirror test lives in the PHP
+        // suite as testBrowserlessShadowSolverForgesV1V2V3Traces.
+        let heights = [1u8, 10, 17, 255];
+        let mut solved = 0u64;
+        for version in [1u8, 2, 3] {
+            for i in 0..100u32 {
+                let nonce = B64.encode(sha2::Sha256::digest(
+                    format!("browserless-solver-v{version}-{i}").as_bytes(),
+                ));
+                let p = generate(KEY, &nonce, "login", "login-action", version).unwrap();
+                let program = decode(&p).expect("the program must parse");
+                assert_eq!(
+                    program.op_version, version,
+                    "the corpus stays on its declared version"
+                );
+                for &height in &heights {
+                    let trace = browserless_forgery_solver(&program, height);
+                    assert!(
+                        verify_executed_trace(&p, &nonce, &trace).is_some(),
+                        "the forged trace of the v{version} program {i} must verify at height {height}"
+                    );
+                    assert!(
+                        expected_digest_over_trace(&p, &nonce, &trace).is_some(),
+                        "the forged trace of the v{version} program {i} must digest at height {height}"
+                    );
+                    solved += 1;
+                }
+                // The observe choice flows into the evidence: different
+                // heights change the digest of a version >= 2 program
+                // (its mandatory observe entry) and leave the version-1
+                // digest untouched (no observe opcode).
+                let digest_1 = expected_digest_over_trace(
+                    &p,
+                    &nonce,
+                    &browserless_forgery_solver(&program, 1),
+                )
+                .expect("the height-1 forged trace must digest");
+                let digest_255 = expected_digest_over_trace(
+                    &p,
+                    &nonce,
+                    &browserless_forgery_solver(&program, 255),
+                )
+                .expect("the height-255 forged trace must digest");
+                if version >= 2 {
+                    assert_ne!(
+                        digest_1, digest_255,
+                        "the chosen height must change the forged evidence"
+                    );
+                } else {
+                    assert_eq!(
+                        digest_1, digest_255,
+                        "a version-1 trace carries no observe entry"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            solved, 1200,
+            "the oracle solves 100 programs of 3 versions at 4 heights"
+        );
     }
 }

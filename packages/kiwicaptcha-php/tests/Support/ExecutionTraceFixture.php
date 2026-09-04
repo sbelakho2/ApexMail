@@ -85,6 +85,35 @@ final class ExecutionTraceFixture
      */
     public static function executedTraceFor(array $program): string
     {
+        return self::buildTrace($program, self::OBSERVED_HEIGHT);
+    }
+
+    /**
+     * The browser-equivalent trace with an explicit fabricated observe
+     * choice. Any legal observed height 1..255 is written through the
+     * u8 state exactly as the verifier replays it, so the later
+     * checksum and read entries stay coherent with that choice. This
+     * entry exists for the adversarial shadow solver: see
+     * BrowserlessForgerySolver. Test-only, never a production API.
+     *
+     * @param array{format: int, scope: string, action: string, op_version: int, ops: list<array{op: int, operands: array<string, mixed>}>} $program
+     */
+    public static function executedTraceForWithObservedHeight(array $program, int $observedHeight): string
+    {
+        if ($observedHeight < 1 || $observedHeight > 255) {
+            throw new \InvalidArgumentException('the fabricated observed height must stay within 1..255');
+        }
+
+        return self::buildTrace($program, $observedHeight);
+    }
+
+    /**
+     * The single state-machine trace builder: the observed height is a
+     * parameter so the fixture's fixed reference choice and the
+     * solver's explicit choice share one behavior-exact simulation.
+     */
+    private static function buildTrace(array $program, int $observedHeight): string
+    {
         $u8 = [];
         $cur = null; // ['id', 'attrs' map, 'dataset' map, 'classes' set, 'appended' bool]
         $docIds = [];
@@ -138,17 +167,17 @@ final class ExecutionTraceFixture
                 // body child, so the real index is the append rank + 1.
                 $entries[] = self::TRACE_NAMES[$op].'('.($appendRank[$record['operands']['id']] ?? -2) + 1 .')';
             } elseif ($op === ExecutionChallengeGenerator::OP_DOM_OBSERVE) {
-                // The browser-equivalent observe: the fabricated reference
-                // height (the real value is the engine's own text
-                // metrics, never predictable here) is written through
+                // The browser-equivalent observe: the fabricated height
+                // (the caller's explicit choice, a value the engine's
+                // own text metrics would measure) is written through
                 // into the replay state,
                 // so the following checksum/read entries in this
                 // synthesized trace are computed over the observed byte —
                 // the full causal-graph semantics, never a placeholder.
                 $idx = $record['operands']['idx'];
-                $entries[] = self::TRACE_NAMES[$op].'('.$idx.','.self::OBSERVED_HEIGHT.')';
+                $entries[] = self::TRACE_NAMES[$op].'('.$idx.','.$observedHeight.')';
                 if ($idx < \count($u8)) {
-                    $u8[$idx] = self::OBSERVED_HEIGHT;
+                    $u8[$idx] = $observedHeight;
                 }
             } else {
                 $entries[] = self::TRACE_NAMES[$op].'('.self::simulateOp($op, $record['operands'], $u8, $cur, $docIds).')';

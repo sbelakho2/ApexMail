@@ -649,6 +649,27 @@ implementing the complete public semantics can still emit a coherent
 trace, because the values are evidence, not a cryptographic proof of
 a browser.
 
+### Adversarial benchmark: the browserless oracle
+
+Execution versions 1 through 3 are forgeable without a browser, and
+the regression suites pin that boundary on purpose. The test-only
+shadow solver decodes each program, replays the interpreter's own
+semantics, picks an arbitrary legal observed height (1 to 255), and
+emits a trace the verifier accepts. The oracle runs 100 generated
+programs per version at heights 1, 10, 17 and 255 and asserts every
+trace verifies and digests. Mirrors live in the PHP suite
+(BrowserlessExecutionForgeryTest) and the Rust execution module with
+identical acceptance assertions.
+
+This oracle is the adversarial benchmark for the next grammar. A
+future version-4 object-graph grammar tests real Web Platform
+semantics: classList, selectors, traversal, fragments, clone and
+reparent, and event ordering. The same oracle must fail on that
+grammar unless the solver implements those semantics. Acceptance
+criterion: the oracle keeps accepting every v1, v2 and v3 trace, and
+the version-4 extension is accepted only when it reproduces the
+tested Web Platform behavior instead of the shadow model.
+
 ## Graceful shutdown sequence
 
 The deployment must drain verification work, not kill it mid-hash.
