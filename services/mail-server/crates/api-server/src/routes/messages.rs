@@ -466,7 +466,7 @@ async fn insert_message_and_queue(
             query.push_str(&format!(
                 "(${i_id}::uuid, ${i_msg}::uuid, ${i_ten}, ${i_dom}::uuid, ${i_from}, ARRAY[${i_rcpt}], ${i_subj}, \
                  ${i_from}, ${i_rcpt}, ${i_html}, ${i_text}, ${i_tags}, ${i_meta}, ${i_sched}, 5, 'pending', \
-                 ${i_created}, ${i_created}"
+                 ${i_created}, ${i_created})"
             ));
             param_idx += 13;
         }
