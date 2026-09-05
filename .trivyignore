@@ -28,3 +28,4 @@ CVE-2026-76642   # util-linux external mount helper — no mounting in container
 CVE-2026-78408   # util-linux nsenter --join-cgroup — nsenter never executed
 CVE-2026-78409   # util-linux X-mount.subdir resolution — no mounting in containers
 CVE-2026-16742   # systemd-homed LPE — systemd-homed absent; libsystemd0 is a linked stub
+CVE-2026-53614   # util-linux SUID mount nosuid/noexec bypass — no SUID mount in these images
