@@ -1,0 +1,34 @@
+{# ── ApexMail Brand Lockup ────────────────────────────────────────────── #}
+{#                                                                        #}
+{# The ApexMail wordmark — "Apex" in the brand accent, "Mail" in the      #}
+{# foreground — used in the header and footer.                            #}
+{#                                                                        #}
+{# Brand note (2026-09-05 restoration): ApexMail's identity is the A-mark  #}
+{# favicon (browser tabs, static/icon.svg) plus this wordmark. The bird    #}
+{# mark is NOT an ApexMail asset — it belongs to the CAPTCHA product and   #}
+{# must never appear in this build (enforced at commit time).            #}
+{#                                                                        #}
+{# Variable:                                                              #}
+{#   - mark_size: base height in px (default 32); the wordmark scales     #}
+{#     with it.                                                           #}
+
+{% set mark_size = mark_size | default(value=32) %}
+
+<a href="{{ lp }}/" class="flex items-center group" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["a11y"] and i18n_data[l]["a11y"]["home_link"] %}{{ i18n_data[l]["a11y"]["home_link"] }}{% else %}ApexMail home{% endif %}">
+  {# Wordmark — "Apex" in the brand accent, "Mail" in the foreground.     #}
+  {# The text-surface-950 on "Mail" is auto-inverted in dark mode by the  #}
+  {# html.dark { --surface-950: ... } override in input.css (the project's  #}
+  {# documented dark-mode mechanism — no Tailwind dark: variant needed).   #}
+  <svg
+    class="apex-wordmark shrink-0"
+    width="{{ mark_size * 3.125 }}"
+    height="{{ mark_size * 1.25 }}"
+    viewBox="0 0 100 40"
+    aria-hidden="true"
+    focusable="false"
+  >
+    <text x="0" y="27" font-family="'Inter Variable', Inter, system-ui, sans-serif" font-size="20" font-weight="700" letter-spacing="-0.02em" fill="currentColor">
+      <tspan class="text-brand-600">Apex</tspan><tspan class="text-surface-950">Mail</tspan>
+    </text>
+  </svg>
+</a>

@@ -9,10 +9,14 @@
 # rendered HTML. The marketing site sells ApexMail; KiwiCaptcha is a separate
 # product with its own brand identity, and the two must not be conflated.
 #
+# BRAND RESTORATION (2026-09-05): the kiwi artwork is the KIWICAPTCHA
+# product mark (packages/kiwicaptcha), NOT an ApexMail asset. ApexMail's
+# identity is the A-mark favicon (static/icon.svg) + the "ApexMail" wordmark
+# (templates/partials/brand-lockup.html). Marketing must carry NO kiwi at
+# all — neither KiwiCaptcha identifiers NOR kiwi artwork/mascot references.
 # This guard scans the marketing SOURCE trees (pre-build) so leaks are caught
-# at commit time, before they ever reach a rendered page. The companion guard
-# in tools/check-forbidden-patterns.sh scans the BUILT public/ output as a
-# post-build backstop.
+# at commit time; the companion in tools/check-forbidden-patterns.sh scans
+# the BUILT public/ output as a post-build backstop.
 #
 # Exit codes:
 #   0 — no KiwiCaptcha references found (boundary intact)
@@ -29,9 +33,9 @@ set -euo pipefail
 # assets use the bare word "kiwi" inside the ApexMail-owned kiwi-logo partial
 # and are prefixed with `apex-` in their identifiers to stay distinct.
 #
-# To allow ApexMail's mascot branding while blocking KiwiCaptcha, the patterns
-# below match KiwiCaptcha's product names but explicitly allow the ApexMail
-# mascot partial via a negative path filter (see ALLOWED_PATHS below).
+# Marketing must carry NO kiwi: KiwiCaptcha identifiers AND the bare word
+# "kiwi" are both forbidden (the kiwi is the KiwiCaptcha product mark; the
+# historical mascot partial was removed in the 2026-09-05 brand restoration).
 FORBIDDEN_PATTERNS=(
   'kiwicaptcha'         # product name (any case matched via -i)
   'kiwi-captcha'
@@ -40,17 +44,11 @@ FORBIDDEN_PATTERNS=(
   'kiwi-container'      # KiwiCaptcha container class
   'KIWI_WASM_B64'       # KiwiCaptcha WASM embed token
   'kcaptcha'            # KiwiCaptcha short slug
+  'kiwi'                # the bare word — the kiwi is KiwiCaptcha's, not ours
 )
 
-# ApexMail-owned mascot assets that legitimately contain "kiwi" — these are
-# the new brand-mark artwork, NOT KiwiCaptcha. Skip them when matching the
-# bare-word patterns above. (None of the FORBIDDEN_PATTERNS above are the bare
-# word "kiwi", so this allowlist is belt-and-suspenders.)
-ALLOWED_PATHS=(
-  'apps/marketing-zola/templates/partials/kiwi-logo.html'
-  'apps/marketing-zola/static/icon.svg'
-  'apps/marketing-zola/static/favicon.svg'
-)
+# No marketing path legitimately contains "kiwi" anymore.
+ALLOWED_PATHS=()
 
 # Marketing source trees to scan (NOT public/ — that is build output and is
 # covered by tools/check-forbidden-patterns.sh).
@@ -70,14 +68,14 @@ for src_path in "${SOURCE_PATHS[@]}"; do
 
   # Build a grep exclude list from ALLOWED_PATHS (relative to repo root).
   excludes=()
-  for ap in "${ALLOWED_PATHS[@]}"; do
+  for ap in ${ALLOWED_PATHS[@]:-}; do
     excludes+=( --exclude="$ap" )
   done
 
   for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
     # -r recursive, -i case-insensitive, -I skip binary files, -l list files.
     # --exclude ensures the ApexMail mascot assets are never flagged.
-    matches=$(grep -rIl ${excludes[@]} -e "$pattern" "$src_path" 2>/dev/null || true)
+    if [ "${#excludes[@]}" -gt 0 ]; then matches=$(grep -rIl "${excludes[@]}" -e "$pattern" "$src_path" 2>/dev/null || true); else matches=$(grep -rIl -e "$pattern" "$src_path" 2>/dev/null || true); fi
     if [ -n "$matches" ]; then
       while IFS= read -r file; do
         # Belt-and-suspenders: skip allowed mascot assets by absolute path.
@@ -103,9 +101,9 @@ if [ "$FOUND" -eq 1 ]; then
   echo "Offending files:" >&2
   printf "%s" "$HITS" >&2
   echo "" >&2
-  echo "If you intended to add ApexMail mascot branding (not KiwiCaptcha)," >&2
-  echo "use the apex-prefixed assets in templates/partials/kiwi-logo.html," >&2
-  echo "static/icon.svg, or static/favicon.svg — those are allowlisted." >&2
+  echo "The bird mark belongs to the CAPTCHA product, not ApexMail." >&2
+  echo "ApexMail identity: the A-mark favicon (static/icon.svg) and the" >&2
+  echo "wordmark lockup (templates/partials/brand-lockup.html)." >&2
   exit 1
 fi
 
