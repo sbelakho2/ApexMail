@@ -1193,6 +1193,20 @@ async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables() {
     .execute(&pool)
     .await
     .expect("audit_logs fixture reconciliation must apply");
+    // The chained writer's ids are UUID strings (36 chars) and its
+    // tenant/resource ids are canonical VARCHAR(26)+ values — the tools
+    // shape's narrow columns would truncate-fail the INSERT.
+    sqlx::raw_sql(
+        "ALTER TABLE audit_logs
+            ALTER COLUMN id TYPE TEXT,
+            ALTER COLUMN tenant_id TYPE TEXT,
+            ALTER COLUMN resource_id TYPE TEXT,
+            ALTER COLUMN action TYPE TEXT,
+            ALTER COLUMN ip_address TYPE TEXT",
+    )
+    .execute(&pool)
+    .await
+    .expect("audit_logs fixture column widening must apply");
     sqlx::raw_sql(
         "CREATE TABLE IF NOT EXISTS audit_chain_head (
             chain_id    TEXT        PRIMARY KEY,
