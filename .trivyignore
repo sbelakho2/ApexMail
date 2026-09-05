@@ -23,3 +23,4 @@ CVE-2026-57432   # perl pack/unpack disclosure — perl never executed
 CVE-2026-57433   # Storable integer overflow — perl never executed
 CVE-2026-8376    # perl regex heap overflow — perl never executed
 CVE-2026-9538    # perl-Archive-Tar DoS — perl never executed
+CVE-2026-78410   # util-linux restricted bind-mount source pinning — no mounting in containers
