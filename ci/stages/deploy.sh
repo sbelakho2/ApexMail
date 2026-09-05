@@ -104,12 +104,38 @@ stage_main() {
         return "$CI_EXIT_FAIL"
     fi
 
+    # nginx: recreate FIRST when the on-disk conf changed, then reload.
+    # A bind-mounted FILE pins the inode it was created with: git replacing
+    # deploy/nginx/nginx.conf leaves the container reading the OLD inode,
+    # and `nginx -s reload` faithfully reloads stale bytes (observed on the
+    # 2026-09-05 deploy: new default_server/headers lived on disk but never
+    # served). Compare the mounted file's md5 against the host file and
+    # restart the container when they differ — a one-second blip for the
+    # static proxy, and only on conf-changing deploys.
+    _reloaded=0
+    _host_conf="$CI_DEPLOY_DIR/deploy/nginx/nginx.conf"
+    if [ -f "$_host_conf" ]; then
+        _host_md5=$(md5sum "$_host_conf" 2>/dev/null | cut -d" " -f1)
+        _ctr_md5=$(compose exec -T nginx md5sum /etc/nginx/nginx.conf 2>/dev/null | cut -d" " -f1)
+        if [ -n "$_host_md5" ] && [ "$_host_md5" != "$_ctr_md5" ]; then
+            ci_info "nginx.conf changed on disk (inode replaced) — restarting nginx to re-bind the mount"
+            compose exec -T nginx nginx -t >>"$CI_STAGE_LOG" 2>&1 \
+                || { ci_err "new nginx.conf fails nginx -t — restarting anyway is unsafe; fix the conf"; return "$CI_EXIT_FAIL"; }
+            if compose restart nginx >>"$CI_STAGE_LOG" 2>&1; then
+                ci_info "nginx restarted on the new conf — upstream re-resolution covered by the restart; reload skipped"
+                _reloaded=1
+                break
+            fi
+            ci_err "nginx restart on new conf failed"
+            return "$CI_EXIT_FAIL"
+        fi
+    fi
+
     # Graceful reload, retried: nginx caches upstream DNS at worker start and
     # recreated backends get new container IPs (deploy-hetzner.yml Reload step).
     ci_info "reloading nginx (re-resolve upstreams)"
-    _reloaded=0
     _i=1
-    while [ "$_i" -le 5 ]; do
+    while [ "$_reloaded" = 0 ] && [ "$_i" -le 5 ]; do
         if compose exec -T nginx nginx -s reload >>"$CI_STAGE_LOG" 2>&1; then
             ci_info "nginx reload OK (attempt $_i)"
             _reloaded=1
