@@ -17,6 +17,7 @@ use KiwiCaptcha\AuthoritySafety;
 use KiwiCaptcha\AuthoritySafetyClassifier;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\ConsumedStateReadableInterface;
+use KiwiCaptcha\ExecutionVersionPolicy;
 use KiwiCaptcha\OperationIdentityAwareStorageInterface;
 use KiwiCaptcha\StorageInterface;
 use Symfony\Component\Console\Command\Command;
@@ -64,16 +65,6 @@ final class KiwiCaptchaDoctorCommand extends Command
      * core constructor enforces the same bound inline.
      */
     private const ARGON_MEMORY_CEILING_KIB = 65536;
-
-    /**
-     * This binary's maximum supported execution-program version: 3,
-     * the strongest grammar the core generator emits (the sibling-index
-     * traversal grammar). Mirrors the core's
-     * `ExecutionChallengeGenerator::MAX_EXECUTION_VERSION` and the
-     * challenge controller's max, the rung that caps the strongest
-     * grammar any emission gate can confirm on this node.
-     */
-    private const MAX_EXECUTION_VERSION = 3;
 
     /**
      * @param array<string, mixed>                     $config the effective processed
@@ -558,7 +549,7 @@ final class KiwiCaptchaDoctorCommand extends Command
         $profile = $this->config['protection_profile'] ?? null;
         $decoyEnabled = (bool) ($this->config['risk']['decoy_v3_enabled'] ?? false);
         $executionOn = ($this->config['risk']['execution_challenge'] ?? 'off') === 'on';
-        $rolloutMode = (string) ($this->config['protocol_rollout']['mode'] ?? 'normal');
+        $rolloutMode = $this->rolloutStatus();
         if ($profile === 'high_abuse' && !$decoyEnabled) {
             // Under high_abuse the profile-derived default is true, so
             // an effective false can only be an explicit deferral. The
@@ -584,7 +575,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             // fallback is protocol v2. Report the execution floor state
             // even here, so the v4 rollout cannot be forgotten.
             if ($executionOn) {
-                return $this->executionWriterState(false, $profile, $rolloutMode);
+                return $this->executionWriterState(false, $profile);
             }
 
             return ['PASS', 'protocol v2 emission (decoy surface off)'];
@@ -595,7 +586,7 @@ final class KiwiCaptchaDoctorCommand extends Command
             if ($executionOn) {
                 // The decoy floor is confirmed; the execution surface
                 // needs the v4 floor on top of it.
-                return $this->executionWriterState(true, $profile, $rolloutMode);
+                return $this->executionWriterState(true, $profile);
             }
 
             return ['PASS', 'decoy surface armed and the central floor confirms protocol v3 emission'];
@@ -605,6 +596,19 @@ final class KiwiCaptchaDoctorCommand extends Command
         }
 
         return ['WARN', 'decoy surface armed but the central floor is below 3 or unconfirmed: issuance falls back to protocol v2; finish the two-phase rollout before expecting decoy-armed emission'];
+    }
+
+    /**
+     * The declared protocol-rollout state machine: "migration" when
+     * the deployment declares protocol_rollout.mode migration,
+     * "normal" otherwise. The protocol-v3 writer check and the
+     * execution-versioning check both consult this single read, so a
+     * deliberate two-phase deferral is recognized identically by the
+     * two state machines.
+     */
+    private function rolloutStatus(): string
+    {
+        return (string) ($this->config['protocol_rollout']['mode'] ?? 'normal');
     }
 
     /**
@@ -620,7 +624,7 @@ final class KiwiCaptchaDoctorCommand extends Command
      *
      * @return array{0: string, 1: string} [status, detail]
      */
-    private function executionWriterState(bool $decoyConfirmed, ?string $profile, string $rolloutMode): array
+    private function executionWriterState(bool $decoyConfirmed, ?string $profile): array
     {
         $this->epochMonitor->refresh();
         $floor = $this->epochMonitor->minProtocolVersion();
@@ -630,7 +634,7 @@ final class KiwiCaptchaDoctorCommand extends Command
         if ($profile === 'high_abuse') {
             return ['FAIL', 'high_abuse requires execution-armed emission, but the fleet protocol floor has not been confirmed at v4. Confirm every serving binary supports protocol v4 and raise the central security-policy min_protocol_version to 4 (the two-phase rollout, see operations.md), or declare protocol_rollout.mode: migration while the v4 floor is being established.'];
         }
-        if ($rolloutMode === 'migration') {
+        if ($this->rolloutStatus() === 'migration') {
             return ['WARN', 'execution surface armed but the central floor is below 4 or unconfirmed with protocol_rollout.mode "migration" declared: issuance stays execution-unarmed while the v4 fleet floor is being established (the two-phase rollout, see operations.md)'];
         }
 
@@ -638,80 +642,62 @@ final class KiwiCaptchaDoctorCommand extends Command
     }
 
     /**
-     * The execution-required-tier posture check. The high_abuse
-     * protection profile models an abuse-heavy production deployment,
-     * and it arms the execution dimension by default
-     * (risk.execution_challenge on). The config tree therefore refuses
-     * an execution_required_version below the execution_version cap
-     * under that posture, unless the deployment explicitly accepts the
-     * downgrade window with kiwi_captcha.execution_allow_downgrade:
-     * true. The strongest abuse profile must never silently end up on
-     * the weakest experimental grammar. This check reports the posture
-     * of the compiled deployment. A required tier equal to the
-     * strongest available grammar passes: the strong grammar is then
-     * server-required, never client-downgradeable. A lower required
-     * tier compiles only as a deliberate downgrade window, and warns
-     * with the explicit flag that permits it named. The strongest
-     * available grammar is the minimum of the three emission-gate
-     * rungs: the node's execution_version cap, the confirmed central
-     * min_execution_version floor, and this binary's maximum
-     * ({@see self::MAX_EXECUTION_VERSION}). An unconfirmed floor keeps
-     * the gate at version 1. Balanced and privacy_strict deployments
-     * are unaffected: their required tier stays operator-owned.
+     * The execution-required-tier posture check, derived from the
+     * shared {@see ExecutionVersionPolicy}. The effective fleet tier is
+     * the minimum of the node's execution_version cap, the confirmed
+     * central min_execution_version floor (an unconfirmed floor counts
+     * as version 1) and the generator's maximum, so the doctor derives
+     * exactly the tier the issuance gate can confirm. A deployment
+     * whose required tier exceeds the effective fleet tier fails:
+     * every armed request refuses a client below the required tier
+     * while the node cannot emit above the effective tier, so the
+     * requirement is unsatisfiable. A required tier below the
+     * effective tier is a client-downgradeable window, accepted only
+     * while protocol_rollout.mode "migration" declares the deliberate
+     * two-phase rollout. Under high_abuse in the normal state the
+     * window fails the gate: the strongest abuse profile must require
+     * the strongest confirmed tier. A required tier equal to the
+     * effective fleet tier passes: the strongest confirmed grammar is
+     * server-required and never client-downgradeable.
      *
      * @return array{0: string, 1: string} [status, detail]
      */
     private function checkExecutionVersioning(): array
     {
-        $profile = $this->config['protection_profile'] ?? null;
-        if ($profile !== 'high_abuse') {
-            return ['PASS', sprintf('no high_abuse required-tier audit applies (protection_profile %s): execution_required_version is operator-owned', $profile === null ? 'none' : $profile)];
+        $gateOn = ($this->config['risk']['execution_challenge'] ?? 'off') === 'on';
+        if (!$gateOn) {
+            return ['PASS', 'risk.execution_challenge is off: the execution dimension is disabled, so execution_required_version has no effect'];
         }
-        if (!\is_string($this->config['execution_key'] ?? null)
-            || ($this->config['risk']['execution_challenge'] ?? 'off') !== 'on'
-        ) {
-            return ['PASS', 'high_abuse without the armed execution dimension (no execution_key, or risk.execution_challenge off): execution_required_version has no effect'];
+        if (!\is_string($this->config['execution_key'] ?? null)) {
+            return ['PASS', 'risk.execution_challenge is on but no execution_key is configured: the armed dimension is inert, so execution_required_version has no effect'];
         }
         $cap = (int) ($this->config['execution_version'] ?? 1);
         $required = (int) ($this->config['execution_required_version'] ?? 1);
-        $allowDowngrade = (bool) ($this->config['execution_allow_downgrade'] ?? false);
+        if ($required > $cap) {
+            return ['FAIL', sprintf('execution_required_version %d exceeds the node execution_version cap %d: the configuration tree refuses this combination at compile time, so observing it means the wiring is broken', $required, $cap)];
+        }
         $this->epochMonitor->refresh();
         $floor = $this->epochMonitor->minExecutionVersion();
-        $floorLabel = $floor === null ? 'unconfirmed' : (string) $floor;
-        // The strongest available grammar: the emission-gate minimum
-        // (node cap, confirmed fleet floor, this binary's max), with an
-        // unconfirmed floor pinning the gate at version 1.
-        $strongest = min($cap, $floor ?? 1, self::MAX_EXECUTION_VERSION);
-        if ($strongest < 2) {
-            return ['PASS', sprintf('high_abuse with the emission gate below version 2 (execution_version cap %d, confirmed central min_execution_version floor %s): the strongest available execution grammar is version 1, so execution_required_version %d cannot leave a strong grammar client-downgradeable', $cap, $floorLabel, $required)];
+        $floorForPolicy = $floor === null || $floor < 1 ? null : $floor;
+        $floorLabel = $floor === null || $floor < 1 ? 'unconfirmed' : (string) $floor;
+        $policy = new ExecutionVersionPolicy($cap, $floorForPolicy);
+        $available = $policy->effectiveAvailableTier();
+        $profile = $this->config['protection_profile'] ?? null;
+        if (!$policy->requirementSatisfiable($required)) {
+            return ['FAIL', sprintf('armed requests cannot satisfy the deployment requirement: execution_required_version %d is above the strongest effective fleet tier %d (execution_version cap %d, confirmed central min_execution_version floor %s). Raise the confirmed fleet floor to at least the required tier, and the node cap to match, before armed issuance can succeed', $required, $available, $cap, $floorLabel)];
         }
-        if ($required < $strongest) {
-            // The gap the compile-time gate exists for: the strongest
-            // grammar the fleet can emit is not the server-required
-            // tier. Under the armed high_abuse posture the config tree
-            // refuses the gap unless execution_allow_downgrade: true
-            // accepts the window, so this branch warns (exit 0) with
-            // the explicit flag named, never a silent pass.
-            if ($allowDowngrade) {
-                $requiredClause = $required === 1 ? 'still at the default 1' : (string) $required;
-
-                return ['WARN', sprintf('high_abuse with the full version-%d capability (execution_key configured, execution_version %d, confirmed central min_execution_version floor %d) but execution_required_version %s: the strong grammar stays client-downgradeable until the required tier is raised to %d, and the downgrade window is accepted only through the explicit kiwi_captcha.execution_allow_downgrade: true flag. Raise execution_required_version to %d once every serving page is on the version-%d generation (reason execution_required_version_%d_with_v%d_capability, see operations.md "Execution versioning")', $strongest, $cap, $floor, $requiredClause, $strongest, $strongest, $strongest, $required, $strongest)];
+        if ($policy->downgradeWindowExists($required)) {
+            if ($this->rolloutStatus() === 'migration') {
+                return ['WARN', sprintf('execution_required_version %d is below the strongest effective fleet tier %d (execution_version cap %d, confirmed central min_execution_version floor %s): the downgrade window is accepted only because protocol_rollout.mode "migration" declares the deliberate two-phase rollout. Raise execution_required_version to %d when the migration completes', $required, $available, $cap, $floorLabel, $available)];
             }
-            // An armed high_abuse deployment with the gap and no flag
-            // cannot compile: the config tree refuses it, so a doctor
-            // that observes it means the wiring is broken.
-            return ['FAIL', 'high_abuse arms the execution dimension (risk.execution_challenge on) with execution_required_version below the execution_version cap, but kiwi_captcha.execution_allow_downgrade: true is not set: the config tree refuses this posture at compile time, so the wiring is broken. Set the explicit flag to accept the downgrade window or raise the required tier to the cap'];
-        }
-        if ($required > $strongest) {
-            // The required tier is server-enforced above the grammar
-            // the confirmed fleet floor currently allows the gate to
-            // emit: never downgradeable, and every armed request
-            // refuses a client below the required tier until the floor
-            // reaches it.
-            return ['PASS', sprintf('execution_required_version %d is above the strongest available grammar version %d (high_abuse, execution_key configured, cap %d, confirmed central min_execution_version floor %d): the required tier is server-required, never client-downgradeable, once the fleet floor reaches it', $required, $strongest, $cap, $floor)];
+            if ($profile === 'high_abuse') {
+                return ['FAIL', sprintf('high_abuse normal mode must require the strongest confirmed tier: execution_required_version %d is below the effective fleet tier %d (execution_version cap %d, confirmed central min_execution_version floor %s). Raise execution_required_version to %d, or declare protocol_rollout.mode "migration" while the downgrade window is deliberate', $required, $available, $cap, $floorLabel, $available)];
+            }
+
+            return ['WARN', sprintf('execution_required_version %d is below the strongest effective fleet tier %d (execution_version cap %d, confirmed central min_execution_version floor %s): the strongest confirmed grammar stays client-downgradeable. Raise execution_required_version to %d, or declare protocol_rollout.mode "migration" while the downgrade window is deliberate', $required, $available, $cap, $floorLabel, $available)];
         }
 
-        return ['PASS', sprintf('execution_required_version %d under the full version-%d capability (high_abuse, execution_key configured, cap %d and floor %d): the strong grammar is server-required, never client-downgradeable', $required, $strongest, $cap, $floor)];
+        return ['PASS', sprintf('execution_required_version %d equals the strongest effective fleet tier %d (execution_version cap %d, confirmed central min_execution_version floor %s): the strongest confirmed grammar is server-required and never client-downgradeable', $required, $available, $cap, $floorLabel)];
     }
 
     /**

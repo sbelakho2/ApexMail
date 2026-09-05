@@ -594,7 +594,7 @@ final class ConfigurationTest extends TestCase
 
     public function testArgonEscalationLadderDefaultsToTheMonotonicThreeRungLadder(): void
     {
-        self::assertSame([1, 4, 8], $this->process()['risk']['argon_escalation_target_bits'], 'argon_escalation_target_bits defaults to [1, 4, 8]');
+        self::assertSame([1, 2, 4], $this->process()['risk']['argon_escalation_target_bits'], 'argon_escalation_target_bits defaults to [1, 2, 4]');
 
         // Strictly increasing ladders inside the core ceiling are accepted.
         self::assertSame([1, 5, 10], $this->process(['risk' => ['argon_escalation_target_bits' => [1, 5, 10]]])['risk']['argon_escalation_target_bits']);
@@ -1305,7 +1305,7 @@ final class ConfigurationTest extends TestCase
 
         self::assertSame('sha256', $processed['algorithm']);
         self::assertSame(18, $processed['difficulty_bits']);
-        self::assertSame(8, $processed['argon2_difficulty_bits']);
+        self::assertSame(4, $processed['argon2_difficulty_bits']);
         self::assertSame(0, $processed['argon_m_kib']);
         self::assertSame(3, $processed['argon_t']);
         self::assertSame(1, $processed['argon_p']);

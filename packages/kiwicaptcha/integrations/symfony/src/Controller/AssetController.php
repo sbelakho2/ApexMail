@@ -34,6 +34,9 @@ final class AssetController
         'driver' => ['file' => 'widget-driver.js', 'content_type' => 'application/javascript; charset=UTF-8'],
         'worker' => ['file' => 'kiwi-worker.js', 'content_type' => 'application/javascript; charset=UTF-8'],
         'execution' => ['file' => 'execution-interpreter.js', 'content_type' => 'application/javascript; charset=UTF-8'],
+        'risk' => ['file' => 'widget-risk.js', 'content_type' => 'application/javascript; charset=UTF-8'],
+        'telemetry' => ['file' => 'widget-telemetry.js', 'content_type' => 'application/javascript; charset=UTF-8'],
+        'locales' => ['file' => 'widget-locales.js', 'content_type' => 'application/javascript; charset=UTF-8'],
     ];
 
     public function __construct(

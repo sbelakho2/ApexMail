@@ -57,9 +57,17 @@ class KiwiCaptchaType extends AbstractType
 
         // The form theme inlines the shared widget assets; provide them from
         // the bundle runtime so the rendered form markup is self-contained.
+        // The lazy widget modules (widget-risk.js / widget-telemetry.js)
+        // follow the same delivery: content for the inline tier embeds,
+        // versioned URLs + SRI digests for the files tier's container
+        // attributes (see the driver-split docs).
         $view->vars['kiwi_css'] = $this->runtime?->css() ?? '';
         $view->vars['kiwi_wasm'] = $this->runtime?->wasm() ?? '';
         $view->vars['kiwi_driver'] = $this->runtime?->driver() ?? '';
+        $view->vars['kiwi_risk'] = $this->runtime?->risk() ?? '';
+        $view->vars['kiwi_telemetry'] = $this->runtime?->telemetry() ?? '';
+        $view->vars['locales_src'] = $this->runtime?->localesSrc() ?? '';
+        $view->vars['locales_integrity'] = $this->runtime?->localesIntegrity() ?? '';
 
         // Files-mode delivery state: the asset_mode tier, the once-per-
         // page asset tags (the request-scoped emission registry lives on
@@ -74,6 +82,10 @@ class KiwiCaptchaType extends AbstractType
         $view->vars['worker_integrity'] = $this->runtime?->workerIntegrity() ?? '';
         $view->vars['execution_src'] = $this->runtime?->executionSrc() ?? '';
         $view->vars['execution_integrity'] = $this->runtime?->executionIntegrity() ?? '';
+        $view->vars['risk_src'] = $this->runtime?->riskSrc() ?? '';
+        $view->vars['risk_integrity'] = $this->runtime?->riskIntegrity() ?? '';
+        $view->vars['telemetry_src'] = $this->runtime?->telemetrySrc() ?? '';
+        $view->vars['telemetry_integrity'] = $this->runtime?->telemetryIntegrity() ?? '';
     }
 
     public function configureOptions(OptionsResolver $resolver): void

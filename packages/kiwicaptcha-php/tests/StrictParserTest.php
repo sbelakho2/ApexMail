@@ -257,9 +257,9 @@ final class StrictParserTest extends TestCase
             'must be an integer',
         ];
 
-        yield 'execution_version outside the canonical set 1|2|3 rejected' => [
+        yield 'execution_version outside the canonical register 1..MAX rejected' => [
             self::mutate('protocol_version', 4) + ['execution_program' => $program, 'execution_version' => 9, 'execution_commitment' => hash('sha256', $program)],
-            'must be one of the canonical execution-dimension versions 1, 2 or 3',
+            sprintf('must be one of the canonical execution-dimension versions 1..%d', \KiwiCaptcha\ExecutionChallengeGenerator::MAX_EXECUTION_VERSION),
         ];
 
 
@@ -465,11 +465,12 @@ final class StrictParserTest extends TestCase
 
     public function testV4RecordWithExecutionVersionTwoRoundTrips(): void
     {
-        // The compat window accepts both canonical execution versions
-        // on the record wire: 1 (the legacy construction-to-probe
-        // grammar, exercised by the fixtures above) and 2 (the causal
-        // observe grammar). A version-2 program rides the same
-        // protocol-v4 triplet shape.
+        // The record register accepts the canonical execution versions,
+        // 1..ExecutionChallengeGenerator::MAX_EXECUTION_VERSION: 1 (the
+        // legacy construction-to-probe grammar, exercised by the
+        // fixtures above) and 2 (the causal observe grammar) both ride
+        // the protocol-v4 triplet shape; the sibling test round-trips a
+        // version-3 program the same way.
         $program = \KiwiCaptcha\ExecutionChallengeGenerator::generate(
             '0123456789abcdef0123456789abcdef',
             '2l0IVh1xuKNjzcCDyV+X0lrceMHlHvmqCs5MdDw8tw0=',

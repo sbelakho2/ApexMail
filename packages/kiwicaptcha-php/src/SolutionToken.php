@@ -8,18 +8,24 @@ namespace KiwiCaptcha;
  * The client-submitted solution, decoded from the `kiwi__token` hidden input.
  *
  * Wire format: `base64(nonce "." counter "." duration_ms "." telemetry_json
- * ["." execution_digest] ["." rsw_proof])`.
- * The telemetry segment may itself contain dots, so decoding splits only on
- * the first four dots (an armed challenge appends the execution digest as
- * a fifth segment; an unarmed token keeps the exact four-segment shape).
+ * ["." execution_digest[":" execution_trace]] ["." rsw_proof])`.
+ * The telemetry segment may itself contain dots, so decoding splits on
+ * all dots and peels the optional suffix segments right-to-left,
+ * independently. The rsw final value is peeled first, exactly when the
+ * last segment is 512 lowercase hex. The execution-evidence segment
+ * that precedes it (digest or digest:trace) is peeled next. The
+ * unarmed token keeps the exact four-segment shape.
  *
  * An rsw token carries the client's final value as an optional final
  * segment: exactly 512 lowercase hex characters (the 256-byte
  * big-endian residue, zero-padded). The counter segment then holds 0,
- * since a time-lock proof has no search counter. The shape is
+ * since a time-lock proof has no search counter. The rsw and execution
+ * dimensions compose: the issuer may arm an execution challenge with
+ * the rsw algorithm, and the wire then carries both the
+ * execution-evidence segment and the rsw final value. The shapes are
  * unambiguous because JSON telemetry always ends with '}', never with a
- * hex tail, and the execution digest is a distinct 64-hex shape, so an
- * rsw proof can never be mistaken for either.
+ * hex tail, and the execution evidence is a distinct 64-hex shape, so
+ * an rsw proof can never be mistaken for either.
  */
 final class SolutionToken
 {
@@ -98,8 +104,8 @@ final class SolutionToken
             $plain .= '.'.$this->executionDigest.($this->executionTrace !== null ? ':'.rtrim(strtr($this->executionTrace, '+/', '-_'), '=') : '');
         }
         // The rsw final value rides as the final segment, after the
-        // execution evidence: an rsw challenge never carries execution
-        // evidence, and the 512-hex discriminator reads the last part.
+        // execution evidence: an armed rsw challenge carries both, and
+        // the 512-hex discriminator reads the last part.
         if ($this->rswProof !== null) {
             $plain .= '.'.$this->rswProof;
         }
@@ -139,65 +145,68 @@ final class SolutionToken
         }
 
         // The wire grammar splits on ALL dots: the first three segments
-        // are nonce/counter/duration, and the final segment is the
-        // execution digest exactly when it is 64 lowercase hex characters
-        // (the shape the driver's interpreter produces), or the rsw
-        // proof exactly when it is 512 lowercase hex characters (the
-        // shape the sequential solver produces) — the telemetry
-        // is everything between. A JSON telemetry object can never end
-        // with a hex tail (it must close with '}'), so the
-        // discriminator is unambiguous, and a malformed digest tail on
-        // an armed token fails the telemetry JSON parse below (fail
-        // closed).
+        // are nonce/counter/duration, and everything from the fourth
+        // segment onward is telemetry plus — at the tail — the optional
+        // execution-evidence segment and the optional rsw final value.
+        // The suffix peels run independently, right-to-left: the rsw
+        // final value is peeled first exactly when the last segment is
+        // 512 lowercase hex (the shape the sequential solver produces),
+        // then the execution-evidence segment (`digest` or
+        // `digest:trace`) is peeled from the segment that precedes it,
+        // so an armed rsw challenge carrying both stays one
+        // unambiguous grammar. A JSON telemetry object can never end
+        // with a hex tail (it must close with '}'), so each
+        // discriminator is unambiguous, and a tail matching neither
+        // stays part of the telemetry and fails the JSON parse below
+        // (fail closed).
         $parts = explode('.', $plain);
         if (\count($parts) < 4) {
             throw DecodeError::malformed();
         }
-        $last = $parts[\count($parts) - 1];
+        $end = \count($parts);
         $executionDigest = null;
         $executionTrace = null;
         $rswProof = null;
-        if (\count($parts) >= 5) {
-            if (preg_match('/^[0-9a-f]{512}$/D', $last) === 1) {
-                // The rsw final value: exactly 512 lowercase hex, the
-                // 256-byte big-endian residue the sequential solver
-                // produces. The counter segment above then holds 0 (an
-                // rsw proof has no search counter).
-                $rswProof = $last;
-                $telemetryStr = implode('.', \array_slice($parts, 3, -1));
-            } else {
-                // The optional fifth segment is `digest` or `digest:trace`:
-                // the digest is exactly 64 lowercase hex and the trace is
-                // canonical base64 (whose alphabet carries neither '.' nor
-                // ':'), so the split is total and the discriminator
-                // unambiguous. A malformed digest tail on an armed token
-                // falls through to the telemetry JSON parse below (fail
-                // closed).
-                $colon = strpos($last, ':');
-                $digestPart = $colon === false ? $last : substr($last, 0, $colon);
-                if (preg_match('/^[0-9a-f]{64}$/D', $digestPart) === 1) {
-                    $executionDigest = $digestPart;
-                    if ($colon !== false) {
-                        $executionTrace = substr($last, $colon + 1);
-                        // The driver emits base64url, unpadded; translate
-                        // back to canonical standard base64 (re-pad) before
-                        // the strict decode + re-encode check.
-                        $standard = strtr($executionTrace, '-_', '+/');
-                        $standard = str_pad($standard, (int) ceil(\strlen($standard) / 4) * 4, '=');
-                        if ($executionTrace === '' || \strlen($executionTrace) > 10924
-                            || base64_decode($standard, true) === false
-                            || rtrim(strtr(base64_encode((string) base64_decode($standard, true)), '+/', '-_'), '=') !== $executionTrace) {
-                            throw DecodeError::malformed();
-                        }
-                    }
-                    $telemetryStr = implode('.', \array_slice($parts, 3, -1));
-                } else {
-                    $telemetryStr = implode('.', \array_slice($parts, 3));
-                }
-            }
-        } else {
-            $telemetryStr = implode('.', \array_slice($parts, 3));
+        if ($end >= 5 && preg_match('/^[0-9a-f]{512}$/D', $parts[$end - 1]) === 1) {
+            // The rsw final value: exactly 512 lowercase hex, the
+            // 256-byte big-endian residue the sequential solver
+            // produces. The counter segment above then holds 0 (an
+            // rsw proof has no search counter).
+            $rswProof = $parts[$end - 1];
+            --$end;
         }
+        if ($end >= 5) {
+            // The segment preceding the (optional) rsw final value is
+            // `digest` or `digest:trace`: the digest is exactly 64
+            // lowercase hex and the trace is canonical base64url (whose
+            // alphabet carries neither '.' nor ':'), so the split is
+            // total and the discriminator unambiguous. A segment whose
+            // digest part is not 64 lowercase hex is not
+            // execution-evidence and stays in the telemetry (fail
+            // closed); a 64-hex digest with a malformed trace rejects
+            // outright, exactly like a lone execution tail.
+            $segment = $parts[$end - 1];
+            $colon = strpos($segment, ':');
+            $digestPart = $colon === false ? $segment : substr($segment, 0, $colon);
+            if (preg_match('/^[0-9a-f]{64}$/D', $digestPart) === 1) {
+                $executionDigest = $digestPart;
+                if ($colon !== false) {
+                    $executionTrace = substr($segment, $colon + 1);
+                    // The driver emits base64url, unpadded; translate
+                    // back to canonical standard base64 (re-pad) before
+                    // the strict decode + re-encode check.
+                    $standard = strtr($executionTrace, '-_', '+/');
+                    $standard = str_pad($standard, (int) ceil(\strlen($standard) / 4) * 4, '=');
+                    if ($executionTrace === '' || \strlen($executionTrace) > 10924
+                        || base64_decode($standard, true) === false
+                        || rtrim(strtr(base64_encode((string) base64_decode($standard, true)), '+/', '-_'), '=') !== $executionTrace) {
+                        throw DecodeError::malformed();
+                    }
+                }
+                --$end;
+            }
+        }
+        $telemetryStr = implode('.', \array_slice($parts, 3, $end - 3));
         [$nonce, $counterStr, $durationStr] = $parts;
 
         // The nonce is base64(32 random bytes): exactly 44 chars, standard

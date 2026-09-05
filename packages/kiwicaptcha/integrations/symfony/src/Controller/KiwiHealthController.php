@@ -7,6 +7,8 @@ namespace BelConsulting\KiwiCaptchaBundle\Controller;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedAuthorityRefusalException;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
 use KiwiCaptcha\ChallengeProfile;
+use KiwiCaptcha\ExecutionChallengeGenerator;
+use KiwiCaptcha\ExecutionVersionPolicy;
 use Symfony\Component\HttpFoundation\JsonResponse;
 use Symfony\Component\HttpFoundation\Response;
 
@@ -33,15 +35,26 @@ use Symfony\Component\HttpFoundation\Response;
  *         `min_execution_version`). When the key is
  *         present, ready requires min_protocol_version <= 4 (this
  *         binary's max protocol version, the execution-capable
- *         canonical), min_execution_version <= 2 (this binary's max
- *         execution-program version; an absent field imposes nothing)
- *         and min_policy_epoch <= the configured
+ *         canonical), min_execution_version <=
+ *         {@see self::MAX_EXECUTION_VERSION} (an absent field imposes
+ *         nothing) and min_policy_epoch <= the configured
  *         risk.policy_version. A newer central policy
  *         (mixed-version rolling deployments, rollbacks) takes an
  *         outdated binary out of the pool before it serves traffic it
  *         cannot honor. When the key is absent the binary's own
  *         configuration is authoritative.
- *      4. the memory-budget invariant holds (only when
+ *      4. when the execution dimension is armed
+ *         (risk.execution_challenge on), the required execution tier
+ *         must be satisfiable. The effective fleet tier is the policy
+ *         minimum of the node cap, the central min_execution_version
+ *         floor (absent counts as version 1) and
+ *         {@see self::MAX_EXECUTION_VERSION}. A required tier above it
+ *         returns 503 with the reason
+ *         security_policy_incompatible:execution_required_R_effective_E.
+ *         Every armed request would refuse every client, so the node
+ *         must not serve until the fleet floor reaches the required
+ *         tier. The leg is inert when the gate is off.
+ *      5. the memory-budget invariant holds (only when
  *         risk.container_memory_mib is configured):
  *         `argon2_max_concurrent_verifications x the fixed Argon
  *         verification envelope (risk.argon_verification_memory_kib, the
@@ -52,7 +65,7 @@ use Symfony\Component\HttpFoundation\Response;
  *         = unlimited) the check is skipped: the invariant is only
  *         meaningful with a finite cap, and an unlimited cap needs an
  *         explicit budget decision.
- *      5. the pinned-primary authority is eligible (only under
+ *      6. the pinned-primary authority is eligible (only under
  *         `ha_authority: pinned_primary` / the `ha_safe` profile): every
  *         wired authority guard passes a fresh check. The guard's
  *         ordinary verification window is deliberately bypassed. A pod
@@ -88,16 +101,15 @@ final class KiwiHealthController
     public const MAX_PROTOCOL_VERSION = 4;
 
     /**
-     * The binary's maximum execution-program version: 2 since the
-     * causal observe grammar (execution version 2, opcode 33) landed —
-     * this binary verifies and interprets version-2 programs. A central
-     * security-policy hash demanding a higher execution version means
-     * this binary cannot honor the version-2 programs the fleet now
-     * writes, so it must not be ready. Mirrored by the php-core
-     * (`ExecutionChallengeGenerator::MAX_EXECUTION_VERSION`) and the
-     * Rust crate (`execution::MAX_EXECUTION_VERSION`).
+     * The binary's maximum execution-program version, taken from the
+     * core generator that emits the programs
+     * ({@see ExecutionChallengeGenerator::MAX_EXECUTION_VERSION}), so
+     * the readiness max can never drift from the emission max. A
+     * central security-policy hash demanding a higher execution
+     * version means this binary cannot honor the programs the fleet
+     * now writes, so it must not be ready.
      */
-    public const MAX_EXECUTION_VERSION = 4;
+    public const MAX_EXECUTION_VERSION = ExecutionChallengeGenerator::MAX_EXECUTION_VERSION;
 
     /** Fixed headroom of the memory-budget invariant, in MiB. */
     public const MEMORY_HEADROOM_MIB = 256;
@@ -166,6 +178,20 @@ final class KiwiHealthController
      *                                                   when absent or when
      *                                                   the risk client IS
      *                                                   the storage client.
+     * @param bool                       $executionGate  whether
+     *                                                   risk.execution_challenge
+     *                                                   is on; the
+     *                                                   required-tier leg
+     *                                                   applies only when
+     *                                                   the dimension is
+     *                                                   armed.
+     * @param int                        $executionVersionCap the node's
+     *                                                   execution_version
+     *                                                   cap (1..4).
+     * @param int                        $executionRequiredVersion the
+     *                                                   server-owned
+     *                                                   execution_required_
+     *                                                   version tier.
      */
     public function __construct(
         private readonly string $secretKey,
@@ -178,6 +204,9 @@ final class KiwiHealthController
         private readonly int $argonEnvelopeMemoryKib = 16384,
         private readonly array $authorityGuards = [],
         private readonly \Predis\Client|null $riskRedis = null,
+        private readonly bool $executionGate = false,
+        private readonly int $executionVersionCap = 1,
+        private readonly int $executionRequiredVersion = 1,
     ) {
     }
 
@@ -392,12 +421,25 @@ final class KiwiHealthController
      * the configured risk.policy_version. When absent (or when no Redis
      * is configured) the binary's own configuration is authoritative.
      *
+     * On top of the central state, the execution-gate leg applies
+     * whenever risk.execution_challenge is on. The shared
+     * {@see ExecutionVersionPolicy} derives the effective fleet tier
+     * from the node cap and the central min_execution_version floor
+     * (absent or 0 counts as version 1). A configured
+     * execution_required_version above the effective tier refuses
+     * readiness: every armed request would refuse every client in that
+     * state, so the node must not serve until the fleet floor reaches
+     * the required tier.
+     *
      * @return array{0: bool, 1: ?string} [compatible, machine-readable reason]
      */
     private function securityPolicyCompatible(): array
     {
         if ($this->redis === null) {
-            return [true, null];
+            // No security Redis by design: the central policy legs are
+            // vacuous, but the execution-gate leg still applies with an
+            // unconfirmed floor (effective tier 1 at best).
+            return $this->withExecutionGateLeg(true, null, null);
         }
         $now = $this->nowMs();
         if ($now - $this->policyAtMs < self::CACHE_MS) {
@@ -406,6 +448,7 @@ final class KiwiHealthController
 
         $ok = true;
         $reason = null;
+        $parsed = [];
         try {
             $policy = $this->redis->hgetall('{kiwi:'.$this->namespace.'}:security-policy');
             if (\is_array($policy) && $policy !== []) {
@@ -421,8 +464,8 @@ final class KiwiHealthController
                             $ok = false;
                             $reason = 'security_policy_state_corrupt:'.$field;
                         } else {
-                            $parsed = (int) $raw;
-                            if ((string) $parsed !== $raw) {
+                            $parsedField = (int) $raw;
+                            if ((string) $parsedField !== $raw) {
                                 $ok = false;
                                 $reason = 'security_policy_state_corrupt:'.$field;
                             }
@@ -433,6 +476,7 @@ final class KiwiHealthController
                     $minProtocol = (int) ($policy['min_protocol_version'] ?? 0);
                     $minEpoch = (int) ($policy['min_policy_epoch'] ?? 0);
                     $minExecution = (int) ($policy['min_execution_version'] ?? 0);
+                    $parsed['min_execution_version'] = $minExecution;
                     if ($minProtocol > self::MAX_PROTOCOL_VERSION) {
                         $ok = false;
                         $reason = 'security_policy_incompatible:min_protocol_version_'.$minProtocol;
@@ -449,10 +493,39 @@ final class KiwiHealthController
             $ok = false;
             $reason = 'security_policy_state_unavailable';
         }
-
+        [$ok, $reason] = $this->withExecutionGateLeg($ok, $reason, $parsed['min_execution_version'] ?? null);
         $this->lastPolicyOk = $ok;
         $this->policyReason = $reason;
         $this->policyAtMs = $now;
+
+        return [$ok, $reason];
+    }
+
+    /**
+     * The execution-gate leg of the central-policy compatibility:
+     * derives the effective fleet tier through the shared
+     * ExecutionVersionPolicy and refuses readiness when the required
+     * execution tier is above it. The fleet floor is the parsed
+     * central min_execution_version when above 0, else version 1 (an
+     * unconfirmed or undeclared floor confirms nothing). The leg is
+     * inert when risk.execution_challenge is off.
+     *
+     * @param int|null $fleetFloor the parsed central execution floor,
+     *                             null when no central policy was read
+     *
+     * @return array{0: bool, 1: ?string} [compatible, machine-readable reason]
+     */
+    private function withExecutionGateLeg(bool $ok, ?string $reason, ?int $fleetFloor): array
+    {
+        if (!$this->executionGate) {
+            return [$ok, $reason];
+        }
+        $floorForPolicy = $fleetFloor === null || $fleetFloor < 1 ? 1 : $fleetFloor;
+        $effective = (new ExecutionVersionPolicy($this->executionVersionCap, $floorForPolicy))
+            ->effectiveAvailableTier();
+        if ($this->executionRequiredVersion > $effective) {
+            return [false, sprintf('security_policy_incompatible:execution_required_%d_effective_%d', $this->executionRequiredVersion, $effective)];
+        }
 
         return [$ok, $reason];
     }

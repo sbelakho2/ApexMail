@@ -2101,9 +2101,11 @@ impl ProductionVerifier {
 
     /// Configure the rsw time-lock trapdoor: the modulus n and the
     /// secret lambda = lcm(p-1, q-1), both canonical standard base64
-    /// (validated at build time with the shared decode). When set, rsw
-    /// records verify through the trapdoor; the default (unset) treats
-    /// a signed rsw record as authentic but unsupported
+    /// (generated with the shipped tools/rsw-keygen binary and
+    /// validated at build time with the shared decode, including the
+    /// weak-input rejections). When set, rsw records verify through
+    /// the trapdoor; the default (unset) treats a signed rsw record as
+    /// authentic but unsupported
     /// ([`VerifyError::UnsupportedRswParams`]).
     pub fn with_rsw_trapdoor(
         mut self,

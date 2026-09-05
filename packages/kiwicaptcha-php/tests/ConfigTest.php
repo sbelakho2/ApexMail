@@ -7,10 +7,88 @@ namespace KiwiCaptcha\Tests;
 use KiwiCaptcha\Config;
 use KiwiCaptcha\PoWAlgorithm;
 use KiwiCaptcha\Tests\Fixtures\Vectors;
+use KiwiCaptcha\Tests\Support\RswFixture;
 use PHPUnit\Framework\TestCase;
 
 final class ConfigTest extends TestCase
 {
+    /** The full public field set, in declaration order. */
+    private const DEBUG_FIELD_NAMES = [
+        'secretKey', 'algorithm', 'mKib', 't', 'p', 'targetBits',
+        'argon2TargetBits', 'ttlSecs', 'minDurationMs', 'solverMaxHashes',
+        'bindingMode', 'policyVersion', 'issuer', 'kid', 'executionKey',
+        'rswModulusN', 'rswLambda', 'rswT',
+    ];
+
+    private static function captureVarDump(object $value): string
+    {
+        ob_start();
+        var_dump($value);
+        $dump = (string) ob_get_clean();
+
+        return $dump;
+    }
+
+    private static function capturePrintR(object $value): string
+    {
+        return print_r($value, true);
+    }
+
+    public function testDebugInfoCoversEveryExposedField(): void
+    {
+        $config = new Config(secretKey: Vectors::SECRET);
+
+        // __debugInfo must show the full shape — every field the class
+        // exposes, by its public name, never a truncated subset.
+        self::assertSame(self::DEBUG_FIELD_NAMES, array_keys($config->__debugInfo()));
+    }
+
+    public function testVarDumpAndPrintRRedactSecretsAndKeepThePublicValues(): void
+    {
+        $secret = 'dump-master-secret-0123456789abcdef';
+        $execution = 'dump-execution-key-0123456789abcdef';
+        $config = new Config(
+            secretKey: $secret,
+            algorithm: PoWAlgorithm::Rsw,
+            issuer: 'dump-issuer',
+            kid: 3,
+            executionKey: $execution,
+            rswModulusN: RswFixture::MODULUS_N_B64,
+            rswLambda: RswFixture::LAMBDA_B64,
+            rswT: Config::MIN_RSW_T,
+        );
+
+        foreach ([self::captureVarDump($config), self::capturePrintR($config)] as $dump) {
+            self::assertStringNotContainsString($secret, $dump);
+            self::assertStringNotContainsString($execution, $dump);
+            self::assertStringNotContainsString(RswFixture::LAMBDA_B64, $dump);
+            // The rsw modulus is public material and prints as itself.
+            self::assertStringContainsString(RswFixture::MODULUS_N_B64, $dump);
+            // The three secret slots (and only those) print the marker.
+            self::assertSame(3, substr_count($dump, '<redacted>'));
+            // Public fields keep their exact values.
+            self::assertStringContainsString('dump-issuer', $dump);
+            self::assertStringContainsString('Rsw', $dump);
+            self::assertStringContainsString((string) Config::MIN_RSW_T, $dump);
+            self::assertStringContainsString('kid', $dump);
+        }
+    }
+
+    public function testVarDumpNullVariantsPrintNullNotRedacted(): void
+    {
+        $config = new Config(secretKey: 'dump-master-secret-0123456789abcdef');
+
+        foreach ([self::captureVarDump($config), self::capturePrintR($config)] as $dump) {
+            // executionKey / rswLambda / rswModulusN are unset: they must
+            // print as null, never as '<redacted>'.
+            self::assertStringNotContainsString('dump-master-secret-0123456789abcdef', $dump);
+            self::assertSame(1, substr_count($dump, '<redacted>'));
+            self::assertStringContainsString('executionKey', $dump);
+            self::assertStringContainsString('rswLambda', $dump);
+            self::assertStringContainsString('rswModulusN', $dump);
+        }
+    }
+
     private function base(array $overrides = []): array
     {
         return array_merge([

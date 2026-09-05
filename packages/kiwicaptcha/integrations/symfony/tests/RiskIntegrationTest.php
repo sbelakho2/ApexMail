@@ -342,7 +342,7 @@ final class RiskIntegrationTest extends TestCase
         // fixed-envelope ladder: ALL three share the
         // server-controlled memory envelope (default 16384 KiB, t=3, p=1) —
         // risk escalates the target difficulty (expected nonce search space
-        // 1/4/8), never the server verification cost — regardless of the
+        // 1/2/4), never the server verification cost — regardless of the
         // app algorithm: the core's issueWithProfile accepts a profile
         // directly.
         $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8);
@@ -359,10 +359,10 @@ final class RiskIntegrationTest extends TestCase
         $argon32 = $resolver->profileFor(RiskAction::Argon32);
         self::assertSame(PoWAlgorithm::Argon2id, $argon32?->algorithm);
         self::assertSame(16384, $argon32?->mKib, 'Argon32 must NOT raise the memory (fixed envelope)');
-        self::assertSame(4, $argon32?->targetBits, 'Argon32 escalates the target difficulty to 4');
+        self::assertSame(2, $argon32?->targetBits, 'Argon32 escalates the target difficulty to 2');
         $argon64 = $resolver->profileFor(RiskAction::Argon64);
         self::assertSame(16384, $argon64?->mKib, 'Argon64 must NOT raise the memory (fixed envelope)');
-        self::assertSame(8, $argon64?->targetBits, 'Argon64 escalates the target difficulty to 8');
+        self::assertSame(4, $argon64?->targetBits, 'Argon64 escalates the target difficulty to 4');
         // StepUp is application-defined and handled by the controller
         // (403 step_UP_required) — it must never map to a challenge profile.
         try {
@@ -382,7 +382,7 @@ final class RiskIntegrationTest extends TestCase
         // Argon app: argon actions map to the fixed-envelope profiles; sha
         // actions are no-ops (argon is already at least as strong).
         $argon = new RiskProfileResolver(PoWAlgorithm::Argon2id, 20);
-        self::assertSame(4, $argon->profileFor(RiskAction::Argon32)?->targetBits, 'the app argon2 difficulty must NOT leak into risk profiles');
+        self::assertSame(2, $argon->profileFor(RiskAction::Argon32)?->targetBits, 'the app argon2 difficulty must NOT leak into risk profiles');
         self::assertNull($argon->profileFor(RiskAction::Sha16));
         self::assertSame(16384, $argon->profileFor(RiskAction::Argon64)?->mKib, 'the envelope applies to an argon2id deployment too');
         // StepUp always throws (controller-handled).
@@ -403,14 +403,14 @@ final class RiskIntegrationTest extends TestCase
      */
     public function testMaximumAdaptiveEscalationKeepsMemoryAtTheEnvelope(): void
     {
-        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 16384, [1, 4, 8]);
+        $resolver = new RiskProfileResolver(PoWAlgorithm::Sha256, 8, 16384, [1, 2, 4]);
         $max = $resolver->profileFor(RiskAction::Argon64);
         self::assertNotNull($max);
         self::assertSame(16384, $max->mKib, 'the server verification memory must stay at the envelope under maximum escalation');
         self::assertSame(3, $max->t);
         self::assertSame(1, $max->p);
         self::assertLessThanOrEqual(20, $max->targetBits, 'the challenge target difficulty stays within the widget-solvable ceiling');
-        self::assertSame(8, $max->targetBits);
+        self::assertSame(4, $max->targetBits, "the default ladder's highest rung is 4");
 
         // A custom envelope is honored across ALL rungs — the ceiling is the
         // configured envelope, never the action.
@@ -510,7 +510,7 @@ final class RiskIntegrationTest extends TestCase
         // The fixed Argon2id verification-memory envelope and the
         // target-difficulty escalation ladder.
         self::assertSame(16384, $risk['argon_verification_memory_kib'], 'the adaptive Argon memory envelope defaults to 16384 KiB');
-        self::assertSame([1, 4, 8], $risk['argon_escalation_target_bits'], 'the default Argon target-bits ladder is [1, 4, 8]');
+        self::assertSame([1, 2, 4], $risk['argon_escalation_target_bits'], 'the default Argon target-bits ladder is [1, 2, 4]');
         // The security-epoch monitor's short cache window.
         self::assertSame(1, $risk['security_epoch_cache_secs'], 'the central security-epoch read is cached 1 s by default');
         // The Ed25519 receipt signer is OFF by default.

@@ -970,7 +970,7 @@ final class ChainedChallengeTest extends TestCase
         self::assertSame(200, $response->getStatusCode(), sprintf('the open chain must auto-resume: %s', (string) $response->getContent()));
         $stage2 = json_decode((string) $response->getContent(), true);
         self::assertSame('argon2id', $stage2['algorithm'], 'the auto-resumed issuance is the stronger stage-2, never a stage-1');
-        self::assertSame(4, $stage2['targetBits'], 'the stage-2 floor is the Argon32 rung of the fixed-envelope ladder');
+        self::assertSame(2, $stage2['targetBits'], 'the stage-2 floor is the Argon32 rung (2) of the fixed-envelope ladder');
         self::assertNotSame($stage1['nonce'], $stage2['nonce'], 'the stage-2 issuance can never re-run the same stage');
 
         $state = $chainService->requirementFor($requirement->chainId);
@@ -1637,7 +1637,7 @@ final class ChainedChallengeTest extends TestCase
         self::assertSame(200, $second->getStatusCode(), sprintf('an expired stage-2 must rearm for a fresh stage-2: %s', (string) $second->getContent()));
         $stage2 = json_decode((string) $second->getContent(), true);
         self::assertSame('argon2id', $stage2['algorithm'], 'the rearmed issuance is STILL the stage-2 floor — never a stage-1');
-        self::assertSame(4, $stage2['targetBits']);
+        self::assertSame(2, $stage2['targetBits'], 'the rearmed floor is the retuned Argon32 rung (2)');
         self::assertNotSame($oldNonce, $stage2['nonce'], 'the rearmed issuance is a NEW stage-2 challenge');
 
         $state = $chainService->requirementFor($requirement->chainId);

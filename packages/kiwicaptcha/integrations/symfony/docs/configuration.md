@@ -323,27 +323,33 @@ boundary. The verifier recomputes the expected digest from the stored
 program and rejects a mismatch with the deterministic
 `execution_mismatch` outcome.
 
-Current status: the dimension is experimental and now carries the
-V2 causal-consistency semantics. Every issued program opens with a
-guaranteed causal graph: DOM construction (createElement, a mutate op,
-an append), a u8 array, and an observe op measuring the real layout
-height of the constructed node. The observed byte lands in the u8
-state, is read back, and is checksummed or rotated over, so later
-exact entries and the final digest depend on the browser-observed
-value. The verifier replays the whole graph
-forward from the reported value, checking bounds, structure and
-whole-trace coherence; a short pure synthesis that skips the
-write-through is rejected. The observed height is a genuine browser
-measurement: the interpreter styles the probed node as a fixed-width
-block rendering a canonical text line, so the value is the engine's
-own default-font metrics. The mirrors never predict it; their
-browser-equivalent traces use a fabricated reference value. In short:
-the first-party client exercises real browser layout during execution
-version 2, while verification currently establishes causal trace
-consistency with the claimed observation, not cryptographic
-provenance of the layout value itself. A solver that implements the
-full public semantics can still fabricate a coherent trace: the
-values are evidence, not a cryptographic proof of a browser.
+Current status: the dimension is experimental and carries the
+version-1 through version-4 grammars. Version 1 is the
+construction-to-probe grammar. Version 2 adds the causal-consistency
+semantics: every issued program opens with a guaranteed causal graph
+(DOM construction: createElement, a mutate op, an append; a u8 array;
+an observe op measuring the real layout height of the constructed
+node). The observed byte lands in the u8 state, is read back, and is
+checksummed or rotated over, so later exact entries and the final
+digest depend on the browser-observed value. Version 3 adds a second
+constructed node and the sibling-index traversal probe, a real DOM
+walk over the built siblings. Version 4 builds a real nested tree
+(two child nodes created under the current node) and probes the
+deepest child with an ancestor-depth walk. The verifier replays the
+whole graph forward from the reported value, checking bounds,
+structure and whole-trace coherence; a short pure synthesis that
+skips the write-through is rejected. The observed height is a genuine
+browser measurement: the interpreter styles the probed node as a
+fixed-width block rendering a canonical text line, so the value is
+the engine's own default-font metrics. The mirrors never predict it;
+their browser-equivalent traces use a fabricated reference value. In
+short: the first-party client exercises real browser layout across
+execution versions 2 through 4, while verification currently
+establishes causal trace consistency with the claimed observation,
+not cryptographic provenance of the layout values themselves. A
+solver that implements the full public semantics can still fabricate
+a coherent trace: the values are evidence, not a cryptographic proof
+of a browser.
 
 The dimension is controlled by these knobs:
 
@@ -367,12 +373,13 @@ The dimension is controlled by these knobs:
   `execution_key`, so turning it on before configuring the key never
   breaks issuance and never arms anything.
 - `kiwi_captcha.execution_required_version` (int 1..4, default 1):
-  the server-owned required execution tier. When 2, an execution-armed
-  request from a client below version 2 is refused with the
-  deterministic `CLIENT_EXECUTION_VERSION_UNSUPPORTED` outcome and is
-  never downgraded to the weaker version-1 grammar. Raise it to 2 only
-  after the fleet is fully on the version-2 generation (the cap above
-  and the central `min_execution_version` floor at 2 everywhere).
+  the server-owned required execution tier. When set above 1, an
+  execution-armed request from a client below that tier is refused
+  with the deterministic `CLIENT_EXECUTION_VERSION_UNSUPPORTED`
+  outcome and is never downgraded to a weaker grammar. Raise it only
+  after the fleet is fully on the destination generation (the cap
+  above and the central `min_execution_version` floor at that tier
+  everywhere).
   `kiwi_captcha.execution_min_required_version` is the semantic alias
   of this option: both spellings set the same value, and setting both
   to different values is refused as a configuration error. The legacy
@@ -380,9 +387,11 @@ The dimension is controlled by these knobs:
   window, so an existing deployment never needs to change its config.
 
 - `kiwi_captcha.execution_version` (int 1..4, default 1): the
-  node's execution-program grammar cap. Version 3 is the
-  sibling-index traversal grammar (opcode 34); version 2 is the
-  causal observe grammar (opcode 33); version 1 is the
+  node's execution-program grammar cap. Version 4 is the nested-tree
+  grammar: the child opcode (35) builds nodes under the current node
+  and the depth probe (36) walks the real ancestor chain. Version 3
+  is the sibling-index traversal grammar (opcode 34); version 2 is
+  the causal observe grammar (opcode 33); version 1 is the
   construction-to-probe grammar every interpreter generation runs. A
   node emits a version above 1 only when the client advertised at
   least that version with the challenge request (the
@@ -394,7 +403,7 @@ The dimension is controlled by these knobs:
   Every other combination emits version 1, so a mixed fleet of older
   binaries and stale open pages is never handed the newer grammar.
   The cap defaults to 1: raising it declares the node ready to write
-  version-2 programs, and the counterpart central floor is declared by
+  the newer grammar, and the counterpart central floor is declared by
   the operator, see operations.md "Execution versioning".
   `kiwi_captcha.execution_max_version` is the semantic alias of this
   option, with the same both-spellings rule as above.
@@ -408,8 +417,11 @@ The dimension is controlled by these knobs:
   required tier is below the node cap, the configuration is refused at
   compile time unless this flag is explicitly true. Set it to true
   only to accept the deliberate downgrade window during the fleet
-  transition. The doctor then warns that the downgrade is permitted
-  only through this flag.
+  transition. The flag only lets the configuration compile: the
+  doctor's posture audit accepts a downgrade window only while
+  `protocol_rollout.mode: migration` is declared, and high_abuse in
+  the normal state must require the strongest confirmed tier, see
+  operations.md "Execution versioning".
 
 The dimension is supplementary evidence only. It is never the sole
 acceptance boundary: the proof-of-work proof and the record state
@@ -435,8 +447,10 @@ config layer always wins over the balanced and high_abuse derived
 defaults; only privacy_strict keeps the force. Under `high_abuse`
 with the gate on, an armed required tier below the node cap is
 refused at compile time unless `execution_allow_downgrade` is
-explicitly true; the balanced and privacy_strict profiles never apply
-that invariant, so their required tier stays operator-owned.
+explicitly true. The balanced and privacy_strict profiles never apply
+that compile-time invariant, yet their required tier is still audited
+against the effective fleet tier by the doctor and the readiness
+probe, see operations.md "Execution versioning".
 
 ## RSW time-lock: the optional sequential proof (experimental)
 
@@ -463,26 +477,54 @@ kiwi_captcha:
 
 ### Modulus setup
 
-Generate two 1024-bit primes p and q, form n = p*q, and precompute
-lambda = lcm(p-1, q-1). Configure n as rsw_modulus_n and lambda as
-rsw_lambda, both canonical standard base64 of the big-endian bytes.
-The modulus is public: it rides the challenge response, because the
-client squares modulo it. Lambda is the trapdoor and must never leave
-the server configuration. The primes themselves are not stored
-anywhere in KiwiCaptcha, so keep them offline or delete them once
-lambda is computed. Validation is shape-only, exactly like an RSA
-public key: the modulus must be exactly 256 bytes with its top bit
-set and odd, and lambda must be even. The lcm relation cannot be
-verified without the primes.
+Generate the pair exclusively with the shipped offline generator
+[`tools/rsw-keygen`](../../../../../tools/rsw-keygen/README.md). The
+tool draws two independent random 1024-bit primes, requires their
+product to be exactly 2048 bits, and computes lambda = lcm(p-1, q-1).
+It runs the trapdoor self-test against the shipped math before it
+emits anything. Do not assemble n and lambda from ad-hoc prime
+generation. No configuration validator can prove that a modulus was
+securely built from two large primes, so the provenance of the pair
+is the whole assurance.
+
+Configure n as rsw_modulus_n and lambda as rsw_lambda, both canonical
+standard base64 of the big-endian bytes. The keygen prints both the
+hex and the base64 forms of each value. The modulus is public: it
+rides the challenge response, because the client squares modulo it.
+Lambda is the secret trapdoor and must never leave the server
+configuration. Never share it with client material, logs, or any
+record. The primes p and q are never stored anywhere in KiwiCaptcha
+and appear only in the keygen's explicit --diagnostic output. Run the
+generator on an offline trusted machine and keep that output out of
+the repository.
+
+Record the modulus fingerprint printed by the keygen
+(rsw_modulus_n_sha256, the sha256 of the canonical 256-byte n). It is
+the way to state which modulus a deployment holds. The command
+`rsw-keygen --fingerprint` recomputes it from a configured n, and a
+redeployment audit compares the two. Validation refuses the weak
+shapes up front: an even or mis-sized modulus, a modulus with a small
+prime factor, and a probable-prime modulus are configuration errors
+at boot. So is a lambda that fails the deterministic consistency
+spot-check `base^lambda == 1 (mod n)` over the fixed small-prime
+base set (2, 3, 5, 7, 11, 13, 17 and 19). The spot-check is not a
+proof that lambda is the true Carmichael value of n: only the keygen
+p/q construction guarantees that. The full lcm relation still cannot
+be verified without the primes, which is why the keygen provenance
+and the fingerprint matter.
 
 ### The sequential cost T
 
 rsw_t is the number of modular squarings the client performs, the
-time-lock's difficulty knob. The default 75,000 completes in a
-fraction of a second in the worker's native BigInt solver on a
-mid-range device. The validated range is 10,000..300,000: below the
-floor the cost is immaterial, and above the ceiling a legitimate
-solve can approach the challenge lifetime. There is no target-bits
+time-lock's difficulty knob. The validated range is 10,000..300,000:
+below the floor the cost is immaterial, and the ceiling is a protocol
+bound, not a device-performance claim: it keeps a legitimate solve
+inside the challenge lifetime while the sequential cost stays
+material. The per-deployment T choice must be derived from
+measurements on the worst device the deployment supports, and the
+qualification state must be documented; the client-performance lab
+measures the real rsw rungs and documents the release-gate procedure
+(`tools/client-perf/README.md`). There is no target-bits
 concept: the proof is deterministic, so the signed canonical carries
 the pinned protocol-floor value in the difficulty slot, and the
 verifier checks the exact final value instead of leading zeros.
@@ -550,8 +592,9 @@ kiwi_captcha:
 
 ### Asset delivery (`asset_mode`)
 
-The widget assets (the CSS, the WASM runtime, the driver and the Argon
-worker) ship in two delivery tiers, selected with `asset_mode`:
+The widget assets (the CSS, the WASM runtime, the driver core, the
+Argon worker and the driver's lazy widget modules) ship in two delivery
+tiers, selected with `asset_mode`:
 
 ```yaml
 kiwi_captcha:
@@ -560,7 +603,9 @@ kiwi_captcha:
 
 `files` (default) emits versioned immutable first-party asset URLs under
 `{prefix}/assets/` (`widget.<sha256-64>.css`, `runtime.<sha256-64>.js`,
-`driver.<sha256-64>.js`, `worker.<sha256-64>.js`), served by the bundle
+`driver.<sha256-64>.js`, `worker.<sha256-64>.js`,
+`execution.<sha256-64>.js`, `risk.<sha256-64>.js`,
+`telemetry.<sha256-64>.js`), served by the bundle
 with a long immutable cache lifetime
 (`Cache-Control: public, max-age=31536000, immutable`), the exact content
 hash in the URL and the content-hash ETag. Each asset is emitted once per
@@ -590,6 +635,27 @@ for the worker asset, and the worker's importScripts for its WASM glue.
 No Blob URL is created, so the worker download is deduplicated across
 widgets like the runtime.
 
+The driver itself is split the same way: the
+always-loaded eager core (`widget-driver.js`) carries the bootstrap,
+the challenge request, the SHA-256 solve, the state machine and the
+lazy-module loader. The adaptive-risk solve tier and the armed-evidence
+machinery (the Argon2id/rsw worker solve, the ExecutionChallengeV1
+runner, the decoy rendering and the coarse client-context descriptor)
+live in `widget-risk.js`. The core loads that module lazily when a
+memory-hard challenge, an armed response or the risk-context opt-in
+needs it. The non-default locale packs (de/fr/es/it/nl/pl/pt/ar) live
+in `widget-locales.js`, loaded only when the core resolves a
+non-default language (English pages pay zero bytes; a failed load
+degrades to the English fallback with a console warning). The
+telemetry session lives in `widget-telemetry.js`, loaded only when the
+widget enables a session. The incumbent compatibility loader lives in
+`widget-compat.js`, delivered inside the `/api.js` loader response and
+never fetched elsewhere. The container carries the lazy module URLs +
+SRI digests as `data-kiwi-risk-src`/`-integrity`,
+`data-kiwi-telemetry-src`/`-integrity` and `data-kiwi-locales-src`/
+`-integrity`, and the core injects the same-origin SRI-pinned module
+script only on trigger, mirroring the worker asset's lazy fetch.
+
 Why immutable caching: the URL contains the content hash, so the bytes
 for a URL can never change. A browser or CDN may keep the response
 forever, and a deployment upgrade simply emits new hashed URLs. Unknown
@@ -603,31 +669,50 @@ CSP per mode:
   `style-src 'self'`); the lazy runtime and worker fetches use
   `connect-src 'self'`, and the same-origin Worker needs
   `worker-src 'self'` — `blob:` is never required.
-- `inline` (compatibility / zero-request tier): every asset is embedded
-  into the page at render time (the historical behavior, zero requests,
-  no static asset handling). The worker is built from a Blob URL, so
-  this tier needs `worker-src blob:`.
+- `inline` (compatibility / zero-request tier): the CSS, the WASM
+  runtime and the driver are embedded into the page at render time
+  (the historical zero-request behavior for the ordinary surface, no
+  static asset handling). The `widget-risk.js` module is embedded the
+  same way, so a memory-hard or armed challenge never needs an
+  external fetch under a CSP that allows inline scripts but not
+  `'self'`; `widget-telemetry.js` is embedded only when telemetry is
+  enabled. The locale packs are never embedded in either tier: their
+  content-addressed URL rides the container (like the execution
+  interpreter), so a default-language inline page still pays zero
+  bytes for translations. The worker is built from a Blob URL, so this
+  tier needs `worker-src blob:`.
 
-`inline` is the documented compatibility tier for zero-request
-deployments: it embeds the CSS, the WASM runtime and the driver into the
-page at render time. A deployment that cannot serve or cache the versioned
-asset URLs selects it explicitly.
+The execution dimension needs no extra directive in either tier. The
+interpreter is a lazy first-party content-addressed asset in both
+tiers (see the ExecutionChallengeV1 section above). The driver loads
+it through a same-origin script tag inside the sandboxed srcdoc
+iframe, so the page's own `script-src` governs the fetch; a SHA-only
+page never triggers it. The `frame-src` directive does not
+govern the about:srcdoc document, so a strict `frame-src 'none'`
+profile stays compatible with execution challenges.
+
+`inline` is the documented compatibility tier for ordinary
+zero-request deployments. It embeds the CSS, the WASM runtime, the
+driver core and the `widget-risk.js` module into the page at render
+time. It embeds `widget-telemetry.js` when a session is enabled. Only
+an execution-armed lifecycle fetches the interpreter asset, and only
+a non-default-language widget fetches the locale module (the lazy
+invariants of the sections above). A deployment that cannot serve or
+cache the versioned asset URLs selects it explicitly.
 
 #### Ordinary-bootstrap size target
 
-The 160,000-byte widget-driver raw cap (with the gzip and brotli caps of
-50,000 / 45,000 bytes, see `packages/kiwicaptcha/tools/perf-budget.sh`)
-is the guardrail, not the goal. After the Argon worker split the driver
-no longer embeds the worker source (the glue carries it for inline mode;
-files mode fetches the versioned worker asset). The ordinary bootstrap,
-the bytes a plain SHA-256 page downloads before any memory-hard
-challenge, targets **sub-30 KB compressed** (gzip or brotli). Remaining
-lazy candidates, not yet split, would shrink the bootstrap further.
-The candidates are the provider-migration compatibility loader (the
-external `/api.js` path ships the full glue and driver eagerly) and the
-advanced risk-triggered modules (the decoy/polymorphism and
-client-context evidence machinery, loaded only when a risk-elevated
-challenge arrives).
+The hard byte budgets live in `packages/kiwicaptcha/tools/perf-budget.sh`
+and its baselines record (`perf-baselines.json`), enforced in CI. The
+eager core (`widget-driver.js`) carries the raw 160,000-byte cap
+forward, now with compressed caps of 30,720 gzip / 28,000 brotli
+bytes; the lazy module assets (`widget-risk.js`,
+`widget-telemetry.js`, `widget-locales.js`, `widget-compat.js`) carry
+their own recorded raw-bytes rows and caps. The ordinary bootstrap, the bytes a plain
+SHA-256 page downloads before any memory-hard or armed challenge,
+targets **sub-30 KB compressed** (gzip or brotli) for the eager core
+alone. The full browser suite, the asset-parity jobs and the perf
+budget gate the split, so the caps stay real.
 
 ### Redis (`redis_dsn`)
 
@@ -933,8 +1018,11 @@ is never forced) are the privacy contract; see
     # emission (a forgotten override must not silently persist). mode
     # "migration" declares the deliberate two-phase migration (v3/v4
     # emission deferred until the fleet floor is confirmed); the doctor
-    # records the same high_abuse deferral as a WARN (exit 0). The
-    # two-phase rollout procedures themselves are unchanged; see
+    # records the same high_abuse deferral as a WARN (exit 0). The mode
+    # also gates the execution-versioning audit: the doctor accepts a
+    # required-tier downgrade window only in the migration state, see
+    # operations.md "Execution versioning".
+    # The two-phase rollout procedures themselves are unchanged; see
     # operations.md "Protocol v3 two-phase rollout" and "Protocol v4
     # execution rollout".
 ```
@@ -1085,7 +1173,7 @@ kiwi_captcha:
         #                                   # bounded by this ONE value;
         #                                   # risk escalates the TARGET
         #                                   # DIFFICULTY, never the memory
-        #     argon_escalation_target_bits: [1, 4, 8] # EXACTLY 3
+        #     argon_escalation_target_bits: [1, 2, 4] # EXACTLY 3
         #                                   # entries (Argon16/32/64), each
         #                                   # 1..20 — the expected nonce
         #                                   # search space escalation

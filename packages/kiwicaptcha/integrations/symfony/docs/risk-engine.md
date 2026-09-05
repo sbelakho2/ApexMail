@@ -53,7 +53,7 @@ On a sha256 deployment, `sha16`/`sha18`/`sha20` raise the target bits, and
 `argon16`/`argon32`/`argon64` issue Argon2id work at the fixed verification
 envelope (`risk.argon_verification_memory_kib`). The memory never escalates;
 the target difficulty does, along `risk.argon_escalation_target_bits`
-(1/4/8). On an argon2id deployment the argon actions issue the same envelope
+(1/2/4). On an argon2id deployment the argon actions issue the same envelope
 and the sha actions are no-ops. `step_up` issues the strongest profile of
 the configured family. The bundle cannot perform application-level step-up
 (MFA), so applications may also react to the decision themselves.
@@ -68,7 +68,7 @@ server-controlled memory envelope, `risk.argon_verification_memory_kib`
 is therefore bounded by one value regardless of the risk decision. Risk
 escalates the target difficulty (the expected nonce search space), not the
 memory. `risk.argon_escalation_target_bits` has exactly 3 entries, each
-1..20, default `[1, 4, 8]`; it maps Argon16 → 1, Argon32 → 4, Argon64 → 8
+1..20, default `[1, 2, 4]`; it maps Argon16 → 1, Argon32 → 2, Argon64 → 4
 leading zero bits. Argon target bits are additionally capped by the core's
 browser-solvable ceiling (`Config::MAX_ARGON2_TARGET_BITS` = 10) at
 issuance. Consequence for capacity planning: the worst-case

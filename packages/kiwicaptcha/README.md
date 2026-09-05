@@ -90,7 +90,7 @@ let config = ChallengeConfig {
     t: 1,                    // time cost; irrelevant for SHA-256
     p: 1,                    // parallelism; irrelevant for SHA-256
     target_bits: 18,         // SHA-256 difficulty (leading zero bits; 18 = ordinary default, 20 = elevated rung)
-    argon2_target_bits: 8,   // ignored for SHA-256
+    argon2_target_bits: 4,   // the Argon2id default, target 4 (ignored for SHA-256)
     ttl_secs: 120,
     min_duration_ms: None,   // None => derived from the difficulty
     auto_tune: false,        // scale target_bits with active solver load?
@@ -111,7 +111,8 @@ let config = ChallengeConfig {
 // m_kib < 8 * p. Two documented profiles — both libsodium-verifiable and
 // browser-feasible (64 MiB is the WASM heap ceiling):
 
-// Low-memory / mobile — 8 MiB memory, 6 bits (~64 Argon2id hashes):
+// Low-memory / mobile — 8 MiB memory, 4 bits (~16 Argon2id hashes, the
+// the target-4 default):
 let argon2_mobile = ChallengeConfig {
     secret_key: "replace-with-32-random-bytes".into(),
     algorithm: PoWAlgorithm::Argon2id,
@@ -119,7 +120,7 @@ let argon2_mobile = ChallengeConfig {
     t: 3,                      // KiwiCaptcha's required minimum (t >= 3)
     p: 1,                      // p == 1 (libsodium raw Argon2id interface)
     target_bits: 8,            // unused for Argon2id (difficulty is argon2_target_bits)
-    argon2_target_bits: 6,     // Argon2id difficulty (valid 1..=10)
+    argon2_target_bits: 4,     // Argon2id difficulty (valid 1..=10)
     ttl_secs: 120,
     min_duration_ms: None,
     auto_tune: false,          // Argon2id difficulty is static
@@ -132,7 +133,7 @@ let argon2_mobile = ChallengeConfig {
     kid: 1,                  // key id
 };
 
-// Desktop — 64 MiB memory (the WASM heap ceiling), 8 bits (~256 hashes):
+// Desktop — 64 MiB memory (the WASM heap ceiling), 4 bits (~16 hashes):
 let argon2_desktop = ChallengeConfig {
     secret_key: "replace-with-32-random-bytes".into(),
     algorithm: PoWAlgorithm::Argon2id,
@@ -140,7 +141,7 @@ let argon2_desktop = ChallengeConfig {
     t: 3,
     p: 1,
     target_bits: 8,
-    argon2_target_bits: 8,
+    argon2_target_bits: 4,
     ttl_secs: 120,
     min_duration_ms: None,
     auto_tune: false,

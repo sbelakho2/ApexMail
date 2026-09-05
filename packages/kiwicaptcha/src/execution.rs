@@ -74,6 +74,17 @@
 //! 31 DOM_EVENT_REAL  id-length byte (4..16) + id bytes
 //! 32 DOM_SERIALIZE_REAL (no operands)
 //! 33 DOM_OBSERVE     id-length byte (4..16) + id bytes + 1 raw index byte
+//! 34 DOM_SIBLING_INDEX id-length byte (4..16) + id bytes
+//! 35 DOM_CHILD       1 tag byte + id-length byte (4..16) + id bytes
+//! 36 DOM_DEPTH       id-length byte (4..16) + id bytes
+//! 37 DOM_FRAGMENT_APPEND 2 raw bytes (slot s % 4, dst cell)
+//! 38 DOM_CLONE       id-length byte (4..16) + id bytes + 1 raw dst cell byte
+//! 39 DOM_REPARENT    id-length byte (4..16) + id bytes + 1 raw dst cell byte
+//! 40 DOM_ATTR_REFLECT 1 raw name byte
+//! 41 DOM_EVENT_PHASE 1 raw dst cell byte
+//! 42 DOM_URL_CANON   (no operands)
+//! 43 DOM_TEXT_MUTATE value-length byte (1..32) + value bytes + 1 raw dst cell byte
+//! 44 DOM_SELECT_DEP  3 raw descendant-index bytes
 //! ```
 //!
 //! String literals are printable ASCII (0x20..0x7E); ids use the
@@ -160,8 +171,13 @@ pub const PROTOCOL_VERSION: u8 = 1;
 
 /// The highest execution version this generator can emit. Version 2
 /// adds the observe opcode and the causal u8 chain; version 3 adds a
-/// second constructed node and the sibling-index traversal probe.
-pub const MAX_EXECUTION_VERSION: u8 = 4;
+/// second constructed node and the sibling-index traversal probe;
+/// version 4 adds the nested tree (DOM_CHILD) and its ancestor-depth
+/// walk (DOM_DEPTH); version 5 adds the causal object-graph grammar
+/// (the clone and reparent spine over the nested tree, the observed
+/// URL-canon digest and the text-mutation serialization readback),
+/// see the design record docs/execution-v5-design.md.
+pub const MAX_EXECUTION_VERSION: u8 = 5;
 
 /// The deterministic op-count bounds of every issued program.
 pub const MIN_OPS: u8 = 8;
@@ -230,7 +246,32 @@ pub const OP_DOM_OBSERVE: u8 = 33;
 pub const OP_DOM_SIBLING_INDEX: u8 = 34;
 pub const OP_DOM_CHILD: u8 = 35;
 pub const OP_DOM_DEPTH: u8 = 36;
-pub const OP_COUNT: u8 = 37;
+/// The version-5 fragment append: moves the current node (with its
+/// whole subtree) into a detached fragment slot; terminal only, never
+/// minted into an issued program.
+pub const OP_DOM_FRAGMENT_APPEND: u8 = 37;
+/// The version-5 clone: deep-copies the current node's subtree,
+/// reassigns the copy's reflected id, inserts it after the original.
+pub const OP_DOM_CLONE: u8 = 38;
+/// The version-5 reparent: moves the current node's subtree under the
+/// constructed target node (the current node stays current).
+pub const OP_DOM_REPARENT: u8 = 39;
+/// The version-5 attribute reflection: the current node's reflected
+/// property value for the indexed fixed attribute name.
+pub const OP_DOM_ATTR_REFLECT: u8 = 40;
+/// The version-5 event phase: a real bubbling event over the current
+/// node's constructed ancestor path.
+pub const OP_DOM_EVENT_PHASE: u8 = 41;
+/// The version-5 URL canon: the SHA-256 of the canonicalized sandboxed
+/// document URL, the one browser-observed entry of the rung.
+pub const OP_DOM_URL_CANON: u8 = 42;
+/// The version-5 text mutate: sets the current node's textContent to
+/// the value operand.
+pub const OP_DOM_TEXT_MUTATE: u8 = 43;
+/// The version-5 select-depth: descends by the three child-index
+/// bytes; the entry is the number of descents completed.
+pub const OP_DOM_SELECT_DEP: u8 = 44;
+pub const OP_COUNT: u8 = 45;
 
 /// The trace entry names, one per opcode (index = opcode).
 const TRACE_NAMES: [&str; OP_COUNT as usize] = [
@@ -271,6 +312,14 @@ const TRACE_NAMES: [&str; OP_COUNT as usize] = [
     "dsib",
     "dchild",
     "ddepth",
+    "dfrag",
+    "dclone",
+    "drepar",
+    "dreflec",
+    "dphase",
+    "durlc",
+    "dmutate",
+    "dsdep",
 ];
 
 /// A parsed op: the opcode plus its canonical operands.
@@ -352,11 +401,12 @@ fn is_identifier(value: &str, max: usize) -> bool {
 ///
 /// Mirrors `KiwiCaptcha\ExecutionChallengeGenerator::generate()`
 /// byte-for-byte: the same PRF stream, the same op draw sequence, the
-/// same blob layout. `version` is the canonical numeric byte, exactly 1
-/// — the only op-version of the wire contract (the parser rejects any
-/// other byte, so issuance never mints a program the verifier would
-/// refuse). It is passed as a `u8` and stamped as the raw numeric
-/// byte; no string-cast ever reaches the blob.
+/// same blob layout. `version` is the canonical numeric byte carrying
+/// the grammar rung, the live range 1..=MAX_EXECUTION_VERSION (the
+/// parser bounds its own opcode space per version, so issuance never
+/// mints a program the verifier would refuse). It is passed as a `u8`
+/// and stamped as the raw numeric byte; no string-cast ever reaches
+/// the blob.
 pub fn generate(
     execution_key: &[u8],
     nonce: &str,
@@ -401,11 +451,16 @@ pub fn generate(
     // observe opcode (floor 8); version 2 adds the causal u8 chain, so
     // its floor rises to 11 (the fixed chain plus the 1..3 extra
     // probes) while the grammar bounds 8..24 stay unchanged and every
-    // stamped count always fits its emitted records.
+    // stamped count always fits its emitted records. Version 5 adds
+    // the six-op causal spine over the version-4 skeleton: its fixed
+    // 21-op skeleton plus up to three drawn extra probes would reach
+    // 24, the grammar cap, so the count byte only adds 0..3 slots
+    // (21 + byte % 4).
     let op_count = match version {
         2 => 11 + (cursor.next_byte() % 14),
         3 => 15 + (cursor.next_byte() % 10),
         4 => 18 + (cursor.next_byte() % 7),
+        5 => 21 + (cursor.next_byte() % 4),
         _ => 8 + (cursor.next_byte() % 17),
     };
     program.push(op_count);
@@ -449,6 +504,7 @@ pub fn generate(
         ops.push((OP_DOM_APPEND, Vec::new()));
     }
     let mut depth_operand = sibling_operand.clone();
+    let mut child_operands: Vec<Vec<u8>> = Vec::new();
     if version >= 4 {
         // The version-4 nested tree: two children created under the
         // current node in sequence (the second under the first), so the
@@ -460,9 +516,11 @@ pub fn generate(
             let mut operands_c = vec![tag_c];
             operands_c.extend_from_slice(&child_operand);
             ops.push((OP_DOM_CHILD, operands_c));
-            depth_operand = child_operand;
+            depth_operand = child_operand.clone();
+            child_operands.push(child_operand);
         }
     }
+    let mut u8_len = 0usize;
     if version >= 2 {
         // The causal chain: `U8_CREATE(len)` then `OBSERVE` writes the
         // browser-observed height at a drawn index inside the array,
@@ -471,8 +529,8 @@ pub fn generate(
         // the array still carrying the observed byte.
         let u8c_byte = cursor.next_byte();
         ops.push((OP_U8_CREATE, vec![u8c_byte]));
-        let u8_len = 8 + (u8c_byte % 57);
-        let obs_idx_byte = cursor.next_byte() % u8_len;
+        u8_len = 8 + (u8c_byte % 57) as usize;
+        let obs_idx_byte = cursor.next_byte() % u8_len as u8;
         let mut obs_operands = id_operand.clone();
         obs_operands.push(obs_idx_byte);
         ops.push((OP_DOM_OBSERVE, obs_operands));
@@ -494,21 +552,90 @@ pub fn generate(
         // The mandatory depth probe of the deepest nested child.
         ops.push((OP_DOM_DEPTH, depth_operand.clone()));
     }
-    let extra_probes = 1 + (cursor.next_byte() % 3);
+    if version >= 5 {
+        // The version-5 causal spine, emitted in the fixed order:
+        // DOM_CLONE, DOM_REPARENT, U8_READ of the reparent cell,
+        // DOM_URL_CANON, DOM_TEXT_MUTATE, DOM_SERIALIZE_REAL. The
+        // current node at this point is the deepest nested child (a
+        // leaf), so the clone deep-copies that leaf, the reparent
+        // moves the copy under one of the constructed nodes (the first
+        // node, the second node or one of the two children, drawn by
+        // two bits over the reused operand bytes), and the text
+        // mutation marks the copy. The reparent cell write binds the
+        // U8_READ that follows (the derived child count read back like
+        // the observed byte of the version-2 chain), the URL-canon
+        // entry is browser-observed, and the closing serialize-real
+        // digests the canonical serialization of the record after the
+        // clone, the reparent and the text mutation. The cell bytes
+        // are drawn modulo the live u8 length so every write lands in
+        // range.
+        let clone_id = draw_id(&mut cursor);
+        let clone_cell = cursor.next_byte() % u8_len as u8;
+        let mut clone_operands = clone_id;
+        clone_operands.push(clone_cell);
+        ops.push((OP_DOM_CLONE, clone_operands));
+        let parent_candidates = [
+            id_operand.clone(),
+            sibling_operand.clone(),
+            child_operands[0].clone(),
+            child_operands[1].clone(),
+        ];
+        let reparent_operand = parent_candidates[(cursor.next_byte() % 4) as usize].clone();
+        let reparent_cell = cursor.next_byte() % u8_len as u8;
+        let mut reparent_operands = reparent_operand;
+        reparent_operands.push(reparent_cell);
+        ops.push((OP_DOM_REPARENT, reparent_operands));
+        ops.push((OP_U8_READ, vec![reparent_cell]));
+        ops.push((OP_DOM_URL_CANON, Vec::new()));
+        let mut text_operands = draw_value(&mut cursor);
+        text_operands.push(cursor.next_byte() % u8_len as u8);
+        ops.push((OP_DOM_TEXT_MUTATE, text_operands));
+        ops.push((OP_DOM_SERIALIZE_REAL, Vec::new()));
+    }
+    let mut extra_probes = 1 + (cursor.next_byte() % 3);
+    if version >= 5 {
+        // The version-5 emission cap: the stamped count is 21..24, so
+        // at most op_count - 21 extra probes fit (a stamped count of
+        // 21 carries the fixed skeleton only).
+        extra_probes = extra_probes.min(op_count - 21);
+    }
     let probe_pool = match version {
         3 => 7,
         4 => 9,
         _ => 5,
     };
     for _ in 0..extra_probes {
-        let probe = OP_DOM_QUERY_REAL + (cursor.next_byte() % probe_pool);
-        let probe = if version >= 4 && probe == OP_DOM_CHILD {
-            // The nested-tree opcode never appears in extra slots (it
-            // would mutate the tree mid-run); the draw maps to the
-            // depth probe of the deepest child.
-            OP_DOM_DEPTH
+        let probe = if version >= 5 {
+            // The version-5 extra-slot pool extends to the read-only
+            // real probes of the rung: geometry, point, event real,
+            // serialize real, observe, sibling, depth, reflect, phase,
+            // URL canon and select depth. Query real and the topology
+            // mutators stay out of the extra slots exactly as the
+            // child op maps away in version 4; the fragment append is
+            // terminal only.
+            [
+                OP_DOM_GEOMETRY,
+                OP_DOM_POINT,
+                OP_DOM_EVENT_REAL,
+                OP_DOM_SERIALIZE_REAL,
+                OP_DOM_OBSERVE,
+                OP_DOM_SIBLING_INDEX,
+                OP_DOM_DEPTH,
+                OP_DOM_ATTR_REFLECT,
+                OP_DOM_EVENT_PHASE,
+                OP_DOM_URL_CANON,
+                OP_DOM_SELECT_DEP,
+            ][(cursor.next_byte() % 11) as usize]
         } else {
-            probe
+            let probe = OP_DOM_QUERY_REAL + (cursor.next_byte() % probe_pool);
+            if version >= 4 && probe == OP_DOM_CHILD {
+                // The nested-tree opcode never appears in extra slots (it
+                // would mutate the tree mid-run); the draw maps to the
+                // depth probe of the deepest child.
+                OP_DOM_DEPTH
+            } else {
+                probe
+            }
         };
         let probe_operands = match probe {
             OP_DOM_QUERY_REAL | OP_DOM_GEOMETRY | OP_DOM_EVENT_REAL => id_operand.clone(),
@@ -520,6 +647,14 @@ pub fn generate(
                 o
             }
             OP_DOM_DEPTH => depth_operand.clone(),
+            // The version-5 current-node probes: the attribute-name
+            // byte of the reflect probe, the phase cell byte (drawn
+            // modulo the live u8 length so its write lands in range),
+            // no operands for the URL-canon probe and the three raw
+            // descendant-index bytes of the select-depth probe.
+            OP_DOM_ATTR_REFLECT => cursor.take(1),
+            OP_DOM_EVENT_PHASE => vec![cursor.next_byte() % u8_len as u8],
+            OP_DOM_SELECT_DEP => cursor.take(3),
             _ => Vec::new(),
         };
         ops.push((probe, probe_operands));
@@ -689,8 +824,9 @@ fn draw_class(cursor: &mut Cursor) -> Vec<u8> {
 ///
 /// The parser is deliberately strict, the two-language mirror of the
 /// PHP `ExecutionChallengeGenerator::decode()`:
-/// - the op version must be exactly 1 (no arbitrary byte — only the one
-///   canonical version of the wire contract exists);
+/// - the op version must be one of the canonical grammar versions
+///   1..=MAX_EXECUTION_VERSION (no arbitrary byte — each version
+///   bounds its own opcode space below);
 /// - the embedded scope/action must match the canonical identifier
 ///   grammar of the rest of Kiwi (`[A-Za-z0-9._:-]` with the issuance
 ///   length caps), so a foreign blob can never smuggle canonical or
@@ -738,9 +874,9 @@ pub fn decode(program_b64: &str) -> Option<Program> {
         return None;
     }
     let op_version = cursor.take_strict(1)?[0];
-    // Execution versions 1, 2 and 3 are accepted (the compat window:
-    // old challenges stay verifiable for their whole TTL); each
-    // version bounds its own opcode space below.
+    // Execution versions 1..=MAX_EXECUTION_VERSION are accepted (the
+    // compat window: old challenges stay verifiable for their whole
+    // TTL); each version bounds its own opcode space below.
     if !(1..=MAX_EXECUTION_VERSION).contains(&op_version) {
         return None;
     }
@@ -760,6 +896,7 @@ pub fn decode(program_b64: &str) -> Option<Program> {
             1 => 33,
             2 => 34,
             3 => 35,
+            4 => 37,
             _ => OP_COUNT,
         };
         if opcode >= max_opcode {
@@ -905,7 +1042,44 @@ fn read_operands(cursor: &mut Cursor, opcode: u8) -> Option<BTreeMap<String, Ope
             map.insert("tag".into(), Operand::Int(tag as u64));
             map.insert("id".into(), Operand::Bytes(id));
         }
-        OP_DOM_SERIALIZE_REAL => {}
+        OP_DOM_SERIALIZE_REAL | OP_DOM_URL_CANON => {}
+        OP_DOM_FRAGMENT_APPEND => {
+            let s = cursor.take_strict(1)?[0];
+            let cell = cursor.take_strict(1)?[0];
+            map.insert("s".into(), Operand::Int((s % 4) as u64));
+            map.insert("cell".into(), Operand::Int((cell % 64) as u64));
+        }
+        OP_DOM_CLONE | OP_DOM_REPARENT => {
+            let id = read_len_bytes(cursor, 16)?;
+            if id.len() < 4 {
+                return None;
+            }
+            let cell = cursor.take_strict(1)?[0];
+            map.insert("id".into(), Operand::Bytes(id));
+            map.insert("cell".into(), Operand::Int((cell % 64) as u64));
+        }
+        OP_DOM_ATTR_REFLECT => {
+            let name = cursor.take_strict(1)?[0];
+            map.insert("name".into(), Operand::Int((name % 5) as u64));
+        }
+        OP_DOM_EVENT_PHASE => {
+            let cell = cursor.take_strict(1)?[0];
+            map.insert("cell".into(), Operand::Int((cell % 64) as u64));
+        }
+        OP_DOM_TEXT_MUTATE => {
+            let val = read_len_bytes(cursor, 32)?;
+            let cell = cursor.take_strict(1)?[0];
+            map.insert("val".into(), Operand::Bytes(val));
+            map.insert("cell".into(), Operand::Int((cell % 64) as u64));
+        }
+        OP_DOM_SELECT_DEP => {
+            let b0 = cursor.take_strict(1)?[0];
+            let b1 = cursor.take_strict(1)?[0];
+            let b2 = cursor.take_strict(1)?[0];
+            map.insert("b0".into(), Operand::Int(b0 as u64));
+            map.insert("b1".into(), Operand::Int(b1 as u64));
+            map.insert("b2".into(), Operand::Int(b2 as u64));
+        }
         OP_DOM_QUERY => {
             let id = read_len_bytes(cursor, 16)?;
             if id.len() < 4 {
@@ -949,10 +1123,15 @@ pub fn canonical_trace(program: &Program) -> String {
     let mut u8arr: Vec<u8> = Vec::new();
     let mut cur: Option<DomNode> = None;
     let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
+    // A version-5 program replays over the object-graph state (the
+    // clone, reparent, fragment, phase and select-depth arms read and
+    // write it); versions 1-4 carry no graph and keep the legacy
+    // single-node semantics byte-for-byte.
+    let mut ctx: Option<ExecutionGraph> = (program.op_version >= 5).then(ExecutionGraph::new);
     let mut entries: Vec<String> = Vec::with_capacity(program.ops.len());
 
     for op in &program.ops {
-        let result = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
+        let result = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids, ctx.as_mut());
         entries.push(format!("{}({})", TRACE_NAMES[op.opcode as usize], result));
     }
     entries.join(";")
@@ -967,6 +1146,232 @@ struct DomNode {
     classes: HashSet<Vec<u8>>,
     appended: bool,
     parent: Option<Vec<u8>>,
+    /// The optional text segment written by the version-5 text-mutate
+    /// op; absent until that op runs.
+    text: Option<Vec<u8>>,
+}
+
+/// The graph record of one constructed element: its parent id and its
+/// ordered child-id list, plus the appended flag (the topology the
+/// version-5 clone, reparent, fragment and phase arms read and write).
+#[derive(Debug, Clone)]
+struct GraphNode {
+    parent: Option<Vec<u8>>,
+    children: Vec<Vec<u8>>,
+    appended: bool,
+}
+
+/// The version-5 execution graph: the node records per constructed
+/// element, the body child list and the four fragment slots. The body
+/// list holds the constructed nodes in append order; the interpreter's
+/// own script element is the implicit first child, never in the list.
+#[derive(Debug)]
+struct ExecutionGraph {
+    nodes: HashMap<Vec<u8>, GraphNode>,
+    body: Vec<Vec<u8>>,
+    frags: [Vec<Vec<u8>>; 4],
+}
+
+impl ExecutionGraph {
+    fn new() -> Self {
+        ExecutionGraph {
+            nodes: HashMap::new(),
+            body: Vec::new(),
+            frags: [Vec::new(), Vec::new(), Vec::new(), Vec::new()],
+        }
+    }
+}
+
+/// Whether a node is attached to the document: it is a body child
+/// itself or its parent chain reaches a body child (the guard bounds
+/// a pathological foreign chain).
+fn graph_is_attached(g: &ExecutionGraph, id: &[u8]) -> bool {
+    if !g.nodes.contains_key(id) {
+        return false;
+    }
+    if g.body.iter().any(|b| b.as_slice() == id) {
+        return true;
+    }
+    let mut guard = 0usize;
+    let mut cursor = g.nodes[id].parent.clone();
+    while let Some(c) = cursor {
+        if guard >= 4096 {
+            break;
+        }
+        guard += 1;
+        if g.body.iter().any(|b| b.as_slice() == c) {
+            return true;
+        }
+        let Some(node) = g.nodes.get(&c) else {
+            break;
+        };
+        cursor = node.parent.clone();
+    }
+    false
+}
+
+/// Whether `ancestor_id` appears in the parent chain of `id` (the
+/// cycle guard bounds a pathological foreign chain).
+fn graph_node_is_ancestor_of(g: &ExecutionGraph, ancestor_id: &[u8], id: &[u8]) -> bool {
+    let mut guard = 0usize;
+    let mut cursor = match g.nodes.get(id) {
+        Some(node) => node.parent.clone(),
+        None => None,
+    };
+    while let Some(c) = cursor {
+        if guard >= 4096 {
+            break;
+        }
+        guard += 1;
+        if c.as_slice() == ancestor_id {
+            return true;
+        }
+        let Some(node) = g.nodes.get(&c) else {
+            break;
+        };
+        cursor = node.parent.clone();
+    }
+    false
+}
+
+/// The element count of a node's subtree: the node itself plus every
+/// element descendant, walked over the graph child lists. A child id
+/// with no graph record still counts as one element (it has no
+/// descendants). The visit budget bounds a pathological foreign chain
+/// whose child list would never terminate; every acyclic graph
+/// terminates far below it with the exact PHP value.
+fn graph_subtree_element_count(g: &ExecutionGraph, id: &[u8]) -> u64 {
+    let mut total = 0u64;
+    let mut budget = 4096usize;
+    let mut stack: Vec<Vec<u8>> = vec![id.to_vec()];
+    while let Some(current) = stack.pop() {
+        if budget == 0 {
+            break;
+        }
+        budget -= 1;
+        total += 1;
+        if let Some(node) = g.nodes.get(&current) {
+            for child in &node.children {
+                stack.push(child.clone());
+            }
+        }
+    }
+    total
+}
+
+/// Detaches a node from the graph: it leaves its parent's child list,
+/// the body child list and any fragment slot, and its parent pointer
+/// and appended flag reset (the node stays registered).
+fn graph_detach(g: &mut ExecutionGraph, id: &[u8]) {
+    if !g.nodes.contains_key(id) {
+        return;
+    }
+    let parent_id = g.nodes[id].parent.clone();
+    if let Some(parent) = parent_id {
+        if let Some(parent_node) = g.nodes.get_mut(&parent) {
+            parent_node.children.retain(|c| c.as_slice() != id);
+        }
+    }
+    if let Some(at) = g.body.iter().position(|b| b.as_slice() == id) {
+        g.body.remove(at);
+    }
+    for slot in 0..4 {
+        if let Some(at) = g.frags[slot].iter().position(|b| b.as_slice() == id) {
+            g.frags[slot].remove(at);
+        }
+    }
+    let node = g
+        .nodes
+        .get_mut(id)
+        .expect("the node stays registered after the detach");
+    node.parent = None;
+    node.appended = false;
+}
+
+/// Attaches a node to the end of the body child list (the real
+/// body.appendChild move semantics): it first detaches from any
+/// parent, body position or fragment slot.
+fn graph_attach_to_body(g: &mut ExecutionGraph, id: &[u8]) {
+    graph_detach(g, id);
+    if !g.nodes.contains_key(id) {
+        // The PHP mirror's auto-vivified record: an attach of a node
+        // with no graph record registers one (the parent and child
+        // lists stay empty).
+        g.nodes.insert(
+            id.to_vec(),
+            GraphNode {
+                parent: None,
+                children: Vec::new(),
+                appended: true,
+            },
+        );
+    }
+    let node = g.nodes.get_mut(id).expect("the attached node exists");
+    node.parent = None;
+    node.appended = true;
+    g.body.push(id.to_vec());
+}
+
+/// The version-5 canonical node string of a record: the sorted
+/// attribute pairs, then the sorted dataset pairs, then the sorted
+/// class names, then the text segment when present, joined with ';' in
+/// that fixed segment order. The graph-option switch is rung-scoped:
+/// versions 1-4 keep the attribute-only string (the `None` side), so
+/// older challenges stay verifiable for their whole TTL.
+fn canonical_node_string(node: &DomNode, ctx: Option<&ExecutionGraph>) -> String {
+    let mut parts: Vec<String> = node
+        .attrs
+        .iter()
+        .map(|(name, value)| {
+            format!(
+                "{}{}{}",
+                String::from_utf8_lossy(name),
+                "=",
+                String::from_utf8_lossy(value)
+            )
+        })
+        .collect();
+    parts.sort();
+    if ctx.is_some() {
+        let mut dataset: Vec<(Vec<u8>, Vec<u8>)> = node
+            .dataset
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        // The keys are unique, so the tuple order equals the PHP ksort
+        // key order.
+        dataset.sort();
+        for (key, value) in dataset {
+            parts.push(format!(
+                "{}{}{}",
+                String::from_utf8_lossy(&key),
+                "=",
+                String::from_utf8_lossy(&value)
+            ));
+        }
+        let mut classes: Vec<Vec<u8>> = node.classes.iter().cloned().collect();
+        classes.sort();
+        for cls in classes {
+            parts.push(String::from_utf8_lossy(&cls).into_owned());
+        }
+        if let Some(text) = &node.text {
+            if !text.is_empty() {
+                parts.push(String::from_utf8_lossy(text).into_owned());
+            }
+        }
+    }
+    parts.join(";")
+}
+
+/// The v5 integer-entry ops write their entry into the u8 cell the
+/// operand names, mirroring the observe replay rule. The write happens
+/// when the array exists and the cell is in range; every issued
+/// program draws its cell bytes modulo the live array length, so the
+/// writes land in range.
+fn write_v5_cell(u8arr: &mut [u8], cell: u64, entry: u64) {
+    if (cell as usize) < u8arr.len() {
+        u8arr[cell as usize] = (entry & 0xFF) as u8;
+    }
 }
 
 fn checksum(u8arr: &[u8]) -> u64 {
@@ -1001,11 +1406,23 @@ fn operand_bytes(op: &Op, key: &str) -> Vec<u8> {
 
 /// The deterministic state-machine execution of one op; returns the
 /// op's canonical trace value (decimal, "1"/"0", or standard base64).
+///
+/// The version-5 object-graph state rides the optional `ctx` (the
+/// node records with parent and child lists, the body child list and
+/// the four fragment slots). Versions 1-4 simulate without it, so
+/// their traces are byte-identical to the pre-v5 engine; the arms
+/// only touch the graph when `ctx` is present. The version-5
+/// integer-entry ops write their entry into the u8 cell the operand
+/// names, the observe replay rule. The serialization ops hash or
+/// base64 the version-5 canonical node string instead of the
+/// version-1..4 attribute-only string, the rung-scoped readback
+/// grammar.
 fn simulate_op(
     op: &Op,
     u8arr: &mut Vec<u8>,
     cur: &mut Option<DomNode>,
     doc_ids: &mut HashSet<Vec<u8>>,
+    mut ctx: Option<&mut ExecutionGraph>,
 ) -> String {
     let u32 = |v: u64| -> u64 { v & 0xFFFF_FFFF };
     match op.opcode {
@@ -1079,7 +1496,20 @@ fn simulate_op(
                 classes: HashSet::new(),
                 appended: false,
                 parent: None,
+                text: None,
             });
+            if let Some(g) = ctx {
+                // The graph record of the created element: no parent,
+                // no children, not yet in the document.
+                g.nodes.insert(
+                    id.clone(),
+                    GraphNode {
+                        parent: None,
+                        children: Vec::new(),
+                        appended: false,
+                    },
+                );
+            }
             B64.encode(id)
         }
         OP_DOM_SET_ATTR => {
@@ -1093,6 +1523,14 @@ fn simulate_op(
             if let Some(node) = cur {
                 node.appended = true;
                 doc_ids.insert(node.id.clone());
+                if let Some(g) = ctx {
+                    // The graph bookkeeping: body.appendChild moves the
+                    // element to the end of the body child list,
+                    // whatever its previous parent, body position or
+                    // fragment slot.
+                    let id = node.id.clone();
+                    graph_attach_to_body(g, &id);
+                }
             }
             "1".into()
         }
@@ -1144,24 +1582,19 @@ fn simulate_op(
             if let Some(node) = cur {
                 node.appended = true;
                 doc_ids.insert(node.id.clone());
+                if let Some(g) = ctx.as_deref_mut() {
+                    // The real interpreter appends an un-appended
+                    // current node to the body and leaves an appended
+                    // one in place.
+                    let attached = graph_is_attached(g, &node.id);
+                    if !attached {
+                        let id = node.id.clone();
+                        graph_attach_to_body(g, &id);
+                    }
+                }
             }
             let serialized = match cur {
-                Some(node) => {
-                    let mut parts: Vec<String> = node
-                        .attrs
-                        .iter()
-                        .map(|(name, value)| {
-                            format!(
-                                "{}{}{}",
-                                String::from_utf8_lossy(name),
-                                "=",
-                                String::from_utf8_lossy(value)
-                            )
-                        })
-                        .collect();
-                    parts.sort();
-                    parts.join(";")
-                }
+                Some(node) => canonical_node_string(node, ctx.as_deref()),
                 None => String::new(),
             };
             B64.encode(serialized.into_bytes())
@@ -1226,24 +1659,12 @@ fn simulate_op(
         OP_DOM_SERIALIZE_REAL => {
             // The interpreter hashes the canonical real readback; the
             // expected digest covers the same canonical string built
-            // from the shadow's current node attributes.
+            // from the shadow's current node. The serialization
+            // grammar is rung-scoped: versions 1-4 hash the sorted
+            // attribute pairs, and a version-5 program hashes the
+            // version-5 canonical node string of the same record.
             let canon = match &cur {
-                Some(node) if node.appended => {
-                    let mut parts: Vec<String> = node
-                        .attrs
-                        .iter()
-                        .map(|(name, value)| {
-                            format!(
-                                "{}{}{}",
-                                String::from_utf8_lossy(name),
-                                "=",
-                                String::from_utf8_lossy(value)
-                            )
-                        })
-                        .collect();
-                    parts.sort();
-                    parts.join(";")
-                }
+                Some(node) if node.appended => canonical_node_string(node, ctx.as_deref()),
                 _ => String::new(),
             };
             hex_sha256(canon.as_bytes())
@@ -1273,14 +1694,265 @@ fn simulate_op(
                 classes: HashSet::new(),
                 appended: true,
                 parent: None,
+                text: None,
             };
-            if let Some(p) = parent_id {
-                if p != id {
-                    node.parent = Some(p);
+            if let Some(p) = parent_id.as_ref() {
+                if *p != id {
+                    node.parent = Some(p.clone());
+                }
+            }
+            if let Some(g) = ctx {
+                // The graph bookkeeping: the child is appended under
+                // the current node, so the parent record's child list
+                // gains the new id and the child record points back at
+                // the parent.
+                g.nodes.insert(
+                    id.clone(),
+                    GraphNode {
+                        parent: parent_id.clone(),
+                        children: Vec::new(),
+                        appended: true,
+                    },
+                );
+                if let Some(p) = parent_id.as_ref() {
+                    if let Some(parent_node) = g.nodes.get_mut(p) {
+                        parent_node.children.push(id.clone());
+                    }
                 }
             }
             *cur = Some(node);
             B64.encode(&id)
+        }
+        // The version-5 object-graph ops. The exact entries (clone
+        // subtree count, reparent target child count, fragment slot
+        // child count, phase target-plus-ancestor count, reflected
+        // value, text byte length, descent count) are computed over
+        // the graph state, and the integer entries are written into
+        // the u8 cell named by the operand, exactly like the observe
+        // replay. The URL-canon entry is browser-observed: the sim
+        // emits the placeholder and the submitted-trace walker
+        // validates the hex shape (see verify_executed_trace).
+        OP_DOM_FRAGMENT_APPEND => {
+            let Some(g) = ctx else {
+                return "0".into();
+            };
+            let slot = operand_int(op, "s") as usize;
+            let mut entry = g.frags[slot].len() as u64;
+            if let Some(node) = cur.as_mut() {
+                if g.nodes.contains_key(&node.id) {
+                    let id = node.id.clone();
+                    graph_detach(g, &id);
+                    g.frags[slot].push(id.clone());
+                    entry = g.frags[slot].len() as u64;
+                    node.appended = false;
+                    doc_ids.remove(&id);
+                }
+            }
+            write_v5_cell(u8arr, operand_int(op, "cell"), entry);
+            entry.to_string()
+        }
+        OP_DOM_CLONE => {
+            let Some(g) = ctx else {
+                return "0".into();
+            };
+            let mut entry = 0u64;
+            let source_record = cur.clone();
+            if let Some(node) = source_record.as_ref() {
+                if g.nodes.contains_key(&node.id) {
+                    let source_id = node.id.clone();
+                    let clone_id = operand_bytes(op, "id");
+                    let source = g.nodes[&source_id].clone();
+                    entry = graph_subtree_element_count(g, &source_id);
+                    let mut copy = node.clone();
+                    copy.id = clone_id.clone();
+                    copy.attrs = node.attrs.clone();
+                    copy.attrs.insert(b"id".to_vec(), clone_id.clone());
+                    copy.parent = source.parent.clone();
+                    copy.appended = source.appended;
+                    g.nodes.insert(
+                        clone_id.clone(),
+                        GraphNode {
+                            parent: source.parent.clone(),
+                            children: source.children.clone(),
+                            appended: source.appended,
+                        },
+                    );
+                    if source.appended {
+                        // The copy is inserted directly after the
+                        // original, either inside the original's parent
+                        // or, for a body child, in the body child list.
+                        doc_ids.insert(clone_id.clone());
+                        if let Some(parent_id) = &source.parent {
+                            if let Some(parent_node) = g.nodes.get_mut(parent_id) {
+                                let at = parent_node
+                                    .children
+                                    .iter()
+                                    .position(|c| *c == source_id)
+                                    .map(|at| at + 1)
+                                    .unwrap_or(parent_node.children.len());
+                                parent_node.children.insert(at, clone_id.clone());
+                            }
+                        } else {
+                            let at = g
+                                .body
+                                .iter()
+                                .position(|b| *b == source_id)
+                                .map(|at| at + 1)
+                                .unwrap_or(g.body.len());
+                            g.body.insert(at, clone_id.clone());
+                        }
+                    }
+                    *cur = Some(copy);
+                }
+            }
+            write_v5_cell(u8arr, operand_int(op, "cell"), entry);
+            entry.to_string()
+        }
+        OP_DOM_REPARENT => {
+            let Some(g) = ctx else {
+                return "0".into();
+            };
+            let mut entry = 0u64;
+            let target_id = operand_bytes(op, "id");
+            if let Some(node) = cur.as_ref() {
+                if g.nodes.contains_key(&node.id) && g.nodes.contains_key(&target_id) {
+                    let cur_id = node.id.clone();
+                    entry = g.nodes[&target_id].children.len() as u64;
+                    // A move onto the node itself or onto one of its
+                    // own descendants is refused (the real
+                    // HierarchyRequestError); an absent target is a
+                    // no-op.
+                    let valid =
+                        cur_id != target_id && !graph_node_is_ancestor_of(g, &cur_id, &target_id);
+                    if valid {
+                        let target_attached = graph_is_attached(g, &target_id);
+                        graph_detach(g, &cur_id);
+                        let target_node = g
+                            .nodes
+                            .get_mut(&target_id)
+                            .expect("the valid target stays registered");
+                        target_node.children.push(cur_id.clone());
+                        let cur_node = g
+                            .nodes
+                            .get_mut(&cur_id)
+                            .expect("the moved node stays registered");
+                        cur_node.parent = Some(target_id.clone());
+                        cur_node.appended = target_attached;
+                        if let Some(node) = cur.as_mut() {
+                            node.parent = Some(target_id.clone());
+                            node.appended = target_attached;
+                        }
+                        if target_attached {
+                            doc_ids.insert(cur_id.clone());
+                        } else {
+                            doc_ids.remove(&cur_id);
+                        }
+                        entry = g.nodes[&target_id].children.len() as u64;
+                    }
+                }
+            }
+            write_v5_cell(u8arr, operand_int(op, "cell"), entry);
+            entry.to_string()
+        }
+        OP_DOM_ATTR_REFLECT => {
+            let name = ATTR_NAMES[(operand_int(op, "name") % 5) as usize];
+            let value = cur
+                .as_ref()
+                .and_then(|n| n.attrs.get(name).cloned())
+                .unwrap_or_default();
+            B64.encode(value)
+        }
+        OP_DOM_EVENT_PHASE => {
+            let Some(g) = ctx else {
+                return "0".into();
+            };
+            let mut count = 0u64;
+            if let Some(node) = cur.as_ref() {
+                if g.nodes.contains_key(&node.id) {
+                    count = 1;
+                    let mut guard = 0usize;
+                    let mut cursor = g.nodes[&node.id].parent.clone();
+                    while let Some(c) = cursor {
+                        if guard >= 4096 {
+                            break;
+                        }
+                        guard += 1;
+                        if !g.nodes.contains_key(&c) {
+                            break;
+                        }
+                        count += 1;
+                        cursor = g.nodes[&c].parent.clone();
+                    }
+                }
+            }
+            write_v5_cell(u8arr, operand_int(op, "cell"), count);
+            count.to_string()
+        }
+        // The URL-canon entry is the one browser-observed value of the
+        // version-5 rung: the sim emits the placeholder, and the
+        // submitted-trace walker validates the shape (64 lowercase
+        // hex) and replays the reported value as the entry. The op
+        // draws no cell byte, so no u8 write follows the obs replay
+        // rule.
+        OP_DOM_URL_CANON => "durlc".into(),
+        OP_DOM_TEXT_MUTATE => {
+            let Some(g) = ctx else {
+                return "0".into();
+            };
+            let mut len = 0u64;
+            if let Some(node) = cur.as_mut() {
+                let val = operand_bytes(op, "val");
+                node.text = Some(val.clone());
+                len = val.len() as u64;
+                let id = node.id.clone();
+                if let Some(graph_node) = g.nodes.get(&id) {
+                    if !graph_node.children.is_empty() {
+                        // The real textContent semantics: the write
+                        // replaces any previous text and removes every
+                        // child element.
+                        let attached = graph_is_attached(g, &id);
+                        let children = graph_node.children.clone();
+                        for child_id in children {
+                            graph_detach(g, &child_id);
+                            if attached {
+                                doc_ids.remove(&child_id);
+                            }
+                        }
+                    }
+                }
+            }
+            write_v5_cell(u8arr, operand_int(op, "cell"), len);
+            len.to_string()
+        }
+        OP_DOM_SELECT_DEP => {
+            let Some(g) = ctx else {
+                return "0".into();
+            };
+            let mut completed = 0u64;
+            if let Some(node) = cur.as_ref() {
+                if g.nodes.contains_key(&node.id) {
+                    let mut level_id = node.id.clone();
+                    for byte in [
+                        operand_int(op, "b0"),
+                        operand_int(op, "b1"),
+                        operand_int(op, "b2"),
+                    ] {
+                        let Some(level) = g.nodes.get(&level_id) else {
+                            break;
+                        };
+                        if level.children.is_empty() {
+                            break;
+                        }
+                        let child = level.children[(byte as usize) % level.children.len()].clone();
+                        level_id = child;
+                        completed += 1;
+                        if !g.nodes.contains_key(&level_id) {
+                            break;
+                        }
+                    }
+                }
+            }
+            completed.to_string()
         }
         _ => "0".into(),
     }
@@ -1343,6 +2015,15 @@ pub mod fixtures {
     /// measurement.
     pub const OBSERVED_HEIGHT: u8 = 10;
 
+    /// The fabricated canonical-URL digest of the version-5 URL-canon
+    /// probe. The real entry is the SHA-256 of the canonicalized
+    /// sandboxed document URL, environment evidence the verifier
+    /// shape-validates and replays, never predicts. The synthesizer
+    /// uses this fixed hex reference value exactly like the fixed
+    /// observed height above, a fabricated reference value.
+    pub const FABRICATED_URL_DIGEST: &str =
+        "e76cac2dfcc313d58bb0f731c433badf0651978a1769007ff3c1ab62cf59fee7";
+
     /// The browser-equivalent executed trace of a program: the canonical
     /// trace with the layout-probe placeholders replaced by valid
     /// browser-observed values — monotonic `GEOMETRY` offsets with height
@@ -1354,7 +2035,9 @@ pub mod fixtures {
     /// The causal `OBSERVE` readback reports the observed text-metric
     /// height and writes it through into the u8 state, so the
     /// following checksum and read entries of this synthesized trace are
-    /// computed over the observed byte.
+    /// computed over the observed byte. The version-5 `URL_CANON`
+    /// entries carry the fixed fabricated digest
+    /// [`FABRICATED_URL_DIGEST`].
     ///
     /// The entries are built per op from the same state machine the
     /// canonical trace uses; only the layout and observed entries are
@@ -1388,6 +2071,9 @@ pub mod fixtures {
         let mut u8arr: Vec<u8> = Vec::new();
         let mut cur: Option<DomNode> = None;
         let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
+        // A version-5 program replays over the object-graph state
+        // exactly like the generator's canonical simulation.
+        let mut ctx: Option<ExecutionGraph> = (program.op_version >= 5).then(ExecutionGraph::new);
         let has_append = program.ops.iter().any(|op| op.opcode == OP_DOM_APPEND);
         let mut top = 0u64;
         let mut append_rank: HashMap<Vec<u8>, usize> = HashMap::new();
@@ -1449,8 +2135,16 @@ pub mod fixtures {
                 if idx < u8arr.len() {
                     u8arr[idx] = observed_height;
                 }
+            } else if op.opcode == OP_DOM_URL_CANON {
+                // The browser-equivalent URL-canon entry: the real
+                // value is the SHA-256 digest of the canonicalized
+                // sandboxed document URL (environment evidence the
+                // verifier shape-validates and replays, never
+                // predicts), so the synthesizer fabricates the fixed
+                // reference digest above.
+                entries.push(format!("durlc({FABRICATED_URL_DIGEST})"));
             } else {
-                let result = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
+                let result = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids, ctx.as_mut());
                 entries.push(format!("{}({result})", TRACE_NAMES[op.opcode as usize]));
             }
         }
@@ -1459,19 +2153,26 @@ pub mod fixtures {
 
     /// The mirror of the PHP BrowserlessForgerySolver class: a pure
     /// shadow solver that forges verifier-accepted executed traces for
-    /// the v1, v2 and v3 grammars without a browser. The observe
-    /// choice is the explicit parameter, any value 1..=255 works, and
-    /// every other trace entry reuses the shared state machine above,
-    /// so the solver carries no second copy of the VM.
+    /// every live grammar version without a browser, through the
+    /// generator maximum [`MAX_EXECUTION_VERSION`] (the version-5
+    /// causal object-graph grammar included: the clone and reparent
+    /// spine, the fragment slots, the observed URL-canon digest and
+    /// the text-mutation readback). The observe choice is the explicit
+    /// parameter, any value 1..=255 works, and every other trace entry
+    /// reuses the shared state machine above, so the solver carries no
+    /// second copy of the VM.
     ///
     /// The oracle is the forgeability regression benchmark, preserved
-    /// on purpose: the tests sweep 100 generated programs of each
-    /// version and assert every forged trace verifies and digests. A
-    /// future version-4 object-graph grammar tests real Web Platform
-    /// semantics (classList, selectors, traversal, fragments, clone
-    /// and reparent, event ordering). Extending this solver to that
-    /// grammar must fail until those semantics are implemented, so
-    /// the future gate is real semantics, never a shadow-model fix.
+    /// on purpose: the tests sweep 100 generated programs of each live
+    /// version through the generator maximum and assert every forged
+    /// trace verifies and digests. The trace is supplementary
+    /// evidence, reproducible by a pure implementation of the public
+    /// semantics. A future object-graph grammar beyond the live
+    /// maximum tests real Web Platform semantics (classList, selectors,
+    /// traversal, fragments, clone and reparent, event ordering).
+    /// Extending this solver to that grammar must fail until those
+    /// semantics are implemented, so the future gate is real
+    /// semantics, never a shadow-model fix.
     pub fn browserless_forgery_solver(program: &Program, observed_height: u8) -> String {
         assert!(
             (1..=255).contains(&observed_height),
@@ -1511,8 +2212,9 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
     let mut cur: Option<DomNode> = None;
     let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
     let mut construction: Vec<Vec<u8>> = Vec::new();
+    let mut ctx: Option<ExecutionGraph> = (program.op_version >= 5).then(ExecutionGraph::new);
     for op in &program.ops {
-        simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
+        simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids, ctx.as_mut());
         if op.opcode == OP_DOM_APPEND {
             // The PHP mirror always appends (the current node id, or
             // '' when no node exists yet): the `POINT` probe's
@@ -1530,6 +2232,7 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
     let mut u8arr: Vec<u8> = Vec::new();
     let mut cur: Option<DomNode> = None;
     let mut doc_ids: HashSet<Vec<u8>> = HashSet::new();
+    let mut ctx: Option<ExecutionGraph> = (program.op_version >= 5).then(ExecutionGraph::new);
     let mut prev_top: i64 = -1;
     let mut append_rank: HashMap<Vec<u8>, usize> = HashMap::new();
     let mut tree_parent: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
@@ -1547,7 +2250,7 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
                 tree_parent.insert(operand_bytes(op, "id"), node.id.clone());
             }
         }
-        let sim = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids);
+        let sim = simulate_op(op, &mut u8arr, &mut cur, &mut doc_ids, ctx.as_mut());
         let name = TRACE_NAMES[op.opcode as usize];
         let name_open = format!("{name}(");
         if pos + name_open.len() > bytes.len()
@@ -1646,6 +2349,25 @@ pub fn verify_executed_trace(program_b64: &str, nonce: &str, trace: &str) -> Opt
                 }
                 pos += end + 1;
             }
+            OP_DOM_URL_CANON => {
+                // The URL-canon entry is the one browser-observed value
+                // of the version-5 rung: the canonical sim emits the
+                // placeholder and the walker validates the shape (64
+                // lowercase hex, the SHA-256 digest of the
+                // canonicalized sandboxed document URL) and replays the
+                // reported value as the entry. The op draws no cell
+                // byte, so no u8 write follows the obs replay rule.
+                let end = pos + 64;
+                if end + 1 > bytes.len()
+                    || !bytes[pos..end]
+                        .iter()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+                    || bytes[end] != b')'
+                {
+                    return None;
+                }
+                pos = end + 1;
+            }
             _ => {
                 let sim_entry = format!("{sim})");
                 if pos + sim_entry.len() > bytes.len()
@@ -1704,7 +2426,10 @@ pub enum GenerateError {
     KeyTooShort,
     #[error("execution action must be 1-32 characters of [A-Za-z0-9._:-]")]
     InvalidAction,
-    #[error("execution version must be the canonical numeric byte 1")]
+    #[error(
+        "execution version must be the canonical numeric byte within 1..={}",
+        MAX_EXECUTION_VERSION
+    )]
     InvalidVersion,
     #[error("execution scope must be 1-128 characters of [A-Za-z0-9._:-]")]
     InvalidScope,
@@ -1802,13 +2527,20 @@ mod tests {
 
     #[test]
     fn fixed_opcode_set_is_fully_reachable() {
-        // Both canonical execution versions are sampled: a version-1
-        // program draws its fillers from the other 28 opcodes (0..27)
-        // and its probe block from 28..32, so the version-1 corpus
-        // reaches exactly 33 opcodes — the observe opcode (33) is a
-        // version-2 extension and must never appear in a version-1
-        // program. The version-2 causal grammar always stamps the
-        // observe op, so its corpus reaches all 34 fixed opcodes.
+        // Every canonical execution version is sampled and must reach
+        // exactly its own opcode space: a version-1 program draws its
+        // fillers from the other 28 opcodes (0..27) and its probe block
+        // from 28..32, so the version-1 corpus reaches exactly 33
+        // opcodes — the observe opcode (33) is a version-2 extension
+        // and must never appear in a version-1 program. The version-2
+        // causal grammar always stamps the observe op, so its corpus
+        // reaches 34 opcodes; version 3 adds the sibling-index opcode
+        // (34), reaching 35; version 4 adds the nested-tree child and
+        // depth opcodes (35/36), reaching 37; version 5 adds the
+        // object-graph opcodes (37-44) except the terminal fragment
+        // append, which is never minted into an issued program, so the
+        // version-5 corpus reaches the full register minus
+        // OP_DOM_FRAGMENT_APPEND (44 of the 45 opcodes).
         let mut seen_v1 = std::collections::HashSet::new();
         for i in 0..64u32 {
             let nonce = B64.encode(sha2::Sha256::digest(format!("nonce-v1-{i}").as_bytes()));
@@ -1821,7 +2553,7 @@ mod tests {
         }
         assert_eq!(
             seen_v1.len(),
-            (OP_COUNT - 4) as usize,
+            33usize,
             "the version-1 opcode space is 0..32 (the observe opcode never appears)"
         );
         assert!(!seen_v1.contains(&OP_DOM_OBSERVE));
@@ -1837,8 +2569,8 @@ mod tests {
         }
         assert_eq!(
             seen_v2.len(),
-            (OP_COUNT - 3) as usize,
-            "the version-2 corpus reaches 34 of the 35 fixed opcodes"
+            34usize,
+            "the version-2 corpus reaches 34 of the fixed opcodes"
         );
         assert!(seen_v2.contains(&OP_DOM_OBSERVE));
         assert!(!seen_v2.contains(&OP_DOM_SIBLING_INDEX));
@@ -1854,8 +2586,8 @@ mod tests {
         }
         assert_eq!(
             seen_v3.len(),
-            (OP_COUNT - 2) as usize,
-            "the version-3 corpus reaches the full fixed opcode set"
+            35usize,
+            "the version-3 corpus reaches 35 of the fixed opcodes"
         );
         assert!(seen_v3.contains(&OP_DOM_SIBLING_INDEX));
         assert!(seen_v3.contains(&OP_DOM_OBSERVE));
@@ -1871,11 +2603,71 @@ mod tests {
         }
         assert_eq!(
             seen_v4.len(),
-            OP_COUNT as usize,
-            "the version-4 corpus reaches the full fixed opcode set"
+            37usize,
+            "the version-4 corpus reaches the full 0..36 nested-tree opcode set"
         );
         assert!(seen_v4.contains(&OP_DOM_DEPTH));
         assert!(seen_v4.contains(&OP_DOM_CHILD));
+        assert!(
+            !seen_v4.iter().any(|op| *op >= OP_DOM_FRAGMENT_APPEND),
+            "a version-4 program never carries the version-5 opcodes"
+        );
+
+        let mut seen_v5 = std::collections::HashSet::new();
+        // The version-5 fixed skeleton is 21 ops and the stamped count
+        // adds 0..3 extra probes, so filler draws from 0..27 are rare
+        // in a version-5 program; the union sweep over the causal
+        // grammars (versions 3 through the maximum, the mirror of the
+        // PHP all-opcodes corpus) guarantees every non-terminal opcode
+        // appears. The fragment-append opcode is terminal by design:
+        // it is never drawn into an issued program's extra slots or
+        // filler.
+        let mut seen_union = std::collections::HashSet::new();
+        for i in 0..240u32 {
+            let version = (3 + (i % 3)) as u8;
+            let nonce = B64.encode(sha2::Sha256::digest(
+                format!("opcode-coverage-{i}").as_bytes(),
+            ));
+            let p = generate(KEY, &nonce, "login", "login-action", version).unwrap();
+            let program = decode(&p).expect("the sampled program must parse");
+            assert_eq!(
+                program.op_version, version,
+                "the union corpus stays on its declared version"
+            );
+            for op in &program.ops {
+                seen_union.insert(op.opcode);
+                if version == 5 {
+                    seen_v5.insert(op.opcode);
+                }
+            }
+        }
+        assert_eq!(
+            seen_union.len(),
+            (OP_COUNT - 1) as usize,
+            "the union corpus reaches every fixed opcode except the terminal fragment append"
+        );
+        assert!(
+            !seen_union.contains(&OP_DOM_FRAGMENT_APPEND),
+            "the terminal fragment append is never minted into an issued program"
+        );
+        for v5_op in [
+            OP_DOM_CLONE,
+            OP_DOM_REPARENT,
+            OP_DOM_ATTR_REFLECT,
+            OP_DOM_EVENT_PHASE,
+            OP_DOM_URL_CANON,
+            OP_DOM_TEXT_MUTATE,
+            OP_DOM_SELECT_DEP,
+        ] {
+            assert!(
+                seen_v5.contains(&v5_op),
+                "the version-5 corpus stamps the object-graph opcode {v5_op}"
+            );
+        }
+        assert!(
+            !seen_v5.contains(&OP_DOM_FRAGMENT_APPEND),
+            "the terminal fragment append is never minted into a version-5 program"
+        );
     }
 
     #[test]
@@ -2290,17 +3082,18 @@ mod tests {
             "opcode 33 inside a version-1 blob must be rejected"
         );
 
-        // A version byte outside the canonical set 1|2|3 is refused at
-        // the decode fence, never interpreted as any grammar, and the
-        // fences are one-way: a version-3 program rewritten to version
-        // 2 must decode to null (its sibling-index opcode 34 is a
-        // version-3 extension), and a version-2 program rewritten to
-        // version 3 must decode to null too (version 3 requires the
-        // second constructed node in its fixed skeleton? no — decode
-        // does not enforce the skeleton, but the opcode bound does: a
-        // version-3 rewrite of a version-2 blob is structurally legal
-        // only if no opcode 34 appears — the fence test pins the
-        // downward direction, which is the fleet-relevant one).
+        // A version byte outside the canonical set 1..=MAX_EXECUTION_VERSION
+        // is refused at the decode fence, never interpreted as any
+        // grammar, and the fences are one-way: a version-3 program
+        // rewritten to version 2 must decode to null (its sibling-index
+        // opcode 34 is a version-3 extension), and a version-2 program
+        // rewritten to version 3 must decode to null too (version 3
+        // requires the second constructed node in its fixed skeleton?
+        // no — decode does not enforce the skeleton, but the opcode
+        // bound does: a version-3 rewrite of a version-2 blob is
+        // structurally legal only if no opcode 34 appears — the fence
+        // test pins the downward direction, which is the
+        // fleet-relevant one).
         let v3_b64 = generate(KEY, NONCE, "login", "login-action", 3).unwrap();
         let mut v3_down = B64.decode(&v3_b64).unwrap();
         assert_eq!(v3_down[version_at], 3);
@@ -2309,11 +3102,34 @@ mod tests {
             decode(&B64.encode(v3_down)).is_none(),
             "a version-3 program with opcode 34 must never decode as version 2"
         );
+        // The version-4 nested-tree grammar (opcodes 35/36) and the
+        // version-5 object-graph grammar (opcodes 37-44) are fenced the
+        // same way: a version-4 program rewritten to version 3 must
+        // decode to null (its child and depth opcodes are version-4
+        // extensions), and a version-5 program rewritten to version 4
+        // must decode to null too (the version-5 opcodes sit above the
+        // version-4 fence 37).
+        let v4_b64 = generate(KEY, NONCE, "login", "login-action", 4).unwrap();
+        let mut v4_down = B64.decode(&v4_b64).unwrap();
+        assert_eq!(v4_down[version_at], 4);
+        v4_down[version_at] = 3;
+        assert!(
+            decode(&B64.encode(v4_down)).is_none(),
+            "a version-4 program with opcode 35 must never decode as version 3"
+        );
+        let v5_b64 = generate(KEY, NONCE, "login", "login-action", 5).unwrap();
+        let mut v5_down = B64.decode(&v5_b64).unwrap();
+        assert_eq!(v5_down[version_at], 5);
+        v5_down[version_at] = 4;
+        assert!(
+            decode(&B64.encode(v5_down)).is_none(),
+            "a version-5 program with opcode 37 must never decode as version 4"
+        );
         let mut foreign_version = v2_bytes;
         foreign_version[version_at] = 9;
         assert!(
             decode(&B64.encode(foreign_version)).is_none(),
-            "a version byte outside 1..3 must decode to null"
+            "a version byte outside the canonical set 1..=MAX_EXECUTION_VERSION must decode to null"
         );
     }
 
@@ -2404,19 +3220,125 @@ mod tests {
     }
 
     #[test]
-    fn browserless_shadow_solver_forges_v1_v2_v3_traces() {
+    fn manifest_constants_match_the_module_register() {
+        // The protocol manifest (protocol/execution-v1.json, schema
+        // 'kiwicaptcha.execution-v1/1') is the canonical register shared
+        // by the PHP core, the Rust core and the interpreter asset. This
+        // test pins the module's own constants against the file, the
+        // mirror of the PHP ExecutionConstantsParityTest and of the CI
+        // lane tools/ci/protocol-manifest-check.sh: opcode numbers,
+        // opcode count, the maximum execution version, the trace-name
+        // list and the internal coherence of the manifest.
+        let manifest: serde_json::Value =
+            serde_json::from_str(include_str!("../../../protocol/execution-v1.json"))
+                .expect("the manifest must parse");
+        assert_eq!(manifest["$schema"], "kiwicaptcha.execution-v1/1");
+        assert_eq!(
+            manifest["format_version"].as_u64().unwrap(),
+            FORMAT_VERSION as u64
+        );
+        assert_eq!(
+            manifest["max_execution_version"].as_u64().unwrap(),
+            MAX_EXECUTION_VERSION as u64
+        );
+        assert_eq!(manifest["opcode_count"].as_u64().unwrap(), OP_COUNT as u64);
+
+        let opcodes = manifest["opcodes"].as_object().expect("opcodes map");
+        let trace_names = manifest["trace_names"]
+            .as_array()
+            .expect("trace_names list");
+        assert_eq!(opcodes.len(), OP_COUNT as usize);
+        assert_eq!(trace_names.len(), OP_COUNT as usize);
+        for (name, number) in opcodes {
+            let constant: u8 = match name.as_str() {
+                "ADD" => OP_ADD,
+                "SUB" => OP_SUB,
+                "MUL" => OP_MUL,
+                "XOR" => OP_XOR,
+                "AND" => OP_AND,
+                "OR" => OP_OR,
+                "SHL" => OP_SHL,
+                "SHR" => OP_SHR,
+                "U8_CREATE" => OP_U8_CREATE,
+                "U8_WRITE" => OP_U8_WRITE,
+                "U8_READ" => OP_U8_READ,
+                "U8_ROTATE" => OP_U8_ROTATE,
+                "STR_LEN" => OP_STR_LEN,
+                "STR_CHARCODE" => OP_STR_CHARCODE,
+                "STR_CODEPOINT" => OP_STR_CODEPOINT,
+                "STR_SLICE" => OP_STR_SLICE,
+                "DOM_CREATE" => OP_DOM_CREATE,
+                "DOM_SET_ATTR" => OP_DOM_SET_ATTR,
+                "DOM_APPEND" => OP_DOM_APPEND,
+                "DOM_QUERY" => OP_DOM_QUERY,
+                "DOM_GET_ATTR" => OP_DOM_GET_ATTR,
+                "DOM_DATASET_SET" => OP_DOM_DATASET_SET,
+                "DOM_DATASET_GET" => OP_DOM_DATASET_GET,
+                "DOM_CLASS_ADD" => OP_DOM_CLASS_ADD,
+                "DOM_CLASS_CONTAINS" => OP_DOM_CLASS_CONTAINS,
+                "DOM_PARENT" => OP_DOM_PARENT,
+                "DOM_DISPATCH" => OP_DOM_DISPATCH,
+                "DOM_SERIALIZE" => OP_DOM_SERIALIZE,
+                "DOM_QUERY_REAL" => OP_DOM_QUERY_REAL,
+                "DOM_GEOMETRY" => OP_DOM_GEOMETRY,
+                "DOM_POINT" => OP_DOM_POINT,
+                "DOM_EVENT_REAL" => OP_DOM_EVENT_REAL,
+                "DOM_SERIALIZE_REAL" => OP_DOM_SERIALIZE_REAL,
+                "DOM_OBSERVE" => OP_DOM_OBSERVE,
+                "DOM_SIBLING_INDEX" => OP_DOM_SIBLING_INDEX,
+                "DOM_CHILD" => OP_DOM_CHILD,
+                "DOM_DEPTH" => OP_DOM_DEPTH,
+                "DOM_FRAGMENT_APPEND" => OP_DOM_FRAGMENT_APPEND,
+                "DOM_CLONE" => OP_DOM_CLONE,
+                "DOM_REPARENT" => OP_DOM_REPARENT,
+                "DOM_ATTR_REFLECT" => OP_DOM_ATTR_REFLECT,
+                "DOM_EVENT_PHASE" => OP_DOM_EVENT_PHASE,
+                "DOM_URL_CANON" => OP_DOM_URL_CANON,
+                "DOM_TEXT_MUTATE" => OP_DOM_TEXT_MUTATE,
+                "DOM_SELECT_DEP" => OP_DOM_SELECT_DEP,
+                other => panic!("manifest opcode {other:?} has no module constant"),
+            };
+            assert_eq!(
+                constant as u64,
+                number.as_u64().unwrap(),
+                "manifest opcode {name} must equal the module constant"
+            );
+        }
+        let mut numbers: Vec<u64> = opcodes
+            .values()
+            .map(|number| number.as_u64().unwrap())
+            .collect();
+        numbers.sort_unstable();
+        let sequential: Vec<u64> = (0..OP_COUNT as u64).collect();
+        assert_eq!(
+            numbers, sequential,
+            "the manifest opcode numbers must be the sequential set 0..N-1"
+        );
+        for (index, name) in trace_names.iter().enumerate() {
+            assert_eq!(
+                name.as_str().unwrap(),
+                TRACE_NAMES[index],
+                "the manifest trace-name list must match the module list"
+            );
+        }
+    }
+
+    #[test]
+    fn browserless_shadow_solver_forges_every_live_version_trace() {
         // The adversarial regression oracle: a pure shadow solver must
-        // forge verifier-accepted traces for the v1, v2 and v3
-        // grammars at several chosen observed heights. The future
-        // version-4 gate sits on this test: an object-graph grammar
-        // tests real Web Platform semantics (classList, selectors,
-        // traversal, fragments, clone and reparent, event ordering),
-        // so extending this solver to version 4 must fail until those
-        // semantics are implemented. The mirror test lives in the PHP
-        // suite as testBrowserlessShadowSolverForgesV1V2V3Traces.
+        // forge verifier-accepted traces for every live grammar, versions
+        // 1 through MAX_EXECUTION_VERSION (the causal object-graph rung
+        // included: the clone and reparent spine, the fragment slots,
+        // the observed URL-canon digest and the text-mutation readback),
+        // at several chosen observed heights. The trace is supplementary
+        // evidence, reproducible by a pure implementation of the public
+        // semantics; a grammar beyond the live maximum must make this
+        // solver fail until those semantics are implemented. The mirror
+        // test lives in the PHP suite as
+        // testBrowserlessShadowSolverForgesEveryLiveVersionTrace.
         let heights = [1u8, 10, 17, 255];
         let mut solved = 0u64;
-        for version in [1u8, 2, 3] {
+        for version in 1..=MAX_EXECUTION_VERSION {
             for i in 0..100u32 {
                 let nonce = B64.encode(sha2::Sha256::digest(
                     format!("browserless-solver-v{version}-{i}").as_bytes(),
@@ -2469,8 +3391,9 @@ mod tests {
             }
         }
         assert_eq!(
-            solved, 1200,
-            "the oracle solves 100 programs of 3 versions at 4 heights"
+            solved,
+            100 * heights.len() as u64 * MAX_EXECUTION_VERSION as u64,
+            "the oracle solves 100 programs of every live version at every observed height"
         );
     }
 }

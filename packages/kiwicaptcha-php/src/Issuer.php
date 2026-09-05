@@ -246,8 +246,10 @@ final class Issuer
      * Production callers omit it.
      *
      * `$executionVersion` is the execution-dimension protocol version,
-     * the canonical numeric byte: exactly 1 (the only version of the
-     * wire contract), passed as an int — never a string that is cast.
+     * the canonical numeric byte carrying the execution grammar version,
+     * 1..{@see ExecutionChallengeGenerator::MAX_EXECUTION_VERSION} (the
+     * generator's live maximum), passed as an int — never a string that
+     * is cast.
      *
      * @throws \InvalidArgumentException when `$decoyNameOverride` is set
      *                                   but not a valid decoy field name
@@ -301,9 +303,10 @@ final class Issuer
      * dimension by accident. `$executionAction` is the provider-style
      * action of the request, 1..32 chars of [A-Za-z0-9._:-], default
      * "default", and `$executionVersion` the dimension protocol
-     * version, the canonical numeric byte: exactly 1 (int, never a
-     * string that is cast). Both are embedded in the program and bound
-     * by the commitment.
+     * version, the canonical numeric byte carrying the execution
+     * grammar version, 1..{@see ExecutionChallengeGenerator::MAX_EXECUTION_VERSION}
+     * (int, never a string that is cast). Both are embedded in the
+     * program and bound by the commitment.
      *
      * An armed issuance writes protocol v4: the stored record carries
      * `execution_program` plus the authenticated `execution_version`
@@ -908,8 +911,9 @@ final class Issuer
      *   issuer|kid[|decoy_field]|execution_version|execution_commitment
      * ```
      *
-     * - `execution_version` is the canonical numeric byte 1 (decimal on
-     *   the wire; never `|`-capable).
+     * - `execution_version` is the canonical numeric byte carrying the
+     *   execution grammar version, 1..{@see ExecutionChallengeGenerator::MAX_EXECUTION_VERSION}
+     *   when armed (decimal on the wire; never `|`-capable).
      * - `execution_commitment` is the hex SHA-256 of the stored
      *   program's base64 wire string: 64 lowercase hex characters,
      *   never `|`-capable.

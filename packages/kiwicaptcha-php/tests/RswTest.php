@@ -181,6 +181,222 @@ final class RswTest extends TestCase
         }
     }
 
+    public function testModulusWithASmallPrimeFactorIsRejected(): void
+    {
+        $this->requireGmp();
+        $weak = gmp_mul(gmp_add(gmp_pow(gmp_init(2), 2046), 1), 3);
+        self::assertSame(2048, \strlen(gmp_strval($weak, 2)), 'the test modulus is exactly 2048 bits');
+        self::assertSame('1', gmp_strval(gmp_mod($weak, gmp_init(2))), 'the test modulus is odd');
+        $bytes = hex2bin(str_pad(gmp_strval($weak, 16), 512, '0', \STR_PAD_LEFT));
+        try {
+            new Config(
+                secretKey: Vectors::SECRET,
+                algorithm: PoWAlgorithm::Rsw,
+                rswModulusN: base64_encode($bytes),
+                rswLambda: RswFixture::LAMBDA_B64,
+            );
+            self::fail('a modulus with a small prime factor must throw');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('found 3', $e->getMessage());
+        }
+    }
+
+    public function testModulusOfTheWrongBitLengthIsRejected(): void
+    {
+        $this->requireGmp();
+        $full = gmp_init(bin2hex(base64_decode(RswFixture::MODULUS_N_B64, true)), 16);
+        $short = gmp_or(gmp_mod($full, gmp_pow(gmp_init(2), 1024)), gmp_pow(gmp_init(2), 1023));
+        self::assertSame(1024, \strlen(gmp_strval($short, 2)));
+        $bytes = hex2bin(str_pad(gmp_strval($short, 16), 256, '0', \STR_PAD_LEFT));
+        try {
+            new Config(
+                secretKey: Vectors::SECRET,
+                algorithm: PoWAlgorithm::Rsw,
+                rswModulusN: base64_encode($bytes),
+                rswLambda: RswFixture::LAMBDA_B64,
+            );
+            self::fail('a 1024-bit modulus must throw');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('exactly 256 bytes', $e->getMessage());
+        }
+    }
+
+    public function testProbablePrimeModulusIsRejected(): void
+    {
+        $this->requireGmp();
+        try {
+            new Config(
+                secretKey: Vectors::SECRET,
+                algorithm: PoWAlgorithm::Rsw,
+                rswModulusN: RswFixture::PROBABLE_PRIME_N_B64,
+                rswLambda: RswFixture::LAMBDA_B64,
+            );
+            self::fail('a probable-prime modulus must throw');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('probable prime', $e->getMessage());
+        }
+    }
+
+    public function testMismatchedLambdaIsRejected(): void
+    {
+        $this->requireGmp();
+        $lambda = gmp_init(bin2hex(base64_decode(RswFixture::LAMBDA_B64, true)), 16);
+        $shifted = gmp_sub($lambda, 2);
+        $bytes = hex2bin(str_pad(gmp_strval($shifted, 16), 512, '0', \STR_PAD_LEFT));
+        try {
+            new Config(
+                secretKey: Vectors::SECRET,
+                algorithm: PoWAlgorithm::Rsw,
+                rswModulusN: RswFixture::MODULUS_N_B64,
+                rswLambda: base64_encode($bytes),
+            );
+            self::fail('a lambda that is not the trapdoor of the modulus must throw');
+        } catch (\InvalidArgumentException $e) {
+            self::assertStringContainsString('rsw_lambda', $e->getMessage());
+        }
+    }
+
+    public function testGoodFixturePairStillPassesTheStrengthenedValidation(): void
+    {
+        $this->requireGmp();
+        $modulus = gmp_init(bin2hex(base64_decode(RswFixture::MODULUS_N_B64, true)), 16);
+        self::assertSame(0, gmp_prob_prime($modulus), 'the fixture semiprime is composite');
+        self::assertSame('1', gmp_strval(gmp_mod($modulus, gmp_init(2))), 'the fixture modulus is odd');
+        // The 1024-bit fixture prime squared is a 2048-bit composite
+        // with no small factor: gmp still reads it as composite, the
+        // same verdict the Rust probable-prime test returns.
+        $prime = gmp_init(bin2hex(base64_decode(RswFixture::PRIME_1024_B64, true)), 16);
+        self::assertSame(0, gmp_prob_prime(gmp_mul($prime, $prime)), 'a prime square is composite');
+
+        $config = $this->rswConfig();
+        self::assertSame(RswFixture::MODULUS_N_B64, $config->rswModulusN);
+        $rsw = new Rsw(RswFixture::MODULUS_N_B64, RswFixture::LAMBDA_B64);
+        self::assertNotNull($rsw->modulus());
+    }
+
+    public function testWarmPairStillRejectsEveryWeakShapeWithTheIdenticalMessage(): void
+    {
+        // The validated-pair memo must never change a rejection: after
+        // the valid fixture pair is constructed (and memoized) in this
+        // process, every weak input of the rejection rows must fail
+        // with the exact byte-identical message a cold construction
+        // produced. Invalid pairs are never memoized, so each row runs
+        // the full validation pipeline.
+        $this->requireGmp();
+        $rsw = new Rsw(RswFixture::MODULUS_N_B64, RswFixture::LAMBDA_B64);
+        self::assertNotNull($rsw->modulus(), 'the warm-up pair must be valid');
+
+        $modulusBytes = base64_decode(RswFixture::MODULUS_N_B64, true);
+        $rows = [
+            'even modulus' => [
+                base64_encode(substr($modulusBytes, 0, -1)."\x00"),
+                RswFixture::LAMBDA_B64,
+                'rsw_modulus_n must be odd (the product of two odd primes)',
+            ],
+            'short modulus' => [
+                base64_encode(substr($modulusBytes, 1)),
+                RswFixture::LAMBDA_B64,
+                'rsw_modulus_n must be the base64 of exactly 256 bytes (a 2048-bit composite), got 255',
+            ],
+            'no top bit' => [
+                base64_encode("\x01".substr($modulusBytes, 1)),
+                RswFixture::LAMBDA_B64,
+                'rsw_modulus_n must have its top bit set (a genuine 2048-bit composite)',
+            ],
+            'odd lambda' => [
+                RswFixture::MODULUS_N_B64,
+                base64_encode(substr(base64_decode(RswFixture::LAMBDA_B64, true), 0, -1)."\x01"),
+                'rsw_lambda must be even (lcm(p-1, q-1) of two odd primes)',
+            ],
+        ];
+        foreach ($rows as $label => [$n, $lambda, $message]) {
+            try {
+                new Rsw($n, $lambda);
+                self::fail("the warm pair must still reject {$label}");
+            } catch (\InvalidArgumentException $e) {
+                self::assertSame($message, $e->getMessage(), "{$label} must keep its exact message");
+            }
+        }
+
+        // The three consistency rejections: the small-factor modulus,
+        // the probable-prime modulus and the mismatched lambda.
+        $weak = gmp_mul(gmp_add(gmp_pow(gmp_init(2), 2046), 1), 3);
+        $bytes = hex2bin(str_pad(gmp_strval($weak, 16), 512, '0', \STR_PAD_LEFT));
+        try {
+            new Rsw(base64_encode($bytes), RswFixture::LAMBDA_B64);
+            self::fail('the warm pair must still reject a small-factor modulus');
+        } catch (\InvalidArgumentException $e) {
+            self::assertSame(
+                'rsw_modulus_n must not be divisible by a small prime (a genuine 2048-bit modulus has none; found 3)',
+                $e->getMessage()
+            );
+        }
+        try {
+            new Rsw(RswFixture::PROBABLE_PRIME_N_B64, RswFixture::LAMBDA_B64);
+            self::fail('the warm pair must still reject a probable-prime modulus');
+        } catch (\InvalidArgumentException $e) {
+            self::assertSame(
+                'rsw_modulus_n must not itself be a probable prime (a genuine 2048-bit modulus is the product of two large primes)',
+                $e->getMessage()
+            );
+        }
+        $lambda = gmp_init(bin2hex(base64_decode(RswFixture::LAMBDA_B64, true)), 16);
+        $shifted = hex2bin(str_pad(gmp_strval(gmp_sub($lambda, 2), 16), 512, '0', \STR_PAD_LEFT));
+        try {
+            new Rsw(RswFixture::MODULUS_N_B64, base64_encode($shifted));
+            self::fail('the warm pair must still reject a mismatched lambda');
+        } catch (\InvalidArgumentException $e) {
+            self::assertSame(
+                'rsw_lambda is not a matching trapdoor for rsw_modulus_n (the lambda shortcut diverges from sequential squaring)',
+                $e->getMessage()
+            );
+        }
+        // The Config entry point keeps its own prefix over the same
+        // byte-identical inner message (the standalone deploy validates
+        // through Config on every request).
+        try {
+            new Config(
+                secretKey: Vectors::SECRET,
+                algorithm: PoWAlgorithm::Rsw,
+                rswModulusN: RswFixture::MODULUS_N_B64,
+                rswLambda: base64_encode($shifted),
+            );
+            self::fail('the warm pair must still reject a mismatched lambda through Config');
+        } catch (\InvalidArgumentException $e) {
+            self::assertSame(
+                'invalid rsw trapdoor configuration: rsw_lambda is not a matching trapdoor for rsw_modulus_n (the lambda shortcut diverges from sequential squaring)',
+                $e->getMessage()
+            );
+        }
+    }
+
+    public function testRepeatedConstructionOfTheSamePairIsIdentical(): void
+    {
+        // The validated-pair memo reuses the decoded representation on
+        // the second construction of the exact same configured pair:
+        // the decoded modulus is the same integer and the trapdoor
+        // expectations are byte-identical to the first (cold)
+        // construction's, across the cost ladder including the 75_000
+        // default.
+        $this->requireGmp();
+        $first = new Rsw(RswFixture::MODULUS_N_B64, RswFixture::LAMBDA_B64);
+        $second = new Rsw(RswFixture::MODULUS_N_B64, RswFixture::LAMBDA_B64);
+        self::assertSame(
+            0,
+            gmp_cmp($first->modulus(), $second->modulus()),
+            'the memoized construction must decode the same modulus'
+        );
+        foreach ([1, 7, 25_000, 75_000] as $t) {
+            $prefix = 'v2|fixture-prefix-'.$t.'|';
+            $nonce = base64_encode(random_bytes(32));
+            self::assertSame(
+                $first->expectedProofHex($prefix, $nonce, $t),
+                $second->expectedProofHex($prefix, $nonce, $t),
+                "both constructions must compute the identical expectation for t={$t}"
+            );
+        }
+    }
+
     public function testRswTBounds(): void
     {
         $this->requireGmp();
@@ -479,5 +695,33 @@ final class RswTest extends TestCase
             issuedAtNs: self::ISSUED_AT * 1_000_000,
             protocolVersion: 2,
         );
+    }
+
+    public function testDebugInfoRedactsLambdaAndKeepsThePublicModulus(): void
+    {
+        $this->requireGmp();
+        $rsw = new Rsw(RswFixture::MODULUS_N_B64, RswFixture::LAMBDA_B64);
+
+        // __debugInfo must show the full four-field shape (modulusB64, n
+        // and their names), with the secret lambda material replaced.
+        self::assertSame(
+            ['modulusB64', 'lambdaB64', 'n', 'lambda'],
+            array_keys($rsw->__debugInfo()),
+        );
+
+        foreach ([
+            static function () use ($rsw): string {
+                ob_start();
+                var_dump($rsw);
+                return (string) ob_get_clean();
+            },
+            static fn (): string => print_r($rsw, true),
+        ] as $capture) {
+            $dump = $capture();
+            self::assertStringNotContainsString(RswFixture::LAMBDA_B64, $dump);
+            // The modulus (raw base64 and decoded) is public and prints.
+            self::assertStringContainsString(RswFixture::MODULUS_N_B64, $dump);
+            self::assertSame(2, substr_count($dump, '<redacted>'));
+        }
     }
 }

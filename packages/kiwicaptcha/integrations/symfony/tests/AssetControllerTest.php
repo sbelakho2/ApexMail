@@ -66,6 +66,9 @@ final class AssetControllerTest extends TestCase
         yield 'driver js' => ['driver', 'widget-driver.js', 'js', 'application/javascript; charset=UTF-8'];
         yield 'worker js' => ['worker', 'kiwi-worker.js', 'js', 'application/javascript; charset=UTF-8'];
         yield 'execution js' => ['execution', 'execution-interpreter.js', 'js', 'application/javascript; charset=UTF-8'];
+        yield 'risk module js' => ['risk', 'widget-risk.js', 'js', 'application/javascript; charset=UTF-8'];
+        yield 'telemetry module js' => ['telemetry', 'widget-telemetry.js', 'js', 'application/javascript; charset=UTF-8'];
+        yield 'locales module js' => ['locales', 'widget-locales.js', 'js', 'application/javascript; charset=UTF-8'];
     }
 
     public function testUnknownHashIs404(): void

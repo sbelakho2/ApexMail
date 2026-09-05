@@ -329,18 +329,21 @@ final class Verifier
         private readonly int $resumeClaimTtlSecs = self::RESUME_CLAIM_TTL_SECS,
         /**
          * The rsw modulus n (canonical standard base64 of the 2048-bit
-         * composite), the public half of the time-lock trapdoor. When
-         * set together with rswLambda, rsw records verify through the
-         * trapdoor; when both are null (the default), a signed rsw
-         * record is authentic but unsupported (UnsupportedRswParams).
-         * Setting exactly one of the pair is refused at construction.
+         * composite, generated with the shipped rsw-keygen tool), the
+         * public half of the time-lock trapdoor. When set together
+         * with rswLambda, rsw records verify through the trapdoor;
+         * when both are null (the default), a signed rsw record is
+         * authentic but unsupported (UnsupportedRswParams). Setting
+         * exactly one of the pair is refused at construction.
          */
         private readonly ?string $rswModulusN = null,
         /**
          * The rsw secret lambda = lcm(p-1, q-1) (canonical standard
          * base64), the trapdoor that lets this verifier compute the
-         * expected final value without the T sequential squarings. Never
-         * stored on the record and never sent to the client.
+         * expected final value without the T sequential squarings. It
+         * is the secret trapdoor: never persist it beside client
+         * material. Never stored on the record and never sent to the
+         * client.
          */
         private readonly ?string $rswLambda = null,
     ) {
@@ -405,6 +408,26 @@ final class Verifier
         }
         $this->argonGate = $argonGate;
         $this->now = $now;
+    }
+
+    /**
+     * Debug inspection must never surface the signing secrets: the full
+     * property shape stays visible under the exact property names, with
+     * the secret-bearing values replaced by a redaction marker. The
+     * secretsByKid map values and the rsw lambda are secrets; the map
+     * keys (kid ids) are identifiers and stay intact, and the rsw
+     * modulus is public by design.
+     */
+    public function __debugInfo(): array
+    {
+        $shape = get_object_vars($this);
+        $shape['secretsByKid'] = array_map(
+            static fn (string $secret): string => '<redacted>',
+            $this->secretsByKid
+        );
+        $shape['rswLambda'] = $shape['rswLambda'] === null ? null : '<redacted>';
+
+        return $shape;
     }
 
     /**
@@ -1012,7 +1035,11 @@ final class Verifier
             if ($this->rsw === null) {
                 return null;
             }
-            if ($token->rswProof === null) {
+            // The rsw composition invariant: an rsw record's solution
+            // must carry counter 0 (a time-lock proof has no search
+            // counter) AND a non-null rsw final value — any other token
+            // shape is rejected outright, never compared.
+            if ($token->counter !== 0 || $token->rswProof === null) {
                 return false;
             }
 
@@ -1020,6 +1047,13 @@ final class Verifier
                 $this->rsw->expectedProofHex($record->prefix, $record->nonce, $record->t),
                 $token->rswProof
             );
+        }
+        // The mirror invariant for every non-rsw algorithm: an rsw
+        // final value is rsw evidence only, so a sha256/argon2id record
+        // presented with a token carrying one is rejected outright —
+        // the hash is never derived for it.
+        if ($token->rswProof !== null) {
+            return false;
         }
         $hash = $this->deriveHash($record, $token->counter);
         if ($hash === null) {
@@ -1743,7 +1777,7 @@ final class Verifier
         // a corrupt or foreign record — stripping, substituting or
         // injecting a program always invalidates the challenge.
         if ($executionPresent) {
-            if (($record->executionVersion < 1 || $record->executionVersion > 4) || $record->executionCommitment === null) {
+            if (($record->executionVersion < 1 || $record->executionVersion > ExecutionChallengeGenerator::MAX_EXECUTION_VERSION) || $record->executionCommitment === null) {
                 return false;
             }
             if (preg_match('/^[0-9a-f]{64}$/D', $record->executionCommitment) !== 1) {

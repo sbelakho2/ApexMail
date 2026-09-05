@@ -343,6 +343,14 @@ final class KernelIntegrationTest extends TestCase
         self::assertStringContainsString('/*KIWI_COMPAT_SPLIT*/', $body);
         self::assertStringContainsString('solver_protocol_version', $body);
         self::assertStringContainsString('compat', $body);
+        // The lazy locale packs are never concatenated into the loader;
+        // the compat markup receives their content-addressed descriptor
+        // (hash + SRI) through the injected marker instead, and the
+        // driver fetches the module only when a non-default language is
+        // resolved. The marker hash must match the shipped module bytes.
+        self::assertStringNotContainsString('register("locales"', $body, 'the loader must never embed widget-locales.js');
+        self::assertStringContainsString('window.__kiwiCaptchaCompatLocales={name:"locales",hash:"', $body);
+        self::assertStringContainsString(hash('sha256', (string) file_get_contents(__DIR__.'/../../Resources/public/widget-locales.js')), $body, 'the marker carries the sha256 of the exact module bytes');
 
         // Revalidation: the same ETag -> 304, no body.
         $second = $kernel->handle(Request::create(

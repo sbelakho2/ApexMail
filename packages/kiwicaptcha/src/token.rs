@@ -93,7 +93,11 @@ pub struct IssuedChallenge {
 
 /// The client-submitted solution, decoded from the `kiwi__token` hidden input.
 ///
-/// The wire format is `base64(nonce || "." || counter || "." || duration_ms || "." || telemetry_json)`.
+/// The wire format is `base64(nonce || "." || counter || "." || duration_ms
+/// || "." || telemetry_json || ["." digest[":" trace]] || ["." rsw_proof])`.
+/// The telemetry segment may itself contain dots; the optional suffix
+/// segments (execution evidence, then the rsw final value) are peeled
+/// right-to-left, so an armed rsw challenge carries both independently.
 /// Hard ceiling for the client-reported duration (telemetry only): 1 hour.
 pub const MAX_DURATION_MS: u64 = 3_600_000;
 
@@ -161,8 +165,8 @@ impl SolutionToken {
             }
         }
         // The rsw final value rides as the final segment, after the
-        // execution evidence: an rsw challenge never carries execution
-        // evidence, and the 512-hex discriminator reads the last part.
+        // execution evidence: an armed rsw challenge carries both, and
+        // the 512-hex discriminator reads the last part.
         if let Some(proof) = &self.rsw_proof {
             plain.push('.');
             plain.push_str(proof);
@@ -192,14 +196,19 @@ impl SolutionToken {
         let plain = String::from_utf8(plain).map_err(|_| DecodeError::InvalidUtf8)?;
 
         // The wire grammar splits on ALL dots: the first three segments
-        // are nonce/counter/duration, and the final segment is the
-        // execution segment exactly when it is `digest` or `digest:trace`
-        // (the digest is 64 lowercase hex and the trace is canonical
-        // unpadded base64url, whose alphabet carries neither '.' nor
-        // ':'), so the split on the first colon is total and the
-        // discriminator is unambiguous. A JSON telemetry object can
-        // never end with a 64-hex tail (it must close with '}'), so a
-        // non-matching tail is telemetry and fails the JSON parse below
+        // are nonce/counter/duration, and everything from the fourth
+        // segment onward is telemetry plus — at the tail — the optional
+        // execution-evidence segment and the optional rsw final value.
+        // The suffix peels run independently, right-to-left: the rsw
+        // final value is peeled first exactly when the last segment is
+        // 512 lowercase hex (the shape the sequential solver produces),
+        // then the execution-evidence segment (`digest` or
+        // `digest:trace`) is peeled from the segment that precedes it,
+        // so an armed rsw challenge carrying both stays one
+        // unambiguous grammar. A JSON telemetry object can never end
+        // with a hex tail (it must close with '}'), so each
+        // discriminator is unambiguous, and a tail matching neither
+        // stays part of the telemetry and fails the JSON parse below
         // (fail closed, PHP parity).
         let parts: Vec<&str> = plain.split('.').collect();
         if parts.len() < 4 {
@@ -208,80 +217,71 @@ impl SolutionToken {
         let nonce = parts[0];
         let counter_str = parts[1];
         let duration_str = parts[2];
-        let last = parts[parts.len() - 1];
-        let execution_digest;
-        let execution_trace;
-        let rsw_proof;
-        let telemetry_str;
-        if parts.len() >= 5 {
+        let mut end = parts.len();
+        let mut execution_digest = None;
+        let mut execution_trace = None;
+        let mut rsw_proof = None;
+        if end >= 5 {
             // The rsw final value is the last segment exactly when it is
             // 512 lowercase hex (the shape the sequential solver
             // produces): the wire discriminator reads the last part, and
             // a JSON telemetry object can never end with a hex tail (it
             // must close with '}'), so the split is unambiguous.
+            let last = parts[end - 1];
             let rsw_ok = last.len() == 512
                 && last
                     .bytes()
                     .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
             if rsw_ok {
                 rsw_proof = Some(last.to_string());
-                execution_digest = None;
-                execution_trace = None;
-                telemetry_str = parts[3..parts.len() - 1].join(".");
-            } else {
-                // The optional fifth segment is `digest` or
-                // `digest:trace`: the digest is exactly 64 lowercase hex
-                // characters (the shape the driver's interpreter
-                // produces) and the trace is canonical unpadded base64url
-                // ([A-Za-z0-9_-], non-empty, at most 10924 characters —
-                // the base64 of an 8 KiB trace, and byte-exact with the
-                // re-encode of its own decoded bytes, the PHP trace
-                // gate). A malformed trace on an armed token is rejected
-                // outright, exactly like the PHP decoder throws for the
-                // same shape; a tail that is not digest-shaped falls
-                // through to the telemetry JSON parse below (fail
-                // closed).
-                rsw_proof = None;
-                let colon = last.find(':');
-                let digest_part = match colon {
-                    Some(i) => &last[..i],
-                    None => last,
-                };
-                let digest_ok = digest_part.len() == 64
-                    && digest_part
-                        .bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-                if digest_ok {
-                    execution_digest = Some(digest_part.to_string());
-                    execution_trace = match colon {
-                        Some(i) => {
-                            let trace = &last[i + 1..];
-                            let trace_ok = !trace.is_empty()
-                                && trace.len() <= 10924
-                                && trace
-                                    .bytes()
-                                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-                                && trace_is_canonical_base64url(trace);
-                            if !trace_ok {
-                                return Err(DecodeError::Malformed);
-                            }
-                            Some(trace.to_string())
-                        }
-                        None => None,
-                    };
-                    telemetry_str = parts[3..parts.len() - 1].join(".");
-                } else {
-                    execution_digest = None;
-                    execution_trace = None;
-                    telemetry_str = parts[3..].join(".");
-                }
+                end -= 1;
             }
-        } else {
-            execution_digest = None;
-            execution_trace = None;
-            rsw_proof = None;
-            telemetry_str = parts[3..].join(".");
         }
+        if end >= 5 {
+            // The segment preceding the (optional) rsw final value is
+            // `digest` or `digest:trace`: the digest is exactly 64
+            // lowercase hex characters (the shape the driver's
+            // interpreter produces) and the trace is canonical unpadded
+            // base64url ([A-Za-z0-9_-], non-empty, at most 10924
+            // characters — the base64 of an 8 KiB trace, and byte-exact
+            // with the re-encode of its own decoded bytes, the PHP trace
+            // gate). A malformed trace on an armed token is rejected
+            // outright, exactly like the PHP decoder throws for the same
+            // shape; a segment whose digest part is not 64 lowercase
+            // hex is not execution evidence and stays in the telemetry
+            // (fail closed).
+            let segment = parts[end - 1];
+            let colon = segment.find(':');
+            let digest_part = match colon {
+                Some(i) => &segment[..i],
+                None => segment,
+            };
+            let digest_ok = digest_part.len() == 64
+                && digest_part
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
+            if digest_ok {
+                execution_digest = Some(digest_part.to_string());
+                execution_trace = match colon {
+                    Some(i) => {
+                        let trace = &segment[i + 1..];
+                        let trace_ok = !trace.is_empty()
+                            && trace.len() <= 10924
+                            && trace
+                                .bytes()
+                                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+                            && trace_is_canonical_base64url(trace);
+                        if !trace_ok {
+                            return Err(DecodeError::Malformed);
+                        }
+                        Some(trace.to_string())
+                    }
+                    None => None,
+                };
+                end -= 1;
+            }
+        }
+        let telemetry_str = parts[3..end].join(".");
 
         // The nonce must be exactly the standard-base64 encoding of 32 bytes
         // (44 characters): a well-formed nonce is what the issuer mints, so
@@ -1316,5 +1316,199 @@ mod tests {
         let decoded = SolutionToken::decode(&token.encode()).unwrap();
         assert_eq!(decoded.rsw_proof, None);
         assert_eq!(decoded.counter, 3);
+    }
+
+    // ── the rsw + execution composition (the two suffix segments coexist) ─
+
+    const COMPOSED_DIGEST: &str =
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    /// Canonical unpadded base64url trace (the "check-trace-key_123456" bytes).
+    const COMPOSED_TRACE: &str = "Y2hlY2stdHJhY2Uta2V5XzEyMzQ1Ng";
+
+    fn composed_wire(telemetry: &str, tail: &str) -> String {
+        B64.encode(format!("{VALID_NONCE}.0.1234.{telemetry}.{tail}").into_bytes())
+    }
+
+    #[test]
+    fn rsw_proof_and_execution_evidence_round_trip_on_one_token() {
+        // The composition the audit broke: the wire carries the
+        // execution-evidence segment AND the 512-hex rsw final value,
+        // and the decode must recover all three fields independently.
+        let proof = "a".repeat(512);
+        let token = SolutionToken {
+            nonce: VALID_NONCE.to_string(),
+            counter: 0,
+            duration_ms: 1234,
+            telemetry: serde_json::json!({"ua": "Mozilla/5.0 (X11; Linux x86_64)"}),
+            execution_digest: Some(COMPOSED_DIGEST.to_string()),
+            execution_trace: Some(COMPOSED_TRACE.to_string()),
+            rsw_proof: Some(proof.clone()),
+        };
+        let wire = token.encode();
+        let plain = String::from_utf8(B64.decode(&wire).unwrap()).unwrap();
+        let telemetry_json =
+            serde_json::to_string(&serde_json::json!({"ua": "Mozilla/5.0 (X11; Linux x86_64)"}))
+                .unwrap();
+        assert_eq!(
+            plain,
+            format!(
+                "{VALID_NONCE}.0.1234.{telemetry_json}.{COMPOSED_DIGEST}:{COMPOSED_TRACE}.{proof}"
+            ),
+            "the proof rides after the digest:trace segment"
+        );
+        let decoded = SolutionToken::decode(&wire).unwrap();
+        assert_eq!(decoded.rsw_proof.as_deref(), Some(proof.as_str()));
+        assert_eq!(
+            decoded.execution_digest.as_deref(),
+            Some(COMPOSED_DIGEST),
+            "the execution digest survives beside the proof"
+        );
+        assert_eq!(
+            decoded.execution_trace.as_deref(),
+            Some(COMPOSED_TRACE),
+            "the execution trace survives beside the proof"
+        );
+        assert_eq!(decoded.counter, 0);
+        assert_eq!(decoded.telemetry["ua"], "Mozilla/5.0 (X11; Linux x86_64)");
+        assert_eq!(decoded.encode(), wire, "decode -> re-encode is byte stable");
+    }
+
+    #[test]
+    fn rsw_proof_and_digest_only_evidence_round_trip_on_one_token() {
+        // The digest-only variant of the composition: no trace, the
+        // proof still rides the final segment and the decode recovers
+        // the digest beside it.
+        let proof = "0".repeat(512);
+        let wire = composed_wire("{}", &format!("{COMPOSED_DIGEST}.{proof}"));
+        let decoded = SolutionToken::decode(&wire).unwrap();
+        assert_eq!(decoded.rsw_proof.as_deref(), Some(proof.as_str()));
+        assert_eq!(decoded.execution_digest.as_deref(), Some(COMPOSED_DIGEST));
+        assert_eq!(decoded.execution_trace, None);
+        assert_eq!(decoded.telemetry, serde_json::json!({}));
+    }
+
+    #[test]
+    fn token_shape_matrix_accepts_every_algorithm_shape() {
+        // The shared PHP/Rust decode matrix — accept rows. The decoder
+        // is algorithm-agnostic (the record decides at verification),
+        // so the rows assert the same outcomes for the sha256, argon2id
+        // and rsw token shapes, with execution evidence off and on.
+        // Every row must round-trip encode -> decode.
+        let proof = "b".repeat(512);
+        // (label, execution on, digest, trace, rsw proof)
+        type Row<'a> = (
+            &'a str,
+            bool,
+            Option<&'a str>,
+            Option<&'a str>,
+            Option<&'a str>,
+        );
+        let rows: &[Row] = &[
+            ("sha256-off", false, None, None, None),
+            (
+                "sha256-on",
+                true,
+                Some(COMPOSED_DIGEST),
+                Some(COMPOSED_TRACE),
+                None,
+            ),
+            ("argon2id-off", false, None, None, None),
+            (
+                "argon2id-on",
+                true,
+                Some(COMPOSED_DIGEST),
+                Some(COMPOSED_TRACE),
+                None,
+            ),
+            ("rsw-off", false, None, None, Some(&proof)),
+            // The composition row: the rsw proof rides behind the
+            // execution evidence on one token.
+            (
+                "rsw-on",
+                true,
+                Some(COMPOSED_DIGEST),
+                Some(COMPOSED_TRACE),
+                Some(&proof),
+            ),
+        ];
+        for &(label, exec_on, digest, trace, rsw) in rows {
+            let token = SolutionToken {
+                nonce: VALID_NONCE.to_string(),
+                counter: 0,
+                duration_ms: 1234,
+                telemetry: serde_json::json!({"wd": true}),
+                execution_digest: digest.map(str::to_string),
+                execution_trace: trace.map(str::to_string),
+                rsw_proof: rsw.map(str::to_string),
+            };
+            let decoded = SolutionToken::decode(&token.encode())
+                .unwrap_or_else(|e| panic!("{label} (execution={exec_on}) must decode: {e}"));
+            assert_eq!(decoded.execution_digest.as_deref(), digest, "{label}");
+            assert_eq!(decoded.execution_trace.as_deref(), trace, "{label}");
+            assert_eq!(decoded.rsw_proof.as_deref(), rsw, "{label}");
+            assert_eq!(decoded.telemetry["wd"], true, "{label}");
+            if exec_on && rsw.is_some() {
+                // The composition keeps dotted telemetry whole too.
+                let dotted = SolutionToken {
+                    nonce: VALID_NONCE.to_string(),
+                    counter: 0,
+                    duration_ms: 2,
+                    telemetry: serde_json::json!({"ua": "Mozilla/5.0 (X11; Linux x86_64)"}),
+                    execution_digest: digest.map(str::to_string),
+                    execution_trace: trace.map(str::to_string),
+                    rsw_proof: rsw.map(str::to_string),
+                };
+                let again = SolutionToken::decode(&dotted.encode()).unwrap();
+                assert_eq!(again.telemetry["ua"], "Mozilla/5.0 (X11; Linux x86_64)");
+            }
+        }
+    }
+
+    #[test]
+    fn token_shape_matrix_rejects_malformed_composition_tails() {
+        // The shared PHP/Rust decode matrix — reject rows. A malformed
+        // trace on the digest:trace segment of a composed token fails
+        // the decode outright, and a malformed rsw proof (bad alphabet
+        // or wrong length) fails closed through the telemetry JSON
+        // parse — both deterministically, exactly like PHP.
+        for bad_trace in [
+            "aGk=",  // padded — not the unpadded wire form
+            "aGk+",  // standard-alphabet char
+            "aGk/",  // standard-alphabet char
+            "a:b",   // colon outside the separator
+            "ab.cd", // dot outside the grammar
+            "a b",   // whitespace
+        ] {
+            let wire = composed_wire(
+                "{}",
+                &format!("{COMPOSED_DIGEST}:{bad_trace}.{}", "a".repeat(512)),
+            );
+            assert!(
+                matches!(SolutionToken::decode(&wire), Err(DecodeError::Malformed)),
+                "a composed token with trace {bad_trace:?} must be rejected"
+            );
+        }
+        for bad_proof in [
+            "A".repeat(512), // uppercase hex
+            "a".repeat(511), // too short
+            "a".repeat(513), // too long
+            "g".repeat(512), // outside the hex alphabet
+        ] {
+            let wire = composed_wire(
+                "{}",
+                &format!("{COMPOSED_DIGEST}:{COMPOSED_TRACE}.{bad_proof}"),
+            );
+            assert!(
+                matches!(SolutionToken::decode(&wire), Err(DecodeError::Malformed)),
+                "a composed token with a {}-char non-lowercase-hex proof must be rejected",
+                bad_proof.len()
+            );
+        }
+        // A digest-only composition with a malformed proof fails too.
+        let upper = composed_wire("{}", &format!("{COMPOSED_DIGEST}.{}", "A".repeat(512)));
+        assert!(matches!(
+            SolutionToken::decode(&upper),
+            Err(DecodeError::Malformed)
+        ));
     }
 }

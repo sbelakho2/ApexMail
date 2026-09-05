@@ -40,6 +40,51 @@ final class ApiJsController
      */
     private const SPLIT = "\n/*KIWI_COMPAT_SPLIT*/\n";
 
+    /**
+     * The lazy widget modules that ride the loader response after the
+     * driver core: widget-risk.js first, then widget-compat.js. The
+     * worker machinery and the armed-evidence runners of widget-risk.js
+     * register on the core bridge the moment they execute, so an
+     * Argon2id/decoy/execution lifecycle on the compat route never
+     * needs an extra fetch. The compat bootstrap activates only when
+     * the loader URL carries the compat parameter. Ordinary widget
+     * pages never load the /api.js route, so the modules stay lazy
+     * everywhere else.
+     *
+     * widget-locales.js is deliberately NOT in this set: the loader is
+     * a mutable asset served to every compat page, and a default-
+     * language page must pay zero bytes for translations. The locales
+     * descriptor below (the content-addressed asset URL parts) rides
+     * the response instead, and the compat markup issues it as
+     * container attributes, so the driver lazy-fetches the module only
+     * when a non-default language is resolved.
+     *
+     * @return list<string>
+     */
+    private function loaderChunks(): array
+    {
+        return ['widget-driver.js', 'widget-risk.js', 'widget-compat.js'];
+    }
+
+    /**
+     * The widget-locales.js descriptor for the compat tier: the module
+     * is never concatenated into the loader (see loaderChunks), so the
+     * rendered compat containers carry its content-addressed URL and
+     * SRI digest as data-kiwi-locales-src / data-kiwi-locales-integrity
+     * instead. The widget-compat.js chunk reads the marker below and
+     * composes the asset URL from its own script URL.
+     */
+    private function localesMarker(): string
+    {
+        $body = (string) file_get_contents(rtrim($this->assetsDir, '/').'/widget-locales.js');
+        $hash = hash('sha256', $body);
+
+        $sri = 'sha256-'.base64_encode(hash('sha256', $body, true));
+
+        return "\n/*KIWI_LOCALES_MARKER*/\n"
+            .'window.__kiwiCaptchaCompatLocales={name:"locales",hash:"'.$hash.'",sri:"'.$sri.'"};'."\n";
+    }
+
     /** @var string|null in-process cache of the concatenated loader */
     private static ?string $cachedBody = null;
 
@@ -97,8 +142,16 @@ final class ApiJsController
     {
         if (self::$cachedBody === null) {
             $glue = (string) file_get_contents(rtrim($this->assetsDir, '/').'/kiwicaptcha-wasm.js');
-            $driver = (string) file_get_contents(rtrim($this->assetsDir, '/').'/widget-driver.js');
-            self::$cachedBody = $glue.self::SPLIT.$driver;
+            $body = $glue.self::SPLIT;
+            foreach ($this->loaderChunks() as $chunk) {
+                if ($chunk === 'widget-compat.js') {
+                    // The locales marker precedes the compat chunk so the
+                    // rendered containers can issue the lazy module URL.
+                    $body .= $this->localesMarker();
+                }
+                $body .= (string) file_get_contents(rtrim($this->assetsDir, '/').'/'.$chunk)."\n";
+            }
+            self::$cachedBody = $body;
         }
 
         return self::$cachedBody;

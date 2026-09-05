@@ -38,17 +38,26 @@ namespace KiwiCaptcha;
  * the generator, which draws the bytes from the PRF stream, and every
  * interpreter, which reads them from the blob, can never drift.
  * The opcode table is the OP_* constant block of this class. It covers
- * integer arithmetic, typed-array ops, string ops and DOM ops.
- * The list: add, sub, mul, xor, and, or, shl, shr, u8 create, u8
- * write, u8 read, u8 rotate, length, charcode, codepoint, slice,
- * create, set attribute, append, query, get attribute, dataset set,
- * dataset get, class add, class contains, parent, dispatch, serialize.
+ * integer arithmetic, typed-array ops, string ops and DOM ops. The
+ * base list: add, sub, mul, xor, and, or, shl, shr, u8 create, u8
+ * write, u8 read, u8 rotate, string length, charcode, codepoint and
+ * slice. The DOM ops follow: create, set attribute, append, query, get
+ * attribute, dataset set, dataset get, class add, class contains,
+ * parent, dispatch and serialize. The browser-observed probes close
+ * the table: query real, geometry, point, event real, serialize real
+ * and observe. Version 2 adds observe, version 3 the sibling-index
+ * probe, and version 4 the child and depth probes of the nested tree.
+ * Version 5 adds the causal object-graph ops: fragment append, clone,
+ * reparent, attribute reflection, event phase, URL canonicalization,
+ * text mutation and select-depth descent. The version-5 integer
+ * entries flow through the u8 cells of the causal array.
  *
  * String literals are printable ASCII (0x20..0x7E); ids and class
  * names come from fixed 64-char alphabets; u32 literals are raw
  * big-endian bytes, so charcode, codepoint, length and slice
  * semantics are byte-exact across JS, PHP and Rust. Dataset keys
- * always start with a digit, so a real-DOM dataset write can never
+ * always start with the literal `x` and stay inside the safe
+ * `x[0-9a-z_]{0,15}` alphabet, so a real-DOM dataset write can never
  * reflect onto a `data-*` attribute that collides with the fixed
  * attribute-name list.
  *
@@ -105,7 +114,6 @@ final class ExecutionChallengeGenerator
 
     /** The program blob format version. */
     public const FORMAT_VERSION = 1;
-    /** The highest execution version this generator can emit (2 adds the observe opcode and the causal u8 chain). */
     /**
      * The highest execution version this generator can emit. Version 2
      * adds the observe opcode and the causal u8 chain. Version 3 adds a
@@ -113,9 +121,14 @@ final class ExecutionChallengeGenerator
      * (dsib). Version 4 builds a real nested tree (a child node created
      * under a constructed parent) and probes its depth with an actual
      * ancestor walk whose exact value the server derives from the
-     * construction order.
+     * construction order. Version 5 adds the causal object-graph
+     * grammar: the clone and reparent spine over the nested tree, the
+     * observed URL-canon digest and the text-mutation serialization
+     * readback. The integer entries flow through the u8 cells, see the
+     * version-5 arms of simulateOp and the design record
+     * docs/execution-v5-design.md.
      */
-    public const MAX_EXECUTION_VERSION = 4;
+    public const MAX_EXECUTION_VERSION = 5;
 
     /** The op-version byte stamped into the program (bumped on op-semantics changes). */
     public const PROTOCOL_VERSION = 1;
@@ -181,7 +194,23 @@ final class ExecutionChallengeGenerator
     public const OP_DOM_SIBLING_INDEX = 34;
     public const OP_DOM_CHILD = 35;
     public const OP_DOM_DEPTH = 36;
-    public const OP_COUNT = 37;
+    /** Version-5 ops: moves the current node (with its subtree) into a detached fragment slot; terminal only. */
+    public const OP_DOM_FRAGMENT_APPEND = 37;
+    /** Version-5 ops: deep-copies the current node's subtree, reassigns the copy's reflected id, inserts it after the original. */
+    public const OP_DOM_CLONE = 38;
+    /** Version-5 ops: moves the current node's subtree under the constructed target node. */
+    public const OP_DOM_REPARENT = 39;
+    /** Version-5 ops: reads the current node's reflected property value for the indexed attribute name. */
+    public const OP_DOM_ATTR_REFLECT = 40;
+    /** Version-5 ops: dispatches a real bubbling event over the current node's constructed ancestor path. */
+    public const OP_DOM_EVENT_PHASE = 41;
+    /** Version-5 ops: canonicalizes and hashes the sandboxed document URL (the one browser-observed entry). */
+    public const OP_DOM_URL_CANON = 42;
+    /** Version-5 ops: sets the current node's textContent to the value operand. */
+    public const OP_DOM_TEXT_MUTATE = 43;
+    /** Version-5 ops: descends by the three child-index bytes; the entry is the number of descents completed. */
+    public const OP_DOM_SELECT_DEP = 44;
+    public const OP_COUNT = 45;
 
     /** The canonical safe dataset-key grammar: the literal 'x' followed by 0..15 of [0-9a-z_]. */
     public const DATASET_KEY_PATTERN = '/^x[0-9a-z_]{0,15}$/D';
@@ -194,6 +223,7 @@ final class ExecutionChallengeGenerator
         'dcreate', 'dattr', 'dappend', 'dqsel', 'dget', 'dset', 'dgetd',
         'cadd', 'ccont', 'dparent', 'ddispatch', 'dserialize',
         'qreal', 'geom', 'point', 'evreal', 'sreal', 'obs', 'dsib', 'dchild', 'ddepth',
+        'dfrag', 'dclone', 'drepar', 'dreflec', 'dphase', 'durlc', 'dmutate', 'dsdep',
     ];
 
     private function __construct()
@@ -223,9 +253,10 @@ final class ExecutionChallengeGenerator
                 'execution action must be 1-32 characters of [A-Za-z0-9._:-]'
             );
         }
-        if ($version < 1 || $version > 4) {
+        if ($version < 1 || $version > self::MAX_EXECUTION_VERSION) {
             throw new \InvalidArgumentException(
-                'execution version must be 1..4 (2 adds the observe opcode; 3 the sibling-index probe; 4 the nested-tree depth probe)'
+                'execution version must be 1..'.self::MAX_EXECUTION_VERSION
+                .' (2 adds the observe opcode; 3 the sibling-index probe; 4 the nested-tree depth probe; 5 the causal object-graph grammar)'
             );
         }
         if ($scope === '' || \strlen($scope) > 128 || preg_match('/^[A-Za-z0-9._:-]+$/D', $scope) !== 1) {
@@ -251,13 +282,22 @@ final class ExecutionChallengeGenerator
         // observe opcode; version 2 adds the causal u8 chain (floor
         // 11); version 3 adds a second constructed node and the
         // sibling-index traversal probe — its fixed 12-op skeleton
-        // plus the drawn 1..3 extra probes needs floor 15. Every
-        // stamped count always fits its emitted records and the
-        // grammar bounds 8..24 stay unchanged.
+        // plus the drawn 1..3 extra probes needs floor 15. Version 4
+        // adds the nested tree (two child ops) and the depth probe;
+        // its fixed 15-op skeleton plus the drawn 1..3 extra probes
+        // needs floor 18. Version 5 adds the six-op causal spine over
+        // the version-4 skeleton (clone, reparent, u8 read of the
+        // reparent cell, URL canon, text mutate, serialize real): its
+        // fixed 21-op skeleton plus up to three drawn extra probes
+        // would reach 24, the grammar cap, so the count byte only
+        // adds 0..3 slots (21 + byte % 4). Every stamped count always
+        // fits its emitted records and the grammar bounds 8..24 stay
+        // unchanged.
         $opCount = match ($version) {
             2 => 11 + (self::nextByte($stream) % 14),
             3 => 15 + (self::nextByte($stream) % 10),
             4 => 18 + (self::nextByte($stream) % 7),
+            5 => 21 + (self::nextByte($stream) % 4),
             default => 8 + (self::nextByte($stream) % 17),
         };
         $program .= \chr($opCount);
@@ -270,8 +310,9 @@ final class ExecutionChallengeGenerator
         // chain (create the array, observe the real layout height of
         // the constructed node into it, read the observed byte back,
         // checksum/rotate over it) and a mandatory real-probe block
-        // (one of the id probes 28/29/31, plus on version 3 the
-        // sibling-index probe 34, plus 1..3 further real probes). The
+        // (one of the id probes 28/29/31; version 3 adds the
+        // sibling-index probe 34; version 4 adds the depth probe and
+        // the two child ops; 1..3 further real probes follow). The
         // probe and observe id operands are the constructed id bytes,
         // drawn once and reused, so every probe reads a real
         // constructed node after the append. The remaining op slots
@@ -307,10 +348,12 @@ final class ExecutionChallengeGenerator
             // current node in sequence (the second under the first), so
             // the program builds a real ancestor chain whose depth the
             // browser walks for the ddepth probe.
+            $childOperands = [];
             for ($n = 0; $n < 2; $n++) {
                 $tagC = self::drawBytes($stream, 1);
                 $childOperand = self::drawIdOperand($stream);
                 $ops[] = [self::OP_DOM_CHILD, $tagC.$childOperand];
+                $childOperands[] = $childOperand;
                 $depthOperand = $childOperand;
             }
         }
@@ -343,7 +386,47 @@ final class ExecutionChallengeGenerator
             // derives from the construction order.
             $ops[] = [self::OP_DOM_DEPTH, $depthOperand];
         }
+        if ($version >= 5) {
+            // The version-5 causal spine, emitted in the fixed order:
+            // DOM_CLONE, DOM_REPARENT, U8_READ of the reparent cell,
+            // DOM_URL_CANON, DOM_TEXT_MUTATE, DOM_SERIALIZE_REAL. The
+            // current node at this point is the deepest nested child
+            // (a leaf), so the clone deep-copies that leaf, the
+            // reparent moves the copy under one of the constructed
+            // nodes (the first node, the second node or one of the two
+            // children, drawn by two bits over the reused operand
+            // bytes), and the text mutation marks the copy. The
+            // reparent cell write binds the U8_READ that follows (the
+            // derived child count read back like the version-2
+            // observed byte), the URL-canon entry is browser-observed
+            // and the closing serialize-real digests the canonical
+            // serialization of the record after the clone, the
+            // reparent and the text mutation. The cell bytes are drawn
+            // modulo the live u8 length so every write lands in range;
+            // the u8-array length itself is the skeleton draw of the
+            // version-2 causal chain above.
+            $cloneOperand = self::drawIdOperand($stream);
+            $cloneCell = self::nextByte($stream) % $u8Len;
+            $ops[] = [self::OP_DOM_CLONE, $cloneOperand.\chr($cloneCell)];
+            $parentCandidates = [$idOperand, $siblingOperand, $childOperands[0], $childOperands[1]];
+            $reparentOperand = $parentCandidates[self::nextByte($stream) % 4];
+            $reparentCell = self::nextByte($stream) % $u8Len;
+            $ops[] = [self::OP_DOM_REPARENT, $reparentOperand.\chr($reparentCell)];
+            $ops[] = [self::OP_U8_READ, \chr($reparentCell)];
+            $ops[] = [self::OP_DOM_URL_CANON, ''];
+            $ops[] = [
+                self::OP_DOM_TEXT_MUTATE,
+                self::drawPrintableOperand($stream, 32).\chr(self::nextByte($stream) % $u8Len),
+            ];
+            $ops[] = [self::OP_DOM_SERIALIZE_REAL, ''];
+        }
         $extraProbes = 1 + (self::nextByte($stream) % 3);
+        if ($version >= 5) {
+            // The version-5 emission cap: the stamped count is 21..24,
+            // so at most opCount - 21 extra probes fit (a stamped
+            // count of 21 carries the fixed skeleton only).
+            $extraProbes = min($extraProbes, $opCount - 21);
+        }
         $probePool = match ($version) {
             2 => 5,
             3 => 7,
@@ -351,7 +434,24 @@ final class ExecutionChallengeGenerator
             default => 5,
         };
         for ($i = 0; $i < $extraProbes; $i++) {
-            $probe = self::OP_DOM_QUERY_REAL + (self::nextByte($stream) % $probePool);
+            if ($version >= 5) {
+                // The version-5 extra-slot pool extends to the read-only
+                // real probes of the rung: geometry, point, event real,
+                // serialize real, observe, sibling, depth, reflect,
+                // phase, URL canon and select depth (opcodes 29..44
+                // with the topology mutators excluded). Query real and
+                // the mutators stay out of the extra slots exactly as
+                // the child op maps away in version 4.
+                $v5Pool = [
+                    self::OP_DOM_GEOMETRY, self::OP_DOM_POINT, self::OP_DOM_EVENT_REAL,
+                    self::OP_DOM_SERIALIZE_REAL, self::OP_DOM_OBSERVE, self::OP_DOM_SIBLING_INDEX,
+                    self::OP_DOM_DEPTH, self::OP_DOM_ATTR_REFLECT, self::OP_DOM_EVENT_PHASE,
+                    self::OP_DOM_URL_CANON, self::OP_DOM_SELECT_DEP,
+                ];
+                $probe = $v5Pool[self::nextByte($stream) % 11];
+            } else {
+                $probe = self::OP_DOM_QUERY_REAL + (self::nextByte($stream) % $probePool);
+            }
             if ($version >= 4 && $probe === self::OP_DOM_CHILD) {
                 // The nested-tree opcode never appears in extra slots
                 // (it would mutate the tree mid-run); the draw maps to
@@ -364,6 +464,15 @@ final class ExecutionChallengeGenerator
                 self::OP_DOM_POINT => self::drawBytes($stream, 2),
                 self::OP_DOM_OBSERVE => $idOperand.self::drawBytes($stream, 1),
                 self::OP_DOM_DEPTH => $depthOperand,
+                // The version-5 current-node probes: the attribute-name
+                // byte of the reflect probe, the phase cell byte (drawn
+                // modulo the live u8 length so its write lands in
+                // range), no operands for the URL-canon probe and the
+                // three raw descendant-index bytes of the select-depth
+                // probe.
+                self::OP_DOM_ATTR_REFLECT => self::drawBytes($stream, 1),
+                self::OP_DOM_EVENT_PHASE => \chr(self::nextByte($stream) % $u8Len),
+                self::OP_DOM_SELECT_DEP => self::drawBytes($stream, 3),
                 default => '',
             };
             $ops[] = [$probe, $probeOperand];
@@ -442,9 +551,10 @@ final class ExecutionChallengeGenerator
             return null;
         }
         $opVersion = $read(1);
-        // Execution versions 1, 2 and 3 are accepted (the compat
-        // window: old challenges stay verifiable for their whole TTL);
-        // each version bounds its own opcode space below.
+        // Every execution version from 1 through the maximum constant
+        // is accepted (the compat window: older challenges stay
+        // verifiable for their whole TTL); each version bounds its own
+        // opcode space below.
         if ($opVersion === null || (\ord($opVersion) < 1 || \ord($opVersion) > self::MAX_EXECUTION_VERSION)) {
             return null;
         }
@@ -466,13 +576,15 @@ final class ExecutionChallengeGenerator
             $opcode = \ord($opcode);
             // Older-version programs never carry newer opcodes (the
             // version-2 observe opcode 33, the version-3 sibling-index
-            // opcode 34): the interpreter of a mixed fleet must be
-            // able to reject a newer grammar by the declared version
-            // byte alone.
+            // opcode 34, the version-4 child and depth opcodes 35 and
+            // 36, the version-5 object-graph opcodes 37-44): the
+            // interpreter of a mixed fleet must be able to reject a
+            // newer grammar by the declared version byte alone.
             $maxOpcode = match (\ord($opVersion)) {
                 1 => 33,
                 2 => 34,
                 3 => 35,
+                4 => 37,
                 default => self::OP_COUNT,
             };
             if ($opcode >= $maxOpcode) {
@@ -532,10 +644,16 @@ final class ExecutionChallengeGenerator
         $cur = null;
         $docIds = [];
         $construction = [];
+        // A version-5 program replays over the full object-graph state
+        // (node records with parent and child lists, the body child
+        // list and the fragment slots); versions 1-4 run the legacy
+        // single-node state with no graph, so their traces stay
+        // byte-identical to the pre-v5 engine.
+        $ctx = $program['op_version'] >= 5 ? self::newExecutionGraph() : null;
         foreach ($program['ops'] as $record) {
             $op = $record['op'];
             $operands = $record['operands'];
-            self::simulateOp($op, $operands, $u8, $cur, $docIds);
+            self::simulateOp($op, $operands, $u8, $cur, $docIds, $ctx);
             if ($op === self::OP_DOM_APPEND) {
                 $construction[] = $cur['id'] ?? '';
             }
@@ -549,6 +667,7 @@ final class ExecutionChallengeGenerator
         $u8 = [];
         $cur = null;
         $docIds = [];
+        $ctx = $program['op_version'] >= 5 ? self::newExecutionGraph() : null;
         $prevTop = -1;
         $appendRank = [];
         $parent = [];
@@ -570,7 +689,7 @@ final class ExecutionChallengeGenerator
                 // ddepth probe's ancestor walk mirrors).
                 $parent[$operands['id']] = $cur['id'];
             }
-            $sim = self::simulateOp($op, $operands, $u8, $cur, $docIds);
+            $sim = self::simulateOp($op, $operands, $u8, $cur, $docIds, $ctx);
             $name = self::TRACE_NAMES[$op];
             if (substr($trace, $pos, \strlen($name) + 1) !== $name.'(') {
                 return null;
@@ -627,7 +746,8 @@ final class ExecutionChallengeGenerator
                 }
                 $pos += \strlen($m[0]);
             } elseif ($op === self::OP_DOM_OBSERVE) {
-                                // validates the grammar and the bounds, requires the
+                // The causal observe entry obs(<dst>,<h>): the walker
+                // validates the grammar and the bounds, requires the
                 // probed id to be an appended node at this point, then
                 // replays the reported height into its own u8 state so
                 // every later checksum/read entry is exact-compared
@@ -642,6 +762,18 @@ final class ExecutionChallengeGenerator
                 }
                 if ($dst < \count($u8)) {
                     $u8[$dst] = $observed;
+                }
+                $pos += \strlen($m[0]);
+            } elseif ($op === self::OP_DOM_URL_CANON) {
+                // The URL-canon entry is the one browser-observed value
+                // of the version-5 rung: the canonical sim emits the
+                // placeholder and the walker validates the shape (64
+                // lowercase hex, the SHA-256 digest of the canonicalized
+                // sandboxed document URL) and replays the reported
+                // value as the entry. The op draws no cell byte, so no
+                // u8 write follows the obs replay rule.
+                if (preg_match('/\G([0-9a-f]{64})\)/', $trace, $m, 0, $pos) !== 1) {
+                    return null;
                 }
                 $pos += \strlen($m[0]);
             } else {
@@ -730,11 +862,16 @@ final class ExecutionChallengeGenerator
         $cur = null; // ['id', 'attrs' map, 'dataset' map, 'classes' set, 'appended' bool]
         $docIds = [];
         $entries = [];
+        // A version-5 program replays over the object-graph state (the
+        // clone, reparent, fragment, phase and select-depth arms read
+        // and write it); versions 1-4 carry no graph and keep the
+        // legacy single-node semantics byte-for-byte.
+        $ctx = $program['op_version'] >= 5 ? self::newExecutionGraph() : null;
 
         foreach ($program['ops'] as $record) {
             $op = $record['op'];
             $operands = $record['operands'];
-            $entries[] = self::TRACE_NAMES[$op].'('.self::simulateOp($op, $operands, $u8, $cur, $docIds).')';
+            $entries[] = self::TRACE_NAMES[$op].'('.self::simulateOp($op, $operands, $u8, $cur, $docIds, $ctx).')';
         }
 
         return implode(';', $entries);
@@ -949,6 +1086,13 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_SIBLING_INDEX => $readIdKeyed(),
             self::OP_DOM_DEPTH => $readIdKeyed(),
             self::OP_DOM_CHILD => self::readChild($read, $readByte, $readIdKeyed),
+            self::OP_DOM_CLONE, self::OP_DOM_REPARENT => self::readIdCell($read, $readByte, $readIdKeyed),
+            self::OP_DOM_FRAGMENT_APPEND => self::readFragAppend($readByte),
+            self::OP_DOM_ATTR_REFLECT => ['name' => ($readByte() ?? 0) % 5],
+            self::OP_DOM_EVENT_PHASE => ['cell' => ($readByte() ?? 0) % 64],
+            self::OP_DOM_URL_CANON => [],
+            self::OP_DOM_TEXT_MUTATE => self::readTextMutate($read, $readByte, $readValue),
+            self::OP_DOM_SELECT_DEP => ['b0' => $readByte() ?? 0, 'b1' => $readByte() ?? 0, 'b2' => $readByte() ?? 0],
             default => null,
         };
     }
@@ -986,6 +1130,66 @@ final class ExecutionChallengeGenerator
         }
 
         return ['id' => $id['id'], 'idx' => $idx % 64];
+    }
+
+    /**
+     * @param callable(): ?int       $readByte
+     * @param callable(): ?array     $readIdKeyed
+     *
+     * @return array{id: string, cell: int}|null
+     */
+    private static function readIdCell(callable $read, callable $readByte, callable $readIdKeyed): ?array
+    {
+        $id = $readIdKeyed();
+        if ($id === null) {
+            return null;
+        }
+        $cell = $readByte();
+        if ($cell === null) {
+            return null;
+        }
+
+        return ['id' => $id['id'], 'cell' => $cell % 64];
+    }
+
+    /**
+     * @param callable(): ?int $readByte
+     *
+     * @return array{s: int, cell: int}|null
+     */
+    private static function readFragAppend(callable $readByte): ?array
+    {
+        $slot = $readByte();
+        if ($slot === null) {
+            return null;
+        }
+        $cell = $readByte();
+        if ($cell === null) {
+            return null;
+        }
+
+        return ['s' => $slot % 4, 'cell' => $cell % 64];
+    }
+
+    /**
+     * @param callable(int): ?string $read
+     * @param callable(): ?int       $readByte
+     * @param callable(): ?array{len: int, s: string} $readValue
+     *
+     * @return array{val: string, cell: int}|null
+     */
+    private static function readTextMutate(callable $read, callable $readByte, callable $readValue): ?array
+    {
+        $value = $readValue();
+        if ($value === null) {
+            return null;
+        }
+        $cell = $readByte();
+        if ($cell === null) {
+            return null;
+        }
+
+        return ['val' => $value['s'], 'cell' => $cell % 64];
     }
 
     /**
@@ -1228,12 +1432,25 @@ final class ExecutionChallengeGenerator
      * The deterministic state-machine execution of one op; returns the
      * op's canonical trace value (decimal, "1"/"0", or standard base64).
      *
+     * The version-5 object-graph state rides the optional $ctx
+     * parameter (the node records with parent and child lists, the
+     * body child list and the four fragment slots, see
+     * {@see self::newExecutionGraph()}). Versions 1-4 simulate without
+     * it, so their traces are byte-identical to the pre-v5 engine; the
+     * arms only touch the graph when $ctx is present. The version-5
+     * integer-entry ops write their entry into the u8 cell the operand
+     * names, the observe replay rule. The serialization ops hash or
+     * base64 the version-5 canonical node string instead of the
+     * version-1..4 attribute-only string, see
+     * {@see self::canonicalNodeString()}.
+     *
      * @param array<string, mixed> $operands
      * @param list<int>            $u8    the u8 array state (by reference)
      * @param array|null           $cur   the current DOM node state
      * @param array<string, true>  $docIds appended ids
+     * @param array|null           $ctx   the version-5 graph, null on versions 1-4
      */
-    private static function simulateOp(int $op, array $operands, array &$u8, ?array &$cur, array &$docIds): string
+    private static function simulateOp(int $op, array $operands, array &$u8, ?array &$cur, array &$docIds, ?array &$ctx = null): string
     {
         $u32 = static fn (int $v): int => $v & 0xFFFFFFFF;
         $checksum = static function () use (&$u8): int {
@@ -1263,9 +1480,9 @@ final class ExecutionChallengeGenerator
                 ? \ord($operands['s'][$operands['idx']])
                 : 0),
             self::OP_STR_SLICE => base64_encode(substr($operands['s'], $operands['start'], $operands['count'])),
-            self::OP_DOM_CREATE => self::opDomCreate($operands, $cur),
+            self::OP_DOM_CREATE => self::opDomCreate($operands, $cur, $ctx),
             self::OP_DOM_SET_ATTR => self::opDomSetAttr($operands, $cur),
-            self::OP_DOM_APPEND => self::opDomAppend($cur, $docIds),
+            self::OP_DOM_APPEND => self::opDomAppend($cur, $docIds, $ctx),
             self::OP_DOM_QUERY => isset($docIds[$operands['s']]) ? '1' : '0',
             self::OP_DOM_GET_ATTR => self::opDomGetAttr($operands, $cur),
             self::OP_DOM_DATASET_SET => self::opDatasetSet($operands, $cur),
@@ -1274,7 +1491,7 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_CLASS_CONTAINS => self::opClassContains($operands, $cur),
             self::OP_DOM_PARENT => $cur !== null && $cur['appended'] ? '1' : '0',
             self::OP_DOM_DISPATCH => '1',
-            self::OP_DOM_SERIALIZE => self::opDomSerialize($cur, $docIds),
+            self::OP_DOM_SERIALIZE => self::opDomSerialize($cur, $docIds, $ctx),
             // Browser-observed entries: the expected values are
             // construction-determined for `QUERY_REAL`/`EVENT_REAL`/
             // `SERIALIZE_REAL` (the interpreter must read the real DOM
@@ -1288,7 +1505,7 @@ final class ExecutionChallengeGenerator
             self::OP_DOM_GEOMETRY => 'geom',
             self::OP_DOM_POINT => 'point',
             self::OP_DOM_EVENT_REAL => self::opEventRealExpected($operands, $cur, $docIds),
-            self::OP_DOM_SERIALIZE_REAL => self::opSerializeRealExpected($docIds, $cur),
+            self::OP_DOM_SERIALIZE_REAL => self::opSerializeRealExpected($docIds, $cur, $ctx),
             // The observed height is browser-only: the pure sim emits the
             // placeholder; the verifier replays the value the submitted
             // trace reports (see verifyExecutedTrace).
@@ -1300,11 +1517,28 @@ final class ExecutionChallengeGenerator
             // dchild creates the child under the current node and moves
             // cur onto it (matching the interpreter); its entry is the
             // child's canonical id, exactly like dcreate.
-            self::OP_DOM_CHILD => self::opDomChild($operands, $cur),
+            self::OP_DOM_CHILD => self::opDomChild($operands, $cur, $ctx),
             // The depth is a real ancestor walk the verifier derives
             // from the construction order; the sim emits the
             // placeholder.
             self::OP_DOM_DEPTH => 'ddepth',
+            // The version-5 object-graph ops. The exact entries (clone
+            // subtree count, reparent target child count, fragment slot
+            // child count, phase target-plus-ancestor count, reflected
+            // value, text byte length, descent count) are computed over
+            // the graph state, and the integer entries are written into
+            // the u8 cell named by the operand, exactly like the
+            // observe replay. The URL-canon entry is browser-observed:
+            // the sim emits the placeholder and the submitted-trace
+            // walker validates the hex shape (see verifyExecutedTrace).
+            self::OP_DOM_FRAGMENT_APPEND => self::opFragAppend($operands, $u8, $cur, $docIds, $ctx),
+            self::OP_DOM_CLONE => self::opDomClone($operands, $u8, $cur, $docIds, $ctx),
+            self::OP_DOM_REPARENT => self::opDomReparent($operands, $u8, $cur, $ctx),
+            self::OP_DOM_ATTR_REFLECT => self::opAttrReflect($operands, $cur),
+            self::OP_DOM_EVENT_PHASE => self::opEventPhase($operands, $u8, $cur, $ctx),
+            self::OP_DOM_URL_CANON => 'durlc',
+            self::OP_DOM_TEXT_MUTATE => self::opTextMutate($operands, $u8, $cur, $docIds, $ctx),
+            self::OP_DOM_SELECT_DEP => self::opSelectDep($operands, $cur, $ctx),
             default => '0',
         };
     }
@@ -1341,25 +1575,23 @@ final class ExecutionChallengeGenerator
 
     /**
      * Canonical real-DOM readback digest: the shadow's current node's
-     * sorted canonical attribute pairs hashed — the interpreter builds
-     * the same canonical string from the real node's sorted attributes.
+     * canonical string hashed, the string the interpreter builds from
+     * the real node. The serialization grammar is rung-scoped.
+     * Versions 1-4 hash the sorted attribute pairs. A version-5
+     * program hashes the version-5 canonical node string of the same
+     * record, see {@see self::canonicalNodeString()}.
      *
      * @param array<string, true> $docIds
      * @param array|null          $cur
+     * @param array|null          $ctx   the version-5 graph, null on versions 1-4
      */
-    private static function opSerializeRealExpected(array $docIds, ?array &$cur): string
+    private static function opSerializeRealExpected(array $docIds, ?array &$cur, ?array &$ctx = null): string
     {
         if ($cur === null || !$cur['appended']) {
             return hash('sha256', '');
         }
-        $names = array_keys($cur['attrs']);
-        sort($names);
-        $parts = [];
-        foreach ($names as $n) {
-            $parts[] = $n.'='.$cur['attrs'][$n];
-        }
 
-        return hash('sha256', implode(';', $parts));
+        return hash('sha256', self::canonicalNodeString($cur, $ctx));
     }
 
     /** @param array|null $cur */
@@ -1444,8 +1676,9 @@ final class ExecutionChallengeGenerator
     /**
      * @param array<string, mixed> $operands
      * @param array|null           $cur
+     * @param array|null           $ctx   the version-5 graph, null on versions 1-4
      */
-    private static function opDomChild(array $operands, ?array &$cur): string
+    private static function opDomChild(array $operands, ?array &$cur, ?array &$ctx = null): string
     {
         $id = $operands['id'];
         $newCur = [
@@ -1463,12 +1696,26 @@ final class ExecutionChallengeGenerator
         if ($cur !== null && $parentId !== $id) {
             $newCur['parent'] = $parentId;
         }
+        if ($ctx !== null) {
+            // The graph bookkeeping: the child is appended under the
+            // current node, so the parent record's child list gains the
+            // new id and the child record points back at the parent.
+            $ctx['nodes'][$id] = ['parent' => $parentId, 'children' => [], 'appended' => true];
+            if ($parentId !== null && isset($ctx['nodes'][$parentId])) {
+                $ctx['nodes'][$parentId]['children'][] = $id;
+            }
+        }
         $cur = $newCur;
 
         return base64_encode($id);
     }
 
-    private static function opDomCreate(array $operands, ?array &$cur): string
+    /**
+     * @param array<string, mixed> $operands
+     * @param array|null           $cur
+     * @param array|null           $ctx   the version-5 graph, null on versions 1-4
+     */
+    private static function opDomCreate(array $operands, ?array &$cur, ?array &$ctx = null): string
     {
         $id = $operands['id'];
         $cur = [
@@ -1481,6 +1728,11 @@ final class ExecutionChallengeGenerator
             'classes' => [],
             'appended' => false,
         ];
+        if ($ctx !== null) {
+            // The graph record of the created element: no parent, no
+            // children, not yet in the document.
+            $ctx['nodes'][$id] = ['parent' => null, 'children' => [], 'appended' => false];
+        }
 
         return base64_encode($id);
     }
@@ -1502,12 +1754,19 @@ final class ExecutionChallengeGenerator
     /**
      * @param array|null          $cur
      * @param array<string, true> $docIds
+     * @param array|null          $ctx   the version-5 graph, null on versions 1-4
      */
-    private static function opDomAppend(?array &$cur, array &$docIds): string
+    private static function opDomAppend(?array &$cur, array &$docIds, ?array &$ctx = null): string
     {
         if ($cur !== null) {
             $cur['appended'] = true;
             $docIds[$cur['id']] = true;
+            if ($ctx !== null) {
+                // The graph bookkeeping: body.appendChild moves the
+                // element to the end of the body child list, whatever
+                // its previous parent, body position or fragment slot.
+                self::graphAttachToBody($ctx, $cur['id']);
+            }
         }
 
         return '1';
@@ -1576,25 +1835,469 @@ final class ExecutionChallengeGenerator
 
     /**
      * The mutation/readback op: appends the current node to the document
-     * AND traces the canonical serialization of its attributes (sorted
-     * by name, `name=value` joined with ';').
+     * AND traces the canonical serialization of the current node record.
+     *
+     * The serialization grammar is rung-scoped. Versions 1-4 keep the
+     * attribute-only string, sorted by name with `name=value` entries
+     * joined by ';'. A version-5 program hashes or base64s the
+     * version-5 canonical node string of the same record, see
+     * {@see self::canonicalNodeString()}. Older challenges stay
+     * verifiable for their whole TTL.
      *
      * @param array|null          $cur
      * @param array<string, true> $docIds
+     * @param array|null          $ctx   the version-5 graph, null on versions 1-4
      */
-    private static function opDomSerialize(?array &$cur, array &$docIds): string
+    private static function opDomSerialize(?array &$cur, array &$docIds, ?array &$ctx = null): string
     {
         if ($cur !== null) {
+            // The real interpreter appends an un-appended current node
+            // to the body and leaves an appended one in place.
             $cur['appended'] = true;
             $docIds[$cur['id']] = true;
+            if ($ctx !== null && !self::graphIsAttached($ctx, $cur['id'])) {
+                self::graphAttachToBody($ctx, $cur['id']);
+            }
         }
-        $attrs = $cur !== null ? $cur['attrs'] : [];
-        \ksort($attrs);
+
+        return base64_encode(self::canonicalNodeString($cur, $ctx));
+    }
+
+    /**
+     * The fresh version-5 execution graph: the node records with
+     * parent and ordered child-id lists per constructed element, the
+     * body child list and the four fragment slots. The body list holds
+     * the constructed nodes in append order; the interpreter's own
+     * script element is the implicit first child, never in the list.
+     *
+     * @return array{nodes: array<string, array{parent: ?string, children: list<string>, appended: bool}>, body: list<string>, frags: array<int, list<string>>}
+     */
+    private static function newExecutionGraph(): array
+    {
+        return [
+            'nodes' => [],
+            'body' => [],
+            'frags' => [[], [], [], []],
+        ];
+    }
+
+    /**
+     * The version-5 canonical node string of a record: the sorted
+     * attribute pairs, then the sorted dataset pairs, then the sorted
+     * class names, then the text segment when present, joined with ';'
+     * in that fixed segment order. Versions 1-4 keep the attribute-only
+     * string (the $ctx switch), so older challenges stay verifiable for
+     * their whole TTL.
+     *
+     * @param array|null $cur
+     * @param array|null $ctx   the version-5 graph, null on versions 1-4
+     */
+    private static function canonicalNodeString(?array $cur, ?array $ctx = null): string
+    {
+        if ($cur === null) {
+            return '';
+        }
         $parts = [];
+        $attrs = $cur['attrs'];
+        \ksort($attrs);
         foreach ($attrs as $name => $value) {
             $parts[] = $name.'='.$value;
         }
+        if ($ctx !== null) {
+            $dataset = $cur['dataset'] ?? [];
+            \ksort($dataset);
+            foreach ($dataset as $key => $value) {
+                $parts[] = $key.'='.$value;
+            }
+            $classes = array_keys($cur['classes'] ?? []);
+            sort($classes);
+            foreach ($classes as $cls) {
+                $parts[] = $cls;
+            }
+            if (array_key_exists('text', $cur) && $cur['text'] !== '') {
+                $parts[] = $cur['text'];
+            }
+        }
 
-        return base64_encode(implode(';', $parts));
+        return implode(';', $parts);
+    }
+
+    /**
+     * The fragment-append arm (v5): moves the current node (with its
+     * whole subtree) into the detached fragment slot named by the
+     * operand. The node leaves its parent, the body child list and the
+     * appended-id set (real-document probes read a fragment-moved node
+     * as absent, deterministically), and the entry is the slot's
+     * child-element count after the move.
+     *
+     * @param array<string, mixed> $operands
+     * @param list<int>            $u8
+     * @param array|null           $cur
+     * @param array<string, true>  $docIds
+     * @param array{nodes: array<string, array{parent: ?string, children: list<string>, appended: bool}>, body: list<string>, frags: array<int, list<string>>} $ctx
+     */
+    private static function opFragAppend(array $operands, array &$u8, ?array &$cur, array &$docIds, array &$ctx): string
+    {
+        $slot = $operands['s'];
+        $entry = \count($ctx['frags'][$slot]);
+        if ($cur !== null && isset($ctx['nodes'][$cur['id']])) {
+            $id = $cur['id'];
+            self::graphDetach($ctx, $id);
+            $ctx['frags'][$slot][] = $id;
+            $entry = \count($ctx['frags'][$slot]);
+            $cur['appended'] = false;
+            unset($docIds[$id]);
+        }
+        self::writeV5Cell($u8, $operands['cell'], $entry);
+
+        return (string) $entry;
+    }
+
+    /**
+     * The clone arm (v5): deep-copies the current node's subtree
+     * (cloneNode semantics), reassigns the copy's reflected id to the
+     * operand id, inserts the copy directly after the original and
+     * moves the current node onto the copy. The entry is the cloned
+     * subtree's element count (the copy root plus every element
+     * descendant, counted over the graph child lists).
+     *
+     * @param array<string, mixed> $operands
+     * @param list<int>            $u8
+     * @param array|null           $cur
+     * @param array<string, true>  $docIds
+     * @param array{nodes: array<string, array{parent: ?string, children: list<string>, appended: bool}>, body: list<string>, frags: array<int, list<string>>} $ctx
+     */
+    private static function opDomClone(array $operands, array &$u8, ?array &$cur, array &$docIds, array &$ctx): string
+    {
+        $entry = 0;
+        if ($cur !== null && isset($ctx['nodes'][$cur['id']])) {
+            $sourceId = $cur['id'];
+            $cloneId = $operands['id'];
+            $source = $ctx['nodes'][$sourceId];
+            $entry = self::graphSubtreeElementCount($ctx, $sourceId);
+            $copy = $cur;
+            $copy['id'] = $cloneId;
+            $copy['attrs'] = $cur['attrs'];
+            $copy['attrs']['id'] = $cloneId;
+            if (array_key_exists('children', $copy)) {
+                unset($copy['children']);
+            }
+            $copy['parent'] = $source['parent'];
+            $copy['appended'] = $source['appended'];
+            $ctx['nodes'][$cloneId] = [
+                'parent' => $source['parent'],
+                'children' => $source['children'],
+                'appended' => $source['appended'],
+            ];
+            if ($source['appended']) {
+                // The copy is inserted directly after the original,
+                // either inside the original's parent or, for a body
+                // child, in the body child list.
+                $docIds[$cloneId] = true;
+                $parentId = $source['parent'];
+                if ($parentId !== null && isset($ctx['nodes'][$parentId])) {
+                    $siblings = $ctx['nodes'][$parentId]['children'];
+                    $at = array_search($sourceId, $siblings, true);
+                    $at = $at === false ? \count($siblings) : $at + 1;
+                    array_splice($siblings, $at, 0, [$cloneId]);
+                    $ctx['nodes'][$parentId]['children'] = $siblings;
+                } else {
+                    $at = array_search($sourceId, $ctx['body'], true);
+                    $at = $at === false ? \count($ctx['body']) : $at + 1;
+                    array_splice($ctx['body'], $at, 0, [$cloneId]);
+                }
+            }
+            $cur = $copy;
+        }
+        self::writeV5Cell($u8, $operands['cell'], $entry);
+
+        return (string) $entry;
+    }
+
+    /**
+     * The reparent arm (v5): moves the current node's subtree under
+     * the constructed node named by the id operand (real appendChild
+     * semantics); the current node does not move. The entry is the
+     * target's child-element count after the move. A move onto the
+     * node itself or onto one of its own descendants is refused (the
+     * real HierarchyRequestError), and an absent target is a no-op.
+     *
+     * @param array<string, mixed> $operands
+     * @param list<int>            $u8
+     * @param array|null           $cur
+     * @param array{nodes: array<string, array{parent: ?string, children: list<string>, appended: bool}>, body: list<string>, frags: array<int, list<string>>} $ctx
+     */
+    private static function opDomReparent(array $operands, array &$u8, ?array &$cur, array &$ctx): string
+    {
+        $entry = 0;
+        $targetId = $operands['id'];
+        if ($cur !== null && isset($ctx['nodes'][$cur['id']]) && isset($ctx['nodes'][$targetId])) {
+            $curId = $cur['id'];
+            $entry = \count($ctx['nodes'][$targetId]['children']);
+            $valid = $curId !== $targetId && !self::graphNodeIsAncestorOf($ctx, $curId, $targetId);
+            if ($valid) {
+                $targetAttached = self::graphIsAttached($ctx, $targetId);
+                self::graphDetach($ctx, $curId);
+                $ctx['nodes'][$curId]['parent'] = $targetId;
+                $ctx['nodes'][$curId]['appended'] = $targetAttached;
+                $ctx['nodes'][$targetId]['children'][] = $curId;
+                $cur['parent'] = $targetId;
+                $cur['appended'] = $targetAttached;
+                if ($targetAttached) {
+                    $docIds[$curId] = true;
+                } else {
+                    unset($docIds[$curId]);
+                }
+                $entry = \count($ctx['nodes'][$targetId]['children']);
+            }
+        }
+        self::writeV5Cell($u8, $operands['cell'], $entry);
+
+        return (string) $entry;
+    }
+
+    /**
+     * The attribute-reflect arm (v5): reads the current node's
+     * reflected property value for the indexed fixed attribute name.
+     * The model reads the record's attr surface (the interpreter keeps
+     * the real property surface in exact agreement: id, title and the
+     * data-* attributes are written through the same canonical model),
+     * so the entry is exact. The entry is the standard base64 of the
+     * value, '' when the attribute is absent.
+     *
+     * @param array<string, mixed> $operands
+     * @param array|null           $cur
+     */
+    private static function opAttrReflect(array $operands, ?array &$cur): string
+    {
+        $name = self::ATTR_NAMES[$operands['name']];
+
+        return base64_encode($cur !== null ? ($cur['attrs'][$name] ?? '') : '');
+    }
+
+    /**
+     * The event-phase arm (v5): dispatches a real bubbling event on
+     * the current node with listeners on every constructed element.
+     * The entry is the number of constructed elements that received
+     * it: the target itself plus its constructed ancestors up to the
+     * document body, excluding the body and the interpreter's script
+     * element. The graph parent chain is the exact model of that walk.
+     *
+     * @param array<string, mixed> $operands
+     * @param list<int>            $u8
+     * @param array|null           $cur
+     * @param array{nodes: array<string, array{parent: ?string, children: list<string>, appended: bool}>, body: list<string>, frags: array<int, list<string>>} $ctx
+     */
+    private static function opEventPhase(array $operands, array &$u8, ?array &$cur, array &$ctx): string
+    {
+        $count = 0;
+        if ($cur !== null && isset($ctx['nodes'][$cur['id']])) {
+            $count = 1;
+            $guard = 0;
+            $cursor = $ctx['nodes'][$cur['id']]['parent'];
+            while ($cursor !== null && isset($ctx['nodes'][$cursor]) && $guard++ < 4096) {
+                ++$count;
+                $cursor = $ctx['nodes'][$cursor]['parent'];
+            }
+        }
+        self::writeV5Cell($u8, $operands['cell'], $count);
+
+        return (string) $count;
+    }
+
+    /**
+     * The text-mutate arm (v5): sets the current node's real
+     * textContent to the value operand, replacing any previous text
+     * and removing every child element (the real textContent
+     * semantics); the node record now carries the text segment. The
+     * entry is the resulting text byte length.
+     *
+     * @param array<string, mixed> $operands
+     * @param list<int>            $u8
+     * @param array|null           $cur
+     * @param array<string, true>  $docIds
+     * @param array{nodes: array<string, array{parent: ?string, children: list<string>, appended: bool}>, body: list<string>, frags: array<int, list<string>>} $ctx
+     */
+    private static function opTextMutate(array $operands, array &$u8, ?array &$cur, array &$docIds, array &$ctx): string
+    {
+        $len = 0;
+        if ($cur !== null) {
+            $cur['text'] = $operands['val'];
+            $len = \strlen($operands['val']);
+            $id = $cur['id'];
+            if (isset($ctx['nodes'][$id]) && $ctx['nodes'][$id]['children'] !== []) {
+                $attached = self::graphIsAttached($ctx, $id);
+                foreach ($ctx['nodes'][$id]['children'] as $childId) {
+                    self::graphDetach($ctx, $childId);
+                    if ($attached) {
+                        unset($docIds[$childId]);
+                    }
+                }
+            }
+        }
+        self::writeV5Cell($u8, $operands['cell'], $len);
+
+        return (string) $len;
+    }
+
+    /**
+     * The select-depth arm (v5): walks real child elements from the
+     * current node down. Step j descends into the child at index
+     * (byte j % child count) when the current level has children; the
+     * entry is the number of descent levels completed, 0-3, an exact
+     * traversal result over the graph child lists.
+     *
+     * @param array<string, mixed> $operands
+     * @param array|null           $cur
+     * @param array{nodes: array<string, array{parent: ?string, children: list<string>, appended: bool}>, body: list<string>, frags: array<int, list<string>>} $ctx
+     */
+    private static function opSelectDep(array $operands, ?array &$cur, array &$ctx): string
+    {
+        $completed = 0;
+        if ($cur !== null && isset($ctx['nodes'][$cur['id']])) {
+            $levelId = $cur['id'];
+            foreach ([$operands['b0'], $operands['b1'], $operands['b2']] as $byte) {
+                $children = $ctx['nodes'][$levelId]['children'];
+                if ($children === []) {
+                    break;
+                }
+                $levelId = $children[$byte % \count($children)];
+                ++$completed;
+                if (!isset($ctx['nodes'][$levelId])) {
+                    break;
+                }
+            }
+        }
+
+        return (string) $completed;
+    }
+
+    /**
+     * The v5 integer-entry ops write their entry into the u8 cell the
+     * operand names, mirroring the observe replay rule. The write
+     * happens when the array exists and the cell is in range; every
+     * issued program draws its cell bytes modulo the live array
+     * length, so the writes land in range.
+     *
+     * @param list<int> $u8
+     */
+    private static function writeV5Cell(array &$u8, int $cell, int $entry): void
+    {
+        if ($cell < \count($u8)) {
+            $u8[$cell] = $entry & 0xFF;
+        }
+    }
+
+    /**
+     * The element count of a node's subtree: the node itself plus
+     * every element descendant, walked over the graph child lists.
+     *
+     * @param array{nodes: array<string, array{parent: ?string, children: list<string>, appended: bool}>, body: list<string>, frags: array<int, list<string>>} $ctx
+     */
+    private static function graphSubtreeElementCount(array $ctx, string $id): int
+    {
+        $total = 1;
+        $children = $ctx['nodes'][$id]['children'] ?? [];
+        foreach ($children as $childId) {
+            $total += isset($ctx['nodes'][$childId])
+                ? self::graphSubtreeElementCount($ctx, $childId)
+                : 1;
+        }
+
+        return $total;
+    }
+
+    /**
+     * Whether a node is attached to the document: it is a body child
+     * itself or its parent chain reaches a body child.
+     *
+     * @param array{nodes: array<string, array{parent: ?string, children: list<string>, appended: bool}>, body: list<string>, frags: array<int, list<string>>} $ctx
+     */
+    private static function graphIsAttached(array $ctx, string $id): bool
+    {
+        if (!isset($ctx['nodes'][$id])) {
+            return false;
+        }
+        if (\in_array($id, $ctx['body'], true)) {
+            return true;
+        }
+        $guard = 0;
+        $cursor = $ctx['nodes'][$id]['parent'];
+        while ($cursor !== null && isset($ctx['nodes'][$cursor]) && $guard++ < 4096) {
+            if (\in_array($cursor, $ctx['body'], true)) {
+                return true;
+            }
+            $cursor = $ctx['nodes'][$cursor]['parent'];
+        }
+
+        return false;
+    }
+
+    /**
+     * Whether $ancestorId appears in the parent chain of $id (the
+     * cycle guard bounds a pathological foreign chain).
+     *
+     * @param array{nodes: array<string, array{parent: ?string, children: list<string>, appended: bool}>, body: list<string>, frags: array<int, list<string>>} $ctx
+     */
+    private static function graphNodeIsAncestorOf(array $ctx, string $ancestorId, string $id): bool
+    {
+        $guard = 0;
+        $cursor = $ctx['nodes'][$id]['parent'] ?? null;
+        while ($cursor !== null && isset($ctx['nodes'][$cursor]) && $guard++ < 4096) {
+            if ($cursor === $ancestorId) {
+                return true;
+            }
+            $cursor = $ctx['nodes'][$cursor]['parent'];
+        }
+
+        return false;
+    }
+
+    /**
+     * Detaches a node from the graph: it leaves its parent's child
+     * list, the body child list and any fragment slot, and its parent
+     * pointer and appended flag reset (the node stays registered).
+     *
+     * @param array{nodes: array<string, array{parent: ?string, children: list<string>, appended: bool}>, body: list<string>, frags: array<int, list<string>>} $ctx
+     */
+    private static function graphDetach(array &$ctx, string $id): void
+    {
+        if (!isset($ctx['nodes'][$id])) {
+            return;
+        }
+        $parentId = $ctx['nodes'][$id]['parent'];
+        if ($parentId !== null && isset($ctx['nodes'][$parentId])) {
+            $ctx['nodes'][$parentId]['children'] = array_values(array_diff(
+                $ctx['nodes'][$parentId]['children'],
+                [$id]
+            ));
+        }
+        $pos = array_search($id, $ctx['body'], true);
+        if ($pos !== false) {
+            array_splice($ctx['body'], $pos, 1);
+        }
+        foreach (array_keys($ctx['frags']) as $slot) {
+            $slotPos = array_search($id, $ctx['frags'][$slot], true);
+            if ($slotPos !== false) {
+                array_splice($ctx['frags'][$slot], $slotPos, 1);
+            }
+        }
+        $ctx['nodes'][$id]['parent'] = null;
+        $ctx['nodes'][$id]['appended'] = false;
+    }
+
+    /**
+     * Attaches a node to the end of the body child list (the real
+     * body.appendChild move semantics): it first detaches from any
+     * parent, body position or fragment slot.
+     *
+     * @param array{nodes: array<string, array{parent: ?string, children: list<string>, appended: bool}>, body: list<string>, frags: array<int, list<string>>} $ctx
+     */
+    private static function graphAttachToBody(array &$ctx, string $id): void
+    {
+        self::graphDetach($ctx, $id);
+        $ctx['nodes'][$id]['parent'] = null;
+        $ctx['nodes'][$id]['appended'] = true;
+        $ctx['body'][] = $id;
     }
 }

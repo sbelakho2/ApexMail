@@ -246,6 +246,29 @@
 
   function solveMessage(m) {
     var algorithm = m.algorithm === "argon2id" ? "argon2id" : (m.algorithm === "rsw" ? "rsw" : "sha256");
+    // RSW parameters are rejected IMMEDIATELY, before any work: the
+    // sequential time lock must never start (no decode of prefix/salt,
+    // no glue handshake wait, no base derivation, no squaring) on an
+    // unsupported ladder. The driver's challenge-contract validation
+    // already filters these, but the worker is the last line of defense
+    // and fails closed with the shared unsupported_rsw_params code:
+    // T must be an integer inside the protocol bounds 10000..=300000,
+    // and the modulus must be a canonical 2048-bit odd composite —
+    // exactly 256 bytes, the top bit set (no implicit leading zero)
+    // and the last byte odd (an even modulus is never a valid RSA-style
+    // composite, so a solver must not burn T squarings on one).
+    if (algorithm === "rsw") {
+      var modulusBytes = null;
+      try {
+        modulusBytes = b64decode(m.modulus);
+      } catch (e) {
+        modulusBytes = null;
+      }
+      if (!Number.isSafeInteger(m.t) || m.t < 10000 || m.t > 300000 || modulusBytes === null || modulusBytes.length !== 256 || (modulusBytes[0] & 0x80) === 0 || (modulusBytes[255] & 1) === 0) {
+        post({ type: "failed", reason: "unsupported_rsw_params" });
+        return;
+      }
+    }
     var prefix = new TextEncoder().encode(String(m.prefix));
     var salt = b64decode(m.salt);
     if (prefix.length !== (m.prefixLen | 0) || salt.length !== (m.saltLen | 0)) {
@@ -272,7 +295,9 @@
           // The rsw solver is pure JS BigInt: the wasm module is never
           // consulted (a null w is fine), but the glue handshake still
           // gates the solve so driver and worker stay in protocol lock.
-          solveRsw(prefix, String(m.nonce), m.modulus, t);
+          // modulusBytes was decoded and validated at the top of
+          // solveMessage (unsupported_rsw_params, before any work).
+          solveRsw(prefix, String(m.nonce), modulusBytes, t);
           return;
         }
         solveSha(w, prefix, salt, targetBits, counter, maxHashes);
@@ -290,6 +315,9 @@
   // browser type, and a 2048-bit modmul runs natively in the engine.
   // The loop is synchronous like the Argon worker's, with a progress
   // post every 1024 squarings so the driver can animate the track.
+  // Parameter validation happened in solveMessage BEFORE any work: T is
+  // inside 10000..=300000 and modulusBytes is a canonical 2048-bit odd
+  // composite, so this function only computes.
   var RSW_PROGRESS_INTERVAL = 1024;
   function bigintFromBytes(bytes) {
     var hex = "";
@@ -305,20 +333,9 @@
     while (hex.length < 512) hex = "0" + hex;
     return hex;
   }
-  function solveRsw(prefixBytes, nonce, modulusB64, t) {
+  function solveRsw(prefixBytes, nonce, modulusBytes, t) {
     if (typeof BigInt === "undefined") {
       post({ type: "failed", reason: "no_bigint" });
-      return;
-    }
-    var modulusBytes;
-    try {
-      modulusBytes = b64decode(modulusB64);
-    } catch (e) {
-      post({ type: "failed", reason: "length_mismatch" });
-      return;
-    }
-    if (modulusBytes.length !== 256 || t < 1) {
-      post({ type: "failed", reason: "length_mismatch" });
       return;
     }
     var combined = new Uint8Array(prefixBytes.length + nonce.length);

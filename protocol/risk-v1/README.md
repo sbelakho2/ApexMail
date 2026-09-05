@@ -6,7 +6,7 @@ The Rust implementation (`packages/kiwicaptcha-risk`) and the PHP
 implementation (`packages/kiwicaptcha-risk-php`) MUST be byte-for-byte
 identical in:
 
-1) `RiskEventKind` — fixed enum, values 1..21:
+1) `RiskEventKind` — fixed enum, values 1..17:
 
    | value | name |
    |-------|------|
@@ -27,10 +27,6 @@ identical in:
    | 15 | SourceRateLimitHit |
    | 16 | GlobalCapacityHit |
    | 17 | RiskDenied |
-   | 18 | HoneypotTriggered |
-   | 19 | DecoyEndpointTouched |
-   | 20 | DecoyFieldSubmitted |
-   | 21 | ChallengeCancelled |
 
    Event semantics: only `PreIssue` (1) counts as a request (velocity);
    feedback events mutate only their own channels. `SourceRateLimitHit`
@@ -39,17 +35,6 @@ identical in:
    source/session/principal reputation, since deployment overload must not
    contaminate an individual visitor. `RiskDenied` (17) performs no state
    mutation, so a risk decision that already denied is never double-counted.
-
-   The risk-v2 layer events `HoneypotTriggered` (18),
-   `DecoyEndpointTouched` (19) and `DecoyFieldSubmitted` (20) carry NO
-   risk-v1 state mutation: `risk-v1.lua` treats them as identity-neutral
-   (no channel changes), and `assess_v2.lua` scores them as v2 honeypot
-   pressure (the `v2_honeypot` signal, weight 1000) when the decision is
-   written to the outcome ledger.
-   `ChallengeCancelled` (21) is risk-neutral with no state change at all —
-   cancelling a challenge is a resource-lifecycle operation, never a debt
-   refund; the issue debt stays until an actual `SolveSuccess` (3) repays
-   it (the event kind remains valid for audit/observability).
 
 2) `SignalVector` — 13 fixed-point fields (u16/int, each 0..1000), in this
    exact order (JSON keys in `fixtures.json`):
@@ -135,12 +120,6 @@ identical in:
    `{kiwi:d}:risk:src:<epoch>:<hex16>` · `...:net:<epoch>:<hex16>` ·
    `...:session:<hex16>` · `...:principal:<hex16>` · `...:global` ·
    `...:dedupe:<event_id>`
-
-   The v2 assessment layer ships its own canonical Lua, `assess_v2.lua`
-   (also embedded byte-identically by both implementations; a copy lives
-   next to `risk-v1.lua` in this directory). It consumes
-   `RiskEventKind` 18–20 as v2 honeypot pressure in addition to the
-   risk-v1 signals.
 
 10) Global pressure levels 0..4 with hysteresis (enter at the normalized
    thresholds 300/550/750/900, i.e. 30/55/75/90% of global saturation —

@@ -420,10 +420,10 @@ final class ProtocolV4Test extends TestCase
 
     public function testNonCanonicalExecutionVersionIsMalformed(): void
     {
-        // execution_version is the canonical numeric byte 1, 2 or 3
-        // (the compat window). A hand-rolled record carrying a version
-        // outside that set is corrupt and fails the verifier's record
-        // gate as MalformedRecord.
+        // execution_version rides the canonical register
+        // 1..ExecutionChallengeGenerator::MAX_EXECUTION_VERSION. A
+        // hand-rolled record carrying a version outside that register is
+        // corrupt and fails the verifier's record gate as MalformedRecord.
         $storage = new ArrayStorage();
         $issuer = new Issuer($this->config(), $storage);
         $challenge = $issuer->issueWithExecutionField('login', '198.51.100.7', true, executionAction: 'a');
@@ -464,7 +464,7 @@ final class ProtocolV4Test extends TestCase
             'login',
             '198.51.100.7',
         );
-        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'execution_version must be one of the canonical versions 1, 2 or 3');
+        self::assertSame(VerifyError::MalformedRecord, $outcome->error, 'execution_version must ride the canonical register 1..MAX_EXECUTION_VERSION');
     }
 
     public function testV4AcceptedByTheCurrentVerifierAndRejectedByOldGenerations(): void
@@ -489,5 +489,117 @@ final class ProtocolV4Test extends TestCase
         self::assertSame(VerifyError::MalformedRecord, $simulator->verify($token, self::SECRET, 'login', '198.51.100.7')->error, 'a v2-only binary rejects v4 as unknown');
         self::assertSame(VerifyError::MalformedRecord, $simulator->verify($token, self::SECRET, 'login', '198.51.100.7', null, 3)->error, 'a v3-only binary rejects v4 as unknown');
         self::assertSame(VerifyError::MalformedRecord, $simulator->gate($storage->find($challenge->nonce), 3), 'the v3-only structural gate refuses v4');
+    }
+
+    public function testArmedIssuanceAtMaxExecutionVersionMintsAndVerifies(): void
+    {
+        // The PHP side mints and verifies armed records at the current
+        // register maximum: an issuance at
+        // ExecutionChallengeGenerator::MAX_EXECUTION_VERSION stores an
+        // execution_version at the ceiling and the verifier's record
+        // gate accepts it (the same gate the Rust `validate_record`
+        // register mirrors), so the record verifies end to end.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer($this->config(), $storage);
+        $challenge = $issuer->issueWithExecutionField(
+            'login',
+            '198.51.100.7',
+            true,
+            executionAction: 'a',
+            executionVersion: ExecutionChallengeGenerator::MAX_EXECUTION_VERSION,
+        );
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+        self::assertSame(
+            ExecutionChallengeGenerator::MAX_EXECUTION_VERSION,
+            $record->executionVersion,
+            'an issuance at the register maximum stamps the canonical maximum',
+        );
+        $program = ExecutionChallengeGenerator::decode($challenge->executionProgram);
+        $trace = ExecutionTraceFixture::executedTraceFor($program);
+        $digest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $trace);
+        $token = SolutionToken::create($challenge->nonce, $this->winningCounter($challenge), 5000, [], $digest, base64_encode($trace))->encode();
+        $outcome = (new Verifier($storage, now: static fn (): int => time()))->verify($token, self::SECRET, 'login', '198.51.100.7');
+        self::assertTrue($outcome->isOk(), sprintf('the PHP verifier accepts its own max-register armed record, got %s', $outcome->code()));
+    }
+
+    public function testExecutionVersionRegisterGateSweepMatchesTheRustSuite(): void
+    {
+        // The record execution-version register parity sweep: the
+        // verifier's record gate accepts exactly
+        // 1..ExecutionChallengeGenerator::MAX_EXECUTION_VERSION — the
+        // exact set of the Rust `validate_record` register. The same
+        // 0..=9 sweep runs in the Rust suite
+        // (`execution_mutation_fuzz.rs`:
+        // `record_execution_version_register_matches_the_php_gate_sweep`)
+        // and must land on the same verdicts case for case: rows inside
+        // the register pass the record gate (a row different from the
+        // signed version fails the signature binding instead), rows
+        // outside it are MalformedRecord before any signature work.
+        $storage = new ArrayStorage();
+        $issuer = new Issuer($this->config(), $storage);
+        $challenge = $issuer->issueWithExecutionField('login', '198.51.100.7', true, executionAction: 'a');
+        $record = $storage->find($challenge->nonce);
+        self::assertNotNull($record);
+        self::assertSame(1, $record->executionVersion, 'the sweep signs at the canonical byte 1');
+        $program = ExecutionChallengeGenerator::decode($challenge->executionProgram);
+        $trace = ExecutionTraceFixture::executedTraceFor($program);
+        $digest = ExecutionChallengeGenerator::digestOverTrace($challenge->executionProgram, $challenge->nonce, $trace);
+        $token = SolutionToken::create($challenge->nonce, $this->winningCounter($challenge), 5000, [], $digest, base64_encode($trace))->encode();
+        $verifier = new Verifier($storage, now: static fn (): int => time());
+
+        $max = ExecutionChallengeGenerator::MAX_EXECUTION_VERSION;
+        for ($value = 0; $value <= 9; $value++) {
+            $storage->store($this->armedRecordWithExecutionVersion($record, $value));
+            $outcome = $verifier->verify($token, self::SECRET, 'login', '198.51.100.7');
+            if ($value < 1 || $value > $max) {
+                self::assertSame(
+                    VerifyError::MalformedRecord,
+                    $outcome->error,
+                    sprintf('execution_version %d is outside the canonical register 1..%d and fails the record gate', $value, $max),
+                );
+            } elseif ($value === 1) {
+                self::assertTrue($outcome->isOk(), sprintf('the signed execution_version %d verifies, got %s', $value, $outcome->code()));
+            } else {
+                self::assertSame(
+                    VerifyError::BadSignature,
+                    $outcome->error,
+                    sprintf('execution_version %d rides the register but breaks the signature binding', $value),
+                );
+            }
+        }
+    }
+
+    /** Rebuild an armed record with a different stored execution_version. */
+    private function armedRecordWithExecutionVersion(ChallengeRecord $record, ?int $version): ChallengeRecord
+    {
+        return new ChallengeRecord(
+            nonce: $record->nonce,
+            scope: $record->scope,
+            bindingTag: $record->bindingTag,
+            issuedAt: $record->issuedAt,
+            expiresAt: $record->expiresAt,
+            algorithm: $record->algorithm,
+            mKib: $record->mKib,
+            t: $record->t,
+            p: $record->p,
+            targetBits: $record->targetBits,
+            salt: $record->salt,
+            prefix: $record->prefix,
+            challenge: $record->challenge,
+            minDurationMs: $record->minDurationMs,
+            issuedAtNs: $record->issuedAtNs,
+            protocolVersion: $record->protocolVersion,
+            region: $record->region,
+            policyVersion: $record->policyVersion,
+            requestBinding: $record->requestBinding,
+            issuer: $record->issuer,
+            kid: $record->kid,
+            hostname: $record->hostname,
+            decoyField: $record->decoyField,
+            executionProgram: $record->executionProgram,
+            executionVersion: $version,
+            executionCommitment: $record->executionCommitment,
+        );
     }
 }

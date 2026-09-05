@@ -7,6 +7,7 @@ namespace BelConsulting\KiwiCaptchaBundle\Tests;
 use BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController;
 use BelConsulting\KiwiCaptchaBundle\Security\Authority\PinnedPrimaryAuthorityGuard;
 use BelConsulting\KiwiCaptchaBundle\Tests\Fixtures\FakePredisClient;
+use KiwiCaptcha\ExecutionChallengeGenerator;
 use PHPUnit\Framework\TestCase;
 
 /**
@@ -16,14 +17,18 @@ use PHPUnit\Framework\TestCase;
  * (cached, debounced) ping, and the central security-policy state
  * ({kiwi:<ns>}:security-policy) is compatible. Compatible means
  * min_protocol_version <= 4 (this binary's max protocol: the
- * execution-capable v4 canonical), min_execution_version <= 2 (this
- * binary's max execution-program version; an absent execution floor
- * imposes nothing) and min_policy_epoch <= the configured
- * risk.policy_version. An absent key leaves the binary's own
- * configuration authoritative. Under ha_authority pinned_primary the
- * readiness additionally forces a fresh authority-guard check per
- * wired authority (never the ordinary verification window) and
- * answers 503 with ha_authority_uninitialized / ha_authority_changed /
+ * execution-capable v4 canonical), min_execution_version <= the
+ * generator max (this binary's max execution-program version; an
+ * absent execution floor imposes nothing) and min_policy_epoch <= the
+ * configured risk.policy_version. When risk.execution_challenge is on
+ * the required execution tier must additionally be satisfiable
+ * against the effective fleet tier, or the probe answers 503 with the
+ * security_policy_incompatible:execution_required_R_effective_E
+ * reason. An absent key leaves the binary's own configuration
+ * authoritative. Under ha_authority pinned_primary the readiness
+ * additionally forces a fresh authority-guard check per wired
+ * authority (never the ordinary verification window) and answers 503
+ * with ha_authority_uninitialized / ha_authority_changed /
  * ha_authority_unreachable when the pin is uninitialized or the
  * authority changed.
  */
@@ -31,9 +36,9 @@ final class KiwiHealthControllerTest extends TestCase
 {
     private const SECRET = '0123456789abcdef0123456789abcdef';
 
-    private function controller(FakePredisClient $client, int $policyVersion = 1, ?callable $nowMs = null): KiwiHealthController
+    private function controller(FakePredisClient $client, int $policyVersion = 1, ?callable $nowMs = null, bool $executionGate = false, int $executionVersionCap = 1, int $executionRequiredVersion = 1): KiwiHealthController
     {
-        return new KiwiHealthController(self::SECRET, $client, 'health-test', $policyVersion, $nowMs);
+        return new KiwiHealthController(self::SECRET, $client, 'health-test', $policyVersion, $nowMs, 0, null, 16384, [], null, $executionGate, $executionVersionCap, $executionRequiredVersion);
     }
 
     /**
@@ -178,30 +183,32 @@ final class KiwiHealthControllerTest extends TestCase
 
     public function testReadyOkWithTheExecutionFloorAtTheBinaryMax(): void
     {
-        // The binary's max execution-program version is 3 (the
-        // sibling-index traversal grammar): a central floor of exactly
-        // 3 is compatible, like a protocol floor exactly at the
-        // binary's max.
+        // The binary's max execution-program version is the generator
+        // authority (5 today): a central floor at or under it is
+        // compatible, like a protocol floor at or under the binary's
+        // max.
         $client = $this->requirePredis();
         $this->setPolicy($client, 4, 1, 4);
         $controller = $this->controller($client, policyVersion: 1);
 
-        self::assertSame(200, $controller->ready()->getStatusCode(), 'min_execution_version 4 <= the binary max (4) — the execution-v4-capable binary stays in the pool');
+        self::assertSame(200, $controller->ready()->getStatusCode(), 'min_execution_version 4 <= the binary max — the binary stays in the pool');
     }
 
-    public function testNotReadyWhenCentralPolicyDemandsExecutionVersion5(): void
+    public function testNotReadyWhenCentralPolicyDemandsAnExecutionVersionAboveTheBinaryMax(): void
     {
         // The execution floor is a reader floor exactly like the
         // protocol floor: a central min_execution_version above this
-        // binary's max (4) must take it out of the pool, or a mixed
-        // fleet could hand it version-4 programs it cannot honor.
+        // binary's max must take it out of the pool, or a mixed fleet
+        // could hand it programs it cannot honor. The binary max is the
+        // generator authority (5 today), so the demand that must leave
+        // the pool is max + 1 (6).
         $client = $this->requirePredis();
-        $this->setPolicy($client, 4, 1, 5);
+        $this->setPolicy($client, 4, 1, ExecutionChallengeGenerator::MAX_EXECUTION_VERSION + 1);
         $controller = $this->controller($client, policyVersion: 1);
 
         $response = $controller->ready();
-        self::assertSame(503, $response->getStatusCode(), 'a central min_execution_version of 5 exceeds this binary\'s max (4) — it must leave the pool (mixed-version rolling deployment)');
-        self::assertSame('security_policy_incompatible:min_execution_version_5', json_decode((string) $response->getContent(), true)['reason'], 'the machine-readable reason names the execution floor with its numeric suffix');
+        self::assertSame(503, $response->getStatusCode(), 'a central min_execution_version above the binary max must leave the pool (mixed-version rolling deployment)');
+        self::assertSame('security_policy_incompatible:min_execution_version_'.(ExecutionChallengeGenerator::MAX_EXECUTION_VERSION + 1), json_decode((string) $response->getContent(), true)['reason'], 'the machine-readable reason names the execution floor with its numeric suffix');
     }
 
     public function testNotReadyWhenCentralPolicyCarriesACorruptExecutionFloor(): void
@@ -231,6 +238,98 @@ final class KiwiHealthControllerTest extends TestCase
         $controller = $this->controller($client, policyVersion: 1);
 
         self::assertSame(200, $controller->ready()->getStatusCode(), 'an absent min_execution_version imposes no execution constraint');
+    }
+
+    // ── the execution-gate required-tier leg ─────────────────────────
+
+    public function testMaxExecutionVersionEqualsTheGeneratorMaximum(): void
+    {
+        self::assertSame(
+            ExecutionChallengeGenerator::MAX_EXECUTION_VERSION,
+            KiwiHealthController::MAX_EXECUTION_VERSION,
+            'the readiness max must track the core generator, never a literal',
+        );
+    }
+
+    public function testExecutionGateReadinessTable(): void
+    {
+        // The exact readiness table for the armed execution dimension:
+        // the effective fleet tier is the policy minimum of the node
+        // cap, the parsed central floor (absent counts as version 1)
+        // and the generator max, and a required tier above it refuses
+        // readiness. Rows: gate, cap, floor, required, expected code.
+        $rows = [
+            [true, 2, null, 2, 503, 'security_policy_incompatible:execution_required_2_effective_1'],
+            [true, 2, 1, 2, 503, 'security_policy_incompatible:execution_required_2_effective_1'],
+            [true, 2, 2, 2, 200, null],
+            [true, 3, 2, 3, 503, 'security_policy_incompatible:execution_required_3_effective_2'],
+            [true, 3, 3, 3, 200, null],
+            [false, 3, 1, 3, 200, null],
+        ];
+        foreach ($rows as [$gate, $cap, $floor, $required, $expectedCode, $expectedReason]) {
+            $client = $this->requirePredis();
+            $policy = ['min_protocol_version' => '4', 'min_policy_epoch' => '1'];
+            if ($floor !== null) {
+                $policy['min_execution_version'] = (string) $floor;
+            }
+            $client->hashes['{kiwi:health-test}:security-policy'] = $policy;
+            $controller = $this->controller($client, executionGate: $gate, executionVersionCap: $cap, executionRequiredVersion: $required);
+
+            $response = $controller->ready();
+            $label = sprintf('gate %s cap %d floor %s required %d', $gate ? 'on' : 'off', $cap, var_export($floor, true), $required);
+            self::assertSame($expectedCode, $response->getStatusCode(), $label);
+            $body = json_decode((string) $response->getContent(), true);
+            if ($expectedReason === null) {
+                self::assertSame('ready', $body['status'], $label);
+            } else {
+                self::assertSame($expectedReason, $body['reason'], $label);
+            }
+        }
+    }
+
+    public function testExecutionGateLegIsInertWhileTheRequiredTierStaysAtOne(): void
+    {
+        // The default required tier 1 is always satisfiable: an armed
+        // deployment with no confirmed floor (or no policy key at all)
+        // stays ready, since the effective tier can never drop below 1.
+        $client = $this->requirePredis();
+        $this->setPolicy($client, 4, 1);
+        $controller = $this->controller($client, executionGate: true, executionVersionCap: 2, executionRequiredVersion: 1);
+
+        self::assertSame(200, $controller->ready()->getStatusCode());
+    }
+
+    public function testExecutionGateLegAppliesWithoutAnySecurityRedis(): void
+    {
+        // No central policy by design: the floor is unconfirmed, so the
+        // effective tier is the node cap floored at 1. A required tier
+        // of 2 is unsatisfiable and the probe refuses; the default
+        // required tier 1 stays ready.
+        $requiredTwo = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 0, null, 16384, [], null, true, 2, 2);
+        self::assertSame(503, $requiredTwo->ready()->getStatusCode());
+        self::assertSame('security_policy_incompatible:execution_required_2_effective_1', json_decode((string) $requiredTwo->ready()->getContent(), true)['reason']);
+
+        $requiredOne = new KiwiHealthController(self::SECRET, null, 'health-test', 1, null, 0, null, 16384, [], null, true, 2, 1);
+        self::assertSame(200, $requiredOne->ready()->getStatusCode());
+    }
+
+    public function testExecutionGateLegHonorsTheGeneratorMaxRung(): void
+    {
+        // The cap and the required tier can reach the generator max:
+        // with a floor at the max the effective tier is the max and the
+        // probe is ready; with the floor absent only version 1 is
+        // confirmed, so the max required tier is unsatisfiable.
+        $client = $this->requirePredis();
+        $this->setPolicy($client, 4, 1, 4);
+        $floorAtMax = $this->controller($client, executionGate: true, executionVersionCap: 4, executionRequiredVersion: 4);
+        self::assertSame(200, $floorAtMax->ready()->getStatusCode(), 'cap 4 required 4 with the floor at the generator max is ready');
+
+        $unfloored = $this->requirePredis();
+        $this->setPolicy($unfloored, 4, 1);
+        $unsatisfiable = $this->controller($unfloored, executionGate: true, executionVersionCap: 4, executionRequiredVersion: 4);
+        $response = $unsatisfiable->ready();
+        self::assertSame(503, $response->getStatusCode(), 'cap 4 required 4 with no confirmed floor is not ready');
+        self::assertSame('security_policy_incompatible:execution_required_4_effective_1', json_decode((string) $response->getContent(), true)['reason']);
     }
 
     public function testNotReadyWhenSecurityRedisIsUnreachable(): void

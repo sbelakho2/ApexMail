@@ -11,6 +11,7 @@
 //! is responsible for storing the record keyed by nonce.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
@@ -304,10 +305,11 @@ pub struct ChallengeRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_program: Option<String>,
     /// The execution-dimension protocol version: the canonical numeric
-    /// byte 1 (u8 on the wire, rendered as decimal in the canonical
-    /// input). Authenticated as the `|execution_version` protocol v4
-    /// canonical segment. Present iff the record carries an execution
-    /// program; the JSON key is absent when `None`.
+    /// byte within the register 1..=MAX_EXECUTION_VERSION (u8 on the
+    /// wire, rendered as decimal in the canonical input). Authenticated
+    /// as the `|execution_version` protocol v4 canonical segment. Present
+    /// iff the record carries an execution program; the JSON key is
+    /// absent when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_version: Option<u8>,
     /// The authenticated mirror of the stored execution program: hex
@@ -346,7 +348,12 @@ fn default_protocol_version() -> u8 {
 /// Configuration for the challenge issuer. Mirrors the server config block but
 /// kept as a plain struct so this crate has no dependency on the api-server
 /// config types.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented manually: the derived formatter would print the
+/// live secrets (the HMAC `secret_key`, the execution `execution_key` and the
+/// rsw `rsw_lambda`) into logs, so the manual impl prints the same field set
+/// with only the secret values replaced by `"<redacted>"`.
+#[derive(Clone)]
 pub struct ChallengeConfig {
     /// HMAC secret key (server-side). Challenges signed with this key cannot
     /// be verified by a server using a different key.
@@ -424,13 +431,20 @@ pub struct ChallengeConfig {
     pub execution_key: Option<String>,
     /// The rsw modulus n = p*q as canonical standard base64 of exactly
     /// 256 bytes (top bit set, odd), the public half of the time-lock
-    /// trapdoor. Required when the algorithm is [`PoWAlgorithm::Rsw`];
-    /// ignored otherwise. `None` (the default) = the rsw algorithm is
-    /// not configured.
+    /// trapdoor. Generate the pair with the shipped tools/rsw-keygen
+    /// binary and record its rsw_modulus_n_sha256 fingerprint; the
+    /// shared decode refuses a weak or probable-prime modulus.
+    /// Required when the algorithm is [`PoWAlgorithm::Rsw`]; ignored
+    /// otherwise. `None` (the default) = the rsw algorithm is not
+    /// configured.
     pub rsw_modulus_n: Option<String>,
     /// The rsw secret lambda = lcm(p-1, q-1) as canonical standard
     /// base64 of 1..=256 even bytes, the trapdoor that lets the server
-    /// verify without the T squarings. Required when the algorithm is
+    /// verify without the T squarings. It is the secret trapdoor:
+    /// never persist it beside client material. A lambda that fails
+    /// the deterministic trapdoor consistency spot-check against the
+    /// modulus is refused by the shared decode. Required when the
+    /// algorithm is
     /// [`PoWAlgorithm::Rsw`]; ignored otherwise. Never stored on the
     /// record and never sent to the client.
     pub rsw_lambda: Option<String>,
@@ -439,6 +453,40 @@ pub struct ChallengeConfig {
     /// The client performs T sequential modular squarings; the server
     /// verifies instantly through lambda.
     pub rsw_t: u32,
+}
+
+impl fmt::Debug for ChallengeConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChallengeConfig")
+            .field("secret_key", &"<redacted>")
+            .field("algorithm", &self.algorithm)
+            .field("m_kib", &self.m_kib)
+            .field("t", &self.t)
+            .field("p", &self.p)
+            .field("target_bits", &self.target_bits)
+            .field("argon2_target_bits", &self.argon2_target_bits)
+            .field("ttl_secs", &self.ttl_secs)
+            .field("min_duration_ms", &self.min_duration_ms)
+            .field("auto_tune", &self.auto_tune)
+            .field("auto_tune_min_bits", &self.auto_tune_min_bits)
+            .field("auto_tune_max_bits", &self.auto_tune_max_bits)
+            .field("binding_mode", &self.binding_mode)
+            .field("policy_version", &self.policy_version)
+            .field("region", &self.region)
+            .field("issuer", &self.issuer)
+            .field("kid", &self.kid)
+            .field(
+                "execution_key",
+                &self.execution_key.as_ref().map(|_| "<redacted>"),
+            )
+            .field("rsw_modulus_n", &self.rsw_modulus_n)
+            .field(
+                "rsw_lambda",
+                &self.rsw_lambda.as_ref().map(|_| "<redacted>"),
+            )
+            .field("rsw_t", &self.rsw_t)
+            .finish()
+    }
 }
 
 impl ChallengeConfig {
@@ -684,9 +732,9 @@ fn canonical_signing_input(payload: &ChallengePayload) -> String {
 ///   issuer|kid[|decoy_field]|execution_version|execution_commitment
 /// ```
 ///
-/// - `execution_version` is the canonical numeric byte 1 or 2 (decimal
-///   on the
-///   wire; never `|`-capable).
+/// - `execution_version` is the canonical numeric byte carrying the
+///   program's execution grammar version, 1..=MAX_EXECUTION_VERSION
+///   when armed (decimal on the wire; never `|`-capable).
 /// - `execution_commitment` is the hex SHA-256 of the stored program's
 ///   base64 wire string: 64 lowercase hex characters, never
 ///   `|`-capable.
@@ -1023,11 +1071,15 @@ pub const MAX_PARALLELISM: u32 = 4;
 /// so issuance refuses the value. Shared with the PHP core.
 pub const MIN_RSW_T: u32 = 10_000;
 
-/// The ceiling for the rsw sequential-squaring cost T. The browser
-/// BigInt solver completes 300,000 squarings in about a second on a
-/// mid-range device, so the ceiling keeps a legitimate solve inside
-/// the challenge lifetime while the sequential cost stays material.
-/// Shared with the PHP core.
+/// The ceiling for the rsw sequential-squaring cost T. The bound is a
+/// protocol ceiling, not a device-performance claim: it keeps a
+/// legitimate solve inside the challenge lifetime on the slowest
+/// supported device while the sequential cost stays material. The
+/// per-deployment T choice must be derived from measurements on the
+/// worst device a deployment supports, and the qualification state
+/// must be documented; the client-performance lab measures the rsw
+/// rungs and documents the release-gate procedure
+/// (tools/client-perf/README.md). Shared with the PHP core.
 pub const MAX_RSW_T: u32 = 300_000;
 
 /// The default rsw sequential-squaring cost T. Shared with the PHP core.
@@ -1536,7 +1588,7 @@ pub fn issue_challenge_with_decoy(
 /// the provider-style action of the request (1..32 chars of
 /// `[A-Za-z0-9._:-]`, default "default") and `execution_version` the
 /// dimension protocol version, the canonical numeric byte (default 1,
-/// exactly 1 — the only version of the wire contract; passed as a u8,
+/// the live grammar range 1..=MAX_EXECUTION_VERSION; passed as a u8,
 /// never a string that is parsed). Both are embedded in the program and
 /// bound by the commitment.
 ///
@@ -2961,6 +3013,62 @@ mod tests {
     }
 
     #[test]
+    fn rsw_issuance_rejects_weak_or_inconsistent_trapdoor_material() {
+        use num_bigint::BigUint;
+        let modulus_b64 = |value: &BigUint| {
+            let bytes = value.to_bytes_be();
+            let mut padded = vec![0u8; 256 - bytes.len()];
+            padded.extend_from_slice(&bytes);
+            base64::engine::general_purpose::STANDARD.encode(&padded)
+        };
+        let reject = |config: &ChallengeConfig| {
+            assert!(matches!(
+                issue_challenge(
+                    config,
+                    "login",
+                    "1.2.3.4",
+                    1_000_000,
+                    1_700_000_000_000_000,
+                    0,
+                    None
+                )
+                .unwrap_err(),
+                SignError::InvalidRswParams
+            ));
+        };
+        let fixture = crate::rsw::fixtures::LAMBDA_B64;
+
+        // A modulus divisible by the small prime 3, shaped exactly like
+        // a genuine 2048-bit modulus.
+        let mut weak = rsw_config(MIN_RSW_T);
+        let factor_three =
+            BigUint::from(3u8) * ((BigUint::from(1u8) << 2046usize) + BigUint::from(1u8));
+        weak.rsw_modulus_n = Some(modulus_b64(&factor_three));
+        reject(&weak);
+
+        // A real 2048-bit probable prime as the modulus.
+        let mut prime = rsw_config(MIN_RSW_T);
+        prime.rsw_modulus_n = Some(
+            "3QB709I66Q8Ivp2P5RtgD4+ci38dHuAuXfzGL4KtCk34UGX9uOG1FgNV92B9BcVS1iX4JCYdqN9cHg62sqEWx+p0fn7rUCuPYZSFpnwcWpVjHMbigzz2wjWt2mhkqLtbgZ/+nar/ptQu7aHKOrQYVAppYf0txmfwtnUbHSWpyMZhUv10JSnNPRuPL6wrb0cH8TjHex2W90islc3qPAwi9lAZdtX/+OepFBLDkmjnE4yi2SyBZ75kHWn+ve7nXg0352zbPtL3gos658lJsVVdt3IbqeVf1I9wnViRYpIS+EYHK5olWm3+sOxwZfbixlgLh0p3JafQoCnZpkF2j+9Gzw=="
+                .into(),
+        );
+        reject(&prime);
+
+        // The fixture lambda shifted by two: even and correctly shaped,
+        // but no longer a multiple of the Carmichael value.
+        let mut shifted_lambda = rsw_config(MIN_RSW_T);
+        let lambda = BigUint::from_bytes_be(
+            &base64::engine::general_purpose::STANDARD
+                .decode(fixture)
+                .expect("the fixture lambda is base64"),
+        );
+        let shifted = (&lambda - BigUint::from(2u8)).to_bytes_be();
+        shifted_lambda.rsw_lambda =
+            Some(base64::engine::general_purpose::STANDARD.encode(&shifted));
+        reject(&shifted_lambda);
+    }
+
+    #[test]
     fn rsw_issuance_validates_t_bounds() {
         for t in [MIN_RSW_T - 1, MAX_RSW_T + 1, 0] {
             let config = rsw_config(t);
@@ -4223,5 +4331,47 @@ mod tests {
                 "profile {profile:?} must be rejected"
             );
         }
+    }
+
+    // ── secret redaction in the Debug shape ─────────────────────────
+
+    #[test]
+    fn config_debug_redacts_secrets_but_keeps_the_public_shape() {
+        let secret = "debug-master-secret-0123456789abcdef";
+        let execution = "debug-execution-key-0123456789abcdef";
+        let mut config = rsw_config(MIN_RSW_T);
+        config.secret_key = secret.into();
+        config.execution_key = Some(execution.into());
+        let debug = format!("{config:?}");
+
+        // None of the live secret byte strings may print.
+        assert!(!debug.contains(secret));
+        assert!(!debug.contains(execution));
+        assert!(!debug.contains(crate::rsw::fixtures::LAMBDA_B64));
+        // The rsw modulus is public material and prints as itself.
+        assert!(debug.contains(crate::rsw::fixtures::MODULUS_N_B64));
+        // Every secret slot prints the redaction marker, and the
+        // non-secret fields keep their exact values.
+        assert_eq!(debug.matches("<redacted>").count(), 3);
+        assert!(debug.contains("ChallengeConfig { secret_key: \"<redacted>\""));
+        assert!(debug.contains("execution_key: Some(\"<redacted>\")"));
+        assert!(debug.contains("rsw_lambda: Some(\"<redacted>\")"));
+        assert!(debug.contains("algorithm: Rsw"));
+        assert!(debug.contains("rsw_t: "));
+        assert!(debug.contains("kid: 1"));
+    }
+
+    #[test]
+    fn config_debug_none_variants_print_none_not_redacted() {
+        let secret = "debug-master-secret-0123456789abcdef";
+        let mut config = profile_base_config();
+        config.secret_key = secret.into();
+        let debug = format!("{config:?}");
+
+        assert!(!debug.contains(secret));
+        assert_eq!(debug.matches("<redacted>").count(), 1);
+        assert!(debug.contains("execution_key: None"));
+        assert!(debug.contains("rsw_lambda: None"));
+        assert!(debug.contains("rsw_modulus_n: None"));
     }
 }

@@ -201,9 +201,10 @@ final class NewIntegratorSmokeTest extends TestCase
 
         try {
             // The Resources public assets the widget include (the form
-            // theme and the api.js compatibility loader) ship and serve.
+            // theme, the driver core, its lazy widget modules and the
+            // api.js compatibility loader) ship and serve.
             $assetsDir = \dirname(__DIR__).'/Resources/public';
-            foreach (['kiwicaptcha-wasm.js', 'widget-driver.js', 'widget.css'] as $asset) {
+            foreach (['kiwicaptcha-wasm.js', 'widget-driver.js', 'widget.css', 'widget-risk.js', 'widget-telemetry.js', 'widget-locales.js', 'widget-compat.js', 'kiwi-worker.js', 'execution-interpreter.js'] as $asset) {
                 self::assertFileExists($assetsDir.'/'.$asset, 'the widget asset '.$asset.' must ship in Resources/public');
                 self::assertGreaterThan(0, \strlen((string) file_get_contents($assetsDir.'/'.$asset)), $asset.' must not be empty');
             }

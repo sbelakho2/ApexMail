@@ -181,16 +181,20 @@ mod tests {
             "the rendered widget carries no checkbox semantics"
         );
         assert!(!html.contains("aria-checked"), "no checkbox state");
-        // Two occurrences: the rendered status element (this renderer's
-        // markup) plus the compat loader's static markup string embedded
-        // in the driver. The rendered widget still carries
-        // exactly ONE live region element — the compat loader does not
-        // alter the native widget's accessibility structure.
+        // Exactly one static occurrence: the server-rendered status
+        // element (this renderer's markup). The compat loader's static
+        // markup string — the second historical occurrence when the
+        // loader lived inside the driver — now ships in the separate
+        // widget-compat.js module, which is delivered only on the
+        // /api.js compat route and is never inlined by this renderer.
+        // The driver core itself only creates the announcer
+        // programmatically (setAttribute), never from a markup literal,
+        // so one literal in the rendered block is the contract.
         assert_eq!(
             html.matches("data-kiwi-status role=\"status\" aria-live=\"polite\"")
                 .count(),
-            2,
-            "one rendered status announcer + the compat markup string in the driver"
+            1,
+            "one rendered status announcer literal (compat markup lives in widget-compat.js)"
         );
         assert!(
             !html.contains("tabindex=\"0\""),

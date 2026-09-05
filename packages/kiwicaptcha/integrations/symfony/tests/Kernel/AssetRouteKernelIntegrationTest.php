@@ -40,6 +40,9 @@ final class AssetRouteKernelIntegrationTest extends TestCase
         'runtime' => ['file' => 'kiwicaptcha-wasm.js', 'content_type' => 'application/javascript; charset=UTF-8', 'ext' => 'js'],
         'worker' => ['file' => 'kiwi-worker.js', 'content_type' => 'application/javascript; charset=UTF-8', 'ext' => 'js'],
         'execution' => ['file' => 'execution-interpreter.js', 'content_type' => 'application/javascript; charset=UTF-8', 'ext' => 'js'],
+        'risk' => ['file' => 'widget-risk.js', 'content_type' => 'application/javascript; charset=UTF-8', 'ext' => 'js'],
+        'telemetry' => ['file' => 'widget-telemetry.js', 'content_type' => 'application/javascript; charset=UTF-8', 'ext' => 'js'],
+        'locales' => ['file' => 'widget-locales.js', 'content_type' => 'application/javascript; charset=UTF-8', 'ext' => 'js'],
     ];
 
     private static ?KernelBrowser $browser = null;
@@ -80,9 +83,11 @@ final class AssetRouteKernelIntegrationTest extends TestCase
         self::assertStringContainsString('data-kiwi-runtime-src="/kiwi-captcha/assets/runtime.', $html, 'the lazy runtime URL rides the container attribute');
         self::assertStringContainsString('data-kiwi-worker-src="/kiwi-captcha/assets/worker.', $html, 'the same-origin worker URL rides the container attribute');
         self::assertStringContainsString('data-kiwi-execution-src="/kiwi-captcha/assets/execution.', $html, 'the lazy execution interpreter URL rides the container attribute');
+        self::assertStringContainsString('data-kiwi-risk-src="/kiwi-captcha/assets/risk.', $html, 'the lazy widget-risk module URL rides the container attribute');
+        self::assertStringContainsString('data-kiwi-telemetry-src="/kiwi-captcha/assets/telemetry.', $html, 'the lazy widget-telemetry module URL rides the container attribute');
 
-        preg_match_all('~/(kiwi-captcha/assets/(execution|widget|driver|runtime|worker)\.([0-9a-f]{64})\.(css|js))~', $html, $matches, PREG_SET_ORDER);
-        self::assertCount(5, $matches, 'the files-mode widget render emits exactly the five asset URLs (widget, driver, runtime, worker, execution)');
+        preg_match_all('~/(kiwi-captcha/assets/(execution|widget|driver|runtime|worker|risk|telemetry)\.([0-9a-f]{64})\.(css|js))~', $html, $matches, PREG_SET_ORDER);
+        self::assertCount(7, $matches, 'the files-mode widget render emits exactly the seven asset URLs (widget, driver, runtime, worker, execution, risk, telemetry)');
 
         $urls = [];
         foreach ($matches as $match) {
@@ -126,9 +131,11 @@ final class AssetRouteKernelIntegrationTest extends TestCase
     {
         $urls = $this->renderedAssetUrls();
 
-        // The five rendered names are exactly the routable asset set:
-        // css, driver js, runtime js, worker js, execution js.
-        self::assertEqualsCanonicalizing(['widget', 'driver', 'runtime', 'worker', 'execution'], array_column($urls, 'name'));
+        // The seven rendered names are exactly the routable asset set:
+        // css, driver js, runtime js, worker js, execution js, and the
+        // two lazy widget-module js assets (widget-risk.js /
+        // widget-telemetry.js).
+        self::assertEqualsCanonicalizing(['widget', 'driver', 'runtime', 'worker', 'execution', 'risk', 'telemetry'], array_column($urls, 'name'));
 
         foreach ($urls as $asset) {
             $name = $asset['name'];

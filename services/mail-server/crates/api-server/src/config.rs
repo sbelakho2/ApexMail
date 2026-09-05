@@ -795,7 +795,9 @@ impl Config {
             .unwrap_or_else(|_| "0".into())
             .parse()
             .unwrap_or(0);
-        let kiwi_argon_t = env_or("KIWI_ARGON_T", "1").parse().unwrap_or(1);
+        // v5 issuance contract: argon2id t must be 3..=6 (crate MIN_ARGON_TIME,
+        // browser driver ceiling 6 — the OLD default of 1 is rejected by both).
+        let kiwi_argon_t = env_or("KIWI_ARGON_T", "3").parse().unwrap_or(3);
         let kiwi_argon_p = env_or("KIWI_ARGON_P", "1").parse().unwrap_or(1);
         // 20-bit difficulty = ~1M expected SHA-256 hashes = ~2-5s on a browser.
         // This matches FriendlyCaptcha (~2.5s) and Anubis difficulty-5 (~1M hashes).
@@ -871,6 +873,24 @@ impl Config {
                 max = SOLVER_MAX_ARGON2_M_KIB,
                 "KiwiCaptcha: Argon2id m_kib exceeds the browser-solvable ceiling — clamping"
             );
+        }
+        // The v5 contract (crate MIN_ARGON_TIME=3, driver ceiling t<=6, p==1
+        // for libsodium cross-verification): an out-of-range t would make
+        // issue_challenge error on EVERY request — fail fast at startup.
+        if kiwi_algorithm == kiwicaptcha::PoWAlgorithm::Argon2id
+            && (!(3..=6).contains(&kiwi_argon_t) || kiwi_argon_p != 1)
+        {
+            tracing::error!(
+                t = kiwi_argon_t,
+                p = kiwi_argon_p,
+                "KiwiCaptcha: Argon2id requires t in 3..=6 and p == 1 (v5 issuance contract)"
+            );
+            return Err(ConfigError::Invalid {
+                var: "KIWI_ARGON_T".into(),
+                reason: format!(
+                    "Argon2id requires t in 3..=6 and p == 1; got t={kiwi_argon_t} p={kiwi_argon_p}"
+                ),
+            });
         }
 
         let config = Config {

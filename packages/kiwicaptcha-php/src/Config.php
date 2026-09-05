@@ -83,10 +83,15 @@ final class Config
     public const MIN_RSW_T = 10_000;
 
     /**
-     * The ceiling for the rsw sequential-squaring cost T. The browser
-     * BigInt solver completes 300,000 squarings in about a second on a
-     * mid-range device, so the ceiling keeps a legitimate solve inside
-     * the challenge lifetime while the sequential cost stays material.
+     * The ceiling for the rsw sequential-squaring cost T. The bound is
+     * a protocol ceiling, not a device-performance claim: it keeps a
+     * legitimate solve inside the challenge lifetime on the slowest
+     * supported device while the sequential cost stays material. The
+     * per-deployment T choice must be derived from measurements on the
+     * worst device a deployment supports, and the qualification state
+     * must be documented; the client-performance lab measures the rsw
+     * rungs and documents the release-gate procedure
+     * (tools/client-perf/README.md). Shared with the Rust core.
      */
     public const MAX_RSW_T = 300_000;
 
@@ -115,7 +120,13 @@ final class Config
      * @param int      $t                   Argon2id time cost.
      * @param int      $p                   Argon2id parallelism.
      * @param int      $targetBits          Leading zero bits for SHA-256 challenges (1..20).
-     * @param int      $argon2TargetBits    Leading zero bits for Argon2id challenges (1..10).
+     * @param int      $argon2TargetBits    Leading zero bits for Argon2id challenges (1..10;
+     *                                      default 4). The client-performance lab
+     *                                      measured the 8-bit rung at ~16 s p95 on a
+     *                                      mainstream desktop, above the absolute 5000 ms
+     *                                      UX ceiling. The default is therefore 4, with
+     *                                      higher rungs reachable only via adaptive risk
+     *                                      escalation.
      * @param int      $ttlSecs             Challenge lifetime in seconds.
      * @param int|null $minDurationMs       Minimum solve duration (null = derive from difficulty).
      * @param int      $solverMaxHashes     Solver cap used by the widget (informational).
@@ -153,14 +164,22 @@ final class Config
      * @param string|null $rswModulusN      The rsw modulus n = p*q as canonical
      *                                      standard base64 of exactly 256 bytes (top bit
      *                                      set, odd), the public half of the time-lock
-     *                                      trapdoor. Required when algorithm is rsw;
-     *                                      ignored otherwise (null default = the rsw
-     *                                      algorithm is not configured).
+     *                                      trapdoor. Generate the pair with the shipped
+     *                                      tools/rsw-keygen binary and record its
+     *                                      rsw_modulus_n_sha256 fingerprint; weak or
+     *                                      fabricated moduli are refused here. Required
+     *                                      when algorithm is rsw; ignored otherwise (null
+     *                                      default = the rsw algorithm is not configured).
      * @param string|null $rswLambda        The rsw secret lambda = lcm(p-1, q-1) as
      *                                      canonical standard base64 of 1..256 even
      *                                      bytes, the trapdoor that lets the server
-     *                                      verify without the T squarings. Required
-     *                                      when algorithm is rsw; ignored otherwise.
+     *                                      verify without the T squarings. It is the
+     *                                      secret trapdoor: never persist it beside
+     *                                      client material. A lambda that fails the
+     *                                      deterministic trapdoor consistency
+     *                                      spot-check against the modulus is
+     *                                      refused here. Required when algorithm is
+     *                                      rsw; ignored otherwise.
      * @param int      $rswT                The rsw sequential-squaring cost T
      *                                      (default 75,000; validated to 10,000..300,000
      *                                      when algorithm is rsw). The client performs T
@@ -174,7 +193,7 @@ final class Config
         public readonly int $t = 3,
         public readonly int $p = 1,
         public readonly int $targetBits = 18,
-        public readonly int $argon2TargetBits = 8,
+        public readonly int $argon2TargetBits = 4,
         public readonly int $ttlSecs = 120,
         public readonly ?int $minDurationMs = null,
         public readonly int $solverMaxHashes = 5_000_000,
@@ -295,6 +314,44 @@ final class Config
                 );
             }
         }
+    }
+
+    /**
+     * Redacted dump shape: every field prints under its public name with
+     * its exact value. The secrets print '<redacted>' — `secretKey`
+     * always, `executionKey` and `rswLambda` only when set. Their null
+     * variants stay null, never a marker. `rswModulusN` is public
+     * material (the client squares modulo n) and prints as itself.
+     *
+     * The shape is the full constructor field set in declaration order,
+     * so var_dump/print_r shows the complete configuration with only the
+     * secret values replaced — the audit-mandated printability fix for
+     * the secret-bearing configuration object.
+     *
+     * @return array<string, mixed>
+     */
+    public function __debugInfo(): array
+    {
+        return [
+            'secretKey' => '<redacted>',
+            'algorithm' => $this->algorithm,
+            'mKib' => $this->mKib,
+            't' => $this->t,
+            'p' => $this->p,
+            'targetBits' => $this->targetBits,
+            'argon2TargetBits' => $this->argon2TargetBits,
+            'ttlSecs' => $this->ttlSecs,
+            'minDurationMs' => $this->minDurationMs,
+            'solverMaxHashes' => $this->solverMaxHashes,
+            'bindingMode' => $this->bindingMode,
+            'policyVersion' => $this->policyVersion,
+            'issuer' => $this->issuer,
+            'kid' => $this->kid,
+            'executionKey' => $this->executionKey !== null ? '<redacted>' : null,
+            'rswModulusN' => $this->rswModulusN,
+            'rswLambda' => $this->rswLambda !== null ? '<redacted>' : null,
+            'rswT' => $this->rswT,
+        ];
     }
 
     /**

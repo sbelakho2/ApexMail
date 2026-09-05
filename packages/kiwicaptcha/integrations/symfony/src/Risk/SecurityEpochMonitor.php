@@ -31,12 +31,15 @@ use KiwiCaptcha\Verifier;
  *
  * The same read also exposes the optional `min_execution_version`
  * field, the execution-grammar floor the challenge controller consults
- * before emitting execution version 2 (the causal observe grammar).
+ * before emitting any rung above version 1 (version 2, the causal
+ * observe grammar, is the first rung above it).
  * The value is null when no confirmed policy exists, 0 when a
  * confirmed policy declares no execution floor, and the parsed floor
  * otherwise. The key is optional and permissive at the read level.
- * Both 0 and null stay below 2, so the writer keeps emitting execution
- * version 1 until the operator explicitly declares the floor.
+ * Both 0 and null mean no declared floor, so the writer stays at
+ * execution version 1 until the operator declares one. A declared
+ * floor then admits its rung, capped by the node cap and the
+ * generator maximum.
  *
  * Four hardening properties:
  *
@@ -97,8 +100,8 @@ final class SecurityEpochMonitor
     /**
      * The central hash field carrying the fleet execution-grammar floor
      * (min_execution_version): the writer-side floor the challenge
-     * controller consults before emitting execution version 2 (the
-     * causal observe grammar), exactly like min_protocol_version gates
+     * controller consults before emitting any execution grammar rung
+     * above version 1, exactly like min_protocol_version gates
      * the protocol rungs. The key is optional: a confirmed policy
      * without it reads as 0 — permissive, no declared execution floor —
      * never null, so a policy-without-the-key is never confused with an
@@ -126,8 +129,8 @@ final class SecurityEpochMonitor
      * central policy at all (no Redis client, read failure, absent or
      * unreadable policy); 0 = a confirmed policy without the key (no
      * declared execution floor — permissive at the read level). Both
-     * stay below 2, so the issuance-side gate emits execution version 2
-     * only when the operator explicitly declared the floor.
+     * mean no declared floor, so the issuance-side gate emits no rung
+     * above version 1 until the operator explicitly declared the floor.
      */
     private ?int $currentMinExecutionVersion = null;
 
@@ -264,9 +267,10 @@ final class SecurityEpochMonitor
      * Otherwise the parsed floor is returned. The floor is
      * non-monotonic and non-sticky like the protocol floor: a lowered
      * value takes effect on the next re-read. The challenge controller
-     * emits execution version 2, the causal observe grammar, only when
-     * this floor is >= 2, the client advertised the capability, and the
-     * node's execution-version cap is >= 2.
+     * emits the resulting effective grammar rung (version 2, the causal
+     * observe grammar, once the floor admits it and the client
+     * advertised the capability and the node cap allows it) — see
+     * {@see \BelConsulting\KiwiCaptchaBundle\Controller\ChallengeController::effectiveExecutionVersion()}.
      */
     public function minExecutionVersion(): ?int
     {
@@ -397,17 +401,17 @@ final class SecurityEpochMonitor
                 }
             }
             // A corrupt execution floor (abc, -1, 1.5, 1e3, overflow)
-            // stays null — an unconfirmed floor that only keeps execution
-            // version 2 unemitted (the fail-safe direction for the writer
-            // gate), never silently collapsed to the permissive 0. The
-            // stale window is deliberately NOT refreshed by this field
-            // either.
+            // stays null — an unconfirmed floor that only keeps every
+            // rung above execution version 1 unemitted (the fail-safe
+            // direction for the writer gate), never silently collapsed
+            // to the permissive 0. The stale window is deliberately NOT
+            // refreshed by this field either.
         }
         // A confirmed policy without the min_execution_version key has no
         // declared execution floor and reads 0 — permissive at the read
-        // level (it imposes nothing on the readiness gate), but below 2,
-        // so the issuance gate never emits execution version 2 until the
-        // operator explicitly declares the floor.
+        // level (it imposes nothing on the readiness gate), but a missing
+        // floor keeps every rung above execution version 1 unemitted
+        // until the operator explicitly declares one.
         if ($executionFloor === null && !\array_key_exists(self::MIN_EXECUTION_VERSION_FIELD, $policy)) {
             $executionFloor = 0;
         }

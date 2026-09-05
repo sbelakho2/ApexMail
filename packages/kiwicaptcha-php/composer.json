@@ -1,6 +1,6 @@
 {
     "name": "kiwicaptcha/kiwicaptcha-php",
-    "description": "KiwiCaptcha: privacy-first, self-hosted proof-of-work anti-abuse engine for PHP. Zero third-party services or tracking; optional first-party telemetry; pure-PHP verification.",
+    "description": "KiwiCaptcha: privacy-first, self-hosted proof-of-work anti-abuse engine for PHP. Zero third-party services or tracking; optional first-party telemetry; PHP-native verification (the optional RSW time-lock algorithm uses GMP).",
     "type": "library",
     "license": "MIT",
     "keywords": ["captcha", "proof-of-work", "sha256", "argon2", "security", "privacy"],
@@ -17,6 +17,7 @@
         "psr/log": "^3.0"
     },
     "suggest": {
+        "ext-gmp": "Required only for the optional RSW time-lock algorithm",
         "psr/cache": "Required for the PSR-6 challenge storage adapter (Psr6Storage)",
         "psr/log": "Optional structured logging of verify outcomes",
         "bel-consulting/kiwicaptcha-symfony": "Symfony bundle integration (form type, validator constraint, Twig widget, challenge endpoint)"

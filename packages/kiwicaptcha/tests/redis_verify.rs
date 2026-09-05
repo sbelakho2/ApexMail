@@ -303,6 +303,26 @@ fn issue_armed_execution(target_bits: u32) -> kiwicaptcha::challenge::Issued {
     .expect("armed issuance")
 }
 
+/// The same issuance at an explicit execution version, so the
+/// register-maximum suite can arm the version-5 causal object-graph
+/// grammar.
+fn issue_armed_execution_at(target_bits: u32, version: u8) -> kiwicaptcha::challenge::Issued {
+    issue_challenge_with_execution(
+        &execution_config(target_bits),
+        "login",
+        IP,
+        now_unix(),
+        now_micros(),
+        0,
+        None,
+        true,
+        Some("login-action"),
+        Some(version),
+        false,
+    )
+    .expect("armed issuance")
+}
+
 /// The executed trace (plaintext) of an issued program and its unpadded
 /// base64url wire encoding — the exact digest:trace evidence a real
 /// browser interpreter run produces (mirrors the canonical helpers of
@@ -1881,6 +1901,90 @@ fn execution_armed_v4_record_verifies_through_the_production_verifier() {
             VerifyOutcome::Valid { .. }
         ),
         "an execution-armed v4 record must verify through the production verifier"
+    );
+}
+
+#[test]
+fn execution_armed_record_at_the_register_maximum_verifies_through_the_production_verifier() {
+    // The register-maximum direction of the same contract: an armed
+    // issuance at execution::MAX_EXECUTION_VERSION (the version-5
+    // causal object-graph grammar) stores the authenticated triplet,
+    // its program decodes at the maximum and carries the version-5
+    // spine ops, and the real digest:trace evidence verifies through
+    // the production verifier over Redis.
+    let Some(url) = redis_url() else { return };
+    let prefix = prefix("v5-armed-max");
+    let issued = issue_armed_execution_at(4, kiwicaptcha::execution::MAX_EXECUTION_VERSION);
+    assert_eq!(
+        issued.record.protocol_version, 4,
+        "an execution-armed issuance writes protocol v4"
+    );
+    assert_eq!(
+        issued.record.execution_version,
+        Some(kiwicaptcha::execution::MAX_EXECUTION_VERSION),
+        "the record rides the register maximum"
+    );
+    let decoded = execution::decode(issued.record.execution_program.as_deref().expect("armed"))
+        .expect("the max-register program parses");
+    assert_eq!(
+        decoded.op_version,
+        kiwicaptcha::execution::MAX_EXECUTION_VERSION
+    );
+    let spine_codes: Vec<u8> = decoded
+        .ops
+        .iter()
+        .filter(|op| {
+            matches!(
+                op.opcode,
+                execution::OP_DOM_CLONE
+                    | execution::OP_DOM_REPARENT
+                    | execution::OP_DOM_URL_CANON
+                    | execution::OP_DOM_TEXT_MUTATE
+            )
+        })
+        .map(|op| op.opcode)
+        .collect();
+    assert_eq!(
+        spine_codes.len(),
+        4,
+        "the max-register program carries the version-5 spine ops"
+    );
+    let counter = solve_for_test(&issued.record).expect("4-bit sha solves");
+    let (digest, trace_b64) = execution_evidence(&issued.record);
+    let standard: String = trace_b64
+        .chars()
+        .map(|c| match c {
+            '-' => '+',
+            '_' => '/',
+            c => c,
+        })
+        .collect();
+    let padded = format!("{standard}{}", "=".repeat((4 - standard.len() % 4) % 4));
+    let trace = String::from_utf8(B64.decode(padded).expect("the padded trace base64 decodes"))
+        .expect("the trace is utf-8");
+    let token = SolutionToken {
+        nonce: issued.record.nonce.clone(),
+        counter,
+        duration_ms: 5000,
+        telemetry: serde_json::json!({}),
+        execution_digest: Some(digest.clone()),
+        execution_trace: Some(trace_b64.clone()),
+        rsw_proof: None,
+    }
+    .encode();
+    let issued_at_ns = issued.record.issued_at_ns;
+
+    let verifier = verifier_for(&url, &prefix);
+    verifier.store().store(&issued.record).unwrap();
+    let outcome = verify_at(&verifier, &token, issued_at_ns);
+    assert!(
+        matches!(outcome, VerifyOutcome::Valid { .. }),
+        "a max-register armed record must verify through the production verifier"
+    );
+    println!(
+        "EXECUTION_AT_MAX_REGISTER: v{} trace carries dclone/drepar/durlc: {}",
+        kiwicaptcha::execution::MAX_EXECUTION_VERSION,
+        trace.contains("dclone(") && trace.contains("durlc(")
     );
 }
 

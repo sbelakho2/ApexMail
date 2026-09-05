@@ -244,8 +244,8 @@ final class Configuration implements ConfigurationInterface
                     ->max(Config::MAX_SHA_TARGET_BITS)
                 ->end()
                 ->integerNode('argon2_difficulty_bits')
-                    ->info('Leading zero bits for Argon2id challenges (default 8, max 10).')
-                    ->defaultValue(8)
+                    ->info('Leading zero bits for Argon2id challenges (default 4, max 10). The default was retuned from 8 after the client-performance lab measured the 8-bit rung (16 MiB, t=3, p=1) at ≈16 s p95 on a mainstream desktop — above the absolute 5000 ms UX ceiling; 4 keeps the ordinary solve inside the ceiling, with the elevated rungs reachable via adaptive risk escalation (never the default).')
+                    ->defaultValue(4)
                     ->min(1)
                     // Same ceiling as the core's Argon2id target-bits max.
                     ->max(10)
@@ -599,9 +599,9 @@ final class Configuration implements ConfigurationInterface
                             ->max(65536)
                         ->end()
                         ->arrayNode('argon_escalation_target_bits')
-                            ->info('Target-difficulty escalation ladder of the three adaptive Argon actions: EXACTLY 3 entries — Argon16, Argon32, Argon64 — strictly increasing within 1..Config::MAX_ARGON2_TARGET_BITS (default [1, 4, 8]). The Argon2id memory stays at risk.argon_verification_memory_kib for every action (t=3, p=1); only the expected nonce search space escalates, so the server verification cost ceiling is risk-independent. A ladder violating 1 <= rung1 < rung2 < rung3 <= Config::MAX_ARGON2_TARGET_BITS is refused at configuration time (the rungs must be strictly increasing and bounded by the core\'s Argon2id widget ceiling).')
+                            ->info('Target-difficulty escalation ladder of the three adaptive Argon actions: EXACTLY 3 entries — Argon16, Argon32, Argon64 — strictly increasing within 1..Config::MAX_ARGON2_TARGET_BITS (default [1, 2, 4]). The Argon2id memory stays at risk.argon_verification_memory_kib for every action (t=3, p=1); only the expected nonce search space escalates, so the server verification cost ceiling is risk-independent. The default was retuned from [1, 4, 8] after the client-performance lab measured the 8-bit rung (16 MiB, t=3, p=1) at ≈16 s p95 on a mainstream desktop — above the absolute 5000 ms UX ceiling; 4 keeps the highest ordinary rung inside the ceiling (rungs above it remain reachable, but only under adaptive escalation, never as the default). A ladder violating 1 <= rung1 < rung2 < rung3 <= Config::MAX_ARGON2_TARGET_BITS is refused at configuration time (the rungs must be strictly increasing and bounded by the core\'s Argon2id widget ceiling).')
                             ->integerPrototype()->min(1)->max(Config::MAX_ARGON2_TARGET_BITS)->end()
-                            ->defaultValue([1, 4, 8])
+                            ->defaultValue([1, 2, 4])
                             ->validate()
                                 ->ifTrue(static fn (array $v): bool => \count($v) !== 3
                                     || $v[0] >= $v[1]
@@ -987,7 +987,7 @@ final class Configuration implements ConfigurationInterface
                     ->end()
                 ->end()
                 ->integerNode('execution_version')
-                    ->info('THE NODE\'S EXECUTION-PROGRAM VERSION CAP (1..4, default 1): the operator-side ceiling of the grammar this deployment emits. Version 2 (the causal observe grammar, opcode 33) is emitted ONLY when every rung of the three-way gate is up: the client advertised execution_max_version >= 2 with the challenge request (the current widget driver does when the deployment configured the execution tier; an older driver never advertises), this cap is raised to 2, AND the confirmed central security-policy floor ({kiwi:<ns>}:security-policy min_execution_version) is >= 2. Any other combination emits version 1, the construction-to-probe grammar every interpreter generation runs, so a mixed fleet of old binaries and stale open pages can never be handed the newer grammar. The cap defaults to 1: raising it is the explicit operator step that declares this node ready to write version-2 programs, mirroring risk.decoy_v3_enabled as a writer switch. The semantic spelling kiwi_captcha.execution_max_version is a canonicalized alias of this option: Symfony Config folds both names onto one processed value, and setting both to different values is refused. The legacy name stays valid through the one-major-version compatibility window. See operations.md "Execution versioning" for the rollout procedure.')
+                    ->info('THE NODE\'S EXECUTION-PROGRAM VERSION CAP (1..4, default 1): the operator-side ceiling of the grammar this deployment emits. A rung N above version 1 is emitted ONLY when every rung of the three-way gate is up for N: the client advertised execution_max_version >= N with the challenge request (the current widget driver does when the deployment configured the execution tier; an older driver never advertises), this cap is raised to at least N, AND the confirmed central security-policy floor ({kiwi:<ns>}:security-policy min_execution_version) is >= N. Below the confirmed rungs the issuance emits the strongest grammar the confirmed rungs admit — version 1, the construction-to-probe grammar every interpreter generation runs, when no rung is confirmed — so a mixed fleet of old binaries and stale open pages can never be handed a newer grammar. The cap defaults to 1: raising it is the explicit operator step that declares this node ready to write that rung\'s programs, mirroring risk.decoy_v3_enabled as a writer switch. The semantic spelling kiwi_captcha.execution_max_version is a canonicalized alias of this option: Symfony Config folds both names onto one processed value, and setting both to different values is refused. The legacy name stays valid through the one-major-version compatibility window. See operations.md "Execution versioning" for the rollout procedure.')
                     ->min(1)
                     ->max(4)
                     ->defaultValue(1)

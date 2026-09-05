@@ -35,6 +35,7 @@
 use hkdf::Hkdf;
 use sha2::Sha256;
 
+use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The public (non-secret) deployment salt for the HKDF-based extraction
@@ -71,11 +72,26 @@ pub const INFO_TENANT_ROOT_PREFIX: &[u8] = b"kiwi/v2/tenant/";
 /// All cryptographic primitives in the crate derive their key internally from
 /// the master via [`DerivedKeys::from_master`], so callers keep passing the
 /// master secret — no existing constructor signature changes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Debug` is implemented manually: the derived formatter would print the
+/// raw purpose keys (the effective challenge-signing, IP-binding and
+/// result-token key material) into logs, so the manual impl prints the same
+/// field set with every key value replaced by `"<redacted>"`.
+#[derive(Clone, PartialEq, Eq)]
 pub struct DerivedKeys {
     challenge: [u8; 32],
     ip_bind: [u8; 32],
     result: [u8; 32],
+}
+
+impl fmt::Debug for DerivedKeys {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DerivedKeys")
+            .field("challenge", &"<redacted>")
+            .field("ip_bind", &"<redacted>")
+            .field("result", &"<redacted>")
+            .finish()
+    }
 }
 
 impl DerivedKeys {
@@ -223,5 +239,17 @@ mod tests {
         let prefixed = DerivedKeys::from_master(MASTER, Some("acme-prod"));
         assert_ne!(exact.challenge_key(), prefixed.challenge_key());
         assert_eq!(DerivedKeys::from_master(MASTER, Some("acme")), exact);
+    }
+
+    #[test]
+    fn derived_keys_debug_redacts_the_purpose_keys() {
+        let keys = DerivedKeys::from_master(MASTER, None);
+        // The Debug shape must never print the purpose keys: the derived
+        // keys are the effective signing/IP-binding/result-token material.
+        assert_eq!(
+            format!("{keys:?}"),
+            "DerivedKeys { challenge: \"<redacted>\", ip_bind: \"<redacted>\", result: \"<redacted>\" }"
+        );
+        assert!(!format!("{keys:?}").contains(MASTER));
     }
 }

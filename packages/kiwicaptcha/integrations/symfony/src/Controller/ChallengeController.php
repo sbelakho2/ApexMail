@@ -17,6 +17,8 @@ use BelConsulting\KiwiCaptchaBundle\Security\IssuanceRateLimiter;
 use BelConsulting\KiwiCaptchaBundle\Security\OutstandingChallenges;
 use BelConsulting\KiwiCaptchaBundle\Security\ScopeIssuanceCap;
 use KiwiCaptcha\Config;
+use KiwiCaptcha\ExecutionChallengeGenerator;
+use KiwiCaptcha\ExecutionVersionPolicy;
 use KiwiCaptcha\Issuer;
 use KiwiCaptcha\Risk\RiskAction;
 use KiwiCaptcha\Risk\RiskEventKind;
@@ -53,15 +55,15 @@ final class ChallengeController
     private const ACCEPTED_PAYLOAD_FIELDS = ['scope', 'algorithm', 'request_binding', 'action', 'cdata', 'sitekey', 'decoy_field', 'honeypot', 'client_context', 'chain_ticket'];
 
     /**
-     * The highest execution-program grammar version this node can emit.
-     * Mirrors the core's ExecutionChallengeGenerator::MAX_EXECUTION_VERSION
-     * (3 = the sibling-index traversal grammar; 2 = the causal observe
-     * grammar; 1 = the construction-to-probe grammar). The effective
-     * per-issuance version is selected by
+     * The highest execution-program grammar version this node can emit,
+     * taken from the core generator
+     * ({@see ExecutionChallengeGenerator::MAX_EXECUTION_VERSION}) so
+     * the capability ceiling can never drift from the emission
+     * maximum. The effective per-issuance version is selected by
      * {@see self::effectiveExecutionVersion()}; the capability a client
      * advertises is capped at this ceiling.
      */
-    private const MAX_EXECUTION_VERSION = 4;
+    private const MAX_EXECUTION_VERSION = ExecutionChallengeGenerator::MAX_EXECUTION_VERSION;
 
     /** Turnstile-compatible shapes, per Cloudflare's docs. */
     private const ACTION_PATTERN = '/^[a-z0-9_-]{1,32}$/i';
@@ -394,24 +396,18 @@ final class ChallengeController
      * The effective execution-program grammar version of this issuance,
      * the real execution-versioning gate of the dimension.
      *
-     * The effective grammar is the strongest version whose rungs are
-     * all up. Version 3 (the sibling-index traversal grammar) needs
-     * the client header, the node cap and the confirmed central floor
-     * at 3; version 2 (the causal observe grammar) needs them at 2.
-     * An older client never advertises and receives version 1.
+     * The shared {@see ExecutionVersionPolicy} derives the effective
+     * fleet tier from the node cap, the confirmed central
+     * min_execution_version floor (null or 0 counts as version 1) and
+     * the generator maximum. The issuance is the client's advertised
+     * capability capped by that tier. An older client never advertises
+     * and receives version 1.
      * A policy that is absent, unreadable or unconfirmed reads null,
      * so only version 1 may be emitted: the mirror of the protocol-v4
      * rule, where no confirmed central policy means no arming. A
      * confirmed policy without the key reads 0, a permissive state
      * with no declared floor, so the newer grammars are never emitted
      * until the operator declares the floor explicitly.
-     *
-     * Everything else emits version 1, the construction-to-probe
-     * grammar with opcodes 0..32 and no observe opcode, which every
-     * interpreter generation runs. The two generations are
-     * distinguishable by the version byte alone, so a mixed fleet of
-     * old binaries and stale open pages can never be handed the newer
-     * grammar by accident.
      *
      * The protocol-v4 emission gate, {@see self::executionArmingEnabled()},
      * stays the protocol gate: arming itself still requires the
@@ -420,18 +416,12 @@ final class ChallengeController
     private function effectiveExecutionVersion(int $clientCapability): int
     {
         $floor = $this->epochMonitor?->minExecutionVersion();
-        // The version ladder: 3 when the client, the node cap and the
-        // confirmed central floor all reach 3; 2 when they all reach 2;
-        // otherwise 1. The floor is null when no central policy is
-        // confirmed, which never permits the newer grammars.
-        if ($clientCapability >= 3 && $this->executionVersionCap >= 3 && $floor !== null && $floor >= 3) {
-            return 3;
-        }
-        if ($clientCapability >= 2 && $this->executionVersionCap >= 2 && $floor !== null && $floor >= 2) {
-            return 2;
-        }
+        $available = (new ExecutionVersionPolicy(
+            $this->executionVersionCap,
+            $floor === null || $floor < 1 ? null : $floor,
+        ))->effectiveAvailableTier();
 
-        return 1;
+        return max(1, min($clientCapability, $available));
     }
 
     /**
@@ -817,19 +807,22 @@ final class ChallengeController
         // Execution-capability advertisement: the client declares the
         // highest execution-program grammar version its interpreter can
         // run via the `Kiwi-Execution-Max-Version` HTTP request header.
-        // The widget driver sends the header with value 2 when the
-        // deployment configured the execution tier; absence, an empty
-        // value, garbage or a value below 2 means the client only knows
-        // version 1 (an older driver, a stale open page, or any client
-        // that never advertises). The advertisement rides an ignorable
-        // header, never a body field: a server generation that
-        // validates challenge bodies against a closed field set would
-        // answer 422 `UNKNOWN_FIELDS` to an unknown body field, while
-        // an unknown header is ignored. The header is a capability
-        // claim, not a security gate: a malformed value degrades to 1,
-        // never a 422, and the issued version is further capped by the
-        // node config and the central fleet floor, see
-        // {@see self::effectiveExecutionVersion()}.
+        // The widget driver sends the header with its current driver
+        // maximum (the highest execution-program version it can run,
+        // today the generator's `MAX_EXECUTION_VERSION`, 4) when the
+        // deployment configured the execution tier. Absence, an empty
+        // value or garbage means the client only knows version 1 (an
+        // older driver, a stale open page, or any client that never
+        // advertises). A smaller valid advertisement caps the issued
+        // grammar at that older version. The advertisement rides an
+        // ignorable header, never a body field: a server generation
+        // that validates challenge bodies against a closed field set
+        // would answer 422 `UNKNOWN_FIELDS` to an unknown body field,
+        // while an unknown header is ignored. The header is a
+        // capability claim, not a security gate: a malformed value
+        // degrades to 1, never a 422, and the issued version is
+        // further capped by the node config and the central fleet
+        // floor, see {@see self::effectiveExecutionVersion()}.
         $clientExecutionCapability = 1;
         $rawCapability = $request->headers->get('Kiwi-Execution-Max-Version');
         if (\is_string($rawCapability) && preg_match('/^(?:0|[1-9][0-9]*)$/D', $rawCapability) === 1) {
@@ -1538,11 +1531,12 @@ final class ChallengeController
             // rides the program (bounded 1..32 chars, already validated
             // above) so the digest binds the action. The grammar
             // version of the program is the effective execution version
-            // of this issuance, {@see self::effectiveExecutionVersion()}
-            // — version 2 (the causal observe grammar) only when the
-            // client advertised it, the node's execution_version cap is
-            // >= 2 and the confirmed central min_execution_version
-            // floor is >= 2; every other issuance stamps version 1.
+            // of this issuance, {@see self::effectiveExecutionVersion()}:
+            // the client's advertised capability capped by the
+            // deployment tier (the node's execution_version cap, the
+            // confirmed central min_execution_version floor and the
+            // generator maximum). An older client never advertises and
+            // receives version 1.
             $armExecution = $this->executionArmingEnabled($executionRiskDecision);
             $executionVersion = $this->effectiveExecutionVersion($clientExecutionCapability);
             // The server-owned required execution tier: the client

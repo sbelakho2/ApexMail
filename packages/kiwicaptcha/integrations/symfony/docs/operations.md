@@ -113,6 +113,16 @@ version. kiwicaptcha:doctor reports the armed posture, so a deploy
 gate can confirm every node verifies the rung before traffic is
 routed to it.
 
+The configuration boundary refuses weak or inconsistent pairs at
+boot: a modulus with a small prime factor, a probable-prime modulus,
+and a lambda that fails the deterministic consistency spot-check
+over the fixed small-prime base set are configuration errors.
+Record the rsw_modulus_n_sha256 fingerprint from the keygen run as
+the identity of the deployed modulus, and spot-check a node with the
+keygen's --fingerprint mode when a rotation or redeployment is
+audited. The primes themselves stay off the servers: only the
+--diagnostic run of the generator ever prints them.
+
 ### Budget guidance
 
 The worker asset carries the rsw solver inside the existing worker
@@ -230,8 +240,11 @@ Under `ha_authority: pinned_primary` (derived by the `ha_safe` protection profil
     Transient probe timeouts never fail readiness on their own.
     The first failure is debounced for one cache window; two consecutive failures flip readiness;
   - the central security-policy state is compatible.
-    The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch` and the optional `min_execution_version`), when present, requires `min_protocol_version <= 4` (this binary's max protocol: the execution-capable v4 canonical), `min_execution_version <= 2` (this binary's max execution-program version; an absent execution floor imposes nothing) and `min_policy_epoch <= risk.policy_version`.
-    When absent, the binary's own configuration is authoritative;
+    The Redis hash `{kiwi:<ns>}:security-policy` (fields `min_protocol_version`, `min_policy_epoch` and the optional `min_execution_version`), when present, requires `min_protocol_version <= 4` (this binary's max protocol: the execution-capable v4 canonical), `min_execution_version <= 4` (this binary's max execution-program version, the core generator's maximum; an absent execution floor imposes nothing) and `min_policy_epoch <= risk.policy_version`.
+    When absent, the binary's own configuration is authoritative.
+  - the required execution tier is satisfiable, only when `risk.execution_challenge` is on. The effective fleet tier is the policy minimum of the node's `kiwi_captcha.execution_version` cap, the central `min_execution_version` floor (absent or 0 counts as version 1) and the generator's maximum execution version.
+    A configured `kiwi_captcha.execution_required_version` above the effective tier refuses readiness (503 `security_policy_incompatible:execution_required_R_effective_E`), because every armed request would refuse every client until the confirmed floor reaches the required tier.
+    When the gate is off the leg is inert.
   - the memory-budget invariant holds (only when `risk.container_memory_mib` is configured):
     `argon2_max_concurrent_verifications × the fixed Argon verification envelope (risk.argon_verification_memory_kib, the risk ladder's worst-case per-verification memory; default 16384 KiB) + 256 MiB headroom <= container_memory_mib`.
     A violated invariant refuses startup (503 `memory_budget_invariant`).
@@ -379,24 +392,29 @@ Residual bounds and failure behavior:
 Protocol v4 carries a second, independent generation signal inside the
 execution dimension: the execution-program grammar version stamped into
 every armed program's version byte. Version 1 is the
-construction-to-probe grammar with opcodes 0..32; version 2 adds the
+construction-to-probe grammar with opcodes 0..32. Version 2 adds the
 causal observe grammar, whose opcode 33 reads a genuine browser layout
-measurement. Older binaries and stale open pages only know version 1,
-so version 2 must never reach them: a mixed fleet cannot tell the two
-grammars apart by protocol_version alone, since both are protocol v4.
+measurement. Version 3 adds a second constructed node and the
+sibling-index traversal probe (opcode 34), a real DOM walk. Version 4
+adds the nested-tree ops: opcode 35 builds a child under the current
+node and the depth probe (opcode 36) walks the real ancestor chain.
+Older binaries and stale open pages only know version 1, so the newer
+grammars must never reach them: a mixed fleet cannot tell the
+grammars apart by protocol_version alone, since every execution
+version rides protocol v4.
 
 The client capability declaration is never an authority over the
 grammar a hostile solver must solve. With
-`kiwi_captcha.execution_required_version` set to 2 (default 1), an
-execution-armed request from a client that cannot solve version 2 is
+`kiwi_captcha.execution_required_version` set above 1 (default 1), an
+execution-armed request from a client below the required tier is
 refused with the deterministic
 `CLIENT_EXECUTION_VERSION_UNSUPPORTED` outcome: reload or upgrade the
-widget. The server never downgrades to version 1 and never issues an
+widget. The server never downgrades the grammar and never issues an
 unarmed challenge. The required tier is the final step of the
-transition. Keep it at 1 while the fleet moves to the version-2
-generation (this node's `execution_version` cap = 2 everywhere and
-the central `min_execution_version` = 2), then raise it to 2 once
-every serving page can solve version 2.
+transition. Keep it at 1 while the fleet climbs the ladder (this
+node's `execution_version` cap and the central `min_execution_version`
+floor equal the destination tier), then raise it once every serving
+page can solve that tier.
 
 The grammar knobs carry two spellings each. The semantic names
 `kiwi_captcha.execution_max_version` and
@@ -420,17 +438,28 @@ with the execution gate on and `execution_required_version` below
 hardened posture raises the required tier to the cap, the destination
 of every rollout. The explicit escape hatch,
 `kiwi_captcha.execution_allow_downgrade: true`, accepts the deliberate
-downgrade window while the fleet transitions. The doctor reports the
-resulting posture: it passes when the required tier equals the node
-cap, and it warns (exit 0) when the window is open, naming the flag
-as the only thing that permits the downgrade. Balanced and
-privacy_strict deployments never apply the invariant: their required
-tier stays operator-owned.
+downgrade window while the fleet transitions.
+
+The doctor and the readiness probe audit the required tier against
+the effective fleet tier, never against the node cap alone. The
+shared ExecutionVersionPolicy takes the minimum of the node cap, the
+confirmed central `min_execution_version` floor (absent or 0 counts
+as version 1) and the generator's maximum execution version.
+A required tier above the effective fleet tier fails the doctor check
+and refuses readiness. Every armed request would refuse the clients
+below the required tier while the fleet can emit only up to the
+effective tier, so the requirement is unsatisfiable until the
+confirmed floor rises. A required tier below the effective tier is a
+client-downgradeable window, and `protocol_rollout.mode: migration`
+is the only state that accepts it (`WARN`, exit 0). In the normal
+state the window fails under `high_abuse`, since the strongest abuse
+profile must require the strongest confirmed tier, and warns under
+the balanced and privacy_strict profiles.
 
 The issuance-side gate is three-way per grammar version. A node emits
 version N above 1 only when every rung for that N is up (the ladder
-reaches 3 when the client, the cap and the floor all reach 3, else 2
-when they all reach 2, else 1):
+lands on the highest N whose client, cap and floor all reach it, with
+1 as the always-available floor):
 
 1. the client advertised at least version N with the challenge
    request, carried by the `Kiwi-Execution-Max-Version` request
@@ -448,10 +477,11 @@ when they all reach 2, else 1):
    exactly like the `min_protocol_version` rule keeps an unconfirmed
    floor from arming v3 or v4.
 
-The procedure mirrors the v4 rollout. Deploy the version-2-capable
+The procedure mirrors the v4 rollout. Deploy the destination-capable
 binaries and interpreter assets everywhere, confirm no older binary or
-stale page remains that would misparse a version-2 program, then
-declare the floor and raise the node caps:
+stale page remains that would misparse the newer program, then
+declare the floor and raise the node caps. The example below walks
+the mechanics with tier 2 as the destination:
 
 ```bash
 redis-cli HSET "{kiwi:<namespace>}:security-policy" \
@@ -461,13 +491,13 @@ redis-cli HSET "{kiwi:<namespace>}:security-policy" \
 #         execution_version: 2
 ```
 
-A node whose cap or floor is below 2 keeps emitting version-1 programs
-to every client, byte-compatible with the version-1 grammar. A rollback
-lowers the floor (or deletes the key) before older binaries are
-re-admitted; the next re-read stops version-2 emission within one cache
-window. Version-1 and version-2 records both verify on the current
-generation for the remainder of their TTL, so the drain window only
-bounds stale open pages, never stored records.
+A node whose cap or floor is below the destination rung keeps emitting
+version-1 programs to every client, byte-compatible with the version-1
+grammar. A rollback lowers the floor (or deletes the key) before older
+binaries are re-admitted; the next re-read stops the newer emission
+within one cache window. Records of every accepted version verify on
+the current generation for the remainder of their TTL, so the drain
+window only bounds stale open pages, never stored records.
 
 The execution floor gained its reader-side enforcement (the readiness
 gate) only in this binary generation. An older serving binary does not
@@ -475,21 +505,39 @@ know the `min_execution_version` field at all: its readiness probe
 keeps enforcing only `min_protocol_version` and `min_policy_epoch`, so
 it stays in the pool however high the execution floor is raised. The
 execution floor therefore drains nothing by itself, unlike the protocol
-floor. Raising `min_execution_version` to 2 requires every serving
-binary to support execution version 2 first. This binary's
-`/health/ready` enforces the floor mechanically: a declared floor above
-its max execution version (2) takes the node out of the pool. Older
-binaries ignore the field, so the operator must not raise the floor
-until this fixed generation is fully deployed.
+floor. Raising `min_execution_version` above 1 requires every serving
+binary to support the destination grammar first. This binary's
+`/health/ready` enforces the floor mechanically in two legs. A
+declared floor above its max execution version (the core generator's
+maximum) takes the node out of the pool. And when the execution gate
+is on, readiness requires the configured `execution_required_version`
+to be satisfiable against the effective fleet tier, the policy
+minimum of the node cap, the confirmed floor (absent or 0 counts as
+version 1) and the generator maximum. An unsatisfiable tier returns
+503 with `security_policy_incompatible:execution_required_R_effective_E`:
+a required tier of 2 with the floor absent or at 1 is exactly that
+state, since every armed request refuses clients below tier 2 while
+the node can emit only version 1. Older binaries ignore the field, so
+the operator must not raise the floor until this fixed generation is
+fully deployed.
 
 The doctor's protocol-writer checks keep covering the execution
 surface: under `high_abuse` (which turns `risk.execution_challenge` on
 by default) a node that arms the dimension without the confirmed
 protocol-v4 floor fails the deploy gate unless
 `protocol_rollout.mode: migration` declares the deliberate deferral.
-The version rungs above ride on top of that gate: they only choose
-between the version-1 and version-2 grammar of an already-armed
-issuance.
+On top of that writer gate, the doctor's execution-versioning check
+audits the required tier against the effective fleet tier through the
+same shared policy, so issuance, the doctor and the readiness probe
+can never derive different tiers:
+
+| protection profile | required tier vs effective fleet tier | `protocol_rollout.mode` | Doctor status |
+|---|---|---|---|
+| any | above | any | FAIL: armed requests cannot satisfy the deployment requirement |
+| any | equal | any | PASS: the strongest confirmed grammar is server-required |
+| any | below | migration | WARN (exit 0): the deliberate two-phase downgrade window |
+| high_abuse | below | normal | FAIL: high_abuse normal mode must require the strongest confirmed tier |
+| balanced / privacy_strict | below | normal | WARN (exit 0): raise the required tier to the effective tier or declare the migration state |
 
 The post-solve disposition record schema migrates in two phases.
 This release writes schema version 1 (chain_required records carry their chain_expires_at bound, a shape an earlier release already accepts) and reads both versions 1 and 2.
@@ -638,11 +686,14 @@ a program pays zero bytes for it. The privacy_strict profile forces the
 gate off; high_abuse arms it; balanced defaults it off. See
 configuration.md "ExecutionChallengeV1" for the operator contract.
 
-The V2 causal-consistency semantics are experimental: every armed
-program opens with a guaranteed causal graph (DOM construction, a u8
-array, an observe op reading the real text metrics of the constructed
-node, then a byte read-back). The verifier replays the graph forward
-from the reported value.
+The V2 causal-consistency semantics are experimental, and versions 3
+and 4 build on them. Every armed program from version 2 up opens with
+a guaranteed causal graph (DOM construction, a u8 array, an observe op
+reading the real text metrics of the constructed node, then a byte
+read-back). Version 3 adds the sibling-index traversal probe against a
+second constructed node, and version 4 builds the nested tree whose
+ancestor-depth walk closes the program (see configuration.md). The
+verifier replays the graph forward from the reported value.
 A valid trace therefore requires the full causal semantics; a short
 pure synthesis that skips the write-through is rejected. A solver
 implementing the complete public semantics can still emit a coherent
@@ -651,24 +702,26 @@ a browser.
 
 ### Adversarial benchmark: the browserless oracle
 
-Execution versions 1 through 3 are forgeable without a browser, and
-the regression suites pin that boundary on purpose. The test-only
-shadow solver decodes each program, replays the interpreter's own
-semantics, picks an arbitrary legal observed height (1 to 255), and
-emits a trace the verifier accepts. The oracle runs 100 generated
-programs per version at heights 1, 10, 17 and 255 and asserts every
-trace verifies and digests. Mirrors live in the PHP suite
+Every live grammar rung is forgeable without a browser, versions 1
+through the generator's `MAX_EXECUTION_VERSION`, the causal
+object-graph rung included. The regression suites pin that boundary on
+purpose: the oracle fails mechanically if a future rung ever lands
+before the solver models it. The test-only shadow solver
+decodes each program, replays the interpreter's own semantics, picks
+an arbitrary legal observed height (1 to 255), and emits a trace the
+verifier accepts. The oracle runs 100 generated programs per version
+at heights 1, 10, 17 and 255 and asserts every trace verifies and
+digests. Mirrors live in the PHP suite
 (BrowserlessExecutionForgeryTest) and the Rust execution module with
 identical acceptance assertions.
 
-This oracle is the adversarial benchmark for the next grammar. A
-future version-4 object-graph grammar tests real Web Platform
-semantics: classList, selectors, traversal, fragments, clone and
-reparent, and event ordering. The same oracle must fail on that
-grammar unless the solver implements those semantics. Acceptance
-criterion: the oracle keeps accepting every v1, v2 and v3 trace, and
-the version-4 extension is accepted only when it reproduces the
-tested Web Platform behavior instead of the shadow model.
+The trace is supplementary evidence, reproducible by any
+implementation of the public semantics, never a browser attestation.
+Acceptance criterion: the oracle keeps accepting every trace the
+generator mints at any live version up to its
+`MAX_EXECUTION_VERSION`. A grammar extension beyond that maximum is
+accepted only when the solver reproduces the tested Web Platform
+behavior instead of the shadow model.
 
 ## Graceful shutdown sequence
 

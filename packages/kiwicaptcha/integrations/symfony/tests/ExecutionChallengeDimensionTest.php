@@ -98,6 +98,25 @@ final class ExecutionChallengeDimensionTest extends TestCase
         );
     }
 
+    public function testTheReadinessProbeReceivesTheSameExecutionKnobsAsTheController(): void
+    {
+        // The readiness probe derives the same effective fleet tier as
+        // issuance, so it must receive the same processed values: the
+        // gate state, the node cap and the required tier.
+        $container = $this->load([[
+            'secret_key' => self::SECRET,
+            'execution_key' => self::EXECUTION_KEY,
+            'execution_version' => 2,
+            'execution_required_version' => 2,
+            'risk' => ['redis_service' => 'fake_redis', 'execution_challenge' => 'on'],
+        ]]);
+
+        $health = $container->getDefinition(\BelConsulting\KiwiCaptchaBundle\Controller\KiwiHealthController::class);
+        self::assertTrue($health->getArgument('$executionGate'), 'the readiness probe must see the execution gate on');
+        self::assertSame(2, $health->getArgument('$executionVersionCap'), 'the readiness probe must see the node cap');
+        self::assertSame(2, $health->getArgument('$executionRequiredVersion'), 'the readiness probe must see the required tier');
+    }
+
     public function testPrivacyStrictProfileForcesTheGateOffEvenAgainstAnExplicitOverride(): void
     {
         $container = $this->load([[
@@ -453,6 +472,48 @@ final class ExecutionChallengeDimensionTest extends TestCase
         self::assertSame(200, $response->getStatusCode(), (string) $response->getContent());
         $payload = json_decode((string) $response->getContent(), true);
         self::assertSame(1, $this->programVersion($payload['execution_program']), 'default tier 1 emits version 1 to a headerless client');
+    }
+
+    public function testRequiredExecutionVersionThreeRefusesWhileTheConfirmedFloorIsBelowTheTier(): void
+    {
+        // The effective tier is a floor-gated ladder, not a client
+        // promise: with the node cap at 3 but the confirmed central
+        // floor at 2, every request that would need version 3 is
+        // refused with the deterministic client-unsupported code, even
+        // when the client advertises version 3. The issuance can only
+        // emit up to the confirmed floor, so the required tier is
+        // unsatisfiable until the fleet floor reaches it, exactly the
+        // posture the doctor and the readiness probe report.
+        $container = $this->load([[
+            'secret_key' => self::SECRET,
+            'execution_key' => self::EXECUTION_KEY,
+            'execution_version' => 3,
+            'execution_required_version' => 3,
+            'redis_service' => 'fake_redis',
+            'risk' => ['enabled' => true, 'redis_service' => 'fake_redis', 'execution_challenge' => 'on'],
+            'storage' => 'kiwi_captcha.storage.array',
+            'difficulty_bits' => 8,
+        ]]);
+        $controller = $container->get(ChallengeController::class);
+        $redis = $container->get('fake_redis');
+        $monitor = $container->get(\BelConsulting\KiwiCaptchaBundle\Risk\SecurityEpochMonitor::class);
+        $this->seedExecutionPolicy($redis, $monitor, executionFloor: 2);
+
+        foreach ([null, '2', '3'] as $capability) {
+            $server = [
+                'CONTENT_TYPE' => 'application/json',
+                'REMOTE_ADDR' => '127.0.0.1',
+                'HTTP_ORIGIN' => 'http://localhost',
+            ];
+            if ($capability !== null) {
+                $server['HTTP_Kiwi_Execution_Max_Version'] = $capability;
+            }
+            $response = $controller->challenge(Request::create('/kiwi-captcha/challenge', 'POST', [], [], [], $server, '{"scope":"login","action":"login-action"}'));
+            self::assertSame(422, $response->getStatusCode(), 'the sub-floor request (capability '.var_export($capability, true).') must be refused');
+            $body = json_decode((string) $response->getContent(), true);
+            self::assertSame('CLIENT_EXECUTION_VERSION_UNSUPPORTED', $body['error']['code'] ?? null, 'the refusal code is deterministic');
+            self::assertArrayNotHasKey('execution_program', $body, 'no weaker grammar is ever handed out');
+        }
     }
 
     public function testVersion3GrammarIsIssuedWhenClientConfigAndFloorAllReachThree(): void

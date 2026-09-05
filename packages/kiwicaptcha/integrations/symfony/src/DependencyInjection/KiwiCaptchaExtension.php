@@ -1790,10 +1790,17 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
         // runs. /health/ready is 200 only when the signing keys are
         // configured, the security Redis answers a (cached) PING and the
         // central security-policy state is compatible
-        // ({kiwi:<ns>}:security-policy: min_protocol_version <= 3 and
-        // min_policy_epoch <= risk.policy_version; key absent = the
-        // binary's own config is authoritative). Argon queue fullness and
-        // transient probe timeouts never fail readiness.
+        // ({kiwi:<ns>}:security-policy: min_protocol_version <= 4,
+        // min_execution_version <= the generator max and min_policy_epoch
+        // <= risk.policy_version; key absent = the binary's own config is
+        // authoritative). Argon queue fullness and transient probe
+        // timeouts never fail readiness.
+        // When the execution dimension is armed (risk.execution_challenge
+        // on), readiness additionally requires the required execution
+        // tier to be satisfiable against the effective fleet tier
+        // (the shared ExecutionVersionPolicy over the node cap and the
+        // central min_execution_version floor); an unsatisfiable tier
+        // returns 503 with the machine-readable reason.
         // A finite container budget requires a finite Argon concurrency
         // cap: 0 means "unlimited", and an unlimited memory-hard workload
         // has no finite worst case — the combination is refused at compile
@@ -1829,6 +1836,15 @@ final class KiwiCaptchaExtension extends Extension implements PrependExtensionIn
             // leaves the pool immediately.
             ->setArgument('$authorityGuards', $authorityGuardRefs)
             ->setArgument('$riskRedis', $riskRedis)
+            // The execution-gate leg: the readiness probe receives the
+            // gate state (risk.execution_challenge), the node's
+            // execution_version cap and the execution_required_version
+            // tier, the same processed values the challenge controller
+            // receives, and derives the effective fleet tier through the
+            // shared ExecutionVersionPolicy.
+            ->setArgument('$executionGate', $config['risk']['execution_challenge'] === 'on')
+            ->setArgument('$executionVersionCap', $config['execution_version'])
+            ->setArgument('$executionRequiredVersion', $config['execution_required_version'])
             ->addTag('controller.service_arguments')->setPublic(true));
 
         // Form type (renders the widget through the form theme). The

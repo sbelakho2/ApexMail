@@ -438,6 +438,203 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         ];
     }
 
+    /**
+     * Boot the execution-versioning scenario kernel (profile, node cap,
+     * execution floor state, required tier, downgrade flag and rollout
+     * mode), seed the protocol-v4 floor (so the writer checks pass) and
+     * run the doctor. Returns the command tester.
+     */
+    private function executionVersioningTester(string $profile, int $cap, ?int $executionFloor, int $required, bool $allowDowngrade, string $rolloutMode): CommandTester
+    {
+        $container = $this->containerFor(new DoctorExecutionRequiredVersionKernel('test', true, $cap, $required, $allowDowngrade, $profile, $rolloutMode));
+        if ($executionFloor === null) {
+            $this->seedProtocolFloor($container, 4);
+        } else {
+            $this->seedFloors($container, 4, $executionFloor);
+        }
+        $tester = $this->doctor($container);
+        $tester->execute([]);
+
+        return $tester;
+    }
+
+    public function testDoctorExecutionVersioningTableHighAbuse(): void
+    {
+        // The exact execution-versioning table under the high_abuse
+        // profile, derived from the shared ExecutionVersionPolicy over
+        // the node cap, the confirmed central floor (absent counts as
+        // version 1) and the generator max. Rows: cap, floor, required,
+        // allow-downgrade flag, rollout mode, expected status.
+        $rows = [
+            [1, 1, 1, false, 'normal', 'PASS', 'equals the strongest effective fleet tier'],
+            [2, 2, 1, true, 'normal', 'FAIL', 'high_abuse normal mode must require the strongest confirmed tier'],
+            [2, 2, 1, true, 'migration', 'WARN', 'accepted only because protocol_rollout.mode "migration"'],
+            [2, 2, 2, false, 'normal', 'PASS', 'equals the strongest effective fleet tier'],
+            [3, 3, 1, true, 'normal', 'FAIL', 'high_abuse normal mode must require the strongest confirmed tier'],
+            [3, 3, 2, true, 'normal', 'FAIL', 'high_abuse normal mode must require the strongest confirmed tier'],
+            [3, 3, 2, true, 'migration', 'WARN', 'accepted only because protocol_rollout.mode "migration"'],
+            [3, 3, 3, false, 'normal', 'PASS', 'equals the strongest effective fleet tier'],
+            [3, 2, 2, true, 'normal', 'PASS', 'equals the strongest effective fleet tier'],
+            [3, 2, 3, false, 'normal', 'FAIL', 'armed requests cannot satisfy the deployment requirement'],
+            [3, null, 2, true, 'normal', 'FAIL', 'armed requests cannot satisfy the deployment requirement'],
+        ];
+        foreach ($rows as [$cap, $floor, $required, $allowDowngrade, $mode, $status, $fragment]) {
+            $tester = $this->executionVersioningTester('high_abuse', $cap, $floor, $required, $allowDowngrade, $mode);
+            $label = sprintf('high_abuse cap %d floor %s required %d mode %s', $cap, var_export($floor, true), $required, $mode);
+            self::assertStringContainsString('['.$status.'] Execution versioning', $tester->getDisplay(), $label);
+            self::assertStringContainsString($fragment, $tester->getDisplay(), $label);
+            self::assertSame($status === 'FAIL' ? Command::FAILURE : Command::SUCCESS, $tester->getStatusCode(), $label);
+        }
+    }
+
+    public function testDoctorExecutionVersioningTableBalancedVariants(): void
+    {
+        // The balanced profile follows the same decision tree without
+        // the high_abuse downgrade failure: the client-downgradeable rows
+        // warn (exit 0) in the normal state, and the migration rows
+        // warn with the deliberate-deferral wording. Rows: cap, floor,
+        // required, rollout mode, expected status.
+        $rows = [
+            [2, 2, 1, 'normal', 'WARN', 'the strongest confirmed grammar stays client-downgradeable'],
+            [2, 2, 1, 'migration', 'WARN', 'accepted only because protocol_rollout.mode "migration"'],
+            [3, 3, 1, 'normal', 'WARN', 'the strongest confirmed grammar stays client-downgradeable'],
+            [3, 3, 2, 'normal', 'WARN', 'the strongest confirmed grammar stays client-downgradeable'],
+            [3, 3, 2, 'migration', 'WARN', 'accepted only because protocol_rollout.mode "migration"'],
+            [3, 3, 3, 'normal', 'PASS', 'equals the strongest effective fleet tier'],
+            [3, 2, 2, 'normal', 'PASS', 'equals the strongest effective fleet tier'],
+            [3, 2, 3, 'normal', 'FAIL', 'armed requests cannot satisfy the deployment requirement'],
+            [3, null, 2, 'normal', 'FAIL', 'armed requests cannot satisfy the deployment requirement'],
+        ];
+        foreach ($rows as [$cap, $floor, $required, $mode, $status, $fragment]) {
+            $tester = $this->executionVersioningTester('balanced', $cap, $floor, $required, false, $mode);
+            $label = sprintf('balanced cap %d floor %s required %d mode %s', $cap, var_export($floor, true), $required, $mode);
+            self::assertStringContainsString('['.$status.'] Execution versioning', $tester->getDisplay(), $label);
+            self::assertStringContainsString($fragment, $tester->getDisplay(), $label);
+            self::assertSame($status === 'FAIL' ? Command::FAILURE : Command::SUCCESS, $tester->getStatusCode(), $label);
+        }
+    }
+
+    public function testDoctorPassesTheExecutionVersioningCheckWhenTheGateIsOff(): void
+    {
+        // No execution dimension at all: the required-tier audit does
+        // not apply, and the check passes regardless of the knobs.
+        $tester = $this->doctor($this->containerFor(new TestKernel('test', true)));
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[PASS] Execution versioning', $display);
+        self::assertStringContainsString('execution dimension is disabled', $display);
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+    }
+
+    public function testDoctorPassesTheExecutionVersioningCheckWhenTheDimensionIsInert(): void
+    {
+        // The gate on without an execution_key never arms: the check
+        // reports the inert state and passes, exactly like issuance.
+        $container = $this->containerFor(new DoctorHighAbuseV3WriterKernel('test', true));
+        $this->seedProtocolFloor($container, 4);
+        $tester = $this->doctor($container);
+        $tester->execute([]);
+
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[PASS] Execution versioning', $display);
+        self::assertStringContainsString('no execution_key is configured: the armed dimension is inert', $display);
+        self::assertStringNotContainsString('[FAIL] Execution versioning', $display);
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+    }
+
+    public function testDoctorFailsWhenTheRequiredTierExceedsTheConfirmedFloorAndNamesTheRungs(): void
+    {
+        // The unsatisfiable row names the cap, the confirmed floor and
+        // the effective tier, so the operator sees exactly which rung
+        // must rise before armed requests can succeed.
+        $tester = $this->executionVersioningTester('high_abuse', 3, 2, 3, false, 'normal');
+
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[FAIL] Execution versioning', $display);
+        self::assertStringContainsString('armed requests cannot satisfy the deployment requirement', $display);
+        self::assertStringContainsString('execution_required_version 3 is above the strongest effective fleet tier 2', $display);
+        self::assertStringContainsString('execution_version cap 3, confirmed central min_execution_version floor 2', $display);
+    }
+
+    public function testDoctorFailsWhenTheFloorIsUnconfirmedAndNamesTheUnconfirmedRung(): void
+    {
+        // An absent central execution floor confirms only version 1:
+        // the effective tier is 1, so a required tier above it is
+        // unsatisfiable and the message names the unconfirmed rung.
+        $tester = $this->executionVersioningTester('high_abuse', 3, null, 2, true, 'normal');
+
+        self::assertSame(Command::FAILURE, $tester->getStatusCode());
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[FAIL] Execution versioning', $display);
+        self::assertStringContainsString('execution_required_version 2 is above the strongest effective fleet tier 1', $display);
+        self::assertStringContainsString('confirmed central min_execution_version floor unconfirmed', $display);
+    }
+
+    public function testDoctorWarnsOnTheMigrationStateDowngradeWindow(): void
+    {
+        // The deliberate two-phase migration state is the only
+        // downgrade-window acceptance: the warning states that the
+        // required tier must be raised once the migration completes.
+        $tester = $this->executionVersioningTester('high_abuse', 3, 3, 2, true, 'migration');
+
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode(), 'the deliberate migration downgrade window must warn, never fail');
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[WARN] Execution versioning', $display);
+        self::assertStringContainsString('accepted only because protocol_rollout.mode "migration" declares the deliberate two-phase rollout', $display);
+        self::assertStringContainsString('Raise execution_required_version to 3 when the migration completes', $display);
+    }
+
+    public function testDoctorFailsOnTheHighAbuseNormalModeDowngradeWindow(): void
+    {
+        // The strongest abuse profile in the normal state must require
+        // the strongest confirmed tier: the flag-accepted downgrade
+        // window still fails the deploy gate until the rollout mode
+        // declares the deliberate migration state.
+        $tester = $this->executionVersioningTester('high_abuse', 3, 3, 1, true, 'normal');
+
+        self::assertSame(Command::FAILURE, $tester->getStatusCode(), 'high_abuse in the normal state with a downgrade window must fail the deploy gate');
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[FAIL] Execution versioning', $display);
+        self::assertStringContainsString('high_abuse normal mode must require the strongest confirmed tier', $display);
+        self::assertStringContainsString('execution_required_version 1 is below the effective fleet tier 3', $display);
+        self::assertStringContainsString('declare protocol_rollout.mode "migration"', $display);
+    }
+
+    public function testDoctorPassesWhenTheRequiredTierEqualsTheEffectiveFleetTier(): void
+    {
+        // The required tier at the effective fleet tier makes the
+        // strongest confirmed grammar server-required, so the check
+        // passes with the exact equal-tier wording, whatever the
+        // node cap above it.
+        $tester = $this->executionVersioningTester('high_abuse', 2, 2, 2, false, 'normal');
+
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[PASS] Execution versioning', $display);
+        self::assertStringContainsString('execution_required_version 2 equals the strongest effective fleet tier 2', $display);
+        self::assertStringContainsString('execution_version cap 2, confirmed central min_execution_version floor 2', $display);
+        self::assertStringNotContainsString('[WARN] Execution versioning', $display);
+        self::assertStringNotContainsString('[FAIL] Execution versioning', $display);
+    }
+
+    public function testDoctorDoesNotWarnWhenTheNodeCapGatesBelowTheConfirmedFloor(): void
+    {
+        // No capability above version 1 on the node (cap 1) even under
+        // a confirmed version-3 central execution floor: the effective
+        // fleet tier is 1, equal to the default required tier, so the
+        // check passes without any downgrade-window warning.
+        $tester = $this->executionVersioningTester('high_abuse', 1, 3, 1, false, 'normal');
+
+        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
+        $display = $tester->getDisplay();
+        self::assertStringContainsString('[PASS] Execution versioning', $display);
+        self::assertStringContainsString('execution_required_version 1 equals the strongest effective fleet tier 1', $display);
+        self::assertStringNotContainsString('[WARN] Execution versioning', $display);
+        self::assertStringNotContainsString('[FAIL] Execution versioning', $display);
+    }
+
     public function testDoctorFailsOnHighAbuseWithAnAbsentProtocolFloor(): void
     {
         // high_abuse promises the decoy surface; without a confirmed
@@ -507,32 +704,6 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
         self::assertStringNotContainsString('[FAIL]', $display);
     }
 
-    public function testDoctorWarnsOnHighAbuseWithFullV2CapabilityWhileTheRequiredTierStaysOne(): void
-    {
-        // The hardened-posture gap: high_abuse with the full version-2
-        // capability (execution_key configured, node cap 2, confirmed
-        // central execution floor 2) but execution_required_version at
-        // the default 1 keeps the strong grammar client-downgradeable.
-        // The compile-time gate refuses that gap unless the deployment
-        // explicitly accepts the downgrade window, so the kernel boots
-        // with execution_allow_downgrade: true and the doctor warns
-        // (exit 0), naming the flag as the only thing that permits the
-        // downgrade — never a silent pass, never a deploy-gate failure.
-        $container = $this->containerFor(new DoctorExecutionRequiredVersionKernel('test', true, 2, 1, true));
-        $this->seedFloors($container, 4, 2);
-        $tester = $this->doctor($container);
-        $tester->execute([]);
-
-        self::assertSame(Command::SUCCESS, $tester->getStatusCode(), 'the flag-accepted downgrade window must warn, never fail the deploy gate');
-        $display = $tester->getDisplay();
-        self::assertStringContainsString('[WARN] Execution versioning', $display);
-        self::assertStringContainsString('execution_allow_downgrade: true flag', $display, 'the WARN must name the explicit flag that permits the downgrade');
-        self::assertStringContainsString('execution_required_version_1_with_v2_capability', $display, 'the WARN must carry the machine-readable reason code');
-        self::assertStringContainsString('the strong grammar stays client-downgradeable until the required tier is raised to 2', $display);
-        self::assertStringContainsString('Raise execution_required_version to 2 once every serving page is on the version-2 generation', $display);
-        self::assertStringNotContainsString('[FAIL]', $display);
-    }
-
     public function testHighAbuseArmedMismatchWithoutTheFlagIsRefusedAtContainerCompile(): void
     {
         // The invariant the flag unlocks: high_abuse arms the execution
@@ -549,110 +720,6 @@ final class KiwiCaptchaDoctorCommandTest extends TestCase
             self::assertStringContainsString('execution_required_version must not be below', $e->getMessage());
             self::assertStringContainsString('execution_allow_downgrade: true', $e->getMessage());
         }
-    }
-
-    public function testDoctorPassesOnHighAbuseWithFullV2CapabilityAndTheRequiredTierAtTwo(): void
-    {
-        // The hardened posture: execution_required_version 2 under the
-        // same full capability makes the strong grammar server-required,
-        // so the execution-versioning check passes and the deploy gate
-        // stays green.
-        $container = $this->containerFor(new DoctorExecutionRequiredVersionKernel('test', true, 2, 2));
-        $this->seedFloors($container, 4, 2);
-        $tester = $this->doctor($container);
-        $tester->execute([]);
-
-        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
-        $display = $tester->getDisplay();
-        self::assertStringContainsString('[PASS] Execution versioning', $display);
-        self::assertStringContainsString('execution_required_version 2 under the full version-2 capability', $display);
-        self::assertStringContainsString('the strong grammar is server-required, never client-downgradeable', $display);
-        self::assertStringNotContainsString('[WARN] Execution versioning', $display);
-        self::assertStringNotContainsString('[FAIL]', $display);
-    }
-
-    public function testDoctorWarnsOnHighAbuseWithFullV3CapabilityWhileTheRequiredTierStaysTwo(): void
-    {
-        // The version-3 shape of the same flag-accepted downgrade
-        // window: cap and confirmed central execution floor 3 (the
-        // strongest available grammar is version 3) with
-        // execution_required_version at 2: a client that cannot solve
-        // version 3 is downgraded to version 2, so the strongest
-        // grammar stays client-downgradeable and the doctor warns
-        // (exit 0) with the explicit flag named and the
-        // machine-readable reason naming the v3 capability.
-        $container = $this->containerFor(new DoctorExecutionRequiredVersionKernel('test', true, 3, 2, true));
-        $this->seedFloors($container, 4, 3);
-        $tester = $this->doctor($container);
-        $tester->execute([]);
-
-        self::assertSame(Command::SUCCESS, $tester->getStatusCode(), 'the flag-accepted sub-strongest required tier under full V3 capability must warn, never fail the deploy gate');
-        $display = $tester->getDisplay();
-        self::assertStringContainsString('[WARN] Execution versioning', $display);
-        self::assertStringContainsString('execution_allow_downgrade: true flag', $display, 'the WARN must name the explicit flag that permits the downgrade');
-        self::assertStringContainsString('execution_required_version_2_with_v3_capability', $display, 'the WARN must carry the machine-readable reason code naming the strongest (v3) capability');
-        self::assertStringContainsString('the strong grammar stays client-downgradeable until the required tier is raised to 3', $display);
-        self::assertStringContainsString('Raise execution_required_version to 3 once every serving page is on the version-3 generation', $display);
-        self::assertStringNotContainsString('[FAIL]', $display);
-    }
-
-    public function testDoctorPassesOnHighAbuseWithFullV3CapabilityAndTheRequiredTierAtThree(): void
-    {
-        // The hardened v3 posture: execution_required_version 3 under
-        // cap and confirmed floor 3 makes the version-3 strong grammar
-        // server-required, so the execution-versioning check passes and
-        // the deploy gate stays green.
-        $container = $this->containerFor(new DoctorExecutionRequiredVersionKernel('test', true, 3, 3));
-        $this->seedFloors($container, 4, 3);
-        $tester = $this->doctor($container);
-        $tester->execute([]);
-
-        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
-        $display = $tester->getDisplay();
-        self::assertStringContainsString('[PASS] Execution versioning', $display);
-        self::assertStringContainsString('execution_required_version 3 under the full version-3 capability', $display);
-        self::assertStringContainsString('the strong grammar is server-required, never client-downgradeable', $display);
-        self::assertStringNotContainsString('[WARN] Execution versioning', $display);
-        self::assertStringNotContainsString('[FAIL]', $display);
-    }
-
-    public function testDoctorDoesNotWarnWhenTheNodeCapGatesBelowTheConfirmedV3Floor(): void
-    {
-        // No version-2+ capability on the node (cap 1) even under a
-        // confirmed version-3 central execution floor: the strongest
-        // available grammar is version 1, so the required-tier audit
-        // stays silent regardless of how high the fleet floor has
-        // climbed.
-        $container = $this->containerFor(new DoctorExecutionRequiredVersionKernel('test', true, 1, 1));
-        $this->seedFloors($container, 4, 3);
-        $tester = $this->doctor($container);
-        $tester->execute([]);
-
-        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
-        $display = $tester->getDisplay();
-        self::assertStringContainsString('[PASS] Execution versioning', $display);
-        self::assertStringNotContainsString('[WARN] Execution versioning', $display, 'a node cap of 1 must not trigger the required-tier warning even under a v3 floor');
-        self::assertStringNotContainsString('execution_required_version_', $display);
-        self::assertStringNotContainsString('[FAIL]', $display);
-    }
-
-    public function testDoctorDoesNotWarnOnHighAbuseWithTheNodeCapAtOne(): void
-    {
-        // No version-2 capability (node cap 1 despite the confirmed
-        // central execution floor): the node only ever emits version 1,
-        // so the default required tier stays safe and the check passes
-        // without any warning, unchanged from the pre-check behavior.
-        $container = $this->containerFor(new DoctorExecutionRequiredVersionKernel('test', true, 1, 1));
-        $this->seedFloors($container, 4, 2);
-        $tester = $this->doctor($container);
-        $tester->execute([]);
-
-        self::assertSame(Command::SUCCESS, $tester->getStatusCode());
-        $display = $tester->getDisplay();
-        self::assertStringContainsString('[PASS] Execution versioning', $display);
-        self::assertStringNotContainsString('[WARN] Execution versioning', $display, 'a node cap of 1 must not trigger the required-tier warning');
-        self::assertStringNotContainsString('execution_required_version_1_with_v2_capability', $display);
-        self::assertStringNotContainsString('[FAIL]', $display);
     }
 
     public function testDoctorWarnsOnHighAbuseWithTheDecoyExplicitlyDeferred(): void

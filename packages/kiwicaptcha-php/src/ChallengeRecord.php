@@ -131,9 +131,11 @@ namespace KiwiCaptcha;
  * {@see Config::isValidDecoyFieldName()}, and is enforced on read and
  * by the verifier's malformed-record path.
  *
- * `executionVersion` is the execution-dimension protocol version,
- * always 1 (the only canonical version; an old record without the field
- * is an unarmed record). It is an authenticated canonical field of
+ * `executionVersion` is the execution-dimension protocol version, the
+ * canonical numeric byte carrying the armed program's execution grammar
+ * version, 1..{@see ExecutionChallengeGenerator::MAX_EXECUTION_VERSION}
+ * (an old record without the field is an unarmed record). It is an
+ * authenticated canonical field of
  * protocol v4: the `|execution_version` segment, see
  * {@see Issuer::canonicalPayload()}, so a stored/tampered record cannot
  * change or drop it without breaking the signature. The JSON key is
@@ -253,7 +255,9 @@ final class ChallengeRecord
         // work.
         public readonly ?string $executionProgram = null,
         // The execution-dimension protocol version (the canonical
-        // numeric byte 1), authenticated as the `|execution_version`
+        // numeric byte carrying the program's execution grammar version,
+        // up to ExecutionChallengeGenerator::MAX_EXECUTION_VERSION),
+        // authenticated as the `|execution_version`
         // protocol v4 canonical segment. Present iff the record carries
         // an execution program; the JSON key is omitted when null.
         public readonly ?int $executionVersion = null,
@@ -585,7 +589,7 @@ final class ChallengeRecord
                 throw MalformedRecordException::incompleteExecutionFields();
             }
             self::requireInt($data['execution_version'], 'execution_version', 0, 255);
-            if ($data['execution_version'] < 1 || $data['execution_version'] > 4) {
+            if ($data['execution_version'] < 1 || $data['execution_version'] > ExecutionChallengeGenerator::MAX_EXECUTION_VERSION) {
                 throw MalformedRecordException::invalidExecutionVersion($data['execution_version']);
             }
             self::requireString($data['execution_commitment'], 'execution_commitment');

@@ -1,82 +1,32 @@
 /*!
-* KiwiCaptcha execution interpreter — ExecutionChallengeV1 (the
-* Cap-style dimension). FIXED, AUDITED asset: lazy-loaded by the widget
-* driver (execution.<sha256>.js) ONLY when a challenge response carries
-* an execution program; a SHA-only page never fetches this file.
+* KiwiCaptcha execution interpreter — ExecutionChallengeV1. FIXED,
+* AUDITED asset, lazy-loaded by the driver (execution.<sha256>.js) only
+* when a challenge response carries an execution program; a SHA-only
+* page never fetches this file.
 *
-* THIS FILE MUST NEVER CONTAIN eval / new Function / setTimeout-driven
-* code generation: the browser test suite asserts this with a spec grep
-* (the interpreter is a small deterministic bytecode VM, nothing more).
-* There is deliberately no Math.random and no Date.readout in the op
-* semantics — the executed program is a pure function of its bytes, so
-* the server recomputes the identical canonical op trace.
+* Deterministic bytecode VM: no dynamic code construction, no
+* Math.random, no Date in the op semantics — a program is a pure
+* function of its bytes, so the server mirrors recompute the identical
+* canonical op trace and digest. Opcode split: COMPUTE 0-15, DOM 16-27,
+* real-DOM probes 28-36, v5 object-graph ops 37-44. The op-count bound
+* (8..24 ops) keeps a whole run ~0.1 ms on a low-end device.
 *
-* ── How it runs ───────────────────────────────────────────────────────
-* The driver creates a SANDBOXED EPHEMERAL IFRAME per armed challenge
-* (srcdoc with a minimal document; sandbox="allow-scripts
-* allow-same-origin" — allow-same-origin is REQUIRED because a
-* sandboxed opaque-origin document cannot load a same-origin script
-* under the recommended CSP `script-src 'self'`; the sandbox flags that
-* are not granted — forms, popups, top-navigation, pointer lock — stay
-* blocked). The iframe loads THIS asset via <script src integrity=...>
-* (same-origin, CSP-clean, SRI-pinned by the browser), the interpreter
-* announces ready, the driver posts the program, the interpreter runs
-* the VM and posts back the execution digest (64 lowercase hex). The
-* driver validates message.source === the iframe it created and the
-* per-run id before accepting anything.
+* The driver runs it in a SANDBOXED EPHEMERAL IFRAME per armed
+* challenge (srcdoc, sandbox="allow-scripts allow-same-origin";
+* allow-same-origin is required because an opaque-origin document
+* cannot load a same-origin script under the recommended CSP; forms,
+* popups, top-navigation and pointer lock stay blocked). The iframe
+* loads this asset via <script src integrity=...> (CSP-clean,
+* SRI-pinned) and the driver accepts messages only from that iframe.
 *
-* ── The compute/DOM split ─────────────────────────────────────────────
-* The opcode set is split into the COMPUTE SUBSET (opcodes 0-15:
-* integer arithmetic, typed-array ops, string/UTF-8 ops — pure
-* functions of their operands, no DOM) and the DOM SUBSET (opcodes
-* 16-27: createElement/setAttribute/appendChild/querySelector/
-* getAttribute/dataset/classList/parent/dispatch/serialize against the
-* sandboxed iframe document; opcodes 28-33: the real-DOM evidence
-* probes — real query readback, layout geometry, the topmost-node
-* point probe, a real event dispatch readback, the canonical
-* serialization digest and the causal observe probe (the measured
-* height of the constructed node, written into the u8 state) —
-* validated by the verifier's invariants (exact for
-* QUERY_REAL/EVENT_REAL/SERIALIZE_REAL, monotonic geometry with
-* height >= 1, the point probe naming the topmost constructed node,
-* and the observe entry replaying the reported height). The compute
-* subset is worker-portable by
-* design: it never touches the document, so it can move into the
-* existing worker architecture (kiwi-worker.js) without any protocol
-* change. In THIS implementation the whole VM runs inside the ephemeral
-* iframe, because the op-count bound (8..24 ops, enforced on every
-* program) keeps the wall-clock cost ~0.1 ms on a low-end device —
-* orders of magnitude below the ~20 ms budget the dimension documents —
-* and a worker hop would add latency, not safety. The budget is a
-* documented bound, never a runtime timer: the interpreter enforces the
-* OLD-COUNT bound (the deterministic proxy for the wall-clock cap).
-*
-* ── Determinism contract ──────────────────────────────────────────────
-* The interpreter computes the canonical op trace exactly like the
-* server mirrors (PHP KiwiCaptcha\ExecutionChallengeGenerator, Rust
-* crate::execution): one `opname(result)` entry per op joined with ';',
-* results being decimal integers, "1"/"0", or standard base64 of a
-* byte string. The single browser-observed entry is 'obs(<dst>,<h>)':
-* the height h is the real text-metric layout measurement of the
-* constructed node (a fixed-width block rendering a canonical text
-* line in the engine's default font), written into the VM u8 state at
-* dst, and replayed by the verifier from the trace itself. The
-* mirrors never predict the observed height: the value is engine and
-* platform specific, so their browser-equivalent traces carry the
-* same entry shape over a fabricated reference value. The digest is hex
-* HMAC-SHA256 keyed by the PROGRAM
-* BYTES (the content-derived key; the secret execution_key never
-* leaves the server) over
-* `kiwi-execution-v1|nonce|scope|action|version|canonical_op_trace`
-* with scope/action/version read from the program blob itself. The
-* digest binds the submission to the issued program and challenge
-* context; the server recomputes the expected value from the STORED
-* program and compares in constant time.
-*
-* The interpreter runs its own tiny SHA-256 + HMAC-SHA256 (no
-* crypto.subtle dependency: the sandboxed iframe may run in contexts
-* where the WebCrypto API is unavailable, and a synchronous
-* implementation keeps the digest computation deterministic).
+* Trace format: one `opname(result)` entry per op joined with ';';
+* results are decimal integers, "1"/"0", or standard base64; the
+* browser-observed entries 'obs(<dst>,<h>)' and (v5) 'durlc(<64 hex>)'
+* are replayed by the verifier. Digest: hex HMAC-SHA256 keyed by the
+* PROGRAM BYTES (the execution_key never leaves the server) over
+* `kiwi-execution-v1|nonce|scope|action|version|canonical_op_trace`.
+* The VM runs its own SHA-256 + HMAC-SHA256 (crypto.subtle may be
+* unavailable there; synchronous code keeps the digest deterministic).
 */
 (function () {
  "use strict";
@@ -87,7 +37,9 @@
  var KIWI_EXECUTION_ERROR = "kiwi-execution-error";
  var MIN_OPS = 8;
  var MAX_OPS = 24;
- var OP_COUNT = 37;
+ var OP_COUNT = 45;
+ // OP_SPACE[opVersion] = the first opcode each program version rejects.
+ var OP_SPACE = [0, 33, 34, 35, 37, OP_COUNT];
  var FORMAT_VERSION = 1;
  var ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
  var CLASS_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-";
@@ -99,9 +51,10 @@
   "slen", "schar", "scode", "sslice",
   "dcreate", "dattr", "dappend", "dqsel", "dget", "dset", "dgetd",
   "cadd", "ccont", "dparent", "ddispatch", "dserialize",
-  "qreal", "geom", "point", "evreal", "sreal", "obs", "dsib", "dchild", "ddepth"
+  "qreal", "geom", "point", "evreal", "sreal", "obs", "dsib", "dchild", "ddepth",
+  "dfrag", "dclone", "drepar", "dreflec", "dphase", "durlc", "dmutate", "dsdep"
  ];
- // ── Minimal SHA-256 (FIPS 180-4), deterministic ─────────────────────
+ // ── SHA-256 (FIPS 180-4) ──
  var K = [
   0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
   0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
@@ -191,7 +144,7 @@
   opad.set(inner, blockSize);
   return sha256Bytes(opad);
  }
- // ── Tiny base64 / utf8 helpers (byte-exact) ─────────────────────────
+ // ── Base64 / utf8 helpers ──
  var B64_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
  function b64Encode(bytes) {
   var out = "";
@@ -230,11 +183,8 @@
   for (var i = 0; i < s.length; i++) out[i] = s.charCodeAt(i) & 0xff;
   return out;
  }
- // ── The program parser ──────────────────────────────────────────────
- // Mirrors the PHP/Rust parsers byte-for-byte: length bytes carry the
- // ACTUAL length; the raw-byte operands (int literals, U8_CREATE,
- // U8_WRITE/READ/ROTATE, tag/name indexes, slice start/count) derive
- // the same value both sides derive.
+ // ── The program parser ──
+ // Mirrors the PHP/Rust parsers byte-for-byte.
  function parseProgram(bytes) {
   var pos = 0;
   function take(n) {
@@ -258,12 +208,8 @@
   var actionBytes = take(actionLen);
   if (actionBytes === null) return null;
   var opVersion = byte();
-  // Execution versions 1, 2 and 3 are accepted (the compat window:
-  // old challenges stay executable for their whole TTL); each version
-  // bounds its own opcode space below — version 1 never carries the
-  // version-2 observe opcode (33), versions below 3 never carry the
-  // version-3 sibling-index opcode (34).
-  if (opVersion < 1 || opVersion > 4) return null;
+  // Versions 1..5 accepted (the compat window); each bounds its opcode space (OP_SPACE).
+  if (opVersion < 1 || opVersion > 5) return null;
   var opCount = byte();
   if (opCount === null || opCount < MIN_OPS || opCount > MAX_OPS) return null;
   function readLenBytes(maxLen) {
@@ -277,8 +223,7 @@
   for (var i = 0; i < opCount; i++) {
    var opcode = byte();
    if (opcode === null) return null;
-   // Version 1 programs never carry the version-2 observe opcode.
-   var maxOpcode = opVersion === 1 ? 33 : (opVersion === 2 ? 34 : (opVersion === 3 ? 35 : OP_COUNT));
+   var maxOpcode = OP_SPACE[opVersion];
    if (opcode >= maxOpcode) return null;
    var operands = [];
    switch (opcode) {
@@ -339,7 +284,8 @@
      operands.push({ k: "count", v: tail15[1] % 32 });
      break;
     }
-    case 16: {
+    case 16: case 35: {
+     // DCREATE/DCHILD share the tag-byte + id shape.
      var tag = byte();
      var id16 = readLenBytes(16);
      if (tag === null || !id16 || id16.length < 4) return null;
@@ -357,12 +303,6 @@
     }
     case 18: case 25: case 26: case 27:
      break;
-    case 19: {
-     var id19 = readLenBytes(16);
-     if (!id19 || id19.length < 4) return null;
-     operands.push({ k: "id", v: id19 });
-     break;
-    }
     case 20: {
      var name20 = byte();
      if (name20 === null) return null;
@@ -394,9 +334,8 @@
      operands.push({ k: "s", v: s23 });
      break;
     }
-    case 28: case 29: case 31: {
-     // Real-DOM probes: QUERY_REAL/GEOMETRY/EVENT_REAL carry a
-     // constructed id (4..16 bytes, like the plain query op).
+    case 19: case 28: case 29: case 31: case 34: case 36: {
+     // Query/probe/DSIB/DDEPTH: one constructed id (4..16 bytes).
      var idReal = readLenBytes(16);
      if (!idReal || idReal.length < 4) return null;
      operands.push({ k: "id", v: idReal });
@@ -413,8 +352,7 @@
     case 32:
      break;
     case 33: {
-     // OBSERVE: the constructed id (4..16 bytes, like the real
-     // probes) then one raw byte for the u8 destination index.
+     // OBSERVE: the constructed id then one raw byte for the u8 index.
      var obsId = readLenBytes(16);
      if (!obsId || obsId.length < 4) return null;
      var obsByte = byte();
@@ -423,30 +361,54 @@
      operands.push({ k: "idx", v: obsByte % 64 });
      break;
     }
-    case 34: {
-     // DSIB: the constructed id (4..16 bytes), the sibling-index
-     // traversal probe operand.
-     var dsibId = readLenBytes(16);
-     if (!dsibId || dsibId.length < 4) return null;
-     operands.push({ k: "id", v: dsibId });
+    case 37: {
+     // DFRAG: the fragment slot byte (s % 4) then a raw cell byte.
+     var fgA = byte(), fgB = byte();
+     if (fgA === null || fgB === null) return null;
+     operands.push({ k: "s", v: fgA % 4 });
+     operands.push({ k: "cell", v: fgB % 64 });
      break;
     }
-    case 35: {
-     // DCHILD: a tag byte then the new child's id (created under the
-     // current node).
-     var chTag = byte();
-     if (chTag === null) return null;
-     var chId = readLenBytes(16);
-     if (!chId || chId.length < 4) return null;
-     operands.push({ k: "tag", v: chTag % 4 });
-     operands.push({ k: "id", v: chId });
+    case 38: case 39: {
+     // DCLONE/DREPAR: the target id then a raw cell byte.
+     var clId = readLenBytes(16);
+     if (!clId || clId.length < 4) return null;
+     var clCell = byte();
+     if (clCell === null) return null;
+     operands.push({ k: "id", v: clId });
+     operands.push({ k: "cell", v: clCell % 64 });
      break;
     }
-    case 36: {
-     // DDEPTH: the constructed id (4..16 bytes).
-     var ddId = readLenBytes(16);
-     if (!ddId || ddId.length < 4) return null;
-     operands.push({ k: "id", v: ddId });
+    case 40: {
+     var rfByte = byte();
+     if (rfByte === null) return null;
+     operands.push({ k: "name", v: rfByte % 5 });
+     break;
+    }
+    case 41: {
+     var phByte = byte();
+     if (phByte === null) return null;
+     operands.push({ k: "cell", v: phByte % 64 });
+     break;
+    }
+    case 42:
+     break;
+    case 43: {
+     // DMUTATE: a printable value then a raw cell byte.
+     var dmVal = readLenBytes(32);
+     if (!dmVal) return null;
+     var dmCell = byte();
+     if (dmCell === null) return null;
+     operands.push({ k: "val", v: dmVal });
+     operands.push({ k: "cell", v: dmCell % 64 });
+     break;
+    }
+    case 44: {
+     var dsA = byte(), dsB = byte(), dsC = byte();
+     if (dsA === null || dsB === null || dsC === null) return null;
+     operands.push({ k: "b0", v: dsA });
+     operands.push({ k: "b1", v: dsB });
+     operands.push({ k: "b2", v: dsC });
      break;
     }
     default:
@@ -454,8 +416,7 @@
    }
    ops.push({ opcode: opcode, operands: operands });
   }
-  // Exact EOF: the op list must consume the whole blob (the mirrors'
-  // strict-parser parity — a trailing byte is a foreign blob).
+  // Exact EOF: a trailing byte is a foreign blob (strict-parser parity).
   if (pos !== bytes.length) return null;
   return {
    scope: bytesToAscii(scopeBytes),
@@ -475,27 +436,24 @@
   }
   return undefined;
  }
- // ── The deterministic state machine ─────────────────────────────────
- // DOM state mirrors the real sandboxed iframe document. The
- // interpreter keeps its OWN attribute record (setAttribute ops + the
- // reflected id) — serialization reads that record, never
- // getAttributeNames, so dataset writes can never leak into the
- // canonical serialization.
+ function opId(ops) {
+  return bytesToAscii(opValue(ops, "id"));
+ }
+ // ── The deterministic state machine ──
+ // Serialization reads this module's own attribute record, never getAttributeNames.
  function runProgram(program, doc) {
   var u8 = new Uint8Array(0);
   var cur = null; // { el, id, attrs: {name: value}, dataset: {}, classes: {}, appended }
   var docIds = {}; // id -> true for appended nodes
   var entries = [];
-  // The POINT probe's whole-program predicate (the verifier checks
-  // "any DOM_APPEND op", never the probe's position): the browser
-  // answers 'div' exactly when the program constructs a node.
+var v5 = program.opVersion >= 5;
+var frags = [null, null, null, null]; // the four v5 fragment slots
+  // POINT probe: 'div' iff the program appends any node at all.
   var hasAppend = false;
   for (var pre = 0; pre < program.ops.length; pre++) {
    if (program.ops[pre].opcode === 18) { hasAppend = true; break; }
   }
-  // GEOMETRY tops must be monotonic across the whole trace (the
-  // verifier's invariant); a real layout offset can never decrease,
-  // and an absent probe reports the previous top.
+  // GEOMETRY tops stay monotonic; an absent probe reports the previous.
   var geomTop = -1;
   function checksum() {
    var sum = 0;
@@ -508,6 +466,57 @@
    for (var i = 0; i < names.length; i++) {
     parts.push(names[i] + "=" + node.attrs[names[i]]);
    }
+   return parts.join(";");
+  }
+  // The v5 cell rule: the entry lands in the u8 cell when in range.
+  function writeCell(cell, entry) {
+   if (cell < u8.length) u8[cell] = entry & 0xff;
+  }
+  function appendCurrent() {
+   if (cur && !cur.appended) {
+    doc.body.appendChild(cur.el);
+    cur.appended = true;
+    docIds[cur.id] = true;
+   }
+  }
+  function copyMap(src) {
+   var out = {};
+   for (var key in src) {
+    if (Object.prototype.hasOwnProperty.call(src, key)) out[key] = src[key];
+   }
+   return out;
+  }
+  // URL canonicalization: scheme/host lowercased, fragment dropped (srcdoc-deterministic).
+  function canonicalUrl(href) {
+   var h = String(href);
+   var cut = h.indexOf("#");
+   if (cut >= 0) h = h.substr(0, cut);
+   var colon = h.indexOf(":");
+   if (colon > 0) {
+    var scheme = h.substr(0, colon).toLowerCase();
+    var rest = h.substr(colon + 1);
+    if (rest.substr(0, 2) === "//") {
+     var end = rest.length;
+     for (var i = 2; i < rest.length; i++) {
+      var c = rest.charAt(i);
+      if (c === "/" || c === "?") { end = i; break; }
+     }
+     rest = rest.substr(0, end).toLowerCase() + rest.substr(end);
+    }
+    h = scheme + ":" + rest;
+   }
+   return h;
+  }
+  // Rung-scoped canonical node string: serializeAttrs plus the v5 dataset/classes/text.
+  function canonicalNodeString(node) {
+   if (!v5) return serializeAttrs(node);
+   var s5 = serializeAttrs(node);
+   var parts = s5 === "" ? [] : s5.split(";");
+   var dnames = Object.keys(node.dataset || {}).sort();
+   for (var j = 0; j < dnames.length; j++) parts.push(dnames[j] + "=" + node.dataset[dnames[j]]);
+   var cnames = Object.keys(node.classes || {}).sort();
+   for (var k = 0; k < cnames.length; k++) parts.push(cnames[k]);
+   if (node.text !== undefined && node.text !== "") parts.push(node.text);
    return parts.join(";");
   }
   for (var i = 0; i < program.ops.length; i++) {
@@ -588,16 +597,12 @@
      break;
     }
     case 18: {
-     if (cur && !cur.appended) {
-      doc.body.appendChild(cur.el);
-      cur.appended = true;
-      docIds[cur.id] = true;
-     }
+     appendCurrent();
      value = "1";
      break;
     }
     case 19: {
-     var qid = bytesToAscii(opValue(ops, "id"));
+     var qid = opId(ops);
      value = docIds[qid] ? "1" : "0";
      break;
     }
@@ -648,21 +653,14 @@
      break;
     }
     case 27: {
-     if (cur && !cur.appended) {
-      doc.body.appendChild(cur.el);
-      cur.appended = true;
-      docIds[cur.id] = true;
-     }
-     var serialized = cur ? serializeAttrs(cur) : "";
+     appendCurrent();
+     var serialized = cur ? canonicalNodeString(cur) : "";
      value = b64Encode(asciiBytes(serialized));
      break;
     }
     case 28: {
-     // Real querySelectorById readback: 'none' unless the probed
-     // id is the current appended node, then the canonical
-     // 'div|name=value;...' attribute pairs (the dataset writes
-     // never leak into the canonical record).
-     var qrId = bytesToAscii(opValue(ops, "id"));
+     // Real query readback of the current appended node: 'div|...' or 'none'.
+     var qrId = opId(ops);
      if (!docIds[qrId]) {
       value = "none";
      } else if (cur && cur.id === qrId) {
@@ -673,11 +671,8 @@
      break;
     }
     case 29: {
-     // Layout geometry of the constructed node: real offsetTop /
-     // offsetHeight (clamped to the verifier invariants: height
-     // >= 1, tops never decreasing). A probe of a node that is
-     // not (yet) in the document reports the previous top.
-     var gmEl = doc.getElementById(bytesToAscii(opValue(ops, "id")));
+     // Real layout geometry, clamped to the verifier's invariants.
+     var gmEl = doc.getElementById(opId(ops));
      var gmTop = gmEl ? gmEl.offsetTop : 0;
      if (gmTop < geomTop) gmTop = geomTop;
      geomTop = gmTop;
@@ -687,16 +682,13 @@
      break;
     }
     case 30: {
-     // The topmost-node point probe: 'div' when the program
-     // constructs any node, 'none' otherwise (the verifier's
-     // whole-program predicate; x/y are the probe coordinates).
+     // The topmost-node point probe: 'div'/'none'.
      value = hasAppend ? "div" : "none";
      break;
     }
     case 31: {
-     // Real event readback: the canonical 'kiwi-ev:tag' for the
-     // current appended node, 'none' for a foreign id.
-     var evId = bytesToAscii(opValue(ops, "id"));
+     // Real event readback: 'kiwi-ev:tag' for the current node.
+     var evId = opId(ops);
      if (!docIds[evId]) {
       value = "none";
      } else {
@@ -705,25 +697,14 @@
      break;
     }
     case 32: {
-     // Canonical real serialization digest: hex SHA-256 of the
-     // current node's sorted canonical attribute pairs, or of the
-     // empty string when nothing is appended (the interpreter's
-     // own sha256 keeps the digest deterministic).
-     var srParts = (cur && cur.appended) ? serializeAttrs(cur) : "";
+     // Canonical digest: hex SHA-256 of the rung-scoped node string ("" if none appended).
+     var srParts = (cur && cur.appended) ? canonicalNodeString(cur) : "";
      value = bytesToHex(sha256Bytes(asciiBytes(srParts)));
      break;
     }
     case 33: {
-     // OBSERVE: the measured real layout height of the constructed
-     // node, written into the u8 state like U8_WRITE. The probe
-     // pins the layout to a fixed-width block that renders a
-     // canonical text line, so the measurement is the engine's own
-     // text metrics (its default font and line height): a value a
-     // pure function of the program cannot compute, since it
-     // varies across engines and platforms. The verifier replays
-     // this entry from the trace itself; it never predicts the
-     // height. An absent node reports 1.
-     var obsId = bytesToAscii(opValue(ops, "id"));
+     // OBSERVE: real layout height into the u8 state; verifier-replayed. Absent: 1.
+     var obsId = opId(ops);
      var obsIdx = opValue(ops, "idx");
      var obsEl = doc.getElementById(obsId);
      var obsH = 1;
@@ -741,12 +722,8 @@
      break;
     }
     case 34: {
-     // DSIB: the real sibling index of the constructed node — the
-     // length of its previousElementSibling chain in the sandboxed
-     // document (its position among the body children the program
-     // appended). The verifier computes the exact expected value from
-     // the append order; an absent node reports 0.
-     var dsibId = bytesToAscii(opValue(ops, "id"));
+     // DSIB: real previousElementSibling chain length (absent node: 0).
+     var dsibId = opId(ops);
      var dsibEl = doc.getElementById(dsibId);
      var dsibIdx = 0;
      while (dsibEl) {
@@ -757,9 +734,8 @@
      break;
     }
     case 35: {
-     // DCHILD: create a new element as a real child of the current
-     // node and make it current (a real nested tree edge).
-     var chId = bytesToAscii(opValue(ops, "id"));
+     // DCHILD: real child of the current node; it becomes current.
+     var chId = opId(ops);
      var chEl = doc.createElement(TAG_NAMES[opValue(ops, "tag")]);
      chEl.id = chId;
      if (cur && cur.el) cur.el.appendChild(chEl);
@@ -768,9 +744,8 @@
      break;
     }
     case 36: {
-     // DDEPTH: the real ancestor-chain length of the probed node up
-     // to (excluding) the document body.
-     var ddId = bytesToAscii(opValue(ops, "id"));
+     // DDEPTH: real ancestor-chain length up to body.
+     var ddId = opId(ops);
      var ddEl = doc.getElementById(ddId);
      var ddDepth = 0;
      while (ddEl && ddEl.parentElement && ddEl.parentElement !== doc.body) {
@@ -780,6 +755,126 @@
      value = "" + ddDepth;
      break;
     }
+    case 37: {
+     // DFRAG: move the current subtree into the detached fragment slot.
+     var fgEntry = 0;
+     if (cur && cur.el) {
+      var fgS = opValue(ops, "s");
+      if (!frags[fgS]) frags[fgS] = doc.createDocumentFragment();
+      frags[fgS].appendChild(cur.el);
+      cur.appended = false;
+      if (docIds[cur.id]) delete docIds[cur.id];
+      fgEntry = frags[fgS].children.length;
+     }
+     writeCell(opValue(ops, "cell"), fgEntry);
+     value = String(fgEntry);
+     break;
+    }
+    case 38: {
+     // DCLONE: real deep clone, re-id, insert after the original.
+     var clId = opId(ops);
+     var clEntry = 0;
+     if (cur && cur.el) {
+      clEntry = cur.el.getElementsByTagName("*").length + 1;
+      var copyEl = cur.el.cloneNode(true);
+      copyEl.id = clId;
+      if (cur.appended && cur.el.parentNode) cur.el.parentNode.insertBefore(copyEl, cur.el.nextSibling);
+      var rec = { el: copyEl, id: clId, attrs: copyMap(cur.attrs), dataset: copyMap(cur.dataset), classes: copyMap(cur.classes), appended: cur.appended };
+      rec.attrs.id = clId;
+      if (cur.text !== undefined) rec.text = cur.text;
+      if (cur.appended) docIds[clId] = true;
+      cur = rec;
+     }
+     writeCell(opValue(ops, "cell"), clEntry);
+     value = String(clEntry);
+     break;
+    }
+    case 39: {
+     // DREPAR: real appendChild of the current subtree under the target; self-move = real no-op.
+     var rpEntry = 0;
+     if (cur && cur.el) {
+      var rpEl = doc.getElementById(opId(ops));
+      if (rpEl) {
+       try {
+        rpEl.appendChild(cur.el);
+        cur.appended = !!rpEl.isConnected;
+        if (cur.appended) docIds[cur.id] = true;
+        else { if (docIds[cur.id]) delete docIds[cur.id]; }
+       } catch (e) {}
+       rpEntry = rpEl.children.length;
+      }
+     }
+     writeCell(opValue(ops, "cell"), rpEntry);
+     value = String(rpEntry);
+     break;
+    }
+    case 40: {
+     // DREFLEC: the indexed reflected attribute value.
+     var rfName = ATTR_NAMES[opValue(ops, "name")];
+     var rfVal = cur ? (cur.attrs[rfName] || "") : "";
+     value = b64Encode(asciiBytes(rfVal));
+     break;
+    }
+    case 41: {
+     // DPHASE: real bubbling dispatch count of constructed elements.
+     var phCount = 0;
+     if (cur && cur.el) {
+      var phH = function () { phCount++; };
+      var phEl = cur.el;
+      while (phEl && phEl !== doc.body) {
+       phEl.addEventListener("kiwi-exec-phase", phH, false);
+       phEl = phEl.parentElement;
+      }
+      try {
+       cur.el.dispatchEvent(new doc.defaultView.Event("kiwi-exec-phase", { bubbles: true }));
+      } catch (e) {}
+      phEl = cur.el;
+      while (phEl && phEl !== doc.body) {
+       phEl.removeEventListener("kiwi-exec-phase", phH, false);
+       phEl = phEl.parentElement;
+      }
+     }
+     writeCell(opValue(ops, "cell"), phCount);
+     value = String(phCount);
+     break;
+    }
+    case 42: {
+     // DURLC: SHA-256 hex of the canonicalized document URL.
+     value = bytesToHex(sha256Bytes(asciiBytes(canonicalUrl(doc.defaultView && doc.defaultView.location ? doc.defaultView.location.href : doc.URL))));
+     break;
+    }
+    case 43: {
+     // DMUTATE: real textContent replacement; entry = text byte length.
+     var dmVal = bytesToAscii(opValue(ops, "val"));
+     var dmLen = 0;
+     if (cur && cur.el) {
+      var dmGone = [];
+      for (var dmi = 0; dmi < cur.el.children.length; dmi++) dmGone.push(cur.el.children[dmi].id);
+      cur.el.textContent = dmVal;
+      cur.text = dmVal;
+      dmLen = dmVal.length;
+      for (var dmj = 0; dmj < dmGone.length; dmj++) {
+       if (docIds[dmGone[dmj]]) delete docIds[dmGone[dmj]];
+      }
+     }
+     writeCell(opValue(ops, "cell"), dmLen);
+     value = String(dmLen);
+     break;
+    }
+    case 44: {
+     // DSDEP: descend real child elements by the three index bytes.
+     var sdLevel = (cur && cur.el) ? cur.el : null;
+     var sdDone = 0;
+     var sdBytes = [opValue(ops, "b0"), opValue(ops, "b1"), opValue(ops, "b2")];
+     while (sdLevel && sdDone < 3) {
+      var sdKids = sdLevel.children;
+      if (!sdKids.length) break;
+      sdLevel = sdKids[sdBytes[sdDone] % sdKids.length];
+      sdDone++;
+     }
+     value = String(sdDone);
+     break;
+    }
     default:
      value = "0";
    }
@@ -787,9 +882,7 @@
   }
   return entries.join(";");
  }
- // ── The digest ──────────────────────────────────────────────────────
- // digest = hex(HMAC-SHA256(program_bytes,
- //   "kiwi-execution-v1|" nonce "|" scope "|" action "|" version "|" trace))
+ // ── The digest ──
  function computeDigest(programBytes, program, nonce, trace) {
   var msg = asciiBytes(
    KIWI_EXECUTION_PROTOCOL + "|" + nonce + "|" + program.scope + "|" +
@@ -797,23 +890,14 @@
   );
   return bytesToHex(hmacSha256(programBytes, msg));
  }
- // ── The message loop ────────────────────────────────────────────────
+ // ── The message loop ──
  function start() {
   if (typeof window === "undefined" || !window.parent) return;
   var parent = window.parent;
   function post(type, payload) {
    try {
-    // The parent is the driver's page; the srcdoc iframe is
-    // same-origin (sandbox allow-scripts allow-same-origin), so the
-    // target is same-origin. The explicit "/" target is the
-    // sender-origin shorthand (the document's own origin): inside a
-    // sandboxed srcdoc document `window.location.origin` reports
-    // the literal string "null" even though the document's real
-    // origin IS the parent's, so posting with "null" would silently
-    // drop the message. "/" delivers to the real same-origin parent
-    // and is never a "*" wildcard (the driver validates the message
-    // source on its side; the payload carries no secrets, only the
-    // digest).
+    // The srcdoc iframe is same-origin: "/" (the sender-origin shorthand)
+    // reaches the real parent; the literal "null" origin reported here drops it.
     parent.postMessage({ type: type, protocol: KIWI_EXECUTION_PROTOCOL, payload: payload || {} }, "/");
    } catch (e) {}
   }

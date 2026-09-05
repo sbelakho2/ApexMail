@@ -1,0 +1,138 @@
+(function () {
+  // ── widget-locales.js: the lazy non-default locale packs ─
+  // The eager driver core (widget-driver.js) keeps the English pack,
+  // the untranslated fallback and the language-resolution logic. Every
+  // other WCAG 3.1.2 pack ships here, so a default-language page pays
+  // zero bytes for translations. The core loads this module exactly
+  // when its kiwiResolveLang() resolves a non-default language, once
+  // per page (the same-origin SRI-pinned module loader dedups the
+  // asset). The packs register on the same internal bridge
+  // (window.__kiwiCaptchaCore) the lazy widget-risk and telemetry
+  // modules use: the core merges them into its pack table and
+  // re-applies the widgets that were waiting in the English fallback.
+  // A load failure degrades to English with a console warning; the
+  // widget still solves and renders. RTL packs carry dir: "rtl" so the
+  // widget subtree flips direction when the pack lands.
+  var packs = {
+    de: { dir: "ltr",
+      label: "Sicherheitspr\u00fcfung", badgeIdle: "Bereit", badgeWait: "Warten",
+      badgeWorking: "Arbeitet", badgeSuccess: "Erfolgreich", badgeFailed: "Fehlgeschlagen",
+      badgeVersionError: "Versionsfehler", badgeUnavailable: "Nicht verf\u00fcgbar",
+      statusConnecting: "Verbinde\u2026", statusVerifying: "Pr\u00fcfe\u2026",
+      statusVerified: "Pr\u00fcfung abgeschlossen", statusFailed: "Pr\u00fcfung fehlgeschlagen",
+      statusExpired: "Pr\u00fcfung abgelaufen", statusWorkerUnavailable: "Worker nicht verf\u00fcgbar",
+      statusSolverMismatch: "Solver-Version stimmt nicht",
+      hintProtected: "Gesch\u00fctzt", hintRetrying: "Pr\u00fcfung fehlgeschlagen ({msg}) \u2014 neuer Versuch\u2026",
+      hintClickRetry: "Pr\u00fcfung fehlgeschlagen ({msg}) \u2014 dr\u00fccken Sie die Schaltfl\u00e4che Erneut.",
+      hintVerified: "Proof-of-Work lokal verifiziert.",
+      hintWorker: "Worker nicht verf\u00fcgbar \u2014 Argon2id ben\u00f6tigt einen Web Worker, den das CSP dieser Seite blockiert; erneut versuchen oder data-kiwi-worker-src konfigurieren.",
+      hintSolver: "Der Solver-Worker ist veraltet \u2014 laden Sie die Seite neu, um die aktuelle Version zu laden.",
+      expired: "abgelaufen", retryButton: "Erneut", checking: "Pr\u00fcfe\u2026" },
+    fr: { dir: "ltr",
+      label: "Contr\u00f4le de s\u00e9curit\u00e9", badgeIdle: "Inactif", badgeWait: "Attente",
+      badgeWorking: "Traitement", badgeSuccess: "R\u00e9ussi", badgeFailed: "\u00c9chec",
+      badgeVersionError: "Erreur de version", badgeUnavailable: "Indisponible",
+      statusConnecting: "Connexion\u2026", statusVerifying: "V\u00e9rification\u2026",
+      statusVerified: "V\u00e9rification termin\u00e9e", statusFailed: "V\u00e9rification \u00e9chou\u00e9e",
+      statusExpired: "V\u00e9rification expir\u00e9e", statusWorkerUnavailable: "Worker indisponible",
+      statusSolverMismatch: "Version du solveur incompatible",
+      hintProtected: "Prot\u00e9g\u00e9", hintRetrying: "V\u00e9rification \u00e9chou\u00e9e ({msg}) \u2014 nouvelle tentative\u2026",
+      hintClickRetry: "V\u00e9rification \u00e9chou\u00e9e ({msg}) \u2014 appuyez sur le bouton R\u00e9essayer.",
+      hintVerified: "Preuve de travail v\u00e9rifi\u00e9e localement.",
+      hintWorker: "Worker indisponible \u2014 Argon2id n\u00e9cessite un Web Worker que le CSP de cette page bloque; r\u00e9essayez ou configurez data-kiwi-worker-src.",
+      hintSolver: "Le solveur est obsol\u00e8te \u2014 rechargez la page pour charger la version actuelle.",
+      expired: "expir\u00e9", retryButton: "R\u00e9essayer", checking: "V\u00e9rification\u2026" },
+    es: { dir: "ltr",
+      label: "Comprobaci\u00f3n de seguridad", badgeIdle: "Inactivo", badgeWait: "Espera",
+      badgeWorking: "Trabajando", badgeSuccess: "Correcto", badgeFailed: "Fall\u00f3",
+      badgeVersionError: "Error de versi\u00f3n", badgeUnavailable: "No disponible",
+      statusConnecting: "Conectando\u2026", statusVerifying: "Verificando\u2026",
+      statusVerified: "Verificaci\u00f3n completada", statusFailed: "Verificaci\u00f3n fallida",
+      statusExpired: "Verificaci\u00f3n caducada", statusWorkerUnavailable: "Worker no disponible",
+      statusSolverMismatch: "Versi\u00f3n del solver no coincide",
+      hintProtected: "Protegido", hintRetrying: "Verificaci\u00f3n fallida ({msg}) \u2014 reintentando\u2026",
+      hintClickRetry: "Verificaci\u00f3n fallida ({msg}) \u2014 pulse el bot\u00f3n Reintentar.",
+      hintVerified: "Prueba de trabajo verificada localmente.",
+      hintWorker: "Worker no disponible \u2014 Argon2id necesita un Web Worker que el CSP de esta p\u00e1gina bloquea; reintente o configure data-kiwi-worker-src.",
+      hintSolver: "El worker del solver est\u00e1 desactualizado \u2014 recargue la p\u00e1gina para cargar la versi\u00f3n actual.",
+      expired: "caducado", retryButton: "Reintentar", checking: "Verificando\u2026" },
+    it: { dir: "ltr",
+      label: "Controllo di sicurezza", badgeIdle: "Inattivo", badgeWait: "Attesa",
+      badgeWorking: "In corso", badgeSuccess: "Riuscito", badgeFailed: "Non riuscito",
+      badgeVersionError: "Errore di versione", badgeUnavailable: "Non disponibile",
+      statusConnecting: "Connessione\u2026", statusVerifying: "Verifica\u2026",
+      statusVerified: "Verifica completata", statusFailed: "Verifica non riuscita",
+      statusExpired: "Verifica scaduta", statusWorkerUnavailable: "Worker non disponibile",
+      statusSolverMismatch: "Versione del solver non corrispondente",
+      hintProtected: "Protetto", hintRetrying: "Verifica non riuscita ({msg}) \u2014 nuovo tentativo\u2026",
+      hintClickRetry: "Verifica non riuscita ({msg}) \u2014 premere il pulsante Riprova.",
+      hintVerified: "Prova di lavoro verificata localmente.",
+      hintWorker: "Worker non disponibile \u2014 Argon2id richiede un Web Worker bloccato dal CSP di questa pagina; riprovare o configurare data-kiwi-worker-src.",
+      hintSolver: "Il worker del solver \u00e8 obsoleto \u2014 ricaricare la pagina per caricare la versione corrente.",
+      expired: "scaduto", retryButton: "Riprova", checking: "Verifica\u2026" },
+    nl: { dir: "ltr",
+      label: "Beveiligingscontrole", badgeIdle: "Inactief", badgeWait: "Wachten",
+      badgeWorking: "Bezig", badgeSuccess: "Geslaagd", badgeFailed: "Mislukt",
+      badgeVersionError: "Versiefout", badgeUnavailable: "Niet beschikbaar",
+      statusConnecting: "Verbinden\u2026", statusVerifying: "Controleren\u2026",
+      statusVerified: "Controle voltooid", statusFailed: "Controle mislukt",
+      statusExpired: "Controle verlopen", statusWorkerUnavailable: "Worker niet beschikbaar",
+      statusSolverMismatch: "Solver-versie komt niet overeen",
+      hintProtected: "Beschermd", hintRetrying: "Controle mislukt ({msg}) \u2014 opnieuw proberen\u2026",
+      hintClickRetry: "Controle mislukt ({msg}) \u2014 druk op de knop Opnieuw.",
+      hintVerified: "Proof of work lokaal geverifieerd.",
+      hintWorker: "Worker niet beschikbaar \u2014 Argon2id vereist een Web Worker die door het CSP van deze pagina wordt geblokkeerd; probeer opnieuw of configureer data-kiwi-worker-src.",
+      hintSolver: "De solver-worker is verouderd \u2014 herlaad de pagina om de huidige versie te laden.",
+      expired: "verlopen", retryButton: "Opnieuw", checking: "Controleren\u2026" },
+    pl: { dir: "ltr",
+      label: "Kontrola bezpiecze\u0144stwa", badgeIdle: "Bezczynny", badgeWait: "Oczekiwanie",
+      badgeWorking: "Pracuje", badgeSuccess: "Powodzenie", badgeFailed: "Niepowodzenie",
+      badgeVersionError: "B\u0142\u0105d wersji", badgeUnavailable: "Niedost\u0119pny",
+      statusConnecting: "\u0141\u0105czenie\u2026", statusVerifying: "Weryfikacja\u2026",
+      statusVerified: "Weryfikacja zako\u0144czona", statusFailed: "Weryfikacja nieudana",
+      statusExpired: "Weryfikacja wygas\u0142a", statusWorkerUnavailable: "Worker niedost\u0119pny",
+      statusSolverMismatch: "Niezgodna wersja solwera",
+      hintProtected: "Chronione", hintRetrying: "Weryfikacja nieudana ({msg}) \u2014 ponawianie\u2026",
+      hintClickRetry: "Weryfikacja nieudana ({msg}) \u2014 naci\u015bnij przycisk Pon\u00f3w.",
+      hintVerified: "Dow\u00f3d pracy zweryfikowany lokalnie.",
+      hintWorker: "Worker niedost\u0119pny \u2014 Argon2id wymaga Web Workera blokowanego przez CSP tej strony; spr\u00f3buj ponownie lub skonfiguruj data-kiwi-worker-src.",
+      hintSolver: "Worker solwera jest nieaktualny \u2014 prze\u0142aduj stron\u0119, aby za\u0142adowa\u0107 bie\u017c\u0105c\u0105 wersj\u0119.",
+      expired: "wygas\u0142", retryButton: "Pon\u00f3w", checking: "Weryfikacja\u2026" },
+    pt: { dir: "ltr",
+      label: "Verifica\u00e7\u00e3o de seguran\u00e7a", badgeIdle: "Inativo", badgeWait: "Aguardar",
+      badgeWorking: "A trabalhar", badgeSuccess: "Conclu\u00eddo", badgeFailed: "Falhou",
+      badgeVersionError: "Erro de vers\u00e3o", badgeUnavailable: "Indispon\u00edvel",
+      statusConnecting: "A ligar\u2026", statusVerifying: "A verificar\u2026",
+      statusVerified: "Verifica\u00e7\u00e3o conclu\u00edda", statusFailed: "Verifica\u00e7\u00e3o falhada",
+      statusExpired: "Verifica\u00e7\u00e3o expirada", statusWorkerUnavailable: "Worker indispon\u00edvel",
+      statusSolverMismatch: "Vers\u00e3o do solver incompat\u00edvel",
+      hintProtected: "Protegido", hintRetrying: "Verifica\u00e7\u00e3o falhada ({msg}) \u2014 a tentar novamente\u2026",
+      hintClickRetry: "Verifica\u00e7\u00e3o falhada ({msg}) \u2014 prima o bot\u00e3o Repetir.",
+      hintVerified: "Prova de trabalho verificada localmente.",
+      hintWorker: "Worker indispon\u00edvel \u2014 Argon2id precisa de um Web Worker que o CSP desta p\u00e1gina bloqueia; tente novamente ou configure data-kiwi-worker-src.",
+      hintSolver: "O worker do solver est\u00e1 desatualizado \u2014 recarregue a p\u00e1gina para carregar a vers\u00e3o atual.",
+      expired: "expirado", retryButton: "Repetir", checking: "A verificar\u2026" },
+    ar: { dir: "rtl",
+      label: "\u0641\u062d\u0635 \u0627\u0644\u0623\u0645\u0627\u0646", badgeIdle: "\u062e\u0627\u0645\u062f", badgeWait: "\u0627\u0646\u062a\u0638\u0627\u0631",
+      badgeWorking: "\u064a\u0639\u0645\u0644", badgeSuccess: "\u0646\u0627\u062c\u062d", badgeFailed: "\u0641\u0634\u0644",
+      badgeVersionError: "\u062e\u0637\u0623 \u0641\u064a \u0627\u0644\u0625\u0635\u062f\u0627\u0631", badgeUnavailable: "\u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631",
+      statusConnecting: "\u062c\u0627\u0631\u064d \u0627\u0644\u0627\u062a\u0635\u0627\u0644\u2026", statusVerifying: "\u062c\u0627\u0631\u064d \u0627\u0644\u062a\u062d\u0642\u0642\u2026",
+      statusVerified: "\u0627\u0643\u062a\u0645\u0644 \u0627\u0644\u062a\u062d\u0642\u0642", statusFailed: "\u0641\u0634\u0644 \u0627\u0644\u062a\u062d\u0642\u0642",
+      statusExpired: "\u0627\u0646\u062a\u0647\u062a \u0645\u0647\u0644\u0629 \u0627\u0644\u062a\u062d\u0642\u0642", statusWorkerUnavailable: "\u0627\u0644\u0639\u0627\u0645\u0644 \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631",
+      statusSolverMismatch: "\u0625\u0635\u062f\u0627\u0631 \u0627\u0644\u062d\u0644 \u063a\u064a\u0631 \u0645\u062a\u0637\u0627\u0628\u0642",
+      hintProtected: "\u0645\u062d\u0645\u064a", hintRetrying: "\u0641\u0634\u0644 \u0627\u0644\u062a\u062d\u0642\u0642 ({msg}) \u2014 \u0625\u0639\u0627\u062f\u0629 \u0627\u0644\u0645\u062d\u0627\u0648\u0644\u0629\u2026",
+      hintClickRetry: "\u0641\u0634\u0644 \u0627\u0644\u062a\u062d\u0642\u0642 ({msg}) \u2014 \u0627\u0636\u063a\u0637 \u0639\u0644\u0649 \u0632\u0631 \u0625\u0639\u0627\u062f\u0629 \u0627\u0644\u0645\u062d\u0627\u0648\u0644\u0629.",
+      hintVerified: "\u062a\u0645 \u0627\u0644\u062a\u062d\u0642\u0642 \u0645\u0646 \u062f\u0644\u064a\u0644 \u0627\u0644\u0639\u0645\u0644 \u0645\u062d\u0644\u064a\u064b\u0627.",
+      hintWorker: "\u0627\u0644\u0639\u0627\u0645\u0644 \u063a\u064a\u0631 \u0645\u062a\u0648\u0641\u0631 \u2014 \u064a\u062a\u0637\u0644\u0628 Argon2id \u0639\u0627\u0645\u0644 \u0648\u064a\u0628 \u062a\u062d\u062c\u0628\u0647 \u0633\u064a\u0627\u0633\u0629 CSP \u0647\u0630\u0647 \u0627\u0644\u0635\u0641\u062d\u0629\u061b \u0623\u0639\u062f \u0627\u0644\u0645\u062d\u0627\u0648\u0644\u0629 \u0623\u0648 \u0642\u0645 \u0628\u062a\u0643\u0648\u064a\u0646 data-kiwi-worker-src.",
+      hintSolver: "\u0639\u0627\u0645\u0644 \u0627\u0644\u062d\u0644 \u0642\u062f\u064a\u0645 \u2014 \u0623\u0639\u062f \u062a\u062d\u0645\u064a\u0644 \u0627\u0644\u0635\u0641\u062d\u0629 \u0644\u062a\u062d\u0645\u064a\u0644 \u0627\u0644\u0625\u0635\u062f\u0627\u0631 \u0627\u0644\u062d\u0627\u0644\u064a.",
+      expired: "\u0627\u0646\u062a\u0647\u062a \u0627\u0644\u0645\u0647\u0644\u0629", retryButton: "\u0625\u0639\u0627\u062f\u0629 \u0627\u0644\u0645\u062d\u0627\u0648\u0644\u0629", checking: "\u062c\u0627\u0631\u064d \u0627\u0644\u062a\u062d\u0642\u0642\u2026" }
+  };
+  // The module registers itself with the internal core bridge the
+  // moment it executes (the core injects this file as a same-origin
+  // SRI-pinned script only when a non-default language was resolved);
+  // a module script that somehow ran before the core is inert.
+  var kiwiBridge = (typeof window !== "undefined" && window.__kiwiCaptchaCore) || null;
+  if (kiwiBridge && typeof kiwiBridge.register === "function") {
+    kiwiBridge.register("locales", { packs: packs });
+  }
+})();

@@ -30,9 +30,14 @@ use Twig\Environment;
  *    SHA-256 page pays nothing for the Argon machinery. The worker runs
  *    as a same-origin Worker (no Blob), so files mode needs
  *    worker-src 'self'.
- *  - "inline" (compatibility / zero-request tier): all assets are
- *    inlined at render time — the widget makes no external requests (the
- *    historical behavior). The Blob worker it builds needs
+ *  - "inline" (compatibility / zero-request tier): the ordinary
+ *    compatibility surface — the stylesheet, the WASM runtime glue and
+ *    the driver — is inlined at render time (the historical behavior).
+ *    The ExecutionChallenge interpreter stays a lazy first-party
+ *    content-addressed asset (executionSrc below; the interpreter is
+ *    never embedded) that the driver fetches exactly once on an
+ *    execution-armed lifecycle, so a non-execution lifecycle makes no
+ *    external asset request. The Blob worker this tier builds needs
  *    worker-src blob:.
  *
  * The telemetry mode (off/minimal/full) follows the bundle config (forced
@@ -54,6 +59,9 @@ final class KiwiCaptchaRuntime
         'driver' => ['driver', 'js'],
         'worker' => ['worker', 'js'],
         'execution' => ['execution', 'js'],
+        'risk' => ['risk', 'js'],
+        'telemetry' => ['telemetry', 'js'],
+        'locales' => ['locales', 'js'],
     ];
 
     private readonly string $css;
@@ -61,6 +69,9 @@ final class KiwiCaptchaRuntime
     private readonly string $driver;
     private readonly string $worker;
     private readonly string $execution;
+    private readonly string $risk;
+    private readonly string $telemetryAsset;
+    private readonly string $localesAsset;
 
     /** @var array<string, array{url: string, sri: string}>|null */
     private ?array $assetInfo = null;
@@ -85,6 +96,9 @@ final class KiwiCaptchaRuntime
         $this->driver = $this->readAsset($assetDir, 'widget-driver.js');
         $this->worker = $this->readAsset($assetDir, 'kiwi-worker.js');
         $this->execution = $this->readAsset($assetDir, 'execution-interpreter.js');
+        $this->risk = $this->readAsset($assetDir, 'widget-risk.js');
+        $this->telemetryAsset = $this->readAsset($assetDir, 'widget-telemetry.js');
+        $this->localesAsset = $this->readAsset($assetDir, 'widget-locales.js');
     }
 
     private function readAsset(string $dir, string $name): string
@@ -123,6 +137,21 @@ final class KiwiCaptchaRuntime
         return $this->execution;
     }
 
+    public function risk(): string
+    {
+        return $this->risk;
+    }
+
+    public function telemetry(): string
+    {
+        return $this->telemetryAsset;
+    }
+
+    public function locales(): string
+    {
+        return $this->localesAsset;
+    }
+
     public function assetMode(): string
     {
         return $this->assetMode;
@@ -156,7 +185,7 @@ final class KiwiCaptchaRuntime
             return $this->assetInfo;
         }
         $prefix = rtrim($this->routePrefix, '/');
-        $contents = ['widget' => $this->css, 'runtime' => $this->wasm, 'driver' => $this->driver, 'worker' => $this->worker, 'execution' => $this->execution];
+        $contents = ['widget' => $this->css, 'runtime' => $this->wasm, 'driver' => $this->driver, 'worker' => $this->worker, 'execution' => $this->execution, 'risk' => $this->risk, 'telemetry' => $this->telemetryAsset, 'locales' => $this->localesAsset];
         $info = [];
         foreach (self::ASSET_KEYS as $key => [$var, $ext]) {
             $content = $contents[$key];
@@ -289,6 +318,91 @@ final class KiwiCaptchaRuntime
     }
 
     /**
+     * The driver's data-kiwi-risk-src value (files mode): the versioned
+     * widget-risk.js asset URL the driver loads lazily when the
+     * adaptive-risk tier is triggered (a memory-hard challenge, an armed
+     * response or the coarse risk-context opt-in). The inline tier
+     * embeds the module instead, so no URL rides the container there.
+     * Empty in inline mode.
+     */
+    public function riskSrc(): string
+    {
+        if ($this->assetMode !== 'files') {
+            return '';
+        }
+
+        return $this->assets()['risk']['url'];
+    }
+
+    /**
+     * The driver's data-kiwi-risk-integrity value (files mode): the SRI
+     * digest of the widget-risk.js asset, verified by the browser's
+     * native SRI check when the core injects the module script. Empty in
+     * inline mode.
+     */
+    public function riskIntegrity(): string
+    {
+        if ($this->assetMode !== 'files') {
+            return '';
+        }
+
+        return $this->assets()['risk']['sri'];
+    }
+
+    /**
+     * The driver's data-kiwi-telemetry-src value (files mode): the
+     * versioned widget-telemetry.js asset URL the driver loads lazily
+     * when a widget enables a telemetry session. Empty in inline mode
+     * (the inline tier embeds the module when telemetry is enabled).
+     */
+    public function telemetrySrc(): string
+    {
+        if ($this->assetMode !== 'files') {
+            return '';
+        }
+
+        return $this->assets()['telemetry']['url'];
+    }
+
+    /**
+     * The driver's data-kiwi-telemetry-integrity value (files mode): the
+     * SRI digest of the widget-telemetry.js asset. Empty in inline mode.
+     */
+    public function telemetryIntegrity(): string
+    {
+        if ($this->assetMode !== 'files') {
+            return '';
+        }
+
+        return $this->assets()['telemetry']['sri'];
+    }
+
+    /**
+     * The driver's data-kiwi-locales-src value: the versioned
+     * widget-locales.js asset URL the driver lazy-fetches only when a
+     * widget's resolved language is non-default. Emitted in both asset
+     * tiers like the execution interpreter: the module is never
+     * embedded (a default-language page pays zero bytes for the
+     * non-default translations), so the content-addressed URL is the
+     * only delivery. Empty when the asset is unavailable.
+     */
+    public function localesSrc(): string
+    {
+        return $this->assets()['locales']['url'];
+    }
+
+    /**
+     * The driver's data-kiwi-locales-integrity value: the SRI digest of
+     * the widget-locales.js asset (sha256-<base64>), verified by the
+     * browser's native SRI check when the core injects the module
+     * script. Empty when the asset is unavailable.
+     */
+    public function localesIntegrity(): string
+    {
+        return $this->assets()['locales']['sri'];
+    }
+
+    /**
      * The explicit `frame-ancestors` CSP directive for the widget page:
      * the space-separated allowlisted origins
      * (risk.challenge_origin_allowlist), always explicit, never
@@ -350,6 +464,21 @@ final class KiwiCaptchaRuntime
             'kiwi_css' => $this->css,
             'kiwi_wasm' => $this->wasm,
             'kiwi_driver' => $this->driver,
+            // The lazy widget modules (see the driver split docs): the
+            // inline tier embeds widget-risk.js (the adaptive-risk solve
+            // tier + armed-evidence machinery, always: a decoy or
+            // memory-hard challenge can be armed per response) and
+            // widget-telemetry.js (only when a session is enabled); the
+            // files tier renders their versioned URLs + SRI digests as
+            // container attributes for the driver's lazy fetch.
+            'kiwi_risk' => $this->risk,
+            'kiwi_telemetry' => $this->telemetryAsset,
+            'risk_src' => $this->riskSrc(),
+            'risk_integrity' => $this->riskIntegrity(),
+            'telemetry_src' => $this->telemetrySrc(),
+            'telemetry_integrity' => $this->telemetryIntegrity(),
+            'locales_src' => $this->localesSrc(),
+            'locales_integrity' => $this->localesIntegrity(),
             // Files-mode delivery state (asset_mode + the request-scoped
             // emission registry + the driver's lazy runtime and worker
             // URLs and SRI digests).

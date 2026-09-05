@@ -24,18 +24,34 @@
 //! (the client squares modulo n), so it also rides the challenge
 //! response; lambda never leaves the server configuration.
 //!
-//! Validation is shape-only: the modulus must be exactly 256 bytes with
-//! the top bit set (a genuine 2048-bit composite) and odd, and lambda
-//! must decode to 1..=256 bytes and be even (both `p-1` and `q-1` are
-//! even, so lambda is even). The lcm relation cannot be checked without
-//! the factorization, exactly like an RSA public key cannot be verified
-//! against its private exponent. Both values are canonical standard
-//! base64 of their big-endian bytes.
+//! Validation first proves the shape: the modulus must be exactly 256
+//! bytes with the top bit set (a genuine 2048-bit composite) and odd,
+//! and lambda must decode to 1..=256 bytes and be even (both `p-1` and
+//! `q-1` are even, so lambda is even). Beyond the shape, three weak or
+//! inconsistent inputs are refused: a modulus divisible by any prime at
+//! or below 1000 (no product of two 1024-bit primes has one), a
+//! probable-prime modulus (a genuine modulus is composite), and a
+//! lambda that fails the deterministic trapdoor consistency spot-check
+//! over the fixed small-prime base set. The spot-check requires
+//! `base^lambda == 1` modulo n per base, the exact condition under
+//! which the trapdoor shortcut agrees with the client's sequential
+//! squaring at every cost T. So a lambda that passes it for every base
+//! of the set behaves as the trapdoor at every tested base. It is a
+//! spot-check, not a proof: no fixed base set can establish that lambda
+//! is the true Carmichael value of n without the factorization, exactly
+//! like an RSA public key cannot be verified against its private
+//! exponent. Only the first-party generator's p/q construction is
+//! guaranteed to produce lambda = lcm(p-1, q-1), so the residual
+//! assurance for a deployed pair is its provenance: operators generate
+//! the pair with the shipped `tools/rsw-keygen` binary and record the
+//! modulus fingerprint. Both values are canonical standard base64 of
+//! their big-endian bytes.
 
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use num_bigint::BigUint;
 use sha2::{Digest, Sha256};
+use std::fmt;
 
 /// The modulus is a 2048-bit composite: exactly 256 bytes.
 pub const MODULUS_BYTES: usize = 256;
@@ -48,10 +64,24 @@ pub const PROOF_HEX_LENGTH: usize = 512;
 
 /// A decoded and validated rsw trapdoor: the public 2048-bit composite
 /// modulus `n = p*q` and the secret `lambda = lcm(p-1, q-1)`.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented manually: the derived formatter would print the
+/// secret `lambda` into logs, so the manual impl prints the same field set
+/// with only the lambda value replaced by `"<redacted>"` (the modulus `n`
+/// is public material — the client squares modulo `n`).
+#[derive(Clone)]
 pub struct RswTrapdoor {
     n: BigUint,
     lambda: BigUint,
+}
+
+impl fmt::Debug for RswTrapdoor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RswTrapdoor")
+            .field("n", &self.n)
+            .field("lambda", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Why an rsw trapdoor configuration is refused. Mirrors the PHP
@@ -71,13 +101,21 @@ pub enum RswError {
     InvalidLambdaSize,
     #[error("rsw_lambda must be even (lcm(p-1, q-1) of two odd primes)")]
     InvalidLambdaParity,
+    #[error("rsw_modulus_n must not be divisible by a small prime (a genuine 2048-bit modulus has none; found {0})")]
+    InvalidModulusSmallFactor(u32),
+    #[error("rsw_modulus_n must not itself be a probable prime (a genuine 2048-bit modulus is the product of two large primes)")]
+    InvalidModulusProbablyPrime,
+    #[error("rsw_lambda is not a matching trapdoor for rsw_modulus_n (the lambda shortcut diverges from sequential squaring)")]
+    InvalidLambdaTrapdoor,
 }
 
 impl RswTrapdoor {
     /// Decode and validate the trapdoor pair, mirroring the PHP `Rsw`
     /// constructor: canonical standard base64 of exactly 256 bytes with
     /// the top bit set and odd for the modulus, canonical standard
-    /// base64 of 1..=256 even bytes for lambda.
+    /// base64 of 1..=256 even bytes for lambda, then the three
+    /// weak-input rejections of [`small_prime_factor`],
+    /// [`is_probable_prime`] and [`trapdoor_consistent`].
     pub fn new(modulus_b64: &str, lambda_b64: &str) -> Result<Self, RswError> {
         let n_bytes = canonical_base64_bytes(modulus_b64)?;
         if n_bytes.len() != MODULUS_BYTES {
@@ -97,10 +135,19 @@ impl RswTrapdoor {
             return Err(RswError::InvalidLambdaParity);
         }
 
-        Ok(RswTrapdoor {
-            n: BigUint::from_bytes_be(&n_bytes),
-            lambda: BigUint::from_bytes_be(&lambda_bytes),
-        })
+        let n = BigUint::from_bytes_be(&n_bytes);
+        let lambda = BigUint::from_bytes_be(&lambda_bytes);
+        if let Some(factor) = small_prime_factor(&n) {
+            return Err(RswError::InvalidModulusSmallFactor(factor));
+        }
+        if is_probable_prime(&n) {
+            return Err(RswError::InvalidModulusProbablyPrime);
+        }
+        if !trapdoor_consistent(&n, &lambda) {
+            return Err(RswError::InvalidLambdaTrapdoor);
+        }
+
+        Ok(RswTrapdoor { n, lambda })
     }
 
     /// The decoded modulus n.
@@ -152,6 +199,263 @@ fn canonical_base64_bytes(value: &str) -> Result<Vec<u8>, RswError> {
     Ok(bytes)
 }
 
+/// The trial-division ceiling of the weak-modulus rejection: any prime
+/// factor at or below this bound marks the modulus as severely
+/// weak, because a genuine modulus is the product of two primes of
+/// roughly 1024 bits.
+pub const SMALL_PRIME_LIMIT: u32 = 1000;
+
+/// The fixed base set of the trapdoor consistency spot-check: the
+/// primes 2, 3, 5, 7, 11, 13, 17 and 19. Each stays below the
+/// trial-division ceiling, so a conforming modulus shares no factor
+/// with any base and the exponent reduction of the trapdoor applies.
+pub const SELFTEST_BASES: [u64; 8] = [2, 3, 5, 7, 11, 13, 17, 19];
+
+/// The largest |D| the Lucas parameter search tries before it declares
+/// the input composite. The bound exceeds the smallest value that a
+/// 2048-bit prime could exhaust, so a genuine candidate always finds a
+/// Jacobi symbol of -1 while a perfect square never does (its symbol is
+/// 1 for every coprime D).
+const LUCAS_D_BOUND: u64 = 3000;
+
+/// The smallest factor of `n` among the primes at or below
+/// [`SMALL_PRIME_LIMIT`], or `None` when `n` has none.
+pub fn small_prime_factor(n: &BigUint) -> Option<u32> {
+    primes_below(SMALL_PRIME_LIMIT as u64 + 1)
+        .into_iter()
+        .skip(1)
+        .find(|p| n % BigUint::from(*p) == BigUint::from(0u8))
+        .map(|p| p as u32)
+}
+
+/// Is `n` a probable prime? The yardstick is Baillie's composite of a
+/// base-2 strong Miller-Rabin round with the strong Lucas test under
+/// Selfridge parameters, the same probable-prime notion PHP reaches
+/// through `gmp_prob_prime`. No composite is known to pass the pair at
+/// any size, so a genuine 2048-bit semiprime never trips the rejection
+/// while every prime does.
+pub fn is_probable_prime(n: &BigUint) -> bool {
+    if n.bits() <= 1 {
+        return false;
+    }
+    if !n.bit(0) {
+        return n == &BigUint::from(2u8);
+    }
+    // Trial division by the primes below 100: an odd input below 2^14
+    // that survives is prime, and every surviving input keeps its
+    // smallest factor above 100 for the Lucas parameter search.
+    let primes = primes_below(100);
+    for p in &primes {
+        if n % BigUint::from(*p) == BigUint::from(0u8) {
+            return n == &BigUint::from(*p);
+        }
+    }
+    if n.bits() <= 13 {
+        return true;
+    }
+    if !miller_rabin(n, &BigUint::from(2u8)) {
+        return false;
+    }
+    strong_lucas(n)
+}
+
+/// Does `lambda` act as the trapdoor of `n`? The check is a
+/// deterministic consistency spot-check: per base of the fixed
+/// [`SELFTEST_BASES`] set, `base^lambda` must equal 1 modulo `n`. Each
+/// equality holds exactly when that base's order divides lambda, which
+/// is precisely the condition that the lambda shortcut `base^(2^T mod
+/// lambda)` matches the T sequential squarings of the base at every
+/// cost T. Every genuine pair passes, because lambda is the Carmichael
+/// value of the semiprime; a mismatched or fabricated lambda fails the
+/// spot-check almost surely, so it is refused at configuration time.
+/// Passing every base is not a proof that lambda is exactly the
+/// Carmichael value: only the first-party generator's p/q construction
+/// guarantees that, and the pass verdict is the strongest consistency
+/// evidence a configuration validator without the primes can hold.
+pub fn trapdoor_consistent(n: &BigUint, lambda: &BigUint) -> bool {
+    SELFTEST_BASES
+        .iter()
+        .all(|base| BigUint::from(*base).modpow(lambda, n) == BigUint::from(1u8))
+}
+
+/// The primes below `limit`, sieve-generated. The two trial-division
+/// bounds and the probable-prime prefilter share this list.
+fn primes_below(limit: u64) -> Vec<u64> {
+    let mut sieve = vec![true; limit.max(2) as usize];
+    sieve[0] = false;
+    sieve[1] = false;
+    let mut p = 2usize;
+    while p * p < sieve.len() {
+        if sieve[p] {
+            let mut m = p * p;
+            while m < sieve.len() {
+                sieve[m] = false;
+                m += p;
+            }
+        }
+        p += 1;
+    }
+    (0..sieve.len())
+        .filter(|&i| sieve[i])
+        .map(|i| i as u64)
+        .collect()
+}
+
+/// A strong Miller-Rabin round to the base `a`: does `n` survive as a
+/// probable prime? The round never rejects a prime, and a composite
+/// survives at most a quarter of the bases.
+fn miller_rabin(n: &BigUint, a: &BigUint) -> bool {
+    let n_minus_1 = n - BigUint::from(1u8);
+    let s = n_minus_1.trailing_zeros().expect("n is odd and above 1") as usize;
+    let d = &n_minus_1 >> s;
+    let mut x = a.modpow(&d, n);
+    if x == BigUint::from(1u8) || x == n_minus_1 {
+        return true;
+    }
+    for _ in 0..s - 1 {
+        x = (&x * &x) % n;
+        if x == n_minus_1 {
+            return true;
+        }
+    }
+    false
+}
+
+/// The strong Lucas probable-prime test with Selfridge parameters, the
+/// second half of the probable-prime yardstick. Returns false on a
+/// shared factor or on an exhausted parameter search, which is exactly
+/// the composite verdict a perfect square deserves.
+fn strong_lucas(n: &BigUint) -> bool {
+    let (d_mod, q_mod) = match selfridge_parameters(n) {
+        Some(params) => params,
+        None => return false,
+    };
+    let n_plus_1 = n + BigUint::from(1u8);
+    let s = n_plus_1.trailing_zeros().expect("n is odd") as usize;
+    let d_odd = &n_plus_1 >> s;
+
+    // Double-and-add over the bits of the odd index d_odd, tracking
+    // (U_k, V_k, Q^k) with the parameter P fixed at 1. The halving of
+    // the add steps multiplies by the inverse of 2 modulo the odd n.
+    let half = (n + BigUint::from(1u8)) >> 1usize;
+    let mut u = BigUint::from(1u8);
+    let mut v = BigUint::from(1u8);
+    let mut q_pow = q_mod.clone();
+    let mut bit = d_odd.bits() - 1;
+    while bit > 0 {
+        bit -= 1;
+        let doubled_u = (&u * &v) % n;
+        let doubled_v = double_v(&v, &q_pow, n);
+        q_pow = (&q_pow * &q_pow) % n;
+        if d_odd.bit(bit) {
+            u = ((&doubled_u + &doubled_v) * &half) % n;
+            v = ((&d_mod * &doubled_u) + &doubled_v) % n;
+            v = (&v * &half) % n;
+            q_pow = (&q_pow * &q_mod) % n;
+        } else {
+            u = doubled_u;
+            v = doubled_v;
+        }
+    }
+
+    // The strong condition: U_d vanishes, or V at the odd index d or
+    // at one of its s-1 doublings vanishes.
+    if u == BigUint::from(0u8) || v == BigUint::from(0u8) {
+        return true;
+    }
+    let mut v_doubled = v;
+    let mut q_doubled = q_pow;
+    for _ in 0..s - 1 {
+        v_doubled = double_v(&v_doubled, &q_doubled, n);
+        q_doubled = (&q_doubled * &q_doubled) % n;
+        if v_doubled == BigUint::from(0u8) {
+            return true;
+        }
+    }
+    false
+}
+
+/// The doubling step V_2k = V_k^2 - 2 Q^k of the Lucas chain.
+fn double_v(v: &BigUint, q_pow: &BigUint, n: &BigUint) -> BigUint {
+    let twice_q = (q_pow << 1usize) % n;
+    let squared = (v * v) % n;
+    (squared + n - twice_q) % n
+}
+
+/// The Selfridge parameter search: the first D of 5, -7, 9, -11, ...
+/// with a Jacobi symbol of -1 against the odd `n`, returned as D mod n
+/// and Q = (1 - D) / 4 mod n. A shared factor or an exhausted search
+/// (a perfect square, whose symbol is 1 for every coprime D) yields
+/// None, the composite verdict.
+fn selfridge_parameters(n: &BigUint) -> Option<(BigUint, BigUint)> {
+    let mut magnitude = 5u64;
+    while magnitude <= LUCAS_D_BOUND {
+        let symbol_of_m = jacobi(&BigUint::from(magnitude), n);
+        if symbol_of_m == 0 {
+            return None;
+        }
+        let positive = magnitude % 4 == 1;
+        let symbol = if positive || !n.bit(1) {
+            symbol_of_m
+        } else {
+            -symbol_of_m
+        };
+        if symbol == -1 {
+            let d_mod = if positive {
+                BigUint::from(magnitude)
+            } else {
+                n - BigUint::from(magnitude)
+            };
+            let q = if positive {
+                n - BigUint::from((magnitude - 1) / 4)
+            } else {
+                BigUint::from((magnitude + 1) / 4)
+            };
+            return Some((d_mod, q));
+        }
+        magnitude += 2;
+    }
+    None
+}
+
+/// The Jacobi symbol of `a` against the odd positive `n`: 1, -1, or 0
+/// when the two share a factor. The classic binary algorithm.
+fn jacobi(a: &BigUint, n: &BigUint) -> i8 {
+    let mut a = a % n;
+    let mut n = n.clone();
+    let mut result = 1i8;
+    while a != BigUint::from(0u8) {
+        while !a.bit(0) {
+            a >>= 1usize;
+            let n_low = low_bits(&n, 3);
+            if n_low == 3 || n_low == 5 {
+                result = -result;
+            }
+        }
+        std::mem::swap(&mut a, &mut n);
+        if low_bits(&a, 2) == 3 && low_bits(&n, 2) == 3 {
+            result = -result;
+        }
+        a = &a % &n;
+    }
+    if n == BigUint::from(1u8) {
+        result
+    } else {
+        0
+    }
+}
+
+/// The low `bits` (at most 8) of a big integer, as a small value.
+fn low_bits(n: &BigUint, bits: u8) -> u32 {
+    let mut value = 0u32;
+    for offset in 0..bits {
+        if n.bit(offset as u64) {
+            value |= 1 << offset;
+        }
+    }
+    value
+}
+
 #[cfg(feature = "test-fixtures")]
 pub mod fixtures {
     //! Test-only rsw fixture keys and the browser-equivalent sequential
@@ -197,5 +501,200 @@ pub mod fixtures {
             value = (&value * &value) % &modulus;
         }
         super::proof_hex(&value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trapdoor_debug_redacts_lambda_but_prints_the_public_modulus() {
+        let trapdoor = fixtures::trapdoor();
+        let debug = format!("{trapdoor:?}");
+        // The secret lambda never prints — the Debug shape shows the
+        // public modulus n (as its own decimal digits, like the derived
+        // formatter did) with the lambda slot replaced by the marker.
+        assert!(debug.starts_with("RswTrapdoor { n: "));
+        assert!(debug.ends_with("lambda: \"<redacted>\" }"));
+        assert!(!debug.contains(fixtures::LAMBDA_B64));
+        assert!(debug.contains(&format!("{}", trapdoor.modulus())));
+        assert_eq!(debug.matches("<redacted>").count(), 1);
+    }
+
+    use base64::engine::general_purpose::STANDARD as TestB64;
+    use base64::Engine;
+
+    /// A real 2048-bit probable prime, generated with openssl for the
+    /// probable-prime rejection tests. A genuine modulus must never
+    /// look like it: the constant is a prime, so both language cores
+    /// refuse it deterministically and cheaply.
+    const PROBABLE_PRIME_N_B64: &str = "3QB709I66Q8Ivp2P5RtgD4+ci38dHuAuXfzGL4KtCk34UGX9uOG1FgNV92B9BcVS1iX4JCYdqN9cHg62sqEWx+p0fn7rUCuPYZSFpnwcWpVjHMbigzz2wjWt2mhkqLtbgZ/+nar/ptQu7aHKOrQYVAppYf0txmfwtnUbHSWpyMZhUv10JSnNPRuPL6wrb0cH8TjHex2W90islc3qPAwi9lAZdtX/+OepFBLDkmjnE4yi2SyBZ75kHWn+ve7nXg0352zbPtL3gos658lJsVVdt3IbqeVf1I9wnViRYpIS+EYHK5olWm3+sOxwZfbixlgLh0p3JafQoCnZpkF2j+9Gzw==";
+
+    /// A real 1024-bit prime whose square is a 2048-bit composite with
+    /// no small factor: the square path of the probable-prime test.
+    const PRIME_1024_B64: &str = "2PBoikMccpiIzz4G2CatF+bwUSHAUCsY31/vtWRzn2niSrjQDA7VZiv2W2Q3dwKlp2rtHp8irvTOxrCpyt1WoHB3epXlGi9BenmaFenwufyghc4/UIk30jERCOb5zvo+scyQVrBZjGYgROIe5zgVhmMfXnbvCxaTqpPTyFckqcc=";
+
+    /// The classic strong pseudoprimes to the first small prime bases:
+    /// each survives the matching Miller-Rabin rounds and must still
+    /// read as composite under the full probable-prime yardstick.
+    const STRONG_PSEUDOPRIMES: [u64; 4] = [1373653, 25326001, 3215031751, 3825123056546413051];
+
+    fn decode_b64(value: &str) -> Vec<u8> {
+        TestB64.decode(value).expect("the constant is base64")
+    }
+
+    fn big_from_b64(value: &str) -> BigUint {
+        BigUint::from_bytes_be(&decode_b64(value))
+    }
+
+    fn modulus_b64(value: &BigUint) -> String {
+        let bytes = value.to_bytes_be();
+        assert!(bytes.len() <= MODULUS_BYTES, "test modulus fits 256 bytes");
+        let mut padded = vec![0u8; MODULUS_BYTES - bytes.len()];
+        padded.extend_from_slice(&bytes);
+        TestB64.encode(&padded)
+    }
+
+    /// The odd 2048-bit multiple factor * (2^b + 1) with the top bit
+    /// set: exactly the shape of a genuine modulus, severely
+    /// weak underneath it.
+    fn weak_modulus_with_factor(factor: u64) -> BigUint {
+        let factor_bits = 64 - factor.leading_zeros();
+        let shift = 2048 - factor_bits;
+        BigUint::from(factor) * ((BigUint::from(1u8) << shift) + BigUint::from(1u8))
+    }
+
+    #[test]
+    fn fixture_trapdoor_pair_still_validates() {
+        assert!(RswTrapdoor::new(fixtures::MODULUS_N_B64, fixtures::LAMBDA_B64).is_ok());
+    }
+
+    #[test]
+    fn even_modulus_is_refused() {
+        let mut bytes = decode_b64(fixtures::MODULUS_N_B64);
+        bytes[MODULUS_BYTES - 1] &= !1;
+        assert!(matches!(
+            RswTrapdoor::new(&TestB64.encode(&bytes), fixtures::LAMBDA_B64),
+            Err(RswError::InvalidModulusParity)
+        ));
+    }
+
+    #[test]
+    fn short_modulus_is_refused() {
+        let short = TestB64.encode(&decode_b64(fixtures::MODULUS_N_B64)[..128]);
+        assert!(matches!(
+            RswTrapdoor::new(&short, fixtures::LAMBDA_B64),
+            Err(RswError::InvalidModulusSize)
+        ));
+    }
+
+    #[test]
+    fn high_bit_clear_modulus_is_refused() {
+        let mut bytes = vec![0xffu8; MODULUS_BYTES];
+        bytes[0] = 0x7f;
+        assert!(matches!(
+            RswTrapdoor::new(&TestB64.encode(&bytes), fixtures::LAMBDA_B64),
+            Err(RswError::InvalidModulusTopBit)
+        ));
+    }
+
+    #[test]
+    fn odd_lambda_is_refused() {
+        let mut bytes = decode_b64(fixtures::LAMBDA_B64);
+        let last = bytes.len() - 1;
+        bytes[last] |= 1;
+        assert!(matches!(
+            RswTrapdoor::new(fixtures::MODULUS_N_B64, &TestB64.encode(&bytes)),
+            Err(RswError::InvalidLambdaParity)
+        ));
+    }
+
+    #[test]
+    fn small_prime_factor_of_the_modulus_is_refused() {
+        let weak = weak_modulus_with_factor(3);
+        assert_eq!(small_prime_factor(&weak), Some(3));
+        assert!(matches!(
+            RswTrapdoor::new(&modulus_b64(&weak), fixtures::LAMBDA_B64),
+            Err(RswError::InvalidModulusSmallFactor(3))
+        ));
+        // The even exponent keeps 2^2044 + 1 away from the factor 3, so
+        // the smallest factor of the multiple really is 5.
+        let by_five = BigUint::from(5u8) * ((BigUint::from(1u8) << 2044usize) + BigUint::from(1u8));
+        assert_eq!(small_prime_factor(&by_five), Some(5));
+        assert_eq!(
+            small_prime_factor(&big_from_b64(fixtures::MODULUS_N_B64)),
+            None
+        );
+    }
+
+    #[test]
+    fn probable_prime_modulus_is_refused() {
+        assert!(is_probable_prime(&big_from_b64(PROBABLE_PRIME_N_B64)));
+        assert!(matches!(
+            RswTrapdoor::new(PROBABLE_PRIME_N_B64, fixtures::LAMBDA_B64),
+            Err(RswError::InvalidModulusProbablyPrime)
+        ));
+    }
+
+    #[test]
+    fn mismatched_lambda_is_refused() {
+        let lambda = big_from_b64(fixtures::LAMBDA_B64);
+        let shifted = &lambda - BigUint::from(2u8);
+        assert!(matches!(
+            RswTrapdoor::new(
+                fixtures::MODULUS_N_B64,
+                &TestB64.encode(shifted.to_bytes_be())
+            ),
+            Err(RswError::InvalidLambdaTrapdoor)
+        ));
+        assert!(!trapdoor_consistent(
+            &big_from_b64(fixtures::MODULUS_N_B64),
+            &shifted
+        ));
+        assert!(trapdoor_consistent(
+            &big_from_b64(fixtures::MODULUS_N_B64),
+            &lambda
+        ));
+    }
+
+    #[test]
+    fn probable_prime_verdicts_match_known_primes_and_pseudoprimes() {
+        let primes = primes_below(5000);
+        for p in primes.iter().filter(|p| **p >= 3) {
+            assert!(is_probable_prime(&BigUint::from(*p)), "{p} is prime");
+        }
+        for composite in STRONG_PSEUDOPRIMES {
+            assert!(
+                !is_probable_prime(&BigUint::from(composite)),
+                "{composite} is a strong pseudoprime, never a probable prime"
+            );
+        }
+        assert!(!is_probable_prime(&BigUint::from(9u8)));
+        assert!(!is_probable_prime(&big_from_b64(fixtures::MODULUS_N_B64)));
+        assert!(!is_probable_prime(&big_from_b64(PRIME_1024_B64).pow(2u32)));
+    }
+
+    #[test]
+    fn shifted_lambda_fails_the_euler_test_at_a_second_base() {
+        // The mutated lambda diverges from the genuine Carmichael
+        // value: the consistency spot-check fails at every base of the
+        // fixed set, not just the cheapest one. The assertion probes
+        // base 3 directly.
+        let n = big_from_b64(fixtures::MODULUS_N_B64);
+        let shifted = big_from_b64(fixtures::LAMBDA_B64) - BigUint::from(2u8);
+        assert_ne!(BigUint::from(3u8).modpow(&shifted, &n), BigUint::from(1u8));
+    }
+
+    #[test]
+    fn jacobi_symbol_agrees_with_small_tables() {
+        assert_eq!(jacobi(&BigUint::from(5u16), &BigUint::from(2047u16)), -1);
+        assert_eq!(jacobi(&BigUint::from(5u16), &BigUint::from(89u16)), 1);
+        assert_eq!(jacobi(&BigUint::from(3u8), &BigUint::from(11u8)), 1);
+        assert_eq!(jacobi(&BigUint::from(2u8), &BigUint::from(7u8)), 1);
+        assert_eq!(jacobi(&BigUint::from(0u8), &BigUint::from(7u8)), 0);
+        assert_eq!(jacobi(&BigUint::from(3u8), &BigUint::from(9u8)), 0);
+        // (5|21) = (5|3) * (5|7) = -1 * -1 = 1
+        assert_eq!(jacobi(&BigUint::from(5u16), &BigUint::from(21u16)), 1);
     }
 }

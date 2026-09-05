@@ -181,7 +181,7 @@ $config = new Config(
 //     mKib: 8192,        // low-memory profile; 65536 for desktop-class
 //     t: 3,
 //     p: 1,
-//     argon2TargetBits: 8,
+//     argon2TargetBits: 4, // the target-4 default
 // );
 
 // Production: shared atomic storage (Redis fused-Lua consume transition).

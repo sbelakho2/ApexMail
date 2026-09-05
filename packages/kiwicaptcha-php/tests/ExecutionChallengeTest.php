@@ -113,11 +113,11 @@ final class ExecutionChallengeTest extends TestCase
     public function testGenerationRefusesANoncanonicalVersionByte(): void
     {
         // The version argument during generation is a canonical
-        // numeric byte, exactly 1, 2 or 3: any other byte is refused
-        // before any program is minted (the strict parser would reject
-        // the blob anyway, so issuance never produces an unparseable
-        // program). No string-cast ever reaches the blob.
-        foreach ([0, 5, 255] as $bad) {
+        // numeric byte within 1..MAX_EXECUTION_VERSION: any other byte
+        // is refused before any program is minted (the strict parser
+        // would reject the blob anyway, so issuance never produces an
+        // unparseable program). No string-cast ever reaches the blob.
+        foreach ([0, 6, 255] as $bad) {
             try {
                 ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, self::SCOPE, self::ACTION, $bad);
                 self::fail('a noncanonical version byte must be refused');
@@ -125,10 +125,12 @@ final class ExecutionChallengeTest extends TestCase
                 self::assertStringContainsString('execution version must be', $e->getMessage());
             }
         }
-        // Both canonical bytes generate and stamp their own version:
-        // 1 (the legacy construction-to-probe grammar) and 2 (the
-        // causal observe grammar).
-        foreach ([1, 2] as $version) {
+        // Every register version generates and stamps its own version
+        // byte: 1 (the legacy construction-to-probe grammar), 2 (the
+        // causal observe grammar), 3 (the sibling-index probe), 4
+        // (the nested-tree depth probe) and 5 (the causal
+        // object-graph grammar).
+        foreach (range(1, ExecutionChallengeGenerator::MAX_EXECUTION_VERSION) as $version) {
             $decoded = ExecutionChallengeGenerator::decode(
                 ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, self::SCOPE, self::ACTION, $version)
             );
@@ -603,19 +605,21 @@ final class ExecutionChallengeTest extends TestCase
     public function testAllOpcodesExecuteDeterministically(): void
     {
         // Every opcode of the fixed set appears across a deterministic
-        // corpus of version-2 programs (the causal grammar carries the
-        // observe opcode 33 plus the probe block 28..32; nonces derive
-        // from sha256 over a label, so the same programs run on every
-        // PHP version and every CI cell — the corpus is large enough
-        // that the rarest filler opcodes (uniform over 0..27 in the
-        // filler slots) are certainly drawn), and every trace entry is
-        // a valid value (decimal, "1"/"0", or base64 — never
-        // containing the ';' separator). Version-1 programs never
-        // reach opcode 33 (the observe opcode is a v2-only extension;
-        // see the structure corpus tests).
+        // corpus of version-3, version-4 and version-5 programs (the
+        // causal grammars carry the observe opcode 33 plus the probe
+        // block; nonces derive from sha256 over a label, so the same
+        // programs run on every PHP version and every CI cell — the
+        // corpus is large enough that the rarest filler opcodes
+        // (uniform over 0..27 in the filler slots) are certainly
+        // drawn), and every trace entry is a valid value (decimal,
+        // "1"/"0", or base64 — never containing the ';' separator).
+        // The fragment-append opcode is terminal by design: it is
+        // never drawn into an issued program's extra slots or filler
+        // (see generate), so the reachable set is the full register
+        // minus OP_DOM_FRAGMENT_APPEND.
         $seen = [];
-        for ($i = 0; $i < 160; $i++) {
-            $version = 3 + ($i % 2);
+        for ($i = 0; $i < 240; $i++) {
+            $version = 3 + ($i % 3);
             $nonce = base64_encode(hash('sha256', 'opcode-coverage-'.$i, true));
             $program = ExecutionChallengeGenerator::generate(self::KEY, $nonce, self::SCOPE, self::ACTION, $version);
             $decoded = ExecutionChallengeGenerator::decode($program);
@@ -627,7 +631,8 @@ final class ExecutionChallengeTest extends TestCase
                 $seen[$op['op']] = true;
             }
         }
-        self::assertCount(ExecutionChallengeGenerator::OP_COUNT, $seen, 'every fixed opcode must be reachable by the generator');
+        self::assertCount(ExecutionChallengeGenerator::OP_COUNT - 1, $seen, 'every fixed opcode except the terminal fragment append must be reachable by the generator');
+        self::assertArrayNotHasKey(ExecutionChallengeGenerator::OP_DOM_FRAGMENT_APPEND, $seen, 'the terminal fragment append is never minted into an extra slot');
     }
 
     public function testRustMirrorVectorsAreReproduced(): void
@@ -708,12 +713,12 @@ final class ExecutionChallengeTest extends TestCase
     public function testStrictParserRejectsTrailingBytesAndBadContextBytes(): void
     {
         // The parser strictness: exact EOF after the op list
-        // (a trailing byte is invalid), the version byte exactly 1 or 2
-        // (both canonical grammar versions parse, no other byte), and
-        // the embedded scope/action must match the canonical identifier
-        // grammar. A version-1 blob never carries the version-2 observe
-        // opcode (33): the parser rejects a newer grammar by the
-        // declared version byte alone.
+        // (a trailing byte is invalid), the version byte within
+        // 1..MAX_EXECUTION_VERSION (register versions parse, no other
+        // byte), and the embedded scope/action must match the canonical
+        // identifier grammar. A version-1 blob never carries the
+        // version-2 observe opcode (33): the parser rejects a newer
+        // grammar by the declared version byte alone.
         $v1B64 = ExecutionChallengeGenerator::generate(self::KEY, self::NONCE, self::SCOPE, self::ACTION, 1);
         $good = ExecutionChallengeGenerator::decode($v1B64);
         self::assertNotNull($good);
@@ -725,14 +730,15 @@ final class ExecutionChallengeTest extends TestCase
         self::assertFalse(ExecutionChallengeGenerator::isValidProgram(base64_encode($goodBytes."\x00")), 'a trailing byte after the op list must be rejected');
         self::assertNull(ExecutionChallengeGenerator::decode(base64_encode($goodBytes."\x00")));
 
-        // A version byte other than 1|2 (index scopeLen + actionLen +
-        // 2 after the format/scopeLen prefix): a blob whose version
-        // byte is not 1..3 must be rejected.
+        // A version byte outside the canonical register (index scopeLen
+        // + actionLen + 2 after the format/scopeLen prefix): a blob
+        // whose version byte is not within 1..MAX_EXECUTION_VERSION
+        // must be rejected.
         $scopeLen = \ord($goodBytes[1]);
         $actionLen = \ord($goodBytes[2 + $scopeLen]);
         $badVersion = $goodBytes;
         $badVersion[2 + $scopeLen + $actionLen + 1] = "\x09";
-        self::assertFalse(ExecutionChallengeGenerator::isValidProgram(base64_encode($badVersion)), 'a version byte outside 1..3 must be rejected');
+        self::assertFalse(ExecutionChallengeGenerator::isValidProgram(base64_encode($badVersion)), 'a version byte outside the canonical register must be rejected');
         self::assertNull(ExecutionChallengeGenerator::decode(base64_encode($badVersion)));
 
         // Scope with an out-of-grammar byte (a space): the embedded

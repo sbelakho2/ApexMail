@@ -14,7 +14,7 @@
 {{ kiwi_css|raw }}
 </style>
 {%- endif -%}
-<div class="kiwi-container" data-kiwi-endpoint="{{ endpoint }}" data-kiwi-scope="{{ scope }}" data-kiwi-telemetry="{{ telemetry }}"{% if riskClientContext %} data-kiwi-risk-context="coarse"{% endif %}{% if requestBinding %} data-kiwi-request-binding="{{ requestBinding }}"{% endif %}{% if algorithm %} data-kiwi-algorithm="{{ algorithm }}"{% endif %}{% if runtime_src is defined and runtime_src is not empty %} data-kiwi-runtime-src="{{ runtime_src }}"{% if runtime_integrity is defined and runtime_integrity is not empty %} data-kiwi-runtime-integrity="{{ runtime_integrity }}"{% endif %}{% endif %}{% if worker_src is defined and worker_src is not empty %} data-kiwi-worker-src="{{ worker_src }}"{% if worker_integrity is defined and worker_integrity is not empty %} data-kiwi-worker-integrity="{{ worker_integrity }}"{% endif %}{% endif %}{% if execution_src is defined and execution_src is not empty %} data-kiwi-execution-src="{{ execution_src }}"{% if execution_integrity is defined and execution_integrity is not empty %} data-kiwi-execution-integrity="{{ execution_integrity }}"{% endif %}{% endif %}>
+<div class="kiwi-container" data-kiwi-endpoint="{{ endpoint }}" data-kiwi-scope="{{ scope }}" data-kiwi-telemetry="{{ telemetry }}"{% if riskClientContext %} data-kiwi-risk-context="coarse"{% endif %}{% if requestBinding %} data-kiwi-request-binding="{{ requestBinding }}"{% endif %}{% if algorithm %} data-kiwi-algorithm="{{ algorithm }}"{% endif %}{% if runtime_src is defined and runtime_src is not empty %} data-kiwi-runtime-src="{{ runtime_src }}"{% if runtime_integrity is defined and runtime_integrity is not empty %} data-kiwi-runtime-integrity="{{ runtime_integrity }}"{% endif %}{% endif %}{% if worker_src is defined and worker_src is not empty %} data-kiwi-worker-src="{{ worker_src }}"{% if worker_integrity is defined and worker_integrity is not empty %} data-kiwi-worker-integrity="{{ worker_integrity }}"{% endif %}{% endif %}{% if execution_src is defined and execution_src is not empty %} data-kiwi-execution-src="{{ execution_src }}"{% if execution_integrity is defined and execution_integrity is not empty %} data-kiwi-execution-integrity="{{ execution_integrity }}"{% endif %}{% endif %}{% if locales_src is defined and locales_src is not empty %} data-kiwi-locales-src="{{ locales_src }}"{% if locales_integrity is defined and locales_integrity is not empty %} data-kiwi-locales-integrity="{{ locales_integrity }}"{% endif %}{% endif %}{% if asset_mode is defined and asset_mode == 'files' %}{% if risk_src is defined and risk_src is not empty %} data-kiwi-risk-src="{{ risk_src }}"{% if risk_integrity is defined and risk_integrity is not empty %} data-kiwi-risk-integrity="{{ risk_integrity }}"{% endif %}{% endif %}{% if telemetry_src is defined and telemetry_src is not empty %} data-kiwi-telemetry-src="{{ telemetry_src }}"{% if telemetry_integrity is defined and telemetry_integrity is not empty %} data-kiwi-telemetry-integrity="{{ telemetry_integrity }}"{% endif %}{% endif %}{% endif %}>
     <input type="hidden" name="{{ full_name }}" value="" data-kiwi-token />
     <div class="kiwi-widget" data-kiwi-widget data-state="idle"
          role="group" aria-label="KiwiCaptcha security check">
@@ -67,5 +67,25 @@
 <script{% if nonce %} nonce="{{ nonce }}"{% endif %}>
 {{ kiwi_driver|raw }}
 </script>
+{# The lazy widget modules of the driver split (inline tier): the
+   adaptive-risk solve tier + armed-evidence module (widget-risk.js) is
+   embedded on every inline page — a decoy or memory-hard challenge can
+   be armed per response, and embedding keeps the tier's zero-request
+   Blob-worker contract under CSPs that allow 'unsafe-inline' but not
+   'self' — and the telemetry module (widget-telemetry.js) only when a
+   session is enabled (the container's data-kiwi-telemetry says so).
+   The locale packs (widget-locales.js) are NEVER embedded in this
+   tier: the container carries the versioned module URL + SRI digest
+   (data-kiwi-locales-src / data-kiwi-locales-integrity, like the
+   execution interpreter) and the driver fetches them only when a
+   non-default language is resolved, so a default-language page pays
+   zero bytes for translations. #}
+<script{% if nonce %} nonce="{{ nonce }}"{% endif %}>
+{{ kiwi_risk|raw }}
+</script>
+{% if telemetry != 'off' %}<script{% if nonce %} nonce="{{ nonce }}"{% endif %}>
+{{ kiwi_telemetry|raw }}
+</script>
+{% endif %}
 {%- endif -%}
 {% endblock %}

@@ -110,6 +110,23 @@ final class DerivedKeys
     }
 
     /**
+     * Redacted dump shape: the three purpose keys are derived key
+     * material (the effective challenge-signing, IP-binding and
+     * result-token keys), so every field prints under its property name
+     * with the value replaced by '<redacted>'.
+     *
+     * @return array<string, string>
+     */
+    public function __debugInfo(): array
+    {
+        return [
+            'challengeKey' => '<redacted>',
+            'ipBindKey' => '<redacted>',
+            'resultKey' => '<redacted>',
+        ];
+    }
+
+    /**
      * Derive the three purpose keys from the master secret. Memoized per
      * master secret (and tenant id) for the process lifetime: the
      * secrets are immutable deployment configuration, so the three `HKDF`
@@ -163,6 +180,8 @@ final class DerivedKeys
             self::hkdf($master, self::INFO_RESULT_TOKEN, $salt),
         );
     }
+
+    
 
     /** The challenge-signing key (K_challenge): HMAC over the canonical payload. */
     public function challengeKey(): string

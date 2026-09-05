@@ -435,7 +435,7 @@ final class RiskWiringTest extends TestCase
         $resolver = $container->getDefinition('kiwi_captcha.risk.resolver');
         $args = $resolver->getArguments();
         self::assertSame(16384, $args[2], 'arg 2 = risk.argon_verification_memory_kib (the FIXED envelope, default 16384)');
-        self::assertSame([1, 4, 8], $args[3], 'arg 3 = risk.argon_escalation_target_bits (default [1, 4, 8])');
+        self::assertSame([1, 2, 4], $args[3], 'arg 3 = risk.argon_escalation_target_bits (default [1, 2, 4])');
 
         $risk = $this->riskDefaults();
         $risk['argon_verification_memory_kib'] = 32768;

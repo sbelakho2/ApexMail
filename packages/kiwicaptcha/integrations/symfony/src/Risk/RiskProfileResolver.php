@@ -29,8 +29,8 @@ use KiwiCaptcha\Risk\RiskAction;
  *    as its difficulty mechanism; escalation happens purely in the target
  *    difficulty. The expected nonce search space rises along
  *    risk.argon_escalation_target_bits, a strictly increasing 3-rung
- *    ladder within 1..Config::MAX_ARGON2_TARGET_BITS ([1, 4, 8] by
- *    default, Argon16 -> 1, Argon32 -> 4, Argon64 -> 8). The server's
+ *    ladder within 1..Config::MAX_ARGON2_TARGET_BITS ([1, 2, 4] by
+ *    default, Argon16 -> 1, Argon32 -> 2, Argon64 -> 4). The server's
  *    per-verification memory cost is then bounded by one value
  *    regardless of the decision. The core's issueWithProfile accepts a profile directly
  *    regardless of the app default, so a SHA-configured deployment can
@@ -57,15 +57,18 @@ use KiwiCaptcha\Risk\RiskAction;
 final class RiskProfileResolver
 {
     /**
-     * Calibration note: the highest Argon rung (target 8, about 256
-     * expected Argon2id evaluations at the fixed 16 MiB envelope) must
-     * be calibrated against physical low-end mobile hardware: cheap and
-     * mid-range Android, older and recent iPhone, battery-saver and
-     * thermal-throttled states. Measure p50/p95/p99 solve time and
-     * failure rate; desktop estimates do not transfer. The lab is
-     * tools/client-perf (the client-performance harness): the emulation
-     * tiers are runnable now and are the regression signal. The
-     * physical-device tiers are the release boundary; see
+     * Calibration note: the highest Argon rung (target 4, about 16
+     * expected Argon2id evaluations at the fixed 16 MiB envelope). The
+     * ladder was retuned from [1, 4, 8] to [1, 2, 4] after the
+     * client-performance lab measured the 8-bit rung at ~16 s p95
+     * on a mainstream desktop, above the absolute 5000 ms UX ceiling.
+     * Calibrate the rung against physical low-end mobile hardware:
+     * cheap and mid-range Android, older and recent iPhone,
+     * battery-saver and thermal-throttled states. Measure p50/p95/p99
+     * solve time and failure rate; desktop estimates do not transfer.
+     * The lab is tools/client-perf (the client-performance harness):
+     * the emulation tiers are runnable now and are the regression
+     * signal. The physical-device tiers are the release boundary; see
      * tools/client-perf/README.md "Release qualification" for the
      * procedure. The rung must never be weakened based on
      * client-reported device capabilities, since bots lie. If it proves
@@ -86,7 +89,7 @@ final class RiskProfileResolver
         private readonly PoWAlgorithm $algorithm,
         private readonly int $shaFloorBits,
         private readonly int $argonEnvelopeMemoryKib = 16384,
-        private readonly array $argonTargetBits = [1, 4, 8],
+        private readonly array $argonTargetBits = [1, 2, 4],
     ) {
         if (\count($this->argonTargetBits) !== 3) {
             throw new \InvalidArgumentException(
