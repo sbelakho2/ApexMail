@@ -1147,6 +1147,48 @@ async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables() {
     };
     apply_tool_migrations(&pool).await;
 
+    // The purge helper now writes its (non-optional) deletion audit entry
+    // through the hash-chained audit writer, which maintains
+    // audit_logs + audit_chain_head. The TOOLS migration set this suite
+    // applies predates both tables (they are canonical-chain migration
+    // 050/105), so the fixtures are created here explicitly — same shape
+    // as the api-server tenants.rs test fixture.
+    sqlx::raw_sql(
+        "CREATE TABLE IF NOT EXISTS audit_logs (
+            id TEXT PRIMARY KEY,
+            tenant_id TEXT,
+            user_id TEXT,
+            action TEXT NOT NULL,
+            resource TEXT NOT NULL,
+            resource_id TEXT,
+            details JSONB NOT NULL DEFAULT '{}'::jsonb,
+            ip_address TEXT,
+            user_agent TEXT,
+            outcome TEXT NOT NULL,
+            error_message TEXT,
+            timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            hash TEXT NOT NULL,
+            previous_hash TEXT,
+            signature TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("audit_logs fixture DDL must apply");
+    sqlx::raw_sql(
+        "CREATE TABLE IF NOT EXISTS audit_chain_head (
+            chain_id    TEXT        PRIMARY KEY,
+            head_hash   TEXT        NOT NULL,
+            prev_hash   TEXT,
+            head_seq    BIGINT      NOT NULL DEFAULT 1,
+            updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("audit_chain_head fixture DDL must apply");
+
     let tenant_id = insert_test_tenant(&pool, "delete-coverage").await;
     let feature_flag_key = format!("delete-coverage-{}", Uuid::new_v4().simple());
 
