@@ -1692,6 +1692,17 @@ mod tests {
         let _guard = test_runtime().enter();
         sqlx::postgres::PgPoolOptions::new()
             .max_connections(1)
+            // Bound the acquire timeout: against the unreachable test
+            // endpoint sqlx otherwise RETRIES the refused connection until
+            // the 30s default elapses, and DB-failure tests that make
+            // several calls then run for minutes. That is not just slow —
+            // the wall-clock drift once pushed a six-attempt rate-limit
+            // test across a top-of-the-hour boundary, silently switching
+            // the limiter to a fresh hour-bucket key (observed on the
+            // 2026-09-05 host run: attempt 6 at 20:00:17 keyed to hour 20
+            // instead of 19). 50ms keeps every failure path fast and the
+            // whole test inside one bucket.
+            .acquire_timeout(std::time::Duration::from_millis(50))
             .connect_lazy("postgres://fake:fake@localhost:1/fake")
             .unwrap()
     }
