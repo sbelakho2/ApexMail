@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ApexMail × KiwiCaptcha — Unified Design-Language Proposals (2026-09-05)</title>
+<style>
+  :root{
+    --bg:#fafafa; --card:#fff; --line:#e4e4e7; --fg:#111113; --fg2:#71717a;
+    --brand:#dc2626; --brand-soft:#fee2e2; --ok:#059669; --err:#dc2626; --warn:#d97706;
+    --track:#e4e4e7; --fill:#d4d4d8; --surface:#fafafa; --ink:#18181b;
+  }
+  .dark{
+    --bg:#0f0f10; --card:#18181b; --line:#27272a; --fg:#f4f4f5; --fg2:#a1a1aa;
+    --brand:#ef4444; --brand-soft:#3f1d1d; --ok:#34d399; --err:#f87171; --warn:#fbbf24;
+    --track:#27272a; --fill:#3f3f46; --surface:#111113; --ink:#fafafa;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:15px/1.55 -apple-system,BlinkMacSystemFont,"Inter",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  header{padding:44px 32px 10px;max-width:1240px;margin:0 auto}
+  h1{font-size:25px;letter-spacing:-.02em;margin:0 0 8px}
+  header p{color:var(--fg2);margin:0;max-width:82ch}
+  .mode{position:fixed;right:16px;top:14px;z-index:9;font-size:12px;font-weight:600;border:1px solid var(--line);
+    background:var(--card);color:var(--fg);border-radius:999px;padding:7px 13px;cursor:pointer}
+  .tabs{max-width:1240px;margin:18px auto 0;padding:0 32px;display:flex;gap:8px}
+  .tabs button{font:600 13px/1 inherit;padding:10px 16px;border-radius:10px;border:1px solid var(--line);
+    background:transparent;color:var(--fg2);cursor:pointer}
+  .tabs button[aria-selected="true"]{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+  main{max-width:1240px;margin:18px auto 80px;padding:0 32px;
+    display:grid;grid-template-columns:repeat(auto-fill,minmax(520px,1fr));gap:22px}
+  section[hidden]{display:none}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px 22px 18px}
+  .num{font-size:12px;font-weight:700;color:var(--brand);letter-spacing:.08em}
+  .card h2{font-size:16.5px;margin:3px 0 2px;letter-spacing:-.01em}
+  .tag{color:var(--fg2);font-size:12.5px;margin:0 0 12px}
+  .stage{border:1px dashed var(--line);border-radius:12px;padding:16px;margin-bottom:10px;
+    display:flex;align-items:center;justify-content:center;min-height:110px;background:var(--surface)}
+  .desc{font-size:12.5px;color:var(--fg2)}
+  .desc b{color:var(--fg);font-weight:600}
+  .uni{display:inline-block;margin-top:6px;font-size:11px;font-weight:700;letter-spacing:.06em;
+    color:var(--brand);border:1px solid var(--brand);border-radius:999px;padding:2px 8px}
+
+  /* ── shared language primitives ─────────────────────────────── */
+  .slot{display:inline-grid;place-items:center;min-width:16px;height:21px;padding:0 3px;border-radius:4px;
+    background:var(--track);color:var(--fg2);font:600 12.5px/1 ui-monospace,Menlo,monospace}
+  .slot.solid{background:var(--brand);color:#fff}
+  .slot.ok{background:var(--ok);color:#fff}
+  .needle{display:grid;grid-template-columns:repeat(8,7px);gap:6px}
+  .needle i{width:5px;height:5px;border-radius:50%;background:var(--fill)}
+  .needle i.on{background:var(--brand)}
+  .rrow{display:flex;gap:8px;font:12px/1.8 ui-monospace,Menlo,monospace;color:var(--fg2)}
+  .rrow .ok{color:var(--ok)} .rrow .on{color:var(--brand)}
+  .meter{height:2px;background:var(--track);border-radius:2px;position:relative;overflow:hidden}
+  .meter i{position:absolute;inset:0;width:64%;background:var(--brand)}
+  .hair{height:1px;background:var(--line)}
+  .lock{color:var(--brand)}
+  .lock svg{display:block}
+  .btn{display:inline-flex;align-items:center;gap:8px;height:40px;padding:0 16px;border-radius:9px;
+    border:1px solid var(--line);background:var(--card);color:var(--fg);font:600 13px/1 inherit}
+  .btn.primary{background:var(--brand);border-color:var(--brand);color:#fff}
+  .klabel{font:600 10.5px/1 ui-monospace,Menlo,monospace;letter-spacing:.14em;color:var(--fg2);text-transform:uppercase}
+  @media (prefers-reduced-motion:reduce){*{animation:none !important;transition:none !important}}
+  @keyframes flipIn{0%{transform:translateY(-6px);opacity:0}100%{transform:none;opacity:1}}
+  .flip .slot{animation:flipIn .25s ease backwards}
+</style>
+</head>
+<body>
+<button class="mode" onclick="document.body.classList.toggle('dark')">light / dark</button>
+<header>
+  <h1>One language, three surfaces — marketing · control plane · console</h1>
+  <p>The unified language derived from your picks — the <b>Spiral Lock</b> mark and the <b>Mono Checksum</b> widget —
+     applied platform-wide. Same palette (brand red, zinc neutrals, emerald success), same four motifs everywhere:
+     <b>slot</b> (flip-cell), <b>needle</b> (one solid among faint), <b>receipt</b> (pipeline rows), <b>hairline</b> (2px meter) —
+     sans for voice, mono for data; motion 120–400ms; no gradients, no glow. Ten directions per surface.</p>
+</header>
+<div class="tabs" role="tablist">
+  <button role="tab" aria-selected="true" data-tab="m">Marketing — 10</button>
+  <button role="tab" aria-selected="false" data-tab="c">Control plane — 10</button>
+  <button role="tab" aria-selected="false" data-tab="w">Console — 10</button>
+</div>
+<main id="m"></main>
+<main id="c" hidden></main>
+<main id="w" hidden></main>
+<script>
+const MARK=(s,c)=>`<span class="lock"${c?` style="color:${c}"`:''}><svg viewBox="0 0 64 64" width="${s}" height="${s}" fill="none" aria-hidden="true">
+<g stroke="currentColor" stroke-width="6.6" stroke-linecap="round"><path d="M32 36.5 c0 -4 5.4 -4 5.4 0 c0 5.4 -8.1 6.8 -11 1.4 c-4.1 -6.8 2.7 -14.9 10.4 -13.5 c10.8 1.4 13.5 13.5 6.8 21.6 c-8.1 10.8 -25.7 8.1 -31.1 -5.4 c-5.4 -14.9 6.8 -29.7 23 -28.4"/></g>
+<path d="M21 26 v-4 a11 11 0 0 1 22 0 v4" stroke="currentColor" stroke-width="6.6" stroke-linecap="round" fill="none"/></svg></span>`;
+const RIB=(word,color)=>`<span style="display:inline-flex;gap:3px">`+[...word].map((ch,i)=>
+  `<span class="slot${i===2?' solid':''}"${color?` style="background:${i===2?'var(--brand)':''}"`:''}>${ch}</span>`).join("")+`</span>`;
+const NEEDLE=(on=5)=>{let h='<span class="needle">';for(let i=0;i<16;i++)h+=`<i${i===on?' class="on"':''}></i>`;return h+'</span>'};
+const RC=(rows)=>rows.map(r=>`<div class="rrow">${r}</div>`).join("");
+
+const DATA={
+m:[
+["Ledger Hero","Hero headline left; a seven-slot checksum ribbon right that cycles on load and settles to APEXMAIL — the widget's settling moment as the brand's handshake.",
+ `<div style="display:flex;gap:22px;align-items:center;flex-wrap:wrap;justify-content:center">
+   <div style="max-width:250px"><div class="klabel">transactional email</div>
+     <div style="font-size:24px;font-weight:700;letter-spacing:-.02em;line-height:1.15;margin:6px 0">Email, proven.</div>
+     <div style="font-size:12.5px;color:var(--fg2)">Send with proof of delivery on every message.</div></div>
+   <div class="flip" style="display:flex;flex-direction:column;gap:8px;align-items:center">${RIB("APEXMAIL")}
+     <span class="meter" style="width:150px"><i></i></span></div></div>`,
+ "type 44/–.02 display · slots settle 250ms stagger 120ms · hero ribbon = widget settle"],
+["Nonce Field","A field of faint dots with exactly one red needle — the search space with the winning nonce. Headline floats over the lattice; the metaphor needs no words.",
+ `<div style="text-align:center"><div style="display:flex;justify-content:center;margin-bottom:10px">${NEEDLE()}</div>
+   <div style="font-size:22px;font-weight:700;letter-spacing:-.02em">One in a million. Found.</div>
+   <div style="display:flex;justify-content:center;margin-top:10px">${NEEDLE(11)}</div></div>`,
+ "lattice 5px dots 6px gap · needle = active accent · full-bleed section background"],
+["Terminal Handbook","Marketing typeset as a technical manual: §-numbered mono section labels, hairline rules, two-column text. Trust through audit-flavored structure.",
+ `<div style="width:100%;max-width:360px"><div class="hair"></div>
+   <div style="display:flex;gap:12px;padding:8px 0"><span class="klabel" style="color:var(--brand)">§ 01</span>
+   <div><b style="font-size:13px">Delivery API</b><div style="font-size:12px;color:var(--fg2)">POST /v1/messages — one call, signed proof of work per send.</div></div></div>
+   <div class="hair"></div><div style="display:flex;gap:12px;padding:8px 0"><span class="klabel">§ 02</span>
+   <div><b style="font-size:13px">Webhooks</b><div style="font-size:12px;color:var(--fg2)">message.* events, HMAC-signed, replay-protected.</div></div></div><div class="hair"></div></div>`,
+ "Inter text + mono § labels · hairlines only · tables not cards"],
+["Flip Stat Band","Stats as flip-board digits: 99.9 renders in four slots that settle on scroll-in. The widget's calm motion, borrowed for proof numbers.",
+ `<div style="text-align:center"><div class="klabel">uptime, trailing 12 months</div>
+   <div class="flip" style="display:flex;gap:4px;justify-content:center;margin:8px 0">
+     <span class="slot">9</span><span class="slot">9</span><span class="slot">.</span><span class="slot solid">9</span><span style="font-size:20px;font-weight:700;margin-left:4px">%</span></div>
+   <span class="meter" style="display:block;width:220px;margin:0 auto"><i style="width:99%"></i></span></div>`,
+ "digits as slots · settle 250ms · hairline under = same value, chart-free"],
+["Card Ledger","Feature cards each headed by a three-slot hex tag and a red index numeral — every feature addressable like a nonce.",
+ `<div style="display:flex;gap:10px">${["A1","F2","K3"].map((t,i)=>`
+   <div style="flex:1;border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:var(--card)">
+     <div style="display:flex;justify-content:space-between;align-items:center">
+       <span class="mono" style="font-size:11px;font-weight:700;color:var(--brand)">0${i+1}</span>
+       <span style="display:inline-flex;gap:2px">${[...t].map(c=>`<span class="slot" style="min-width:13px;height:16px;font-size:10px">${c}</span>`).join("")}</span></div>
+     <b style="display:block;font-size:12.5px;margin-top:8px">${["Delivery API","Warmup","Proof receipts"][i]}</b>
+     <div style="font-size:11px;color:var(--fg2)">${["signed, retried, proven","reputation, automated","per message, exportable"][i]}</div></div>`).join("")}</div>`,
+ "cards = 1px zinc · tag slots + red index · hover: tag solidifies 200ms"],
+["Proof Receipt","Every marketing section closes with the widget's receipt — challenge · work · proof — completed. The product story told in the widget's own grammar.",
+ `<div style="text-align:left">${RC([
+   `<span class="ok">✓</span> challenge <span class="ok">issued</span>`,
+   `<span class="ok">✓</span> work <span class="ok">done · 1.8s</span>`,
+   `<span class="ok">✓</span> proof <span class="ok">accepted</span> · <b style="color:var(--fg)">delivered</b>`])}
+   <div style="margin-top:10px"><span class="btn primary" style="height:34px;font-size:12.5px">Start free ${MARK(14,'#fff')}</span></div></div>`,
+ "receipt block at section foot · CTA inline · identical grammar to widget done-state"],
+["Mono Rail Nav","Navigation as a checksum rail: brand left, items as slot cells — the active page is the solid needle. Wayfinding borrowed from the search space.",
+ `<div style="width:100%;border:1px solid var(--line);border-radius:10px;padding:8px 10px;display:flex;gap:10px;align-items:center;background:var(--card)">
+   ${MARK(18)}<span style="font-weight:700;font-size:13px">ApexMail</span>
+   <span style="flex:1"></span>
+   <span class="slot">features</span><span class="slot solid">pricing</span><span class="slot">docs</span><span class="slot">status</span>
+   <span class="btn primary" style="height:30px;font-size:12px;padding:0 12px">Sign up</span></div>`,
+ "items = slots 32px · active = solid · collapse to burger under 720px"],
+["Split-flap Pricing","Price digits are flip-slots; the recommended plan is the needle — the one solid among faint outlines. Pricing that decides itself.",
+ `<div style="display:flex;gap:10px;align-items:stretch;justify-content:center">${[0,1,2].map(i=>`
+   <div style="border:${i===1?'2px solid var(--brand)':'1px solid var(--line)'};${i===1?'':'opacity:.62;'}border-radius:10px;padding:10px 14px;background:var(--card)">
+     <div class="klabel">${["starter","pro","scale"][i]}</div>
+     <div class="flip" style="display:flex;gap:2px;margin:6px 0">${[..."65"].map(d=>`<span class="slot"${i===1?' style="background:var(--brand);color:#fff"':''}>${d}</span>`).join("")}<span style="font-weight:700;font-size:15px;margin-left:3px">€</span></div>
+     ${i===1?'<span class="klabel" style="color:var(--brand)">most verified</span>':''}</div>`).join("")}</div>`,
+ "digits = slots · recommended = solid needle among 62% faint · flip on period change"],
+["Delivery Trace","The hero subline is a live trace: three receipt rows typing in, proving the pipeline while the headline states it. Show, then tell.",
+ `<div><div style="font-size:20px;font-weight:700;letter-spacing:-.02em;margin-bottom:8px">Proof on every send.</div>
+   ${RC([`<span class="on">→</span> challenge <span class="on">acquiring…</span>`,
+         `<span>·</span> work <span style="color:var(--fg2)">queued</span>`,
+         `<span>·</span> proof <span style="color:var(--fg2)">pending</span>`])}</div>`,
+ "mono trace 12px · rows activate 120ms stagger · loops on hero, static elsewhere"],
+["Quiet Editorial","The restraint direction: display typography and zinc space carry the page; mono survives only as micro-labels and the tiny lock. The loudest quiet on the list.",
+ `<div style="text-align:center;padding:8px 0">
+   <div style="font-size:26px;font-weight:750;letter-spacing:-.03em;line-height:1.1">The email platform<br>that proves itself.</div>
+   <div class="meter" style="width:70px;margin:12px auto"><i style="width:100%;background:var(--brand)"></i></div>
+   <div style="display:flex;gap:14px;justify-content:center;align-items:center">
+     <span class="klabel">est. 2025 · tallinn</span>${MARK(14)}<span class="klabel">eeu-hosted</span></div></div>`,
+ "display 26/–.03 · one red hairline · mono micro-labels only"],
+],
+c:[
+["Audit Grid","KPI panels as ledger cells — hex headers, one state dot each; a firing alert is the needle that finds you. Quiet chrome, high density.",
+ `<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;width:100%">
+   ${[["0xA1","sends",false],["0xB2","bounces",false],["0xC3","alerts",true]].map(([h,l,al])=>`
+   <div style="border:1px solid var(--line);border-radius:9px;padding:9px 10px;background:var(--card)">
+     <div style="display:flex;justify-content:space-between"><span class="klabel">${h}</span>
+     <span style="width:6px;height:6px;border-radius:50%;background:${al?'var(--brand)':'var(--fill)'};margin-top:3px"></span></div>
+     <b style="font-size:16px">${al?"2":"48,201"}</b><div style="font-size:10.5px;color:var(--fg2)">${l}</div></div>`).join("")}</div>`,
+ "panel ids hex · state needle dot · 8px grid gap; tables over cards"],
+["Flip KPIs","Every KPI value arrives as settling flip-slots; a refresh re-flips. Ops numbers that move like the widget — 250ms, then still.",
+ `<div style="display:flex;gap:18px;align-items:center">${[..."1240"].map((d,i)=>`<span class="slot" style="min-width:20px;height:26px;font-size:15px;animation-delay:${i*90}ms">${d}</span>`).join("")}
+   <div><div class="klabel">messages / hr</div><span class="meter" style="display:block;width:110px"><i style="width:78%"></i></span></div></div>`,
+ "values = slots · stagger 90ms · re-flip on data refresh"],
+["Tenants Ledger","Tenant rows as receipt lines with a mono index rail; the selected tenant is the solid needle. Density for power users.",
+ `<div style="width:100%;max-width:380px">${[["0x01","acme","active",0],["0x02","globex","trial",0],["0x03","initech","suspended",1]].map(([i,t,s,sel])=>`
+   <div style="display:flex;gap:10px;align-items:center;padding:6px 8px;border-radius:7px;${sel?'background:var(--brand);color:#fff':''}">
+     <span class="mono" style="font-size:10.5px;opacity:.65">${i}</span><b style="font-size:12.5px">${t}</b>
+     <span style="flex:1"></span><span class="klabel" style="${sel?'color:#fff':''}">${s}</span></div>`).join("")}</div>`,
+ "index rail mono 10.5 · selected row = solid · hover shows receipt preview"],
+["Ops Terminal","The CP speaks terminal: mono for all data, sans only for menus; a command bar crowns the shell. The 2026 ops-console register.",
+ `<div style="width:100%;max-width:380px">
+   <div class="mono" style="border:1px solid var(--line);border-radius:8px;padding:7px 10px;font-size:12px;color:var(--fg2);margin-bottom:8px;background:var(--card)">⌘K <span style="float:right">run command…</span></div>
+   <table class="mono" style="width:100%;font-size:11.5px;border-collapse:collapse">
+     <tr style="color:var(--fg2)"><td style="padding:4px 6px">tenant</td><td>queue</td><td>state</td></tr>
+     <tr><td style="padding:4px 6px">acme</td><td>1,204</td><td style="color:var(--ok)">healthy</td></tr>
+     <tr><td style="padding:4px 6px">initech</td><td>88</td><td style="color:var(--err)">suspended</td></tr></table></div>`,
+ "command palette ⌘K · mono tables · sans menus only"],
+["Needle Alerts","The alert list inverts emphasis: rules sit faint; the firing alert is the one solid row — signal finds you, not the reverse.",
+ `<div style="width:100%;max-width:360px">${[["queue depth","firing",1],["cert expiry","ok",0],["bounce rate","ok",0]].map(([r,s,f])=>`
+   <div style="display:flex;gap:10px;align-items:center;padding:7px 10px;border-radius:8px;margin-bottom:4px;${f?'background:var(--brand);color:#fff':'border:1px solid var(--line);opacity:.6'}">
+     <b style="font-size:12.5px">${r}</b><span style="flex:1"></span>
+     <span class="klabel" style="${f?'color:#fff':''}">${s}</span></div>`).join("")}</div>`,
+ "firing = solid red · rest 60% faint · ack returns row to faint (200ms)"],
+["Pipeline Status","The CP header itself is a widget-12 ribbon: every platform service a slot; a degraded service goes solid. System health as one glanceable word.",
+ `<div style="display:flex;flex-direction:column;gap:8px;align-items:center">
+   <div style="display:flex;gap:3px">${[..."APIOK.."].map((_,i)=>`<span class="slot${i===3?'':''}" style="min-width:14px;height:18px;font-size:10px">${["api","mta","imap","wkr","ent","trk","bll","obs"][i]}</span>`).join("")}</div>
+   <div style="display:flex;gap:3px"><span class="slot">api</span><span class="slot">mta</span><span class="slot solid">imap</span><span class="slot">worker</span><span class="slot">billing</span></div>
+   <span class="klabel" style="color:var(--brand)">imap degraded · others nominal</span></div>`,
+ "services = slots · degraded = solid · tooltip receipt on hover"],
+["Module Cards v2","The module grid as dot-lattices: each tile carries its needle; the active module's needle lights. Navigation you can read from across the room.",
+ `<div style="display:flex;gap:10px">${[0,1,2].map(i=>`
+   <div style="border:1px solid ${i===0?'var(--brand)':'var(--line)'};border-radius:10px;padding:10px;width:86px;background:var(--card)">
+     ${NEEDLE(i===0?4:99)}<div class="klabel" style="margin-top:8px">${["tenants","audit","revenue"][i]}</div></div>`).join("")}</div>`,
+ "tile = lattice 16 · active tile = lit needle + brand border · 200ms"],
+["Receipt Detail","Every CP detail view ends with an auto-generated receipt — who changed what, when, hash-chained. The audit trail rendered in the widget's grammar.",
+ `<div>${RC([`<span class="ok">✓</span> 2026-09-05 21:04 <b style="color:var(--fg)">operator@</b> plan → scale`,
+            `<span class="ok">✓</span> 2026-09-05 21:04 audit <span class="ok">hash-linked</span>`,
+            `<span class="on">…</span> replication <span class="on">pending</span>`])}</div>`,
+ "immutable footer block · mono 12px · replicates widget done-state"],
+["Sparse Slate","Calm-white CP: mono reserved for IDs and timestamps, hairlines carry all progress. The anti-noise direction for all-day operators.",
+ `<div style="width:100%;max-width:340px">
+   <div style="display:flex;justify-content:space-between;padding:6px 0"><span style="font-size:12.5px;font-weight:600">Daily send quota</span><span class="mono" style="font-size:11px;color:var(--fg2)">0x9f3 · 21:04</span></div>
+   <span class="meter" style="display:block"><i style="width:41%"></i></span>
+   <div style="display:flex;justify-content:space-between;padding:10px 0 6px"><span style="font-size:12.5px;font-weight:600">Warmup pace</span><span class="mono" style="font-size:11px;color:var(--fg2)">0x9f4</span></div>
+   <span class="meter" style="display:block"><i style="width:72%;background:var(--ok)"></i></span></div>`,
+ "mono = IDs/timestamps only · hairlines everywhere · zero fills"],
+["Flight Deck","The dark-first variant: zinc-950 surfaces, red needles, one dial drawn from the lock's geometry. For the NOC wall and 3 a.m.",
+ `<div style="background:#0c0c0e;border:1px solid #27272a;border-radius:12px;padding:14px;width:100%;max-width:300px;color:#f4f4f5">
+   <div style="display:flex;justify-content:space-between;align-items:center"><span class="klabel" style="color:#a1a1aa">MTA · europe</span>${MARK(16,'#ef4444')}</div>
+   <div style="display:flex;gap:14px;align-items:center;margin-top:8px">
+     <span style="font-size:20px;font-weight:750">99.98<span style="font-size:12px">%</span></span>
+     <span class="meter" style="flex:1;background:#27272a"><i style="width:99%;background:#34d399"></i></span></div>
+   <div style="margin-top:8px">${NEEDLE(7).replace(/var\(--fill\)/g,'#3f3f46').replace(/class="on"/g,'class="on" style="background:#ef4444"')}</div></div>`,
+ "zinc-950 surfaces · emerald ok / red needle · optional CP theme"],
+],
+w:[
+["Composer Slots","The message composer wears the motif: recipients and tags are flip-slot chips — typing feels like filling a checksum.",
+ `<div style="width:100%;max-width:360px;border:1px solid var(--line);border-radius:10px;padding:10px;background:var(--card)">
+   <div class="klabel">to</div>
+   <div style="display:flex;gap:4px;margin:6px 0;flex-wrap:wrap"><span class="slot">ada@acme.com</span><span class="slot solid">grace@…</span><span class="slot" style="min-width:8px">+</span></div>
+   <div class="hair"></div>
+   <div class="klabel" style="margin-top:8px">tags</div>
+   <div style="display:flex;gap:4px;margin-top:6px"><span class="slot">welcome</span><span class="slot ok">v2</span></div></div>`,
+ "chips = slots · remove = flip-out 200ms · verified recipients = ok slots"],
+["Inbox Ledger","The messages list as a ledger: unread messages carry the solid needle dot; everything else recedes. Twenty unread, one glance.",
+ `<div style="width:100%;max-width:370px">${[["Invoice 204 sent","delivered",1],["Welcome v2","opened",1],["Reset for bob","bounced",0]].map(([s,st,u])=>`
+   <div style="display:flex;gap:10px;align-items:center;padding:7px 8px;border-bottom:1px solid var(--line)">
+     <span style="width:6px;height:6px;border-radius:50%;background:${u?'var(--brand)':'transparent'};border:1px solid ${u?'var(--brand)':'var(--fill)'}"></span>
+     <b style="font-size:12.5px;${u?'':'color:var(--fg2);font-weight:500'}">${s}</b><span style="flex:1"></span>
+     <span class="klabel">${st}</span></div>`).join("")}</div>`,
+ "unread = needle dot · read rows 60% · status = mono label"],
+["Quiet Meter Dashboard","The dashboard as rows of quiet meters — each quota a hairline filling toward its limit; the widget's anatomy becomes the KPI card.",
+ `<div style="width:100%;max-width:330px">${[["Sends · 12,400 / 50,000",25],["API · 1.2M / 5M",24],["Recipients · 480 / 1,000",48]].map(([l,p])=>`
+   <div style="padding:7px 0"><div style="display:flex;justify-content:space-between"><span style="font-size:12px;font-weight:600">${l.split(" · ")[0]}</span><span class="mono" style="font-size:10.5px;color:var(--fg2)">${l.split(" · ")[1]}</span></div>
+   <span class="meter" style="display:block;margin-top:5px"><i style="width:${p}%"></i></span></div>`).join("")}</div>`,
+ "KPI = quiet meter · over-quota = hairline red · no charts needed"],
+["Flip Numbers","Sends, opens, clicks — the three numbers that matter arrive as settling flip-slots. Dashboard theater, 250ms once, then calm.",
+ `<div style="display:flex;gap:22px;align-items:center">${[..."24810"].map((d,i)=>`<span class="slot" style="min-width:19px;height:25px;font-size:14px;animation-delay:${i*80}ms">${d}</span>`).join("")}
+   <div><div class="klabel">delivered · 30d</div><div class="klabel" style="color:var(--ok)">98.9% inbox</div></div></div>`,
+ "value = slots · single settle on load · re-flip on range change"],
+["Receipt Empty States","Empty states borrow the widget's receipt: pipeline rows wait patiently, one CTA. Nothing to show, still on language.",
+ `<div style="text-align:center">${RC([`<span class="ok">✓</span> list ready`,
+   `<span class="on">…</span> contacts <span class="on">none yet</span>`,
+   `<span>—</span> imports <span style="color:var(--fg2)">pending</span>`])}
+   <div style="margin-top:8px"><span class="btn primary" style="height:32px;font-size:12px">Import contacts</span></div></div>`,
+ "receipt = empty-state grammar · one CTA · matches widget idle state"],
+["Delivery Timeline","Message detail is the full receipt: queued → sent → delivered → opened, each row stamped with its timestamp and proof hash.",
+ `<div>${RC([`<span class="ok">✓</span> 21:02:11 queued <span class="ok">0x41</span>`,
+            `<span class="ok">✓</span> 21:02:12 sent <span class="ok">mta-1</span>`,
+            `<span class="ok">✓</span> 21:02:14 delivered <span class="ok">proof ✓</span>`,
+            `<span class="on">…</span> 21:19:03 opened <span class="on">awaiting</span>`])}</div>`,
+ "detail = receipt · hashes truncated 0x… · rows stream in live"],
+["Mono Forms","Form fields with mono micro-labels above (NAME, EMAIL, PLAN) and a 2px red hairline on focus — the Field-Kin DNA, console-wide.",
+ `<div style="width:100%;max-width:300px">
+   <div class="klabel">webhook url</div>
+   <div style="border:1px solid var(--line);border-bottom:2px solid var(--brand);border-radius:8px;padding:9px 10px;margin-top:4px;background:var(--card)">
+     <span class="mono" style="font-size:12px;color:var(--fg2)">https://hooks.acme.com/apex<span style="background:var(--brand);color:#fff;padding:0 1px">▍</span></span></div>
+   <div class="klabel" style="margin-top:8px">events</div>
+   <div style="display:flex;gap:3px;margin-top:4px"><span class="slot solid">sent</span><span class="slot">delivered</span><span class="slot">bounced</span></div></div>`,
+ "focus = 2px hairline · caret block · labels mono caps"],
+["Needle Search","Search as a single mono input with a block caret; results render faint except the match — the needle. Find, in the product's own words.",
+ `<div style="width:100%;max-width:340px">
+   <div class="mono" style="border:1px solid var(--line);border-radius:8px;padding:8px 10px;font-size:12.5px;background:var(--card)">grace@<span style="background:var(--brand);color:#fff">▍</span></div>
+   <div style="margin-top:6px">${[["Grace Hopper","grace@acme.com",1],["Grace Liu","grace@ Liu co",0]].map(([n,e,m])=>`
+     <div style="display:flex;gap:8px;padding:6px 8px;border-radius:7px;${m?'background:var(--brand);color:#fff':'opacity:.62'}">
+       <b style="font-size:12.5px">${n}</b><span style="flex:1"></span><span class="mono" style="font-size:10.5px;opacity:.8">${e}</span></div>`).join("")}</div></div>`,
+ "match = solid · others faint · mono input, sans results"],
+["Status Rail Shell","The left rail as a slot column: nav items are cells; the active section is solid. The app shell wears the checksum.",
+ `<div style="display:flex;gap:12px">
+   <div style="display:flex;flex-direction:column;gap:4px">${[..."dash"].map(c=>`<span class="slot" style="min-width:13px;height:17px;font-size:9.5px">${c}</span>`).join("")}
+     <span class="slot solid" style="min-width:13px;height:17px;font-size:9.5px">msg</span>
+     ${[..."lists"].map(c=>`<span class="slot" style="min-width:13px;height:17px;font-size:9.5px">${c}</span>`).join("")}</div>
+   <div style="flex:1;border:1px dashed var(--line);border-radius:10px;display:grid;place-items:center"><span class="klabel">messages</span></div></div>`,
+ "rail = slot column · active = solid · collapse to 44px needle column"],
+["Editorial Console","The restrained console: sans everywhere except data cells and status chips; the lock is the only ornament. For teams who live here eight hours a day.",
+ `<div style="width:100%;max-width:340px">
+   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+     <b style="font-size:13.5px">Campaign · Welcome v2</b>${MARK(15)}</div>
+   <div style="display:flex;gap:8px">
+     <div style="flex:1;border:1px solid var(--line);border-radius:9px;padding:8px 10px"><div class="klabel">sent</div><span class="mono" style="font-size:14px;font-weight:700">2,410</span></div>
+     <div style="flex:1;border:1px solid var(--line);border-radius:9px;padding:8px 10px"><div class="klabel">opened</div><span class="mono" style="font-size:14px;font-weight:700;color:var(--ok)">61%</span></div>
+     <div style="flex:1;border:1px solid var(--line);border-radius:9px;padding:8px 10px"><div class="klabel">state</div><span class="slot ok" style="margin-top:2px">live</span></div></div></div>`,
+ "mono = numbers + state slots · everything else sans · no ornament but the lock"],
+]};
+
+for (const key of ["m","c","w"]) {
+  const root=document.getElementById(key);
+  DATA[key].forEach(([name,tag,mock,spec],i)=>{
+    const card=document.createElement("div"); card.className="card";
+    card.innerHTML=`<div class="num">${String(i+1).padStart(2,"0")}</div><h2>${name}</h2>
+      <p class="tag">${tag}</p><div class="stage">${mock}</div>
+      <p class="desc">${spec}</p><span class="uni">unifies with widget #12 · mark #8</span>`;
+    root.appendChild(card);
+  });
+}
+document.querySelectorAll("[data-tab]").forEach(b=>b.onclick=()=>{
+  document.querySelectorAll("[data-tab]").forEach(x=>x.setAttribute("aria-selected", String(x===b)));
+  for (const k of ["m","c","w"]) document.getElementById(k).hidden = (k!==b.dataset.tab);
+});
+</script>
+</body>
+</html>
