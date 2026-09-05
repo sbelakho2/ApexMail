@@ -1148,11 +1148,13 @@ async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables() {
     apply_tool_migrations(&pool).await;
 
     // The purge helper now writes its (non-optional) deletion audit entry
-    // through the hash-chained audit writer, which maintains
-    // audit_logs + audit_chain_head. The TOOLS migration set this suite
-    // applies predates both tables (they are canonical-chain migration
-    // 050/105), so the fixtures are created here explicitly — same shape
-    // as the api-server tenants.rs test fixture.
+    // through the hash-chained audit writer. The TOOLS migration set this
+    // suite applies carries a LEGACY audit_logs shape (resource_type/
+    // metadata/prev_hash — no session_id/resource/outcome/signature/
+    // created_at/details), and its CREATE TABLE wins because it runs
+    // first. Bring whichever shape exists up to the writer's column
+    // contract: CREATE IF NOT EXISTS covers a bare database, the ALTERs
+    // reconcile the tools shape in place.
     sqlx::raw_sql(
         "CREATE TABLE IF NOT EXISTS audit_logs (
             id TEXT PRIMARY KEY,
@@ -1177,6 +1179,20 @@ async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables() {
     .execute(&pool)
     .await
     .expect("audit_logs fixture DDL must apply");
+    sqlx::raw_sql(
+        "ALTER TABLE audit_logs
+            ADD COLUMN IF NOT EXISTS session_id TEXT,
+            ADD COLUMN IF NOT EXISTS resource TEXT,
+            ADD COLUMN IF NOT EXISTS details JSONB NOT NULL DEFAULT '{}'::jsonb,
+            ADD COLUMN IF NOT EXISTS outcome TEXT,
+            ADD COLUMN IF NOT EXISTS error_message TEXT,
+            ADD COLUMN IF NOT EXISTS previous_hash TEXT,
+            ADD COLUMN IF NOT EXISTS signature TEXT,
+            ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
+    )
+    .execute(&pool)
+    .await
+    .expect("audit_logs fixture reconciliation must apply");
     sqlx::raw_sql(
         "CREATE TABLE IF NOT EXISTS audit_chain_head (
             chain_id    TEXT        PRIMARY KEY,
