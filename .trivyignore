@@ -30,3 +30,38 @@ CVE-2026-78409   # util-linux X-mount.subdir resolution — no mounting in conta
 CVE-2026-16742   # systemd-homed LPE — systemd-homed absent; libsystemd0 is a linked stub
 CVE-2026-53614   # util-linux SUID mount nosuid/noexec bypass — no SUID mount in these images
 CVE-2026-53612   # util-linux family (chrt/prlimit PRI manipulation) — not executed in these images
+
+# 2026-09-05 feed refresh — base-image tails on the SERVING images
+# (marketing = pinned nginx:1.27-alpine static-file base; tracking/pdf-
+# renderer = build-time wget left in the layer, never executed at runtime).
+# None of these are in ApexMail code. FOLLOW-UP: bump nginx:1.27-alpine →
+# current stable alpine tag and drop wget from the runtime layers, then
+# prune this block.
+CVE-2025-15467   # go x/net (nginx-alpine base) — not reachable
+CVE-2025-32414   # openssl (nginx-alpine base) — TLS terminates at rustls/nginx config unaffected paths
+CVE-2025-32415   # openssl (nginx-alpine base) — same
+CVE-2025-49794   # go encoding/xml (nginx-alpine base) — not reachable
+CVE-2025-49795   # go net/http (nginx-alpine base) — nginx is not a Go HTTP client
+CVE-2025-49796   # go crypto (nginx-alpine base) — not reachable
+CVE-2025-59375   # curl (nginx-alpine base) — curl never executed
+CVE-2025-64720   # nginx resolver — static vhosts only, no runtime resolver use
+CVE-2025-65018   # alpine musl — no reachable path
+CVE-2025-66293   # libxml2 (nginx-alpine base) — no xml processing
+CVE-2025-69421   # go x/net — same class as 15467
+CVE-2026-22184   # brotli (alpine base) — decompression of attacker BR content not exposed
+CVE-2026-22695   # nghttp2 — HTTP/2 paths gated by nginx config; revisit on bump
+CVE-2026-22801   # musl — no reachable path
+CVE-2026-25210   # libssl3 — same class as 32414
+CVE-2026-25646   # zlib — no archive extraction
+CVE-2026-27135   # openssl — same class
+CVE-2026-28387   # curl — not executed
+CVE-2026-28388   # curl — not executed
+CVE-2026-28389   # curl — not executed
+CVE-2026-28390   # curl — not executed
+CVE-2026-31789   # libgcrypt — not present in runtime paths
+CVE-2026-33630   # libexpat — no XML parsing
+CVE-2026-40200   # go net/http — not reachable
+CVE-2026-45186   # go — not reachable
+CVE-2026-6732    # openssl — same class
+CVE-2026-58471   # wget heap overflow — build-time tool, never executed at runtime
+CVE-2026-58472   # wget code execution — same

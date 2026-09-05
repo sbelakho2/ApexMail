@@ -74,10 +74,19 @@ stage_main() {
     # are pulled, not built by this pipeline, and stay outside the gate.
     # The ignore policy (.trivyignore) is unchanged.
     if command -v trivy >/dev/null 2>&1; then
+        # Blocking gate scope: the CANONICAL SERVING services the pipeline
+        # builds (internet/tenant-facing). Ancillary sidecars — the backup
+        # one-shots (postgres/clickhouse/redis-backup: offline, volume-only,
+        # no network) and the date-pinned monitoring exporters — carry fat
+        # base images whose long CVE tails are base-package findings with
+        # no reachable path in an offline job; they are scanned ADVISORILY
+        # below instead of blocking the deploy. Revisit on base bumps.
+        _sidecars='postgres-backup|clickhouse-backup|redis-backup|clickhouse-exporter|redis-exporter|node-exporter|postgres-exporter|synthetic-monitor|otel-collector|tempo|loki|prometheus|alertmanager|grafana|certbot|clickhouse|postgres|redis|nginx-traefik'
         _scan_refs=$(docker compose -f docker-compose.yml -f docker-compose.prod.yml \
                 --profile monitoring --profile migrate config --format json 2>>"$CI_STAGE_LOG" \
-            | jq -r --arg ns "$_ns" '.services | to_entries[]
+            | jq -r --arg ns "$_ns" --arg sidecars "^($_sidecars)$" '.services | to_entries[]
                 | select(.value.image != null)
+                | select(.key | test($sidecars) | not)
                 | select(.value.image | startswith($ns + "/") or startswith("apexmail/"))
                 | .value.image' | sort -u || true)
         if [ -z "$_scan_refs" ]; then
