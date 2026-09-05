@@ -917,7 +917,10 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         let response = app
-            .oneshot(authenticated_chat_request(None, "99999999-9999-9999-9999-999999999999"))
+            .oneshot(authenticated_chat_request(
+                None,
+                "99999999-9999-9999-9999-999999999999",
+            ))
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);

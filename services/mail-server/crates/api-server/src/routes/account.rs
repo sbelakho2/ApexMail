@@ -89,8 +89,13 @@ async fn get_profile(
 /// ones. The plain `verify_password` used here before only understood
 /// Argon2id, so any account with a legacy bcrypt hash could NEVER delete
 /// its own account (always "invalid password").
-fn verify_password_dual_scheme(password: &str, hash: &str, subject: &str) -> Result<bool, ApiError> {
-    let result = if hash.starts_with("$2a$") || hash.starts_with("$2b$") || hash.starts_with("$2y$") {
+fn verify_password_dual_scheme(
+    password: &str,
+    hash: &str,
+    subject: &str,
+) -> Result<bool, ApiError> {
+    let result = if hash.starts_with("$2a$") || hash.starts_with("$2b$") || hash.starts_with("$2y$")
+    {
         bcrypt::verify(password, hash).map_err(|error| error.to_string())
     } else if hash.starts_with("$argon2") {
         apexmail_lib::verify_password(password, hash).map_err(|error| error.to_string())

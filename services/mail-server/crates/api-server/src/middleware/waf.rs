@@ -106,8 +106,7 @@ fn log_threat(label: &str, threat: &ThreatInfo) {
 
 fn blocked_response(status: u16, threat: &ThreatInfo) -> Response {
     let code = if (400..599).contains(&status) {
-        axum::http::StatusCode::from_u16(status)
-            .unwrap_or(axum::http::StatusCode::FORBIDDEN)
+        axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::FORBIDDEN)
     } else {
         axum::http::StatusCode::FORBIDDEN
     };
@@ -182,18 +181,24 @@ mod tests {
 
     #[test]
     fn blocked_response_uses_engine_status() {
-        let resp = blocked_response(403, &ThreatInfo {
-            total_score: 9,
-            matches: vec![],
-            decision: WafDecision::Block(403),
-        });
+        let resp = blocked_response(
+            403,
+            &ThreatInfo {
+                total_score: 9,
+                matches: vec![],
+                decision: WafDecision::Block(403),
+            },
+        );
         assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
         // Out-of-range engine statuses degrade to 403, never panic.
-        let resp = blocked_response(999, &ThreatInfo {
-            total_score: 9,
-            matches: vec![],
-            decision: WafDecision::Block(999),
-        });
+        let resp = blocked_response(
+            999,
+            &ThreatInfo {
+                total_score: 9,
+                matches: vec![],
+                decision: WafDecision::Block(999),
+            },
+        );
         assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
     }
 }

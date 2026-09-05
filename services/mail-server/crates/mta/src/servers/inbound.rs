@@ -2058,8 +2058,7 @@ async fn deliver_one_to_mailstore(
         };
         // M28: bounded RPC — a hung mailstore must not stall the session.
         let account_id = loop {
-            match rpc_with_deadline(client.get_account(lookup.clone()), MAILSTORE_RPC_TIMEOUT)
-                .await
+            match rpc_with_deadline(client.get_account(lookup.clone()), MAILSTORE_RPC_TIMEOUT).await
             {
                 Some(Ok(resp)) => {
                     let r = resp.into_inner();

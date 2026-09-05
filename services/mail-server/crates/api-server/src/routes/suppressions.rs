@@ -176,7 +176,6 @@ async fn create_suppression(
     }
     validate_reason_source(&body.reason, &body.source)?;
 
-
     // Check duplicate
     let exists = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM suppressions WHERE tenant_id = $1 AND LOWER(email) = $2",

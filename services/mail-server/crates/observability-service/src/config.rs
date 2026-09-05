@@ -581,7 +581,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("token.txt");
         std::fs::write(&path, "file-secret-wins\n").unwrap();
-        std::env::set_var("INTERNAL_SERVICE_TOKEN", "dev-internal-service-token-change-me");
+        std::env::set_var(
+            "INTERNAL_SERVICE_TOKEN",
+            "dev-internal-service-token-change-me",
+        );
         std::env::set_var("INTERNAL_SERVICE_TOKEN_FILE", &path);
 
         let cfg = ObservabilityConfig::from_env().unwrap();
@@ -594,12 +597,18 @@ mod tests {
         // non-compose deployments working when the mount is missing).
         std::env::set_var("INTERNAL_SERVICE_TOKEN_FILE", dir.join("missing.txt"));
         let cfg = ObservabilityConfig::from_env().unwrap();
-        assert_eq!(cfg.internal_service_token, "dev-internal-service-token-change-me");
+        assert_eq!(
+            cfg.internal_service_token,
+            "dev-internal-service-token-change-me"
+        );
 
         // No file configured at all → plain env variable, then cleanup.
         std::env::remove_var("INTERNAL_SERVICE_TOKEN_FILE");
         let cfg = ObservabilityConfig::from_env().unwrap();
-        assert_eq!(cfg.internal_service_token, "dev-internal-service-token-change-me");
+        assert_eq!(
+            cfg.internal_service_token,
+            "dev-internal-service-token-change-me"
+        );
 
         std::env::remove_var("INTERNAL_SERVICE_TOKEN");
         std::fs::remove_dir_all(&dir).unwrap();

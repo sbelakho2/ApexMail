@@ -367,9 +367,7 @@ async fn logs_ingest(
                     .into_response()
             }
         };
-        let service = entry
-            .service
-            .unwrap_or_else(|| "unknown".to_string());
+        let service = entry.service.unwrap_or_else(|| "unknown".to_string());
         let message = truncate_chars(&entry.message, MAX_LOG_INGEST_MESSAGE_CHARS);
         parsed.push(crate::types::LogEntry {
             id: Uuid::new_v4(),
@@ -1068,7 +1066,10 @@ mod tests {
     async fn log_ingest_requires_the_service_token() {
         let app = router(test_state());
         let resp = app
-            .oneshot(log_ingest_request(json!([{ "level": "info", "message": "x" }]), false))
+            .oneshot(log_ingest_request(
+                json!([{ "level": "info", "message": "x" }]),
+                false,
+            ))
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);

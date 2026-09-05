@@ -176,9 +176,9 @@ impl IntoResponse for PdfApiError {
         let (status, message) = match &self {
             // Path-shaped/invalid template names are caller errors: 400, and
             // the name is not echoed back into the response.
-            PdfApiError::Render(RenderError::World(
-                WorldError::InvalidTemplateName(_),
-            )) => (StatusCode::BAD_REQUEST, "invalid template name".to_string()),
+            PdfApiError::Render(RenderError::World(WorldError::InvalidTemplateName(_))) => {
+                (StatusCode::BAD_REQUEST, "invalid template name".to_string())
+            }
             PdfApiError::Render(RenderError::World(e)) => {
                 (StatusCode::NOT_FOUND, format!("Template error: {e}"))
             }

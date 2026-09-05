@@ -141,10 +141,14 @@ async fn proxy_request(
 
     let raw_host = parsed.host_str().unwrap_or("");
     // Strip brackets from IPv6 for matching.
-    let host_lower = raw_host.trim_start_matches('[').trim_end_matches(']').to_lowercase();
-    if !allowlist.iter().any(|allowed| {
-        host_lower == *allowed || host_lower.ends_with(&format!(".{allowed}"))
-    }) {
+    let host_lower = raw_host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_lowercase();
+    if !allowlist
+        .iter()
+        .any(|allowed| host_lower == *allowed || host_lower.ends_with(&format!(".{allowed}")))
+    {
         return Err(ApiError::Validation(vec![
             "URL host not in proxy allowlist".into(),
         ]));
@@ -402,11 +406,10 @@ mod tests {
 
     #[test]
     fn any_private_answer_rejects_the_whole_resolution() {
-        assert!(first_private_resolved_addr(
-            "mixed.example",
-            &[addr("8.8.8.8"), addr("10.0.0.5")]
-        )
-        .is_err());
+        assert!(
+            first_private_resolved_addr("mixed.example", &[addr("8.8.8.8"), addr("10.0.0.5")])
+                .is_err()
+        );
         assert!(first_private_resolved_addr("ok.example", &[addr("8.8.8.8")]).is_ok());
         assert!(
             first_private_resolved_addr("empty.example", &[]).is_err(),
@@ -416,8 +419,18 @@ mod tests {
 
     #[test]
     fn private_coverage_includes_metadata_and_mapped_forms() {
-        for blocked in ["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "100.64.0.1"] {
-            assert!(is_private_ip(&blocked.parse::<IpAddr>().unwrap()), "{blocked}");
+        for blocked in [
+            "127.0.0.1",
+            "10.1.2.3",
+            "172.16.0.1",
+            "192.168.1.1",
+            "169.254.169.254",
+            "100.64.0.1",
+        ] {
+            assert!(
+                is_private_ip(&blocked.parse::<IpAddr>().unwrap()),
+                "{blocked}"
+            );
         }
         assert!(!is_private_ip(&"93.184.216.34".parse::<IpAddr>().unwrap()));
         // IPv4-mapped loopback — the exact gap in the shared helper.

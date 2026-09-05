@@ -277,15 +277,17 @@ async fn delete_operator(
         ]));
     }
 
-    sqlx::query("DELETE FROM users WHERE id = $1 AND tenant_id = $2 AND role IN ('admin', 'owner')")
-        .bind(&id)
-        .bind(&auth.tenant_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| {
-            tracing::error!(operator_id = %id, error = %e, "operator delete failed");
-            ApiError::Internal("Failed to delete operator".into())
-        })?;
+    sqlx::query(
+        "DELETE FROM users WHERE id = $1 AND tenant_id = $2 AND role IN ('admin', 'owner')",
+    )
+    .bind(&id)
+    .bind(&auth.tenant_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| {
+        tracing::error!(operator_id = %id, error = %e, "operator delete failed");
+        ApiError::Internal("Failed to delete operator".into())
+    })?;
 
     tx.commit()
         .await

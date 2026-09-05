@@ -3366,20 +3366,6 @@ async fn stripe_get_json<T: DeserializeOwned>(
     decode_stripe_response(response).await
 }
 
-async fn stripe_post_json<T: DeserializeOwned>(client: &Client, path: &str) -> Result<T, String> {
-    let secret_key = std::env::var("STRIPE_SECRET_KEY")
-        .map_err(|_| "Stripe secret key is not configured".to_string())?;
-
-    let response = client
-        .post(format!("{}{}", stripe_api_base_url(), path))
-        .bearer_auth(secret_key)
-        .send()
-        .await
-        .map_err(|error| format!("Stripe request failed: {error}"))?;
-
-    decode_stripe_response(response).await
-}
-
 /// `stripe_post_json` with an `Idempotency-Key` header (mirrors the
 /// dedicated-IP charge call below): money-moving POSTs must be safe to
 /// retry — a timeout between Stripe executing the pay call and the

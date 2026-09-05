@@ -515,11 +515,12 @@ async fn resolve_plan_limit_or_warn(
     }
     // No joined limit (terminal-subscription path): look the plans row up
     // by name so operator-configured limits still win.
-    let row_limit: Option<i64> = sqlx::query_scalar("SELECT email_limit FROM plans WHERE name = $1")
-        .bind(plan_name)
-        .fetch_optional(db)
-        .await
-        .map_err(|e| format!("overage sweep: plan lookup failed: {e}"))?;
+    let row_limit: Option<i64> =
+        sqlx::query_scalar("SELECT email_limit FROM plans WHERE name = $1")
+            .bind(plan_name)
+            .fetch_optional(db)
+            .await
+            .map_err(|e| format!("overage sweep: plan lookup failed: {e}"))?;
     if let Some(limit) = row_limit {
         return Ok(Some(limit));
     }
@@ -675,20 +676,19 @@ async fn collect_usage_invoice(
 
     // (a) Wallet first — EUR only. A non-EUR wallet is never spent on a EUR
     // invoice; mixing currencies would mint phantom money.
-    let wallet: Option<(i64, String)> = sqlx::query_as(
-        "SELECT balance, currency FROM wallets WHERE tenant_id = $1 FOR UPDATE",
-    )
-    .bind(&invoice.tenant_id)
-    .fetch_optional(&mut *tx)
-    .await
-    .unwrap_or_else(|error| {
-        warn!(
-            tenant_id = %invoice.tenant_id,
-            error = %error,
-            "usage invoice collection: wallet read failed — no wallet credit applied"
-        );
-        None
-    });
+    let wallet: Option<(i64, String)> =
+        sqlx::query_as("SELECT balance, currency FROM wallets WHERE tenant_id = $1 FOR UPDATE")
+            .bind(&invoice.tenant_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .unwrap_or_else(|error| {
+                warn!(
+                    tenant_id = %invoice.tenant_id,
+                    error = %error,
+                    "usage invoice collection: wallet read failed — no wallet credit applied"
+                );
+                None
+            });
 
     let mut applied_cents: i64 = 0;
     if let Some((balance, currency)) = wallet {
@@ -735,14 +735,7 @@ async fn collect_usage_invoice(
 
     // (b) Whole-invoice paid when the wallet covered everything.
     if remaining_cents <= 0 {
-        match finalize_collection(
-            &mut tx,
-            invoice,
-            "paid",
-            None,
-        )
-        .await
-        {
+        match finalize_collection(&mut tx, invoice, "paid", None).await {
             Ok(()) => {
                 *wallet_paid += 1;
                 info!(
@@ -894,8 +887,8 @@ async fn create_stripe_invoiceitem(
     };
 
     let idempotency_key = format!("overage_{tenant_id}_{}", period_start.to_rfc3339());
-    let base_url = std::env::var("STRIPE_API_BASE_URL")
-        .unwrap_or_else(|_| "https://api.stripe.com".into());
+    let base_url =
+        std::env::var("STRIPE_API_BASE_URL").unwrap_or_else(|_| "https://api.stripe.com".into());
 
     let form = [
         ("customer", customer),

@@ -413,8 +413,8 @@ mod tests {
             .encode(serde_json::to_vec(payload).unwrap());
         let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(payload_b64.as_bytes());
-        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(mac.finalize().into_bytes());
+        let sig_b64 =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes());
         format!("{payload_b64}.{sig_b64}")
     }
 
@@ -436,10 +436,8 @@ mod tests {
         // FAILED to deserialize, so the impersonation branch silently
         // reported unauthenticated for all real sessions.
         let now_ms = chrono::Utc::now().timestamp_millis();
-        let token = mint_impersonation_session(
-            &impersonation_session_payload(now_ms + 60_000),
-            "secret",
-        );
+        let token =
+            mint_impersonation_session(&impersonation_session_payload(now_ms + 60_000), "secret");
         let payload = verify_session_token(&token, "secret").expect("minted shape must verify");
         assert_eq!(payload.token_type.as_deref(), Some("impersonation"));
         assert_eq!(payload.token_id.as_deref(), Some("jti-1"));
@@ -451,10 +449,7 @@ mod tests {
         // Expiry used to be optional — a signed token with no `exp` was
         // valid forever.
         let mut payload = impersonation_session_payload(0);
-        payload
-            .as_object_mut()
-            .unwrap()
-            .remove("exp");
+        payload.as_object_mut().unwrap().remove("exp");
         let token = mint_impersonation_session(&payload, "secret");
         assert!(verify_session_token(&token, "secret").is_err());
     }

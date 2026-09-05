@@ -101,18 +101,20 @@ async fn check_tenant_deletion_preconditions(db: &PgPool, tenant_id: &str) -> Re
     {
         Ok(row) => row,
         // Pre-121 columns missing: degrade honestly (sweeper parity).
-        Err(error) if is_missing_column(&error) => {
-            sqlx::query_as(
-                "SELECT false AS legal_hold, NULL::int AS retention_days, \
+        Err(error) if is_missing_column(&error) => sqlx::query_as(
+            "SELECT false AS legal_hold, NULL::int AS retention_days, \
                  GREATEST(created_at, updated_at) AS anchor \
                  FROM tenants WHERE id = $1",
-            )
-            .bind(tenant_id)
-            .fetch_optional(db)
-            .await
-            .map_err(|_| ApiError::Internal("failed to load tenant obligations".into()))?
+        )
+        .bind(tenant_id)
+        .fetch_optional(db)
+        .await
+        .map_err(|_| ApiError::Internal("failed to load tenant obligations".into()))?,
+        Err(_) => {
+            return Err(ApiError::Internal(
+                "failed to load tenant obligations".into(),
+            ))
         }
-        Err(_) => return Err(ApiError::Internal("failed to load tenant obligations".into())),
     };
 
     let Some(obligations) = obligations else {
@@ -366,23 +368,23 @@ async fn update_tenant(
     let mut changed = false;
     let mut rows_affected: u64 = 0;
     if let Some(name) = &body.name {
-        rows_affected += sqlx::query("UPDATE tenants SET name = $1, updated_at = NOW() WHERE id = $2")
-            .bind(name)
-            .bind(&id)
-            .execute(&mut *tx)
-            .await?
-            .rows_affected();
+        rows_affected +=
+            sqlx::query("UPDATE tenants SET name = $1, updated_at = NOW() WHERE id = $2")
+                .bind(name)
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
         changed = true;
     }
     if let Some(status) = &body.status {
-        rows_affected += sqlx::query(
-            "UPDATE tenants SET status = $1, updated_at = NOW() WHERE id = $2",
-        )
-        .bind(status)
-        .bind(&id)
-        .execute(&mut *tx)
-        .await?
-        .rows_affected();
+        rows_affected +=
+            sqlx::query("UPDATE tenants SET status = $1, updated_at = NOW() WHERE id = $2")
+                .bind(status)
+                .bind(&id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
         changed = true;
     }
 
@@ -455,7 +457,12 @@ async fn delete_tenant(
 /// Actor-attributed tenant audit (P2-2): the acting operator's tenant AND
 /// user id land in every entry — `user_id: None` left control-plane
 /// mutations recorded as "someone did this, unknown who".
-async fn log_tenant_audit(state: &AppState, auth: &AuthUser, action: &str, tenant_id: Option<&str>) {
+async fn log_tenant_audit(
+    state: &AppState,
+    auth: &AuthUser,
+    action: &str,
+    tenant_id: Option<&str>,
+) {
     let resource_id = tenant_id;
     let metadata = if tenant_id.is_some() {
         json!({})

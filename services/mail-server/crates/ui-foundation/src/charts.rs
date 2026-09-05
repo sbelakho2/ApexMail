@@ -315,15 +315,15 @@ pub fn render_pie_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
         .iter()
         .take(6)
         .map(|(label, val)| {
-            format!("{} {:.0}%", crate::shell::html_escape(label), val / total * 100.0)
+            format!(
+                "{} {:.0}%",
+                crate::shell::html_escape(label),
+                val / total * 100.0
+            )
         })
         .collect::<Vec<_>>()
         .join(", ");
-    svg = svg.replacen(
-        "Pie chart",
-        &format!("Pie chart: {aria_summary}"),
-        1,
-    );
+    svg = svg.replacen("Pie chart", &format!("Pie chart: {aria_summary}"), 1);
 
     let mut angle = -90_f64.to_radians();
     let mut legend_items = String::new();
@@ -346,10 +346,7 @@ pub fn render_pie_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
         let separator_color = "white";
         let escaped_label = crate::shell::html_escape(label);
         let pct = (val / total * 100.0).round();
-        let slice_title = format!(
-            "<title>{}: {} ({:.0}%)</title>",
-            escaped_label, val, pct
-        );
+        let slice_title = format!("<title>{}: {} ({:.0}%)</title>", escaped_label, val, pct);
 
         if slice_angle >= 2.0 * std::f64::consts::PI - 0.001 {
             svg.push_str(&format!(

@@ -407,7 +407,7 @@ fn csv_record_bytes(header: bool, row: Option<&AuditExportRow>) -> Result<Vec<u8
         ])?;
     }
     writer.flush()?;
-    writer.into_inner().map_err(|e| std::io::Error::other(e))
+    writer.into_inner().map_err(std::io::Error::other)
 }
 
 async fn audit_export(
@@ -421,42 +421,6 @@ async fn audit_export(
     let (window_start, window_end) =
         resolve_search_window(body.from.as_deref(), body.to.as_deref(), Utc::now())?;
     let limit = body.limit.clamp(1, 50_000);
-
-    let mut conditions: Vec<String> = vec!["timestamp >= $1".into(), "timestamp <= $2".into()];
-    let mut param_idx = 3u32;
-
-    if body.tenant_id.is_some() {
-        conditions.push(format!("tenant_id = ${param_idx}"));
-        param_idx += 1;
-    }
-    if body.action.is_some() {
-        conditions.push(format!("action = ${param_idx}"));
-        param_idx += 1;
-    }
-
-    let has_fts = body.q.as_ref().is_some_and(|q| !q.trim().is_empty());
-
-    let sql = if has_fts {
-        format!(
-            "SELECT timestamp, action, resource, resource_id, user_id, tenant_id, ip_address, outcome, error_message
-             FROM audit_logs
-             WHERE {} AND fts_vector @@ plainto_tsquery('english', ${param_idx})
-             ORDER BY timestamp DESC
-             LIMIT ${}",
-            conditions.join(" AND "),
-            param_idx + 1
-        )
-    } else {
-        format!(
-            "SELECT timestamp, action, resource, resource_id, user_id, tenant_id, ip_address, outcome, error_message
-             FROM audit_logs
-             WHERE {}
-             ORDER BY timestamp DESC
-             LIMIT ${}",
-            conditions.join(" AND "),
-            param_idx + 1
-        )
-    };
 
     // The export itself is audited (P2): an unaudited bulk export of the
     // compliance trail is precisely the read the trail exists to record.
@@ -613,11 +577,7 @@ impl futures::Stream for ExportChunkState {
             if let Some(ref q) = q {
                 query = query.bind(q.clone());
             }
-            query
-                .bind(chunk_limit)
-                .bind(offset)
-                .fetch_all(&pool)
-                .await
+            query.bind(chunk_limit).bind(offset).fetch_all(&pool).await
         });
 
         match fut.as_mut().poll(cx) {
@@ -778,7 +738,11 @@ mod tests {
         let record_str = String::from_utf8(record).unwrap();
         assert!(record_str.contains("\"id,with,commas\""));
         assert!(record_str.contains("\"boom\nsecond line\""));
-        assert_eq!(record_str.lines().count(), 2, "embedded newline stays quoted");
+        assert_eq!(
+            record_str.lines().count(),
+            2,
+            "embedded newline stays quoted"
+        );
     }
 
     /// Time-window parity with the audit list route: an unbounded window

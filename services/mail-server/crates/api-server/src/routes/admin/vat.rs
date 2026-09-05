@@ -461,12 +461,9 @@ async fn trigger_kmd_generation(
 
     // We need to call the billing-service vat_kmd module
     // Since api-server depends on billing-service, we can use it directly
-    let generation = billing_service::vat_kmd::generate_kmd_return(
-        &state.db,
-        body.tax_year,
-        body.tax_month,
-    )
-    .await;
+    let generation =
+        billing_service::vat_kmd::generate_kmd_return(&state.db, body.tax_year, body.tax_month)
+            .await;
 
     // Manual KMD generation is a fiscal-control-plane mutation — it must be
     // audited with full actor attribution (P2-2) on BOTH outcomes; a

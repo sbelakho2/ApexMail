@@ -1110,7 +1110,8 @@ mod tests {
         // terminal (completed/failed/cancelled — e.g. set by reap_stuck_tests
         // mid-run) must win over the run's own outcome.
         assert!(
-            FINALIZE_STATUS_SQL.contains("CASE WHEN status IN ('completed', 'failed', 'cancelled')"),
+            FINALIZE_STATUS_SQL
+                .contains("CASE WHEN status IN ('completed', 'failed', 'cancelled')"),
             "finalize must not overwrite terminal statuses: {FINALIZE_STATUS_SQL}"
         );
         assert!(

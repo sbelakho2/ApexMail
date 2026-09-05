@@ -223,13 +223,12 @@ async fn account_context(state: &AppState, tenant_id: &str) -> serde_json::Value
     .await
     .ok();
 
-    let domains: Option<(i64,)> = sqlx::query_as(
-        "SELECT COUNT(*) FROM domains WHERE tenant_id = $1 AND verified = true",
-    )
-    .bind(tenant_id)
-    .fetch_one(&state.db)
-    .await
-    .ok();
+    let domains: Option<(i64,)> =
+        sqlx::query_as("SELECT COUNT(*) FROM domains WHERE tenant_id = $1 AND verified = true")
+            .bind(tenant_id)
+            .fetch_one(&state.db)
+            .await
+            .ok();
 
     serde_json::json!({
         "plan": plan.as_ref().map(|(p, _, _)| p.clone()),

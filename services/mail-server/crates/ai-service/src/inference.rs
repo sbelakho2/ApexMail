@@ -587,17 +587,25 @@ mod tests {
             "presence is reported redacted: {rendered}"
         );
         // The None case reports cleanly too.
-        let no_key = InferenceConfig { api_key: None, ..config };
+        let no_key = InferenceConfig {
+            api_key: None,
+            ..config
+        };
         assert!(!format!("{no_key:?}").contains("sk-"));
     }
 
     #[test]
     fn effective_timeout_floors_zero_timeouts() {
-        let mut config = InferenceConfig::default();
-        config.timeout = Duration::from_secs(30);
+        let config = InferenceConfig {
+            timeout: Duration::from_secs(30),
+            ..Default::default()
+        };
         assert_eq!(effective_timeout(&config), Duration::from_secs(30));
-        config.timeout = Duration::ZERO;
-        assert_eq!(effective_timeout(&config), FALLBACK_TIMEOUT);
+        let zero = InferenceConfig {
+            timeout: Duration::ZERO,
+            ..Default::default()
+        };
+        assert_eq!(effective_timeout(&zero), FALLBACK_TIMEOUT);
     }
 
     /// One-shot mock endpoint that always answers 500 with a huge body that
@@ -634,7 +642,10 @@ mod tests {
                     }
                 }
             }
-            let body = format!("{{\"error\":{{\"message\":\"invalid request: {}\"}}}}", "E".repeat(5000));
+            let body = format!(
+                "{{\"error\":{{\"message\":\"invalid request: {}\"}}}}",
+                "E".repeat(5000)
+            );
             let head = format!(
                 "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()

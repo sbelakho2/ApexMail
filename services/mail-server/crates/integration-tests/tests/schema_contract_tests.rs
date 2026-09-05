@@ -1216,8 +1216,8 @@ async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables() {
         Some("test-operator"),
         false,
     )
-        .await
-        .expect("failed to delete tenant through purge helper");
+    .await
+    .expect("failed to delete tenant through purge helper");
     assert!(
         deleted,
         "tenant purge helper reported no deleted tenant row"

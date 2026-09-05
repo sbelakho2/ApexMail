@@ -858,13 +858,22 @@ mod tests {
 
         // Contains correct amounts — in EUROS (2-decimal dot format), not
         // raw cents: the header declares EUR and the XSD expects decimals.
-        assert!(xml.contains("12000.00"), "Should contain 24% taxable amount in euros");
-        assert!(xml.contains("2880.00"), "Should contain 24% VAT amount in euros");
+        assert!(
+            xml.contains("12000.00"),
+            "Should contain 24% taxable amount in euros"
+        );
+        assert!(
+            xml.contains("2880.00"),
+            "Should contain 24% VAT amount in euros"
+        );
         assert!(
             xml.contains("3000.00"),
             "Should contain zero-rated amount in euros (200k + 100k cents)"
         );
-        assert!(xml.contains("15000.00"), "Should contain total taxable in euros");
+        assert!(
+            xml.contains("15000.00"),
+            "Should contain total taxable in euros"
+        );
         assert!(xml.contains("3600.00"), "Should contain total VAT in euros");
         assert!(xml.contains("42"), "Should contain invoice count");
         // The raw cent values must NOT appear in any amount element.
@@ -908,9 +917,7 @@ mod tests {
         let mut kmd = sample_kmd_result();
         kmd.total_taxable_cents = 123_456_789;
         kmd.total_vat_cents = 29_629_629;
-        let xml = client
-            .build_kmd_inf_xml(&kmd, &sample_breakdown())
-            .unwrap();
+        let xml = client.build_kmd_inf_xml(&kmd, &sample_breakdown()).unwrap();
 
         assert!(
             xml.contains("<TotalTaxableTurnover>1234567.89</TotalTaxableTurnover>"),

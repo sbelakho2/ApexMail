@@ -25,7 +25,12 @@ fn build_gdpr_audit_metadata(body: &UpdateGdprRequest) -> serde_json::Value {
 /// Audit with full actor attribution (P2-2): the operator's tenant AND user
 /// id must land in the entry — an unattributed GDPR status change is
 /// unverifiable the moment it matters legally.
-async fn log_gdpr_audit(state: &AppState, auth: &AuthUser, request_id: &str, metadata: serde_json::Value) {
+async fn log_gdpr_audit(
+    state: &AppState,
+    auth: &AuthUser,
+    request_id: &str,
+    metadata: serde_json::Value,
+) {
     crate::audit_log::insert_audit_log_best_effort_with_env(
         &state.db,
         state.config.environment.is_production(),

@@ -376,12 +376,7 @@ mod tests {
 
     #[test]
     fn test_placement_from_folder_spam_conventions() {
-        for name in [
-            "[Gmail]/Spam",
-            "Junk",
-            "JUNK",
-            "Bulk Mail",
-        ] {
+        for name in ["[Gmail]/Spam", "Junk", "JUNK", "Bulk Mail"] {
             assert_eq!(
                 placement_from_folder(name, &ProviderName::Other("prov".into())),
                 "spam",

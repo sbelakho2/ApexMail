@@ -1077,7 +1077,10 @@ mod tests {
         assert!(result.was_modified);
         // The href itself must be neutralized, not merely detected.
         assert!(
-            !result.sanitized.to_ascii_lowercase().contains("javascript:"),
+            !result
+                .sanitized
+                .to_ascii_lowercase()
+                .contains("javascript:"),
             "javascript: URL must not survive: {}",
             result.sanitized
         );
@@ -1104,7 +1107,10 @@ mod tests {
         let result = sanitize_llm_output(r#"<img src='JaVaScRiPt:alert(1)'>"#);
         assert!(result.was_modified);
         assert!(
-            !result.sanitized.to_ascii_lowercase().contains("javascript:"),
+            !result
+                .sanitized
+                .to_ascii_lowercase()
+                .contains("javascript:"),
             "case-folded scheme must not survive: {}",
             result.sanitized
         );

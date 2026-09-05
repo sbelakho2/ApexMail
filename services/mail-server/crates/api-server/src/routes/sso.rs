@@ -411,8 +411,7 @@ async fn complete_sso_login(
     // ON DELETE CASCADE removes identity rows with their user, so a hit
     // here always resolves; a miss is still handled defensively by
     // falling through to the verified-email path.
-    let mut existing: Option<(String, String, String, Option<String>, String, String, bool)> =
-        None;
+    let mut existing: Option<(String, String, String, Option<String>, String, String, bool)> = None;
     if let Some(linked_id) = linked_user_id.as_deref() {
         existing = sqlx::query_as(
             "SELECT id::text, tenant_id, email, name, role, status, mfa_enabled FROM users WHERE id = $1::uuid LIMIT 1",
@@ -697,7 +696,9 @@ fn select_verified_github_email(
     let address = |e: &serde_json::Value| e["email"].as_str().map(str::to_string);
 
     // Verified + primary is GitHub's canonical account address.
-    if let Some(primary) = emails.iter().find(|e| verified(e) && e["primary"].as_bool() == Some(true))
+    if let Some(primary) = emails
+        .iter()
+        .find(|e| verified(e) && e["primary"].as_bool() == Some(true))
     {
         return address(primary);
     }
@@ -706,10 +707,12 @@ fn select_verified_github_email(
     // control of that exact address (case-insensitive match — GitHub
     // addresses are case-insensitive at delivery).
     if let Some(profile) = profile_email.filter(|p| !p.trim().is_empty()) {
-        if let Some(matching) = emails
-            .iter()
-            .find(|e| verified(e) && e["email"].as_str().is_some_and(|a| a.eq_ignore_ascii_case(profile)))
-        {
+        if let Some(matching) = emails.iter().find(|e| {
+            verified(e)
+                && e["email"]
+                    .as_str()
+                    .is_some_and(|a| a.eq_ignore_ascii_case(profile))
+        }) {
             return address(matching);
         }
     }
@@ -1391,13 +1394,19 @@ mod tests {
             gh_email("a@example.com", true, false),
             gh_email("b@example.com", false, false),
         ];
-        assert_eq!(select_verified_github_email(Some("a@example.com"), &emails), None);
+        assert_eq!(
+            select_verified_github_email(Some("a@example.com"), &emails),
+            None
+        );
         assert_eq!(select_verified_github_email(None, &emails), None);
     }
 
     #[test]
     fn github_email_selection_empty_list_yields_none() {
-        assert_eq!(select_verified_github_email(Some("x@example.com"), &[]), None);
+        assert_eq!(
+            select_verified_github_email(Some("x@example.com"), &[]),
+            None
+        );
     }
 
     #[test]

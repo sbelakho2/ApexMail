@@ -693,8 +693,12 @@ async fn update_risk(
                 .await?;
             }
 
-            log_risk_audit(&state, &auth, &RiskMutation::ResolveFlag { tenant_id, flag_id })
-                .await;
+            log_risk_audit(
+                &state,
+                &auth,
+                &RiskMutation::ResolveFlag { tenant_id, flag_id },
+            )
+            .await;
             Ok(Json(serde_json::json!({ "success": true })))
         }
         RiskMutation::SaveThresholds { thresholds } => {

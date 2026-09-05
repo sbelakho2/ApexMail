@@ -1481,11 +1481,17 @@ mod tests {
     fn member_removal_path_rejects_quoting_garbage_instead_of_mangling() {
         // Ids containing '"' or ']' previously had those characters
         // repeatedly trimmed off, silently deleting a DIFFERENT member.
-        assert_eq!(parse_member_removal_path("members[value eq \"a\"]\"]"), None);
+        assert_eq!(
+            parse_member_removal_path("members[value eq \"a\"]\"]"),
+            None
+        );
         assert_eq!(parse_member_removal_path("members[value eq \"]\"]"), None);
         // Wrong shapes are rejected, not guessed.
         assert_eq!(parse_member_removal_path("displayName"), None);
-        assert_eq!(parse_member_removal_path("members[value eq \"u-001\""), None);
+        assert_eq!(
+            parse_member_removal_path("members[value eq \"u-001\""),
+            None
+        );
     }
 
     // ── Email gate (P2-1) ───────────────────────────────────────
@@ -1493,7 +1499,15 @@ mod tests {
     #[test]
     fn plausible_email_gate_rejects_blank_and_malformed() {
         assert!(is_plausible_email("user@example.com"));
-        for bad in ["", "   ", "noat", "@example.com", "user@", "user@nodot", "a b@example.com"] {
+        for bad in [
+            "",
+            "   ",
+            "noat",
+            "@example.com",
+            "user@",
+            "user@nodot",
+            "a b@example.com",
+        ] {
             assert!(!is_plausible_email(bad), "{bad:?} must be rejected");
         }
     }

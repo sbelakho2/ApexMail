@@ -893,9 +893,15 @@ mod tests {
         for index in 0..=text.len() {
             let floored = floor_to_char_boundary(text, index);
             let ceiled = ceil_to_char_boundary(text, index);
-            assert!(text.is_char_boundary(floored), "floor({index}) broke a char");
+            assert!(
+                text.is_char_boundary(floored),
+                "floor({index}) broke a char"
+            );
             assert!(text.is_char_boundary(ceiled), "ceil({index}) broke a char");
-            assert!(floored <= ceiled, "floor must not overshoot ceil at {index}");
+            assert!(
+                floored <= ceiled,
+                "floor must not overshoot ceil at {index}"
+            );
         }
         // Out-of-range indices clamp instead of panicking.
         assert_eq!(floor_to_char_boundary(text, 999), text.len());
@@ -912,7 +918,10 @@ mod tests {
         let v = ResponseVerifier::new();
         let response = "关于您的账户问题，我们的建议如下。我不能分享database password\u{1F512}这样的内部信息，这超出我的范围。请提供更多细节以便我们协助您。";
         let verdict = v.verify(response);
-        assert!(!verdict.passed, "keyword in non-English refusal stays flagged");
+        assert!(
+            !verdict.passed,
+            "keyword in non-English refusal stays flagged"
+        );
     }
 
     #[test]
@@ -945,7 +954,8 @@ mod tests {
         // Regression: the SLA context slice (±60 bytes) panicked on
         // multi-byte surroundings.
         let v = ResponseVerifier::new();
-        let response = "我们承诺所有计划的正常运行时间为 99.99% 🚀，请放心使用！如有疑问请联系支持团队。";
+        let response =
+            "我们承诺所有计划的正常运行时间为 99.99% 🚀，请放心使用！如有疑问请联系支持团队。";
         let verdict = v.verify(response);
         assert!(verdict
             .violations

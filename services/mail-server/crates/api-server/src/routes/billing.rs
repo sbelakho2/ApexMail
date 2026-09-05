@@ -1294,8 +1294,7 @@ fn admin_invoice_export_query(use_legacy_schema: bool) -> &'static str {
 /// see `routes::system_sender::SYSTEM_TENANT_ID`). Accepting only the
 /// literal 403'd every human platform operator from billing admin.
 fn has_admin_access(auth: &AuthUser) -> bool {
-    (auth.tenant_id == "system"
-        || auth.tenant_id == crate::routes::system_sender::SYSTEM_TENANT_ID)
+    (auth.tenant_id == "system" || auth.tenant_id == crate::routes::system_sender::SYSTEM_TENANT_ID)
         && auth
             .scopes
             .iter()
@@ -4056,7 +4055,8 @@ async fn admin_create_invoice(
     // multiplication — the previous unchecked `quantity * unit_price`
     // accepted negative quantities/prices (negative totals netting out
     // other lines) and could overflow.
-    let mut base_line_items: Vec<(String, i64, i64, i64)> = Vec::with_capacity(body.line_items.len());
+    let mut base_line_items: Vec<(String, i64, i64, i64)> =
+        Vec::with_capacity(body.line_items.len());
     for item in &body.line_items {
         if item.quantity <= 0 {
             return Ok((
@@ -4260,10 +4260,9 @@ async fn admin_get_mrr_report(
     // bugs billing-service fixed — truncated yearly/12 pricing,
     // creation-date instead of billing-cycle-start bucketing, and no
     // tenants join). Single source: billing_service::routes::MRR_REPORT_SQL.
-    let report: serde_json::Value =
-        sqlx::query_scalar(billing_service::routes::MRR_REPORT_SQL)
-            .fetch_one(&state.db)
-            .await?;
+    let report: serde_json::Value = sqlx::query_scalar(billing_service::routes::MRR_REPORT_SQL)
+        .fetch_one(&state.db)
+        .await?;
 
     Ok(billing_success_response(
         serde_json::json!({ "report": report }),
@@ -4283,10 +4282,9 @@ async fn admin_get_churn_report(
     // and truncated yearly/12). Single source:
     // billing_service::routes::CHURN_REPORT_SQL (stripe_price_id snapshot
     // join + unpriced-churn coverage).
-    let report: serde_json::Value =
-        sqlx::query_scalar(billing_service::routes::CHURN_REPORT_SQL)
-            .fetch_one(&state.db)
-            .await?;
+    let report: serde_json::Value = sqlx::query_scalar(billing_service::routes::CHURN_REPORT_SQL)
+        .fetch_one(&state.db)
+        .await?;
 
     Ok(billing_success_response(
         serde_json::json!({ "report": report }),
@@ -4732,7 +4730,10 @@ mod tests {
         assert!(has_admin_access(&auth_user(&["billing:admin"], "system")));
         // Human operators authenticate as the SEEDED system tenant, not the
         // literal sentinel — the gate must accept both.
-        assert!(has_admin_access(&auth_user(&["*"], "system_internal_tenant01")));
+        assert!(has_admin_access(&auth_user(
+            &["*"],
+            "system_internal_tenant01"
+        )));
         // System tenant WITHOUT an admin scope is rejected.
         assert!(!has_admin_access(&auth_user(&["tenant:*"], "system")));
         assert!(!has_admin_access(&auth_user(&["messages:read"], "system")));

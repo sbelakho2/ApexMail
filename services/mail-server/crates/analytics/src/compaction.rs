@@ -547,11 +547,9 @@ mod tests {
         }
 
         // A different tenant / missing tree yields an empty set.
-        assert!(
-            load_manifested_ids(root.to_str().unwrap(), "tenant_b")
-                .await
-                .is_empty()
-        );
+        assert!(load_manifested_ids(root.to_str().unwrap(), "tenant_b")
+            .await
+            .is_empty());
         assert!(
             load_manifested_ids(root.join("nope").to_str().unwrap(), "tenant_a")
                 .await

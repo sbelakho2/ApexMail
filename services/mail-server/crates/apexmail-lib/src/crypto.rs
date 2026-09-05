@@ -34,7 +34,10 @@ pub enum PasswordVerificationError {
 /// callers of the [`create_hmac_signature`] wrapper may treat failure as an
 /// invariant violation — but this form makes the (theoretical) failure
 /// explicit instead of silently yielding an empty signature string.
-pub fn try_create_hmac_signature(key: &[u8], data: &[u8]) -> Result<String, hmac::digest::InvalidLength> {
+pub fn try_create_hmac_signature(
+    key: &[u8],
+    data: &[u8],
+) -> Result<String, hmac::digest::InvalidLength> {
     let mut mac = HmacSha256::new_from_slice(key)?;
     mac.update(data);
     Ok(hex::encode(mac.finalize().into_bytes()))
@@ -48,8 +51,7 @@ pub fn try_create_hmac_signature(key: &[u8], data: &[u8]) -> Result<String, hmac
 /// — an empty string that callers could not distinguish from a real
 /// signature and that silently disabled signature checks downstream.
 pub fn create_hmac_signature(key: &[u8], data: &[u8]) -> String {
-    try_create_hmac_signature(key, data)
-        .expect("HMAC-SHA256 accepts keys of any length")
+    try_create_hmac_signature(key, data).expect("HMAC-SHA256 accepts keys of any length")
 }
 
 /// Fallible HMAC-SHA256 signature as base64 — see
@@ -69,8 +71,7 @@ pub fn try_create_hmac_signature_base64(
 /// unreachable for HMAC, so it panics on the invariant rather than
 /// returning an empty string (see [`create_hmac_signature`]).
 pub fn create_hmac_signature_base64(key: &[u8], data: &[u8]) -> String {
-    try_create_hmac_signature_base64(key, data)
-        .expect("HMAC-SHA256 accepts keys of any length")
+    try_create_hmac_signature_base64(key, data).expect("HMAC-SHA256 accepts keys of any length")
 }
 
 /// Timing-safe comparison of two strings (constant-time).
@@ -428,7 +429,10 @@ mod tests {
             detect_api_key_hash_version("$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$hash"),
             ApiKeyHashVersion::Argon2id
         );
-        assert_eq!(detect_api_key_hash_version("junk"), ApiKeyHashVersion::Unknown);
+        assert_eq!(
+            detect_api_key_hash_version("junk"),
+            ApiKeyHashVersion::Unknown
+        );
         // 64-hex is reported as HmacSha256 even though a plain SHA-256
         // digest has the identical shape — documented limitation.
         assert_eq!(

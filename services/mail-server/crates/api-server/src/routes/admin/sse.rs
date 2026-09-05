@@ -26,24 +26,14 @@ use crate::middleware::auth::{require_scopes, AuthUser};
 use crate::routes::helpers::table_exists;
 use crate::state::AppState;
 
-/// Hard stream lifetime: a browser tab left open must not hold a
-/// connection (and its per-tick COUNT queries) open forever — the client
-/// reconnects automatically when the stream ends.
-const MAX_STREAM_DURATION: Duration = Duration::from_secs(30 * 60);
-
 /// Consecutive poll failures tolerated before the stream closes. Erroring
 /// polls previously rendered healthy zeros (`unwrap_or(0)`), which is worse
 /// than no dashboard: operators trust a silently dead metric.
 const MAX_CONSECUTIVE_POLL_ERRORS: u32 = 3;
 
-/// A stream that yields `()` every `period`, implemented with `futures`
-/// primitives so this crate does not need a `tokio-stream` dependency.
-fn interval_stream(period: Duration) -> impl futures::Stream<Item = ()> {
-    futures::stream::unfold((), move |_| async move {
-        tokio::time::sleep(period).await;
-        Some(((), ()))
-    })
-}
+/// Hard lifetime cap for one SSE connection. The browser's EventSource
+/// reconnects automatically, which re-runs the auth/scope gates.
+const MAX_STREAM_DURATION: Duration = Duration::from_secs(30 * 60);
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -161,7 +151,7 @@ async fn sse_dashboard(
     // the window and re-runs the auth/scope gates. `unfold` owns the poll
     // state (scan's closure bounds reject futures that borrow it).
     let stream = futures::stream::unfold(
-        (db, tokio::time::Instant::now(), 0u32),
+        (db, tokio::time::Instant::now() + MAX_STREAM_DURATION, 0u32),
         |mut poll_state| async move {
             tokio::time::sleep(Duration::from_secs(5)).await;
             if tokio::time::Instant::now() >= poll_state.1 {
@@ -286,7 +276,12 @@ async fn sse_alerts(
         // Same bounded-poll contract as the dashboard stream; unfold owns
         // the state (see sse_dashboard).
         futures::stream::unfold(
-            (db, Arc::clone(&last_seen), tokio::time::Instant::now(), 0u32),
+            (
+                db,
+                Arc::clone(&last_seen),
+                tokio::time::Instant::now(),
+                0u32,
+            ),
             |mut poll_state| async move {
                 tokio::time::sleep(Duration::from_secs(10)).await;
                 if tokio::time::Instant::now() >= poll_state.2 {
@@ -333,11 +328,10 @@ async fn sse_alerts(
                             "alerts SSE poll failed"
                         );
                         if *consecutive_errors >= MAX_CONSECUTIVE_POLL_ERRORS {
-                            tracing::error!(
-                                "alerts SSE closing after repeated poll failures"
-                            );
-                            vec![Ok(Event::default()
-                                .comment("alerts-unavailable-stream-closing"))]
+                            tracing::error!("alerts SSE closing after repeated poll failures");
+                            vec![Ok(
+                                Event::default().comment("alerts-unavailable-stream-closing")
+                            )]
                         } else {
                             vec![Ok(Event::default().comment("alerts-unavailable"))]
                         }

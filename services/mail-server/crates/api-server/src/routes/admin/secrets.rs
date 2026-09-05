@@ -244,26 +244,28 @@ async fn create_secret(
     // encryption key used to silently store `plain:`-marked secrets —
     // at-rest protection that exists only in the label. Non-production
     // keeps the marked fallback with a warning so local flows stay usable.
-    let encrypted_value =
-        match apexmail_lib::secret_at_rest::encrypt_at_rest(&generate_secret_value(), b"apexmail.secrets") {
-            Ok(encrypted) => encrypted,
-            Err(error) => {
-                if state.config.environment.is_production() {
-                    tracing::error!(
-                        error = %error,
-                        "secret encryption key unset in production — refusing plaintext fallback"
-                    );
-                    return Err(ApiError::Internal(
-                        "secret encryption is not configured; refusing to store plaintext".into(),
-                    ));
-                }
-                tracing::warn!(
+    let encrypted_value = match apexmail_lib::secret_at_rest::encrypt_at_rest(
+        &generate_secret_value(),
+        b"apexmail.secrets",
+    ) {
+        Ok(encrypted) => encrypted,
+        Err(error) => {
+            if state.config.environment.is_production() {
+                tracing::error!(
                     error = %error,
-                    "secret encryption key unset (non-production) — storing plaintext-marked secret"
+                    "secret encryption key unset in production — refusing plaintext fallback"
                 );
-                format!("plain:{}", generate_secret_value())
+                return Err(ApiError::Internal(
+                    "secret encryption is not configured; refusing to store plaintext".into(),
+                ));
             }
-        };
+            tracing::warn!(
+                error = %error,
+                "secret encryption key unset (non-production) — storing plaintext-marked secret"
+            );
+            format!("plain:{}", generate_secret_value())
+        }
+    };
     let next_rotation_at =
         next_rotation_offset(&body.rotation_policy).map(|d| chrono::Utc::now() + d);
     let rotation_schedule =

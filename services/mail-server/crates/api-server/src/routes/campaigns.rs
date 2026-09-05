@@ -58,13 +58,13 @@ fn decode_keyset_cursor(encoded: &str) -> Result<(DateTime<Utc>, String), ApiErr
     };
     let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp)
         .map_err(|_| {
-            ApiError::BadRequest(
-                "invalid cursor: must be an encoded created_at timestamp".into(),
-            )
+            ApiError::BadRequest("invalid cursor: must be an encoded created_at timestamp".into())
         })?
         .with_timezone(&Utc);
     if id.is_empty() || id.len() > 64 || id.bytes().any(|b| b.is_ascii_control()) {
-        return Err(ApiError::BadRequest("invalid cursor: malformed row id".into()));
+        return Err(ApiError::BadRequest(
+            "invalid cursor: malformed row id".into(),
+        ));
     }
     Ok((timestamp, id.to_string()))
 }

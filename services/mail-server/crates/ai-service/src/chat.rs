@@ -123,7 +123,10 @@ fn sanitize_history_turn(turn: &ChatTurn) -> Option<(String, String)> {
         "user" => "user",
         "assistant" => "assistant",
         other => {
-            tracing::warn!(role = other, "dropping history turn with non-replayable role");
+            tracing::warn!(
+                role = other,
+                "dropping history turn with non-replayable role"
+            );
             return None;
         }
     };
@@ -134,7 +137,10 @@ fn sanitize_history_turn(turn: &ChatTurn) -> Option<(String, String)> {
     }
     let content = check.sanitized;
     let lower = content.to_lowercase();
-    if HISTORY_ROLE_MARKERS.iter().any(|marker| lower.contains(marker)) {
+    if HISTORY_ROLE_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
         tracing::warn!("dropping history turn containing a role-marker forgery");
         return None;
     }
@@ -241,8 +247,11 @@ and say so if that is not enough)"
                 serde_json::to_string_pretty(&req.account_context).unwrap_or_else(|_| "{}".into())
             )
         };
-        let sanitized_turns: Vec<(String, String)> =
-            req.history.iter().filter_map(sanitize_history_turn).collect();
+        let sanitized_turns: Vec<(String, String)> = req
+            .history
+            .iter()
+            .filter_map(sanitize_history_turn)
+            .collect();
         let history = sanitized_turns
             .iter()
             .rev()

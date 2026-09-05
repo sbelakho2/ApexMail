@@ -161,13 +161,13 @@ fn decode_keyset_cursor(encoded: &str) -> Result<(DateTime<Utc>, String), ApiErr
     };
     let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp)
         .map_err(|_| {
-            ApiError::BadRequest(
-                "invalid cursor: must be an encoded created_at timestamp".into(),
-            )
+            ApiError::BadRequest("invalid cursor: must be an encoded created_at timestamp".into())
         })?
         .with_timezone(&Utc);
     if id.is_empty() || id.len() > 64 || id.bytes().any(|b| b.is_ascii_control()) {
-        return Err(ApiError::BadRequest("invalid cursor: malformed row id".into()));
+        return Err(ApiError::BadRequest(
+            "invalid cursor: malformed row id".into(),
+        ));
     }
     Ok((timestamp, id.to_string()))
 }
@@ -997,7 +997,7 @@ async fn list_messages(
         // id DESC ordering). The VALUE is cast once (`$k::uuid` /
         // `$k::timestamp`), never the indexed column.
         if let Some(ref status) = params.status {
-            let query = format!(
+            let query = String::from(
                 "SELECT id::text AS id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
                  FROM messages WHERE tenant_id = $1 AND status = $2
                    AND (created_at < $3::timestamp OR (created_at = $3::timestamp AND id < $4::uuid))
@@ -1012,7 +1012,7 @@ async fn list_messages(
                 .fetch_all(&state.db)
                 .await?
         } else {
-            let query = format!(
+            let query = String::from(
                 "SELECT id::text AS id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
                  FROM messages WHERE tenant_id = $1
                    AND (created_at < $2::timestamp OR (created_at = $2::timestamp AND id < $3::uuid))

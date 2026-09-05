@@ -26,7 +26,8 @@ use tower_http::trace::TraceLayer;
 use ui_foundation::axum_router as ui_router;
 
 use crate::config::Config;
-use crate::middleware::{    auth, ddos, idempotency, metrics, rate_limiter, request_logger, versioning,    waf,
+use crate::middleware::{
+    auth, ddos, idempotency, metrics, rate_limiter, request_logger, versioning, waf,
 };
 use crate::routes;
 use crate::state::AppState;
@@ -884,7 +885,10 @@ fn inject_kiwi_widget(mut html: String, scope: &str, nonce: &str) -> String {
 /// (and therefore the CAPTCHA) was already consumed at step one.
 fn kiwi_widget_for_render(surface: &str, uri: &Uri) -> Option<&'static str> {
     let scope = kiwi_auth_scope_for(surface, uri.path())?;
-    if uri.query().is_some_and(|q| q.split('&').any(|kv| kv == "mfa=1")) {
+    if uri
+        .query()
+        .is_some_and(|q| q.split('&').any(|kv| kv == "mfa=1"))
+    {
         return None;
     }
     Some(scope)
@@ -3184,7 +3188,10 @@ mod tests {
 
     #[test]
     fn auth_csp_gates_scripts_on_the_exact_per_response_nonce() {
-        let csp = auth_csp_header("a1b2c3d4e5f6a7b8").to_str().unwrap().to_string();
+        let csp = auth_csp_header("a1b2c3d4e5f6a7b8")
+            .to_str()
+            .unwrap()
+            .to_string();
         assert!(csp.contains("script-src 'nonce-a1b2c3d4e5f6a7b8'"));
         assert!(csp.contains("style-src 'self' 'nonce-a1b2c3d4e5f6a7b8'"));
         // No unsafe-inline anywhere near script-src, and no external hosts.
@@ -3202,7 +3209,9 @@ mod tests {
         // The hidden kiwi__token input must precede the form close so it
         // posts with the credentials, and the nonce must reach the script
         // tags (the CSP only admits these).
-        let token_pos = html.find("name=\"kiwi__token\"").expect("token input present");
+        let token_pos = html
+            .find("name=\"kiwi__token\"")
+            .expect("token input present");
         let form_end = html.find("</form>").expect("form close present");
         assert!(token_pos < form_end);
         assert!(html.contains("nonce=\"nonce123\""));
@@ -3212,7 +3221,10 @@ mod tests {
     #[test]
     fn kiwi_widget_render_decision_is_path_and_surface_scoped() {
         assert_eq!(kiwi_auth_scope_for("web", "/login"), Some("login"));
-        assert_eq!(kiwi_auth_scope_for("control-plane", "/login"), Some("cp-login"));
+        assert_eq!(
+            kiwi_auth_scope_for("control-plane", "/login"),
+            Some("cp-login")
+        );
         assert_eq!(kiwi_auth_scope_for("web", "/signup"), Some("signup"));
         assert_eq!(kiwi_auth_scope_for("web", "/dashboard"), None);
         assert_eq!(kiwi_auth_scope_for("marketing", "/login"), None);
