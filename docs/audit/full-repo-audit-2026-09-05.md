@@ -264,3 +264,15 @@ The fix plan in section 6 was executed in nine parallel workstreams plus a first
 **Also fixed en route:** a wall-clock test flake (compliance DSAR limiter keys on the current hour; the unreachable-DB acquire timeout stretched a six-attempt test past a top-of-the-hour boundary into a fresh bucket — bounded the dummy pool to 50ms; 0.27s vs 180s).
 
 **Deployed via pipeline `20260905T200642: OK`.** Live-verified: the widget on web + CP logins carries the v8 path (old silhouette zero occurrences), marketing serves the wordmark with zero kiwi references and the A favicon, health green.
+
+## 11. Unified design language, applied globally — 2026-09-05 night
+
+**The harmonized set:** Mark **no.8 Spiral Lock** · Widget **no.12 Mono Checksum**, carried by **Marketing 01 (Ledger Hero) · CP 06 (Pipeline Status) · Console 03 (Quiet Meters)** — one ribbon motif doing three jobs across three surfaces. Four motifs platform-wide (slot / needle / receipt / hairline), same palette, motion 120–400ms, zero gradients.
+
+**KiwiCaptcha** (standalone `d06591c9`, mirrored): Spiral Lock replaces the kiwi v8 in `logo.rs` (mark/lockup/shield), the compat asset (all three mirrors), and the Symfony twig. The widget is fully restyled to Mono Checksum: badge as slot, a new seven-cell checksum strip (CSS-only, staggered opacity cycle while solving, settles on done), mono receipt typography, 2px hairline track — **the shine/glow is deleted (markup + CSS), pulse and scale retired**. Every `data-kiwi-*` driver hook unchanged; the 277-test package suite passed without touching the driver.
+
+**Marketing**: hero checksum ribbon settling to APEXMAIL + hairline stat meters; needle nav (`aria-current` = solid slot); footer receipt (challenge·work·proof).
+
+**Console**: quiet-meter plan-usage rows (sends / api / recipients hairlines) atop the dashboard. **Control plane**: the service-slot ribbon (platform services as flip-cells, all-nominal solid) under System Overview.
+
+**Deployed via pipeline `20260905T222742: OK`.** Live-verified: the login pages carry the Spiral Lock path with the slot strip, zero glow/shine bytes, all driver hooks and the nonce CSP intact; a live end-to-end solve passes the verifier (valid token → 401 credential stage; bogus → 400 captcha rejection) — the redesign changed skin only, not one byte of the security contract. Marketing serves the ribbon, hairline and receipt; health green. Gates: 6,083 workspace tests, clippy clean, zola clean.
