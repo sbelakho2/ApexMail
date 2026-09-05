@@ -1,0 +1,313 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KiwiCaptcha — Widget Design Proposals (2026-09-05)</title>
+<style>
+  :root{
+    --bg:#fafafa; --card:#fff; --line:#e4e4e7; --fg:#111113; --fg2:#52525b;
+    --brand:#dc2626; --ok:#059669; --err:#dc2626; --track:#e4e4e7; --fill:#a1a1aa;
+    --in-bg:#fff; --in-bd:#d4d4d8;
+  }
+  .dark{
+    --bg:#111113; --card:#1c1c1f; --line:#2a2a2e; --fg:#f4f4f5; --fg2:#a1a1aa;
+    --brand:#ef4444; --ok:#34d399; --err:#f87171; --track:#2a2a2e; --fill:#52525b;
+    --in-bg:#18181b; --in-bd:#3f3f46;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font:15px/1.5 -apple-system,BlinkMacSystemFont,"Inter",system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+  header{padding:44px 32px 12px;max-width:1160px;margin:0 auto}
+  h1{font-size:25px;letter-spacing:-.02em;margin:0 0 8px}
+  header p{color:var(--fg2);margin:0;max-width:78ch}
+  .mode{position:fixed;right:16px;top:14px;font-size:12px;font-weight:600;border:1px solid var(--line);
+    background:var(--card);color:var(--fg);border-radius:999px;padding:7px 13px;cursor:pointer}
+  main{max-width:1160px;margin:20px auto 80px;padding:0 32px;display:grid;grid-template-columns:repeat(auto-fill,minmax(500px,1fr));gap:22px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:20px 22px 18px}
+  .num{font-size:12px;font-weight:700;color:var(--brand);letter-spacing:.08em}
+  .card h2{font-size:17px;margin:3px 0 2px;letter-spacing:-.01em}
+  .tag{color:var(--fg2);font-size:13px;margin:0 0 14px}
+  .stage{border:1px dashed var(--line);border-radius:12px;padding:18px 16px;margin-bottom:12px;
+    display:flex;align-items:center;justify-content:center;min-height:86px}
+  .states{display:flex;gap:6px;margin-bottom:10px}
+  .states button{font:600 11.5px/1 inherit;letter-spacing:.02em;border:1px solid var(--line);background:transparent;
+    color:var(--fg2);padding:6px 10px;border-radius:8px;cursor:pointer}
+  .states button[aria-pressed="true"]{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+  .desc{font-size:13px;color:var(--fg2)}
+  .desc b{color:var(--fg);font-weight:600}
+  code{font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--track);padding:1px 5px;border-radius:5px}
+
+  /* ───────── shared mock tokens (what the real widget theming becomes) ───────── */
+  .kw{--k-brand:var(--brand);--k-ok:var(--ok);--k-err:var(--err);--k-fg:var(--fg);--k-fg2:var(--fg2);
+      --k-bd:var(--in-bd);--k-bg:var(--in-bg);--k-track:var(--track);font:inherit;color:var(--k-fg)}
+  .kw .mark{display:block}
+  .kw [data-s="idle"],.kw [data-s="solving"],.kw [data-s="done"],.kw [data-s="failed"]{display:none}
+  .kw[data-state="idle"] [data-s="idle"],.kw[data-state="solving"] [data-s="solving"],
+  .kw[data-state="done"] [data-s="done"],.kw[data-state="failed"] [data-s="failed"]{display:block}
+
+  /* 01 Quiet Meter */
+  .qm{display:flex;align-items:center;gap:12px;width:100%;max-width:420px}
+  .qm .lbl{font-size:13px;font-weight:560;color:var(--k-fg);white-space:nowrap}
+  .qm .bar{flex:1;height:2px;background:var(--k-track);border-radius:2px;overflow:hidden;position:relative}
+  .qm .bar i{position:absolute;inset:0;background:var(--k-brand);transform-origin:left}
+  .qm[data-state="solving"] .bar i{width:38%;animation:qm-slide 1.4s ease-in-out infinite}
+  .qm[data-state="done"] .bar i{width:100%;background:var(--k-ok);transition:width .35s ease}
+  .qm[data-state="failed"] .bar i{width:100%;background:var(--k-err)}
+  @keyframes qm-slide{0%{transform:translateX(-110%)}100%{transform:translateX(300%)}}
+
+  /* 02 Terminal Line */
+  .tl{font:12.5px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;width:100%;max-width:420px;
+      border-left:2px solid var(--k-brand);padding:4px 10px;color:var(--k-fg2)}
+  .tl b{color:var(--k-fg);font-weight:600}
+  .tl[data-state="done"]{border-color:var(--k-ok)}
+  .tl[data-state="failed"]{border-color:var(--k-err)}
+  .tl .tick{color:var(--k-brand)}
+
+  /* 03 Orbital */
+  .or{display:flex;align-items:center;gap:14px}
+  .or .stage44{position:relative;width:44px;height:44px;display:grid;place-items:center}
+  .or .orbit{position:absolute;inset:0}
+  .or .dot{position:absolute;top:2px;left:50%;width:5px;height:5px;margin-left:-2.5px;border-radius:50%;background:var(--k-brand)}
+  .or[data-state="solving"] .orbit{animation:orb 1.6s linear infinite}
+  .or[data-state="done"] .dot{top:0;background:var(--k-ok);transition:top .3s ease,background .3s ease}
+  @keyframes orb{to{transform:rotate(360deg)}}
+  .or .lbl{font-size:13px;font-weight:560}
+
+  /* 04 Segment Ledger */
+  .sl{display:flex;align-items:center;gap:12px}
+  .sl .segs{display:flex;gap:3px;align-items:flex-end}
+  .sl .segs i{width:5px;height:18px;border-radius:2.5px;background:var(--k-track);transition:background .24s ease}
+  .sl[data-state="solving"] .segs i:nth-child(-n+3){background:var(--k-brand)}
+  .sl[data-state="done"] .segs i{background:var(--k-ok)}
+  .sl[data-state="failed"] .segs i{background:var(--k-err)}
+  .sl .lbl{font-size:13px;font-weight:560}
+
+  /* 05 Pill Badge */
+  .pb{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 14px 0 10px;border-radius:999px;
+      border:1px solid var(--k-bd);background:var(--k-bg);font-size:13px;font-weight:600;transition:border-color .18s ease,color .18s ease}
+  .pb[data-state="done"]{border-color:var(--k-ok);color:var(--k-ok)}
+  .pb[data-state="failed"]{border-color:var(--k-err);color:var(--k-err)}
+  .pb[data-state="solving"]{border-color:var(--k-brand)}
+
+  /* 06 Field Kin */
+  .fk{display:flex;align-items:center;gap:10px;width:100%;max-width:420px;height:44px;padding:0 14px;
+      border:1px solid var(--k-bd);border-radius:10px;background:var(--k-bg);font-size:14px;
+      transition:border-color .2s ease}
+  .fk[data-state="solving"]{border-color:var(--k-brand)}
+  .fk[data-state="done"]{border-color:var(--k-ok)}
+  .fk .bar{flex:1;height:2px;background:var(--k-track);border-radius:2px;overflow:hidden;position:relative}
+  .fk .bar i{position:absolute;inset:0;left:0;width:30%;background:var(--k-brand)}
+  .fk[data-state="solving"] .bar i{animation:qm-slide 1.3s ease-in-out infinite}
+  .fk[data-state="done"] .bar i{width:100%;background:var(--k-ok);transition:width .35s ease}
+  .fk .lbl{font-size:13.5px;color:var(--k-fg2)}
+  .fk[data-state="done"] .lbl{color:var(--k-ok)}
+
+  /* 07 Dial */
+  .dl{display:flex;align-items:center;gap:14px}
+  .dl svg .arc{transition:stroke-dashoffset .45s ease,stroke .3s ease}
+  .dl[data-state="solving"] svg .arc{animation:dial 1.15s ease-in-out infinite;stroke:var(--k-brand)}
+  .dl[data-state="done"] svg .arc{stroke:var(--k-ok)}
+  @keyframes dial{0%{stroke-dashoffset:151}50%{stroke-dashoffset:60}100%{stroke-dashoffset:151}}
+  .dl .lbl{font-size:13px;font-weight:560}
+
+  /* 08 Stacked Receipt */
+  .rc{font:12px/1.9 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--k-fg2)}
+  .rc div b{color:var(--k-fg);font-weight:600}
+  .rc .on{color:var(--k-brand)} .rc .fin{color:var(--k-ok)}
+
+  /* 09 Ambient Border — mock: the submit button IS the widget */
+  .ab button{font:600 14px/1 inherit;padding:0 18px 0 14px;height:44px;border-radius:10px;border:2px solid var(--k-bd);
+    background:var(--k-bg);color:var(--k-fg);cursor:pointer;display:inline-flex;align-items:center;gap:10px;transition:border-color .2s ease}
+  .ab[data-state="solving"] button{border-style:dashed;border-color:var(--k-brand)}
+  .ab[data-state="done"] button{border-style:solid;border-color:var(--k-ok)}
+  .ab .mk{opacity:0;width:16px;height:16px;transition:opacity .25s ease}
+  .ab[data-state="done"] .mk{opacity:1}
+
+  /* 10 Glass Card — refined current anatomy */
+  .gc{display:flex;align-items:center;gap:12px;width:100%;max-width:420px;padding:12px 14px;border-radius:12px;
+      border:1px solid var(--k-bd);background:color-mix(in srgb,var(--k-bg) 88%,transparent);
+      color:var(--k-fg);transition:border-color .2s ease}
+  .gc[data-state="solving"]{border-color:var(--k-brand)}
+  .gc[data-state="done"]{border-color:color-mix(in srgb,var(--k-ok) 55%,var(--k-bd))}
+  .gc[data-state="failed"]{border-color:color-mix(in srgb,var(--k-err) 55%,var(--k-bd))}
+  .gc .chip{width:28px;height:28px;border-radius:8px;display:grid;place-items:center;
+      background:color-mix(in srgb,var(--k-brand) 9%,transparent);color:var(--k-brand);transition:background .2s ease,color .2s ease}
+  .gc[data-state="done"] .chip{background:var(--k-ok);color:#fff}
+  .gc[data-state="failed"] .chip{background:color-mix(in srgb,var(--k-err) 12%,transparent);color:var(--k-err)}
+  .gc .t{font-size:13px;font-weight:600}
+  .gc .s{font-size:12px;color:var(--k-fg2)}
+  .gc .bar{margin-top:6px;height:2px;border-radius:2px;background:var(--k-track);overflow:hidden;position:relative}
+  .gc .bar i{position:absolute;inset:0;width:36%;background:var(--k-brand)}
+  .gc[data-state="solving"] .bar i{animation:qm-slide 1.4s ease-in-out infinite}
+  .gc[data-state="done"] .bar i{width:100%;background:var(--k-ok);transition:width .3s ease}
+
+  /* 11 Braid */
+  .br{display:flex;align-items:center;gap:12px}
+  .br .braid{width:34px;height:22px;
+    background:
+      repeating-linear-gradient(115deg,var(--k-track) 0 2px,transparent 2px 9px),
+      repeating-linear-gradient(-115deg,var(--k-track) 0 2px,transparent 2px 9px)}
+  .br[data-state="solving"] .braid{
+    background:
+      repeating-linear-gradient(115deg,var(--k-brand) 0 2px,transparent 2px 9px),
+      repeating-linear-gradient(-115deg,var(--k-brand) 0 2px,transparent 2px 9px);
+    animation:brsh .5s ease-in-out infinite alternate}
+  .br[data-state="done"] .braid{background:
+      repeating-linear-gradient(0deg,var(--k-ok) 0 2px,transparent 2px 9px)}
+  @keyframes brsh{from{background-position:0 0,0 0}to{background-position:18px 0,-18px 0}}
+  .br .lbl{font-size:13px;font-weight:560}
+
+  /* 12 Mono Checksum */
+  .mc{display:flex;align-items:center;gap:12px}
+  .mc .slots{display:flex;gap:3px;font:600 13px/1 ui-monospace,SFMono-Regular,Menlo,monospace}
+  .mc .slots b{width:15px;height:20px;display:grid;place-items:center;border-radius:4px;
+    background:var(--k-track);color:var(--k-fg2)}
+  .mc[data-state="solving"] .slots b:nth-child(odd){background:var(--k-brand);color:#fff}
+  .mc[data-state="done"] .slots b{background:var(--k-ok);color:#fff}
+  .mc[data-state="failed"] .slots b{background:var(--k-err);color:#fff}
+  .mc .lbl{font-size:13px;color:var(--k-fg2)}
+
+  @media (prefers-reduced-motion: reduce){
+    .qm .bar i,.or .orbit,.fk .bar i,.gc .bar i,.br .braid,.dl svg .arc{animation:none !important}
+  }
+  footer{max-width:1160px;margin:0 auto 70px;padding:0 32px;color:var(--fg2);font-size:13px}
+</style>
+</head>
+<body>
+<button class="mode" onclick="document.body.classList.toggle('dark')">light / dark</button>
+<header>
+  <h1>KiwiCaptcha — widget design proposals</h1>
+  <p>Twelve directions for the widget surface, all wearing the chosen <b>Spiral&nbsp;Lock</b> mark and all
+     retiring the shine. Every direction keeps the current contract: auto-solving PoW (status, not puzzle),
+     <code>aria-live</code> status announcements, a single interactive Retry (&ge;44px, 2px focus ring at 3:1),
+     motion 100&ndash;500&nbsp;ms per <a href="https://www.nngroup.com/articles/animation-duration/">NN/g</a> with
+     <a href="https://www.w3.org/WAI/WCAG22/Techniques/css/C39">prefers-reduced-motion</a> honored, themeable via
+     CSS custom properties, zero gradients. Click a state to preview it.</p>
+</header>
+<main id="grid"></main>
+<footer>
+  Mocks are design-direction artifacts (final CSS is engineered at implementation, including the embedded no-JS
+  fallback and locale packs). Whichever you choose ships together with the Spiral Lock mark in logo.rs, the
+  compat mirrors, and the widget.css shine removal — one coherent change, one pipeline deploy.
+</footer>
+<script>
+const MARK = (s)=>`<svg class="mark" viewBox="0 0 64 64" width="${s}" height="${s}" fill="none" aria-hidden="true">
+ <g stroke="currentColor" stroke-width="6.6" stroke-linecap="round">
+   <path d="M32 36.5 c0 -4 5.4 -4 5.4 0 c0 5.4 -8.1 6.8 -11 1.4 c-4.1 -6.8 2.7 -14.9 10.4 -13.5 c10.8 1.4 13.5 13.5 6.8 21.6 c-8.1 10.8 -25.7 8.1 -31.1 -5.4 c-5.4 -14.9 6.8 -29.7 23 -28.4"/>
+ </g>
+ <path d="M21 26 v-4 a11 11 0 0 1 22 0 v4" stroke="currentColor" stroke-width="6.6" stroke-linecap="round" fill="none"/>
+</svg>`;
+
+const DATA = [
+["Quiet Meter","One 32px-tall row — mark, one label word, and a 2px track that slides while solving, fills green on done. The lowest-profile option; perfect under a password field.",
+ "<b>anatomy</b> mark 18 + label 13/560 + hairline track · <b>motion</b> slide 1.4s loop (ease-in-out), fill 350ms · <b>states</b> track color + label word only",
+ "qm", `<div class="qm kw" data-state="solving" role="status">
+   <span style="color:var(--k-brand);display:grid">${MARK(18)}</span>
+   <span class="lbl"><span data-s="idle">Security check</span><span data-s="solving">Verifying you…</span><span data-s="done">Verified</span><span data-s="failed">Couldn’t verify — retry</span></span>
+   <span class="bar"><i></i></span></div>`],
+
+["Terminal Line","A single monospace line with a 2px status rule — the PoW pipeline as developer-native text. The hash ticker runs while solving; the accepted proof and solve-time print on done.",
+ "<b>anatomy</b> mono 12.5 + left rule · <b>motion</b> text swap 180ms only · <b>best for</b> API docs, dev tools, terminal-styled products",
+ "tl", `<div class="tl kw" data-state="solving" role="status">
+   <span data-s="idle">pow sha-256 · <b>ready</b></span>
+   <span data-s="solving">pow sha-256 · nonce <span class="tick">0x3f2a91</span> ▮</span>
+   <span data-s="done">proof <b>0x0042</b> accepted · 1.8s ✓</span>
+   <span data-s="failed">proof rejected · <b>retry</b></span></div>`],
+
+["Orbital","A 44px stage: the Spiral Lock at center, one 5px satellite orbiting while solving; on done the satellite docks at the shackle apex. The only mark-native motion option.",
+ "<b>anatomy</b> 44px orbit stage + label · <b>motion</b> orbit 1.6s linear, dock 300ms ease · <b>reduced motion</b> static ring + solid dock dot",
+ "or", `<div class="or kw" data-state="solving" role="status">
+   <span class="stage44" style="color:var(--k-brand)">${MARK(22)}<span class="orbit"><span class="dot"></span></span></span>
+   <span class="lbl"><span data-s="idle">Security check</span><span data-s="solving">Working…</span><span data-s="done">Verified</span><span data-s="failed">Failed — retry</span></span></div>`],
+
+["Segment Ledger","Five vertical segments that fill one by one — progress you can read like a nonce counter. Done = all green + mark; failed = all red. No percentages, ever.",
+ "<b>anatomy</b> 5×18px segments, 3px gaps · <b>motion</b> 240ms fill per segment, 120ms stagger · <b>calm</b> deterministic, never a spinner cliché",
+ "sl", `<div class="sl kw" data-state="solving" role="status">
+   <span class="segs"><i></i><i></i><i></i><i></i><i></i></span>
+   <span style="color:var(--k-brand);display:grid">${MARK(20)}</span>
+   <span class="lbl"><span data-s="idle">Ready</span><span data-s="solving">Computing proof…</span><span data-s="done">Verified</span><span data-s="failed">Failed — retry</span></span></div>`],
+
+["Pill Badge","A 32px inline capsule — the smallest complete widget. States swap one word and one border color (180ms). Sits inline next to a submit button or in a toolbar.",
+ "<b>anatomy</b> capsule 32px, mark 16 + word · <b>motion</b> color/border 180ms · <b>placement</b> inline, saves a full form row",
+ "pb", `<div role="status"><span class="pb kw" data-state="solving">
+   <span style="display:grid;color:var(--k-brand)">${MARK(16)}</span>
+   <span data-s="idle">Human check</span><span data-s="solving">Verifying…</span><span data-s="done">Verified</span><span data-s="failed">Retry</span></span></div>`],
+
+["Field Kin","Styled as a native sibling of the host form’s inputs — same height, border and radius (driven by the page’s CSS tokens), so it reads as part of the form language, not an embed.",
+ "<b>anatomy</b> 44px input-clone row · <b>theming</b> inherits host tokens (--k-bd/bg mirror input styles) · <b>motion</b> border 200ms, hairline slide 1.3s",
+ "fk", `<div class="fk kw" data-state="solving" role="status">
+   <span style="color:var(--k-brand);display:grid">${MARK(18)}</span>
+   <span class="lbl"><span data-s="idle">Security check ready</span><span data-s="solving">Solving proof of work…</span><span data-s="done">Verified — you may submit</span><span data-s="failed">Verification failed — retry</span></span>
+   <span class="bar"><i></i></span></div>`],
+
+["Dial","A determinate-when-possible ring around the mark: an indeterminate arc breathes while solving (1.15s ease-in-out), then closes and thickens into the lock’s shackle on done.",
+ "<b>anatomy</b> 40px SVG dial + mark + label · <b>motion</b> arc loop 1.15s, close 450ms · <b>geometry</b> arc join echoes the Spiral Lock shackle",
+ "dl", `<div class="dl kw" data-state="solving" role="status">
+   <span style="position:relative;display:grid;place-items:center;width:44px;height:44px;color:var(--k-brand)">
+     ${MARK(22)}
+     <svg viewBox="0 0 56 56" width="44" height="44" style="position:absolute;inset:0" aria-hidden="true">
+       <circle class="arc" cx="28" cy="28" r="24" stroke="currentColor" stroke-width="3.4" stroke-linecap="round"
+         stroke-dasharray="151" stroke-dashoffset="151" fill="none" transform="rotate(-90 28 28)"/></svg></span>
+   <span class="lbl"><span data-s="idle">Security check</span><span data-s="solving">Computing…</span><span data-s="done">Verified</span><span data-s="failed">Failed — retry</span></span></div>`],
+
+["Stacked Receipt","Three 12px mono micro-rows — <code>challenge · work · proof</code> — each lighting in sequence. The only direction that narrates the pipeline; done stamps all three.",
+ "<b>anatomy</b> 3 rows, 64px total · <b>motion</b> row highlight 200ms on phase change · <b>voice</b> literal, trustworthy, audit-flavored",
+ "rc", `<div class="rc kw" data-state="solving" role="status">
+   <div><b data-s="done">✓</b><span data-s="solving" class="fin">✓</span> challenge <span class="fin">acquired</span></div>
+   <div><span data-s="solving" class="on">…</span><span data-s="done" class="fin">✓</span> work <span data-s="solving" class="on">hashing</span><span data-s="done" class="fin">done · 1.8s</span></div>
+   <div><span data-s="solving">—</span><span data-s="done" class="fin">✓</span> proof <span data-s="solving">pending</span><span data-s="done" class="fin">accepted</span></div></div>`],
+
+["Ambient Border","No widget row at all — the SUBMIT button is the widget: its border crawls (2px, solid-color dash) while solving and solidifies green on done, with the 16px mark fading in inside the button. Zero added vertical space.",
+ "<b>anatomy</b> host button + 16px mark · <b>motion</b> dash crawl 800ms linear loop, solidify 200ms, mark fade 250ms · <b>a11y</b> aria-live status row visually hidden",
+ "ab", `<div class="ab kw" data-state="solving" role="status"><button type="button">
+   <span data-s="solving" style="display:none"></span>
+   Sign in<span class="mk" style="color:var(--k-ok)">${MARK(16)}</span></button></div>`],
+
+["Glass Card","The safe evolution of today’s card: identical anatomy, but 1px border, translucent surface, radius 12, no shadow, no pulse, no shine — motion trimmed to border and color (200ms). Lowest-risk rebrand.",
+ "<b>anatomy</b> 28px chip + title/subtitle + hairline · <b>motion</b> border/color 200ms, hairline slide 1.4s · <b>diff from current</b> −shadow −pulse −shine −scale",
+ "gc", `<div class="gc kw" data-state="solving" role="status">
+   <span class="chip">${MARK(16)}</span>
+   <span style="flex:1;min-width:0">
+     <span class="t" style="display:block"><span data-s="idle">Security check</span><span data-s="solving">Verifying you are human…</span><span data-s="done">Verified</span><span data-s="failed">Verification failed</span></span>
+     <span class="s" style="display:block"><span data-s="idle">Automatic · no puzzles</span><span data-s="solving">Computing proof of work</span><span data-s="done">You may continue</span><span data-s="failed">Tap retry</span></span>
+     <span class="bar"><i></i></span></span></div>`],
+
+["Braid","Two 2px line-fields that braid while solving (hash mixing made visible) and snap into parallel order — the lock’s closed state — when done. Distinctive, near-silent, 22px tall.",
+ "<b>anatomy</b> 34×22 braid field + mark + label · <b>motion</b> braid scroll 500ms alternate, straighten 300ms · <b>metaphor</b> mixing → order",
+ "br", `<div class="br kw" data-state="solving" role="status">
+   <span class="braid"></span>
+   <span style="color:var(--k-brand);display:grid">${MARK(20)}</span>
+   <span class="lbl"><span data-s="idle">Ready</span><span data-s="solving">Mixing…</span><span data-s="done">Locked · verified</span><span data-s="failed">Failed — retry</span></span></div>`],
+
+["Mono Checksum","Seven flip-board slots cycling random hex glyphs while solving, then settling to <b>VERIFIED</b> (or localized). Calm split-flap energy; the first slot doubles as the mark on done.",
+ "<b>anatomy</b> 7 slots 15×20 + label · <b>motion</b> glyph cycle 120ms stagger, settle 250ms · <b>reduced motion</b> static ellipsis → VERIFIED",
+ "mc", `<div class="mc kw" data-state="solving" role="status">
+   <span class="slots"><b>V</b><b>E</b><b>R</b><b>3</b><b>F</b><b>A</b><b>9</b></span>
+   <span style="color:var(--k-brand);display:grid">${MARK(18)}</span>
+   <span class="lbl"><span data-s="idle">awaiting</span><span data-s="solving">solving</span><span data-s="done">accepted</span><span data-s="failed">rejected — retry</span></span></div>`],
+];
+
+const grid=document.getElementById("grid");
+const STATES=["idle","solving","done","failed"];
+DATA.forEach(([name,tag,spec,cls,html],i)=>{
+  const card=document.createElement("div"); card.className="card";
+  card.innerHTML=`<div class="num">${String(i+1).padStart(2,"0")}</div><h2>${name}</h2>
+    <p class="tag">${tag}</p>
+    <div class="stage" data-stage></div>
+    <div class="states" role="group" aria-label="preview states">
+      ${STATES.map(s=>`<button data-set="${s}" aria-pressed="${s==="solving"}">${s}</button>`).join("")}
+    </div>
+    <p class="desc">${spec}</p>`;
+  const stage=card.querySelector("[data-stage]");
+  stage.innerHTML=html;
+  const w=stage.querySelector(".kw");
+  card.querySelectorAll("[data-set]").forEach(b=>b.onclick=()=>{
+    w.dataset.state=b.dataset.set;
+    card.querySelectorAll("[data-set]").forEach(x=>x.setAttribute("aria-pressed", String(x===b)));
+  });
+  grid.appendChild(card);
+});
+</script>
+</body>
+</html>
