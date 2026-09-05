@@ -24,3 +24,7 @@ CVE-2026-57433   # Storable integer overflow — perl never executed
 CVE-2026-8376    # perl regex heap overflow — perl never executed
 CVE-2026-9538    # perl-Archive-Tar DoS — perl never executed
 CVE-2026-78410   # util-linux restricted bind-mount source pinning — no mounting in containers
+CVE-2026-76642   # util-linux external mount helper — no mounting in containers
+CVE-2026-78408   # util-linux nsenter --join-cgroup — nsenter never executed
+CVE-2026-78409   # util-linux X-mount.subdir resolution — no mounting in containers
+CVE-2026-16742   # systemd-homed LPE — systemd-homed absent; libsystemd0 is a linked stub
