@@ -1158,6 +1158,7 @@ async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables() {
             id TEXT PRIMARY KEY,
             tenant_id TEXT,
             user_id TEXT,
+            session_id TEXT,
             action TEXT NOT NULL,
             resource TEXT NOT NULL,
             resource_id TEXT,
