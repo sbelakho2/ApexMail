@@ -236,3 +236,19 @@ The fix plan in section 6 was executed in nine parallel workstreams plus a first
 - **No old code survived**: 5 exited orphan containers removed; 180 pre-remediation images removed (today's builds + `:pre-deploy` rollback tags kept); 3 dangling layers pruned. The `:pre-deploy` tags point at pre-remediation images for rollback — delete them once the deploy has soaked.
 
 **Operational notes:** the pipeline's 5-minute timer now tracks main (last-good-sha fast-path active). Local `secrets/` rotation recommendation stands. Follow-up from the Trivy batch: bump `nginx:1.27-alpine` (marketing) and drop build-time wget from the tracking/pdf-renderer runtime layers, then prune the feed-refresh ignore block.
+
+## 9. KiwiCaptcha mirror round + redeploy — 2026-09-05 evening
+
+**Why:** live widget was byte-identical to the repo mirror, but the MIRROR was 130 standalone commits behind (v5 execution grammar, driver fixes, split widget modules). **Mirror pinned at standalone `31b9e00b`** (18:05 local — note the standalone is under active development; re-mirror deliberately, not by timer).
+
+**Mirrored:** all five packages (kiwicaptcha, -wasm, -php, -risk, -risk-php; exclusions: vendor/, target/, node_modules/) plus the **repo-root `protocol/execution-v1.json`** manifest the crate's tests `include_str!` — the earlier protocol/ dir carried only risk-v1.
+
+**Adaptation found necessary (exactly one):** the v5 issuance contract requires argon2id `t ∈ 3..=6, p == 1` (crate `MIN_ARGON_TIME` rejects t<3 at issuance; the browser driver rejects t>6). The old `KIWI_ARGON_T` default of **1** would have failed every argon2id issuance. Default is now 3 with startup fail-fast validation; prod compose follows. The sha256 production default is unaffected. The public Rust API otherwise stayed compatible — no call-site changes needed.
+
+**Deployed via pipeline run `20260905T182026: OK`** (all nine stages: fetch/validate/test 576s/security/images/deploy/verify/notify).
+
+**Live verification (byte + behavioral):**
+- Widget CSS / wasm glue / driver on app.apexmail.ee are **byte-verbatim the standalone `31b9e00b` assets** (the inline driver is smaller than the previous mirror by design — v5 moved compat/locales/risk/telemetry into separate files-mode modules served only via the compat route).
+- Challenge endpoint issues sha256@20 bits with the full v5 field set; cancel endpoint 204.
+- **End-to-end solve probe**: a genuinely solved challenge (sha256 prefix+counter+salt, ~1.4M hashes in ~1-2s) reaches credential checking (401 invalid credentials for a nonexistent account); a bogus token is rejected 400 "CAPTCHA verification failed" — the live v5 verify path works through the real login flow.
+- Health endpoints 200, SMTP banner 220, 35 containers, zero dangling images; the pipeline's new sha-tag retention keeps only the newest 5 per service.
