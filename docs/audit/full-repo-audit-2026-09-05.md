@@ -252,3 +252,15 @@ The fix plan in section 6 was executed in nine parallel workstreams plus a first
 - Challenge endpoint issues sha256@20 bits with the full v5 field set; cancel endpoint 204.
 - **End-to-end solve probe**: a genuinely solved challenge (sha256 prefix+counter+salt, ~1.4M hashes in ~1-2s) reaches credential checking (401 invalid credentials for a nonexistent account); a bogus token is rejected 400 "CAPTCHA verification failed" — the live v5 verify path works through the real login flow.
 - Health endpoints 200, SMTP banner 220, 35 containers, zero dangling images; the pipeline's new sha-tag retention keeps only the newest 5 per service.
+
+## 10. Brand restoration — kiwi to KiwiCaptcha, A-mark to ApexMail — 2026-09-05 night
+
+**User-established fact:** the kiwi artwork was designed for KiwiCaptcha. ApexMail never had a kiwi brand — its identity is the A-mark favicon (browser tabs; the original `d3faf435` artwork) and the plain "ApexMail" wordmark. The kiwi was adopted onto marketing (and into the favicon) during the `b874f4f9` round under the opposite premise.
+
+**KiwiCaptcha** (standalone commit `319839ab`, mirrored): the v8 unified mark (circular body + beak cone, one continuous path, currentColor) is now the product mark in `logo.rs` (mark/lockup/shield), the compat asset (all three mirror copies) and the Symfony twig template. The old multi-path silhouette with the SMIL wink is retired; the driver's reduced-motion SMIL handling is null-safe with an animate-free mark.
+
+**ApexMail marketing:** favicon restored to the original A; header/footer lockup is the wordmark only (`brand-lockup.html` replaces `kiwi-logo.html`); the isolation gate is inverted — the bare word "kiwi" is forbidden in all marketing source because the kiwi is KiwiCaptcha's mark. Built output carries zero kiwi occurrences.
+
+**Also fixed en route:** a wall-clock test flake (compliance DSAR limiter keys on the current hour; the unreachable-DB acquire timeout stretched a six-attempt test past a top-of-the-hour boundary into a fresh bucket — bounded the dummy pool to 50ms; 0.27s vs 180s).
+
+**Deployed via pipeline `20260905T200642: OK`.** Live-verified: the widget on web + CP logins carries the v8 path (old silhouette zero occurrences), marketing serves the wordmark with zero kiwi references and the A favicon, health green.
