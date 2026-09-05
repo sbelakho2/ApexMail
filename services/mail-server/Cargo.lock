@@ -5260,6 +5260,7 @@ dependencies = [
  "hex",
  "hkdf",
  "hmac 0.12.1",
+ "num-bigint",
  "rand 0.8.6",
  "serde",
  "serde_json",

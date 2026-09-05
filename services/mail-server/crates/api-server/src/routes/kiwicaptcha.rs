@@ -246,6 +246,13 @@ async fn issue_challenge_handler(
         region: None,
         issuer: None,
         kid: 1,
+        // ExecutionChallengeV1 and the RSW time-lock are not armed on this
+        // deployment: no keyed-PRF key and no trapdoor parameters are
+        // configured, so neither dimension is ever issued.
+        execution_key: None,
+        rsw_modulus_n: None,
+        rsw_lambda: None,
+        rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
     };
 
     // Serve repeat requests from the same client (IP hash + scope) within the

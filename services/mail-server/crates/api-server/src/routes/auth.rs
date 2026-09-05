@@ -396,6 +396,16 @@ pub async fn verify_kiwi_token(
         expected_policy_version: None,
         // IP binding is enforced inside verify_solution (intrinsic).
         client_ip: Some(client_ip),
+        // Execution/RSW evidence passes through from the token verbatim. This
+        // deployment never arms those dimensions at issuance (see
+        // routes::kiwicaptcha), so live records are unarmed and present None;
+        // an armed record would still verify through these fields. The
+        // verifier's rsw trapdoor parameters stay unset for the same reason.
+        execution_digest: solution.execution_digest.as_deref(),
+        execution_trace: solution.execution_trace.as_deref(),
+        rsw_proof: solution.rsw_proof.as_deref(),
+        rsw_modulus_n: None,
+        rsw_lambda: None,
         // v1 challenges are rejected by default (the migration window is
         // closed); the api-server only ever issues v2.
         accept_legacy_v1: false,
@@ -4097,6 +4107,10 @@ mod tests {
             region: None,
             issuer: None,
             kid: 1,
+            execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
         };
         let issued = kiwicaptcha::issue_challenge(
             &kc_config,
@@ -4140,6 +4154,9 @@ mod tests {
                 "me": 3, "ke": 2, "hc": 8, "dm": 8, "pl": 3,
                 "et": [10, 25, 40, 90],
             }),
+            execution_digest: None,
+            execution_trace: None,
+            rsw_proof: None,
         }
         .encode();
 
@@ -4203,6 +4220,10 @@ mod tests {
             region: None,
             issuer: None,
             kid: 1,
+            execution_key: None,
+            rsw_modulus_n: None,
+            rsw_lambda: None,
+            rsw_t: kiwicaptcha::challenge::DEFAULT_RSW_T,
         };
         let issued = kiwicaptcha::issue_challenge(
             &kc_config,
@@ -4234,6 +4255,9 @@ mod tests {
             counter,
             duration_ms: 5000,
             telemetry,
+            execution_digest: None,
+            execution_trace: None,
+            rsw_proof: None,
         }
         .encode()
     }
