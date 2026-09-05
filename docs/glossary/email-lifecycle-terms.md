@@ -20,7 +20,7 @@ generation, and customer override ability.
 - **Billable**: No — billing occurs on acceptance, not submission.
 - **Retries**: N/A — handled by client SDK or SMTP client.
 - **Appears in analytics**: Yes, as an ingestion metric.
-- **Generates webhook**: Yes — `message.submitted`.
+- **Generates webhook**: No — submission is an internal ingestion state; the customer-facing webhook stream starts at `message.sent`.
 - **Customer override**: No — this is a system-generated event.
 
 ---
@@ -35,7 +35,7 @@ generation, and customer override ability.
 - **Billable**: No — billing occurs after successful delivery attempt.
 - **Retries**: N/A.
 - **Appears in analytics**: Yes, as accepted volume.
-- **Generates webhook**: Yes — `message.accepted`.
+- **Generates webhook**: No — acceptance is an internal state; no webhook is emitted.
 - **Customer override**: No.
 
 ---
@@ -51,7 +51,7 @@ generation, and customer override ability.
 - **Billable**: No — billing occurs on delivery.
 - **Retries**: N/A.
 - **Appears in analytics**: Yes, as validated volume.
-- **Generates webhook**: Yes — `message.validated`.
+- **Generates webhook**: No — validation is an internal state; no webhook is emitted.
 - **Customer override**: No.
 
 ---
@@ -67,7 +67,7 @@ generation, and customer override ability.
 - **Billable**: No.
 - **Retries**: N/A — rejected messages are not retried.
 - **Appears in analytics**: Yes, as rejection reason.
-- **Generates webhook**: Yes — `message.rejected`.
+- **Generates webhook**: No — rejections are returned synchronously in the API response, not as webhooks.
 - **Customer override**: No.
 
 ---
@@ -83,7 +83,7 @@ generation, and customer override ability.
 - **Billable**: No — billing occurs after delivery or hard bounce.
 - **Retries**: N/A — retries occur at the delivery layer.
 - **Appears in analytics**: Yes, as queue depth metric.
-- **Generates webhook**: Yes — `message.queued`.
+- **Generates webhook**: No — queueing is an internal state; no webhook is emitted.
 - **Customer override**: No.
 
 ---
@@ -134,7 +134,7 @@ generation, and customer override ability.
 - **Billable**: No.
 - **Retries**: N/A.
 - **Appears in analytics**: Yes, as acceptance rate.
-- **Generates webhook**: Yes — `message.accepted_by_recipient`.
+- **Generates webhook**: No — recipient-server acceptance is internal; it is surfaced to customers as `message.sent`.
 - **Customer override**: No.
 
 ---
@@ -170,7 +170,7 @@ generation, and customer override ability.
 - **Billable**: No — billing is deferred until final outcome.
 - **Retries**: Automatic, up to 72 hours with exponential backoff.
 - **Appears in analytics**: Yes, as deferral rate.
-- **Generates webhook**: Yes — `message.deferred`.
+- **Generates webhook**: No — deferrals are internal retry state; a final bounce surfaces as `message.bounced`.
 - **Customer override**: No.
 
 ---
@@ -188,7 +188,7 @@ generation, and customer override ability.
 - **Billable**: Yes — the delivery attempt consumed resources.
 - **Retries**: Already exhausted within the message's retry window.
 - **Appears in analytics**: Yes, as soft bounce count.
-- **Generates webhook**: Yes — `message.soft_bounced`.
+- **Generates webhook**: Yes — `message.bounced` (soft and hard bounces share one event; the payload distinguishes them).
 - **Customer override**: No.
 
 ---
@@ -204,7 +204,7 @@ generation, and customer override ability.
 - **Billable**: Yes — the delivery attempt consumed resources.
 - **Retries**: None — hard bounces are not retried.
 - **Appears in analytics**: Yes, as hard bounce count and bounce rate.
-- **Generates webhook**: Yes — `message.hard_bounced`.
+- **Generates webhook**: Yes — `message.bounced` (soft and hard bounces share one event; the payload distinguishes them).
 - **Customer override**: No — automated suppression is enforced.
 
 ---
@@ -220,7 +220,7 @@ generation, and customer override ability.
 - **Billable**: No — blocked before delivery attempt.
 - **Retries**: None.
 - **Appears in analytics**: Yes, as blocked count.
-- **Generates webhook**: Yes — `message.blocked`.
+- **Generates webhook**: No — blocks are visible via the API and analytics, not webhooks.
 - **Customer override**: Yes — customers may request review of block reason.
 
 ---
@@ -237,7 +237,7 @@ generation, and customer override ability.
 - **Billable**: No — blocked before delivery attempt.
 - **Retries**: None.
 - **Appears in analytics**: Yes, as suppression count.
-- **Generates webhook**: Yes — `message.suppressed`.
+- **Generates webhook**: No — suppression is visible via the suppression-list API, not webhooks.
 - **Customer override**: Partial — organization/workspace suppressions are
   customer-managed; global suppressions cannot be overridden.
 
@@ -306,7 +306,7 @@ generation, and customer override ability.
 - **Billable**: No.
 - **Retries**: N/A.
 - **Appears in analytics**: Yes, as unsubscribe rate.
-- **Generates webhook**: Yes — `message.unsubscribed`.
+- **Generates webhook**: Yes — `recipient.unsubscribed`.
 - **Customer override**: Yes — customers maintain their own lists;
   ApexMail-enforced unsubscribes are mandatory for broadcast streams.
 
@@ -324,7 +324,7 @@ generation, and customer override ability.
 - **Billable**: No — no delivery occurred.
 - **Retries**: Already exhausted.
 - **Appears in analytics**: Yes, as failure rate.
-- **Generates webhook**: Yes — `message.failed`.
+- **Generates webhook**: No — failures are visible via the API and analytics; there is no `message.failed` webhook.
 - **Customer override**: No.
 
 ---
@@ -339,7 +339,7 @@ generation, and customer override ability.
 - **Billable**: No — no delivery occurred.
 - **Retries**: Already exhausted within the TTL window.
 - **Appears in analytics**: Yes, as expired count.
-- **Generates webhook**: Yes — `message.expired`.
+- **Generates webhook**: No — expiry is an internal outcome; there is no `message.expired` webhook.
 - **Customer override**: No.
 
 ---

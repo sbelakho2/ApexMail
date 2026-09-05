@@ -47,8 +47,8 @@ La migration de fournisseur email est une opération à haut risque. Toute livra
 
 | Point de terminaison | Description |
 |---|---|
-| `POST /v1/emails` | Envoyer un email |
-| `POST /v1/emails/batch` | Envoi par lots jusqu'à 1 000 emails |
+| `POST /v1/messages` | Envoyer un email |
+| `POST /v1/messages/batch` | Envoi par lots jusqu'à 100 messages |
 | `POST /v1/templates` | Créer un modèle |
 | `GET /v1/templates` | Lister les modèles |
 | `PUT /v1/templates/:id` | Mettre à jour un modèle |
@@ -57,9 +57,8 @@ La migration de fournisseur email est une opération à haut risque. Toute livra
 
 | Événement | Déclencheur |
 |---|---|
-| `email.delivered` | Le serveur du destinataire a accepté le message |
-| `email.bounced` | Rebond dur ou rebond souple |
-| `email.delayed` | Message différé par le serveur du destinataire |
+| `message.delivered` | Le serveur du destinataire a accepté le message |
+| `message.bounced` | Rebond dur ou rebond souple |
 
 ## Forfait requis
 

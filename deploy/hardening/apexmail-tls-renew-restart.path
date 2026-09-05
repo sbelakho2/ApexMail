@@ -1,0 +1,15 @@
+# ApexMail — systemd path unit: watch the certbot renewal restart flag.
+#
+# Installed (with @FLAG_PATH@/@DEPLOY_DIR@ substituted) by
+# deploy/scripts/deploy.sh; the flag is dropped by the certbot renewal loop
+# (deploy/scripts/certbot-renew-loop.sh) after every successful renewal.
+# The companion .service runs deploy/hardening/tls-renew-restart.sh, which
+# restarts mta + imap-server exactly once per renewal.
+[Unit]
+Description=ApexMail — watch for the certbot TLS renewal restart flag
+
+[Path]
+PathModified=@FLAG_PATH@
+
+[Install]
+WantedBy=multi-user.target

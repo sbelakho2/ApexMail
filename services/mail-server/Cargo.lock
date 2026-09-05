@@ -429,6 +429,7 @@ dependencies = [
  "url",
  "urlencoding",
  "uuid",
+ "waf-engine",
  "x509-parser 0.16.0",
  "zeroize",
 ]

@@ -106,7 +106,7 @@ def send_batch(emails):
         response = requests.post(
             "https://api.apexmail.ee/v1/messages/batch",
             json=chunk,
-            headers={"Authorization": f"Bearer {API_KEY}"}
+            headers={"X-API-Key": API_KEY}
         )
         yield response.json()
 ```

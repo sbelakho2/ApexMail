@@ -44,8 +44,9 @@ pub mod data;
 pub(crate) use data::load_page_data;
 
 use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 
-use axum::extract::{Form, Path, Query, State};
+use axum::extract::{ConnectInfo, Form, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -1773,9 +1774,11 @@ fn valid_email(email: &str) -> bool {
 async fn form_login(
     State(state): State<AppState>,
     headers: HeaderMap,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
-    perform_password_login(state, headers, form, "/dashboard").await
+    let peer_ip = connect_info.map(|ConnectInfo(addr)| addr.ip());
+    perform_password_login(state, headers, form, peer_ip, "/dashboard").await
 }
 
 /// Control-plane operator login — the CP surface's `/login` form posts
@@ -1785,15 +1788,32 @@ async fn form_login(
 async fn form_cp_login(
     State(state): State<AppState>,
     headers: HeaderMap,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
+    let peer_ip = connect_info.map(|ConnectInfo(addr)| addr.ip());
     let email = field(&form, "email").trim().to_string();
     let password = field(&form, "password");
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, "/login", &state.config);
+        return redirect_error(&message, "/login", &state.config);
+    }
+    // The control-plane login is the highest-value credential surface on
+    // the platform: it gets the same scope-bound proof-of-work gate as the
+    // web forms (scope "cp-login" — issued only for the CP login page).
+    if let Err(message) =
+        verify_kiwi_form_token(&state, &headers, peer_ip, &form, "cp-login").await
+    {
+        return redirect_error(&message, "/login", &state.config);
     }
     if email.is_empty() || password.is_empty() {
-        return redirect_error("Email and password are required.", "/login", &state.config);
+        let mut fields = FormFieldMap::new("cp-login");
+        fields.set("email", &email);
+        return redirect_with_field_map(
+            &fields,
+            "Email and password are required.",
+            "/login",
+            &state.config,
+        );
     }
 
     let Some(user) = find_user_by_email(&state, &email).await else {
@@ -1908,6 +1928,57 @@ fn is_operator_role(role: &str) -> bool {
     role == "admin" || role == "owner"
 }
 
+/// KiwiCaptcha verification for the SSR auth forms. The widget injected on
+/// the matching GET page mints a scope-bound, IP-bound challenge; the form
+/// POST must present its single-use solution token BEFORE credentials are
+/// looked at, so an automated submitter cannot probe passwords without
+/// paying the proof-of-work. A missing `ConnectInfo` (tests) degrades to
+/// the "unknown" identity — the same fallback the challenge issuance route
+/// uses — so the IP binding still matches end to end.
+async fn verify_kiwi_form_token(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer_ip: Option<IpAddr>,
+    form: &HashMap<String, String>,
+    scope: &str,
+) -> Result<(), String> {
+    let client_ip = peer_ip.map_or_else(
+        || "unknown".to_string(),
+        |ip| {
+            crate::middleware::rate_limiter::extract_public_client_ip(
+                headers,
+                ip,
+                &state.config.trusted_proxies,
+            )
+        },
+    );
+    let token = form.get("kiwi__token").map(String::as_str);
+    super::auth::verify_kiwi_token(&state.config, &state.redis, token, &client_ip, Some(scope))
+        .await
+        .map_err(|e| kiwi_failure_message(&e))
+}
+
+/// User-facing text for a failed CAPTCHA verification: the verifier's
+/// Validation and ServiceUnavailable messages are already written for end
+/// users; everything else collapses to a generic retry prompt so internal
+/// error detail never reaches the form.
+fn kiwi_failure_message(error: &crate::error::ApiError) -> String {
+    use crate::error::ApiError;
+    match error {
+        ApiError::Validation(messages) => messages
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "CAPTCHA verification failed — please retry.".into()),
+        ApiError::ServiceUnavailable(message) | ApiError::RateLimitedMessage(message) => {
+            message.clone()
+        }
+        ApiError::RateLimited => {
+            "Too many CAPTCHA attempts — wait a moment and try again.".into()
+        }
+        _ => "CAPTCHA verification failed — please retry.".into(),
+    }
+}
+
 /// Shared password step of the multi-step SSR login. MFA-enabled users
 /// are redirected to the `/login?mfa=1` challenge form with a signed,
 /// short-lived challenge cookie (never straight into a session).
@@ -1915,6 +1986,7 @@ async fn perform_password_login(
     state: AppState,
     headers: HeaderMap,
     form: HashMap<String, String>,
+    peer_ip: Option<IpAddr>,
     default_return_to: &str,
 ) -> Response {
     let email = field(&form, "email").trim().to_string();
@@ -1922,10 +1994,17 @@ async fn perform_password_login(
     let return_to = safe_return_to(&form, default_return_to);
 
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, "/login", &state.config);
+        return redirect_error(&message, "/login", &state.config);
+    }
+    if let Err(message) =
+        verify_kiwi_form_token(&state, &headers, peer_ip, &form, "login").await
+    {
+        return redirect_error(&message, "/login", &state.config);
     }
     if email.is_empty() || password.is_empty() {
-        return redirect_error("Email and password are required.", "/login", &state.config);
+        let mut fields = FormFieldMap::new("login");
+        fields.set("email", &email);
+        return redirect_with_field_map(&fields, "Email and password are required.", "/login", &state.config);
     }
     let _ = headers; // rate limiting is enforced by the surrounding stack
 
@@ -2001,7 +2080,7 @@ async fn form_mfa_verify(
     let code = field(&form, "code").trim().to_string();
     let return_to = safe_return_to(&form, "/dashboard");
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, "/login", &state.config);
+        return redirect_error(&message, "/login", &state.config);
     }
     let challenge_cookie = headers
         .get(header::COOKIE)
@@ -2131,8 +2210,10 @@ async fn form_mfa_verify(
 async fn form_signup(
     State(state): State<AppState>,
     headers: HeaderMap,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
+    let peer_ip = connect_info.map(|ConnectInfo(addr)| addr.ip());
     let name = field_truncated(&form, "name", 120);
     let company = field_truncated(&form, "company_name", 100);
     let email = field(&form, "email").trim().to_lowercase();
@@ -2140,20 +2221,54 @@ async fn form_signup(
     let plan = field(&form, "plan");
 
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, "/signup", &state.config);
+        return redirect_error(&message, "/signup", &state.config);
     }
+    if let Err(message) =
+        verify_kiwi_form_token(&state, &headers, peer_ip, &form, "signup").await
+    {
+        return redirect_error(&message, "/signup", &state.config);
+    }
+    // Signup carries the longest typed input of any auth form: every
+    // validation failure below repopulates the non-secret fields so the
+    // user corrects one field instead of retyping the whole form.
     if name.is_empty() || company.is_empty() {
-        return redirect_error(
+        let mut fields = FormFieldMap::new("signup");
+        fields.set("name", &name);
+        fields.set("company_name", &company);
+        fields.set("email", &email);
+        if name.is_empty() {
+            fields.error("name", "Full name is required.");
+        }
+        if company.is_empty() {
+            fields.error("company_name", "Company is required.");
+        }
+        return redirect_with_field_map(
+            &fields,
             "Full name and company are required.",
             "/signup",
             &state.config,
         );
     }
     if !valid_email(&email) {
-        return redirect_error("Enter a valid email address.", "/signup", &state.config);
+        let mut fields = FormFieldMap::new("signup");
+        fields.set("name", &name);
+        fields.set("company_name", &company);
+        fields.set("email", &email);
+        fields.error("email", "Enter a valid email address.");
+        return redirect_with_field_map(
+            &fields,
+            "Enter a valid email address.",
+            "/signup",
+            &state.config,
+        );
     }
     if let Some(message) = password_policy_error(&password) {
-        return redirect_error(message, "/signup", &state.config);
+        let mut fields = FormFieldMap::new("signup");
+        fields.set("name", &name);
+        fields.set("company_name", &company);
+        fields.set("email", &email);
+        fields.error("password", &message);
+        return redirect_with_field_map(&fields, message, "/signup", &state.config);
     }
     let plan = match plan.as_str() {
         "starter" | "pro" | "growth" | "scale" | "free" => plan,
@@ -2320,14 +2435,25 @@ async fn form_signup(
 async fn form_forgot_password(
     State(state): State<AppState>,
     headers: HeaderMap,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
+    let peer_ip = connect_info.map(|ConnectInfo(addr)| addr.ip());
     let email = field(&form, "email").trim().to_lowercase();
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, "/forgot-password", &state.config);
+        return redirect_error(&message, "/forgot-password", &state.config);
+    }
+    if let Err(message) =
+        verify_kiwi_form_token(&state, &headers, peer_ip, &form, "forgot-password").await
+    {
+        return redirect_error(&message, "/forgot-password", &state.config);
     }
     if !valid_email(&email) {
-        return redirect_error(
+        let mut fields = FormFieldMap::new("forgot-password");
+        fields.set("email", &email);
+        fields.error("email", "Enter a valid email address.");
+        return redirect_with_field_map(
+            &fields,
             "Enter a valid email address.",
             "/forgot-password",
             &state.config,
@@ -2420,8 +2546,10 @@ async fn form_forgot_password(
 async fn form_reset_password(
     State(state): State<AppState>,
     headers: HeaderMap,
+    connect_info: Option<ConnectInfo<SocketAddr>>,
     Form(form): Form<HashMap<String, String>>,
 ) -> Response {
+    let peer_ip = connect_info.map(|ConnectInfo(addr)| addr.ip());
     let email = field(&form, "email").trim().to_lowercase();
     let token = field(&form, "token");
     let password = field(&form, "password");
@@ -2432,7 +2560,12 @@ async fn form_reset_password(
         urlencode(&email)
     );
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, "/forgot-password", &state.config);
+        return redirect_error(&message, "/forgot-password", &state.config);
+    }
+    if let Err(message) =
+        verify_kiwi_form_token(&state, &headers, peer_ip, &form, "reset-password").await
+    {
+        return redirect_error(&message, &back, &state.config);
     }
     if token.is_empty() || email.is_empty() {
         return redirect_error(
@@ -2445,7 +2578,7 @@ async fn form_reset_password(
         return redirect_error("The passwords do not match.", &back, &state.config);
     }
     if let Some(message) = password_policy_error(&password) {
-        return redirect_error(message, &back, &state.config);
+        return redirect_error(&message, &back, &state.config);
     }
 
     // Same verification chain as the JSON twin (auth.rs reset_password):
@@ -2706,7 +2839,7 @@ async fn form_mfa_setup(
 ) -> Response {
     let back = safe_return_to(&form, "/cp/security");
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, &back, &state.config);
+        return redirect_error(&message, &back, &state.config);
     }
     let Some(user_id) = user.user_id.clone() else {
         return redirect_error("Sign in again to manage MFA.", "/login", &state.config);
@@ -2763,7 +2896,7 @@ async fn form_mfa_confirm(
 ) -> Response {
     let back = safe_return_to(&form, "/cp/security");
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, &back, &state.config);
+        return redirect_error(&message, &back, &state.config);
     }
     let code = field(&form, "code").trim().to_string();
     let Some(user_id) = user.user_id.clone() else {
@@ -3651,7 +3784,7 @@ async fn form_campaign_preview(
     // (attacker-supplied) body.
     let back = safe_return_to(&form, "/campaigns");
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, &back, &state.config);
+        return redirect_error(&message, &back, &state.config);
     }
     let _ = user;
     let html_body = field(&form, "html_body");
@@ -3914,7 +4047,7 @@ async fn form_domain_verify(
 ) -> Response {
     let back = format!("/domains/{}", urlencode(&id));
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, &back, &state.config);
+        return redirect_error(&message, &back, &state.config);
     }
     if Uuid::parse_str(&id).is_err() {
         return redirect_error("Unknown domain.", "/domains", &state.config);
@@ -4098,7 +4231,7 @@ async fn form_campaign_start(
 ) -> Response {
     let back = format!("/campaigns/{}", urlencode(&id));
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, &back, &state.config);
+        return redirect_error(&message, &back, &state.config);
     }
     if Uuid::parse_str(&id).is_err() {
         return redirect_error("Unknown campaign.", "/campaigns", &state.config);
@@ -4196,7 +4329,7 @@ async fn form_campaign_pause(
 ) -> Response {
     let back = format!("/campaigns/{}", urlencode(&id));
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, &back, &state.config);
+        return redirect_error(&message, &back, &state.config);
     }
     campaign_transition(
         &state,
@@ -4220,7 +4353,7 @@ async fn form_campaign_resume(
 ) -> Response {
     let back = format!("/campaigns/{}", urlencode(&id));
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, &back, &state.config);
+        return redirect_error(&message, &back, &state.config);
     }
     campaign_transition(
         &state,
@@ -4274,7 +4407,7 @@ async fn form_campaign_recipients(
 ) -> Response {
     let back = format!("/campaigns/{}", urlencode(&id));
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, &back, &state.config);
+        return redirect_error(&message, &back, &state.config);
     }
     if Uuid::parse_str(&id).is_err() {
         return redirect_error("Unknown campaign.", "/campaigns", &state.config);
@@ -4563,7 +4696,7 @@ async fn form_template_update(
         format!("/templates/{}", urlencode(&id))
     };
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, &back, &state.config);
+        return redirect_error(&message, &back, &state.config);
     }
     let mut fields = FormFieldMap::new("template-update");
     fields.set("id", &id);
@@ -4663,7 +4796,7 @@ async fn form_template_preview(
 ) -> Response {
     let back = safe_return_to(&form, "/templates");
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, &back, &state.config);
+        return redirect_error(&message, &back, &state.config);
     }
     let mut html_body = field(&form, "html_body");
     let id = field(&form, "id");
@@ -4942,7 +5075,7 @@ async fn bulk_delete_confirm(
 ) -> Response {
     let back = format!("/{scope}");
     if let Err(message) = check_csrf(&form, &headers, &state.config) {
-        return redirect_error(message, &back, &state.config);
+        return redirect_error(&message, &back, &state.config);
     }
     let ids = parse_bulk_ids(&field(&form, "ids"));
     if ids.is_empty() {
@@ -5070,10 +5203,12 @@ async fn form_audit_export(
     } else {
         vec![data::escape_like(search)]
     };
-    // Live audit_logs columns: timestamp/created_at, action,
-    // resource_type, user_id (there is no outcome/status/resource).
+    // Live audit_logs columns: created_at, action, resource, user_id —
+    // the canonical writer (audit_log.rs) inserts `resource`; the legacy
+    // `resource_type` spelling was renamed by the fix migrations and
+    // fails at runtime.
     let sql = format!(
-        "SELECT created_at, action, resource_type, user_id FROM audit_logs WHERE {where_clause} ORDER BY created_at DESC NULLS LAST LIMIT 10000"
+        "SELECT created_at, action, resource, user_id FROM audit_logs WHERE {where_clause} ORDER BY created_at DESC NULLS LAST LIMIT 10000"
     );
     let rows = sqlx::query_as::<
         _,

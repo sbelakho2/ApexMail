@@ -15,7 +15,7 @@ ApexMail ofrece infraestructura de email transaccional con opciones de despliegu
 
 ## Soluciones por caso de uso
 
-- **[Email transaccional](transactional-email/)** — Email generado por la aplicación: restablecimientos de contraseña, recibos, notificaciones y alertas de cuenta. API REST y relé SMTP con webhooks firmados, idempotencia y configuración por flujo.
+- **[Email transaccional](transactional-email/)** — Email generado por la aplicación: restablecimientos de contraseña, recibos, notificaciones y alertas de cuenta. API REST y relé SMTP con webhooks firmados, idempotencia y configuración por caso de uso.
 - **[Plataformas SaaS](saas-platforms/)** — Infraestructura de email multi-tenant para productos SaaS B2B y B2C. Subcuentas, aislamiento de dominios, RBAC personalizado, SSO y entrega con marca blanca.
 - **[Sectores regulados](regulated-industries/)** — Revisión orientada al RGPD y de carácter contractual. Soporte de DPA, revisión de residencia de datos, controles de auditoría y opciones de despliegue privado. La disponibilidad HIPAA no se ofrece actualmente.
 - **[Envío de alto volumen](high-volume-sending/)** — Millones de emails al mes. IP dedicadas gestionadas, calentamiento automatizado, priorización de colas, APIs por lotes y SLA contractuales.

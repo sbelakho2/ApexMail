@@ -69,5 +69,5 @@ audit and customer transparency.
 
 ## Get a Reputation Snapshot
 
-We can audit your existing domain in under an hour — using the same Google and
-Microsoft data feeds we use in production. [Book a deliverability review](/contact/).
+We can audit your existing domain — typically within one business day — using
+the same Google and Microsoft data feeds we use in production. [Book a deliverability review](/contact/).

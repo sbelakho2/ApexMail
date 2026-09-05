@@ -13,7 +13,10 @@ pub struct InboxPollResult {
     pub delivered: bool,
     /// The IMAP folder where the message was found (e.g. `"INBOX"`, `"[Gmail]/Spam"`).
     pub folder: Option<String>,
-    /// Approximate response time in milliseconds (time until the message appeared).
+    /// Approximate response time in milliseconds (time until the message
+    /// appeared). `None` when the message was not delivered — absent
+    /// deliveries carry no latency, otherwise they poison the per-provider
+    /// average delivery time.
     pub response_time_ms: Option<i64>,
     /// Raw RFC822 headers of the delivered message (used to parse
     /// `Authentication-Results` verdicts downstream).
@@ -131,12 +134,14 @@ impl ImapPoller {
             }
         }
 
-        // All attempts exhausted without finding the message.
-        let elapsed = start.elapsed().as_millis() as i64;
+        // All attempts exhausted without finding the message: nothing was
+        // delivered, so there is no response time to report. Returning
+        // Some(elapsed) here used to feed poll-window durations into
+        // per-provider average delivery times, poisoning the speed score.
         Ok(InboxPollResult {
             delivered: false,
             folder: None,
-            response_time_ms: Some(elapsed),
+            response_time_ms: None,
             raw_headers: None,
             error: None,
         })

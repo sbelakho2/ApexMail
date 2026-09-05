@@ -6,3 +6,4 @@ pub mod metrics;
 pub mod rate_limiter;
 pub mod request_logger;
 pub mod versioning;
+pub mod waf;

@@ -9,7 +9,6 @@ competitor_slug = "sendgrid"
 competitor_name = "SendGrid"
 competitor_description = "Twilio SendGrid is a popular email delivery platform owned by Twilio."
 pricing_as_of = "2026-08-19"
-verification_date = "2026-08-19"
 currency_note = "Prices are shown in EUR. Where a provider publishes only USD, the EUR figure is converted at 1 USD = €0.92 (reference rate, 2026-08-19) and the provider's published USD price is shown in parentheses. Exclude applicable taxes."
 og_image = "/images/og-image.png"
 # Feature comparison counts — update when capabilities change
@@ -45,8 +44,8 @@ comparison_sections = [
     { feature = "Residency Review", apex = '<span class="text-brand-600 font-semibold">Enterprise review</span>', comp = '<span class="text-surface-600">Enterprise only</span>', winner = "none" }
   ]},
   { title = "DEVELOPER EXPERIENCE", rows = [
-    { feature = "Time to First Email", apex = '<span class="text-brand-600 font-semibold">&lt;10 seconds</span>', comp = '<span class="text-surface-600">~5 minutes</span>', winner = "none" },
-    { feature = "Official SDK Coverage", apex = '<span class="text-brand-600 font-semibold">Six published SDKs</span>', comp = '<span class="text-surface-600">Seven SDKs</span>', winner = "none" },
+    { feature = "Time to First Email", apex = '<span class="text-brand-600 font-semibold">Minutes (after domain verification)</span>', comp = '<span class="text-surface-600">See provider quickstart</span>', winner = "none" },
+    { feature = "Official SDK Coverage", apex = '<span class="text-brand-600 font-semibold">Five SDKs in active development (Python, Go, PHP, Ruby, Java); source in the monorepo, not yet published to registries; no Node.js SDK</span>', comp = '<span class="text-surface-600">Seven SDKs</span>', winner = "competitor" },
     { feature = "Idempotency Keys", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Webhook Signatures", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
     { feature = "Sandbox Mode", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" }

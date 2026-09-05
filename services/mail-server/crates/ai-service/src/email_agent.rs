@@ -57,6 +57,12 @@ pub(crate) const MAX_DRAFTS_PER_TENANT_PER_DAY: i64 = 200;
 /// Bytes of the stored raw MIME scanned for auto-submission headers.
 const HEADER_SCAN_BYTES: i32 = 16_384;
 
+/// Hard ceiling on the stored raw MIME the agent will even try to process.
+/// Larger messages (the MTA accepts up to 25 MB) cannot be parsed and
+/// tokenized within the body/token budgets; they are skipped and flagged
+/// with a human-review note instead of being retried forever.
+pub(crate) const MAX_RAW_MESSAGE_BYTES: usize = 10 * 1024 * 1024;
+
 static RAW_MESSAGE_MISSING_WARNING: Once = Once::new();
 
 /// The ONLY successful write path: stores a generated reply as a DRAFT
@@ -94,6 +100,18 @@ pub(crate) const TENANT_DRAFT_COUNT_SQL: &str = r#"SELECT COUNT(*) FROM inbound_
                WHERE tenant_id = $1 AND pending_approval = true
                  AND processed_at > NOW() - INTERVAL '1 day'"#;
 
+/// The quarantine write: gives up on a message after
+/// [`MAX_PROCESS_ATTEMPTS`] failures, marking it processed with an error
+/// note (and no pending approval) so it cannot poison the queue forever.
+/// The terminal `processed_at` also makes the row ineligible for re-claim
+/// regardless of the claim marker.
+pub(crate) const QUARANTINE_MESSAGE_SQL: &str = r#"
+            UPDATE inbound_messages
+            SET processed_at = NOW(), processing = false, processed = true,
+                ai_response = $2, ai_tokens_used = 0, pending_approval = false
+            WHERE id = $1
+            "#;
+
 /// Claim up to 10 unprocessed inbound messages atomically.
 ///
 /// Unprocessed rows stay eligible regardless of age: the previous
@@ -121,6 +139,17 @@ const CLAIM_UNPROCESSED_SQL: &str = r#"
                         FROM candidates
                         WHERE inbound.id = candidates.id
                         RETURNING inbound.id, inbound.tenant_id, inbound.raw_message
+            "#;
+
+/// Release a claimed-but-unprocessed row back to the poller. The claim query
+/// ([`CLAIM_UNPROCESSED_SQL`]) re-claims rows via `ai_claimed_at IS NULL`, so
+/// releasing must clear BOTH markers: resetting only `processing` (the
+/// reply-handler's column) would leave `ai_claimed_at` set and strand the
+/// message forever — no later poll could ever claim it again.
+pub(crate) const RELEASE_CLAIM_SQL: &str = r#"
+            UPDATE inbound_messages
+            SET processing = false, ai_claimed_at = NULL
+            WHERE id = $1 AND processed_at IS NULL
             "#;
 
 /// What to do with a message whose processing just failed for the
@@ -543,6 +572,25 @@ impl EmailAnswerer {
 
         let count = rows.len();
         for row in &rows {
+            // Oversized raw messages are skipped and flagged: parsing and
+            // answering a >10 MiB MIME is outside every budget here, and
+            // failing inside process_message would burn all five attempts
+            // just to quarantine it anyway.
+            if row.raw_message.len() > MAX_RAW_MESSAGE_BYTES {
+                tracing::warn!(
+                    msg_id = %row.id,
+                    size_bytes = row.raw_message.len(),
+                    cap = MAX_RAW_MESSAGE_BYTES,
+                    "Inbound message exceeds the raw-message size cap — flagged for human review, no draft"
+                );
+                self.attempts.remove(&row.id);
+                let _ = sqlx::query(DECLINE_MESSAGE_SQL)
+                    .bind(&row.id)
+                    .bind("[NO DRAFT — message exceeds the 10 MiB processing cap; manual review required]")
+                    .execute(&self.pool)
+                    .await;
+                continue;
+            }
             // Rate-limit deferrals must not consume a retry attempt: peek
             // first and simply re-queue the message for a later poll.
             if !self
@@ -553,12 +601,12 @@ impl EmailAnswerer {
                     msg_id = %row.id,
                     "Inference rate limit reached — deferring inbound message"
                 );
-                let _ = sqlx::query(
-                    "UPDATE inbound_messages SET processing = false WHERE id = $1 AND processed_at IS NULL",
-                )
-                .bind(&row.id)
-                .execute(&self.pool)
-                .await;
+                // Clear the claim marker so a later poll can re-claim the row;
+                // no attempt is consumed for a rate-limit deferral.
+                let _ = sqlx::query(RELEASE_CLAIM_SQL)
+                    .bind(&row.id)
+                    .execute(&self.pool)
+                    .await;
                 continue;
             }
             if let Err(e) = self.process_message(row).await {
@@ -574,12 +622,14 @@ impl EmailAnswerer {
                             max_attempts = MAX_PROCESS_ATTEMPTS,
                             "Failed to process inbound message — will retry on a later poll"
                         );
-                        let _ = sqlx::query(
-                            "UPDATE inbound_messages SET processing = false WHERE id = $1 AND processed_at IS NULL",
-                        )
-                        .bind(&row.id)
-                        .execute(&self.pool)
-                        .await;
+                        // Release the claim (both markers) so the retry can
+                        // actually happen; the attempts entry stays so the
+                        // counter survives until the row reaches a terminal
+                        // state (draft, decline, or quarantine).
+                        let _ = sqlx::query(RELEASE_CLAIM_SQL)
+                            .bind(&row.id)
+                            .execute(&self.pool)
+                            .await;
                     }
                     FailureAction::Quarantine => {
                         tracing::error!(
@@ -588,18 +638,11 @@ impl EmailAnswerer {
                             "Inbound message exceeded max processing attempts — quarantining"
                         );
                         self.attempts.remove(&row.id);
-                        let _ = sqlx::query(
-                            r#"
-                            UPDATE inbound_messages
-                            SET processed_at = NOW(), processing = false, processed = true,
-                                ai_response = $2, ai_tokens_used = 0
-                            WHERE id = $1
-                            "#,
-                        )
-                        .bind(&row.id)
-                        .bind("This email could not be processed after repeated failures. Please contact support@apexmail.ee directly.")
-                        .execute(&self.pool)
-                        .await;
+                        let _ = sqlx::query(QUARANTINE_MESSAGE_SQL)
+                            .bind(&row.id)
+                            .bind("This email could not be processed after repeated failures. Please contact support@apexmail.ee directly.")
+                            .execute(&self.pool)
+                            .await;
                     }
                 }
             } else {
@@ -1214,6 +1257,40 @@ mod tests {
     }
 
     #[test]
+    fn release_claim_clears_both_markers_so_rows_can_be_reclaimed() {
+        // Regression: deferral/retry used to reset only `processing`, but the
+        // claim query requires `ai_claimed_at IS NULL` — a claimed row whose
+        // processing failed was stranded forever (never re-claimable, never
+        // quarantined). Release must clear BOTH markers.
+        assert!(
+            RELEASE_CLAIM_SQL.contains("ai_claimed_at = NULL"),
+            "release must clear the AI claim marker"
+        );
+        assert!(
+            RELEASE_CLAIM_SQL.contains("processing = false"),
+            "release must also reset the shared processing flag"
+        );
+        assert!(
+            RELEASE_CLAIM_SQL.contains("processed_at IS NULL"),
+            "release must never resurrect a finished message"
+        );
+    }
+
+    #[test]
+    fn quarantine_write_is_terminal_and_never_pending_approval() {
+        // The quarantine path is only reachable because retries now release
+        // the claim; when it fires it must be terminal and not releasable.
+        assert!(
+            QUARANTINE_MESSAGE_SQL.contains("processed = true"),
+            "quarantine must mark the message processed"
+        );
+        assert!(
+            QUARANTINE_MESSAGE_SQL.contains("pending_approval = false"),
+            "quarantine notes must never be releasable as outbound mail"
+        );
+    }
+
+    #[test]
     fn failures_retry_until_max_attempts_then_quarantine() {
         for attempt in 1..MAX_PROCESS_ATTEMPTS {
             assert_eq!(failure_action(attempt), FailureAction::Retry);
@@ -1443,6 +1520,8 @@ mod tests {
             DECLINE_MESSAGE_SQL,
             SENDER_REPLY_COUNT_SQL,
             TENANT_DRAFT_COUNT_SQL,
+            RELEASE_CLAIM_SQL,
+            QUARANTINE_MESSAGE_SQL,
         ] {
             let lower = sql.to_lowercase();
             assert!(

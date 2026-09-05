@@ -25,9 +25,9 @@ Transactional email is mission-critical infrastructure. Delayed password resets 
 
 ## ApexMail Solution
 
-- **REST API** (`POST /v1/emails`) — JSON payloads with idempotency keys. Submit and forget.
+- **REST API** (`POST /v1/messages`) — JSON payloads with idempotency keys. Submit and forget.
 - **SMTP Relay** (`smtp.apexmail.ee:587` with STARTTLS) — Drop-in for existing SMTP clients.
-- **Transactional Streams** — Isolate sending configurations (dedicated IP, custom domain, suppression list) per email type.
+- **Isolated sending configuration** — Dedicated IPs, custom domains, and suppression-list settings can be scoped per email type.
 - **Signed Webhooks** — Real-time `delivered`, `bounced`, `complained`, `opened`, `clicked` events, each with a unique event ID and HMAC signature.
 - **Idempotency** — Deduplicate submissions using client-supplied keys. Resubmit safely after network errors.
 
@@ -35,8 +35,8 @@ Transactional email is mission-critical infrastructure. Delayed password resets 
 
 1. Create an API key in **Dashboard → Settings → API Keys**.
 2. Verify your sending domain (SPF, DKIM, custom return-path).
-3. Create a transactional stream for your email type.
-4. Send via REST or SMTP with the stream name in the payload.
+3. Configure a dedicated sending domain (and, on eligible plans, a dedicated IP) for your email type.
+4. Send via REST or SMTP.
 5. Register a webhook endpoint to receive delivery events.
 6. Monitor delivery metrics in the dashboard or via the analytics API.
 
@@ -44,22 +44,21 @@ Transactional email is mission-critical infrastructure. Delayed password resets 
 
 | Endpoint | Description |
 |---|---|
-| `POST /v1/emails` | Send an email |
-| `GET /v1/emails/:id` | Retrieve email status and events |
-| `DELETE /v1/emails/:id/schedule` | Cancel a scheduled send |
-| `POST /v1/emails/batch` | Send up to 1,000 emails in one request |
+| `POST /v1/messages` | Send an email |
+| `GET /v1/messages/:id` | Retrieve email status and events |
+| `POST /v1/messages/:id/cancel` | Cancel a scheduled send |
+| `POST /v1/messages/batch` | Send up to 100 messages in one request |
 
 ## Relevant Webhook Events
 
 | Event | Trigger |
 |---|---|
-| `email.accepted` | API accepted the request |
-| `email.delivered` | Receiving server accepted the message |
-| `email.bounced` | Hard or soft bounce |
-| `email.complained` | Recipient reported as spam |
-| `email.opened` | Open detected (tracking pixel) |
-| `email.clicked` | Link click detected |
-| `email.delayed` | Message deferred by receiving server |
+| `message.sent` | Message accepted for delivery |
+| `message.delivered` | Receiving server accepted the message |
+| `message.bounced` | Hard or soft bounce |
+| `message.complained` | Recipient reported as spam |
+| `message.opened` | Open detected (tracking pixel) |
+| `message.clicked` | Link click detected |
 
 ## Required Plan
 
@@ -88,7 +87,7 @@ Transactional email is mission-critical infrastructure. Delayed password resets 
 
 ## Known Limitations
 
-- Free plan content stored for 24 hours only.
+- Event history is retained 30 days by default (7 days on the Free plan); message content 7 days by default, plan-dependent up to 730 days.
 - Attachment size limited to 25 MB per message.
 - Open and click tracking require HTML body with tracking pixel/links.
 

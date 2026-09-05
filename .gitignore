@@ -146,3 +146,10 @@ apps/ai/training/merged_*/
 apps/ai/training/__pycache__/
 apps/ai/training/*.safetensors
 apps/ai/training/**/*.pt
+
+# Build/report artifacts and training data — never tracked (audit 2026-09-05)
+/reports/
+/data/
+/test_output.txt
+tools/contrast-audit/node_modules/
+dump.rdb

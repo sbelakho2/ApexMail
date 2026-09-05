@@ -1,0 +1,12 @@
+# analytics cold-storage backup scheduler image: tar + gzip + openssl + rsync.
+#
+# The cold store is consumed via a READ-ONLY volume mount (no network access
+# to any service needed), so a minimal Alpine base is enough. openssl +
+# rsync are baked in for the same reason as Dockerfile.postgres-backup: the
+# offsite mirror needs rsync and the container's data path has no egress,
+# so a runtime `apk add` could never reach a CDN.
+#
+# Entrypoint (set in docker-compose.prod.yml) is
+# deploy/hardening/scripts/analytics-backup-encrypt.sh.
+FROM alpine:3.20
+RUN apk add --no-cache openssl rsync

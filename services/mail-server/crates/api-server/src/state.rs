@@ -34,6 +34,9 @@ pub struct AppStateInner {
     /// Dedicated IP provider (Hetzner Cloud). `None` if HETZNER_API_TOKEN is unset.
     pub ip_provider: Option<DedicatedIpProvider>,
     pub ddos_protector: Arc<DdosProtector>,
+    /// WAF screening engine (audit F-WIRING-1 wiring). `None` when the WAF
+    /// is disabled by config — the middleware is then a pass-through.
+    pub waf_engine: Option<Arc<waf_engine::WafEngine>>,
     /// Pre-built grader state (engine + config + db). `None` if grader is disabled.
     pub grader_state: Option<Arc<GraderState>>,
     /// Pre-built inbox-placement state (engine + db). `None` if placement is disabled.
@@ -146,6 +149,7 @@ impl AppStateInner {
         placement_state: Option<Arc<PlacementState>>,
         resilient: ResilientClient,
     ) -> AppState {
+        let waf_engine = build_waf_engine(&config);
         Arc::new(Self {
             db,
             pools,
@@ -156,11 +160,24 @@ impl AppStateInner {
             ses_provider,
             ip_provider,
             ddos_protector,
+            waf_engine,
             grader_state,
             placement_state,
             resilient,
         })
     }
+}
+
+/// Build the WAF engine from config. `None` = disabled (the middleware
+/// passes every request through). The engine itself is cheap to construct
+/// (rule tables are static); one instance lives in the shared state.
+fn build_waf_engine(config: &Config) -> Option<Arc<waf_engine::WafEngine>> {
+    if !config.waf_enabled {
+        return None;
+    }
+    Some(Arc::new(waf_engine::WafEngine::new(
+        waf_engine::WafConfig::default(),
+    )))
 }
 
 #[cfg(test)]

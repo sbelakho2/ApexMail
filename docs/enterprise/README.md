@@ -11,7 +11,7 @@ ApexMail Enterprise provides:
 - **White Labeling** - Complete brand customization
 - **Template Approval Workflows** - Governance and compliance
 - **Log Streaming** - Real-time data export to external systems
-- **Compliance Tools** - GDPR, HIPAA, SOC 2 automation
+- **Compliance Tools** - GDPR workflows in production; HIPAA and SOC 2 are **planned, not certified** (see [security/framework-status.md](../security/framework-status.md))
 - **Private Cloud Deployment** - Run in your own VPC
 - **Premium Support** - SLA-backed response times
 - **Quarterly Business Reviews** - Strategic partnership
@@ -25,7 +25,8 @@ ApexMail Enterprise provides:
 | White Labeling | [whitelabel.md](./whitelabel.md) | Production |
 | Template Approval | [template-approval.md](./template-approval.md) | Production |
 | Log Streaming | [log-streaming.md](./log-streaming.md) | Production |
-| Compliance | [compliance.md](./compliance.md) | Production |
+| Compliance (GDPR workflows) | [compliance.md](./compliance.md) | Production |
+| Compliance (HIPAA / SOC 2) | [compliance.md](./compliance.md) + [framework status](../security/framework-status.md) | **Planned — not certified.** GDPR workflows are production; HIPAA readiness is targeted Q2 2027, SOC 2 Q1 2027. |
 | Private Cloud | [private-cloud.md](./private-cloud.md) | Production |
 | Support | [support.md](./support.md) | Production |
 | QBR | [qbr.md](./qbr.md) | Production |
@@ -35,8 +36,10 @@ ApexMail Enterprise provides:
 All enterprise features are accessible via the Enterprise API:
 
 ```bash
-# Base URL
-https://api.apexmail.ee/enterprise/v1
+# Base URL — the enterprise service has its own hostname; each feature
+# area is a top-level path prefix on it (e.g. /sso, /compliance, /ips,
+# /sub-accounts, /support, /templates, /whitelabel, /qbr, /log-streams)
+https://enterprise.apexmail.ee
 
 # Authentication
 X-API-Key: <enterprise_api_key>

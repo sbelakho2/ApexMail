@@ -1,11 +1,10 @@
 version: 2
 updates:
-  - package-ecosystem: github-actions
-    directory: "/"
-    schedule:
-      interval: weekly
-    commit-message:
-      prefix: ci
+  # NOTE (audit §4): the github-actions ecosystem entry was removed —
+  # .github/workflows is empty (deployment is the self-hosted ci/ pipeline,
+  # which dependabot cannot track). The docker "/" entry was removed —
+  # there is no root Dockerfile (build contexts live under deploy/,
+  # services/mail-server/, apps/marketing-zola/).
 
   - package-ecosystem: cargo
     directory: "/services/mail-server"
@@ -17,15 +16,17 @@ updates:
       include: scope
 
   - package-ecosystem: docker
-    directory: "/"
+    directory: "/deploy"
     schedule:
       interval: weekly
     commit-message:
       prefix: deps
       include: scope
 
-  - package-ecosystem: docker
-    directory: "/deploy"
+  # tools/contrast-audit is the only npm manifest outside vendored
+  # node_modules trees (package.json + package-lock.json at its root).
+  - package-ecosystem: npm
+    directory: "/tools/contrast-audit"
     schedule:
       interval: weekly
     commit-message:

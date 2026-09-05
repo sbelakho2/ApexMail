@@ -37,7 +37,7 @@ info:
     The API uses a dual versioning scheme:
 
     - **Standard API** — `https://api.apexmail.ee/v1/<resource>`: The base server URL `https://api.apexmail.ee/v1` is defined globally and applies to all paths that do not override it.
-    - **Enterprise API** — `https://api.apexmail.ee/enterprise/v1/<resource>`: Enterprise private cloud, dedicated IP, and BYOIP paths are prefixed with `/enterprise/v1/` and use a per-path `servers` override with the base URL `https://api.apexmail.ee` (without the `/v1` suffix, as the version is embedded in the path).
+    - **Enterprise API** — `https://enterprise.apexmail.ee/<resource>`: Enterprise private cloud, dedicated IP, and BYOIP paths live on the dedicated enterprise hostname (`enterprise.apexmail.ee`) as top-level path prefixes (`/deployments`, `/ips`, ...) and use a per-path `servers` override pointing at that host.
   version: 1.0.0
   contact:
     name: ApexMail Support
@@ -2412,11 +2412,11 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimitError'
 
-  /enterprise/v1/deployments:
+  /deployments:
     servers:
-      - url: https://api.apexmail.ee
+      - url: https://enterprise.apexmail.ee
         description: Enterprise production API
-      - url: https://sandbox.api.apexmail.ee
+      - url: https://sandbox.enterprise.apexmail.ee
         description: Enterprise sandbox API
     post:
       operationId: createEnterprisePrivateDeployment
@@ -2461,11 +2461,11 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimitError'
 
-  /enterprise/v1/deployments/{id}:
+  /deployments/{id}:
     servers:
-      - url: https://api.apexmail.ee
+      - url: https://enterprise.apexmail.ee
         description: Enterprise production API
-      - url: https://sandbox.api.apexmail.ee
+      - url: https://sandbox.enterprise.apexmail.ee
         description: Enterprise sandbox API
     get:
       operationId: getEnterprisePrivateDeployment
@@ -2497,11 +2497,11 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimitError'
 
-  /enterprise/v1/deployments/tenant/{tenant_id}:
+  /deployments/tenant/{tenant_id}:
     servers:
-      - url: https://api.apexmail.ee
+      - url: https://enterprise.apexmail.ee
         description: Enterprise production API
-      - url: https://sandbox.api.apexmail.ee
+      - url: https://sandbox.enterprise.apexmail.ee
         description: Enterprise sandbox API
     get:
       operationId: listEnterprisePrivateDeployments
@@ -2531,11 +2531,11 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimitError'
 
-  /enterprise/v1/deployments/{id}/provision:
+  /deployments/{id}/provision:
     servers:
-      - url: https://api.apexmail.ee
+      - url: https://enterprise.apexmail.ee
         description: Enterprise production API
-      - url: https://sandbox.api.apexmail.ee
+      - url: https://sandbox.enterprise.apexmail.ee
         description: Enterprise sandbox API
     post:
       operationId: provisionEnterprisePrivateDeployment
@@ -2579,11 +2579,11 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimitError'
 
-  /enterprise/v1/deployments/{id}/health:
+  /deployments/{id}/health:
     servers:
-      - url: https://api.apexmail.ee
+      - url: https://enterprise.apexmail.ee
         description: Enterprise production API
-      - url: https://sandbox.api.apexmail.ee
+      - url: https://sandbox.enterprise.apexmail.ee
         description: Enterprise sandbox API
     get:
       operationId: checkEnterprisePrivateDeploymentHealth
@@ -2615,11 +2615,11 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimitError'
 
-  /enterprise/v1/ips/allocate:
+  /ips/allocate:
     servers:
-      - url: https://api.apexmail.ee
+      - url: https://enterprise.apexmail.ee
         description: Enterprise production API
-      - url: https://sandbox.api.apexmail.ee
+      - url: https://sandbox.enterprise.apexmail.ee
         description: Enterprise sandbox API
     post:
       operationId: allocateEnterpriseDedicatedIp
@@ -2664,11 +2664,11 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimitError'
 
-  /enterprise/v1/ips/{id}:
+  /ips/{id}:
     servers:
-      - url: https://api.apexmail.ee
+      - url: https://enterprise.apexmail.ee
         description: Enterprise production API
-      - url: https://sandbox.api.apexmail.ee
+      - url: https://sandbox.enterprise.apexmail.ee
         description: Enterprise sandbox API
     get:
       operationId: getEnterpriseDedicatedIp
@@ -2700,11 +2700,11 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimitError'
 
-  /enterprise/v1/ips/tenant/{tenant_id}:
+  /ips/tenant/{tenant_id}:
     servers:
-      - url: https://api.apexmail.ee
+      - url: https://enterprise.apexmail.ee
         description: Enterprise production API
-      - url: https://sandbox.api.apexmail.ee
+      - url: https://sandbox.enterprise.apexmail.ee
         description: Enterprise sandbox API
     get:
       operationId: listEnterpriseDedicatedIps
@@ -2749,11 +2749,11 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimitError'
 
-  /enterprise/v1/ips/reputation/{ip_address}:
+  /ips/reputation/{ip_address}:
     servers:
-      - url: https://api.apexmail.ee
+      - url: https://enterprise.apexmail.ee
         description: Enterprise production API
-      - url: https://sandbox.api.apexmail.ee
+      - url: https://sandbox.enterprise.apexmail.ee
         description: Enterprise sandbox API
     get:
       operationId: getEnterpriseDedicatedIpReputation
@@ -2785,11 +2785,11 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimitError'
 
-  /enterprise/v1/ips/byoip:
+  /ips/byoip:
     servers:
-      - url: https://api.apexmail.ee
+      - url: https://enterprise.apexmail.ee
         description: Enterprise production API
-      - url: https://sandbox.api.apexmail.ee
+      - url: https://sandbox.enterprise.apexmail.ee
         description: Enterprise sandbox API
     post:
       operationId: registerEnterpriseByoipRange
@@ -2834,11 +2834,11 @@ paths:
         '429':
           $ref: '#/components/responses/RateLimitError'
 
-  /enterprise/v1/ips/byoip/{id}/verify:
+  /ips/byoip/{id}/verify:
     servers:
-      - url: https://api.apexmail.ee
+      - url: https://enterprise.apexmail.ee
         description: Enterprise production API
-      - url: https://sandbox.api.apexmail.ee
+      - url: https://sandbox.enterprise.apexmail.ee
         description: Enterprise sandbox API
     post:
       operationId: verifyEnterpriseByoipRange

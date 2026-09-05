@@ -83,7 +83,9 @@ async fn export_analytics(
     let range = super::analytics::parse_analytics_range(&params.range);
     let columns = super::analytics::detect_event_columns(&state).await;
 
-    let tenant_scoped = auth.tenant_id != "system";
+    // Slug-aware system-tenant resolution (audit F1): operators belong to
+    // `system_internal_tenant01`; the literal check wrongly scoped them.
+    let tenant_scoped = !crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await;
     let sql = build_export_query(columns, range, tenant_scoped);
 
     let rows = if tenant_scoped {

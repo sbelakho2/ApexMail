@@ -10,11 +10,13 @@ https://api.apexmail.ee/v1
 
 ## Authentication
 
-All requests require an API key passed as a Bearer token:
+All requests require an API key passed in the `X-API-Key` header:
 
 ```
-Authorization: Bearer am_live_xxxxxxxxxxxxxxxxxxxx
+X-API-Key: am_live_xxxxxxxxxxxxxxxxxxxx
 ```
+
+`Authorization: Bearer` is used only for dashboard JWT sessions, never for API keys.
 
 Generate API keys from **Dashboard → Settings → API Keys**.
 
@@ -91,7 +93,7 @@ GET /v1/messages/:id
 ## Cancel Scheduled Email
 
 ```
-DELETE /v1/messages/:id/schedule
+POST /v1/messages/:id/cancel
 ```
 
 ## Batch Send
@@ -112,12 +114,8 @@ GET /v1/messages?limit=50&after=msg_01JABCDEFGHIJKLM
 
 ## Rate Limits
 
-| Plan | Rate Limit |
-|---|---|
-| Free | 100 req/min |
-| Starter | 600 req/min |
-| Scale | 3,000 req/min |
-| Enterprise | 10,000 req/min |
+Throughput tiers are plan-based — see the canonical table in
+[API Rate Limits](../api/rate-limits.md) (Free 10 req/s up to Enterprise 5,000 req/s).
 
 Rate limit headers are included in every response:
 

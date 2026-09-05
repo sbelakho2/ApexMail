@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::ApiError;
-use crate::middleware::auth::AuthUser;
+use crate::middleware::auth::{require_scopes, AuthUser};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -132,8 +132,11 @@ pub fn lookup_outcome(recipient: &str) -> Option<(String, String, String, Vec<St
 
 async fn list_test_addresses(
     State(_state): State<AppState>,
-    _auth: AuthUser,
+    auth: AuthUser,
 ) -> Result<Json<Vec<TestAddress>>, ApiError> {
+    // The router is unmounted today, but guard it anyway so a future
+    // mounting cannot expose an unauthenticated enumeration endpoint.
+    require_scopes(&auth, &["messages:read"])?;
     Ok(Json(test_addresses()))
 }
 
@@ -166,6 +169,11 @@ async fn test_send(
     auth: AuthUser,
     Json(body): Json<TestSendRequest>,
 ) -> Result<(StatusCode, Json<TestSendResponse>), ApiError> {
+    // The router is unmounted today, but guard it anyway: without a scope
+    // check this would be an unauthenticated write primitive (messages +
+    // events rows in any tenant) the moment someone mounts it.
+    require_scopes(&auth, &["messages:send"])?;
+
     let ta = lookup_test_address(&body.to)
         .ok_or_else(|| ApiError::Validation(vec![
             format!("'{}' is not a valid test address. Use GET /v1/test/addresses to list available test addresses.", body.to)

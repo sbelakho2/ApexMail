@@ -5,7 +5,7 @@
 embeds this directory via `sqlx::migrate!` at build time):
 
 ```sh
-# What deploy-hetzner.yml ("Run database migrations") and deploy.sh (Step 5) run:
+# What ci/stages/migrate.sh (pipeline migration gate) and deploy.sh (Step 5) run:
 docker compose -f docker-compose.yml -f docker-compose.prod.yml \
   --env-file .env --profile migrate run --rm migrator
 ```

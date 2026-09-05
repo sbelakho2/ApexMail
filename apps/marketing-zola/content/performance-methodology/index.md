@@ -155,7 +155,7 @@ Any published API latency number must specify the exact measurement boundaries.
 | Metric type | p50, p95, p99 |
 | Sample size | All accepted messages successfully delivered in measurement period |
 | Sample period | Rolling 30 days |
-| Message size | All messages up to the platform maximum (10 MB including attachments) |
+| Message size | All messages up to the platform maximum (25 MB including attachments) |
 | Attachments | Included in measurement; larger attachments increase latency |
 | Retry inclusion | Only first-successful-delivery latency is measured. Messages that succeed after retry are measured from API acceptance to the successful retry handoff, with retry delay included in the latency |
 | Deferred message exclusion | Deferred messages are included only when they ultimately succeed. Permanently bounced messages are excluded |

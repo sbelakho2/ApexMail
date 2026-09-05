@@ -20,7 +20,7 @@ Supported statuses are `pending`, `provisioning`, `active`, `maintenance`, `deco
 ### Create Deployment
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/deployments \
+curl -X POST https://enterprise.apexmail.ee/deployments \
   -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -42,17 +42,17 @@ Response body wraps a `PrivateDeployment` in the standard `ApiResult` envelope. 
 ### List and Inspect Deployments
 
 ```bash
-curl https://api.apexmail.ee/enterprise/v1/deployments/tenant/$TENANT_ID \
+curl https://enterprise.apexmail.ee/deployments/tenant/$TENANT_ID \
   -H "X-API-Key: $API_KEY"
 
-curl https://api.apexmail.ee/enterprise/v1/deployments/$DEPLOYMENT_ID \
+curl https://enterprise.apexmail.ee/deployments/$DEPLOYMENT_ID \
   -H "X-API-Key: $API_KEY"
 ```
 
 ### Start Provisioning
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/deployments/$DEPLOYMENT_ID/provision \
+curl -X POST https://enterprise.apexmail.ee/deployments/$DEPLOYMENT_ID/provision \
   -H "X-API-Key: $API_KEY"
 ```
 
@@ -61,7 +61,7 @@ Provisioning moves a `pending` deployment to `provisioning`. If the deployment i
 ### Health Check
 
 ```bash
-curl https://api.apexmail.ee/enterprise/v1/deployments/$DEPLOYMENT_ID/health \
+curl https://enterprise.apexmail.ee/deployments/$DEPLOYMENT_ID/health \
   -H "X-API-Key: $API_KEY"
 ```
 
@@ -74,7 +74,7 @@ Dedicated IP records track tenant ownership, optional deployment association, PT
 ### Allocate a Dedicated IP
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/ips/allocate \
+curl -X POST https://enterprise.apexmail.ee/ips/allocate \
   -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -89,13 +89,13 @@ The Enterprise plan includes 10 dedicated IPs in the backend plan seed. Addition
 ### Read IP Records and Reputation
 
 ```bash
-curl https://api.apexmail.ee/enterprise/v1/ips/$IP_ID \
+curl https://enterprise.apexmail.ee/ips/$IP_ID \
   -H "X-API-Key: $API_KEY"
 
-curl 'https://api.apexmail.ee/enterprise/v1/ips/tenant/'$TENANT_ID'?limit=50&offset=0' \
+curl 'https://enterprise.apexmail.ee/ips/tenant/'$TENANT_ID'?limit=50&offset=0' \
   -H "X-API-Key: $API_KEY"
 
-curl https://api.apexmail.ee/enterprise/v1/ips/reputation/203.0.113.10 \
+curl https://enterprise.apexmail.ee/ips/reputation/203.0.113.10 \
   -H "X-API-Key: $API_KEY"
 ```
 
@@ -108,7 +108,7 @@ BYOIP registration stores a customer CIDR, marks it `pending_verification`, and 
 ### Register a CIDR
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/ips/byoip \
+curl -X POST https://enterprise.apexmail.ee/ips/byoip \
   -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -135,7 +135,7 @@ Example response payload:
 ### Verify a CIDR
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/ips/byoip/$BYOIP_RANGE_ID/verify \
+curl -X POST https://enterprise.apexmail.ee/ips/byoip/$BYOIP_RANGE_ID/verify \
   -H "X-API-Key: $API_KEY" \
   -H "Content-Type: application/json" \
   -d '{

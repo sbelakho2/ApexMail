@@ -10,7 +10,12 @@
 # re-resolving and rebuilding the world: any `cargo build` after the cook
 # starts from fully compiled third-party dependencies. Previously the deps
 # stage COPYed the entire crates tree, invalidating the cache on every commit.
-FROM rust:1.93.1-slim-bookworm AS chef
+#
+# Toolchain pin ALIGNED with deploy/Dockerfile.tracking (rust:1.97.1 — the
+# newer of the two diverging pins, audit §2 "two Rust toolchain versions
+# across build paths"). CI (ci/pipeline.sh test/validate stages) builds the
+# workspace with this image and will catch any incompatibility.
+FROM rust:1.97.1-slim-bookworm AS chef
 
 WORKDIR /app/services/mail-server
 ENV CARGO_TARGET_DIR=/app/target

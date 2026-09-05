@@ -25,12 +25,10 @@ const CANONICAL_EMAIL_LIMITS: &[i64] = &[30_000, 50_000, 150_000, 500_000, 2_000
 /// rate (€0.40/1K emails), and the PAYG API overage rate (€0.10/1K calls).
 const CANONICAL_RATES: &[f64] = &[0.001, 0.0008, 0.0005, 0.0003, 0.40, 0.10];
 
-const ALLOWED_DOMAINS: &[&str] = &[
-    "apexmail.ee",
-    "api.apexmail.ee",
-    "app.apexmail.ee",
-    "track.apexmail.ee",
-];
+// Allowed answer domains come from the knowledge module (single source of
+// truth shared with the prompt builders) so the verifier can never reject a
+// host the generator was taught to cite (e.g. status.apexmail.ee).
+const ALLOWED_DOMAINS: &[&str] = crate::knowledge::ALLOWED_HOSTS;
 
 /// The local tables above must equal the knowledge module's canonical
 /// values — enforced by `canonical_tables_match_knowledge` in the tests.
@@ -350,8 +348,11 @@ impl ResponseVerifier {
         let mut search_start = 0usize;
         while let Some(kw_pos) = lower[search_start..].find(&kw_lower) {
             let abs_pos = search_start + kw_pos;
-            let start = abs_pos.saturating_sub(80);
-            let end = (abs_pos + kw_lower.len() + 80).min(lower.len());
+            // Floor/ceil to char boundaries: raw byte offsets around a match
+            // in multi-byte text (CJK, emoji) can land mid-char, and slicing
+            // there panics — killing the whole request.
+            let start = floor_to_char_boundary(&lower, abs_pos.saturating_sub(80));
+            let end = ceil_to_char_boundary(&lower, abs_pos + kw_lower.len() + 80);
             let context = &lower[start..end];
             if !refusal_phrases.iter().any(|p| context.contains(p)) {
                 return false;
@@ -520,12 +521,22 @@ impl ResponseVerifier {
                 .expect("valid static SLA regex")
         });
         if let Some(m) = SLA_RE.find(&lower) {
-            let m_start = m.start().saturating_sub(60);
-            let m_end = (m.end() + 60).min(lower.len());
+            // Floor/ceil to char boundaries — see is_legitimate_mention.
+            let m_start = floor_to_char_boundary(&lower, m.start().saturating_sub(60));
+            let m_end = ceil_to_char_boundary(&lower, m.end() + 60);
             let sla_context = &lower[m_start..m_end];
+            // Uptime context must recognize the CJK wording too: a Chinese
+            // answer saying 正常运行时间 99.99% (uptime 99.99%) makes the
+            // same over-promise as the English one — the verifier grades
+            // assistant output, which is not guaranteed to be English.
             let is_uptime_context = sla_context.contains("uptime")
                 || sla_context.contains("sla")
-                || sla_context.contains("availability");
+                || sla_context.contains("availability")
+                // uptime (zh), availability (zh), uptime rate (ja), operation rate (ko)
+                || sla_context.contains("正常运行时间")
+                || sla_context.contains("可用性")
+                || sla_context.contains("稼働率")
+                || sla_context.contains("가동률");
             if is_uptime_context && !sla_context.contains("credit") {
                 violations.push(Violation::UptimeSlaClaim {
                     text: m.as_str().to_string(),
@@ -624,8 +635,9 @@ fn extract_euro_matches(text: &str) -> Vec<(f64, String)> {
             let amount: f64 = raw.parse().ok()?;
             let amount = (amount * 100.0).round() / 100.0;
             let m = cap.get(0).expect("capture 0 is the whole match");
-            let start = m.start().saturating_sub(60);
-            let end = (m.end() + 60).min(text.len());
+            // Floor/ceil to char boundaries — see is_legitimate_mention.
+            let start = floor_to_char_boundary(text, m.start().saturating_sub(60));
+            let end = ceil_to_char_boundary(text, m.end() + 60);
             let context = text[start..end].to_string();
             Some((amount, context))
         })
@@ -641,6 +653,30 @@ fn has_plan_or_period_context(context: &str) -> bool {
             .expect("valid static context regex")
     });
     CONTEXT_RE.is_match(context)
+}
+
+/// Floor `index` down to the nearest char boundary of `text`.
+///
+/// Context extraction slices around regex/keyword matches using byte
+/// offsets; in multi-byte text (CJK, emoji, `€`) an arbitrary byte offset
+/// can land inside a character, where slicing would panic. Flooring the
+/// start (and ceiling the end) keeps every slice on a boundary.
+fn floor_to_char_boundary(text: &str, index: usize) -> usize {
+    let mut i = index.min(text.len());
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+/// Ceil `index` up to the nearest char boundary of `text`.
+/// See [`floor_to_char_boundary`] for why this exists.
+fn ceil_to_char_boundary(text: &str, index: usize) -> usize {
+    let mut i = index.min(text.len());
+    while i < text.len() && !text.is_char_boundary(i) {
+        i += 1;
+    }
+    i
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -665,6 +701,11 @@ mod knowledge_lockstep {
             super::CANONICAL_RATES.to_vec(),
             crate::knowledge::canonical_rates(),
             "verifier rate table drifted from the knowledge module"
+        );
+        assert_eq!(
+            super::ALLOWED_DOMAINS,
+            crate::knowledge::ALLOWED_HOSTS,
+            "verifier domain allowlist drifted from the knowledge module"
         );
     }
 }
@@ -841,5 +882,87 @@ mod tests {
             "Open the authenticated domain DNS view and publish its unique direct-DKIM TXT record at the supplied selector._domainkey hostname.",
         );
         assert!(verdict.passed, "{:?}", verdict.violations);
+    }
+
+    // ── multi-byte safety: byte-offset slicing must never panic ─────────
+
+    #[test]
+    fn boundary_helpers_floor_and_ceil_to_char_boundaries() {
+        // "é€世🎉" — 2, 3, 3 and 4 byte chars.
+        let text = "é€世🎉";
+        for index in 0..=text.len() {
+            let floored = floor_to_char_boundary(text, index);
+            let ceiled = ceil_to_char_boundary(text, index);
+            assert!(text.is_char_boundary(floored), "floor({index}) broke a char");
+            assert!(text.is_char_boundary(ceiled), "ceil({index}) broke a char");
+            assert!(floored <= ceiled, "floor must not overshoot ceil at {index}");
+        }
+        // Out-of-range indices clamp instead of panicking.
+        assert_eq!(floor_to_char_boundary(text, 999), text.len());
+        assert_eq!(ceil_to_char_boundary(text, 999), text.len());
+    }
+
+    #[test]
+    fn verify_survives_cjk_text_around_internal_keywords() {
+        // Regression: the refusal-context slice used raw byte offsets; with
+        // multi-byte text before the keyword the slice panicked and killed
+        // the whole request. The Chinese text refuses to share the keyword,
+        // but the refusal-phrase list is English, so the keyword is still
+        // flagged — the requirement is the flag arrives without a panic.
+        let v = ResponseVerifier::new();
+        let response = "关于您的账户问题，我们的建议如下。我不能分享database password\u{1F512}这样的内部信息，这超出我的范围。请提供更多细节以便我们协助您。";
+        let verdict = v.verify(response);
+        assert!(!verdict.passed, "keyword in non-English refusal stays flagged");
+    }
+
+    #[test]
+    fn verify_survives_emoji_and_euro_amounts_around_prices() {
+        // Regression: the €-context slice (±60 bytes) panicked when multi-
+        // byte characters surrounded the amount.
+        let v = ResponseVerifier::new();
+        let response = "您好！🎉 Pro 计划的价格是 €65/月 🎉，包含 150,000 封邮件。祝您使用愉快！😀 詳細はサポートまで 🚀";
+        let verdict = v.verify(response);
+        assert!(
+            verdict.passed,
+            "canonical price in CJK/emoji text must pass: {:?}",
+            verdict.violations
+        );
+    }
+
+    #[test]
+    fn verify_flags_non_canonical_price_in_multibyte_text_without_panicking() {
+        let v = ResponseVerifier::new();
+        let response = "您好！🎉 Pro 计划的价格是 €49/月 😊，非常划算！详询 support。";
+        let verdict = v.verify(response);
+        assert!(verdict
+            .violations
+            .iter()
+            .any(|viol| matches!(viol, Violation::ForbiddenPrice { found, .. } if *found == 49.0)));
+    }
+
+    #[test]
+    fn verify_survives_sla_percentage_in_multibyte_text() {
+        // Regression: the SLA context slice (±60 bytes) panicked on
+        // multi-byte surroundings.
+        let v = ResponseVerifier::new();
+        let response = "我们承诺所有计划的正常运行时间为 99.99% 🚀，请放心使用！如有疑问请联系支持团队。";
+        let verdict = v.verify(response);
+        assert!(verdict
+            .violations
+            .iter()
+            .any(|v| matches!(v, Violation::UptimeSlaClaim { .. })));
+    }
+
+    #[test]
+    fn status_host_taught_by_knowledge_verifies() {
+        // Regression: knowledge::ALLOWED_HOSTS listed status.apexmail.ee but
+        // the verifier's own list did not — answers citing it were rejected.
+        let v = ResponseVerifier::new();
+        let verdict = v.verify("Current platform status is at https://status.apexmail.ee anytime.");
+        assert!(
+            verdict.passed,
+            "status.apexmail.ee must verify: {:?}",
+            verdict.violations
+        );
     }
 }

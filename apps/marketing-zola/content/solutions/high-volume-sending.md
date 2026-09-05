@@ -19,7 +19,7 @@ At high volume, small deliverability changes have large revenue impact. A 1% del
 ## Core Problem
 
 - Shared IP pools accumulate reputation risk from other senders.
-- Queue backpressure during provider throttling affects all streams if not isolated.
+- Queue backpressure during provider throttling affects all sending if not isolated.
 - Manual IP warm-up is error-prone and slow.
 - Rate limits on standard plans cap throughput below business requirements.
 - Without dedicated infrastructure, peak traffic competes with other customers.
@@ -28,8 +28,8 @@ At high volume, small deliverability changes have large revenue impact. A 1% del
 
 - **Dedicated IPs** — Approved add-on on Pro; 1 included on Growth, 3 on Scale, and 10 on Enterprise. Contract-scoped deployment options are reviewed separately.
 - **Automated Warm-Up** — Gradual volume ramp following provider-specific schedules. Monitored for reputation signals. Manual override available.
-- **Queue Prioritization** — Per-stream priority configuration. Transactional streams processed ahead of broadcast. Time-to-inbox targets monitored.
-- **Batch API** (`POST /v1/emails/batch`) — Submit up to 1,000 emails per request. Lower per-message overhead than individual API calls.
+- **Queue Prioritization** — Transactional traffic is prioritized ahead of bulk under load. Time-to-inbox targets monitored.
+- **Batch API** (`POST /v1/messages/batch`) — Submit up to 100 messages per request. Lower per-message overhead than individual API calls.
 - **Rate Limits** — Limits are enforced per API key and plan; see the current API documentation for public limits.
 - **Contractual SLA** — Scale and Enterprise include plan-level SLA terms; non-standard deployments require a separate contract review.
 
@@ -38,8 +38,8 @@ At high volume, small deliverability changes have large revenue impact. A 1% del
 1. Request dedicated IP eligibility review from support or sales.
 2. Once approved, dedicated IPs are provisioned and assigned to your account.
 3. Automated warm-up begins. Monitor warm-up progress in dashboard.
-4. Assign dedicated IPs to transactional streams for reputation isolation.
-5. Configure per-stream queue priority and concurrency limits.
+4. Assign dedicated IPs to your transactional sending for reputation isolation.
+5. Configure queue priority and concurrency limits.
 6. Use batch API for high-throughput sending scenarios.
 7. Monitor delivery latency, queue depth, and provider-specific acceptance rates.
 
@@ -47,10 +47,9 @@ At high volume, small deliverability changes have large revenue impact. A 1% del
 
 | Endpoint | Description |
 |---|---|
-| `POST /v1/emails` | Send individual email |
-| `POST /v1/emails/batch` | Send up to 1,000 emails in one request |
+| `POST /v1/messages` | Send individual email |
+| `POST /v1/messages/batch` | Send up to 100 messages in one request |
 | `GET /v1/dedicated-ips` | List dedicated IPs and warm-up status |
-| `GET /v1/streams/:id/stats` | Per-stream throughput and latency metrics |
 | `GET /v1/analytics/delivery` | Aggregate delivery metrics by provider |
 
 ## Required Plan
@@ -64,7 +63,7 @@ At high volume, small deliverability changes have large revenue impact. A 1% del
 ## Security Considerations
 
 - Dedicated IP reputation is managed exclusively for your account. Changes require account owner approval.
-- Batch API requests are atomic: all messages in a batch succeed or fail together (no partial completion).
+- Each message in a batch is validated individually; the API reports per-message acceptance.
 - Queue depth and processing latency are visible in real time via dashboard and API.
 - Rate limit headers returned on every response. Monitor `X-RateLimit-Remaining` to avoid throttling.
 
@@ -72,7 +71,7 @@ At high volume, small deliverability changes have large revenue impact. A 1% del
 
 - Dedicated IP eligibility requires a sending history review. New accounts start on shared IPs.
 - IP warm-up typically takes 2-4 weeks depending on target volume and provider policies.
-- Maximum batch size is 1,000 emails per request. Larger volumes require multiple batch calls.
+- Maximum batch size is 100 messages per request. Larger volumes require multiple batch calls.
 - Throughput during provider outages depends on queue retry configuration and provider recovery time.
 
 ## Recommended Next Action

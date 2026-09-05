@@ -17,7 +17,7 @@ ApexMail requires a database solution that can:
 - Work without paid SaaS dependencies
 
 ## Decision
-We chose **PostgreSQL 15+** as the primary database with the following architecture:
+We chose **PostgreSQL 16+** as the primary database with the following architecture:
 
 ### Primary Database (PostgreSQL)
 - OLTP workloads: messages, recipients, campaigns, users
@@ -58,8 +58,8 @@ Total: 100 max connections to PostgreSQL
 ### Risks Mitigated
 - Connection exhaustion: Rust-managed `deadpool-postgres` pools with strict per-service limits
 - Schema drift: Startup fingerprint validation
-- Data loss: WAL archiving + continuous PITR
+- Data loss: nightly encrypted, restore-verified backups — note there is **no WAL archiving/PITR**; recovery point granularity is the last nightly backup (see [operations/disaster-recovery.md](../operations/disaster-recovery.md))
 
 ## Related ADRs
 - ADR 0002: MTA Stack (queue storage)
-- ADR 0005: SLO Management (metrics storage)
+- ADR 0004: Caching Strategy (Redis alongside PostgreSQL)

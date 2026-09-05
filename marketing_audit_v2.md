@@ -1,5 +1,7 @@
 ### Hyper-Detailed Design & Functional Audit: ApexMail Marketing Ecosystem (v2.0)
 
+> **Superseded (2026-09-05):** for the current verified state of the marketing site (and the whole repository), see [docs/audit/full-repo-audit-2026-09-05.md](docs/audit/full-repo-audit-2026-09-05.md) — this earlier audit is retained as historical context only.
+
 This document provides a pixel-perfect, logic-deep audit of the ApexMail marketing application (`apps/marketing-zola`). Every finding is categorized by severity and impact on the "Premium" brand identity.
 
 ---

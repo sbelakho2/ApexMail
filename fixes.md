@@ -1,3 +1,14 @@
+# HISTORICAL AUDIT LOG — DO NOT USE AS A STATEMENT OF CURRENT REALITY
+
+> **Status (2026-09-05): superseded.** This file is a historical record of the
+> 2026-07 audit rounds and the remediation claims made at that time. It is
+> retained for traceability only. Several "FIXED" claims below were later
+> verified to be **false** and are marked with `CORRECTION (2026-09-05)` notes
+> inline (SDK publication, the Resend 24-row comparison, and the GHCR
+> deployment pipeline). The current, verified state of the repository is
+> documented in **[docs/audit/full-repo-audit-2026-09-05.md](docs/audit/full-repo-audit-2026-09-05.md)**.
+> Nothing in this file should be cited as evidence of present behavior.
+
 What is now working well
 1. Pricing is coherent on the dedicated Pricing page
 
@@ -229,6 +240,14 @@ SDK helpers for signature verification are referenced across all five languages.
 
 10. SDKs — FIXED
 
+> **CORRECTION (2026-09-05): the claim below is FALSE.** No ApexMail SDK is
+> published on any registry. There are **five** SDKs in `packages/`
+> (Python, Go, PHP, Ruby, Java) and all are **unpublished and in development**;
+> there is **no Node.js SDK**. The six-SDK registry table below (including
+> `@apexmail/node` on npm) described an aspiration, not a shipped state. See
+> `docs/api/sdk-reference.md` and `docs/api/sdk-support-levels.md` for the
+> current truth.
+
 The SDK page at /docs/sdks/ now documents six officially supported languages (Node.js, Python, Go, PHP, Ruby, Java) with complete details for each:
 
 | Language   | Package              | Registry        | Runtime     |
@@ -331,6 +350,13 @@ Resolution applied:
 The comparison page now correctly represents Postmark's capabilities based on publicly available documentation. The methodology footer cites sources and verification date (2026-07-30).
 
 15. The comparison architecture — FIXED
+
+> **CORRECTION (2026-09-05): partially FALSE.** The `/compare` index and the
+> per-provider pages exist, but the claim that the Resend page "has been fully
+> populated with 24 comparison rows" is **false** — `apps/marketing-zola/content/compare/resend/index.md`
+> contains no comparison table rows. Do not rely on the "19 ApexMail wins"
+> count either. See the 2026-09-05 audit, section 1.8/3, for the verified
+> state of the comparison pages.
 
 The comparison index advertises pages for Amazon SES, Mailgun, Postmark, Resend and SendGrid. The Resend URL previously redirected to the generic comparison index rather than delivering the promised detailed comparison.
 
@@ -446,6 +472,18 @@ The visual product and commercial strategy remain strong. The website is still b
 ---
 
 ## Deployment system — FIXED 2026-07-30
+
+> **CORRECTION (2026-09-05): the "canonical deployment" described below is
+> FALSE.** The GitHub Actions workflows (`deploy.yml`, `deploy-hetzner.yml`)
+> and the GHCR push/pull pipeline are **decommissioned** — `.github/workflows/`
+> is empty and no registry is used. Production is deployed by the
+> **self-hosted pipeline** (`ci/pipeline.sh`, run on the deploy host by a
+> 5-minute systemd timer): it builds all images **locally on the host**
+> (tagged with `ghcr.io/...` names for compatibility, never pushed), runs the
+> migration gate, brings the stack up via `docker-compose.prod.yml`, and
+> verifies it. The `Makefile`/`deploy/scripts/deploy.sh` path remains the
+> manual/emergency fallback. See `deploy/DEPLOYMENT.md` (still the single
+> source of truth) and `docs/audit/full-repo-audit-2026-09-05.md`.
 
 The canonical deployment path is CI/CD with Docker Compose; see `deploy/DEPLOYMENT.md` (single source of truth).
 

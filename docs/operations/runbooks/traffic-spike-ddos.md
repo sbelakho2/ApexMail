@@ -24,7 +24,7 @@ ApexMail is rate-limited at multiple layers:
 - **Application:** Token bucket rate limiters per tenant (configurable burst/tier)
 - **Circuit breakers:** Redis-backed state machine (CLOSED → OPEN → HALF-OPEN)
 - **HPA:** Auto-scales API server (2–10 pods) based on CPU/memory
-- **Connection budget:** 650 total DB connections across all pods (see [`db_cluster_connection_budget`](../../deploy/helm/apexmail/values.yaml:359))
+- **Connection budget:** total DB connections = SUM of per-service `DATABASE_POOL_MAX` (see [`docker-compose.yml`](../../docker-compose.yml))
 
 ## Symptoms
 
@@ -261,7 +261,7 @@ If the API server is overwhelmed and needs to shed load:
 
 ## Related
 
-- [API alerting rules](../../deploy/prometheus/alerts/api-alerts.yml)
+- [API alerting rules](../../../deploy/prometheus/alerts/api-alerts.yml)
 - [Secret Rotation Runbook](../secret-rotation.md)
 - [Cache Warming Strategy](../cache-warming.md)
-- [Helm chart values (rate limiting)](../../deploy/helm/apexmail/values.yaml:286)
+- [nginx rate-limit zones](../../deploy/nginx/nginx.conf)

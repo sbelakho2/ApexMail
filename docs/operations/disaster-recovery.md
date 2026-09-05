@@ -1,431 +1,143 @@
 # Disaster Recovery & Backup Procedures
 
-This document describes ApexMail's disaster recovery (DR) architecture, backup strategies, failover mechanisms, and recovery procedures. The systems described here are primarily implemented in the HA (High Availability) application and the Control Plane.
-
-All infrastructure runs on **Hetzner Cloud servers** (Hetzner Cloud ARM) in Finland (primary) and Germany (standby). Email delivery uses a **hybrid architecture**: AWS SES for shared-pool sending, Hetzner Cloud (self-hosted SMTP) for dedicated IPs. See [Hybrid Email Infrastructure](../architecture/hybrid-email-infrastructure.md) for details.
-
----
-
-## Table of Contents
-
-- [Backup Strategy](#backup-strategy)
-- [Point-In-Time Recovery (PITR)](#point-in-time-recovery-pitr)
-- [Backup Encryption](#backup-encryption)
-- [Failover State Machine](#failover-state-machine)
-- [STONITH Fencing](#stonith-fencing)
-- [Circuit Breakers with Redis Persistence](#circuit-breakers-with-redis-persistence)
-- [Replication Monitoring](#replication-monitoring)
-- [Chaos Engineering](#chaos-engineering)
-- [Recovery Procedures](#recovery-procedures)
-- [Data Retention Policies](#data-retention-policies)
-- [DR Testing Cadence](#dr-testing-cadence)
-
----
-
-## Backup Strategy
-
-ApexMail employs a multi-layered backup strategy to ensure data durability and rapid recovery.
-
-### Backup Types
-
-| Type | Description | Frequency | Retention |
-|------|-------------|-----------|-----------|
-| **Full backup** | Complete snapshot of all databases and configuration | Daily (configurable) | 30 days (configurable) |
-| **Incremental backup** | Only changed data since the last full or incremental backup | Every 6 hours | 30 days |
-| **WAL archiving** | Continuous archiving of PostgreSQL Write-Ahead Log segments | Continuous (real-time) | 30 days |
-
-### Backup Configuration
-
-Default settings (configurable via Control Plane):
-
-```yaml
-backup:
-  schedule:
-    full: "0 2 * * *"         # Daily at 02:00 UTC
-    incremental: "0 */6 * * *" # Every 6 hours
-  retention:
-    days: 30
-  storage:
-    primary: s3://apexmail-backup-fi/   # Hetzner S3 object storage (Finland)
-    replica: s3://apexmail-backup-de/   # Hetzner S3 object storage (Germany)
-  dr_region: eu-de  # Germany standby
-```
-
-Backups are stored on **Hetzner S3-compatible object storage** co-located in the same Hetzner datacentre as each server. Cross-site copies are replicated via S3 cross-region replication over the Hetzner internal network.
-
-### Backup Verification
-
-Every backup is verified post-completion:
-
-1. **Checksum validation** — SHA-256 checksums are computed and stored alongside backup artifacts.
-2. **Restore test** — Automated weekly restore to a staging environment validates backup integrity.
-3. **Size anomaly detection** — Backups that deviate more than ±20% from the rolling average trigger an alert.
-
----
-
-## Point-In-Time Recovery (PITR)
-
-PITR enables recovery to any specific point in time within the WAL retention window by replaying Write-Ahead Log segments on top of a base backup.
-
-### How PITR Works
-
-1. Select the most recent full backup that precedes the target recovery time.
-2. Restore the full backup to a new database cluster.
-3. Replay WAL segments from the archive up to the specified recovery target.
-4. The database is brought online at the exact requested state.
-
-### PITR Configuration
-
-```yaml
-pitr:
-  wal_archive:
-    location: /backup/apexmail/wal-archive/
-    compression: zstd
-    encryption: aes-256-gcm
-  recovery_target:
-    # Specify one of the following:
-    time: "2026-02-09T14:30:00Z"     # Recover to a specific timestamp
-    xid: "12345678"                   # Recover to a specific transaction ID
-    lsn: "0/1A2B3C4D"                # Recover to a specific WAL position
-    name: "pre-migration-snapshot"    # Recover to a named restore point
-```
-
-### Recovery Time Objectives
-
-| Metric | Target |
-|--------|--------|
-| RPO (Recovery Point Objective) | < 1 minute (continuous WAL archiving) |
-| RTO (Recovery Time Objective) | < 15 minutes for same-site; < 30 minutes for cross-site (Finland ↔ Germany) |
-
----
-
-## Backup Encryption
-
-All backup data is encrypted at rest and in transit.
-
-### Encryption Specification
-
-| Layer | Algorithm | Details |
-|-------|-----------|---------|
-| Data encryption | AES-256-GCM | Each backup artifact is encrypted with a unique data encryption key (DEK) |
-| Key encryption | AES-256-KW | DEKs are wrapped by a key encryption key (KEK) managed locally |
-| In-transit | TLS 1.3 | All backup transfers between Finland and Germany use TLS 1.3 |
-| WAL segments | AES-256-GCM | Encrypted before writing to the archive |
-
-### Key Management
-
-- **KEK rotation:** Automatic rotation every 90 days. KEKs are stored in an encrypted keyfile on a separate volume from the backup data.
-- **DEK lifecycle:** A new DEK is generated for each backup. DEKs are encrypted (wrapped) with the current KEK and stored in the backup metadata.
-- **Key access audit:** All key access events are logged to the compliance audit log.
-- **Emergency access:** Break-glass procedure requires two authorised operators and generates a security incident ticket.
-
----
-
-## Failover State Machine
-
-The failover system uses a distributed state machine with Redis-based coordination to manage primary/replica role transitions.
-
-### States
-
-```
-                    ┌──────────┐
-         ┌─────────│  NORMAL  │─────────┐
-         │         └──────────┘         │
-    health check        │          manual trigger
-      failure           │
-         │              ▼
-         │     ┌──────────────┐
-         └────▶│  DETECTING   │
-               └──────────────┘
-                       │
-              confirmed failure
-                       │
-                       ▼
-               ┌──────────────┐
-               │  FENCING     │──── fence fails ────▶ BLOCKED
-               └──────────────┘
-                       │
-                fence success
-                       │
-                       ▼
-               ┌──────────────┐
-               │  PROMOTING   │
-               └──────────────┘
-                       │
-              promotion complete
-                       │
-                       ▼
-               ┌──────────────┐
-               │  REDIRECTING │
-               └──────────────┘
-                       │
-              traffic switched
-                       │
-                       ▼
-               ┌──────────────┐
-               │  COMPLETED   │
-               └──────────────┘
-```
-
-### Distributed Locking
-
-Failover coordination uses Redis-based distributed locks to prevent split-brain scenarios:
-
-- **Lock key:** `failover:lock:{cluster_id}`
-- **Lock TTL:** 30 seconds (auto-renewed every 10 seconds by the lock holder)
-- **Fencing tokens:** Monotonically increasing tokens are issued with each lock acquisition. Any operation presenting a stale fencing token is rejected.
-- **Lock contention:** If multiple nodes detect a failure simultaneously, only the first to acquire the lock proceeds with failover. Others enter an observer state.
-
-### Failover Timeline
-
-| Phase | Typical Duration | Description |
-|-------|-----------------|-------------|
-| Detection | 5–10 seconds | Three consecutive health check failures trigger detection |
-| Fencing | 2–5 seconds | STONITH fencing isolates the failed primary |
-| Promotion | 3–8 seconds | Replica is promoted; WAL replay completes |
-| Redirection | 1–3 seconds | Zone.ee DNS updated; connections drained |
-| **Total** | **11–26 seconds** | End-to-end automatic failover |
-
----
-
-## STONITH Fencing
-
-**STONITH** (Shoot The Other Node In The Head) prevents split-brain conditions where two nodes believe they are the primary.
-
-### Fencing Mechanisms
-
-| Method | Description | Use Case |
-|--------|-------------|----------|
-| **Hetzner Cloud API** | API call to Hetzner's cloud server management to force a server reset or shutdown | Primary method |
-| **SSH fencing** | SSH into the node and issue `systemctl stop postgresql` or `poweroff` | Fallback if Cloud API is slow |
-| **Network fencing** | Firewall rule injection (iptables) to block all PostgreSQL traffic to/from the failed node | Fallback if API and SSH fail |
-| **Self-fencing** | Failed node detects loss of quorum and voluntarily demotes itself | Cooperative split-brain resolution |
-
-### Fencing Order
-
-1. Attempt Hetzner Cloud API fencing (timeout: 10 seconds).
-2. If API fencing fails, attempt SSH fencing (timeout: 5 seconds).
-3. If SSH fencing fails, apply network fencing via iptables (timeout: 5 seconds).
-4. If all remote fencing fails, wait for self-fencing (timeout: 15 seconds).
-5. If self-fencing does not occur, the failover enters `BLOCKED` state and requires manual intervention.
-
-### Fencing Verification
-
-After fencing, the system verifies isolation:
-
-- TCP check confirms the fenced node is unreachable on PostgreSQL port.
-- The fencing token is written to Redis; any connection from the fenced node presenting a stale token is rejected.
-
----
-
-## Circuit Breakers with Redis Persistence
-
-Circuit breaker state is persisted in Redis to survive process restarts and ensure consistent behavior across a distributed worker fleet.
-
-### Redis Key Schema
-
-```
-circuit:{service}:{destination} → {
-  state: "closed" | "open" | "half-open",
-  failure_count: number,
-  last_failure: ISO 8601 timestamp,
-  opened_at: ISO 8601 timestamp | null,
-  half_open_attempts: number
-}
-```
-
-**TTL:** Circuit breaker keys expire after 24 hours of inactivity.
-
-### State Transitions
-
-| Current State | Event | Next State | Action |
-|---------------|-------|------------|--------|
-| Closed | Failure count ≥ threshold | Open | Stop sending; set `opened_at` |
-| Open | Reset timeout elapsed | Half-Open | Allow single probe request |
-| Half-Open | Probe succeeds | Closed | Reset failure count |
-| Half-Open | Probe fails | Open | Restart reset timeout |
-
-### Configuration
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `failure_threshold` | 10 | Number of failures before opening |
-| `reset_timeout` | 60s | Time before transitioning from open to half-open |
-| `monitoring_window` | 120s | Sliding window for failure counting |
-| `half_open_max_attempts` | 3 | Max probes in half-open state before requiring manual reset |
-
----
-
-## Replication Monitoring
-
-Continuous monitoring of PostgreSQL streaming replication between Hetzner Finland and Germany.
-
-### Monitored Metrics
-
-| Metric | Warning Threshold | Critical Threshold | Check Interval |
-|--------|------------------|--------------------|----------------|
-| Replication lag (seconds) | > 5s | > 30s | 10s |
-| Replication lag (bytes) | > 16 MB | > 256 MB | 10s |
-| Replication slot WAL retention | > 1 GB | > 5 GB | 60s |
-| Replica connection status | Disconnected > 10s | Disconnected > 60s | 5s |
-| WAL archive success rate | < 99% | < 95% | 60s |
-
-### Alerting
-
-Alerts are delivered via:
-
-- Slack `#ops-alerts` channel (warning and critical)
-- Email to the on-call rotation (critical)
-- Control Plane dashboard (all severity levels)
-
----
-
-## Chaos Engineering
-
-ApexMail includes a built-in chaos engineering framework (`tools/chaos/`) for validating DR readiness.
-
-### Experiment Types
-
-| # | Experiment | Description | Blast Radius |
-|---|-----------|-------------|--------------|
-| 1 | **Node failure** | Terminate a random worker or API process | Single node |
-| 2 | **Network partition** | Isolate Finland from Germany using iptables rules | Cross-site |
-| 3 | **Disk failure** | Simulate I/O errors on the data volume | Single node |
-| 4 | **DNS failure** | Block DNS resolution for specific domains | Cluster-wide |
-| 5 | **Clock skew** | Introduce time drift on a node (±30 seconds) | Single node |
-| 6 | **Memory pressure** | Consume available memory to trigger OOM conditions | Single node |
-| 7 | **Database failover** | Force a primary database failover | Cluster-wide |
-| 8 | **Connection exhaustion** | Saturate PostgreSQL connection pool to test backpressure | Single node |
-
-### Safety Controls
-
-- **Abort conditions:** Experiments automatically abort if customer-facing error rates exceed 1%.
-- **Blast radius limits:** Maximum percentage of nodes affected is configurable (default: 25%).
-- **Scheduling:** Experiments run only during maintenance windows unless overridden.
-- **Rollback:** Each experiment includes an automatic rollback procedure that executes on abort or completion.
-- **Audit trail:** All experiments are logged with operator, parameters, duration, and outcome.
-- **Never run in production** — enforced by environment checks at startup.
-
-### Running Experiments
-
-Experiments are run via scripts in `tools/chaos/`:
+> **Rewritten 2026-09-05.** Earlier versions of this document described a
+> two-region HA topology (Finland primary / Germany standby), STONITH fencing,
+> WireGuard interconnects, WAL archiving with PITR, and Kubernetes-based DR
+> tooling. **None of that exists.** This document now describes the actual
+> deployment: a **single Hetzner host in Finland** running the whole stack
+> under Docker Compose, protected by encrypted nightly database backups. There
+> is **no standby region and no automatic failover** — recovery means host
+> rebuild plus backup restore.
+
+## Reality check (what DR actually looks like here)
+
+| Property | Reality |
+|---|---|
+| Production topology | One Hetzner host (Finland), full stack via `docker-compose.prod.yml` |
+| Standby region | **None.** There is no second region, no replication, no region failover |
+| PostgreSQL backups | Nightly `pg_dump`, encrypted, restore-verified (see below) |
+| ClickHouse backups | Nightly per-table dumps, encrypted, restore-verified |
+| Redis backups | **None.** Redis holds cache/queue/challenge state only; after a loss the queue contents and cached state are gone |
+| WAL archiving / PITR | **Not implemented.** Recovery point granularity is the last nightly backup (RPO up to ~24 h) |
+| Failover automation | None — a host failure is an outage until the host is rebuilt or replaced |
+| Deployment | Self-hosted pipeline on the host (`ci/pipeline.sh`); see `deploy/DEPLOYMENT.md` |
+
+Honest objectives (to be validated in drills, not measured yet):
+
+- **RPO:** PostgreSQL and ClickHouse ≤ 24 h (nightly backup cadence). Setting
+  `BACKUP_TARGET` (offsite rsync mirror) protects against host loss, not
+  against the cadence.
+- **RTO:** hours, not minutes — a full recovery involves provisioning/rebuilding
+  the host, re-running the bootstrap, rebuilding all images, and restoring the
+  databases. Measure it in the quarterly drill and record the real number.
+
+## Backup mechanism
+
+Two compose services implement backups (`docker-compose.prod.yml`):
+`postgres-backup` and `clickhouse-backup`. Both run the same contract
+(`deploy/hardening/scripts/postgres-backup-encrypt.sh` /
+`clickhouse-backup-encrypt.sh`):
+
+1. Dump the data (PostgreSQL `pg_dump`; ClickHouse per-table `SELECT` dumps —
+   each table dump is atomic, but the set is **not** a cross-table snapshot;
+   acceptable for the append-only OLAP data).
+2. Encrypt with AES-256-CBC + PBKDF2 using the `backup_encryption_key` Docker
+   secret (`PROD_BACKUP_ENCRYPTION_KEY_FILE`).
+3. **Verify restorability before deleting the plaintext** — decrypt the
+   artifact and run `pg_restore --list` (or the ClickHouse equivalent check).
+   A backup that cannot be decrypted and read is never counted as good.
+4. Prune: PostgreSQL keeps `BACKUP_KEEP_DAYS` (14) / weeks (8) / months (6)
+   with a newest-`BACKUP_KEEP_COUNT` (30) bound; ClickHouse keeps 14 days /
+   14 artifacts.
+5. Optionally mirror offsite: when `BACKUP_TARGET` is set (rsync over SSH,
+   key at `/var/run/apexmail-backup-ssh/id_ed25519`, pinned `known_hosts`,
+   dedicated `apexmail_backup_egress` network), encrypted artifacts are
+   copied to the offsite host. Without `BACKUP_TARGET`, backups exist **only
+   on the same physical host** as the database — a host-disk failure without
+   an offsite mirror can be total data loss. Configure it.
+
+Health monitoring: each backup container's healthcheck requires the scheduler
+process to be alive **and** an encrypted artifact newer than 25 h to exist.
+A red `postgres-backup`/`clickhouse-backup` in `docker compose ps` means
+backups have silently stopped — treat as SEV2.
+
+### What is *not* backed up (known gaps)
+
+- **Redis** — queue contents, rate-limit counters, and KiwiCaptcha challenges
+  are lost on Redis loss; in-flight queued email not yet persisted to
+  PostgreSQL is gone.
+- **Analytics-cold store** — no backup job covers it.
+- **Host-local state** under `/opt/apexmail` (`.env`, `secrets/`, TLS certs)
+  must be re-rendered during rebuild from `.env.production.example` +
+  `deploy/scripts/issue-letsencrypt.sh` (keep an offline copy of the secrets
+  — they cannot be regenerated).
+
+## Recovery procedures
+
+### Procedure 1: PostgreSQL data loss / corruption (host survives)
 
 ```bash
-# Run a chaos experiment
-cd tools/chaos
-./run-experiment.sh --experiment node-failure --target tracking
+# 1. Stop the writers
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env stop api-server worker mta tracking enterprise sales-autopilot billing-service
 
-# Dry run (no actual disruption)
-./run-experiment.sh --experiment network-partition --dry-run
+# 2. Decrypt + restore the latest verified backup
+docker compose ... exec postgres-backup sh -c \
+  'openssl enc -d -aes-256-cbc -pbkdf2 -in /backups/<latest>.enc -out /backups/restore.dump -pass file:/run/secrets/backup_encryption_key'
+docker compose ... exec postgres dropdb -U apexmail apexmail   # data is already lost/corrupt
+docker compose ... exec postgres createdb -U apexmail apexmail
+docker compose ... exec postgres pg_restore -U apexmail -d apexmail --no-owner /backups/restore.dump
 
-# Force a database failover test in staging
-./run-experiment.sh --experiment database-failover --target postgres
+# 3. Restart and verify
+docker compose ... up -d
+make verify
 ```
 
----
+Data written after the last nightly backup is lost (RPO ≤ 24 h).
 
-## Recovery Procedures
+### Procedure 2: Full host loss (host rebuilt or replaced)
 
-### Procedure 1: Single-Node Recovery
+1. **Rebuild the host** — `deploy/scripts/hetzner-bootstrap.sh` (Docker,
+   UFW, sshd hardening, `/opt/apexmail`).
+2. **Restore the offsite backups** — if `BACKUP_TARGET` was configured, the
+   encrypted artifacts exist off-host; rsync them back. If it was **not**
+   configured, the backups died with the host: this is a total-loss scenario.
+3. **Re-deploy from scratch** — follow *Fresh-host bootstrap* in
+   `deploy/DEPLOYMENT.md`: clone the repo, render `.env` from
+   `.env.production.example`, re-create all `PROD_*_FILE` secret files,
+   `ci/install.sh`, `ci/pipeline.sh run` (builds all images on the host).
+4. **Restore databases** — Procedure 1 against the recovered artifacts.
+5. **Reissue TLS** — `deploy/scripts/issue-letsencrypt.sh` (certs are not
+   backed up).
+6. **Verify** — `make verify` plus the deploy verification checklist in
+   `deploy/DEPLOYMENT.md`.
 
-**Scenario:** A single worker or API process fails on the Finland server.
+### Procedure 3: Single service failure
 
-| Step | Action | Expected Duration |
-|------|--------|-------------------|
-| 1 | Systemd restarts the failed service automatically | 5–15 seconds |
-| 2 | Service runs health checks and connects to DB/Redis | 10–30 seconds |
-| 3 | Health check endpoint returns healthy; traffic resumes | 5–10 seconds |
-| **Total** | | **20–55 seconds** |
+Restart via compose (`docker compose ... up -d <svc>`); the pipeline's verify
+stage output and the per-service healthchecks (`/health/live`, `/health/ready`)
+identify what is down. Services are stateless except postgres/redis/clickhouse/
+mailstore volumes, so a crashed service recovers with no data action.
 
-If the process repeatedly fails (3 restarts within 5 minutes), an alert fires for manual investigation.
+## DR testing
 
-### Procedure 2: Database Failover (Finland → Germany)
+See [Disaster Recovery Testing](disaster-recovery-testing.md) for the drill
+cadence. The drill that matters most is **Procedure 2 on a scratch host**:
+provision a throwaway Hetzner machine, run the bootstrap + pipeline + restore
+end-to-end from the offsite mirror, and record the actual RTO. Every backup's
+restorability is additionally verified automatically at backup time
+(decrypt + `pg_restore --list` before the plaintext is deleted).
 
-**Scenario:** Finland PostgreSQL primary becomes unavailable.
+## Data retention
 
-| Step | Action | Expected Duration |
-|------|--------|-------------------|
-| 1 | Health check detects failure (3 consecutive failures) | 15–30 seconds |
-| 2 | Failover state machine acquires lock and initiates fencing | 2–5 seconds |
-| 3 | STONITH fences Finland primary via Hetzner Cloud API | 5–15 seconds |
-| 4 | Germany replica promoted to primary (`pg_promote()`) | 3–8 seconds |
-| 5 | Zone.ee DNS updated; application reconnects | 1–3 seconds |
-| **Total** | | **26–61 seconds** |
+Plan-dependent event/analytics retention is defined in
+[compliance/data-retention.md](../compliance/data-retention.md) and is
+separate from the backup retention above (backup retention is a fixed
+operational window, not a plan feature).
 
-### Procedure 3: Full Site Recovery (Finland Down)
+## Related documentation
 
-**Scenario:** The entire Hetzner Finland datacentre becomes unavailable.
-
-| Step | Action | Expected Duration |
-|------|--------|-------------------|
-| 1 | HA service detects health check failures across all Finland endpoints | 30–60 seconds |
-| 2 | HA service updates Zone.ee DNS to route traffic to Germany | 30–60 seconds |
-| 3 | Germany services start accepting full traffic | 1–2 minutes |
-| 4 | Germany PostgreSQL promoted to primary (if not already) | 3–8 seconds |
-| 5 | Verification and traffic ramp-up | 2–5 minutes |
-| **Total** | | **4–9 minutes** |
-
-### Procedure 4: Data Corruption Recovery
-
-**Scenario:** Data corruption detected (accidental deletion, bad migration, etc.).
-
-| Step | Action | Expected Duration |
-|------|--------|-------------------|
-| 1 | Identify the point in time immediately before corruption | Manual (variable) |
-| 2 | Provision new database cluster on an isolated Hetzner server | 2–5 minutes |
-| 3 | Restore from latest full backup preceding the corruption event | 5–20 minutes |
-| 4 | Replay WAL segments up to the target recovery point (PITR) | 5–30 minutes |
-| 5 | Validate recovered data integrity | 5–15 minutes |
-| 6 | Switch application to recovered database | 1–3 minutes |
-| **Total** | | **18–73 minutes** (depending on data volume) |
-
----
-
-## Data Retention Policies
-
-Data retention periods vary by subscription plan. Data beyond the retention window is permanently deleted.
-
-### Retention by Plan
-
-| Plan | Event Data | Analytics | Audit Logs | Backups |
-|------|------------|-----------|------------|---------|
-| **Free** | 7 days | 7 days | 7 days | None |
-| **Starter** | 30 days | 30 days | 30 days | 7 days |
-| **Pro** | 60 days | 60 days | 60 days | 30 days |
-| **Growth** | 90 days | 90 days | 90 days | 30 days |
-| **Scale** | 365 days | 365 days | 365 days | 90 days |
-| **Enterprise** | 730 days | 730 days | 730 days | 365 days |
-
-### Retention Enforcement
-
-- A nightly job scans for data beyond the retention window and schedules it for deletion.
-- Deletion is soft-delete first (data marked as expired), followed by hard-delete after a 48-hour grace period.
-- Enterprise customers can configure custom retention periods up to 7 years for compliance requirements.
-- Audit logs are exempt from standard retention and are retained for a minimum of 3 years (730 days default, configurable).
-
----
-
-## DR Testing Cadence
-
-Regular testing validates that disaster recovery procedures work as documented.
-
-### Recommended Schedule
-
-| Test Type | Frequency | Scope | Participants |
-|-----------|-----------|-------|-------------|
-| Backup restore verification | Weekly (automated) | Single database | Automated pipeline |
-| Single-node failover | Monthly | Staging | On-call engineer |
-| Database failover | Monthly | Staging cluster | Database team |
-| Cross-site failover (Finland ↔ Germany) | Quarterly | Production (controlled) | SRE team + stakeholders |
-| Full DR exercise | Semi-annually | All systems | Entire engineering org |
-| Chaos engineering experiments | Bi-weekly | Staging; monthly in production | SRE team |
-| Tabletop exercise | Quarterly | N/A (discussion-based) | Engineering + leadership |
-
-### Post-Test Deliverables
-
-After each DR test:
-
-1. **Incident report** — Document what happened, what worked, and what didn't.
-2. **Runbook updates** — Amend recovery procedures based on findings.
-3. **RTO/RPO validation** — Confirm actual recovery times against stated objectives.
-4. **Action items** — Track improvements in the engineering backlog with assigned owners and deadlines.
+- [deploy/DEPLOYMENT.md](../../deploy/DEPLOYMENT.md) — canonical deployment and fresh-host bootstrap
+- [Backup Verification](backup-verification.md)
+- [Disaster Recovery Testing](disaster-recovery-testing.md)
+- [Runbook: DB recovery](runbooks/db-recovery.md)
+- [Runbook: Redis failure](runbooks/redis-failure.md)

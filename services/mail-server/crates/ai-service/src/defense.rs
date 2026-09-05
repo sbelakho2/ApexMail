@@ -644,12 +644,36 @@ fn classify_threat_level(findings: &[InjectionFinding], _output: &str) -> Threat
         }
     }
 
+    if distinct_override_escalation(findings) {
+        return ThreatLevel::Critical;
+    }
+
     match score {
         0 => ThreatLevel::Clean,
         1..=10 => ThreatLevel::Suspicious,
         11..=25 => ThreatLevel::Malicious,
         _ => ThreatLevel::Critical,
     }
+}
+
+/// Escalation rule complementing the additive score: two or more DIFFERENT
+/// instruction-override patterns in one input is a keyword-stuffed
+/// jailbreak by construction — no benign message stacks "ignore all
+/// previous instructions" together with "jailbreak". Such an input is
+/// Critical regardless of the additive total (which caps at Malicious for
+/// exactly two hits).
+fn distinct_override_escalation(findings: &[InjectionFinding]) -> bool {
+    findings
+        .iter()
+        .filter(|f| {
+            matches!(
+                f,
+                InjectionFinding::ContextSwitch { pattern }
+                    if INSTRUCTION_OVERRIDE_PATTERNS.contains(&pattern.as_str())
+            )
+        })
+        .count()
+        >= 2
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -721,30 +745,61 @@ fn strip_dangerous_html_tags(html: &str) -> String {
             .expect("valid event handler regex")
     });
 
+    // URL-carrying attributes whose value starts with a scripting/data
+    // scheme. The scheme IS the payload, so the whole attribute is dropped
+    // (previously `<a href="javascript:...">` kept its href: the detector
+    // flagged it, the remover did not strip it).
+    static DANGEROUS_URL_ATTR_RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r#"(?i)\s+(?:href|src|action|formaction|xlink:href|poster|background)\s*=\s*(?:"\s*(?:javascript|vbscript|data)\s*:[^"]*"|'\s*(?:javascript|vbscript|data)\s*:[^']*'|(?:javascript|vbscript|data)\s*:[^\s>]*)"#,
+        )
+        .expect("valid dangerous URL attribute regex")
+    });
+
     let no_tags = DANGEROUS_TAG_RE.replace_all(html, "");
     let no_handlers = EVENT_HANDLER_RE.replace_all(&no_tags, "");
-    no_handlers.to_string()
+    let no_url_attrs = DANGEROUS_URL_ATTR_RE.replace_all(&no_handlers, "");
+    no_url_attrs.into_owned()
 }
+
+/// ASCII-case-insensitive strip patterns applied to plain-text email
+/// bodies. The previous `str::replace` pass was case-sensitive, so
+/// `<SCRIPT>`, `JaVaScRiPt:` and `ONERROR=` sailed through untouched
+/// (each entry is anchored only at the literal tag/prefix, ASCII
+/// case-folding is enough for this ASCII-only markup vocabulary).
+static EMAIL_BODY_STRIP_PATTERNS: Lazy<Vec<(Regex, &'static str)>> = Lazy::new(|| {
+    [
+        (r"(?i)<script", "[removed]"),
+        (r"(?i)</script", "[removed]"),
+        (r"(?i)<iframe", "[removed]"),
+        (r"(?i)</iframe", "[removed]"),
+        (r"(?i)javascript:", "[removed]"),
+        (r"(?i)vbscript:", "[removed]"),
+        (r"(?i)onclick\s*=", "[removed]"),
+        (r"(?i)onerror\s*=", "[removed]"),
+        (r"(?i)onload\s*=", "[removed]"),
+        (r"(?i)<img", "[removed]"),
+        (r"(?i)<a\s+href", "[removed]"),
+    ]
+    .into_iter()
+    .map(|(pattern, replacement)| {
+        (
+            Regex::new(pattern).unwrap_or_else(|error| panic!("valid pattern {pattern}: {error}")),
+            replacement,
+        )
+    })
+    .collect()
+});
 
 /// Sanitize an email body for HTML content before SMTP delivery.
 /// Strips HTML injection from AI-generated email responses.
 pub fn sanitize_email_body(body: &str, allow_html: bool) -> String {
     if !allow_html {
-        // For text/plain emails, strip ALL HTML-like content
+        // For text/plain emails, strip ALL HTML-like content — matched
+        // ASCII-case-insensitively so case-folding cannot bypass a pattern.
         let mut s = body.to_string();
-        for pattern in &[
-            ("<script", "[removed]"),
-            ("</script", "[removed]"),
-            ("<iframe", "[removed]"),
-            ("</iframe", "[removed]"),
-            ("javascript:", "[removed]"),
-            ("onclick=", "[removed]"),
-            ("onerror=", "[removed]"),
-            ("onload=", "[removed]"),
-            ("<img", "[removed]"),
-            ("<a href", "[removed]"),
-        ] {
-            s = s.replace(pattern.0, pattern.1);
+        for (pattern, replacement) in EMAIL_BODY_STRIP_PATTERNS.iter() {
+            s = pattern.replace_all(&s, *replacement).into_owned();
         }
         s
     } else {
@@ -1020,6 +1075,47 @@ mod tests {
     fn test_sanitize_output_javascript_url() {
         let result = sanitize_llm_output(r#"<a href="javascript:alert(1)">link</a>"#);
         assert!(result.was_modified);
+        // The href itself must be neutralized, not merely detected.
+        assert!(
+            !result.sanitized.to_ascii_lowercase().contains("javascript:"),
+            "javascript: URL must not survive: {}",
+            result.sanitized
+        );
+        assert!(result.sanitized.contains("link"), "link text is kept");
+        assert!(
+            !result.sanitized.contains("href"),
+            "the dangerous attribute is dropped with its value: {}",
+            result.sanitized
+        );
+    }
+
+    #[test]
+    fn sanitize_output_strips_data_and_case_folded_url_schemes() {
+        // data: URLs in href/src are dropped like javascript: ones.
+        let result = sanitize_llm_output(r#"<a href="data:text/html;base64,PHNjcmlwdD4=">x</a>"#);
+        assert!(result.was_modified);
+        assert!(
+            !result.sanitized.to_ascii_lowercase().contains("data:"),
+            "data: URL must not survive: {}",
+            result.sanitized
+        );
+
+        // Case-folded and single-quoted variants are caught too.
+        let result = sanitize_llm_output(r#"<img src='JaVaScRiPt:alert(1)'>"#);
+        assert!(result.was_modified);
+        assert!(
+            !result.sanitized.to_ascii_lowercase().contains("javascript:"),
+            "case-folded scheme must not survive: {}",
+            result.sanitized
+        );
+    }
+
+    #[test]
+    fn sanitize_output_keeps_ordinary_hrefs() {
+        // A benign http(s) href in a non-dangerous tag is untouched.
+        let result = sanitize_llm_output(r#"<a href="https://apexmail.ee/docs">docs</a>"#);
+        assert!(!result.was_modified);
+        assert!(result.sanitized.contains("https://apexmail.ee/docs"));
     }
 
     #[test]
@@ -1039,6 +1135,23 @@ mod tests {
         );
         assert!(!result.contains("<script"));
         assert!(result.contains("Thank you"));
+    }
+
+    #[test]
+    fn sanitize_email_body_matches_ascii_case_insensitively() {
+        // Regression: the strip pass was case-sensitive; case-folded
+        // payloads passed through verbatim.
+        let result = sanitize_email_body(
+            "Hi <SCRIPT>alert(1)</SCRIPT> click <A HREF=\"JaVaScRiPt:alert(2)\">me</A> now",
+            false,
+        );
+        assert!(!result.to_ascii_lowercase().contains("<script"));
+        assert!(!result.to_ascii_lowercase().contains("javascript:"));
+        assert!(result.contains("Hi"), "surrounding text is kept");
+
+        let result = sanitize_email_body("<IMG SRC=none ONERROR=steal()>", false);
+        assert!(!result.to_ascii_lowercase().contains("onerror"));
+        assert!(!result.to_ascii_lowercase().contains("<img"));
     }
 
     #[test]

@@ -51,7 +51,19 @@ pub async fn create_placement_test(
 
     match state.engine.create_test(body, tenant_uuid).await {
         Ok(test) => created(serde_json::json!(test)),
-        Err(e) => err(StatusCode::BAD_REQUEST, &e.to_string()),
+        // Validation refusals travel as sqlx::Error::Protocol carrying
+        // operator guidance (no seed accounts, rate limit, unverified From
+        // domain) — those are genuine 400s for the caller to act on.
+        Err(e @ sqlx::Error::Protocol(_)) => err(StatusCode::BAD_REQUEST, &e.to_string()),
+        // Everything else is an infrastructure failure (DB outage, pool
+        // exhaustion): a 500 that does not leak internals to the caller.
+        Err(e) => {
+            tracing::error!(error = %e, "inbox-placement: create test failed");
+            err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to create placement test",
+            )
+        }
     }
 }
 
@@ -261,7 +273,9 @@ pub async fn get_placement_trends(
         Err(_) => return err(StatusCode::BAD_REQUEST, "invalid tenant_id"),
     };
 
-    let days = days.unwrap_or(30) as i32;
+    // Trend window: default 30 days, clamped to 1..=365 so an unclamped
+    // `days` cannot drag the query start back decades (or zero it out).
+    let days = days.unwrap_or(30).clamp(1, 365) as i32;
 
     // Parse optional provider filter.
     let provider = provider.as_deref().map(ProviderName::from_str);

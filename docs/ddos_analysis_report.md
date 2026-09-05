@@ -1,10 +1,10 @@
 # DDoS Protection System Analysis Report
 
-> **Implementation Status (2026-02):** All 7 recommended systems below have been fully implemented as Rust crates in `services/mail-server/crates/`. Combined with the existing `ddos-protection` crate, ApexMail now has 8 security crates with 230 passing tests. See [Security Systems Reference](security/Security_Systems.md) for complete implementation details.
+> **Implementation Status (updated 2026-09-05):** The systems below exist as Rust crates in `services/mail-server/crates/` (8 security crates, 230 passing tests). **However, most are not wired into any production binary** — the 2026-09-05 full-repo audit (section 1.2) found that `waf-engine`, `ids-engine`, `ato-protection`, `dlp-engine`, `sandbox`, `isolation`, `ha`, `rate-limiter`, and `pattern-matcher` are dead code with no consumer in the deployed services. Read this report as a design analysis, not a description of live runtime protection. See [Security Systems Reference](security/Security_Systems.md) and [the audit](audit/full-repo-audit-2026-09-05.md).
 
 ## 1. Quality and Architecture Analysis
 
-The DDoS protection system implemented in the `ApexMail` project (`crates/ddos-protection`) is of exceptionally high quality, featuring a sophisticated, multi-layered defense-in-depth architecture. 
+The DDoS protection crate in the `ApexMail` project (`crates/ddos-protection`) implements a multi-layered defense-in-depth architecture with these properties: 
 
 ### Key Architectural Layers:
 *   **Layer 1: Network Edge** - Support for XDP/eBPF packet filtering for high-performance, low-level traffic dropping.
@@ -23,7 +23,7 @@ The DDoS protection system implemented in the `ApexMail` project (`crates/ddos-p
 
 ## 2. Real-Life Usefulness
 
-This system is **highly useful and production-ready** for a modern, high-scale mail server environment. 
+The design addresses these failure modes of a high-scale mail server environment: 
 
 *   **Resource Exhaustion Prevention:** The SMTP-specific protections (like Tarpitting and Slowloris mitigation) are critical. Mail servers are frequent targets for slow-drip attacks designed to tie up connection pools; this system explicitly mitigates that.
 *   **False Positive Reduction:** By using ML, behavioral analysis, and progressive challenges, the system avoids the common pitfall of static rate limiters: blocking legitimate users during traffic spikes.
@@ -34,7 +34,7 @@ This system is **highly useful and production-ready** for a modern, high-scale m
 
 ## 3. Recommended Additional Security Systems (Hybrid FOSS & Custom Rust Architecture)
 
-To achieve the most sophisticated, state-of-the-art security posture, we must combine the best-in-class, continuously updated Free and Open Source Software (FOSS) with highly specialized, custom-coded Rust components where FOSS falls short or introduces unacceptable overhead.
+To reach the target security posture, we combine continuously updated Free and Open Source Software (FOSS) with custom-coded Rust components where FOSS falls short or introduces unacceptable overhead.
 
 ### A. Network & Infrastructure Security (FOSS + Custom Rust)
 

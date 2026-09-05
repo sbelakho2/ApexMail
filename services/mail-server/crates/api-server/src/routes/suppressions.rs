@@ -95,6 +95,33 @@ pub struct BulkSuppressResponse {
 
 const MAX_BULK_ENTRIES: usize = 10_000;
 
+/// Rows per chunked multi-row INSERT in [`bulk_suppress`] — one round-trip
+/// per 500 rows (5 bind parameters each) instead of one per row.
+const SUPPRESSION_BULK_CHUNK_SIZE: usize = 500;
+
+/// Maximum length of the caller-supplied `reason` and `source` fields —
+/// suppressions.reason is VARCHAR(50) and source VARCHAR(100) on the
+/// canonical schema (runtime CREATE_SUPPRESSIONS), so over-long values
+/// used to fail inside the INSERT with a database error instead of a 400.
+const MAX_REASON_LEN: usize = 50;
+const MAX_SOURCE_LEN: usize = 100;
+
+/// Validate the caller-supplied `reason`/`source` lengths against the
+/// VARCHAR columns they are stored in.
+fn validate_reason_source(reason: &str, source: &str) -> Result<(), ApiError> {
+    if reason.is_empty() || reason.len() > MAX_REASON_LEN {
+        return Err(ApiError::Validation(vec![format!(
+            "reason is required and must be {MAX_REASON_LEN} characters or fewer"
+        )]));
+    }
+    if source.len() > MAX_SOURCE_LEN {
+        return Err(ApiError::Validation(vec![format!(
+            "source must be {MAX_SOURCE_LEN} characters or fewer"
+        )]));
+    }
+    Ok(())
+}
+
 struct PreparedBulkEntry<'a> {
     email: String,
     reason: &'a str,
@@ -111,6 +138,12 @@ fn prepare_bulk_entries<'a>(
     for entry in entries {
         let email = canonical_email(&entry.email);
         if !apexmail_lib::validation::is_valid_email(&email) {
+            invalid += 1;
+            continue;
+        }
+        // Over-long reasons would fail inside the chunked INSERT (the column
+        // is VARCHAR(50)) — reject them up front as invalid entries.
+        if entry.reason.is_empty() || entry.reason.len() > MAX_REASON_LEN {
             invalid += 1;
             continue;
         }
@@ -138,9 +171,11 @@ async fn create_suppression(
 
     let email = canonical_email(&body.email);
 
-    if !apexmail_lib::validation::is_valid_email(&email) {
+    if !apexmail_lib::validation::is_valid_email(&body.email) {
         return Err(ApiError::Validation(vec!["invalid email address".into()]));
     }
+    validate_reason_source(&body.reason, &body.source)?;
+
 
     // Check duplicate
     let exists = sqlx::query_scalar::<_, i64>(
@@ -278,31 +313,65 @@ async fn bulk_suppress(
         let existing_set: std::collections::HashSet<&str> =
             existing.iter().map(|(e,)| e.as_str()).collect();
 
-        // Batch insert non-duplicates
+        // Chunked multi-row insert (previously one INSERT per entry — up to
+        // 10,000 sequential round-trips for a max-size bulk request). Rows
+        // already present are filtered first, so each chunk is a plain
+        // multi-row INSERT with ON CONFLICT DO NOTHING as the race safety
+        // net; a chunk hit by a concurrent insert simply counts those rows
+        // as duplicates.
+        let to_insert: Vec<&PreparedBulkEntry> = valid_entries
+            .iter()
+            .filter(|entry| !existing_set.contains(entry.email.as_str()))
+            .collect();
+
         let now = Utc::now();
-        for entry in &valid_entries {
-            if existing_set.contains(entry.email.as_str()) {
-                duplicates += 1;
+        for chunk in to_insert.chunks(SUPPRESSION_BULK_CHUNK_SIZE) {
+            if chunk.is_empty() {
                 continue;
             }
 
-            match sqlx::query(
-                "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
-                 VALUES ($1,$2,$3,$4,'bulk',$5)
-                 ON CONFLICT (tenant_id, email) DO NOTHING",
-            )
-            .bind(next_suppression_id())
-            .bind(&auth.tenant_id)
-            .bind(&entry.email)
-            .bind(entry.reason)
-            .bind(now)
-            .execute(&state.db)
-            .await
-            {
-                Ok(r) if r.rows_affected() > 0 => created += 1,
-                Ok(_) => duplicates += 1, // ON CONFLICT hit
+            let mut query = String::from(
+                "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at) VALUES ",
+            );
+            let mut param_idx = 1u32;
+            for (i, _) in chunk.iter().enumerate() {
+                if i > 0 {
+                    query.push_str(", ");
+                }
+                query.push_str(&format!(
+                    "(${}, ${}, ${}, ${}, 'bulk', ${})",
+                    param_idx,
+                    param_idx + 1,
+                    param_idx + 2,
+                    param_idx + 3,
+                    param_idx + 4,
+                ));
+                param_idx += 5;
+            }
+            query.push_str(" ON CONFLICT (tenant_id, email) DO NOTHING");
+
+            let mut q = sqlx::query(&query);
+            for entry in chunk {
+                q = q
+                    .bind(next_suppression_id())
+                    .bind(&auth.tenant_id)
+                    .bind(&entry.email)
+                    .bind(entry.reason);
+            }
+            q = q.bind(now);
+
+            match q.execute(&state.db).await {
+                Ok(r) => {
+                    created += r.rows_affected() as usize;
+                    duplicates += chunk.len() - r.rows_affected() as usize;
+                }
                 Err(e) => {
-                    tracing::error!(email = %apexmail_lib::pii::redact_email(&entry.email), error = %e, "bulk suppress insert failed");
+                    tracing::error!(
+                        tenant_id = %auth.tenant_id,
+                        count = chunk.len(),
+                        error = %e,
+                        "bulk suppress chunk failed"
+                    );
                 }
             }
         }
@@ -412,6 +481,34 @@ mod tests {
         assert_eq!(prepared.len(), 1);
         assert_eq!(prepared[0].email, "alice@example.com");
         assert_eq!(duplicates, 1);
+        assert_eq!(invalid, 1);
+    }
+
+    #[test]
+    fn test_validate_reason_source_matches_column_widths() {
+        assert!(validate_reason_source("hard_bounce", "manual").is_ok());
+        assert!(validate_reason_source("hard_bounce", "").is_ok());
+
+        // reason is VARCHAR(50): empty and over-long must 400, not fail
+        // inside the INSERT.
+        assert!(validate_reason_source("", "manual").is_err());
+        assert!(validate_reason_source(&"r".repeat(51), "manual").is_err());
+        assert!(validate_reason_source(&"r".repeat(50), "manual").is_ok());
+        // source is VARCHAR(100).
+        assert!(validate_reason_source("hard_bounce", &"s".repeat(101)).is_err());
+        assert!(validate_reason_source("hard_bounce", &"s".repeat(100)).is_ok());
+    }
+
+    #[test]
+    fn test_prepare_bulk_entries_rejects_overlong_reasons_as_invalid() {
+        let entries = vec![BulkEntry {
+            email: "ok@example.com".into(),
+            reason: "r".repeat(51),
+        }];
+
+        let (prepared, _duplicates, invalid) = prepare_bulk_entries(&entries);
+
+        assert!(prepared.is_empty());
         assert_eq!(invalid, 1);
     }
 }

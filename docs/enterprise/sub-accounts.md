@@ -35,7 +35,7 @@ Parent Account (Agency/Enterprise)
 ### API Request
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/sub-accounts \
+curl -X POST https://enterprise.apexmail.ee/sub-accounts \
   -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -88,7 +88,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/sub-accounts \
 Configure limits per sub-account:
 
 ```bash
-curl -X PUT https://api.apexmail.ee/enterprise/v1/sub-accounts/{sub_account_id}/quotas \
+curl -X PUT https://enterprise.apexmail.ee/sub-accounts/{sub_account_id}/quotas \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "quotas": {
@@ -173,7 +173,7 @@ Sub-Account User
 ### List Sub-Accounts
 
 ```bash
-curl https://api.apexmail.ee/enterprise/v1/sub-accounts \
+curl https://enterprise.apexmail.ee/sub-accounts \
   -H "X-API-Key: YOUR_API_KEY"
 ```
 
@@ -207,7 +207,7 @@ Response:
 ### Update Sub-Account
 
 ```bash
-curl -X PUT https://api.apexmail.ee/enterprise/v1/sub-accounts/{sub_account_id} \
+curl -X PUT https://enterprise.apexmail.ee/sub-accounts/{sub_account_id} \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "name": "Client ABC - Premium",
@@ -221,7 +221,7 @@ curl -X PUT https://api.apexmail.ee/enterprise/v1/sub-accounts/{sub_account_id} 
 ### Suspend Sub-Account
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/sub-accounts/{sub_account_id}/suspend \
+curl -X POST https://enterprise.apexmail.ee/sub-accounts/{sub_account_id}/suspend \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "reason": "billing_issue",
@@ -232,7 +232,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/sub-accounts/{sub_account_id}
 ### Delete Sub-Account
 
 ```bash
-curl -X DELETE https://api.apexmail.ee/enterprise/v1/sub-accounts/{sub_account_id} \
+curl -X DELETE https://enterprise.apexmail.ee/sub-accounts/{sub_account_id} \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "confirmDeletion": true,
@@ -246,7 +246,7 @@ curl -X DELETE https://api.apexmail.ee/enterprise/v1/sub-accounts/{sub_account_i
 ### Sub-Account Analytics
 
 ```bash
-curl https://api.apexmail.ee/enterprise/v1/sub-accounts/{sub_account_id}/analytics \
+curl https://enterprise.apexmail.ee/sub-accounts/{sub_account_id}/analytics \
   -H "X-API-Key: YOUR_API_KEY" \
   -G -d "startDate=2024-01-01" -d "endDate=2024-01-31"
 ```
@@ -284,7 +284,7 @@ Response:
 Get analytics across all sub-accounts:
 
 ```bash
-curl https://api.apexmail.ee/enterprise/v1/sub-accounts/analytics/aggregate \
+curl https://enterprise.apexmail.ee/sub-accounts/analytics/aggregate \
   -H "X-API-Key: YOUR_API_KEY"
 ```
 
@@ -293,7 +293,7 @@ curl https://api.apexmail.ee/enterprise/v1/sub-accounts/analytics/aggregate \
 ### Per-Sub-Account Billing
 
 ```bash
-curl https://api.apexmail.ee/enterprise/v1/sub-accounts/billing \
+curl https://enterprise.apexmail.ee/sub-accounts/billing \
   -H "X-API-Key: YOUR_API_KEY" \
   -G -d "month=2024-01"
 ```

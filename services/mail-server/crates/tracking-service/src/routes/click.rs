@@ -246,44 +246,30 @@ async fn verify_redirect_domain(state: &AppState, tenant_id: &str, domain: &str)
         }
     }
 
-    // 3. Postgres:owned domains
-    let result: bool = async {
-        let row = sqlx::query_as::<_, (i64,)>(
-            "SELECT 1 FROM domains WHERE tenant_id = $1 AND domain = $2 LIMIT 1",
-        )
-        .bind(tenant_id)
-        .bind(domain)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
-
-        if row.is_some() {
-            return true;
+    // 3. Postgres:owned domains, then tenant allowed_redirect_domains
+    //    wildcard patterns.
+    //
+    // A database ERROR must NOT be treated as an authoritative "not allowed":
+    // the previous `.ok().flatten()` swallowed failures and cached them as a
+    // 300 s deny, silently breaking every owned-domain redirect during a
+    // database blip. On error we log at ERROR level and return the safe
+    // fallback WITHOUT touching the caches, so the next request re-queries.
+    // Only an authoritative absence (no owned-domain row AND no pattern
+    // match) is cached as "0".
+    let result = match query_domain_authorization(state, tenant_id, domain).await {
+        Ok(authorized) => authorized,
+        Err(error) => {
+            error!(
+                tenant_id = %tenant_id,
+                domain = %domain,
+                error = %error,
+                "Click: domain authorization lookup failed — denying for this request only"
+            );
+            return false;
         }
+    };
 
-        // 4. Postgres:allowed_redirect_domains wildcard patterns
-        let row = sqlx::query_as::<_, (Vec<String>,)>(
-            "SELECT allowed_redirect_domains FROM tenant_settings WHERE tenant_id = $1",
-        )
-        .bind(tenant_id)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
-
-        if let Some((patterns,)) = row {
-            for pattern in &patterns {
-                if match_domain_pattern(domain, pattern) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-    .await;
-
-    // Cache result in both Redis and moka
+    // Cache the authoritative result in both Redis and moka.
     if let Ok(mut conn) = state.redis.get().await {
         let val = if result { "1" } else { "0" };
         let _ = redis::cmd("SETEX")
@@ -295,6 +281,46 @@ async fn verify_redirect_domain(state: &AppState, tenant_id: &str, domain: &str)
     }
     state.domain_cache.insert(cache_key, result).await;
     result
+}
+
+/// Authoritative Postgres check for redirect-domain authorization: an
+/// owned `domains` row, or a wildcard match in `tenant_settings`.
+/// `Err` means the database could not answer — callers must deny for the
+/// current request WITHOUT caching the outcome.
+async fn query_domain_authorization(
+    state: &AppState,
+    tenant_id: &str,
+    domain: &str,
+) -> Result<bool, sqlx::Error> {
+    // Migration 070 renamed `domains.domain` to `domains.name` — the old
+    // column reference made this query fail on every deployment.
+    let owned = sqlx::query_as::<_, (i64,)>(
+        "SELECT 1 FROM domains WHERE tenant_id = $1 AND name = $2 LIMIT 1",
+    )
+    .bind(tenant_id)
+    .bind(domain)
+    .fetch_optional(&state.db)
+    .await?;
+
+    if owned.is_some() {
+        return Ok(true);
+    }
+
+    let patterns = sqlx::query_as::<_, (Vec<String>,)>(
+        "SELECT allowed_redirect_domains FROM tenant_settings WHERE tenant_id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_optional(&state.db)
+    .await?;
+
+    if let Some((patterns,)) = patterns {
+        for pattern in &patterns {
+            if match_domain_pattern(domain, pattern) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Match a domain against a pattern (supports `*.example.com` wildcard prefix).

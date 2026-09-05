@@ -12,7 +12,7 @@ use crate::config::AiConfig;
 use crate::types::{AiError, Prediction};
 
 /// Connection details for an OpenAI-compatible chat-completions runtime.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct InferenceConfig {
     pub enabled: bool,
     pub endpoint: String,
@@ -23,6 +23,23 @@ pub struct InferenceConfig {
     /// (AI_TEMPERATURE) — previously parsed by config and never consumed.
     pub max_tokens: u32,
     pub temperature: f64,
+}
+
+/// Manual Debug: the derived implementation printed the provider API key
+/// verbatim into logs and error reports. The key is redacted to its
+/// presence only.
+impl std::fmt::Debug for InferenceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InferenceConfig")
+            .field("enabled", &self.enabled)
+            .field("endpoint", &self.endpoint)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "[redacted]"))
+            .field("timeout", &self.timeout)
+            .field("max_tokens", &self.max_tokens)
+            .field("temperature", &self.temperature)
+            .finish()
+    }
 }
 
 impl InferenceConfig {
@@ -134,6 +151,19 @@ pub(crate) fn build_predict_user_prompt(input: &serde_json::Value) -> Result<Str
     Ok(format!("<user_data>\n{pretty}\n</user_data>"))
 }
 
+/// Timeout floor used when the configured timeout is zero/absent, so no
+/// model request can hang forever even on a degraded client build.
+const FALLBACK_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// The configured timeout, or the [`FALLBACK_TIMEOUT`] floor when zero.
+fn effective_timeout(config: &InferenceConfig) -> Duration {
+    if config.timeout.is_zero() {
+        FALLBACK_TIMEOUT
+    } else {
+        config.timeout
+    }
+}
+
 /// A bounded client for the model provider.
 #[derive(Clone)]
 pub struct LlmClient {
@@ -143,11 +173,40 @@ pub struct LlmClient {
 
 impl LlmClient {
     pub fn new(config: InferenceConfig) -> Self {
-        let http = Client::builder()
-            .timeout(config.timeout)
-            .build()
-            .unwrap_or_else(|_| Client::new());
+        let http = match Client::builder().timeout(config.timeout).build() {
+            Ok(client) => client,
+            Err(error) => {
+                // A builder failure must never degrade into a timeout-less
+                // client: `Client::new()` carries no default timeout, and an
+                // unbounded provider call can pin a worker forever. Retry
+                // with a minimal sane timeout and log the original error.
+                let fallback_timeout = effective_timeout(&config);
+                tracing::error!(
+                    error = %error,
+                    configured_secs = config.timeout.as_secs(),
+                    fallback_secs = fallback_timeout.as_secs(),
+                    "model HTTP client build failed — retrying with a minimal sane timeout"
+                );
+                Client::builder()
+                    .timeout(fallback_timeout)
+                    .build()
+                    .unwrap_or_else(|fallback_error| {
+                        tracing::error!(
+                            error = %fallback_error,
+                            "model HTTP client build failed twice — using default client; per-request timeouts still bound every call"
+                        );
+                        Client::new()
+                    })
+            }
+        };
         Self { config, http }
+    }
+
+    /// The configured timeout, or the [`FALLBACK_TIMEOUT`] floor when it is
+    /// zero. Applied per request so the bound holds even on a client whose
+    /// builder-level timeout could not be set.
+    fn request_timeout(&self) -> Duration {
+        effective_timeout(&self.config)
     }
 
     pub fn is_enabled(&self) -> bool {
@@ -292,6 +351,7 @@ impl LlmClient {
         let mut request = self
             .http
             .post(self.config.chat_completions_url())
+            .timeout(self.request_timeout())
             .json(&payload);
         if let Some(api_key) = &self.config.api_key {
             request = request.bearer_auth(api_key);
@@ -306,9 +366,13 @@ impl LlmClient {
         })?;
 
         if !status.is_success() {
-            let detail: String = body.chars().take(512).collect();
+            // Keep a short, clearly-marked prefix only: provider error
+            // bodies frequently echo the user's prompt back, and this string
+            // flows into error logs and API responses.
+            const MAX_PROVIDER_ERROR_CHARS: usize = 200;
+            let detail: String = body.chars().take(MAX_PROVIDER_ERROR_CHARS).collect();
             return Err(AiError::ModelUnavailable(format!(
-                "model provider returned {status}: {detail}"
+                "model provider returned {status} (provider error prefix, truncated): {detail}"
             )));
         }
 
@@ -499,5 +563,116 @@ mod tests {
         let nested = out["nested"]["list"][0].as_str().unwrap();
         assert!(nested.contains("[truncated]"));
         assert_eq!(out["nested"]["list"][1], 7);
+    }
+
+    #[test]
+    fn inference_config_debug_redacts_the_api_key() {
+        // Regression: the derived Debug printed the provider key verbatim.
+        let config = InferenceConfig {
+            enabled: true,
+            endpoint: "https://model.example/v1".into(),
+            model: "apexmail-assistant".into(),
+            api_key: Some("sk-super-secret-provider-key".into()),
+            timeout: Duration::from_secs(30),
+            max_tokens: 768,
+            temperature: 0.0,
+        };
+        let rendered = format!("{config:?}");
+        assert!(
+            !rendered.contains("sk-super-secret-provider-key"),
+            "Debug must not leak the key: {rendered}"
+        );
+        assert!(
+            rendered.contains(r#""[redacted]""#),
+            "presence is reported redacted: {rendered}"
+        );
+        // The None case reports cleanly too.
+        let no_key = InferenceConfig { api_key: None, ..config };
+        assert!(!format!("{no_key:?}").contains("sk-"));
+    }
+
+    #[test]
+    fn effective_timeout_floors_zero_timeouts() {
+        let mut config = InferenceConfig::default();
+        config.timeout = Duration::from_secs(30);
+        assert_eq!(effective_timeout(&config), Duration::from_secs(30));
+        config.timeout = Duration::ZERO;
+        assert_eq!(effective_timeout(&config), FALLBACK_TIMEOUT);
+    }
+
+    /// One-shot mock endpoint that always answers 500 with a huge body that
+    /// echoes the user's prompt (as real providers do in validation errors).
+    async fn spawn_failing_endpoint() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind ephemeral port");
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("accept one request");
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            // Drain until end of headers + body (best effort; the client
+            // sends one small JSON body).
+            loop {
+                let n = tokio::io::AsyncReadExt::read(&mut sock, &mut chunk)
+                    .await
+                    .unwrap_or(0);
+                if n == 0 {
+                    break;
+                }
+                buf.extend_from_slice(&chunk[..n]);
+                let headers_end = buf.windows(4).position(|w| w == b"\r\n\r\n");
+                if let Some(pos) = headers_end {
+                    let content_length: usize = String::from_utf8_lossy(&buf[..pos])
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                        .and_then(|l| l.split(':').nth(1))
+                        .and_then(|v| v.trim().parse().ok())
+                        .unwrap_or(0);
+                    if buf.len() >= pos + 4 + content_length {
+                        break;
+                    }
+                }
+            }
+            let body = format!("{{\"error\":{{\"message\":\"invalid request: {}\"}}}}", "E".repeat(5000));
+            let head = format!(
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, head.as_bytes()).await;
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut sock, body.as_bytes()).await;
+            let _ = tokio::io::AsyncWriteExt::shutdown(&mut sock).await;
+        });
+        format!("http://{addr}/v1")
+    }
+
+    /// Provider error bodies must arrive at logs/callers only as a short,
+    /// clearly-marked prefix — they can echo the user's prompt verbatim.
+    #[tokio::test]
+    async fn provider_error_bodies_are_truncated_before_logging_or_returning() {
+        let endpoint = spawn_failing_endpoint().await;
+        let client = LlmClient::new(InferenceConfig {
+            enabled: true,
+            endpoint,
+            model: "apexmail-assistant".into(),
+            api_key: None,
+            timeout: Duration::from_secs(10),
+            max_tokens: 64,
+            temperature: 0.0,
+        });
+        let error = client
+            .generate("system", "user", 64)
+            .await
+            .expect_err("mock endpoint returns 500");
+        let message = error.to_string();
+        assert!(
+            message.contains("truncated"),
+            "the truncation must be marked: {message}"
+        );
+        assert!(
+            message.chars().count() < 400,
+            "the echoed provider body must be bounded: {} chars",
+            message.chars().count()
+        );
     }
 }

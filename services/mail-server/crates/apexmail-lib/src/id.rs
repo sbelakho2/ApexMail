@@ -67,10 +67,15 @@ fn generate_secure_from_alphabet(alphabet: &[u8], len: usize) -> Result<String, 
     if alphabet.is_empty() {
         return Err("alphabet must not be empty".into());
     }
-    // Largest multiple of alphabet.len() that fits in u8 — values above it
-    // are rejected and redrawn so every character is equally likely.
-    let alphabet_len = alphabet.len() as u16;
-    let bound = (256u32 / alphabet_len as u32 * alphabet_len as u32) as u8;
+    // Largest multiple of alphabet.len() that fits in one byte. Kept in
+    // usize: for alphabet lengths that divide 256 exactly (e.g. 128 or
+    // 256) the bound IS 256, which does not fit u8 — the previous
+    // `as u8` cast wrapped it to 0, the rejection test then rejected every
+    // byte, and the loop spun forever. In usize the comparison is correct
+    // for every alphabet length 1..=256 and can never yield 0.
+    let alphabet_len = alphabet.len();
+    debug_assert!((1..=256).contains(&alphabet_len));
+    let bound = (256usize / alphabet_len) * alphabet_len;
     let mut out = String::with_capacity(len);
     let mut bytes = [0u8; 64];
     let mut filled = 0;
@@ -82,9 +87,9 @@ fn generate_secure_from_alphabet(alphabet: &[u8], len: usize) -> Result<String, 
             filled = bytes.len();
         }
         filled -= 1;
-        let b = bytes[filled];
+        let b = bytes[filled] as usize;
         if b < bound {
-            out.push(alphabet[(b as usize) % alphabet.len()] as char);
+            out.push(alphabet[b % alphabet_len] as char);
         }
     }
     Ok(out)
@@ -202,5 +207,47 @@ mod tests {
     #[test]
     fn secure_alphabet_rejects_empty() {
         assert!(generate_secure_from_alphabet(b"", 8).is_err());
+    }
+
+    // ── modulo-bias / termination regression ───────────────────────────
+
+    #[test]
+    fn secure_generation_terminates_for_every_power_of_two_alphabet() {
+        // Regression: the rejection bound was cast to u8, so alphabet
+        // lengths that divide 256 (128, 256) produced bound == 0 → the
+        // loop rejected every byte and spun forever.
+        for alphabet_len in [1usize, 2, 4, 64, 128] {
+            let alphabet: Vec<u8> = (0..alphabet_len as u8).collect();
+            let generated =
+                generate_secure_from_alphabet(&alphabet, 256).expect("generation terminates");
+            assert_eq!(generated.len(), 256, "alphabet_len {alphabet_len}");
+        }
+    }
+
+    #[test]
+    fn secure_generation_is_roughly_uniform() {
+        // 2-char alphabet over 20_000 draws: each ~50% (±2pp tolerance).
+        let alphabet = b"ab";
+        let out = generate_secure_from_alphabet(alphabet, 20_000).unwrap();
+        let a_count = out.bytes().filter(|&b| b == b'a').count();
+        assert!(
+            (9_600..=10_400).contains(&a_count),
+            "expected ~50/50 split, got {a_count}/20000"
+        );
+
+        // 4-char alphabet over 20_000 draws: each ~25% (±2pp).
+        let alphabet = b"wxyz";
+        let out = generate_secure_from_alphabet(alphabet, 20_000).unwrap();
+        for ch in ['w', 'x', 'y', 'z'] {
+            let count = out.chars().filter(|&c| c == ch).count();
+            assert!(
+                (4_600..=5_400).contains(&count),
+                "expected ~25% for {ch}, got {count}/20000"
+            );
+        }
+
+        // Single-char alphabet: always the one character.
+        let out = generate_secure_from_alphabet(b"a", 64).unwrap();
+        assert_eq!(out, "a".repeat(64));
     }
 }

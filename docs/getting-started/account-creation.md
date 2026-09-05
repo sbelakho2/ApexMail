@@ -43,7 +43,7 @@ export APEXMAIL_API_KEY="am_live_xxxxxxxxxxxxxxxxxxxx"
 
 ```bash
 curl -s https://api.apexmail.ee/v1/account \
-  -H "Authorization: Bearer $APEXMAIL_API_KEY" \
+  -H "X-API-Key: $APEXMAIL_API_KEY" \
   | jq .
 ```
 

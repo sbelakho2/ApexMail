@@ -65,6 +65,35 @@ paths = [
     # Root legacy landing page (generated snapshot markup).
     "^index[.]html$",
     #
+    # 2026-09-05 narrowing (audit §2: the old VALUE regexes "CHANGEME",
+    # "changethis" and "0123456789abcdef" suppressed ANY secret containing
+    # those substrings in ANY file): the deterministic hex fixture
+    # '0123456789abcdef…' is now allowlisted by exact reviewed location
+    # instead — every file below was re-triaged as in-source test vectors /
+    # example constants (none is a credential). A real secret containing the
+    # substring anywhere ELSE is caught again.
+    "(^|/)crates/ai-service/src/bandits[.]rs$",
+    "(^|/)crates/apexmail-lib/src/id[.]rs$",
+    "(^|/)crates/api-server/src/routes/(auth|events)[.]rs$",
+    "(^|/)crates/compliance/tests/gdpr_compliance_db_tests[.]rs$",
+    "(^|/)crates/ddos-protection/src/decision[.]rs$",
+    "(^|/)crates/enterprise/src/field_encryption[.]rs$",
+    "(^|/)crates/mailstore-core/src/(encryption|main|storage)[.]rs$",
+    "(^|/)crates/outbound-queue/src/main[.]rs$",
+    "(^|/)crates/sales-autopilot/src/dispatcher[.]rs$",
+    # KiwiCaptcha canonical example vectors live in the package source and
+    # perf tooling (deterministic fake secrets by design).
+    "(^|/)packages/kiwicaptcha/src/",
+    "(^|/)packages/kiwicaptcha/tools/",
+    "(^|/)packages/kiwicaptcha-php/src/ExecutionChallengeGenerator[.]php$",
+    "(^|/)packages/kiwicaptcha/integrations/symfony/src/Risk/ClientContextTag[.]php$",
+    "(^|/)tests/browser/router[.]php$",
+    # Vendored artifacts (tracked binaries / node_modules — see audit §4;
+    # moving them out of git is the real fix): the compiled tailwind CLI
+    # and the vendored playwright tree contain binary hash-like strings.
+    "^apps/marketing-zola/tailwindcss$",
+    "(^|/)tools/contrast-audit/node_modules/",
+    #
     # Per-file heuristic-noise triage (2026-08-23, all 66 remaining findings
     # reviewed line-by-line — every hit is the generic-api-key/tf-password
     # heuristic firing on ordinary code: env-var NAME literals, `key:` struct
@@ -109,19 +138,26 @@ paths = [
 # NOTE on breadth: the entries above are directory-anchored for suites whose
 # entire purpose is fake fixtures, plus generated-output trees. They do NOT
 # cover ordinary source files — in-source test constants are allowlisted by
-# VALUE below so a real secret pasted into any src file still fires.
+# exact reviewed FILE PATH (see the 2026-09-05 narrowing block above) so a
+# real secret pasted into any other src file still fires.
 regexes = [
     # Allow secrets in pull request templates (they're examples)
     "(?i)pull_request_template",
     # Allow references in markdown documentation
     "(?i)your-.+-here",
-    # Allow placeholder values in config maps
-    "CHANGEME",
-    "changethis",
+    # 2026-09-05 narrowing (audit §2): the old bare "CHANGEME"/"changethis"
+    # value suppressors allowed ANY secret containing those substrings. The
+    # replacement only matches COMPOSE DEFAULT INTERPOLATION syntax
+    # (${VAR:-changeme}) — the placeholder shape used in the compose files —
+    # which a real secret value never has. Bare CHANGEME/changethis strings
+    # anywhere else are scanned normally again.
+    "\\$\\{[A-Z_][A-Z0-9_]*:-(changeme|changethis)\\}",
     #
     # 2026-08-23 triage: deterministic fixture values used by in-source
     # test modules and docs examples (reviewed — none is a real credential).
-    "0123456789abcdef",
+    # NOTE: "0123456789abcdef" was REMOVED from this list on 2026-09-05 and
+    # replaced by exact reviewed paths above (audit §2: the substring form
+    # suppressed genuine hex secrets anywhere in the tree).
     "am_test_[0-9a-z]+",
     "am_live_test_[0-9a-z]+",
     "am_live_x1y2z3abc",
@@ -137,3 +173,12 @@ regexes = [
     # Truncated example JWTs in API docs.
     "eyJhbGciOiJIUzI1NiIs[.][.][.]",
 ]
+
+# README.md path note (2026-09-05): the "^README[.]md$" path allowlist in the
+# paths list above CANNOT be narrowed to specific documented sections —
+# gitleaks allowlist paths are regexes matched against the FILE PATH only;
+# there is no line-range or section-anchor primitive in the config format.
+# The README's quickstart curl examples (Bearer <your-key> placeholders) span
+# multiple sections, so the whole file stays allowlisted. Narrowing further
+# would require editing the README content itself (docs owner), not this
+# config.

@@ -66,7 +66,7 @@ Fees are as published on the [pricing page](https://apexmail.ee/pricing) or as a
 
 ### 6.2 Taxes
 
-Estonian VAT (currently 24%) is applied where required by law. VAT-registered EU businesses may provide a valid VAT ID for reverse-charge treatment.
+VAT is applied on a destination basis. Customers in Estonia are charged Estonian VAT (currently 24%); consumers in other EU member states are charged the statutory VAT rate of the relevant member state. Business customers with a valid EU VAT ID on file receive reverse-charge treatment (VAT self-accounted by the customer), and business customers established outside the EU are generally exempt from VAT charged by us.
 
 ### 6.3 Overage
 

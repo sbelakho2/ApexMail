@@ -324,9 +324,11 @@ impl VectorStore {
             let expected_sig = maybe_signature.ok_or(EmbeddingError::IntegrityCheckFailed)?;
             let computed_sig = hex::encode(verifier.finalize().into_bytes());
             if !constant_time_eq(&computed_sig, &expected_sig) {
+                // No signature material in the log — the hex digests are
+                // integrity secrets-adjacent output and belong nowhere.
                 warn!(
                     "NDJSON HMAC verification FAILED — data may be tampered or corrupted. \
-                     Refusing to load. Expected sig: {expected_sig}, computed: {computed_sig}"
+                     Refusing to load."
                 );
                 return Err(EmbeddingError::IntegrityCheckFailed);
             }
@@ -361,12 +363,30 @@ impl VectorStore {
             parsed.push(v);
         }
 
-        let count = parsed.len();
+        // Admit through the same capacity machinery as `add()`: LRU
+        // eviction at the threshold, a hard stop at `max_vectors`. The old
+        // raw `insert()` loop bypassed both caps, so restoring a snapshot
+        // could exceed the memory budget the live path enforces. Once the
+        // cap is reached the remaining rows are dropped (warn + truncated
+        // count) rather than failing the whole restore.
+        let mut imported = 0usize;
         for v in parsed {
+            if self.inner.len() >= self.eviction_threshold {
+                self.evict_lru();
+            }
+            if self.inner.len() >= self.max_vectors {
+                warn!(
+                    imported,
+                    cap = self.max_vectors,
+                    "NDJSON import hit max_vectors — remaining rows dropped"
+                );
+                break;
+            }
             self.inner.insert(v.id, v);
+            imported += 1;
         }
 
-        Ok(count)
+        Ok(imported)
     }
 
     /// Evict the oldest (least recently accessed) entries.

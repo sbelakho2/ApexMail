@@ -31,7 +31,7 @@ QBRs deliver:
 ### Schedule QBR
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/schedule \
+curl -X POST https://enterprise.apexmail.ee/qbr/schedule \
   -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -254,14 +254,14 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/schedule \
 ### Get QBR Report
 
 ```bash
-curl https://api.apexmail.ee/enterprise/v1/qbr/reports/{qbr_id} \
+curl https://enterprise.apexmail.ee/qbr/reports/{qbr_id} \
   -H "X-API-Key: YOUR_API_KEY"
 ```
 
 ### Download QBR Presentation
 
 ```bash
-curl https://api.apexmail.ee/enterprise/v1/qbr/reports/{qbr_id}/download \
+curl https://enterprise.apexmail.ee/qbr/reports/{qbr_id}/download \
   -H "X-API-Key: YOUR_API_KEY" \
   -G -d "format=pdf"
 ```
@@ -269,7 +269,7 @@ curl https://api.apexmail.ee/enterprise/v1/qbr/reports/{qbr_id}/download \
 ### List Historical QBRs
 
 ```bash
-curl https://api.apexmail.ee/enterprise/v1/qbr/reports \
+curl https://enterprise.apexmail.ee/qbr/reports \
   -H "X-API-Key: YOUR_API_KEY"
 ```
 
@@ -339,7 +339,7 @@ Response:
 ### Track Action Item Progress
 
 ```bash
-curl -X PUT https://api.apexmail.ee/enterprise/v1/qbr/actions/{action_id} \
+curl -X PUT https://enterprise.apexmail.ee/qbr/actions/{action_id} \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "status": "completed",
@@ -353,7 +353,7 @@ curl -X PUT https://api.apexmail.ee/enterprise/v1/qbr/actions/{action_id} \
 ### Request Custom Analysis
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/custom-analysis \
+curl -X POST https://enterprise.apexmail.ee/qbr/custom-analysis \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "qbrId": "qbr_2024q1_abc",
@@ -382,7 +382,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/custom-analysis \
 ### Pre-QBR Survey
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/survey \
+curl -X POST https://enterprise.apexmail.ee/qbr/survey \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "qbrId": "qbr_2024q1_abc",
@@ -405,7 +405,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/survey \
 ### Set Quarterly Goals
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/goals \
+curl -X POST https://enterprise.apexmail.ee/qbr/goals \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
@@ -436,7 +436,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/qbr/goals \
 ### Track Goal Progress
 
 ```bash
-curl https://api.apexmail.ee/enterprise/v1/qbr/goals/progress \
+curl https://enterprise.apexmail.ee/qbr/goals/progress \
   -H "X-API-Key: YOUR_API_KEY" \
   -G -d "quarter=2024-Q2"
 ```

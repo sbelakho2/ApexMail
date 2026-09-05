@@ -771,7 +771,6 @@ The **intended production behavior** is the **45-day schedule** documented in [S
 |----------|------|---------|
 | AWS SES Setup Guide | [`docs/deployment/ses-setup.md`](ses-setup.md) | Standalone SES setup walkthrough |
 | Configuration Reference | [`docs/deployment/configuration.md`](configuration.md) | All environment variables |
-| Helx Chart Deployment | [`docs/deployment/helm.md`](helm.md) | Kubernetes deployment |
 | Quickstart Guide | [`docs/deployment/quickstart.md`](quickstart.md) | Local development |
 | SES Tool Contract | [`docs/tool-contracts/ses.md`](../tool-contracts/ses.md) | Internal SES engineering spec |
 | Hetzner Tool Contract | [`docs/tool-contracts/hetzner.md`](../tool-contracts/hetzner.md) | Internal Hetzner engineering spec |

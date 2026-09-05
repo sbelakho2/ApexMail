@@ -254,10 +254,14 @@ async fn dispatch(
     let response = match api_router(state).clone().oneshot(request).await {
         Ok(r) => r,
         Err(e) => {
+            // Public endpoint: log the detail, return a generic message —
+            // the raw in-process dispatch error can carry internal routes
+            // and infrastructure detail.
+            tracing::error!(error = %e, "explorer dispatch failed");
             return (
                 500,
-                serde_json::json!({"error": {"message": format!("dispatch failed: {e}")}}),
-            )
+                serde_json::json!({"error": {"code": "internal_error", "message": "The sandbox request could not be processed. Please try again shortly."}}),
+            );
         }
     };
     let status = response.status().as_u16();
@@ -348,7 +352,16 @@ pub async fn exec(
     }
     let sandbox = match sandbox(&state).await {
         Ok(s) => s,
-        Err(e) => return error_page(StatusCode::INTERNAL_SERVER_ERROR, &e),
+        Err(e) => {
+            // Public endpoint: the provisioning error carries database
+            // detail (table names, driver errors) — log it at ERROR and
+            // show a generic page instead of propagating it.
+            tracing::error!(error = %e, "explorer sandbox provisioning failed");
+            return error_page(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "The API sandbox is temporarily unavailable. Please try again shortly.",
+            );
+        }
     };
 
     let started = std::time::Instant::now();

@@ -90,7 +90,7 @@ impl CompactionWorker {
             // F13:ids already manifested in a previous (possibly crashed) run.
             // A crash between the JSONL write and the DELETE used to duplicate
             // cold rows on rerun — manifested ids are never re-written.
-            let mut manifested = load_manifested_ids(&self.storage_path, tenant_id);
+            let mut manifested = load_manifested_ids(&self.storage_path, tenant_id).await;
 
             loop {
                 let rows = tokio::time::timeout(
@@ -374,7 +374,24 @@ fn parse_manifest(data: &[u8]) -> Option<BatchManifest> {
 /// `*.manifest.json` under the tenant's storage tree). Missing directories
 /// or unreadable/corrupt manifests are skipped — a corrupt manifest costs a
 /// possible cold duplicate for those ids, never data loss.
-fn load_manifested_ids(
+///
+/// The scan is a blocking `std::fs` tree walk, so it runs on the blocking
+/// pool (audit: it used to run directly on the async runtime thread); a
+/// panic inside the blocking task degrades to an empty set (same
+/// fail-open semantics as an unreadable manifest).
+async fn load_manifested_ids(
+    storage_path: &str,
+    tenant_id: &str,
+) -> std::collections::HashSet<uuid::Uuid> {
+    let storage_path = storage_path.to_string();
+    let tenant_id = tenant_id.to_string();
+    tokio::task::spawn_blocking(move || scan_manifested_ids(&storage_path, &tenant_id))
+        .await
+        .unwrap_or_default()
+}
+
+/// Synchronous core of [`load_manifested_ids`] (runs on the blocking pool).
+fn scan_manifested_ids(
     storage_path: &str,
     tenant_id: &str,
 ) -> std::collections::HashSet<uuid::Uuid> {
@@ -499,10 +516,14 @@ mod tests {
 
     /// A crash between JSONL write and DELETE must not duplicate cold rows on
     /// rerun:the rerun loads the manifested ids and skips re-writing them.
-    #[test]
-    fn load_manifested_ids_finds_written_manifests() {
-        let root =
-            std::env::temp_dir().join(format!("apexmail_compact_test_{}", std::process::id()));
+    /// Drives the async wrapper so the blocking-pool path is exercised.
+    #[tokio::test]
+    async fn load_manifested_ids_finds_written_manifests() {
+        let root = std::env::temp_dir().join(format!(
+            "apexmail_compact_test_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
         let dir = root.join("tenant_a/2026/08");
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -519,15 +540,23 @@ mod tests {
         // Non-manifest files must be ignored.
         std::fs::write(dir.join("events_1.jsonl"), b"{}\n").unwrap();
 
-        let loaded = load_manifested_ids(root.to_str().unwrap(), "tenant_a");
+        let loaded = load_manifested_ids(root.to_str().unwrap(), "tenant_a").await;
         assert_eq!(loaded.len(), 2);
         for id in &ids {
             assert!(loaded.contains(id));
         }
 
         // A different tenant / missing tree yields an empty set.
-        assert!(load_manifested_ids(root.to_str().unwrap(), "tenant_b").is_empty());
-        assert!(load_manifested_ids(root.join("nope").to_str().unwrap(), "tenant_a").is_empty());
+        assert!(
+            load_manifested_ids(root.to_str().unwrap(), "tenant_b")
+                .await
+                .is_empty()
+        );
+        assert!(
+            load_manifested_ids(root.join("nope").to_str().unwrap(), "tenant_a")
+                .await
+                .is_empty()
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }

@@ -40,7 +40,6 @@
 
 - Rejected emails (validation failures, unverified domains, suppressed recipients)
 - Duplicate idempotent requests within 24-hour key lifetime
-- Test emails within the free tier
 - Webhook delivery attempts
 - API calls that do not result in accepted emails
 - Account management and dashboard access

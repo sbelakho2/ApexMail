@@ -26,7 +26,7 @@ use chrono::{DateTime, Utc};
 use dns_resolver::DnsLookup;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -464,6 +464,19 @@ async fn delete_domain(
 ) -> Result<StatusCode, ApiError> {
     require_scopes(&auth, &["domains:write"])?;
 
+    // M-5(3): the SES DeleteEmailIdentity HTTPS round-trip used to run while
+    // the domain row lock, the tenant advisory lock, and the SES-identity
+    // advisory lock were all held — a multi-second external-IO window that
+    // serialised every domain mutation for the tenant. Mirroring the verify
+    // flow's re-phasing, the delete is now two phases:
+    //
+    // 1. short locked tx — collect (name, ses_verified) under the same locks
+    //    a re-create would take, delete the row, commit;
+    // 2. best-effort SES delete AFTER the commit, with no locks held. A
+    //    failure is logged (and surfaces in metrics) but does not fail the
+    //    request: the local row is already gone, and a stale SES identity is
+    //    harmless — verification reconfigures pending identities if the name
+    //    ever returns.
     let mut tx = state.db.begin().await?;
     lock_tenant_domain_mutations(&mut tx, &auth.tenant_id).await?;
 
@@ -481,13 +494,6 @@ async fn delete_domain(
         domain.ok_or_else(|| ApiError::NotFound("domain not found".into()))?;
     lock_domain_identity(&mut tx, &domain_name).await?;
 
-    // If SES actually accepted this identity for sending, remove it before the
-    // local row is released for a future create/verify cycle. Pending legacy
-    // identities are safely reconfigured by verification if the name returns.
-    if Config::ses_transport_enabled() && ses_verified {
-        delete_ses_domain_identity(&state, &domain_name).await?;
-    }
-
     let result = sqlx::query("DELETE FROM domains WHERE id = $1::uuid AND tenant_id = $2")
         .bind(&id)
         .bind(&auth.tenant_id)
@@ -499,6 +505,20 @@ async fn delete_domain(
     }
 
     tx.commit().await?;
+
+    // Phase 2 — SES cleanup with no database locks held. If SES actually
+    // accepted this identity for sending, remove it now that the local row is
+    // released for a future create/verify cycle. Pending legacy identities
+    // are safely reconfigured by verification if the name returns.
+    if Config::ses_transport_enabled() && ses_verified {
+        if let Err(error) = delete_ses_domain_identity(&state, &domain_name).await {
+            error!(
+                domain = %domain_name,
+                error = %error,
+                "SES identity cleanup after domain delete failed — the local row is deleted; the stale SES identity is harmless and will be reconfigured if the domain returns"
+            );
+        }
+    }
 
     Ok(StatusCode::NO_CONTENT)
 }

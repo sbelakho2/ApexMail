@@ -82,6 +82,38 @@ enum QueueOutcome {
     RecipientSuppressed,
 }
 
+/// Why the queue write itself failed. Every constructor logs the CAUSE at
+/// ERROR level before returning — the previously swallowed
+/// `.map_err(|_| ())` sites answered 451 without leaving any trace of
+/// WHICH statement failed, turning every queue outage into an
+/// undiagnosable "Requested action aborted". The variant decides the
+/// WHY the queue write failed matters: infrastructure failures are
+/// transient (451, client retries); a malformed internally-generated id is
+/// permanent (554).
+enum QueueWriteFailure {
+    /// Infrastructure failure (DB/pool/task): answer 451 so the client
+    /// retries the message.
+    Transient,
+    /// This message can never be queued (internal invariant broken):
+    /// answer 554 so the client does not retry.
+    Permanent,
+}
+
+impl QueueWriteFailure {
+    /// Log `cause` at ERROR and classify the failure as retryable
+    /// infrastructure (451).
+    fn transient(cause: impl std::fmt::Display, stage: &str) -> Self {
+        tracing::error!(error = %cause, stage = stage, "Submission queue write failed (transient)");
+        Self::Transient
+    }
+
+    /// Log `cause` at ERROR and classify the failure as permanent (554).
+    fn permanent(cause: impl std::fmt::Display, stage: &str) -> Self {
+        tracing::error!(error = %cause, stage = stage, "Submission queue write failed (permanent)");
+        Self::Permanent
+    }
+}
+
 /// Terminal outcome of one AUTH exchange (RFC 4954). Failing replies are
 /// RETURNED, not written: the session loop emits them through `reply!` so
 /// every 4xx/5xx counts toward the session error budget and is logged via
@@ -721,8 +753,16 @@ impl SubmissionServer {
                                 Ok(QueueOutcome::RecipientSuppressed) => {
                                     reply!("550 5.1.1 recipient address suppressed\r\n");
                                 }
-                                Err(_) => {
+                                Err(QueueWriteFailure::Transient) => {
+                                    // Infrastructure failure — already
+                                    // ERROR-logged with its cause inside
+                                    // queue_message; the client retries.
                                     reply!("451 4.3.0 Requested action aborted\r\n");
+                                }
+                                Err(QueueWriteFailure::Permanent) => {
+                                    // Internal invariant broken for THIS
+                                    // message — retrying cannot fix it.
+                                    reply!("554 5.6.0 Message could not be queued\r\n");
                                 }
                             }
                             mail_from = None;
@@ -1102,7 +1142,7 @@ impl SubmissionServer {
         rcpt_to: &[String],
         data: &[u8],
         msg_id: &str,
-    ) -> Result<QueueOutcome, ()> {
+    ) -> Result<QueueOutcome, QueueWriteFailure> {
         // The MIME parse is pure CPU over up to max_message_size (10 MB) of
         // bytes: it must run on the blocking pool, never on the async
         // worker the session loop shares with every other connection. The
@@ -1112,10 +1152,17 @@ impl SubmissionServer {
             let data = data.to_vec();
             tokio::task::spawn_blocking(move || prepare_queue_payload(&data))
                 .await
-                .map_err(|_| ())?
+                .map_err(|e| {
+                    QueueWriteFailure::transient(
+                        e,
+                        "submission queue: payload preparation task failed",
+                    )
+                })?
         };
 
-        let mut tx = self.pool.begin().await.map_err(|_| ())?;
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            QueueWriteFailure::transient(e, "submission queue: begin transaction failed")
+        })?;
 
         // Queue-insert durability: a submission must not be acknowledged
         // before its queue row is recoverable. PostgreSQL defaults to
@@ -1126,7 +1173,12 @@ impl SubmissionServer {
         sqlx::query("SET LOCAL synchronous_commit = on")
             .execute(&mut *tx)
             .await
-            .map_err(|_| ())?;
+            .map_err(|e| {
+                QueueWriteFailure::transient(
+                    e,
+                    "submission queue: SET LOCAL synchronous_commit failed",
+                )
+            })?;
 
         // tenant_id is VARCHAR(26) referencing tenants(id) — never the user's
         // account UUID. Look up the authenticated user's actual tenant (by
@@ -1136,14 +1188,16 @@ impl SubmissionServer {
                 .bind(auth_email)
                 .fetch_optional(&mut *tx)
                 .await
-                .map_err(|_| ())?
+                .map_err(|e| {
+                    QueueWriteFailure::transient(e, "submission queue: tenant lookup failed")
+                })?
                 .flatten();
 
         // CAN-SPAM (F): the REST send path refuses suppressed recipients
         // before queueing; the SMTP submission path must not be a bypass.
         // Canonicalize (trim + lowercase) exactly like the api-server check
         // and drop suppressed recipients from the queued row. A lookup
-        // failure surfaces as Err(()) → 451 so the client retries rather
+        // failure surfaces as Transient → 451 so the client retries rather
         // than silently delivering to a suppressed address.
         let rcpt_to: Vec<String> = match tenant_id.as_deref() {
             Some(tenant) => {
@@ -1156,7 +1210,12 @@ impl SubmissionServer {
                     .bind(&canonical)
                     .fetch_all(&mut *tx)
                     .await
-                    .map_err(|_| ())?;
+                    .map_err(|e| {
+                        QueueWriteFailure::transient(
+                            e,
+                            "submission queue: suppression lookup failed",
+                        )
+                    })?;
                 if !suppressed.is_empty() {
                     for dropped in &suppressed {
                         warn!(
@@ -1208,7 +1267,12 @@ impl SubmissionServer {
                     .bind(requires_ses)
                     .fetch_optional(&mut *tx)
                     .await
-                    .map_err(|_| ())?
+                    .map_err(|e| {
+                        QueueWriteFailure::transient(
+                            e,
+                            "submission queue: sender domain lookup failed",
+                        )
+                    })?
                 }
             }
             None => None,
@@ -1235,7 +1299,13 @@ impl SubmissionServer {
             Some((domain_id, true)) => domain_id,
         };
 
-        let message_uuid = Uuid::parse_str(msg_id).map_err(|_| ())?;
+        // The queue row's id/message_id are UUID columns: a non-UUID msg_id
+        // is an internal invariant violation (this server minted it), not a
+        // client error and not a transient condition — 554, never retried
+        // by a well-behaved client.
+        let message_uuid = Uuid::parse_str(msg_id).map_err(|e| {
+            QueueWriteFailure::permanent(e, "submission queue: generated message id is not a UUID")
+        })?;
         let to_first = rcpt_to.first().cloned().unwrap_or_default();
 
         sqlx::query(
@@ -1265,9 +1335,13 @@ impl SubmissionServer {
         .bind(&payload.attachments)
         .execute(&mut *tx)
         .await
-        .map_err(|_| ())?;
+        .map_err(|e| {
+            QueueWriteFailure::transient(e, "submission queue: email_queue INSERT failed")
+        })?;
 
-        tx.commit().await.map_err(|_| ())?;
+        tx.commit().await.map_err(|e| {
+            QueueWriteFailure::transient(e, "submission queue: transaction commit failed")
+        })?;
 
         info!(
             message_id = %msg_id,

@@ -52,8 +52,8 @@ Wir bewahren personenbezogene Daten nur so lange auf, wie es für die Zwecke, f�
 |---|---|
 | Kontodaten | Vertragsdauer + 30 Tage |
 | Abrechnungsunterlagen | 7 Jahre (estnisches Rechnungslegungsrecht) |
-| E-Mail-Inhalte (Text, Betreff, Header, Anhänge) | Standardmäßig 7 Tage; planabhängiges Maximum (von 1 Tag im Free-Plan bis 730 Tage bei Enterprise) |
-| Ereignisprotokolle (Zustell-, Öffnungs- und Klick-Ereignisse) | Standardmäßig 30 Tage; planabhängiges Maximum (bis 730 Tage bei Enterprise) |
+| E-Mail-Inhalte (Text, Betreff, Header, Anhänge) | Standardmäßig 7 Tage; planabhängig, bis zu 730 Tage bei Enterprise |
+| Ereignisprotokolle (Zustell-, Öffnungs- und Klick-Ereignisse) | Standardmäßig 30 Tage (7 Tage im Free-Plan); planabhängig, bis zu 730 Tage bei Enterprise |
 | Support-Tickets | 2 Jahre nach Lösung |
 
 Vollständige Details finden Sie in unserer [Datenaufbewahrungsrichtlinie](/compliance/#data-retention).

@@ -17,7 +17,7 @@ Template approval workflows provide:
 ### Create Approval Workflow
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/template-workflows \
+curl -X POST https://enterprise.apexmail.ee/template-workflows \
   -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -111,7 +111,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/template-workflows \
 ### Submit Template
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/templates/{template_id}/submit \
+curl -X POST https://enterprise.apexmail.ee/templates/{template_id}/submit \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "workflowId": "wf_marketing_review",
@@ -154,7 +154,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/templates/{template_id}/submi
 ### Approve Template
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/templates/approve \
+curl -X POST https://enterprise.apexmail.ee/templates/approve \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "submissionId": "sub_xyz789",
@@ -172,7 +172,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/templates/approve \
 ### Reject Template
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/templates/approve \
+curl -X POST https://enterprise.apexmail.ee/templates/approve \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "submissionId": "sub_xyz789",
@@ -192,7 +192,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/templates/approve \
 ### Version History
 
 ```bash
-curl https://api.apexmail.ee/enterprise/v1/templates/{template_id}/versions \
+curl https://enterprise.apexmail.ee/templates/{template_id}/versions \
   -H "X-API-Key: YOUR_API_KEY"
 ```
 
@@ -227,7 +227,7 @@ Response:
 ### Compare Versions
 
 ```bash
-curl https://api.apexmail.ee/enterprise/v1/templates/{template_id}/compare \
+curl https://enterprise.apexmail.ee/templates/{template_id}/compare \
   -H "X-API-Key: YOUR_API_KEY" \
   -G -d "v1=2" -d "v2=3"
 ```
@@ -237,7 +237,7 @@ curl https://api.apexmail.ee/enterprise/v1/templates/{template_id}/compare \
 ### Check Submission Status
 
 ```bash
-curl https://api.apexmail.ee/enterprise/v1/templates/submissions/{submission_id} \
+curl https://enterprise.apexmail.ee/templates/submissions/{submission_id} \
   -H "X-API-Key: YOUR_API_KEY"
 ```
 
@@ -285,7 +285,7 @@ Response:
 ### List Pending Approvals
 
 ```bash
-curl https://api.apexmail.ee/enterprise/v1/templates/submissions/pending \
+curl https://enterprise.apexmail.ee/templates/submissions/pending \
   -H "X-API-Key: YOUR_API_KEY" \
   -G -d "approverId=user_legal_head"
 ```

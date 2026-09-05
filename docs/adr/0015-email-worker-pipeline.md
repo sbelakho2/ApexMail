@@ -79,4 +79,4 @@ API Submit → Validate → Enqueue → [Route Decision] → Deliver → Track
 - [Architecture: Delivery Transport](../architecture/delivery-transport.md) — Detailed transport routing
 - [Architecture: Queue System](../architecture/queue-system.md) — Queue architecture overview
 - [`outbound-queue` crate](../../services/mail-server/crates/outbound-queue/) — SES queue worker implementation
-- [`smtp-edge` crate](../../services/mail-server/crates/smtp-edge/) — SMTP delivery worker implementation
+- [`mta` crate](../../services/mail-server/crates/mta/) — SMTP delivery (the legacy `smtp-edge` crate was removed; see `deploy/DEPLOYMENT.md`)

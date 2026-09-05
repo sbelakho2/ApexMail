@@ -95,20 +95,41 @@ async fn get_session(
         reason: None,
     };
 
-    // Check for impersonation session cookie
+    // Check for impersonation session cookie. HMAC + expiry alone vouch
+    // nothing about server state, so every presentation is revalidated
+    // against the stores routes/impersonate.rs wrote at exchange time
+    // (jti tombstone, absolute lifetime cap, operator status). Failures
+    // surface as authenticated:false plus a reason — the endpoint's
+    // contract is a state report, not an error status.
     let impersonation_token = extract_cookie(&headers, "impersonation_session");
     if let Some(token) = impersonation_token {
-        if let Ok(payload) = verify_session_token(&token, &state.config.session_secret) {
-            if payload.token_type.as_deref() == Some("impersonation") {
-                response.authenticated = true;
-                response.impersonation = Some(ImpersonationInfo {
-                    tenant_id: payload.tenant_id.unwrap_or_default(),
-                    operator_id: payload.operator_id.unwrap_or_default(),
-                    operator_name: payload.operator_name.unwrap_or_else(|| "Operator".into()),
-                    exp: payload.exp,
-                    expires_at: payload.exp,
-                });
-                response.session_type = Some("impersonation".into());
+        match verify_session_token(&token, &state.config.session_secret) {
+            Ok(payload) if payload.token_type.as_deref() == Some("impersonation") => {
+                match revalidate_impersonation_session(&state, &payload).await {
+                    Ok(()) => {
+                        response.authenticated = true;
+                        response.impersonation = Some(ImpersonationInfo {
+                            tenant_id: payload.tenant_id.unwrap_or_default(),
+                            operator_id: payload.operator_id.unwrap_or_default(),
+                            operator_name: payload
+                                .operator_name
+                                .unwrap_or_else(|| "Operator".into()),
+                            exp: payload.exp,
+                            expires_at: payload.exp,
+                        });
+                        response.session_type = Some("impersonation".into());
+                    }
+                    Err(reason) => {
+                        tracing::warn!(reason = %reason, "impersonation session refused on revalidation");
+                        response.reason = Some(reason);
+                    }
+                }
+            }
+            // A correctly signed but non-impersonation token in this
+            // cookie authenticates nothing.
+            Ok(_) => {}
+            Err(error) => {
+                response.reason = Some(error.to_string());
             }
         }
     }
@@ -187,9 +208,20 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 struct SessionPayload {
     #[serde(rename = "type")]
     token_type: Option<String>,
+    /// The wire format is camelCase (see routes/impersonate.rs's mint):
+    /// `deny_unknown_fields` makes a missing rename a hard deserialize
+    /// failure, not a silently-null field.
+    #[serde(rename = "tenantId")]
     tenant_id: Option<String>,
+    #[serde(rename = "operatorId")]
     operator_id: Option<String>,
+    #[serde(rename = "operatorName")]
     operator_name: Option<String>,
+    /// `jti` of the single-use impersonation token the session was minted
+    /// from (routes/impersonate.rs mints it as `tokenId`). Mandatory for
+    /// revalidation.
+    #[serde(rename = "tokenId")]
+    token_id: Option<String>,
     exp: Option<i64>,
 }
 
@@ -230,15 +262,109 @@ fn verify_session_token(token: &str, secret: &str) -> Result<SessionPayload, Api
     let payload: SessionPayload = serde_json::from_slice(&payload_bytes)
         .map_err(|_| ApiError::Unauthorized("invalid session token payload".into()))?;
 
-    // Check expiry
-    if let Some(exp) = payload.exp {
-        let now_ms = chrono::Utc::now().timestamp_millis();
-        if now_ms > exp {
-            return Err(ApiError::Unauthorized("session token expired".into()));
-        }
+    // Expiry is MANDATORY: an optional check let a correctly signed token
+    // without `exp` authenticate forever (the same audit-D class fixed for
+    // impersonation tokens in routes/impersonate.rs).
+    let exp = payload
+        .exp
+        .ok_or_else(|| ApiError::Unauthorized("session token missing expiry".into()))?;
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if now_ms > exp {
+        return Err(ApiError::Unauthorized("session token expired".into()));
     }
 
     Ok(payload)
+}
+
+/// Server-side maximum impersonation-SESSION lifetime. The session payload
+/// carries no `iat`, so the absolute cap is enforced as "exp must not
+/// promise more than one hour of validity from the evaluation point" —
+/// the same 1-hour ceiling `MAX_IMPERSONATION_TOKEN_TTL_MS` imposed on
+/// the token at exchange time in routes/impersonate.rs.
+const MAX_IMPERSONATION_SESSION_TTL_MS: i64 = 60 * 60 * 1000;
+
+/// True when `exp_ms` stays within the one-hour absolute cap relative to
+/// `now_ms`. Separated for unit testing.
+fn impersonation_lifetime_within_cap(exp_ms: i64, now_ms: i64) -> bool {
+    exp_ms - now_ms <= MAX_IMPERSONATION_SESSION_TTL_MS
+}
+
+/// Revalidate an impersonation session against server-side state.
+///
+/// Every introspection re-derives liveness from the same stores the token
+/// exchange wrote:
+///
+///   * jti tombstone — `apexmail:impersonation_used:{jti}` is `SET NX`'d
+///     at exchange with a TTL ≥ the session's remaining life, so its
+///     existence proves the session was minted by a single-use exchange
+///     that has not outlived its recorded validity. A missing tombstone
+///     means forged jti, Redis flush, or a stale cookie — all refused,
+///     failing closed exactly like the exchange itself does on Redis
+///     unavailability.
+///   * absolute lifetime cap — [`MAX_IMPERSONATION_SESSION_TTL_MS`].
+///   * operator status — a deactivated operator's live cookies must stop
+///     vouching immediately; the operator resolves by user id or email
+///     against the users table the control plane manages.
+async fn revalidate_impersonation_session(
+    state: &AppState,
+    payload: &SessionPayload,
+) -> Result<(), String> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    let exp = payload
+        .exp
+        .ok_or_else(|| "impersonation session missing expiry".to_string())?;
+    if !impersonation_lifetime_within_cap(exp, now_ms) {
+        return Err("impersonation session exceeds the maximum lifetime".into());
+    }
+
+    let jti = payload
+        .token_id
+        .as_deref()
+        .filter(|jti| !jti.is_empty())
+        .ok_or_else(|| "impersonation session missing token ID".to_string())?;
+
+    let tombstone_key = format!("apexmail:impersonation_used:{jti}");
+    // Both the command error and a pool-acquisition failure land in the
+    // same error arm below: fail closed either way.
+    let tombstone_exists: Result<bool, String> = match state.redis.get().await {
+        Ok(mut conn) => {
+            deadpool_redis::redis::AsyncCommands::exists::<_, bool>(&mut *conn, &tombstone_key)
+                .await
+                .map_err(|error| error.to_string())
+        }
+        Err(error) => Err(format!("redis pool acquisition failed: {error}")),
+    };
+    match tombstone_exists {
+        Ok(true) => {}
+        Ok(false) => return Err("impersonation session is no longer active".into()),
+        Err(error) => {
+            tracing::error!(error = %error, "Redis unavailable revalidating impersonation session");
+            return Err("impersonation session could not be revalidated".into());
+        }
+    }
+
+    let operator_id = payload
+        .operator_id
+        .as_deref()
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| "impersonation session missing operator".to_string())?;
+    let operator_status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM users WHERE id::text = $1 OR LOWER(email) = LOWER($1) LIMIT 1",
+    )
+    .bind(operator_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|error| {
+        tracing::error!(error = %error, "operator status recheck failed for impersonation session");
+        "impersonation session could not be revalidated".to_string()
+    })?;
+    match operator_status.as_deref() {
+        Some("active") => Ok(()),
+        // A missing row is a deleted operator — treated exactly like a
+        // deactivated one: the session stops vouching.
+        _ => Err("impersonation operator is no longer active".into()),
+    }
 }
 
 #[cfg(test)]
@@ -270,6 +396,105 @@ mod tests {
         assert!(constant_time_eq(b"hello", b"hello"));
         assert!(!constant_time_eq(b"hello", b"world"));
         assert!(!constant_time_eq(b"hello", b"hell"));
+    }
+
+    // ── Impersonation-session revalidation (pure parts) ──────────
+
+    /// Mint a session cookie with the exact payload shape
+    /// routes/impersonate.rs emits (`payload.signature`, HMAC-SHA256,
+    /// base64url). Local signer so these tests do not depend on another
+    /// module's private helper.
+    fn mint_impersonation_session(payload: &serde_json::Value, secret: &str) -> String {
+        use base64::Engine;
+        use hmac::{Hmac, Mac};
+        use sha2::Sha256;
+
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(payload).unwrap());
+        let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(payload_b64.as_bytes());
+        let sig_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(mac.finalize().into_bytes());
+        format!("{payload_b64}.{sig_b64}")
+    }
+
+    fn impersonation_session_payload(exp: i64) -> serde_json::Value {
+        serde_json::json!({
+            "type": "impersonation",
+            "tenantId": "ten_demo",
+            "operatorId": "op_1",
+            "operatorName": "Op",
+            "tokenId": "jti-1",
+            "exp": exp,
+        })
+    }
+
+    #[test]
+    fn session_payload_with_token_id_deserializes() {
+        // Regression: SessionPayload carries deny_unknown_fields and used
+        // to lack `tokenId` — every cookie minted by routes/impersonate.rs
+        // FAILED to deserialize, so the impersonation branch silently
+        // reported unauthenticated for all real sessions.
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let token = mint_impersonation_session(
+            &impersonation_session_payload(now_ms + 60_000),
+            "secret",
+        );
+        let payload = verify_session_token(&token, "secret").expect("minted shape must verify");
+        assert_eq!(payload.token_type.as_deref(), Some("impersonation"));
+        assert_eq!(payload.token_id.as_deref(), Some("jti-1"));
+        assert_eq!(payload.tenant_id.as_deref(), Some("ten_demo"));
+    }
+
+    #[test]
+    fn session_token_without_expiry_is_rejected() {
+        // Expiry used to be optional — a signed token with no `exp` was
+        // valid forever.
+        let mut payload = impersonation_session_payload(0);
+        payload
+            .as_object_mut()
+            .unwrap()
+            .remove("exp");
+        let token = mint_impersonation_session(&payload, "secret");
+        assert!(verify_session_token(&token, "secret").is_err());
+    }
+
+    #[test]
+    fn session_token_expired_is_rejected() {
+        let expired = chrono::Utc::now().timestamp_millis() - 1_000;
+        let token = mint_impersonation_session(&impersonation_session_payload(expired), "secret");
+        assert!(verify_session_token(&token, "secret").is_err());
+    }
+
+    #[test]
+    fn session_token_wrong_signature_is_rejected() {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let token = mint_impersonation_session(
+            &impersonation_session_payload(now_ms + 60_000),
+            "right-secret",
+        );
+        assert!(verify_session_token(&token, "wrong-secret").is_err());
+    }
+
+    #[test]
+    fn impersonation_lifetime_cap_arithmetic() {
+        let now_ms = 1_000_000_000i64;
+        // Freshly minted 30-minute session: within the 1-hour cap.
+        assert!(impersonation_lifetime_within_cap(
+            now_ms + 30 * 60 * 1000,
+            now_ms
+        ));
+        // Exactly one hour: still within (cap is inclusive).
+        assert!(impersonation_lifetime_within_cap(
+            now_ms + MAX_IMPERSONATION_SESSION_TTL_MS,
+            now_ms
+        ));
+        // Two hours: over the cap — a cookie whose signature promised more
+        // than the exchange could ever have granted must be refused.
+        assert!(!impersonation_lifetime_within_cap(
+            now_ms + 2 * 60 * 60 * 1000,
+            now_ms
+        ));
     }
 
     #[test]

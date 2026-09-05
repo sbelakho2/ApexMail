@@ -18,7 +18,7 @@ In test mode, you can only send to verified email addresses. Add recipients in *
 
 ```bash
 curl -s -X POST https://api.apexmail.ee/v1/test-recipients \
-  -H "Authorization: Bearer $APEXMAIL_API_KEY" \
+  -H "X-API-Key: $APEXMAIL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"email": "dev@example.org"}' \
   | jq .

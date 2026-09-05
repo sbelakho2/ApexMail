@@ -12,8 +12,10 @@
 # --build-only, then:
 #   * tags every canonical image with :<sha> in addition to :latest
 #     (rollback pins — deploy/DEPLOYMENT.md § Rollback expects :<sha> tags)
-#   * runs the post-build Trivy gate on api-server + mta (:<sha>) — deploy.yml
-#     scanned exactly these two, failing on CRITICAL/HIGH
+#   * runs the post-build Trivy gate on EVERY runtime image the compose
+#     files define (the scan list is derived from the merged compose
+#     config — audit §2: the old gate scanned only api-server + mta, 2 of
+#     ~20 built images)
 #   * writes SPDX SBOMs for runtime images (advisory, like the Syft step)
 #   * prunes :<sha> tags older than CI_KEEP_SHAS (default 5) per service so
 #     image storage cannot grow without bound
@@ -27,7 +29,10 @@ set -eu
 
 CANONICAL_SERVICES="api-server mta imap-server mailstore worker enterprise observability
                     status-server billing-service sales-autopilot compliance analytics-worker pdf-renderer ai-service migrator"
-EXTRA_IMAGES="marketing tracking-service"
+# Images with their own Dockerfiles, built by deploy.sh's separate loop:
+# marketing + tracking + the four backup sidecars (postgres / clickhouse /
+# redis / analytics-cold).
+EXTRA_IMAGES="marketing tracking-service postgres-backup clickhouse-backup redis-backup analytics-backup"
 
 stage_main() {
     if ! ci_on_deploy_host; then
@@ -58,16 +63,53 @@ stage_main() {
         fi
     done
 
-    # --- 3. post-build Trivy gate (deploy.yml scanned api-server + mta) -----------
+    # --- 3. post-build Trivy gate — EVERY runtime image the compose files define
+    # Audit §2 (Trivy scanned only 2 of ~20 images): the scan list is now
+    # DERIVED from the merged compose config (base + prod overlay + the
+    # monitoring/migrate profiles the deploy activates) instead of a
+    # hardcoded api-server+mta pair. Every service whose resolved image is
+    # one of OUR builds — the GHCR_NS namespace deploy.sh tags into, or the
+    # apexmail/* namespace of the monitoring sidecars — is gated. Stock
+    # third-party images (postgres, redis, nginx, certbot, prometheus, ...)
+    # are pulled, not built by this pipeline, and stay outside the gate.
+    # The ignore policy (.trivyignore) is unchanged.
     if command -v trivy >/dev/null 2>&1; then
-        for _svc in api-server mta; do
-            ci_check "trivy gate $_ns/$_svc:$CI_SHA" \
-                trivy image --ignorefile "$REPO_ROOT/.trivyignore" --severity "$CI_TRIVY_SEVERITY" --exit-code 1 --quiet "$_ns/$_svc:$CI_SHA" \
-                || { ci_err "Trivy gate FAILED for $_svc — fix vulnerabilities before deploying"; return "$CI_EXIT_FAIL"; }
-            trivy image --format spdx-json --output "$RUN_DIR/sbom-$_svc.spdx.json" \
-                "$_ns/$_svc:$CI_SHA" >>"$CI_STAGE_LOG" 2>&1 \
-                && ci_info "SBOM: $RUN_DIR/sbom-$_svc.spdx.json" \
-                || ci_warn "SBOM generation failed for $_svc (advisory)"
+        _scan_refs=$(docker compose -f docker-compose.yml -f docker-compose.prod.yml \
+                --profile monitoring --profile migrate config --format json 2>>"$CI_STAGE_LOG" \
+            | jq -r --arg ns "$_ns" '.services | to_entries[]
+                | select(.value.image != null)
+                | select(.value.image | startswith($ns + "/") or startswith("apexmail/"))
+                | .value.image' | sort -u || true)
+        if [ -z "$_scan_refs" ]; then
+            ci_err "derived an EMPTY trivy scan list from the compose config — refusing to silently skip the gate (check the compose config output above)"
+            return "$CI_EXIT_FAIL"
+        fi
+        for _ref in $_scan_refs; do
+            # Prefer the :<sha> rollback pin (byte-identical to :latest and
+            # exactly what the digest manifest below records).
+            _scan_img="$_ref"
+            case "$_ref" in
+                "$_ns"/*:latest)
+                    if docker image inspect "${_ref%:latest}:$CI_SHA" >/dev/null 2>&1; then
+                        _scan_img="${_ref%:latest}:$CI_SHA"
+                    fi
+                    ;;
+            esac
+            if ! docker image inspect "$_scan_img" >/dev/null 2>&1; then
+                # Not built by this pipeline (e.g. a monitoring sidecar
+                # pinned to a date tag) — advisory skip, matching the fact
+                # that deploy.sh never builds it.
+                ci_warn "image $_scan_img (from compose config) not built by this pipeline — trivy scan skipped (advisory)"
+                continue
+            fi
+            ci_check "trivy gate $_scan_img" \
+                trivy image --ignorefile "$REPO_ROOT/.trivyignore" --severity "$CI_TRIVY_SEVERITY" --exit-code 1 --quiet "$_scan_img" \
+                || { ci_err "Trivy gate FAILED for $_scan_img — fix vulnerabilities before deploying"; return "$CI_EXIT_FAIL"; }
+            _sbom_name=$(printf '%s' "$_scan_img" | tr '/:' '__')
+            trivy image --format spdx-json --output "$RUN_DIR/sbom-$_sbom_name.spdx.json" \
+                "$_scan_img" >>"$CI_STAGE_LOG" 2>&1 \
+                && ci_info "SBOM: $RUN_DIR/sbom-$_sbom_name.spdx.json" \
+                || ci_warn "SBOM generation failed for $_scan_img (advisory)"
         done
     else
         ci_warn "trivy missing — post-build vulnerability gate skipped (install with ci/install.sh)"

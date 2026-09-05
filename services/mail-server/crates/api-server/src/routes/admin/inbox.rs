@@ -115,7 +115,9 @@ async fn list_inbox(
 
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
-    let tenant_scoped = auth.tenant_id != "system";
+    // Slug-aware system-tenant resolution (audit F1): the literal `system`
+    // sentinel never matches human operators (`system_internal_tenant01`).
+    let tenant_scoped = !crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await;
     let sql = build_list_inbox_sql(&params, tenant_scoped);
 
     let mut query = sqlx::query_as::<
@@ -238,7 +240,8 @@ async fn update_message(
     Json(body): Json<UpdateInboxMessage>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    let tenant_scoped = auth.tenant_id != "system";
+    // Slug-aware system-tenant resolution (audit F1) — see list_inbox.
+    let tenant_scoped = !crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await;
     let sql = build_update_inbox_sql(&body, tenant_scoped)?;
 
     let mut query = sqlx::query(&sql).bind(&body.id);

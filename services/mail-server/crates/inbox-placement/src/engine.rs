@@ -12,6 +12,27 @@ use crate::seed_manager::SeedManager;
 use crate::sender::send_test_email;
 use crate::types::*;
 
+/// Claim a test for execution: `pending` (or an in-flight `running` retry)
+/// → `running`. Check-and-set — when zero rows match, the test has already
+/// reached a terminal state (typically the reaper's `failed` after
+/// `stuck_test_timeout_secs`) and must not be resurrected.
+pub(crate) const CLAIM_RUNNING_SQL: &str =
+    "UPDATE placement_tests SET status = 'running' WHERE id = $1 AND status IN ('pending', 'running')";
+
+/// Finalise a finished run: progress columns are always written, but an
+/// existing terminal status (`completed`/`failed`/`cancelled` — e.g. set by
+/// the reaper mid-run) wins over the run's own outcome. Previously this
+/// UPDATE was unconditional and silently flipped a reaped `failed` test
+/// back to `completed`.
+pub(crate) const FINALIZE_STATUS_SQL: &str = r#"
+            UPDATE placement_tests
+            SET status = CASE WHEN status IN ('completed', 'failed', 'cancelled')
+                              THEN status ELSE $1 END,
+                completed_accounts = $2,
+                completed_at = $3
+            WHERE id = $4
+            "#;
+
 /// Core orchestration engine for inbox placement testing.
 ///
 /// Coordinates the full lifecycle: test creation, email dispatch via SMTP,
@@ -212,11 +233,23 @@ impl PlacementEngine {
         .await?
         .ok_or_else(|| sqlx::Error::Protocol(format!("placement test {} not found", test_id)))?;
 
-        // 2. Mark as running (lowercase — see create_test for schema notes).
-        sqlx::query("UPDATE placement_tests SET status = 'running' WHERE id = $1")
+        // 2. Mark as running via check-and-set (lowercase — see create_test
+        // for schema notes). Zero affected rows means the test already
+        // reached a terminal state — most commonly the reaper marked it
+        // `failed` while it waited for this (serialized) run — and it must
+        // not be resurrected.
+        let claimed = sqlx::query(CLAIM_RUNNING_SQL)
             .bind(test_id)
             .execute(&self.db)
             .await?;
+        if claimed.rows_affected() == 0 {
+            tracing::warn!(
+                test_id = %test_id,
+                status = %test.status,
+                "Placement test is already in a terminal state — skipping execution"
+            );
+            return Ok(());
+        }
 
         let imp = ImapPoller::new(self.config.clone());
         let mut completed = 0i32;
@@ -343,18 +376,19 @@ impl PlacementEngine {
         }
 
         // 4. Finalise test status (lowercase values — see create_test).
+        // Check-and-set: a terminal status already on the row (the reaper
+        // can mark a long run `failed` mid-flight) is preserved; only the
+        // progress columns are overwritten unconditionally.
         let now = Utc::now();
         let new_status = if completed > 0 { "completed" } else { "failed" };
 
-        sqlx::query(
-            "UPDATE placement_tests SET status = $1, completed_accounts = $2, completed_at = $3 WHERE id = $4",
-        )
-        .bind(new_status)
-        .bind(completed)
-        .bind(now)
-        .bind(test_id)
-        .execute(&self.db)
-        .await?;
+        sqlx::query(FINALIZE_STATUS_SQL)
+            .bind(new_status)
+            .bind(completed)
+            .bind(now)
+            .bind(test_id)
+            .execute(&self.db)
+            .await?;
 
         // 5. Update health status per account, derived from that account's own
         // outcome in this test (not the aggregate test result).
@@ -1056,6 +1090,34 @@ fn build_encryptor(config: &PlacementConfig) -> Option<Arc<FieldEncryptor>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── scheduler/engine status race ────────────────────────────────
+
+    #[test]
+    fn running_claim_never_resurrects_a_terminal_test() {
+        // The claim must be check-and-set: only pending/running rows may
+        // transition to running. An unconditional UPDATE would restart a
+        // test the reaper already marked failed.
+        assert!(
+            CLAIM_RUNNING_SQL.contains("status IN ('pending', 'running')"),
+            "claim must exclude terminal statuses: {CLAIM_RUNNING_SQL}"
+        );
+    }
+
+    #[test]
+    fn final_status_write_preserves_an_existing_terminal_status() {
+        // The finalize write may fill progress columns, but a status already
+        // terminal (completed/failed/cancelled — e.g. set by reap_stuck_tests
+        // mid-run) must win over the run's own outcome.
+        assert!(
+            FINALIZE_STATUS_SQL.contains("CASE WHEN status IN ('completed', 'failed', 'cancelled')"),
+            "finalize must not overwrite terminal statuses: {FINALIZE_STATUS_SQL}"
+        );
+        assert!(
+            FINALIZE_STATUS_SQL.contains("completed_accounts = $2"),
+            "progress columns are still recorded"
+        );
+    }
 
     // ── F4:From-domain extraction ───────────────────────────────────
 

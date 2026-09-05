@@ -13,10 +13,10 @@ Für Enterprise-Beschaffung, Sicherheitsprüfung oder Private-Cloud-Planung fül
 
 ## Vertriebsanfrage-Formular
 
-<div id="enquiry-submitted" class="form-banner form-banner--success" role="status">
+<div id="enquiry-submitted" class="form-banner form-banner--success" role="status" hidden>
   <p><strong>Vielen Dank — Ihre Eingabe wurde übermittelt.</strong> Unser Team prüft die Anfrage und antwortet innerhalb von 2 Werktagen.</p>
 </div>
-<div id="enquiry-error" class="form-banner form-banner--error" role="alert">
+<div id="enquiry-error" class="form-banner form-banner--error" role="alert" hidden>
   <p><strong>Ihre Eingabe konnte nicht entgegengenommen werden.</strong> Bitte prüfen Sie die Pflichtfelder (eine gültige geschäftliche E-Mail-Adresse ist erforderlich) und versuchen Sie es erneut.</p>
 </div>
 <form id="sales-contact-form" class="space-y-6 max-w-2xl" method="POST" action="https://api.apexmail.ee/v1/contact/sales">
@@ -151,7 +151,7 @@ Für Enterprise-Beschaffung, Sicherheitsprüfung oder Private-Cloud-Planung fül
     <select id="security-review" name="security_review_needs"
       class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
       <option value="" selected>Prüfungstiefe auswählen</option>
-      <option value="standard">Standard — SIG/CAIQ/HECVAT-Pakete ausreichend</option>
+      <option value="standard">Standard — Sicherheitsfragebogen wird anhand aktueller Prüfunterlagen fallweise beantwortet (kein standardisiertes SIG/CAIQ/HECVAT-Paket ist Teil des Produktumfangs)</option>
       <option value="detailed">Detailliert — individueller Sicherheitsfragebogen erforderlich</option>
       <option value="pen_test">Penetrationstest-Bericht erforderlich</option>
       <option value="on_site">Vor-Ort-Audit oder Architektur-Review erforderlich</option>

@@ -22,13 +22,16 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
     let value: u64 = num
         .parse()
         .map_err(|_| format!("Invalid number in duration: '{}'", num))?;
+    // Checked multiplication: "5e18d"-style inputs used to overflow u64
+    // (panic in debug, silent wraparound in release).
     let secs = match suffix.as_str() {
-        "s" => value,
-        "m" => value * 60,
-        "h" => value * 3600,
-        "d" => value * 86400,
+        "s" => Some(value),
+        "m" => value.checked_mul(60),
+        "h" => value.checked_mul(3600),
+        "d" => value.checked_mul(86400),
         _ => return Err(format!("Unknown duration suffix: {}", suffix)),
-    };
+    }
+    .ok_or_else(|| format!("Duration '{}' overflows the supported range", s))?;
     Ok(Duration::from_secs(secs))
 }
 
@@ -61,5 +64,14 @@ mod tests {
         assert!(parse_duration("").is_err());
         assert!(parse_duration("abc").is_err());
         assert!(parse_duration("10x").is_err());
+    }
+
+    #[test]
+    fn test_parse_overflow_returns_error_not_panic() {
+        // Regression: huge values used to overflow u64 on multiply (panic
+        // in debug builds, silent wraparound in release).
+        assert!(parse_duration("213504000000000000d").is_err()); // × 86400 > u64::MAX
+        assert!(parse_duration("18446744073709551615s").is_ok()); // u64::MAX secs still fits
+        assert!(parse_duration("99999999999999999999d").is_err()); // number itself over u64
     }
 }

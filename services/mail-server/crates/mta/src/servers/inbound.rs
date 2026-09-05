@@ -17,7 +17,7 @@ use tokio::io::{AsyncWriteExt, BufStream};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use tokio_rustls::TlsAcceptor;
-use tracing::{debug, info, warn};
+use tracing::{debug, error, info, warn};
 use trust_dns_resolver::{Resolver, TokioResolver};
 use uuid::Uuid;
 
@@ -64,6 +64,19 @@ const MAILSTORE_RPC_TIMEOUT: Duration = Duration::from_secs(10);
 /// mailstore bounds end-of-DATA to ~30 s instead of
 /// max_recipients × 2 × MAILSTORE_RPC_TIMEOUT.
 const MAILSTORE_DELIVERY_DEADLINE: Duration = Duration::from_secs(30);
+
+/// Mailbox names for mailbox delivery. The mailstore creates the standard
+/// mailbox set at account creation; "Spam" is the store-side name of the
+/// folder IMAP advertises with the `\Junk` special-use attribute.
+const INBOX_MAILBOX: &str = "Inbox";
+const QUARANTINE_MAILBOX: &str = "Spam";
+
+/// Backoff ladder for mailstore SERVICE failures (get_account/store_message
+/// RPC errors that are not "account not found"): the initial attempt plus
+/// these sleeps bound a transient mailstore blip to ~5.25 s of waiting
+/// inside the overall [`MAILSTORE_DELIVERY_DEADLINE`] before the message is
+/// left recorded for a later sweep/manual replay.
+const MAILSTORE_RETRY_BACKOFF_MS: [u64; 3] = [250, 1_000, 4_000];
 
 /// F-14: number of 4xx/5xx replies after which the session is closed with
 /// `421 4.7.0 Too many errors` (RFC 5321 §4.3.2 recommends a small limit).
@@ -926,6 +939,17 @@ impl InboundServer {
         } else if (ctx.auth_plain_pending || ctx.auth_login_user.is_some()) && ctx.tls_active {
             // AUTH continuation line (base64 payload, or "*" to cancel —
             // F-12, RFC 4954 §4).
+            //
+            // QUIT is dispatched BEFORE the continuation consumes the line:
+            // the state machine must not eat protocol verbs as base64
+            // payloads (a client that aborts mid-AUTH with QUIT used to be
+            // answered "334"-style challenges or 535s while its intent was
+            // to close).
+            if verb == "QUIT" {
+                ctx.auth_plain_pending = false;
+                ctx.auth_login_user = None;
+                return "221 2.0.0 Bye\r\n".into();
+            }
             if raw_line.trim() == "*" {
                 ctx.auth_plain_pending = false;
                 ctx.auth_login_user = None;
@@ -936,9 +960,20 @@ impl InboundServer {
                 ctx.auth_plain_pending = false;
                 return self.do_auth_plain(raw_line.trim(), ctx).await;
             }
-            // AUTH LOGIN state machine: we're waiting for username or password
+            // AUTH LOGIN state machine: we're waiting for username or password.
+            // Malformed base64 is a protocol error (501 5.5.2, RFC 4954 §4),
+            // not an empty credential: `unwrap_or_default()` used to turn
+            // garbage into an empty username, burning a lockout-worthy
+            // failure for what is a client bug.
             use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
-            let decoded = BASE64.decode(raw_line.trim()).unwrap_or_default();
+            let trimmed = raw_line.trim();
+            let decoded = match BASE64.decode(trimmed) {
+                Ok(decoded) => decoded,
+                Err(_) => {
+                    ctx.auth_login_user = None;
+                    return "501 5.5.2 Invalid base64\r\n".into();
+                }
+            };
             let value = String::from_utf8_lossy(&decoded).to_string();
 
             if ctx.auth_login_user.as_deref() == Some("") {
@@ -1300,11 +1335,21 @@ impl InboundServer {
         self.queue_inbound_webhook(&message_id, mail_from, &ctx.rcpt_to)
             .await?;
 
-        // 7. Deliver to the mailstore mailbox (best-effort). inbound_messages
-        //    is the durable record; a mailstore outage must not fail the SMTP
-        //    transaction, and unknown recipients are simply skipped.
+        // 7. Deliver to the mailstore mailbox. inbound_messages is the
+        //    durable record; a mailstore SERVICE failure is retried in-line
+        //    (see deliver_to_mailstore) and, if it persists, strands the row
+        //    with an ERROR log for a later sweep/manual replay — never a
+        //    silent skip. Unknown recipients are simply skipped.
         if !ctx.rcpt_to.is_empty() {
-            self.deliver_to_mailstore(ctx, &stored_message).await;
+            // DMARC p=quarantine must land in the Junk folder (the
+            // mailstore's "Spam" mailbox, advertised to IMAP clients with
+            // the \Junk special-use attribute), not the Inbox.
+            let mailbox = match disposition {
+                crate::auth::MessageDisposition::Quarantine => QUARANTINE_MAILBOX,
+                _ => INBOX_MAILBOX,
+            };
+            self.deliver_to_mailstore(ctx, &stored_message, &message_id, mailbox)
+                .await;
         }
 
         info!(
@@ -1482,26 +1527,49 @@ impl InboundServer {
     ///
     /// The fully-composed stored message (Received trace header +
     /// Authentication-Results + optional ARC seal + raw client bytes) is
-    /// stored into each recipient's Inbox via the mailstore gRPC service so
-    /// the message is visible over IMAP. Best-effort: failures are logged,
-    /// never propagated to the SMTP session.
+    /// stored into each recipient's mailbox via the mailstore gRPC service so
+    /// the message is visible over IMAP.
+    ///
+    /// The composed message is shared as ONE refcounted `Bytes` buffer
+    /// across all N recipients (each store request is a refcount bump,
+    /// never a copy): a per-recipient `to_vec()` of a 25 MB message
+    /// × 100 recipients buffered ~2.5 GB inside a single transaction.
     ///
     /// Recipients are delivered CONCURRENTLY under ONE overall deadline
     /// (see [`MAILSTORE_DELIVERY_DEADLINE`]): sequentially, two RPCs at up
     /// to [`MAILSTORE_RPC_TIMEOUT`] each for up to max_recipients
     /// recipients could stall end-of-DATA for tens of minutes inside a
     /// single SMTP transaction.
-    async fn deliver_to_mailstore(&self, ctx: &SessionContext, final_message: &[u8]) {
+    async fn deliver_to_mailstore(
+        &self,
+        ctx: &SessionContext,
+        final_message: &[u8],
+        message_id: &str,
+        mailbox: &str,
+    ) {
         let deadline = tokio::time::Instant::now() + MAILSTORE_DELIVERY_DEADLINE;
+        let message = bytes::Bytes::from(final_message.to_vec());
         let deliveries = ctx
             .rcpt_to
             .iter()
             .map(|recipient| {
                 let mut client = self.mailstore.clone();
                 let recipient = recipient.clone();
-                let message = final_message.to_vec();
+                // Refcount bump only — one composed buffer backs every
+                // recipient's gRPC store request.
+                let message = message.clone();
+                let message_id = message_id.to_string();
+                let mailbox = mailbox.to_string();
                 async move {
-                    deliver_one_to_mailstore(&mut client, &recipient, &message, deadline).await
+                    deliver_one_to_mailstore(
+                        &mut client,
+                        &recipient,
+                        &message,
+                        &message_id,
+                        &mailbox,
+                        deadline,
+                    )
+                    .await
                 }
             })
             .collect::<Vec<_>>();
@@ -1959,87 +2027,226 @@ async fn rpc_with_deadline<T>(fut: impl Future<Output = T>, dur: Duration) -> Op
 
 /// One recipient's mailbox delivery: account lookup then store, both under
 /// the shared overall deadline (which also subsumes the per-RPC
-/// [`MAILSTORE_RPC_TIMEOUT`] bounds). Best-effort: every failure path logs
-/// and returns without propagating to the SMTP session.
+/// [`MAILSTORE_RPC_TIMEOUT`] bounds).
+///
+/// Failure discipline (RFC 5321 §6.1 — a 250-accepted message must be
+/// delivered or DSN'd, never silently dropped):
+/// * NotFound / empty account — no mailstore account for the recipient;
+///   skipped with a debug log (the SMTP RCPT path only guarantees the
+///   DOMAIN is managed, not that the mailbox exists).
+/// * Any OTHER error (service unavailable, internal error, timeout) — a
+///   SERVICE failure, not "no account": retried up to
+///   [`MAILSTORE_RETRY_BACKOFF_MS`.len()] times with backoff inside the
+///   overall deadline. If the retries are exhausted (or the deadline
+///   cancels the ladder), the message stays recorded in
+///   `inbound_messages` and an ERROR-level log carries recipient + message
+///   id so a later sweep or manual replay can deliver it. The SMTP session
+///   is never failed: the message was already accepted with 250.
 async fn deliver_one_to_mailstore(
     client: &mut MailstoreClient,
     recipient: &str,
-    final_message: &[u8],
+    final_message: &bytes::Bytes,
+    message_id: &str,
+    mailbox: &str,
     deadline: tokio::time::Instant,
 ) {
+    let mut retries_done = 0usize;
     let work = async {
         let lookup = GetAccountRequest {
             account_id: String::new(),
             email: recipient.to_string(),
         };
         // M28: bounded RPC — a hung mailstore must not stall the session.
-        let account_id =
-            match rpc_with_deadline(client.get_account(lookup), MAILSTORE_RPC_TIMEOUT).await {
+        let account_id = loop {
+            match rpc_with_deadline(client.get_account(lookup.clone()), MAILSTORE_RPC_TIMEOUT)
+                .await
+            {
                 Some(Ok(resp)) => {
                     let r = resp.into_inner();
                     if r.account_id.is_empty() {
+                        // Ok(None)-equivalent: determinately no account.
+                        debug!(
+                            recipient = %mail_common::pii::redact_email(recipient),
+                            "No mailstore account for recipient; skipping mailbox delivery"
+                        );
                         return;
                     }
-                    r.account_id
+                    break r.account_id;
                 }
-                Some(Err(e)) => {
+                Some(Err(status)) if status.code() == tonic::Code::NotFound => {
+                    // The mailstore answers "no account" as NotFound — the
+                    // same determinate skip as the empty account_id above.
                     debug!(
                         recipient = %mail_common::pii::redact_email(recipient),
-                        error = %e,
                         "No mailstore account for recipient; skipping mailbox delivery"
                     );
                     return;
                 }
-                None => {
-                    debug!(
+                outcome => {
+                    let cause = match outcome {
+                        Some(Err(e)) => e.to_string(),
+                        _ => "RPC timed out".to_string(),
+                    };
+                    if !mailstore_retry(
+                        &mut retries_done,
+                        "get_account",
+                        &cause,
+                        recipient,
+                        message_id,
+                        deadline,
+                    )
+                    .await
+                    {
+                        return;
+                    }
+                }
+            }
+        };
+
+        // The requested mailbox (Inbox, or the Spam/Junk folder for a DMARC
+        // quarantine disposition) may have been deleted by the user. A
+        // NotFound here is determinate for THAT mailbox only — fall back to
+        // the Inbox once rather than stranding the message, then stop.
+        let mut mailbox = mailbox.to_string();
+        loop {
+            let req = StoreMessageRequest {
+                account_id: account_id.clone(),
+                mailbox: mailbox.clone(),
+                // Refcount bump onto the shared composed buffer — no
+                // per-recipient copy of the message body.
+                raw_message: final_message.clone(),
+                flags: Some(MessageFlags {
+                    recent: true,
+                    ..Default::default()
+                }),
+                internal_date: chrono::Utc::now().timestamp(),
+                // Delivery path: keep per-mailbox Message-ID dedup active.
+                dedup_exempt: false,
+            };
+            match rpc_with_deadline(client.store_message(req), MAILSTORE_RPC_TIMEOUT).await {
+                Some(Ok(resp)) => {
+                    info!(
                         recipient = %mail_common::pii::redact_email(recipient),
-                        "Mailstore account lookup timed out; skipping mailbox delivery"
+                        mailbox = %mailbox,
+                        uid = resp.into_inner().uid,
+                        "Message delivered to mailstore mailbox"
                     );
                     return;
                 }
-            };
-
-        let req = StoreMessageRequest {
-            account_id,
-            mailbox: "Inbox".to_string(),
-            raw_message: final_message.to_vec().into(),
-            flags: Some(MessageFlags {
-                recent: true,
-                ..Default::default()
-            }),
-            internal_date: chrono::Utc::now().timestamp(),
-            // Delivery path: keep per-mailbox Message-ID dedup active.
-            dedup_exempt: false,
-        };
-        match rpc_with_deadline(client.store_message(req), MAILSTORE_RPC_TIMEOUT).await {
-            Some(Ok(resp)) => {
-                info!(
-                    recipient = %mail_common::pii::redact_email(recipient),
-                    uid = resp.into_inner().uid,
-                    "Message delivered to mailstore mailbox"
-                );
-            }
-            Some(Err(e)) => {
-                warn!(
-                    recipient = %mail_common::pii::redact_email(recipient),
-                    error = %e,
-                    "Failed to deliver message to mailstore mailbox"
-                );
-            }
-            None => {
-                warn!(
-                    recipient = %mail_common::pii::redact_email(recipient),
-                    "Mailstore store_message timed out; mailbox delivery skipped"
-                );
+                Some(Err(status)) if status.code() == tonic::Code::NotFound => {
+                    warn!(
+                        recipient = %mail_common::pii::redact_email(recipient),
+                        mailbox = %mailbox,
+                        "Mailbox not found for delivery; falling back to Inbox"
+                    );
+                    if mailbox == INBOX_MAILBOX {
+                        // Even the Inbox is gone — determinate, not a service
+                        // failure. The durable inbound_messages row stands.
+                        error!(
+                            recipient = %mail_common::pii::redact_email(recipient),
+                            message_id = %message_id,
+                            mailbox = %mailbox,
+                            "Mailstore reports no Inbox for account; mailbox delivery skipped — \
+                             message remains recorded in inbound_messages for replay"
+                        );
+                        metrics::counter!("mta.inbound.mailstore_stranded").increment(1);
+                        return;
+                    }
+                    mailbox = INBOX_MAILBOX.to_string();
+                    continue;
+                }
+                outcome => {
+                    let cause = match outcome {
+                        Some(Err(e)) => e.to_string(),
+                        _ => "RPC timed out".to_string(),
+                    };
+                    if !mailstore_retry(
+                        &mut retries_done,
+                        "store_message",
+                        &cause,
+                        recipient,
+                        message_id,
+                        deadline,
+                    )
+                    .await
+                    {
+                        return;
+                    }
+                }
             }
         }
     };
     if tokio::time::timeout_at(deadline, work).await.is_err() {
-        warn!(
+        // The overall delivery deadline cancelled the ladder mid-retry: the
+        // message IS stranded (row recorded, mailbox delivery not done) —
+        // the same operational condition as exhausted retries.
+        error!(
             recipient = %mail_common::pii::redact_email(recipient),
-            "Mailstore delivery exceeded the overall delivery deadline; mailbox delivery skipped"
+            message_id = %message_id,
+            deadline_secs = MAILSTORE_DELIVERY_DEADLINE.as_secs(),
+            "Mailstore delivery exceeded the overall deadline; mailbox delivery skipped — \
+             message remains recorded in inbound_messages for replay"
         );
+        metrics::counter!("mta.inbound.mailstore_stranded").increment(1);
     }
+}
+
+/// Service-failure retry ladder shared by both RPCs of a mailbox delivery.
+/// `retries_done` tracks the backoff step already consumed for this
+/// recipient (the get_account and store_message stages share the ladder so
+/// one recipient can never spend more than the full schedule inside the
+/// delivery deadline). Returns `true` when the caller should retry (the
+/// backoff was slept through, still inside the deadline), `false` when the
+/// ladder is exhausted or the deadline passed — in which case the ERROR
+/// log that flags the row for replay has already been emitted here.
+async fn mailstore_retry(
+    retries_done: &mut usize,
+    stage: &str,
+    cause: &str,
+    recipient: &str,
+    message_id: &str,
+    deadline: tokio::time::Instant,
+) -> bool {
+    let Some(&backoff_ms) = MAILSTORE_RETRY_BACKOFF_MS.get(*retries_done) else {
+        // Ladder exhausted: the durable inbound_messages row is the replay
+        // source — surface it loudly, never silently skip.
+        error!(
+            recipient = %mail_common::pii::redact_email(recipient),
+            message_id = %message_id,
+            stage = stage,
+            cause = %cause,
+            "Mailstore delivery failed after all retries — message remains recorded in \
+             inbound_messages; a sweep or manual replay must deliver it"
+        );
+        metrics::counter!("mta.inbound.mailstore_stranded").increment(1);
+        return false;
+    };
+    *retries_done += 1;
+    warn!(
+        recipient = %mail_common::pii::redact_email(recipient),
+        message_id = %message_id,
+        stage = stage,
+        cause = %cause,
+        backoff_ms = backoff_ms,
+        "Mailstore service failure; retrying mailbox delivery"
+    );
+    // Sleep the backoff, but never past the overall delivery deadline —
+    // the caller's timeout_at would cancel us mid-sleep anyway, and this
+    // way the stranded-message ERROR log lands deterministically here.
+    let sleep = tokio::time::sleep(Duration::from_millis(backoff_ms));
+    if tokio::time::timeout_at(deadline, sleep).await.is_err() {
+        error!(
+            recipient = %mail_common::pii::redact_email(recipient),
+            message_id = %message_id,
+            stage = stage,
+            cause = %cause,
+            "Mailstore delivery deadline reached mid-backoff — message remains recorded in \
+             inbound_messages for replay"
+        );
+        metrics::counter!("mta.inbound.mailstore_stranded").increment(1);
+        return false;
+    }
+    true
 }
 
 /// Fan one delivery future out per recipient, all sharing a single overall
@@ -2362,6 +2569,49 @@ mod tests {
         assert!(
             step3.contains("454"),
             "locked account must get 454, got {step3:?}"
+        );
+    }
+
+    /// RFC 4954 §4: QUIT while a continuation is pending closes the session
+    /// — it must NOT be consumed as a base64 payload (the old path answered
+    /// a 535 for the "QUIT" credentials instead of 221).
+    #[tokio::test]
+    async fn test_inbound_quit_during_auth_continuation_closes_session() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        let step1 = handle_cmd(&server, "AUTH LOGIN", &mut ctx).await;
+        assert!(step1.contains("334"), "username challenge: {step1:?}");
+        let quit = handle_cmd(&server, "QUIT", &mut ctx).await;
+        assert!(quit.contains("221"), "QUIT must close: {quit:?}");
+        assert!(
+            ctx.auth_login_user.is_none() && !ctx.auth_plain_pending,
+            "auth state must be cleared"
+        );
+
+        // Same for the AUTH PLAIN two-step continuation.
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))).await;
+        let step1 = handle_cmd(&server, "AUTH PLAIN", &mut ctx).await;
+        assert!(step1.contains("334"), "plain challenge: {step1:?}");
+        let quit = handle_cmd(&server, "QUIT", &mut ctx).await;
+        assert!(quit.contains("221"), "QUIT must close: {quit:?}");
+        assert!(!ctx.auth_plain_pending, "auth state must be cleared");
+    }
+
+    /// Malformed base64 on a continuation line is a 501 protocol error, not
+    /// an empty credential: the old path decoded garbage to an empty
+    /// username and burned a lockout-worthy auth failure.
+    #[tokio::test]
+    async fn test_inbound_auth_login_malformed_base64_gets_501() {
+        let (server, mut ctx) = test_inbound(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))).await;
+        let step1 = handle_cmd(&server, "AUTH LOGIN", &mut ctx).await;
+        assert!(step1.contains("334"), "username challenge: {step1:?}");
+        let step2 = handle_cmd(&server, "!!!not-base64!!!", &mut ctx).await;
+        assert!(
+            step2.contains("501"),
+            "malformed base64 must get 501, got {step2:?}"
+        );
+        assert!(
+            ctx.auth_login_user.is_none(),
+            "auth state must be reset after 501"
         );
     }
 

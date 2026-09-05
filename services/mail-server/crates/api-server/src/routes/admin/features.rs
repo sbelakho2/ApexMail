@@ -22,16 +22,20 @@ pub fn router() -> Router<AppState> {
     )
 }
 
+/// Actor-attributed feature-flag audit (P2-2): flag flips change platform
+/// behaviour — the entry must record which operator did it, not `None`.
 async fn log_feature_audit(
-    db: &sqlx::PgPool,
+    state: &AppState,
+    auth: &AuthUser,
     action: &str,
     feature_id: Uuid,
     metadata: serde_json::Value,
 ) {
-    crate::audit_log::insert_audit_log_best_effort(
-        db,
-        None,
-        None,
+    crate::audit_log::insert_audit_log_best_effort_with_env(
+        &state.db,
+        state.config.environment.is_production(),
+        Some(auth.tenant_id.as_str()),
+        auth.user_id.as_deref(),
         action,
         "feature_flag",
         Some(&feature_id.to_string()),
@@ -189,7 +193,8 @@ async fn create_feature(
     .await?;
 
     log_feature_audit(
-        &state.db,
+        &state,
+        &auth,
         "control_plane.feature.created",
         id,
         json!({
@@ -245,7 +250,8 @@ async fn update_feature(
 
         if !changes.is_empty() {
             log_feature_audit(
-                &state.db,
+                &state,
+                &auth,
                 "control_plane.feature.updated",
                 id,
                 serde_json::Value::Object(changes),

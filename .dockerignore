@@ -1,7 +1,14 @@
 # =============================================================================
 # ApexMail .dockerignore
 # =============================================================================
-# Exclude files not needed in Docker build context to reduce build time and image size
+# Exclude files not needed in Docker build context to reduce build time and
+# image size.
+#
+# SECURITY (audit 1.9): builds run on the deploy host where the production
+# secret store (secrets/, /opt/apexmail/secrets bind) and live datastore
+# state (dump.rdb, data/) exist next to the checkout. Everything below MUST
+# stay excluded so no image build context ever tar-ships plaintext prod
+# secrets or runtime state.
 
 # Version control
 .git
@@ -12,6 +19,21 @@
 **/build
 **/.turbo
 **/target
+
+# Secrets and live local state — NEVER part of a build context
+secrets/
+dump.rdb
+data/
+test_output.txt
+reports/
+.kilo/
+.turbo/
+.idea/
+.venv/
+# Belt-and-braces: apps/ai is excluded wholesale below, but the training
+# venv is 10s of GB — keep an explicit entry in case apps/ai is ever scoped
+# down to a subset directory.
+apps/ai/training/.venv
 
 # Development files
 .env
@@ -27,15 +49,13 @@ node_modules/
 *.swo
 *~
 
-# Documentation (not needed at runtime)
-docs/
+# Documentation: intentionally NOT ignored. The runtime Dockerfiles COPY
+# docs/ into the images (services/mail-server/Dockerfile builder stages
+# COPY docs; the ai-service serves it as the grounding corpus), so a
+# `docs/` exclusion here would break those builds. The previous
+# `docs/` + `!docs/` pair cancelled out to exactly this behaviour — it is
+# now written down instead of accidental. Do NOT add `docs/` here.
 LICENSE
-!docs/
-!docs/api-contract-manifest.json
-!docs/development/
-!docs/development/*.json
-!docs/tool-contracts/
-!docs/tool-contracts/stripe.md
 
 # Test files
 **/tests

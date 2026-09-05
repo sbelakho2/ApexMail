@@ -544,6 +544,20 @@ async fn chat_handler(
             )
         }
     };
+    // The header is set by the trusted gateway AFTER it authorized that
+    // tenant; the body tenant is caller-supplied. When both are present
+    // they must agree — otherwise the request would bill/limit one tenant
+    // while executing (and potentially leaking) as another.
+    if tenant != CONTROL_PLANE_RATE_KEY && tenant != req.tenant_id {
+        tracing::warn!(
+            header_tenant = %tenant,
+            "chat request tenant mismatch between x-apexmail-tenant-id and body tenant_id"
+        );
+        return error_response_json(
+            StatusCode::FORBIDDEN,
+            "tenant identity mismatch between x-apexmail-tenant-id and tenant_id",
+        );
+    }
     if !state.rate_governor.allow(&tenant) {
         return error_response_json(StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded");
     }
@@ -586,7 +600,6 @@ async fn reindex_handler(State(state): State<Arc<AppState>>) -> Response {
         Ok(count) => Json(serde_json::json!({
             "indexed_chunks": count,
             "docs_version": crate::retrieval::docs_version(&dir),
-            "docs_dir": dir.display().to_string(),
         }))
         .into_response(),
         Err(e) => error_response_json(StatusCode::INTERNAL_SERVER_ERROR, &e),
@@ -848,6 +861,66 @@ mod tests {
         );
         let response = app().await.oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    fn authenticated_chat_request(tenant_header: Option<&str>, body_tenant: &str) -> Request<Body> {
+        let mut builder = Request::builder()
+            .uri("/chat")
+            .method("POST")
+            .header("x-api-key", "test-key")
+            .header("content-type", "application/json");
+        if let Some(tenant) = tenant_header {
+            builder = builder.header("x-apexmail-tenant-id", tenant);
+        }
+        builder
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "tenant_id": body_tenant,
+                    "user_id": "user-1",
+                    "message": "What does the Pro plan cost?",
+                    "history": []
+                }))
+                .expect("serialize request"),
+            ))
+            .expect("build request")
+    }
+
+    /// The gateway-set tenant header and the body tenant must agree when
+    /// both are present: without the cross-check, a caller could bill one
+    /// tenant's rate bucket while executing as another.
+    #[tokio::test]
+    async fn chat_rejects_tenant_header_body_mismatch() {
+        let app = app().await;
+        let response = app
+            .clone()
+            .oneshot(authenticated_chat_request(
+                Some("00000000-0000-0000-0000-000000000001"),
+                "99999999-9999-9999-9999-999999999999",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "mismatched identity must be rejected"
+        );
+
+        // Matching identities proceed (escalation answer: no model runtime
+        // in tests) — and the absent header keeps the control-plane bucket.
+        let response = app
+            .clone()
+            .oneshot(authenticated_chat_request(
+                Some("00000000-0000-0000-0000-000000000001"),
+                "00000000-0000-0000-0000-000000000001",
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = app
+            .oneshot(authenticated_chat_request(None, "99999999-9999-9999-9999-999999999999"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[test]

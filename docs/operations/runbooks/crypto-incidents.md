@@ -54,7 +54,7 @@
 | Algorithm | Usage | Location | Risk |
 |-----------|-------|----------|------|
 | AES-256-GCM | Data encryption | [`isolation/src/encryption.rs`](../../../services/mail-server/crates/isolation/src/encryption.rs) | Low (no known practical attacks) |
-| Argon2id | Password hashing | [`submission/src/auth.rs`](../../../services/mail-server/crates/submission/src/auth.rs) | Low (current best practice) |
+| Argon2id | Password hashing | [`apexmail-lib` Argon2id password hashing](../../../services/mail-server/crates/apexmail-lib/src/) | Low (current best practice) |
 | SHA-256 | HMAC, hashing | Multiple locations | Low (no practical collision attacks relevant) |
 | HKDF-SHA256 | Key derivation | [`isolation/src/encryption.rs`](../../../services/mail-server/crates/isolation/src/encryption.rs) | Low (NIST approved) |
 | RSA 2048/4096 | DKIM, JWT | [`outbound-queue/src/dkim.rs`](../../../services/mail-server/crates/outbound-queue/src/dkim.rs) | Medium (migrating to Ed25519 planned) |
@@ -454,7 +454,7 @@ fi
 
 # API key verification
 echo -n "API key: "
-if curl -sf -H "Authorization: Bearer $(cat test-api-key)" \
+if curl -sf -H "X-API-Key: $(cat test-api-key)" \
   https://api.apexmail.ee/v1/account > /dev/null; then
     echo "✅"; PASS=$((PASS+1))
 else

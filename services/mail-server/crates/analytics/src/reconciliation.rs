@@ -87,11 +87,16 @@ impl ReconciliationWorker {
 
         // Orphaned messages:sent but no events in 5+ min
         // #189:Use NOT EXISTS instead of NOT IN (SELECT DISTINCT ...) for O(n) instead of O(n×m)
+        // The messages table has no `message_id` column — its primary key is
+        // `id` (UUID) and events reference it as text, so the anti-join casts
+        // the VALUE once (m.id::text) and leaves the indexed events.message_id
+        // column untouched. The previous m.message_id reference made the whole
+        // health check fail on every deployment.
         let five_min_ago = now - Duration::minutes(5);
         let orphaned_count: (i64,) = sqlx::query_as(
-            "SELECT COUNT(DISTINCT m.message_id) FROM messages m \
+            "SELECT COUNT(*) FROM messages m \
              WHERE m.status = 'sent' AND m.created_at < $1 \
-             AND NOT EXISTS (SELECT 1 FROM events e WHERE e.message_id = m.message_id AND e.timestamp >= $1)",
+             AND NOT EXISTS (SELECT 1 FROM events e WHERE e.message_id = m.id::text AND e.timestamp >= $1)",
         )
         .bind(five_min_ago)
         .fetch_one(&self.pool)

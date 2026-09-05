@@ -142,7 +142,7 @@ curl -H "X-API-Key: am_live_your_api_key" https://api.apexmail.ee/v1/messages
 | POST | `/v1/messages` | Send a message |
 | GET | `/v1/messages` | List messages |
 | GET | `/v1/messages/:id` | Get message details |
-| DELETE | `/v1/messages/:id` | Cancel a scheduled message |
+| POST | `/v1/messages/:id/cancel` | Cancel a scheduled message |
 
 #### Domains
 
@@ -199,18 +199,20 @@ curl -H "X-API-Key: am_live_your_api_key" https://api.apexmail.ee/v1/messages
 
 ## Event Types
 
-ApexMail tracks the following event types:
+ApexMail delivers the following webhook event types (see
+[docs/api/webhooks.md](docs/api/webhooks.md) for the canonical catalog):
 
 | Event | Description |
 |-------|-------------|
-| `queued` | Message accepted and queued for delivery |
-| `sent` | Message sent to recipient's mail server |
-| `delivered` | Message delivered to recipient |
-| `opened` | Recipient opened the message |
-| `clicked` | Recipient clicked a link |
-| `bounced` | Message bounced (hard or soft) |
-| `complained` | Recipient marked as spam |
-| `unsubscribed` | Recipient unsubscribed |
+| `message.sent` | Message sent to recipient's mail server |
+| `message.delivered` | Message delivered to recipient |
+| `message.opened` | Recipient opened the message |
+| `message.clicked` | Recipient clicked a link |
+| `message.bounced` | Message bounced (hard or soft) |
+| `message.complained` | Recipient marked as spam |
+| `recipient.unsubscribed` | Recipient unsubscribed |
+
+Queueing is an internal message state and does not emit a webhook event.
 
 ## Configuration
 
@@ -233,24 +235,28 @@ See `.env.example` for all available configuration options.
 
 ## Deployment
 
-ApexMail ships to production via **Docker Compose + GHCR images**, deployed by
-GitHub Actions over SSH to the Hetzner host. `deploy.yml` builds **all ten
-service images** (`api-server`, `mta`, `imap-server`, `mailstore`, `worker`,
-`enterprise`, `tracking-service`, `observability`, `marketing`,
-`status-server`) and pushes
-them to GHCR; `deploy-hetzner.yml` then pulls them on the host and runs
-`docker compose up -d`. The full, authoritative procedure — including the
-service→image map, tag strategy, required secrets, and drift guard — lives in
-**[`deploy/DEPLOYMENT.md`](deploy/DEPLOYMENT.md)**, which is the single
-source of truth for deployment.
+ApexMail ships to production via the **self-hosted CI pipeline**
+(`ci/pipeline.sh`) running **on the deploy host** (a single Hetzner machine,
+kicked every 5 minutes by a systemd timer): on a push to `main` it fetches the
+ref, builds **all service images locally on the host** (Trivy-gated, recorded
+in a SHA256 digest manifest), runs the `migrator` one-shot as a migration
+gate, brings the stack up with `docker-compose.prod.yml`, and verifies
+per-service health, HTTP probes, and the SMTP banner. A red stage stops the
+line before `docker compose up -d`. There is **no registry** — images are
+tagged with `ghcr.io/...` names for compatibility but never pushed or pulled.
+GitHub Actions is decommissioned (`.github/workflows` is empty; the archived
+workflows and the replacement map live in `.github/workflows-archive/` and
+`ci/README.md`).
 
 The `Makefile` + `deploy/scripts/deploy.sh` path is a **manual/emergency
-fallback only** (it builds images locally on the host and never pushes them);
-do not use it for routine production deploys.
+fallback only** (it builds the same images locally on the host and never
+pushes them); do not use it for routine production deploys.
 
 The legacy bare-metal (systemd) and Kubernetes deployment paths are **superseded**;
-do not use them for production. Their history lives in git; the only supported
-paths are the GH Actions + Docker Compose pipeline and the Makefile emergency fallback.
+do not use them for production. The full, authoritative procedure — including
+the fresh-host bootstrap, service→image map, secrets contract, and drift
+guard — lives in **[`deploy/DEPLOYMENT.md`](deploy/DEPLOYMENT.md)**, which is
+the single source of truth for deployment.
 
 ### Local Development
 

@@ -918,7 +918,7 @@ Report bundle: reports/2026-02-22T14:30:00Z/
 ## Related Documentation
 
 - [Quick Start Guide](quickstart.md)
-- [Docker Configuration](docker.md)
+- [Configuration Reference](configuration.md)
 - [Disaster Recovery](../operations/disaster-recovery.md)
 - [SLO Management](../operations/slo-management.md)
 - [Monitoring Setup](../operations/monitoring.md)

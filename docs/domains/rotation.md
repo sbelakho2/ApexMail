@@ -39,7 +39,7 @@ Dedicated IPs automatically rotate within your pool:
 
 ```bash
 curl -s -X POST https://api.apexmail.ee/v1/ips/rotate \
-  -H "Authorization: Bearer $APEXMAIL_API_KEY" \
+  -H "X-API-Key: $APEXMAIL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"ip": "1.2.3.4", "action": "pause"}' \
   | jq .

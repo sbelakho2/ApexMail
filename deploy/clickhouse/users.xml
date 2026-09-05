@@ -99,11 +99,10 @@
             <load_balancing>random</load_balancing>
             <log_queries>1</log_queries>
         </readwrite>
-        <readonly>
-            <max_memory_usage>10000000000</max_memory_usage>
-            <load_balancing>random</load_balancing>
-            <log_queries>0</log_queries>
-            <readonly>1</readonly>
-        </readonly>
+        <!-- The unused `readonly` profile was REMOVED (audit §2 hygiene):
+             no user referenced it (default -> default, apexmail ->
+             readwrite, apexmail_admin -> default). Re-add and ASSIGN it to
+             a user before relying on it — an unassigned profile provides
+             no enforcement. -->
     </profiles>
 </clickhouse>

@@ -23,9 +23,9 @@ This index lists all documented API endpoints for the ApexMail platform. Each re
 | Dedicated IPs | `/v1/dedicated-ips` | [`dedicated-ips.md`](dedicated-ips.md) | Dedicated sending IP lifecycle |
 | Support | `/v1/support` | [`support.md`](support.md) | Support ticket management |
 | SCIM | `/v1/scim` | [`scim.md`](scim.md) | SCIM 2.0 user/group provisioning |
-| Health | `/v1/health` | [`health.md`](health.md) | Liveness, readiness, and deep health checks |
+| Health | `/health` (unversioned) | [`health.md`](health.md) | Liveness, readiness, and deep health checks |
 | SES Notifications | `/v1/ses` | — (internal) | AWS SES bounce/complaint notification handler |
-| Enterprise | `/v1/enterprise` | [`enterprise.md`](enterprise.md) | Enterprise private cloud, dedicated IP inventory, BYOIP |
+| Enterprise | `enterprise.apexmail.ee/api/enterprise` | [`../../enterprise/README.md`](../../enterprise/README.md) | Enterprise private cloud, dedicated IP inventory, BYOIP |
 | Analytics Export | `/v1/analytics` | [`analytics.md`](analytics.md) | Analytics data export (JSON/CSV/PDF) |
 | Inbox Placement | `/v1/analytics` | [`../inbox-placement.md`](../inbox-placement.md) | Inbox placement testing and deliverability analysis |
 
@@ -35,7 +35,7 @@ All endpoints require authentication unless noted otherwise. See the [Auth API](
 
 - **API Key Authentication**: Include your API key in the `X-API-Key` header
 - **Session Authentication**: Use cookies obtained from `/v1/auth/login`
-- **Public Endpoints**: Auth endpoints (`/v1/auth/*`), health endpoints (`/v1/health/live`), SES notifications (`/v1/ses/notifications`)
+- **Public Endpoints**: Auth endpoints (`/v1/auth/*`), health endpoints (`/health/live`), SES notifications (`/v1/ses/notifications`)
 
 ## Common Headers
 
@@ -70,14 +70,8 @@ Responses include pagination metadata:
 
 ## Rate Limiting
 
-Rate limits are tier-based. See [`../rate-limits.md`](../rate-limits.md) for full details.
-
-| Plan | Requests/Second |
-|------|-----------------|
-| Free | 10/s |
-| Starter / Pro / PAYG | 100/s |
-| Growth / Scale | 500/s |
-| Enterprise | 5,000/s (customizable) |
+Rate limits are tier-based. The single canonical throughput table lives in
+[`../rate-limits.md`](../rate-limits.md).
 
 ## Error Responses
 

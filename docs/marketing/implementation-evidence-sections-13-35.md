@@ -2,6 +2,14 @@
 
 > Report generated: 2026-07-29
 > Each `[x]` below cites evidence for the corresponding checkbox in fixes.md.
+>
+> **Note (2026-09-05):** this is a historical evidence report, not a statement
+> of current reality. Citations to `docs/marketing/plan-matrix.md` are stale:
+> that file was **deleted on 2026-09-05** because its plan catalog
+> (Developer/Pro/Growth/Business tiers) contradicted the real plan catalog
+> (Free/Starter/Pro/Growth/Scale/Enterprise — see `docs/pricing.md`). The
+> verified current state is in
+> [docs/audit/full-repo-audit-2026-09-05.md](../audit/full-repo-audit-2026-09-05.md).
 
 ---
 

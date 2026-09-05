@@ -40,7 +40,7 @@ The BAA covers:
 
 ## Related Resources
 
-- [HIPAA Compliance Overview](./compliance.md)
-- [Data Protection](./data-protection.md) — Encryption, tenant isolation, data residency
+- [HIPAA Compliance Overview](../enterprise/compliance.md)
+- [Data Protection](../security/data-protection.md) — Encryption, tenant isolation, data residency
 - [Security Overview](../security/compliance.md)
 - [Pricing: Enterprise Plan](../pricing.md) — BAA is included with Enterprise

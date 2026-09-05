@@ -608,7 +608,24 @@ async fn try_claim_send_slot(
 }
 
 /// G.3c: release the send marker once the attempt is fully handled.
-async fn release_send_slot(redis: &RedisPool, job: &EmailJob) {
+///
+/// `bookkeeping_failed` marks the case where the post-send writes did NOT
+/// complete (e.g. the row UPDATE errored): the row is still owed a state
+/// transition, so it will be re-claimed after the lease expires — and the
+/// marker MUST NOT be deleted then, or that reclaim would re-send an
+/// already-delivered message. Leaving the key to expire at its TTL
+/// (visibility timeout) keeps the idempotency window exactly as wide as
+/// the lease it protects.
+async fn release_send_slot(redis: &RedisPool, job: &EmailJob, bookkeeping_failed: bool) {
+    if bookkeeping_failed {
+        warn!(
+            job_id = %job.id,
+            recipient = %job.to,
+            attempt = job.attempt,
+            "post-send bookkeeping failed — keeping the send idempotency marker until TTL so a reclaim cannot re-send"
+        );
+        return;
+    }
     match redis.get().await {
         Ok(mut conn) => {
             let _: () = redis::cmd("DEL")
@@ -770,8 +787,9 @@ fn classify_send_failure(err: &ProcessorError) -> SendFailureClass {
 /// Suppressing on those poisons valid recipients — one receiving domain's
 /// spam policy would silence the address for the whole tenant. Only a
 /// 5.1.x address-status enhanced code (or an explicit mailbox rejection
-/// phrase) proves address invalidity. SES `permanent` dispositions are
-/// classified at the source from typed SDK errors and stay authoritative.
+/// phrase) proves address invalidity. SES dispositions carry the
+/// address-proving verdict from the transport source (typed SDK error);
+/// account/configuration refusals dead-letter without suppressing.
 fn is_recipient_invalid(error: &ProcessorError) -> bool {
     match error {
         ProcessorError::Smtp {
@@ -790,16 +808,19 @@ fn is_recipient_invalid(error: &ProcessorError) -> bool {
                 "no such recipient",
                 "recipient not found",
                 "mailbox not found",
-                "mailbox unavailable",
                 "bad destination mailbox",
-                "address rejected",
                 "does not exist",
             ]
             .iter()
             .any(|phrase| m.contains(phrase))
         }
+        // Suppression requires the transport's address-proving verdict —
+        // `permanent` alone is NOT sufficient (sending-paused /
+        // resource-not-found dead-letter without proving the mailbox bad).
         ProcessorError::Ses {
-            permanent: true, ..
+            permanent: true,
+            address_proving: true,
+            ..
         } => true,
         _ => false,
     }
@@ -1464,7 +1485,17 @@ impl EmailProcessor {
         let outcome: ProcessorResult<()> = match send_result {
             Ok(result) => {
                 self.smtp_circuit_breaker.record_success();
-                self.handle_success(job, &result).await
+                // Track whether the POST-SEND bookkeeping completed: if it
+                // failed, the row still owes a state transition and will be
+                // re-claimed — the send marker must survive (see
+                // release_send_slot) so that reclaim does not re-send.
+                match self.handle_success(job, &result).await {
+                    Err(e) => {
+                        release_send_slot(&self.redis, job, true).await;
+                        return Err(e);
+                    }
+                    Ok(()) => Ok(()),
+                }
             }
             Err(e) => {
                 self.smtp_circuit_breaker.record_failure();
@@ -1489,7 +1520,7 @@ impl EmailProcessor {
         // G.3c: release the marker once the attempt is fully handled — on
         // success the pending set already excludes this recipient; on
         // failure the next attempt mints a fresh marker (attempt increments).
-        release_send_slot(&self.redis, job).await;
+        release_send_slot(&self.redis, job, false).await;
 
         outcome
     }
@@ -1836,8 +1867,12 @@ impl EmailProcessor {
             return Ok(());
         }
 
-        // Record sent event
-        sqlx::query(
+        // Record sent event. Best-effort BY CONTRACT: the send already
+        // happened and the row is already 'sent' — an analytics INSERT
+        // failure must NOT classify the delivered mail as failed (the
+        // caller would route it to the bounce handlers and the retry path).
+        // Log + metric; the delivery stands.
+        if let Err(e) = sqlx::query(
             r#"
             INSERT INTO events (id, tenant_id, message_id, domain_id, campaign_id, event_type, recipient, timestamp)
             VALUES ($1, $2, $3, $4, $5, 'sent', $6, NOW())
@@ -1850,7 +1885,16 @@ impl EmailProcessor {
         .bind(&job.campaign_id)
         .bind(&job.to)
         .execute(&self.db)
-        .await?;
+        .await
+        {
+            metrics::counter!("email.sent_event_write_failed").increment(1);
+            error!(
+                job_id = %job.id,
+                recipient = %job.to,
+                error = %e,
+                "Post-send 'sent' event INSERT failed — mail IS delivered (row already 'sent'); analytics event lost, not the delivery"
+            );
+        }
 
         // Stamp the transport actually used on the message row
         // (messages.headers X-Mail-Provider + the transport column) so
@@ -1882,14 +1926,25 @@ impl EmailProcessor {
 
         // D: transition the audit `messages` row 'queued' → 'sent' (the SMTP
         // counterpart of the SES delivery-notification handler). Best-effort
-        // parse: a legacy job without a UUID message id skips the transition
-        // rather than failing the (already successful) send handling.
+        // for the same reason as the events INSERT above: a legacy job
+        // without a UUID message id skips the transition rather than
+        // failing the (already successful) send handling — and so does a
+        // failed write, with a metric.
         if let Ok(message_uuid) = uuid::Uuid::parse_str(&job.message_id) {
-            sqlx::query(MESSAGES_SENT_UPDATE_SQL)
+            if let Err(e) = sqlx::query(MESSAGES_SENT_UPDATE_SQL)
                 .bind(message_uuid)
                 .bind(&job.tenant_id)
                 .execute(&self.db)
-                .await?;
+                .await
+            {
+                metrics::counter!("email.sent_message_transition_failed").increment(1);
+                error!(
+                    job_id = %job.id,
+                    message_id = %job.message_id,
+                    error = %e,
+                    "Post-send messages 'queued'→'sent' transition failed — mail IS delivered; audit row stays 'queued'"
+                );
+            }
         }
 
         // FIX-9/M56: feed the FBL server's complaint-rate alerting. The
@@ -3490,27 +3545,97 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// A MailboxDoesNotExist-class SES rejection arrives as
-    /// `ProcessorError::Ses { permanent: true }` (classified in transport.rs
-    /// where the typed SDK error is still available) and must take the
-    /// hard-bounce path: per-recipient suppression, never a retry.
+    /// `ProcessorError::Ses { permanent: true, address_proving: true }`
+    /// (classified in transport.rs where the typed SDK error is still
+    /// available) and must take the hard-bounce path: per-recipient
+    /// suppression, never a retry.
     #[test]
     fn ses_permanent_failure_classifies_hard_for_suppression() {
         let err = ProcessorError::Ses {
             permanent: true,
+            address_proving: true,
             message: "SES send failed: MailboxDoesNotExist".into(),
         };
         assert_eq!(classify_send_failure(&err), SendFailureClass::Hard);
+        assert!(
+            is_recipient_invalid(&err),
+            "an address-proving SES bounce justifies suppression"
+        );
     }
 
-    /// A transient SES failure (5xx / network) carries permanent:false and
-    /// must retry via the soft-bounce backoff — never suppress on it.
+    /// A transient SES failure (4xx / 5xx / network) carries
+    /// permanent:false and must retry via the soft-bounce backoff — never
+    /// suppress on it.
     #[test]
     fn ses_transient_failure_classifies_soft_for_retry() {
         let err = ProcessorError::Ses {
             permanent: false,
+            address_proving: false,
             message: "SES send failed: 503 Service Unavailable".into(),
         };
         assert_eq!(classify_send_failure(&err), SendFailureClass::Soft);
+        assert!(!is_recipient_invalid(&err));
+    }
+
+    /// Account/configuration refusals (sending paused, suspension, unverified
+    /// MAIL FROM, 4xx) are NOT address proof: the message may dead-letter,
+    /// but the recipient must never be suppressed tenant-wide on them.
+    #[test]
+    fn ses_non_address_permanent_failures_do_not_suppress() {
+        for (code, status) in [
+            (Some("AccountSuspendedException"), None),
+            (Some("MailFromDomainNotVerifiedException"), None),
+            (Some("BadRequestException"), None),
+            (None, Some(400)),
+            (None, Some(403)),
+            (None, Some(452)),
+        ] {
+            let disposition = crate::email::transport::classify_ses_failure(code, status);
+            assert_eq!(
+                disposition,
+                crate::email::transport::SesFailureDisposition::Transient,
+                "{code:?}/{status:?} must retry, not permanent-suppress"
+            );
+        }
+        // Determinate non-address refusals dead-letter WITHOUT suppressing.
+        let err = ProcessorError::Ses {
+            permanent: true,
+            address_proving: false,
+            message: "SES send failed: SendingPausedException".into(),
+        };
+        assert_eq!(classify_send_failure(&err), SendFailureClass::Hard);
+        assert!(
+            !is_recipient_invalid(&err),
+            "sending-paused says nothing about the mailbox"
+        );
+    }
+
+    /// The generic SMTP phrase list must not treat policy rejections
+    /// ("address rejected", "mailbox unavailable") as address proof —
+    /// receiving MTAs emit both for spam-policy and full-mailbox verdicts.
+    #[test]
+    fn smtp_policy_rejection_phrases_do_not_suppress() {
+        for message in [
+            "550 5.7.1 address rejected: access denied",
+            "550 mailbox unavailable (over quota policy)",
+        ] {
+            let err = ProcessorError::Smtp {
+                code: 550,
+                enhanced: None,
+                message: message.into(),
+            };
+            assert!(
+                !is_recipient_invalid(&err),
+                "policy phrase must not suppress: {message}"
+            );
+        }
+        // Genuine mailbox-proof phrases still suppress.
+        let err = ProcessorError::Smtp {
+            code: 550,
+            enhanced: None,
+            message: "550 5.1.1 user unknown".into(),
+        };
+        assert!(is_recipient_invalid(&err));
     }
 
     // ---------------------------------------------------------------------------
@@ -4239,8 +4364,15 @@ mod tests {
             };
             assert!(try_claim_send_slot(&redis, &sibling, 60).await.unwrap());
             // 4. After the attempt is handled the marker is released.
-            release_send_slot(&redis, &job).await;
+            release_send_slot(&redis, &job, false).await;
             assert!(try_claim_send_slot(&redis, &job, 60).await.unwrap());
+            // 5. When post-send bookkeeping FAILED, the marker must survive
+            //    so a reclaim of the still-pending row cannot re-send.
+            release_send_slot(&redis, &job, true).await;
+            assert!(
+                !try_claim_send_slot(&redis, &job, 60).await.unwrap(),
+                "failed bookkeeping must keep the marker held until TTL"
+            );
             Ok(())
         }
         .await;

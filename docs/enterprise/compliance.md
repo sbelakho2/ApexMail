@@ -30,7 +30,7 @@ Compliance features include:
 ### Record Consent
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/consent \
+curl -X POST https://enterprise.apexmail.ee/compliance/consent \
   -H "X-API-Key: YOUR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
@@ -77,14 +77,14 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/consent \
 
 ```bash
 # Send verification email
-curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/consent/verify \
+curl -X POST https://enterprise.apexmail.ee/compliance/consent/verify \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "consentId": "consent_abc123"
   }'
 
 # Confirm consent (after user clicks verification link)
-curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/consent/confirm \
+curl -X POST https://enterprise.apexmail.ee/compliance/consent/confirm \
   -d '{
     "token": "verify_token_xxx"
   }'
@@ -93,7 +93,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/consent/confirm \
 ### Check Consent Status
 
 ```bash
-curl https://api.apexmail.ee/enterprise/v1/compliance/consent/status \
+curl https://enterprise.apexmail.ee/compliance/consent/status \
   -H "X-API-Key: YOUR_API_KEY" \
   -G -d "email=user@example.com"
 ```
@@ -128,7 +128,7 @@ Response:
 ### Right to Access (DSAR)
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/dsar/access \
+curl -X POST https://enterprise.apexmail.ee/compliance/dsar/access \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
@@ -179,7 +179,7 @@ Response:
 ### Right to Erasure (Right to be Forgotten)
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/dsar/erasure \
+curl -X POST https://enterprise.apexmail.ee/compliance/dsar/erasure \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
@@ -219,7 +219,7 @@ Response:
 ### Right to Data Portability
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/dsar/portability \
+curl -X POST https://enterprise.apexmail.ee/compliance/dsar/portability \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
@@ -237,7 +237,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/dsar/portability \
 ### Generate DPA
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/dpa/generate \
+curl -X POST https://enterprise.apexmail.ee/compliance/dpa/generate \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
@@ -293,7 +293,7 @@ Response:
 ### Sign DPA Electronically
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/dpa/sign \
+curl -X POST https://enterprise.apexmail.ee/compliance/dpa/sign \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "dpaId": "dpa_abc123",
@@ -311,7 +311,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/dpa/sign \
 ### Query Audit Logs
 
 ```bash
-curl https://api.apexmail.ee/enterprise/v1/compliance/audit-logs \
+curl https://enterprise.apexmail.ee/compliance/audit-logs \
   -H "X-API-Key: YOUR_API_KEY" \
   -G -d "accountId=acc_xxx" \
   -d "startDate=2024-01-01" \
@@ -366,7 +366,7 @@ Response:
 ### Export Audit Logs
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/audit-logs/export \
+curl -X POST https://enterprise.apexmail.ee/compliance/audit-logs/export \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
@@ -382,7 +382,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/audit-logs/export 
 ### Configure Retention
 
 ```bash
-curl -X PUT https://api.apexmail.ee/enterprise/v1/compliance/retention \
+curl -X PUT https://enterprise.apexmail.ee/compliance/retention \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
@@ -425,7 +425,7 @@ curl -X PUT https://api.apexmail.ee/enterprise/v1/compliance/retention \
 ### Configure Data Residency
 
 ```bash
-curl -X PUT https://api.apexmail.ee/enterprise/v1/compliance/data-residency \
+curl -X PUT https://enterprise.apexmail.ee/compliance/data-residency \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
@@ -445,7 +445,7 @@ curl -X PUT https://api.apexmail.ee/enterprise/v1/compliance/data-residency \
 ### Generate Compliance Report
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/reports \
+curl -X POST https://enterprise.apexmail.ee/compliance/reports \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "accountId": "acc_xxx",
@@ -500,6 +500,14 @@ Response:
 
 ## HIPAA Field-Level Encryption
 
+> **Not HIPAA-certified.** ApexMail is not currently HIPAA-certified and does
+> not offer a signed BAA; HIPAA readiness is planned (target: readiness
+> assessment Q2 2027 — see [security/framework-status.md](../security/framework-status.md)).
+> The field-encryption tooling below is an available encryption control, not a
+> certification or authorization to process regulated PHI. Do not route
+> regulated workloads without written confirmation and the required agreement
+> (see [pricing.md](../pricing.md)).
+
 For healthcare organizations, ApexMail provides AES-256-GCM field-level
 encryption for Protected Health Information (PHI). This goes beyond
 database-level encryption-at-rest by encrypting individual field values
@@ -545,7 +553,7 @@ The following field names are automatically identified as PHI:
 ### Encrypt a Field
 
 ```bash
-curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/encryption/encrypt-field \
+curl -X POST https://enterprise.apexmail.ee/compliance/encryption/encrypt-field \
   -H "X-API-Key: YOUR_API_KEY" \
   -d '{
     "tenant_id": "ten_abc123",
@@ -566,7 +574,7 @@ curl -X POST https://api.apexmail.ee/enterprise/v1/compliance/encryption/encrypt
 ### Check Encryption Status
 
 ```bash
-curl https://api.apexmail.ee/enterprise/v1/compliance/encryption/status/ten_abc123 \
+curl https://enterprise.apexmail.ee/compliance/encryption/status/ten_abc123 \
   -H "X-API-Key: YOUR_API_KEY"
 ```
 

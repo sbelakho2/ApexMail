@@ -167,7 +167,7 @@ served from multiple regions and the ability to fail over between them.
 **Status**: Not a currently available product feature.
 
 **Key distinction**: Multi-region must NOT be claimed unless production
-traffic can actually fail between regions seamlessly. EEA data residency
+traffic can fail between regions without user action. EEA data residency
 with availability-zone redundancy is NOT multi-region.
 
 ---

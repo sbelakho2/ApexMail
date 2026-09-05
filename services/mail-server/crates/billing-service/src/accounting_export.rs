@@ -94,7 +94,20 @@ async fn fetch_accounting_rows(
             i.status
         FROM invoices i
         JOIN tenants t ON t.id = i.tenant_id
-        LEFT JOIN billing_addresses ba ON ba.tenant_id = i.tenant_id
+        -- LATERAL picks exactly ONE address row per tenant (newest first),
+        -- mirroring the KMD rate-breakdown join: a plain LEFT JOIN fans
+        -- out when a tenant ever had two billing addresses, duplicating
+        -- every invoice row in the export (double-counted bookkeeping).
+        -- Migration 116 added UNIQUE(tenant_id) for the future; this also
+        -- holds for historical multi-row databases.
+        LEFT JOIN LATERAL (
+            SELECT company_name, address_line1, address_line2, city, state,
+                   postal_code, country, vat_number
+            FROM billing_addresses ba
+            WHERE ba.tenant_id = i.tenant_id
+            ORDER BY ba.updated_at DESC, ba.created_at DESC, ba.id
+            LIMIT 1
+        ) ba ON true
         WHERE i.issued_at >= $1 AND i.issued_at < $2
         ORDER BY i.issued_at ASC
         "#,

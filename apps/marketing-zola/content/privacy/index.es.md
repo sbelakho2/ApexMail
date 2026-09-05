@@ -52,8 +52,8 @@ Conservamos los datos personales solo el tiempo necesario para los fines para lo
 |---|---|
 | Datos de cuenta | Duración del contrato + 30 días |
 | Registros de facturación | 7 años (ley contable estonia) |
-| Contenido de correo (cuerpo, asunto, encabezados, adjuntos) | 7 días por defecto; máximo dependiente del plan (de 1 día en el plan gratuito hasta 730 días en Enterprise) |
-| Registros de eventos (eventos de entrega, apertura y clic) | 30 días por defecto; máximo dependiente del plan (hasta 730 días en Enterprise) |
+| Contenido de correo (cuerpo, asunto, encabezados, adjuntos) | 7 días por defecto; según el plan, hasta 730 días en Enterprise |
+| Registros de eventos (eventos de entrega, apertura y clic) | 30 días por defecto (7 días en el plan gratuito); según el plan, hasta 730 días en Enterprise |
 | Tickets de soporte | 2 años después de la resolución |
 
 Consulte nuestra [Política de conservación de datos](/compliance/#data-retention) para más detalles.

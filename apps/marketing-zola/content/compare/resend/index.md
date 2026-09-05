@@ -8,7 +8,7 @@ competitor = "Resend"
 competitor_slug = "resend"
 competitor_name = "Resend"
 competitor_description = "Resend is a modern email API for developers with component-based email authoring."
-pricing_as_of = "2026-05-09"
+pricing_as_of = "2026-09-05"
 og_image = "/images/og-image.png"
 # Feature comparison counts — update when capabilities change
 apexmail_wins = 6
@@ -21,7 +21,7 @@ verdict_points = [
   "Advanced analytics, content diagnostics, and send-time recommendations",
   "Built-in consent management, audit logs, and GDPR automation",
   "Idempotency keys, ARC signing, BIMI, and reputation circuit breaker",
-  "First-party SDKs for Node.js, Python, Go, PHP, Ruby, and Java; Resend SDKs for Node.js, PHP, Python, Ruby, Go, Java, Rust, .NET, and Laravel",
+  "First-party SDKs for Python, Go, PHP, Ruby, and Java are in active development (source in the monorepo, not yet published to registries; no Node.js SDK today — use the HTTP API); Resend offers SDKs for Node.js, PHP, Python, Ruby, Go, Java, Rust, .NET, and Laravel",
 ]
 
 # Comparison data (audit 3.3): rendered by partials/compare/table.html via a

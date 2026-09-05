@@ -64,16 +64,21 @@ fn build_support_update_audit_metadata(body: &UpdateTicketRequest) -> serde_json
     })
 }
 
+/// Actor-attributed support audit (P2-2): ticket mutations record the
+/// acting operator's tenant AND user id — `None, None` left every support
+/// action anonymous in the compliance trail.
 async fn log_support_audit(
-    db: &sqlx::PgPool,
+    state: &AppState,
+    auth: &AuthUser,
     action: &str,
     ticket_id: &str,
     metadata: serde_json::Value,
 ) {
-    crate::audit_log::insert_audit_log_best_effort(
-        db,
-        None,
-        None,
+    crate::audit_log::insert_audit_log_best_effort_with_env(
+        &state.db,
+        state.config.environment.is_production(),
+        Some(auth.tenant_id.as_str()),
+        auth.user_id.as_deref(),
         action,
         "support_ticket",
         Some(ticket_id),
@@ -325,7 +330,8 @@ async fn create_ticket(
     let ticket = insert_support_ticket(&state.db, &body).await?;
 
     log_support_audit(
-        &state.db,
+        &state,
+        &auth,
         "control_plane.support.ticket_created",
         &ticket.id,
         build_support_create_audit_metadata(&body, &ticket.id),
@@ -386,37 +392,58 @@ async fn list_tickets(
 
     let ticket_rows = query.fetch_all(&state.db).await?;
 
+    // One batched messages fetch (P2 N+1): the per-ticket loop issued
+    // limit+1 queries per page (101 at the cap). The global window bounds
+    // memory; the per-ticket cap is re-applied while grouping.
+    let ticket_ids: Vec<String> = ticket_rows.iter().map(|row| row.0.clone()).collect();
+    let msg_rows: Vec<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        serde_json::Value,
+        chrono::DateTime<chrono::Utc>,
+    )> = if ticket_ids.is_empty() {
+        Vec::new()
+    } else {
+        sqlx::query_as(
+            "SELECT ticket_id::text, id::text, content, author, author_type, \
+             COALESCE(attachments, '[]'::jsonb), created_at \
+             FROM support_ticket_messages WHERE ticket_id::text = ANY($1) \
+             ORDER BY created_at ASC LIMIT 5000",
+        )
+        .bind(&ticket_ids)
+        .fetch_all(&state.db)
+        .await?
+    };
+
+    // ORDER BY created_at ASC keeps each ticket's slice chronological; the
+    // per-ticket truncation preserves the old per-ticket LIMIT 50 contract.
+    let mut messages_by_ticket: std::collections::HashMap<String, Vec<TicketMessage>> =
+        std::collections::HashMap::new();
+    for (tid, mid, content, author, author_type, attachments, mca) in msg_rows {
+        messages_by_ticket
+            .entry(tid)
+            .or_default()
+            .push(TicketMessage {
+                id: mid,
+                content,
+                author,
+                author_type,
+                attachments,
+                created_at: mca.to_rfc3339(),
+            });
+    }
+    for messages in messages_by_ticket.values_mut() {
+        messages.truncate(50);
+    }
+
     let mut tickets: Vec<Ticket> = Vec::with_capacity(ticket_rows.len());
     for (id, subj, desc, tid, tname, temail, status, priority, cat, assignee, ca, ua) in ticket_rows
     {
-        // Load messages for this ticket
-        let msgs = sqlx::query_as::<_, (
-            String, String, String, String, serde_json::Value, chrono::DateTime<chrono::Utc>,
-        )>(
-            "SELECT id::text, content, author, author_type, COALESCE(attachments, '[]'::jsonb), created_at
-             FROM support_ticket_messages WHERE ticket_id::text = $1
-             ORDER BY created_at ASC LIMIT 50",
-        )
-        .bind(&id)
-        .fetch_all(&state.db)
-        .await
-        ?;
-
-        let messages: Vec<TicketMessage> = msgs
-            .into_iter()
-            .map(
-                |(mid, content, author, at, attachments, mca)| TicketMessage {
-                    id: mid,
-                    content,
-                    author,
-                    author_type: at,
-                    attachments,
-                    created_at: mca.to_rfc3339(),
-                },
-            )
-            .collect();
-
         tickets.push(Ticket {
+            messages: messages_by_ticket.remove(&id).unwrap_or_default(),
             id,
             subject: subj,
             description: desc,
@@ -429,7 +456,6 @@ async fn list_tickets(
             assignee,
             created_at: ca.to_rfc3339(),
             updated_at: ua.to_rfc3339(),
-            messages,
         });
     }
 
@@ -458,23 +484,42 @@ async fn add_reply(
         body.author_type = "agent".to_string();
     }
 
-    let inserted_reply = insert_support_reply_message(&state.db, &body).await?;
-
-    // Optionally update ticket status
-    if let Some(ref new_status) = body.new_status {
-        if VALID_STATUSES.contains(&new_status.as_str()) {
-            sqlx::query(
-                "UPDATE support_tickets SET status = $1, updated_at = NOW() WHERE id::text = $2",
-            )
-            .bind(new_status)
+    // Reject unknown tickets and invalid transitions BEFORE writing: the
+    // FK used to swallow the former into a driver error and the latter was
+    // silently ignored (status stays stale while the reply suggests action).
+    let ticket_exists: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM support_tickets WHERE id::text = $1)")
             .bind(&body.ticket_id)
-            .execute(&state.db)
-            .await?;
+            .fetch_one(&state.db)
+            .await
+            .unwrap_or(false);
+    if !ticket_exists {
+        return Err(ApiError::NotFound("ticket not found".into()));
+    }
+    if let Some(ref new_status) = body.new_status {
+        if !VALID_STATUSES.contains(&new_status.as_str()) {
+            return Err(ApiError::Validation(vec![format!(
+                "invalid newStatus: {new_status}"
+            )]));
         }
     }
 
+    let inserted_reply = insert_support_reply_message(&state.db, &body).await?;
+
+    // Optionally update ticket status (validated above)
+    if let Some(ref new_status) = body.new_status {
+        sqlx::query(
+            "UPDATE support_tickets SET status = $1, updated_at = NOW() WHERE id::text = $2",
+        )
+        .bind(new_status)
+        .bind(&body.ticket_id)
+        .execute(&state.db)
+        .await?;
+    }
+
     log_support_audit(
-        &state.db,
+        &state,
+        &auth,
         "control_plane.support.reply_added",
         &body.ticket_id,
         build_support_reply_audit_metadata(&body, &inserted_reply.id),
@@ -517,6 +562,11 @@ async fn update_ticket(
         }
     }
 
+    // All three UPDATEs share one transaction: a status flip landing while
+    // the priority flip fails must not leave a half-applied edit (the old
+    // shape could set status, then 500 on priority, then re-run to a
+    // second status write).
+    let mut tx = state.db.begin().await?;
     let mut rows_affected: u64 = 0;
 
     if let Some(ref s) = body.status {
@@ -525,7 +575,7 @@ async fn update_ticket(
         )
         .bind(s)
         .bind(&body.id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
     }
@@ -535,7 +585,7 @@ async fn update_ticket(
         )
         .bind(p)
         .bind(&body.id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
     }
@@ -545,17 +595,20 @@ async fn update_ticket(
         )
         .bind(a)
         .bind(&body.id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?
         .rows_affected();
     }
 
     if rows_affected == 0 {
+        tx.rollback().await?;
         return Err(ApiError::NotFound("ticket not found".into()));
     }
+    tx.commit().await?;
 
     log_support_audit(
-        &state.db,
+        &state,
+        &auth,
         "control_plane.support.ticket_updated",
         &body.id,
         build_support_update_audit_metadata(&body),

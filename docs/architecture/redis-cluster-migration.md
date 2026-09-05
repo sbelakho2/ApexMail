@@ -2,7 +2,7 @@
 
 > **Document Owner:** Infrastructure Team
 > **Last Updated:** 2026-05-11
-> **Related:** [`deploy/helm/apexmail/values.yaml`](../../deploy/helm/apexmail/values.yaml), [`rate-limiter/src/redis_limiter.rs`](../../services/mail-server/crates/rate-limiter/src/redis_limiter.rs)
+> **Related:** [`docker-compose.yml` Redis service](../../docker-compose.yml), [`rate-limiter/src/redis_limiter.rs`](../../services/mail-server/crates/rate-limiter/src/redis_limiter.rs)
 
 ## 1. Overview
 
@@ -319,8 +319,8 @@ redis-cli -h redis-cluster -p 6379 CLUSTER NODES | grep master
 redis-cli -h redis-cluster -p 6379 CLUSTER INFO | grep cluster_state
 
 # 5. Verify rate limiting still works
-curl -X POST http://api-server:3000/v1/email/send \
-  -H "Authorization: Bearer test-key" \
+curl -X POST http://api-server:3000/v1/messages \
+  -H "X-API-Key: <test-api-key>" \
   -H "Content-Type: application/json" \
   -d '{"to": ["test@example.com"], "subject": "test", "text_body": "test"}'
 

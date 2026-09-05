@@ -26,8 +26,7 @@ use tower_http::trace::TraceLayer;
 use ui_foundation::axum_router as ui_router;
 
 use crate::config::Config;
-use crate::middleware::{
-    auth, ddos, idempotency, metrics, rate_limiter, request_logger, versioning,
+use crate::middleware::{    auth, ddos, idempotency, metrics, rate_limiter, request_logger, versioning,    waf,
 };
 use crate::routes;
 use crate::state::AppState;
@@ -307,6 +306,13 @@ pub fn build_app(state: AppState) -> Router {
         CONTENT_TYPE,
         header::HeaderName::from_static("x-api-key"),
         header::HeaderName::from_static("x-csrf-token"),
+        // Idempotency-Key participates in the double-send protection; a
+        // browser client cross-origin cannot use a header the CORS layer
+        // refuses to accept, which silently degraded that protection.
+        header::HeaderName::from_static("idempotency-key"),
+        header::HeaderName::from_static("x-tenant-id"),
+        header::HeaderName::from_static("x-request-id"),
+        header::HeaderName::from_static("x-correlation-id"),
     ];
     let has_wildcard_origin = state.config.cors_origins.iter().any(|origin| origin == "*");
     let origins: Vec<HeaderValue> = state
@@ -502,6 +508,12 @@ pub fn build_app(state: AppState) -> Router {
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             ddos::ddos_protection_middleware,
+        ))
+        // WAF screening on the public request path: monitor mode unless
+        // WAF_ENFORCE is set (see middleware::waf).
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            waf::waf_middleware,
         ));
 
     // ── Control-plane (`/v1/admin/*`) routes ─────────────────
@@ -797,6 +809,85 @@ fn static_asset_cache_control(path: &str) -> HeaderValue {
 fn browser_csp_header() -> HeaderValue {
     let analytics_img_src = std::env::var("ANALYTICS_IMAGE_SRC").ok();
     browser_csp_header_with_sources(analytics_img_src.as_deref())
+}
+
+/// The auth pages that carry the KiwiCaptcha widget: (surface, path,
+/// scope). The scope must exist in the issuance allowlist in
+/// `routes::kiwicaptcha.rs` and in the `verify_kiwi_token` call of the
+/// matching form POST handler — the three must stay in lockstep or the
+/// challenge a page mints can never satisfy its own form.
+const KIWI_AUTH_PAGES: &[(&str, &str, &str)] = &[
+    ("web", "/login", "login"),
+    ("web", "/signup", "signup"),
+    ("web", "/forgot-password", "forgot-password"),
+    ("web", "/reset-password", "reset-password"),
+    ("control-plane", "/login", "cp-login"),
+];
+
+fn kiwi_auth_scope_for(surface: &str, path: &str) -> Option<&'static str> {
+    KIWI_AUTH_PAGES
+        .iter()
+        .find(|(s, p, _)| *s == surface && *p == path)
+        .map(|(_, _, scope)| *scope)
+}
+
+/// CSP for the auth pages: identical to the zero-JS browser policy except
+/// that the KiwiCaptcha widget's nonce'd inline `<style>`/`<script>` blocks
+/// are admitted. The nonce is minted per response, so no other inline
+/// script can execute on these pages even if one were ever injected —
+/// a script without the exact per-response nonce still violates the policy.
+fn auth_csp_header(nonce: &str) -> HeaderValue {
+    let analytics_img_src = std::env::var("ANALYTICS_IMAGE_SRC").ok();
+    let analytics_img_src = analytics_img_src
+        .as_deref()
+        .map(str::trim)
+        .filter(|src| !src.is_empty())
+        .filter(|src| src.starts_with("https://"))
+        .map(|src| format!(" {src}"))
+        .unwrap_or_default();
+
+    HeaderValue::from_str(&format!(
+        "default-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'; connect-src 'self'; img-src 'self' data:{analytics_img_src}; font-src 'self' data:; manifest-src 'self'; style-src 'self' 'nonce-{nonce}'; style-src-attr 'unsafe-inline'; script-src 'nonce-{nonce}'; frame-src 'none'; object-src 'none'"
+    ))
+    .expect("auth CSP should be valid")
+}
+
+/// Browser HTML response for the widget-bearing auth pages. This is the
+/// ONE sanctioned exception to the zero-JS strip pass: the render output
+/// itself still contains no scripts (test-pinned in ui-foundation), and
+/// the only executable blocks are the KiwiCaptcha widget scripts injected
+/// here by this server — so the defensive strip is skipped for exactly
+/// this path and the nonce CSP is the control instead.
+fn auth_html_response(html: String, nonce: &str) -> Response {
+    let mut response = Html(html).into_response();
+    response
+        .headers_mut()
+        .insert("Content-Security-Policy", auth_csp_header(nonce));
+    response
+}
+
+/// Insert the KiwiCaptcha widget into an auth page's form: the widget's
+/// hidden `kiwi__token` input must live INSIDE the `<form>` element so it
+/// posts with the credentials. Injection happens after the render pass,
+/// which is why the leptos views themselves remain script-free.
+fn inject_kiwi_widget(mut html: String, scope: &str, nonce: &str) -> String {
+    let widget = kiwicaptcha::kiwi_widget_html("/api/kcaptcha/challenge", scope, Some(nonce));
+    if let Some(form_end) = html.find("</form>") {
+        html.insert_str(form_end, &widget);
+    }
+    html
+}
+
+/// Widget placement decision for a GET render: the scope when the page
+/// carries the widget, `None` otherwise. The MFA step-two variant of
+/// `/login` (query `mfa=1`) is deliberately excluded — the password proof
+/// (and therefore the CAPTCHA) was already consumed at step one.
+fn kiwi_widget_for_render(surface: &str, uri: &Uri) -> Option<&'static str> {
+    let scope = kiwi_auth_scope_for(surface, uri.path())?;
+    if uri.query().is_some_and(|q| q.split('&').any(|kv| kv == "mfa=1")) {
+        return None;
+    }
+    Some(scope)
 }
 
 #[allow(dead_code)]
@@ -1135,7 +1226,13 @@ fn render_ui_response(
         Some(form_csrf.token.as_str()),
     )?;
     let html = apply_recorded_consent_state(html, headers);
-    let mut response = browser_html_response(html);
+    let mut response = match kiwi_widget_for_render(surface, uri) {
+        Some(scope) => {
+            let nonce = uuid::Uuid::new_v4().simple().to_string();
+            auth_html_response(inject_kiwi_widget(html, scope, &nonce), &nonce)
+        }
+        None => browser_html_response(html),
+    };
     append_render_cookies(
         &mut response,
         &form_csrf,
@@ -1240,7 +1337,13 @@ async fn render_ui_response_with_state(
         Some(form_csrf.token.as_str()),
     )?;
     let html = apply_recorded_consent_state(html, headers);
-    let mut response = browser_html_response(html);
+    let mut response = match kiwi_widget_for_render(surface, uri) {
+        Some(scope) => {
+            let nonce = uuid::Uuid::new_v4().simple().to_string();
+            auth_html_response(inject_kiwi_widget(html, scope, &nonce), &nonce)
+        }
+        None => browser_html_response(html),
+    };
     append_render_cookies(
         &mut response,
         &form_csrf,
@@ -1867,6 +1970,8 @@ mod tests {
 
             kiwi_enabled: false,
             kiwi_secret_key: "dev".into(),
+            waf_enabled: false,
+            waf_enforce: false,
             kiwi_algorithm: kiwicaptcha::PoWAlgorithm::Sha256,
             kiwi_argon_m_kib: 0,
             kiwi_argon2_difficulty_bits: 8,
@@ -2053,11 +2158,58 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
-        // Every browser-served HTML response pins script-src 'none'.
+        // Auth pages are the sanctioned nonce exception: they carry the
+        // KiwiCaptcha widget (script-src 'nonce-…', style-src 'self'
+        // 'nonce-…'), and the ONLY script bytes on the page are the
+        // widget's — the render output itself stays script-free.
         let page = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/login")
+                    .header(HOST, "app.apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let csp = page
+            .headers()
+            .get("Content-Security-Policy")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            csp.contains("script-src 'nonce-"),
+            "auth page CSP was: {csp}"
+        );
+        // style ATTRIBUTES keep 'unsafe-inline' (they cannot carry a
+        // nonce); the script directive must not.
+        assert!(
+            !csp.contains("script-src 'unsafe-inline'"),
+            "CSP was: {csp}"
+        );
+        let body = response_body_string(page).await;
+        assert!(
+            body.contains("data-kiwi-widget"),
+            "login page must carry the KiwiCaptcha widget"
+        );
+        // Outside the widget, no other executable blocks exist: the only
+        // executable tags are the widget's own two nonce'd scripts. (A raw
+        // "<script" substring count would also hit literal "<script"
+        // strings inside the driver's JS payload — inert string data.)
+        assert_eq!(
+            body.matches("<script nonce=").count(),
+            2,
+            "exactly the widget's two nonce'd script tags, nothing else"
+        );
+
+        // Every NON-auth browser page still pins script-src 'none' with
+        // zero script bytes.
+        let page = app
+            .oneshot(
+                Request::builder()
+                    .uri("/verify-email")
                     .header(HOST, "app.apexmail.ee")
                     .body(Body::empty())
                     .unwrap(),
@@ -3028,6 +3180,47 @@ mod tests {
         // The element style-src directive must remain nonce-only (the
         // 'unsafe-inline' must not have leaked into style-src itself).
         assert!(csp.contains("style-src 'self';"));
+    }
+
+    #[test]
+    fn auth_csp_gates_scripts_on_the_exact_per_response_nonce() {
+        let csp = auth_csp_header("a1b2c3d4e5f6a7b8").to_str().unwrap().to_string();
+        assert!(csp.contains("script-src 'nonce-a1b2c3d4e5f6a7b8'"));
+        assert!(csp.contains("style-src 'self' 'nonce-a1b2c3d4e5f6a7b8'"));
+        // No unsafe-inline anywhere near script-src, and no external hosts.
+        assert!(!csp.contains("script-src 'unsafe-inline'"));
+        assert!(!csp.contains("captcha.apexmail"));
+    }
+
+    #[test]
+    fn kiwi_widget_injection_places_the_token_input_inside_the_form() {
+        let html = inject_kiwi_widget(
+            "<html><body><form action=\"/web/auth/login\"><input name=\"email\"/></form></body></html>".to_string(),
+            "login",
+            "nonce123",
+        );
+        // The hidden kiwi__token input must precede the form close so it
+        // posts with the credentials, and the nonce must reach the script
+        // tags (the CSP only admits these).
+        let token_pos = html.find("name=\"kiwi__token\"").expect("token input present");
+        let form_end = html.find("</form>").expect("form close present");
+        assert!(token_pos < form_end);
+        assert!(html.contains("nonce=\"nonce123\""));
+        assert!(html.contains("data-kiwi-scope=\"login\""));
+    }
+
+    #[test]
+    fn kiwi_widget_render_decision_is_path_and_surface_scoped() {
+        assert_eq!(kiwi_auth_scope_for("web", "/login"), Some("login"));
+        assert_eq!(kiwi_auth_scope_for("control-plane", "/login"), Some("cp-login"));
+        assert_eq!(kiwi_auth_scope_for("web", "/signup"), Some("signup"));
+        assert_eq!(kiwi_auth_scope_for("web", "/dashboard"), None);
+        assert_eq!(kiwi_auth_scope_for("marketing", "/login"), None);
+
+        let mfa = Uri::from_static("/login?mfa=1&email=a%40b.c");
+        assert_eq!(kiwi_widget_for_render("web", &mfa), None);
+        let plain = Uri::from_static("/login");
+        assert_eq!(kiwi_widget_for_render("web", &plain), Some("login"));
     }
 
     #[tokio::test]

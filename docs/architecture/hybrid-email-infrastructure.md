@@ -233,4 +233,4 @@ For existing tenants on the old SES-only architecture:
 2. Set `HETZNER_API_TOKEN` environment variable
 3. Existing tenants continue on SES shared (no disruption)
 4. New dedicated IP purchases go through Hetzner automatically
-5. No manual migration needed — the trigger handles routing seamlessly
+5. No manual migration needed — the trigger handles routing automatically

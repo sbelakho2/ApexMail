@@ -85,55 +85,72 @@ async fn forgot_password(
     let max_ip_requests: i64 = 5;
     let max_email_requests: i64 = 3;
 
-    if let Ok(mut conn) = state.redis.get().await {
-        let ip_rate_key = format!("apexmail:forgot_password_rate:ip:{client_ip}");
-        // Audit J: hash the address in the Redis key (like the login lockout
-        // does) — storing raw emails as key names pollutes Redis with PII,
-        // leaks addresses to anyone with Redis list/scan access, and keeps
-        // the victim's mailbox address resident long after the window.
-        let email_rate_key = format!("apexmail:forgot_password_rate:email:{}", hash_token(&email));
+    // The limiter fails CLOSED in production: an unreachable Redis used to
+    // silently skip this check (if-let-Ok), removing reset-flooding
+    // protection exactly while the platform is degraded. Outside production
+    // it fails open so local development works without Redis. Script errors
+    // remain rate-limited (count treated as exceeded) in every environment.
+    match state.redis.get().await {
+        Ok(mut conn) => {
+            let ip_rate_key = format!("apexmail:forgot_password_rate:ip:{client_ip}");
+            // Audit J: hash the address in the Redis key (like the login lockout
+            // does) — storing raw emails as key names pollutes Redis with PII,
+            // leaks addresses to anyone with Redis list/scan access, and keeps
+            // the victim's mailbox address resident long after the window.
+            let email_rate_key =
+                format!("apexmail:forgot_password_rate:email:{}", hash_token(&email));
 
-        // Atomic rate-limit check using Lua script to avoid INCR + EXPIRE race condition.
-        // The script atomically increments the counter and sets expiry on first creation.
-        // Checks both IP and email keys; denies if either exceeds its limit.
-        let count: i64 = deadpool_redis::redis::Script::new(
-            r#"
-                local ip_key = KEYS[1]
-                local email_key = KEYS[2]
-                local max_ip = tonumber(ARGV[1])
-                local max_email = tonumber(ARGV[2])
-                local window_secs = tonumber(ARGV[3])
+            // Atomic rate-limit check using Lua script to avoid INCR + EXPIRE race condition.
+            // The script atomically increments the counter and sets expiry on first creation.
+            // Checks both IP and email keys; denies if either exceeds its limit.
+            let count: i64 = deadpool_redis::redis::Script::new(
+                r#"
+                    local ip_key = KEYS[1]
+                    local email_key = KEYS[2]
+                    local max_ip = tonumber(ARGV[1])
+                    local max_email = tonumber(ARGV[2])
+                    local window_secs = tonumber(ARGV[3])
 
-                local ip_count = redis.call('INCR', ip_key)
-                if ip_count == 1 then
-                    redis.call('EXPIRE', ip_key, window_secs)
-                end
+                    local ip_count = redis.call('INCR', ip_key)
+                    if ip_count == 1 then
+                        redis.call('EXPIRE', ip_key, window_secs)
+                    end
 
-                local email_count = redis.call('INCR', email_key)
-                if email_count == 1 then
-                    redis.call('EXPIRE', email_key, window_secs)
-                end
+                    local email_count = redis.call('INCR', email_key)
+                    if email_count == 1 then
+                        redis.call('EXPIRE', email_key, window_secs)
+                    end
 
-                if ip_count > max_ip or email_count > max_email then
-                    return 1
-                end
-                return 0
-            "#,
-        )
-        .key(&ip_rate_key)
-        .key(&email_rate_key)
-        .arg(max_ip_requests)
-        .arg(max_email_requests)
-        .arg(window_secs)
-        .invoke_async::<i64>(&mut *conn)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, ip = %client_ip, email = %email, "forgot-password rate-limit Lua script failed; treating as rate-limited");
-            1
-        });
+                    if ip_count > max_ip or email_count > max_email then
+                        return 1
+                    end
+                    return 0
+                "#,
+            )
+            .key(&ip_rate_key)
+            .key(&email_rate_key)
+            .arg(max_ip_requests)
+            .arg(max_email_requests)
+            .arg(window_secs)
+            .invoke_async::<i64>(&mut *conn)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, ip = %client_ip, email = %email, "forgot-password rate-limit Lua script failed; treating as rate-limited");
+                1
+            });
 
-        if count > 0 {
-            return Err(ApiError::RateLimited);
+            if count > 0 {
+                return Err(ApiError::RateLimited);
+            }
+        }
+        Err(error) => {
+            if state.config.environment.is_production() {
+                tracing::error!(error = %error, ip = %client_ip, "forgot-password rate limiter unavailable — failing closed in production");
+                return Err(ApiError::ServiceUnavailable(
+                    "password reset is temporarily unavailable; please retry shortly".into(),
+                ));
+            }
+            tracing::warn!(error = %error, ip = %client_ip, "forgot-password rate limiter unavailable — failing open outside production");
         }
     }
 

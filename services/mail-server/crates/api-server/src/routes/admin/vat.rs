@@ -128,12 +128,16 @@ async fn kmd_table_exists(db: &sqlx::PgPool) -> bool {
     crate::routes::helpers::table_exists(db, "vat_kmd_returns").await
 }
 
-fn is_system_admin(auth: &AuthUser) -> bool {
-    auth.tenant_id == "system"
+/// Slug-aware system-tenant membership (audit F1): human operators belong
+/// to the seeded `system_internal_tenant01` tenant, not the literal
+/// `system` sentinel only static API keys carry — the literal comparison
+/// hard-403'd every human operator from the KMD console.
+async fn is_system_admin(state: &AppState, auth: &AuthUser) -> bool {
+    crate::routes::web::is_system_tenant(state, &auth.tenant_id).await
 }
 
-fn require_system_kmd_access(auth: &AuthUser) -> Result<(), ApiError> {
-    if is_system_admin(auth) {
+async fn require_system_kmd_access(state: &AppState, auth: &AuthUser) -> Result<(), ApiError> {
+    if is_system_admin(state, auth).await {
         Ok(())
     } else {
         Err(ApiError::Forbidden(
@@ -153,7 +157,7 @@ async fn list_kmd_returns(
     Query(query): Query<KmdListQuery>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    require_system_kmd_access(&auth)?;
+    require_system_kmd_access(&state, &auth).await?;
 
     if !kmd_table_exists(&state.db).await {
         return Ok(Json(serde_json::json!({
@@ -162,6 +166,10 @@ async fn list_kmd_returns(
         })));
     }
 
+    // Clamp pagination: negative/unbounded limit/offset would 500 on bind
+    // (P1) and OFFSET-past-end scans are pointless.
+    let limit = query.limit.clamp(1, 200);
+    let offset = query.offset.max(0);
     let rows: Vec<(
         String,
         i32,
@@ -188,8 +196,8 @@ async fn list_kmd_returns(
         LIMIT $1 OFFSET $2
         "#,
     )
-    .bind(query.limit)
-    .bind(query.offset)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&state.db)
     .await?;
 
@@ -219,7 +227,7 @@ async fn get_latest_kmd(
     auth: AuthUser,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    require_system_kmd_access(&auth)?;
+    require_system_kmd_access(&state, &auth).await?;
 
     if !kmd_table_exists(&state.db).await {
         return Ok(Json(serde_json::json!(null)));
@@ -315,7 +323,7 @@ async fn get_current_vat_summary(
             .and_utc()
     };
 
-    let tenant_scoped = !is_system_admin(&auth);
+    let tenant_scoped = !is_system_admin(&state, &auth).await;
     let tenant_filter = if tenant_scoped {
         "\n          AND tenant_id = $3"
     } else {
@@ -443,7 +451,7 @@ async fn trigger_kmd_generation(
     Json(body): Json<GenerateKmdBody>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    require_system_kmd_access(&auth)?;
+    require_system_kmd_access(&state, &auth).await?;
 
     if body.tax_month < 1 || body.tax_month > 12 {
         return Err(ApiError::Validation(vec![
@@ -453,9 +461,47 @@ async fn trigger_kmd_generation(
 
     // We need to call the billing-service vat_kmd module
     // Since api-server depends on billing-service, we can use it directly
-    match billing_service::vat_kmd::generate_kmd_return(&state.db, body.tax_year, body.tax_month)
-        .await
-    {
+    let generation = billing_service::vat_kmd::generate_kmd_return(
+        &state.db,
+        body.tax_year,
+        body.tax_month,
+    )
+    .await;
+
+    // Manual KMD generation is a fiscal-control-plane mutation — it must be
+    // audited with full actor attribution (P2-2) on BOTH outcomes; a
+    // best-effort entry never fails the request.
+    let is_production = state.config.environment.is_production();
+    let (outcome, mut metadata) = match &generation {
+        Ok(result) => (
+            "success",
+            serde_json::json!({
+                "taxYear": result.tax_year,
+                "taxMonth": result.tax_month,
+                "kmdId": result.kmd_id.to_string(),
+                "invoiceCount": result.invoice_count,
+                "totalTaxableCents": result.total_taxable_cents,
+                "totalVatCents": result.total_vat_cents,
+            }),
+        ),
+        Err(error) => ("failure", serde_json::json!({ "error": error.to_string() })),
+    };
+    metadata["outcome"] = serde_json::json!(outcome);
+    crate::audit_log::insert_audit_log_best_effort_with_env(
+        &state.db,
+        is_production,
+        Some(auth.tenant_id.as_str()),
+        auth.user_id.as_deref(),
+        "control_plane.vat.kmd_generated",
+        "vat_kmd_return",
+        Some(&format!("{}/{}", body.tax_year, body.tax_month)),
+        metadata,
+        None,
+        None,
+    )
+    .await;
+
+    match generation {
         Ok(result) => {
             let response = serde_json::json!({
                 "success": true,
@@ -482,7 +528,7 @@ async fn get_kmd_by_period(
     Path((year, month)): Path<(i32, i32)>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
-    require_system_kmd_access(&auth)?;
+    require_system_kmd_access(&state, &auth).await?;
 
     if !(1..=12).contains(&month) {
         return Err(ApiError::Validation(vec![

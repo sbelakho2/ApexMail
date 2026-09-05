@@ -69,6 +69,13 @@ struct ImapSession {
     uid_next: u64,
     exists: u32,
     recent: u32,
+    /// Store-side change token (`GetMailboxStatusResponse.highest_modseq`,
+    /// derived from the mailbox row's updated_at) captured at SELECT and
+    /// after every view refresh. NOOP/IDLE/refresh compare it (plus
+    /// uidnext/exists, which have full resolution where modseq is
+    /// second-granular) to skip the full 100k-message re-list when the
+    /// mailbox has not changed. 0 = unknown (forces one full refresh).
+    mailbox_modseq: u64,
     /// F6: session-scoped \Recent approximation — the UIDs this session
     /// considers \Recent (unseen when first observed via SELECT, plus unseen
     /// arrivals during the session). The store has no persistent
@@ -99,6 +106,7 @@ impl ImapSession {
             uid_next: 0,
             exists: 0,
             recent: 0,
+            mailbox_modseq: 0,
             recent_uids: HashSet::new(),
             permanent_flags: vec![
                 "\\Seen".into(),
@@ -1481,6 +1489,22 @@ fn auth_required(session: &ImapSession) -> bool {
     session.state != SessionState::NotAuthenticated
 }
 
+/// Refresh-gate: has the mailbox changed since the session's snapshot?
+///
+/// The full re-list (up to 100k `MessageMeta`s) is only needed to detect
+/// arrivals and expunges. Arrivals strictly advance `uidnext`, expunges
+/// change `exists`, and `highest_modseq` (mailbox-row updated_at, 1-second
+/// granularity) catches anything else that mutates the mailbox row — the
+/// uidnext/exists pair has full resolution, covering the same-second
+/// window where modseq alone could alias two states. A session with no
+/// snapshot yet (`mailbox_modseq == 0`) always refreshes.
+fn mailbox_view_changed(session: &ImapSession, mb: &mail_proto::Mailbox, modseq: u64) -> bool {
+    session.mailbox_modseq == 0
+        || modseq != session.mailbox_modseq
+        || mb.uidnext.max(1) != session.uid_next
+        || mb.exists != session.exists
+}
+
 /// Re-list the selected mailbox so the session's UID map (and thus sequence
 /// numbers) stays correct even when other sessions modify the mailbox.
 ///
@@ -1494,9 +1518,27 @@ fn auth_required(session: &ImapSession) -> bool {
 /// had expunged. (RFC 3501 §5.2 discourages unsolicited EXPUNGEs during
 /// FETCH/STORE/SEARCH responses; the alternative — silently shifted sequence
 /// numbers — is strictly worse, and RFC 9051 removes the restriction.)
+///
+/// Cost gate: a cheap `get_mailbox_status` (one mailbox row) runs first and
+/// the 100k-message listing is skipped entirely when the mailbox is
+/// unchanged since the session's snapshot (see [`mailbox_view_changed`]) —
+/// NOOP polling against an idle mailbox no longer re-lists it. A failed
+/// status call falls back to the full listing (previous behaviour).
 async fn refresh_session_view(session: &mut ImapSession) -> String {
     if !mailbox_selected(session) {
         return String::new();
+    }
+    {
+        let mut client = session.client.clone();
+        if let Ok(status) =
+            get_mailbox_status(&mut client, &session.account_id, &session.mailbox).await
+        {
+            let resp = status.into_inner();
+            let mb = resp.mailbox.clone().unwrap_or_default();
+            if !mailbox_view_changed(session, &mb, resp.highest_modseq) {
+                return String::new();
+            }
+        }
     }
     let old_uid_map = session.uid_map.clone();
     let mut client = session.client.clone();
@@ -1521,6 +1563,17 @@ async fn refresh_session_view(session: &mut ImapSession) -> String {
         if let Some(&last) = session.uid_map.last() {
             session.uid_next = session.uid_next.max(last.saturating_add(1));
         }
+        // Keep the snapshot in step with what was just listed: fetch the
+        // change token AFTER the listing so a change that landed between
+        // the gate and the list is not missed by the NEXT refresh.
+        if let Ok(status) =
+            get_mailbox_status(&mut client, &session.account_id, &session.mailbox).await
+        {
+            let resp = status.into_inner();
+            let mb = resp.mailbox.unwrap_or_default();
+            session.mailbox_modseq = resp.highest_modseq;
+            session.uid_next = session.uid_next.max(mb.uidnext.max(1));
+        }
         return diff;
     }
     String::new()
@@ -1538,6 +1591,7 @@ fn deselect_mailbox(session: &mut ImapSession) {
     session.uid_next = 0;
     session.exists = 0;
     session.recent = 0;
+    session.mailbox_modseq = 0;
     session.recent_uids.clear();
     session.uid_map.clear();
     session.read_only = false;
@@ -1969,6 +2023,7 @@ async fn handle_select<W: AsyncWrite + Unpin>(
     session.uid_validity = mb.uidvalidity.max(1);
     session.uid_next = mb.uidnext.max(1);
     session.exists = new_exists;
+    session.mailbox_modseq = status.highest_modseq;
     session.recent_uids = new_recent_uids;
     session.state = SessionState::Selected;
     session.uid_map = new_uid_map;
@@ -2651,6 +2706,14 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
     // A full FETCH range therefore costs one bounded metadata pass plus the
     // streamed body fetches — accepted for an IMAP4rev1 server of this
     // scale rather than implementing QRESYNC-style paging.
+    //
+    // KNOWN LIMITATION (mailstore API): a section-limited peek
+    // (BODY.PEEK[HEADER.FIELDS (...)], partial <o.n>) still fetches the
+    // FULL body — GetMessageRequest exposes only `include_body: bool`, no
+    // section/offset parameters, so the section is sliced client-side in
+    // emit_fetch_response. Extending the mailstore proto with section
+    // fetch is the follow-up; the polling paths that would amplify the
+    // cost (NOOP/IDLE/view refresh) are gated by mailbox_view_changed.
     const FETCH_CONCURRENCY: usize = 8;
     for chunk in uids.chunks(FETCH_CONCURRENCY) {
         let mut body_futures = Vec::new();
@@ -2749,8 +2812,25 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
                     operation: FlagOperation::Add as i32,
                 };
                 let mut c = session.client.clone();
+                let mailbox = session.mailbox.clone();
                 seen_futures.push(async move {
-                    let _ = c.set_flags(req).await;
+                    // The FETCH response this chunk already wrote ADVERTISED
+                    // \Seen — a failed store would desync the client's view
+                    // of the flag. Retry once (transient mailstore/RPC
+                    // blips), then surface a warn with mailbox+uid so an
+                    // operator can reconcile; the error can no longer be
+                    // propagated to a response the client already consumed.
+                    if let Err(first_err) = c.set_flags(req.clone()).await {
+                        if let Err(second_err) = c.set_flags(req).await {
+                            warn!(
+                                mailbox = %mailbox,
+                                uid,
+                                error = %second_err,
+                                first_error = %first_err,
+                                "\\Seen flag update failed after retry — FETCH already advertised the flag"
+                            );
+                        }
+                    }
                 });
             }
         }
@@ -2763,10 +2843,69 @@ async fn handle_fetch<W: AsyncWrite + Unpin>(
     write_line(writer, &tagged_ok(tag, "FETCH completed")).await
 }
 
+/// One element of a FETCH response's parenthesized attribute list, in the
+/// order the request's items dictate.
+enum FetchSegment {
+    /// A non-literal attribute (`UID 5`, `FLAGS (...)`, `ENVELOPE (...)`).
+    Attr(String),
+    /// A literal-carrying attribute — a `BODY[...]` item with its exact
+    /// octets. `name` is the response form of the section spec (including
+    /// a `<origin>` suffix for partial fetches).
+    Literal { name: String, payload: Vec<u8> },
+}
+
+/// Serialized pieces of one `* n FETCH (...)` response, in wire order.
+///
+/// RFC 3501 §7.4.2: every `{n}` literal announcement is IMMEDIATELY
+/// followed by CRLF and exactly n octets; the next attribute (or the
+/// closing paren) follows only after the literal's last octet. Splitting
+/// text from octets keeps the layout unit-testable while letting the
+/// writer stream bodies without concatenating them into one buffer.
+enum FetchChunk {
+    /// Response text: attribute names, `{n}` announcements, CRLF, parens.
+    Text(String),
+    /// Raw literal octets.
+    Octets(Vec<u8>),
+}
+
+/// Serialize one FETCH response's exact byte layout from its segments.
+/// Consumes the segments (literal payloads move into the chunk list — no
+/// second copy of the body).
+fn fetch_response_chunks(seq: u32, segments: Vec<FetchSegment>) -> Vec<FetchChunk> {
+    let mut chunks: Vec<FetchChunk> = Vec::with_capacity(segments.len() + 2);
+    let mut out = format!("* {seq} FETCH (");
+    let mut first = true;
+    for segment in segments {
+        if !first {
+            out.push(' ');
+        }
+        match segment {
+            FetchSegment::Attr(attr) => out.push_str(&attr),
+            FetchSegment::Literal { name, payload } => {
+                out.push_str(&format!("{name} {{{}}}\r\n", payload.len()));
+                if !out.is_empty() {
+                    chunks.push(FetchChunk::Text(std::mem::take(&mut out)));
+                }
+                chunks.push(FetchChunk::Octets(payload));
+                // `out` restarts empty: the separator space for the NEXT
+                // segment is emitted by the `!first` branch above, and a
+                // trailing literal is closed by `)` with no extra space
+                // (RFC 3501 §7.4.2 example form).
+            }
+        }
+        first = false;
+    }
+    out.push_str(")\r\n");
+    chunks.push(FetchChunk::Text(out));
+    chunks
+}
+
 /// Emit one `* <seq> FETCH (...)` response, including any literal body
 /// payloads, for a single message. Split out of `handle_fetch` so the
 /// chunked streaming path can write each response as soon as its chunk's
-/// bodies have arrived.
+/// bodies have arrived. Literal wiring (which literal carries which
+/// octets) is [`fetch_response_chunks`]'s contract; this function only
+/// transports it to the socket.
 #[allow(clippy::too_many_arguments)]
 async fn emit_fetch_response<W: AsyncWrite + Unpin>(
     writer: &mut W,
@@ -2786,8 +2925,7 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
     // F6: \Recent is session-scoped; it is reported, never stored.
     flags.recent = recent;
 
-    let mut attrs: Vec<String> = Vec::new();
-    let mut body_payloads: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut segments: Vec<FetchSegment> = Vec::new();
 
     for item in items {
         for ritem in resolve_macro_item(item) {
@@ -2795,24 +2933,30 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
                 // L11: in UID mode the UID attribute is prepended exactly
                 // once below; an explicit UID item must not add a second.
                 FetchItem::Uid if !is_uid => {
-                    attrs.push(format!("UID {}", uid));
+                    segments.push(FetchSegment::Attr(format!("UID {}", uid)));
                 }
                 FetchItem::Uid => {}
                 FetchItem::Flags => {
-                    attrs.push(format!("FLAGS {}", format_imap_flags(&flags)));
+                    segments.push(FetchSegment::Attr(format!(
+                        "FLAGS {}",
+                        format_imap_flags(&flags)
+                    )));
                 }
                 FetchItem::InternalDate => {
-                    attrs.push(format!(
+                    segments.push(FetchSegment::Attr(format!(
                         "INTERNALDATE {}",
                         format_internal_date(meta.internal_date)
-                    ));
+                    )));
                 }
                 FetchItem::Rfc822Size => {
-                    attrs.push(format!("RFC822.SIZE {}", meta.size));
+                    segments.push(FetchSegment::Attr(format!("RFC822.SIZE {}", meta.size)));
                 }
                 FetchItem::Envelope => {
                     let env = meta.envelope.clone().unwrap_or_default();
-                    attrs.push(format!("ENVELOPE {}", format_envelope(&env)));
+                    segments.push(FetchSegment::Attr(format!(
+                        "ENVELOPE {}",
+                        format_envelope(&env)
+                    )));
                 }
                 // F5: BODY (bare) / BODYSTRUCTURE — the derived structure.
                 FetchItem::BodyStructure { extended } => {
@@ -2824,11 +2968,11 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
                         }
                         None => continue,
                     };
-                    attrs.push(format!(
+                    segments.push(FetchSegment::Attr(format!(
                         "{} {}",
                         if extended { "BODYSTRUCTURE" } else { "BODY" },
                         format_body_structure(raw, extended)
-                    ));
+                    )));
                 }
                 FetchItem::Body {
                     section,
@@ -2873,7 +3017,10 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
                             payload.clear();
                         }
                     }
-                    body_payloads.push((resp_name, payload));
+                    segments.push(FetchSegment::Literal {
+                        name: resp_name,
+                        payload,
+                    });
                 }
                 FetchItem::Fast | FetchItem::All | FetchItem::Full => {}
             }
@@ -2881,40 +3028,15 @@ async fn emit_fetch_response<W: AsyncWrite + Unpin>(
     }
 
     if is_uid {
-        attrs.insert(0, format!("UID {}", uid));
+        segments.insert(0, FetchSegment::Attr(format!("UID {}", uid)));
     }
 
-    // Write `* seq FETCH (attr1 attr2 BODY[] {n}` then the literal bytes
-    // then `) CRLF`.
-    let mut out = format!("* {} FETCH (", seq);
-    let mut first = true;
-    for a in &attrs {
-        if !first {
-            out.push(' ');
-        }
-        out.push_str(a);
-        first = false;
-    }
-    for (name, payload) in &body_payloads {
-        if !first {
-            out.push(' ');
-        }
-        out.push_str(&format!("{} {{{}}}", name, payload.len()));
-        first = false;
-    }
-    writer.write_all(out.as_bytes()).await?;
-    if !body_payloads.is_empty() {
-        // RFC 3501 §7.4.2: after the last literal the closing paren
-        // follows immediately (no trailing space).
-        writer.write_all(b"\r\n").await?;
-        for (i, (_, payload)) in body_payloads.iter().enumerate() {
-            if i > 0 {
-                writer.write_all(b" ").await?;
-            }
-            writer.write_all(payload).await?;
+    for chunk in fetch_response_chunks(seq, segments) {
+        match chunk {
+            FetchChunk::Text(text) => writer.write_all(text.as_bytes()).await?,
+            FetchChunk::Octets(octets) => writer.write_all(&octets).await?,
         }
     }
-    writer.write_all(b")\r\n").await?;
     Ok(())
 }
 
@@ -4709,41 +4831,58 @@ async fn handle_noop<W: AsyncWrite + Unpin>(
         if let Ok(status) =
             get_mailbox_status(&mut client, &session.account_id, &session.mailbox).await
         {
-            let mb = status.into_inner().mailbox.unwrap_or_default();
+            let resp = status.into_inner();
+            let mb = resp.mailbox.clone().unwrap_or_default();
+            let modseq = resp.highest_modseq;
 
-            // L5: re-list the mailbox so polling clients learn about messages
-            // REMOVED by other sessions (EXPUNGE), not just about arrivals.
-            // The diff shares the IDLE path's logic via view_update_lines.
-            let list_req = ListMessagesRequest {
-                account_id: session.account_id.clone(),
-                mailbox: session.mailbox.clone(),
-                uid_min: 1,
-                uid_max: u64::MAX,
-                limit: 100_000,
-            };
-            if let Ok(resp) = client.list_messages(list_req).await {
-                let mut msgs = resp.into_inner().messages;
-                msgs.sort_by_key(|m| m.uid);
-                msgs.dedup_by_key(|m| m.uid);
-                let new_uids: Vec<u64> = msgs.iter().map(|m| m.uid).collect();
-                responses.push_str(&view_update_lines(&old_uid_map, &new_uids));
-                // F6: unseen arrivals since the last poll join this session's
-                // \Recent set; messages that left the view drop out of it.
-                let known: HashSet<u64> = old_uid_map.iter().copied().collect();
-                for m in &msgs {
-                    if !known.contains(&m.uid) && !m.flags.as_ref().map(|f| f.seen).unwrap_or(false)
-                    {
-                        session.recent_uids.insert(m.uid);
+            // Cost gate: the status call above is one mailbox row; skip the
+            // 100k-message re-list when nothing changed since the session's
+            // snapshot (see mailbox_view_changed). Only a changed mailbox
+            // pays for the EXPUNGE-detecting listing below.
+            let changed = mailbox_view_changed(session, &mb, modseq);
+            if changed {
+                // L5: re-list the mailbox so polling clients learn about
+                // messages REMOVED by other sessions (EXPUNGE), not just
+                // about arrivals. The diff shares the IDLE path's logic
+                // via view_update_lines.
+                let list_req = ListMessagesRequest {
+                    account_id: session.account_id.clone(),
+                    mailbox: session.mailbox.clone(),
+                    uid_min: 1,
+                    uid_max: u64::MAX,
+                    limit: 100_000,
+                };
+                if let Ok(resp) = client.list_messages(list_req).await {
+                    let mut msgs = resp.into_inner().messages;
+                    msgs.sort_by_key(|m| m.uid);
+                    msgs.dedup_by_key(|m| m.uid);
+                    let new_uids: Vec<u64> = msgs.iter().map(|m| m.uid).collect();
+                    responses.push_str(&view_update_lines(&old_uid_map, &new_uids));
+                    // F6: unseen arrivals since the last poll join this
+                    // session's \Recent set; messages that left the view
+                    // drop out of it.
+                    let known: HashSet<u64> = old_uid_map.iter().copied().collect();
+                    for m in &msgs {
+                        if !known.contains(&m.uid)
+                            && !m.flags.as_ref().map(|f| f.seen).unwrap_or(false)
+                        {
+                            session.recent_uids.insert(m.uid);
+                        }
                     }
-                }
-                let live: HashSet<u64> = new_uids.iter().copied().collect();
-                session.recent_uids.retain(|u| live.contains(u));
-                session.uid_map = new_uids;
-                // EXISTS reports the size of the session's resolvable view
-                // (the capped uid_map), keeping sequence numbers consistent.
-                session.exists = session.uid_map.len().min(u32::MAX as usize) as u32;
-                if let Some(&last) = session.uid_map.last() {
-                    session.uid_next = session.uid_next.max(last.saturating_add(1));
+                    let live: HashSet<u64> = new_uids.iter().copied().collect();
+                    session.recent_uids.retain(|u| live.contains(u));
+                    session.uid_map = new_uids;
+                    // EXISTS reports the size of the session's resolvable
+                    // view (the capped uid_map), keeping sequence numbers
+                    // consistent.
+                    session.exists = session.uid_map.len().min(u32::MAX as usize) as u32;
+                    if let Some(&last) = session.uid_map.last() {
+                        session.uid_next = session.uid_next.max(last.saturating_add(1));
+                    }
+                    // Snapshot the post-listing change token so unchanged
+                    // polls stay cheap (refresh semantics: a change landing
+                    // between the gate and the list is caught next poll).
+                    session.mailbox_modseq = modseq;
                 }
             }
             // F6: RECENT reports this session's (approximated) recent count,
@@ -4804,6 +4943,7 @@ async fn handle_close<W: AsyncWrite + Unpin>(
     session.recent_uids.clear();
     session.uid_next = 0;
     session.uid_validity = 0;
+    session.mailbox_modseq = 0;
 
     write_line(writer, &tagged_ok(tag, "CLOSE completed")).await
 }
@@ -4914,7 +5054,7 @@ async fn process_mailbox_event<W: AsyncWrite + Unpin>(
     writer: &mut W,
     _event: &MailboxEvent,
 ) -> Result<()> {
-    let (account_id, mailbox, old_exists, old_recent, old_uidnext, old_uid_map) = {
+    let (account_id, mailbox, old_exists, old_recent, old_uidnext, old_uid_map, old_modseq) = {
         let g = session.lock().await;
         (
             g.account_id.clone(),
@@ -4923,6 +5063,7 @@ async fn process_mailbox_event<W: AsyncWrite + Unpin>(
             g.recent,
             g.uid_next,
             g.uid_map.clone(),
+            g.mailbox_modseq,
         )
     };
     if mailbox.is_empty() {
@@ -4935,7 +5076,22 @@ async fn process_mailbox_event<W: AsyncWrite + Unpin>(
         Ok(s) => s.into_inner(),
         Err(_) => return Ok(()),
     };
-    let mb = status.mailbox.unwrap_or_default();
+    let mb = status.mailbox.clone().unwrap_or_default();
+
+    // Cost gate: the event stream can be chattier than the view (events for
+    // flag-only or same-second changes). When the status snapshot matches
+    // the session's (uidnext/exists/modseq — see mailbox_view_changed),
+    // this event cannot have changed the uid map the responses below are
+    // computed from, so the 100k-message listing is skipped. The gate only
+    // ever suppresses a listing whose diff would have been empty for the
+    // EXISTS/EXPUNGE/RECENT/UIDNEXT responses this path emits.
+    if old_modseq != 0
+        && status.highest_modseq == old_modseq
+        && mb.uidnext.max(1) == old_uidnext
+        && mb.exists == old_exists
+    {
+        return Ok(());
+    }
 
     let list_req = ListMessagesRequest {
         account_id: account_id.clone(),
@@ -5034,6 +5190,7 @@ async fn process_mailbox_event<W: AsyncWrite + Unpin>(
         g.recent_uids = recent_uids;
         g.uid_next = new_uidnext;
         g.uid_map = new_uids;
+        g.mailbox_modseq = status.highest_modseq;
     }
 
     if !out.is_empty() {
@@ -5683,6 +5840,137 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RFC 3501 §7.4.2 wiring: with TWO literals in one FETCH response,
+    /// every `{n}` announcement must be IMMEDIATELY followed by CRLF and
+    /// its n octets BEFORE the next attribute is emitted. The old layout
+    /// announced both sizes on one line and space-joined the payloads,
+    /// which desynchronizes any RFC-compliant client literal parser.
+    #[test]
+    fn fetch_response_two_literals_interleave_announcement_and_octets() {
+        let segments = vec![
+            FetchSegment::Attr("UID 7".to_string()),
+            FetchSegment::Literal {
+                name: "BODY[]".to_string(),
+                payload: b"hello".to_vec(),
+            },
+            FetchSegment::Literal {
+                name: "BODY[HEADER]<0>".to_string(),
+                payload: b"From: x".to_vec(),
+            },
+        ];
+        let bytes: Vec<u8> = fetch_response_chunks(3, segments)
+            .into_iter()
+            .flat_map(|chunk| match chunk {
+                FetchChunk::Text(text) => text.into_bytes(),
+                FetchChunk::Octets(octets) => octets,
+            })
+            .collect();
+
+        let expected = b"* 3 FETCH (UID 7 BODY[] {5}\r\nhello BODY[HEADER]<0> {7}\r\nFrom: x)\r\n";
+        assert_eq!(
+            bytes, expected.to_vec(),
+            "literal announcement must be followed by CRLF + exactly n octets before the next attribute"
+        );
+    }
+
+    /// A literal-only response opens straight into the announcement after
+    /// the paren, and the closing paren follows the last octet with no
+    /// separating space (RFC 3501 §7.4.2 example form).
+    #[test]
+    fn fetch_response_single_literal_layout() {
+        let segments = vec![FetchSegment::Literal {
+            name: "BODY[TEXT]".to_string(),
+            payload: b"line1\r\nline2".to_vec(),
+        }];
+        let bytes: Vec<u8> = fetch_response_chunks(1, segments)
+            .into_iter()
+            .flat_map(|chunk| match chunk {
+                FetchChunk::Text(text) => text.into_bytes(),
+                FetchChunk::Octets(octets) => octets,
+            })
+            .collect();
+
+        assert_eq!(
+            bytes,
+            // "line1\r\nline2" is 12 octets — the announcement must state
+            // exactly the payload length the client will read.
+            b"* 1 FETCH (BODY[TEXT] {12}\r\nline1\r\nline2)\r\n".to_vec()
+        );
+    }
+
+    /// No literals: one text chunk, identical to the pre-segmentation wire
+    /// format.
+    #[test]
+    fn fetch_response_attributes_only_unchanged() {
+        let segments = vec![
+            FetchSegment::Attr("UID 9".to_string()),
+            FetchSegment::Attr("RFC822.SIZE 42".to_string()),
+        ];
+        let bytes: Vec<u8> = fetch_response_chunks(2, segments)
+            .into_iter()
+            .flat_map(|chunk| match chunk {
+                FetchChunk::Text(text) => text.into_bytes(),
+                FetchChunk::Octets(octets) => octets,
+            })
+            .collect();
+        assert_eq!(bytes, b"* 2 FETCH (UID 9 RFC822.SIZE 42)\r\n".to_vec());
+    }
+
+    /// The refresh gate: an unchanged mailbox snapshot (modseq + uidnext +
+    /// exists all equal) must read as "no change", any single differing
+    /// signal must read as "changed", and an unknown snapshot (modseq 0)
+    /// always forces a refresh.
+    #[test]
+    fn mailbox_view_changed_gates_on_modseq_uidnext_exists() {
+        let session = ImapSession {
+            mailbox_modseq: 100,
+            uid_next: 12,
+            exists: 5,
+            ..test_session_skeleton()
+        };
+        let mb = |uidnext: u64, exists: u32| mail_proto::Mailbox {
+            uidnext,
+            exists,
+            ..Default::default()
+        };
+        assert!(!mailbox_view_changed(&session, &mb(12, 5), 100));
+        assert!(mailbox_view_changed(&session, &mb(13, 5), 100));
+        assert!(mailbox_view_changed(&session, &mb(12, 4), 100));
+        assert!(mailbox_view_changed(&session, &mb(12, 5), 101));
+        assert!(mailbox_view_changed(
+            &ImapSession {
+                mailbox_modseq: 0,
+                ..session
+            },
+            &mb(12, 5),
+            100
+        ));
+    }
+
+    /// Minimal session for pure view-gate tests. The client points at an
+    /// unroutable address — the gate test never performs an RPC.
+    fn test_session_skeleton() -> ImapSession {
+        // connect_lazy() touches the Tokio runtime during hyper pool
+        // setup. These gate tests are plain #[test]s (no ambient runtime),
+        // so construct the channel under a throwaway current-thread
+        // runtime; async callers with their own runtime take the direct
+        // path. The channel is never dialed — no RPC happens in these
+        // tests.
+        let make_channel = || Channel::from_static("http://127.0.0.1:1").connect_lazy();
+        let channel = if tokio::runtime::Handle::try_current().is_ok() {
+            make_channel()
+        } else {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime builds")
+                .block_on(async { make_channel() })
+        };
+        let interceptor = InternalServiceAuthInterceptor::new(None)
+            .expect("tokenless interceptor is constructible");
+        ImapSession::new(build_mailstore_client(channel, interceptor))
+    }
 
     #[tokio::test]
     async fn auth_failure_tracker_locks_after_limit_and_clears_on_success() {

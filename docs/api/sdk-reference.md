@@ -1,11 +1,11 @@
 # SDK Reference
 
-ApexMail provides official SDKs for **five languages** to simplify integration with the ApexMail API. All SDKs offer typed interfaces and consistent error handling.
+ApexMail provides SDKs for **five languages** (Python, Go, Ruby, Java, PHP) to simplify integration with the ApexMail API. All SDKs offer typed interfaces and consistent error handling. **All five are in development and not yet published to their language registries** — see the per-SDK notes below for source installs. There is no Node.js SDK.
 
 | Language | Package | Min. version |
 |----------|---------|--------------|
 | Python | `apexmail` (PyPI) | Python ≥ 3.9 |
-| Go | `github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go` | Go 1.21 |
+| Go | `github.com/apexmail/apexmail-go` | Go 1.21 |
 | Ruby | `apexmail` (RubyGems) | Ruby ≥ 3.0 |
 | Java | `ee.apexmail:apexmail-java` (Maven Central) | Java 17 |
 | PHP | `apexmail/apexmail-php` (Packagist) | PHP ≥ 8.1 |
@@ -356,15 +356,10 @@ Signatures use HMAC-SHA256 over the `timestamp.payload` format. The `X-ApexMail-
 
 ## Rate Limits
 
-Rate limits are **plan-based** and vary by subscription tier. See the [dedicated rate limits documentation](./rate-limits.md) for per-plan throughput tiers.
-
-| Scope | Typical Starter Limit |
-|-------|-----------------------|
-| API requests | 100 requests/second per API key |
-| Batch sends | 10 requests/second per API key |
-| Event stream (SSE) | 5 concurrent connections per API key |
-
-> **Note:** The limits above reflect the **Starter** plan. Free plans have lower limits (10 req/s), while Growth, Scale, and Enterprise plans support higher throughput (up to 5000 req/s). Always check the `X-RateLimit-Limit` response header for your actual rate limit.
+Rate limits are **plan-based** and vary by subscription tier. The single
+canonical throughput table lives in the
+[rate limits documentation](./rate-limits.md). Always check the
+`X-RateLimit-Limit` response header for your actual rate limit.
 
 Rate limit information is returned in response headers (`X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset`). SDKs surface this data through their rate-limit error types when limits are exceeded.
 
@@ -372,14 +367,14 @@ Rate limit information is returned in response headers (`X-RateLimit-Limit`, `X-
 
 ## Go SDK
 
-**Module:** `github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go`
+**Module:** `github.com/apexmail/apexmail-go`
 
 > **Not yet published.** The ApexMail SDKs are not yet on public package registries (PyPI, pkg.go.dev, Packagist, RubyGems, Maven Central) — the registry install below will fail until the first stable release. Until then, install from the monorepo source and pin to a specific commit, and verify the source you vendor before shipping it. See the Quickstart's *Install the SDK* step for per-language source-install commands.
 
 Source install — vendor `packages/sdk-go` (e.g. via a Go `replace` directive pinned to a commit):
 
 ```bash
-go mod edit -replace github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go=./packages/sdk-go
+go mod edit -replace github.com/apexmail/apexmail-go=./packages/sdk-go
 ```
 
 **Requirements:** Go 1.21+. No external dependencies — uses only the Go standard library.
@@ -387,7 +382,7 @@ go mod edit -replace github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go=./pac
 ### Initialization
 
 ```go
-import apexmail "github.com/Bel-Consulting-OU/ApexMail/packages/sdk-go"
+import apexmail "github.com/apexmail/apexmail-go"
 
 client := apexmail.New("am_live_your_api_key")
 

@@ -105,16 +105,16 @@ Each component has separate availability tracking:
 
 | Component | Monitored? | Probe URL | Independent |
 |-----------|------------|-----------|-------------|
-| Marketing Website | Yes | `https://apexmail.ee/health` | Same cluster |
-| Dashboard | Yes | `https://dashboard.apexmail.ee/health` | Same cluster |
-| Authentication | Yes | `https://api.apexmail.ee/v1/health/auth` | Same cluster |
-| API | Yes | `https://api.apexmail.ee/v1/health` | Same cluster |
+| Marketing Website | Yes | `https://apexmail.ee` | Same cluster |
+| Dashboard (console) | Yes | `https://app.apexmail.ee/health/live` | Same cluster |
+| Authentication | Yes | `https://api.apexmail.ee/health/live` | Same cluster |
+| API | Yes | `https://api.apexmail.ee/health/ready` | Same cluster |
 | Queue Processing | Yes | Internal probe | Same cluster |
 | Delivery Processing | Yes | Internal probe | Same cluster |
-| Webhooks | Yes | `https://webhooks.apexmail.ee/health` | Same cluster |
-| Documentation | Yes | `https://docs.apexmail.ee/health` | Same cluster |
-| Status Page | Yes | `https://status.apexmail.io` | **Independent** |
-| Billing | Yes | `https://api.apexmail.ee/v1/health/billing` | Same cluster |
+| Webhooks | Yes | `https://api.apexmail.ee/health/ready` (delivered by api-server) | Same cluster |
+| Documentation | Yes | `https://apexmail.ee/docs` | Same cluster |
+| Status Page | Yes | `https://status.apexmail.ee` | **Independent** |
+| Billing | Yes | internal `billing-service` healthcheck (port 4100, no public host) | Same cluster |
 | Private Cloud CP | Yes (where applicable) | Tenant-specific | Mixed |
 
 ### 3.2 Calculation Rules

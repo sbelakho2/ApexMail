@@ -111,7 +111,7 @@
    ```
 
 4. **Verify connection budget:**
-   Review [`db_cluster_connection_budget`](../../deploy/helm/apexmail/values.yaml:359) in Helm values. Ensure `SUM(replicas × max_connections) < DB max_connections - 10%`.
+   Review `DATABASE_POOL_MAX` per service in [`docker-compose.yml`](../../docker-compose.yml) / [`configuration.md`](../deployment/configuration.md). Ensure `SUM(services × pool_max) < DB max_connections - 10%`.
 
 5. **Temporarily increase `max_connections`** if needed (requires restart):
    ```bash
@@ -328,7 +328,7 @@ kubectl exec -n apexmail deploy/postgres-standby -- psql -U apexmail -c \
           pg_last_wal_replay_lsn();"
 
 # 5. Verify application health
-curl -sf https://api.apexmail.ee/v1/health | jq '.status'
+curl -sf https://api.apexmail.ee/health/deep | jq '.status'
 ```
 
 ## Escalation
@@ -344,5 +344,5 @@ curl -sf https://api.apexmail.ee/v1/health | jq '.status'
 
 - [Disaster Recovery & Backup Procedures](../disaster-recovery.md)
 - [Backup verification](../backup-verification.md)
-- [PostgreSQL migration faults](../../faults.md)
+- PostgreSQL migration faults (historical `faults.md` audit document, since removed from the repo)
 - [Secret Rotation Runbook](../secret-rotation.md)

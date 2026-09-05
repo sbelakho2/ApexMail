@@ -16,6 +16,15 @@
 /docker-compose.override.yml @sbelakho2
 /docker-compose.prod.yml @sbelakho2
 
+# CI pipeline (self-hosted — ci/, not .github/workflows)
+/ci/ @sbelakho2
+
+# Compliance constants crate (legal-entity/public claims)
+/compliance/ @sbelakho2
+
+# Operational scripts (backups, secret rotation, audits)
+/scripts/ @sbelakho2
+
 # Documentation and governance
 /docs/ @sbelakho2
 /README.md @sbelakho2
@@ -26,4 +35,3 @@
 # Tooling, data, and experiments
 /tools/ @sbelakho2
 /data/ @sbelakho2
-/Lobster/ @sbelakho2

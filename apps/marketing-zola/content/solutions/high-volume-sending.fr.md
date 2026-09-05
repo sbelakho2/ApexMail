@@ -19,7 +19,7 @@ Grandes plateformes SaaS envoyant plus d'1M d'emails/mois. Plateformes e-commerc
 ## Problème central
 
 - Les pools d'IP partagées accumulent le risque de réputation d'autres expéditeurs.
-- La contre-pression dans les files pendant le bridage des fournisseurs affecte tous les flux si elle n'est pas isolée.
+- La contre-pression dans les files pendant le bridage des fournisseurs affecte tout l'envoi si elle n'est pas isolée.
 - Le réchauffement IP manuel est source d'erreurs et lent.
 - Les limites de débit des forfaits standard plafonnent le débit en deçà des besoins métier.
 - Sans infrastructure dédiée, le trafic de pointe concurrence celui des autres clients.
@@ -28,8 +28,8 @@ Grandes plateformes SaaS envoyant plus d'1M d'emails/mois. Plateformes e-commerc
 
 - **IP dédiées** — Option additionnelle approuvée sur Pro ; 1 incluse sur Growth, 3 sur Scale et 10 sur Enterprise. Les options de déploiement contractualisées sont revues séparément.
 - **Réchauffement automatisé** — Montée en charge progressive selon des calendriers propres à chaque fournisseur. Supervisé au regard des signaux de réputation. Override manuel disponible.
-- **Priorisation des files** — Configuration de priorité par flux. Les flux transactionnels sont traités avant les envois massifs. Objectifs de temps jusqu'à la boîte de réception supervisés.
-- **API par lots** (`POST /v1/emails/batch`) — Soumettez jusqu'à 1 000 emails par requête. Surcoût par message inférieur aux appels API individuels.
+- **Priorisation des files** — Le trafic transactionnel est traité en priorité devant les envois massifs en période de charge. Objectifs de temps jusqu'à la boîte de réception supervisés.
+- **API par lots** (`POST /v1/messages/batch`) — Soumettez jusqu'à 100 messages par requête. Surcoût par message inférieur aux appels API individuels.
 - **Limites de débit** — Les limites sont appliquées par clé API et par forfait ; consultez la documentation API actuelle pour les limites publiques.
 - **SLA contractuel** — Scale et Enterprise incluent des engagements SLA au niveau du forfait ; les déploiements non standards requièrent une revue contractuelle distincte.
 
@@ -38,8 +38,8 @@ Grandes plateformes SaaS envoyant plus d'1M d'emails/mois. Plateformes e-commerc
 1. Demandez la revue d'éligibilité IP dédiée au support ou à l'équipe commerciale.
 2. Une fois approuvées, les IP dédiées sont provisionnées et attribuées à votre compte.
 3. Le réchauffement automatisé démarre. Suivez sa progression dans le tableau de bord.
-4. Attribuez les IP dédiées aux flux transactionnels pour isoler la réputation.
-5. Configurez la priorité de file et les limites de concurrence par flux.
+4. Attribuez les IP dédiées à votre envoi transactionnel pour isoler la réputation.
+5. Configurez la priorité de file et les limites de concurrence.
 6. Utilisez l'API par lots pour les scénarios d'envoi à fort débit.
 7. Surveillez la latence de livraison, la profondeur des files et les taux d'acceptation par fournisseur.
 
@@ -47,10 +47,9 @@ Grandes plateformes SaaS envoyant plus d'1M d'emails/mois. Plateformes e-commerc
 
 | Point de terminaison | Description |
 |---|---|
-| `POST /v1/emails` | Envoyer un email individuel |
-| `POST /v1/emails/batch` | Envoyer jusqu'à 1 000 emails en une requête |
+| `POST /v1/messages` | Envoyer un email individuel |
+| `POST /v1/messages/batch` | Envoyer jusqu'à 100 messages en une requête |
 | `GET /v1/dedicated-ips` | Lister les IP dédiées et l'état de réchauffement |
-| `GET /v1/streams/:id/stats` | Métriques de débit et de latence par flux |
 | `GET /v1/analytics/delivery` | Métriques de livraison agrégées par fournisseur |
 
 ## Forfait requis
@@ -64,7 +63,7 @@ Grandes plateformes SaaS envoyant plus d'1M d'emails/mois. Plateformes e-commerc
 ## Considérations de sécurité
 
 - La réputation des IP dédiées est gérée exclusivement pour votre compte. Toute modification requiert l'approbation du propriétaire du compte.
-- Les requêtes d'API par lots sont atomiques : tous les messages d'un lot réussissent ou échouent ensemble (pas de complétion partielle).
+- Chaque message d'un lot est validé individuellement ; l'API rapporte l'acceptation par message.
 - La profondeur des files et la latence de traitement sont visibles en temps réel via le tableau de bord et l'API.
 - Les en-têtes de limite de débit sont renvoyés sur chaque réponse. Surveillez `X-RateLimit-Remaining` pour éviter le bridage.
 
@@ -72,7 +71,7 @@ Grandes plateformes SaaS envoyant plus d'1M d'emails/mois. Plateformes e-commerc
 
 - L'éligibilité IP dédiée requiert une revue de l'historique d'envoi. Les nouveaux comptes démarrent sur des IP partagées.
 - Le réchauffement IP prend généralement 2 à 4 semaines selon le volume cible et les politiques des fournisseurs.
-- La taille maximale d'un lot est de 1 000 emails par requête. Les volumes supérieurs nécessitent plusieurs appels par lots.
+- La taille maximale d'un lot est de 100 messages par requête. Les volumes supérieurs nécessitent plusieurs appels par lots.
 - Le débit pendant les pannes fournisseurs dépend de la configuration de retry des files et du temps de rétablissement du fournisseur.
 
 ## Prochaine étape recommandée

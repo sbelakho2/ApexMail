@@ -267,6 +267,8 @@ fn test_config() -> Config {
         internal_tls_client_key_path: None,
         kiwi_enabled: false,
         kiwi_secret_key: "dev".into(),
+        waf_enabled: false,
+        waf_enforce: false,
         kiwi_algorithm: kiwicaptcha::PoWAlgorithm::Sha256,
         kiwi_argon_m_kib: 0,
         kiwi_argon_t: 2,
@@ -1207,7 +1209,13 @@ async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables() {
     .await
     .expect("failed to seed autopilot_inbox_messages row");
 
-    let deleted = delete_tenant_records(&pool, &tenant_id)
+    let deleted = delete_tenant_records(
+        &pool,
+        &tenant_id,
+        "system_internal_tenant01",
+        Some("test-operator"),
+        false,
+    )
         .await
         .expect("failed to delete tenant through purge helper");
     assert!(

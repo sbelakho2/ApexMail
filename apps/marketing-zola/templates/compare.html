@@ -1,12 +1,12 @@
 {# Compare page template #}
 {% extends "base.html" %}
 
-{% block title %}{{ page.title }}{% endblock title %}
-{% block description %}{{ page.description }}{% endblock description %}
-{% block og_title %}{{ page.title }}{% endblock og_title %}
-{% block og_description %}{{ page.description }}{% endblock og_description %}
-{% block twitter_title %}{{ page.title }}{% endblock twitter_title %}
-{% block twitter_description %}{{ page.description }}{% endblock twitter_description %}
+{% block title %}{% if page.title %}{{ page.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}{% endblock title %}
+{% block description %}{% if page.description %}{{ page.description }}{% else %}{{ config.description }}{% endif %}{% endblock description %}
+{% block og_title %}{% if page.title %}{{ page.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}{% endblock og_title %}
+{% block og_description %}{% if page.description %}{{ page.description }}{% else %}{{ config.description }}{% endif %}{% endblock og_description %}
+{% block twitter_title %}{% if page.title %}{{ page.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}{% endblock twitter_title %}
+{% block twitter_description %}{% if page.description %}{{ page.description }}{% else %}{{ config.description }}{% endif %}{% endblock twitter_description %}
 
 {% block content %}
 {% include "partials/compare/hero.html" %}

@@ -1,7 +1,7 @@
 # Messages API
 
 > **Base path:** `/v1/messages`
-> **Required scopes:** `messages:send` (POST), `messages:read` (GET), `messages:write` (DELETE)
+> **Required scopes:** `messages:send` (POST, cancel), `messages:read` (GET)
 > **Rate limit:** Tier-based (see [Rate Limits](../rate-limits.md))
 > **Idempotency:** Supported via `Idempotency-Key` header for POST endpoints
 > **Content-Type:** `application/json`
@@ -26,7 +26,7 @@ For idempotent sending, include an `Idempotency-Key` header with a unique value 
 | GET | `/v1/messages` | List messages |
 | GET | `/v1/messages/:id` | Get message details |
 | POST | `/v1/messages/batch` | Send batch messages |
-| DELETE | `/v1/messages/:id` | Cancel scheduled message |
+| POST | `/v1/messages/:id/cancel` | Cancel scheduled message |
 
 ---
 
@@ -373,7 +373,7 @@ Cancel a message that hasn't been sent yet.
 ### Request
 
 ```http
-DELETE /v1/messages/msg_01HQMXJ5KXMW0NREP0YGCZKNVD
+POST /v1/messages/msg_01HQMXJ5KXMW0NREP0YGCZKNVD/cancel
 X-API-Key: {{api_key}}
 ```
 

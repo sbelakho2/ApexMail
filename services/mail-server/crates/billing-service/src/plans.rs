@@ -280,6 +280,28 @@ pub fn builtin_quota_limits(plan_name: Option<&str>) -> (i64, i64) {
     (plan.email_limit, plan.api_call_limit)
 }
 
+/// The builtin email limit for a KNOWN plan name, or `None` when the name
+/// matches no builtin plan.
+///
+/// [`builtin_quota_limits`] deliberately falls back to the free plan for
+/// unknown names (quota lookups must always resolve to something). The
+/// overage sweep needs the stricter variant: a missing `plans` row must be
+/// resolved to the builtin limit by name, and an UNKNOWN name must surface
+/// as unknown (skip with a warning) rather than silently borrowing the free
+/// plan's 30 000-email limit — or worse, the historical `unwrap_or(0)`
+/// which billed the tenant's entire volume as overage.
+pub fn builtin_email_limit_for_plan(plan_name: &str) -> Option<i64> {
+    default_plans()
+        .into_iter()
+        .find(|plan| plan.name == plan_name)
+        .map(|plan| plan.email_limit)
+}
+
+/// Whether `plan_name` is one of the builtin plan identifiers.
+pub fn is_builtin_plan_name(plan_name: &str) -> bool {
+    builtin_email_limit_for_plan(plan_name).is_some()
+}
+
 // ---------------------------------------------------------------------------
 // Database helpers
 // ---------------------------------------------------------------------------
@@ -715,6 +737,28 @@ mod tests {
             builtin_quota_limits(Some("does-not-exist")),
             (30_000, 300_000)
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Overage sweep fallback (audit 1.3): a missing plans row resolves to
+    // the builtin limit BY NAME; unknown names stay unknown.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn builtin_email_limit_resolves_known_plans_by_name() {
+        assert_eq!(builtin_email_limit_for_plan("free"), Some(30_000));
+        assert_eq!(builtin_email_limit_for_plan("starter"), Some(50_000));
+        assert_eq!(builtin_email_limit_for_plan("enterprise"), Some(5_000_000));
+        // PAYG is unlimited.
+        assert_eq!(builtin_email_limit_for_plan("payg"), Some(-1));
+        assert!(is_builtin_plan_name("payg"));
+    }
+
+    #[test]
+    fn builtin_email_limit_is_none_for_unknown_plans() {
+        assert_eq!(builtin_email_limit_for_plan("does-not-exist"), None);
+        assert_eq!(builtin_email_limit_for_plan(""), None);
+        assert!(!is_builtin_plan_name("legacy-custom"));
     }
 
     #[test]

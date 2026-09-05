@@ -63,7 +63,7 @@ git checkout -b feature/your-feature-name
 
 #### 3. Make Changes
 
-- Follow the [coding standards](./getting-started.md#coding-standards)
+- Follow the [coding standards](../user-guide/getting-started.md)
 - Write tests for new functionality
 - Update documentation as needed
 
@@ -111,7 +111,7 @@ Include:
 - [ ] Documentation updated
 - [ ] Commit messages follow conventions
 
-> **Style guide:** The project uses an [`.editorconfig`](../../.editorconfig) for machine-readable style rules (indentation, charset, line endings). For detailed design principles and visual style, see the [Style Guide (DOCX)](../style_guide.docx).
+> **Style guide:** The project uses an [`.editorconfig`](../../.editorconfig) for machine-readable style rules (indentation, charset, line endings). For visual and UI style, see the [Style System](style-system.md); the former binary `style_guide.docx` was removed from the docs tree (2026-09-05) — its content lives on in git history.
 
 ### Code Review Process
 
@@ -125,7 +125,7 @@ Include:
 
 ## Development Setup
 
-See [Development Guide](./getting-started.md) for full setup instructions.
+See the [root Contributing guide](../../CONTRIBUTING.md) and [README](../../README.md) for full setup instructions.
 
 Quick start:
 ```bash

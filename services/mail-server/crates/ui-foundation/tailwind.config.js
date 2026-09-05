@@ -9,10 +9,15 @@ module.exports = {
     // Rust source stores class names inside escaped string literals
     // (class=\"...\") which Tailwind's default extractor misses. Use a
     // broader extract that treats the raw file text as a class source so
-    // utilities referenced only from Rust render correctly.
+    // utilities referenced only from Rust render correctly. The class must
+    // also include `.` and `,`: arbitrary values carry both (letter-spacing
+    // `tracking-[0.28em]`, viewport math `w-[min(20rem,calc(100vw-2rem))]`)
+    // and a regex without them silently drops the entire letter-spacing
+    // scale from the compiled CSS. Merged junk tokens (e.g. Rust range
+    // expressions) are harmless — Tailwind ignores unknown classes.
     extract: {
       rs: (content) => {
-        return content.match(/[A-Za-z0-9-_:/[\]()%]+/g) || [];
+        return content.match(/[A-Za-z0-9-_:/[\]()%.,]+/g) || [];
       },
     },
   },
@@ -38,6 +43,28 @@ module.exports = {
     'font-mono',
     'tracking-[0.12em]',
     'tracking-[0.16em]',
+    // The full arbitrary letter-spacing / leading / opacity / grid scale
+    // used by the surfaces: `.`- and `,`-bearing values are the exact
+    // class the extractor historically dropped — safelist every one in
+    // use so a future extractor regression cannot silently strip the
+    // typographic scale again.
+    'tracking-[0.01em]',
+    'tracking-[0.1em]',
+    'tracking-[0.18em]',
+    'tracking-[0.2em]',
+    'tracking-[0.22em]',
+    'tracking-[0.24em]',
+    'tracking-[0.28em]',
+    'tracking-[0.32em]',
+    'leading-[1.55]',
+    'leading-[1.6]',
+    'opacity-[0.03]',
+    'w-[min(20rem,calc(100vw-2rem))]',
+    'lg:grid-cols-[1.05fr_0.95fr]',
+    'lg:grid-cols-[1.1fr_0.9fr]',
+    'lg:grid-cols-[1.25fr_0.75fr]',
+    'xl:grid-cols-[1.15fr_0.85fr]',
+    'xl:grid-cols-[1.2fr_0.8fr]',
     // Pressed-state scale: the rs extractor's token regex has no `.`, so
     // arbitrary scale values never match — safelist them so the button
     // primitive's active:scale pressed state actually compiles.

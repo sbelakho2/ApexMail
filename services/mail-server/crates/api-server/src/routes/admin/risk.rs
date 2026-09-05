@@ -64,13 +64,16 @@ fn build_risk_audit_entry(mutation: &RiskMutation) -> RiskAuditEntry {
     }
 }
 
-async fn log_risk_audit(state: &AppState, mutation: &RiskMutation) {
+async fn log_risk_audit(state: &AppState, auth: &AuthUser, mutation: &RiskMutation) {
     let entry = build_risk_audit_entry(mutation);
 
-    crate::audit_log::insert_audit_log_best_effort(
+    // Actor attribution (P2-2): the target tenant stays in the entry's
+    // tenant scope; the ACTING operator's identity rides along as user_id.
+    crate::audit_log::insert_audit_log_best_effort_with_env(
         &state.db,
+        state.config.environment.is_production(),
         entry.tenant_id.as_deref(),
-        None,
+        auth.user_id.as_deref(),
         entry.action,
         "risk",
         entry.resource_id.as_deref(),
@@ -665,6 +668,7 @@ async fn update_risk(
 
             log_risk_audit(
                 &state,
+                &auth,
                 &RiskMutation::SetLimit {
                     tenant_id,
                     limit_type,
@@ -677,19 +681,20 @@ async fn update_risk(
         }
         RiskMutation::ResolveFlag { tenant_id, flag_id } => {
             if table_exists(&state.db, "reputation_alerts").await {
-                if let Err(e) = sqlx::query(
+                // Propagate (P2): swallowing the UPDATE reported
+                // success:true for a flag that was never resolved —
+                // operators trusted a no-op.
+                sqlx::query(
                     "UPDATE reputation_alerts SET acknowledged = true WHERE tenant_id = $1 AND id = $2",
                 )
                 .bind(&tenant_id)
                 .bind(&flag_id)
                 .execute(&state.db)
-                .await
-                {
-                    tracing::warn!(tenant_id = %tenant_id, flag_id = %flag_id, error = %e, "Failed to resolve reputation flag");
-                }
+                .await?;
             }
 
-            log_risk_audit(&state, &RiskMutation::ResolveFlag { tenant_id, flag_id }).await;
+            log_risk_audit(&state, &auth, &RiskMutation::ResolveFlag { tenant_id, flag_id })
+                .await;
             Ok(Json(serde_json::json!({ "success": true })))
         }
         RiskMutation::SaveThresholds { thresholds } => {
@@ -697,6 +702,7 @@ async fn update_risk(
 
             log_risk_audit(
                 &state,
+                &auth,
                 &RiskMutation::SaveThresholds {
                     thresholds: thresholds.clone(),
                 },
@@ -709,7 +715,7 @@ async fn update_risk(
         RiskMutation::RunAssessment => {
             let thresholds = load_risk_settings(&state.db).await?.thresholds;
             let job_id = enqueue_risk_assessment(state.clone(), thresholds);
-            log_risk_audit(&state, &RiskMutation::RunAssessment).await;
+            log_risk_audit(&state, &auth, &RiskMutation::RunAssessment).await;
             Ok(Json(queued_risk_assessment_response(&job_id)))
         }
     }

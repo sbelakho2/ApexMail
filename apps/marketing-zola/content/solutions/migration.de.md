@@ -47,8 +47,8 @@ Die Migration eines E-Mail-Anbieters ist ein riskanter Vorgang. Verlorene Zustel
 
 | Endpunkt | Beschreibung |
 |---|---|
-| `POST /v1/emails` | E-Mail senden |
-| `POST /v1/emails/batch` | Bis zu 1.000 E-Mails im Batch senden |
+| `POST /v1/messages` | E-Mail senden |
+| `POST /v1/messages/batch` | Bis zu 100 Nachrichten im Batch senden |
 | `POST /v1/templates` | Vorlage erstellen |
 | `GET /v1/templates` | Vorlagen auflisten |
 | `PUT /v1/templates/:id` | Vorlage aktualisieren |
@@ -57,9 +57,8 @@ Die Migration eines E-Mail-Anbieters ist ein riskanter Vorgang. Verlorene Zustel
 
 | Ereignis | Auslöser |
 |---|---|
-| `email.delivered` | Empfangender Server hat die Nachricht angenommen |
-| `email.bounced` | Hard- oder Soft-Bounce |
-| `email.delayed` | Nachricht vom empfangenden Server verzögert |
+| `message.delivered` | Empfangender Server hat die Nachricht angenommen |
+| `message.bounced` | Hard- oder Soft-Bounce |
 
 ## Erforderlicher Tarif
 

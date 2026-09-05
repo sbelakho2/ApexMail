@@ -454,8 +454,14 @@ impl EmtaClient {
         let rate_0_reverse_charge = Self::rate_sum(&kmd.rates, 0.0, Some("reverse_charge"));
         let rate_0_non_eu = Self::rate_sum(&kmd.rates, 0.0, Some("non_eu"));
 
-        let total_taxable = kmd.total_taxable_cents;
-        let total_vat = kmd.total_vat_cents;
+        // The XML header declares EUR and the KMD XSD expects euro DECIMALS
+        // (2-fraction dot format) — the internal integer-cents values MUST
+        // be divided by 100 at this boundary. Interpolating raw cents used
+        // to overstate the filed return 100× (audit 1.3). Integer math
+        // only (same shape as the e-arve renderer's
+        // cents_to_decimal_string).
+        let total_taxable = Self::cents_to_euro_decimal(kmd.total_taxable_cents);
+        let total_vat = Self::cents_to_euro_decimal(kmd.total_vat_cents);
 
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -496,9 +502,9 @@ impl EmtaClient {
             period_end = period_end,
             registry_code = registry_code,
             now_rfc3339 = chrono::Utc::now().to_rfc3339(),
-            rate_24_taxable = rate_24_taxable,
-            rate_24_vat = rate_24_vat,
-            zero_rated = rate_0_reverse_charge + rate_0_non_eu,
+            rate_24_taxable = Self::cents_to_euro_decimal(rate_24_taxable),
+            rate_24_vat = Self::cents_to_euro_decimal(rate_24_vat),
+            zero_rated = Self::cents_to_euro_decimal(rate_0_reverse_charge + rate_0_non_eu),
             total_taxable = total_taxable,
             total_vat = total_vat,
             invoice_count = kmd.invoice_count,
@@ -621,6 +627,17 @@ impl EmtaClient {
             .replace('>', "&gt;")
             .replace('"', "&quot;")
             .replace('\'', "&apos;")
+    }
+
+    /// Render integer cents as a euro decimal string ("15000.00") with a
+    /// dot separator and exactly two fraction digits — the format the KMD
+    /// XSD expects for every `<Amount>` given the header's
+    /// `<Currency>EUR</Currency>`. Integer math only: money formatting
+    /// must never round-trip through f64 (see money_invariants).
+    fn cents_to_euro_decimal(cents: i64) -> String {
+        let sign = if cents < 0 { "-" } else { "" };
+        let abs = cents.unsigned_abs();
+        format!("{sign}{}.{:02}", abs / 100, abs % 100)
     }
 
     /// Sum `taxable_amount_cents` for buckets matching a rate and optional reason.
@@ -839,16 +856,70 @@ mod tests {
         assert!(xml.contains("<Line number=\"2\">"), "Should have line 2");
         assert!(xml.contains("<Line number=\"3\">"), "Should have line 3");
 
-        // Contains correct amounts (in cents)
-        assert!(xml.contains("1200000"), "Should contain 24% taxable amount");
-        assert!(xml.contains("288000"), "Should contain 24% VAT amount");
+        // Contains correct amounts — in EUROS (2-decimal dot format), not
+        // raw cents: the header declares EUR and the XSD expects decimals.
+        assert!(xml.contains("12000.00"), "Should contain 24% taxable amount in euros");
+        assert!(xml.contains("2880.00"), "Should contain 24% VAT amount in euros");
         assert!(
-            xml.contains("300000"),
-            "Should contain zero-rated amount (200k + 100k)"
+            xml.contains("3000.00"),
+            "Should contain zero-rated amount in euros (200k + 100k cents)"
         );
-        assert!(xml.contains("1500000"), "Should contain total taxable");
-        assert!(xml.contains("360000"), "Should contain total VAT");
+        assert!(xml.contains("15000.00"), "Should contain total taxable in euros");
+        assert!(xml.contains("3600.00"), "Should contain total VAT in euros");
         assert!(xml.contains("42"), "Should contain invoice count");
+        // The raw cent values must NOT appear in any amount element.
+        assert!(!xml.contains("<Amount>1200000</Amount>"));
+        assert!(!xml.contains("<TotalVatLiability>360000</TotalVatLiability>"));
+    }
+
+    // ------------------------------------------------------------------
+    // Audit 1.3 — the KMD XML must divide cents by 100. A one-env flip of
+    // EMTA_ENABLED used to file a 100× overstated return.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_cents_to_euro_decimal_known_values() {
+        // 1 500 000 cents = €15 000.00 (the sample return's taxable base).
+        assert_eq!(EmtaClient::cents_to_euro_decimal(1_500_000), "15000.00");
+        // 360 000 cents = €3 600.00 output VAT.
+        assert_eq!(EmtaClient::cents_to_euro_decimal(360_000), "3600.00");
+        // Fractional cents render with exactly two digits.
+        assert_eq!(EmtaClient::cents_to_euro_decimal(1), "0.01");
+        assert_eq!(EmtaClient::cents_to_euro_decimal(5), "0.05");
+        assert_eq!(EmtaClient::cents_to_euro_decimal(99), "0.99");
+        assert_eq!(EmtaClient::cents_to_euro_decimal(100), "1.00");
+        assert_eq!(EmtaClient::cents_to_euro_decimal(0), "0.00");
+        // Negative amounts (adjustments) keep the sign.
+        assert_eq!(EmtaClient::cents_to_euro_decimal(-2_409), "-24.09");
+    }
+
+    #[test]
+    fn test_kmd_xml_amounts_are_euros_not_cents() {
+        let config = EmtaConfig {
+            api_base_url: "https://xroad.ee".into(),
+            client_cert_path: "".into(),
+            client_key_path: "".into(),
+            company_registry_code: "12345678".into(),
+            enabled: true,
+        };
+        let client = EmtaClient::new(config, HttpClient::new());
+
+        // A known return: 123 456 789 cents taxable, 29 629 629 cents VAT.
+        let mut kmd = sample_kmd_result();
+        kmd.total_taxable_cents = 123_456_789;
+        kmd.total_vat_cents = 29_629_629;
+        let xml = client
+            .build_kmd_inf_xml(&kmd, &sample_breakdown())
+            .unwrap();
+
+        assert!(
+            xml.contains("<TotalTaxableTurnover>1234567.89</TotalTaxableTurnover>"),
+            "total taxable must render as euro decimals"
+        );
+        assert!(
+            xml.contains("<TotalVatLiability>296296.29</TotalVatLiability>"),
+            "total VAT must render as euro decimals"
+        );
     }
 
     #[test]

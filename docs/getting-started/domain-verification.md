@@ -40,7 +40,7 @@ Return to the dashboard and click **Verify**. DNS propagation can take up to 48 
 
 ```bash
 curl -s -X POST https://api.apexmail.ee/v1/domains/example.com/verify \
-  -H "Authorization: Bearer $APEXMAIL_API_KEY" \
+  -H "X-API-Key: $APEXMAIL_API_KEY" \
   | jq .
 ```
 
@@ -59,11 +59,11 @@ curl -s -X POST https://api.apexmail.ee/v1/domains/example.com/verify \
 
 After verification, configure:
 
-- [SPF](docs/domains/spf.md) — authorize ApexMail to send on your behalf.
-- [DKIM](docs/domains/dkim.md) — cryptographically sign outgoing email.
-- [DMARC](docs/domains/dmarc.md) — tell receivers how to handle unauthenticated email.
-- [Return Path](docs/domains/return-path.md) — custom bounce domain.
-- [Tracking Domain](docs/domains/tracking-domain.md) — custom domain for open/click tracking.
+- [SPF](../domains/spf.md) — authorize ApexMail to send on your behalf.
+- [DKIM](../domains/dkim.md) — cryptographically sign outgoing email.
+- [DMARC](../domains/dmarc.md) — tell receivers how to handle unauthenticated email.
+- [Return Path](../domains/return-path.md) — custom bounce domain.
+- [Tracking Domain](../domains/tracking-domain.md) — custom domain for open/click tracking.
 
 ## Related
 

@@ -6,7 +6,6 @@ use axum::routing::get;
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::middleware::auth::{require_scopes, AuthUser};
@@ -152,21 +151,36 @@ async fn list_events(
 async fn get_event(
     State(state): State<AppState>,
     auth: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<String>,
 ) -> Result<Json<EventResponse>, ApiError> {
     require_scopes(&auth, &["events:read"])?;
+
+    // events.id is VARCHAR(64) (migration 075 / runtime CREATE_EVENTS) — the
+    // path parameter is bound as text after format validation, never parsed
+    // as a UUID.
+    if !is_valid_event_id(&id) {
+        return Err(ApiError::BadRequest(
+            "event id must be 1-64 characters without control characters".into(),
+        ));
+    }
 
     let row = sqlx::query_as::<_, EventRow>(
         "SELECT id, message_id, event_type, recipient, metadata, timestamp
          FROM events WHERE id = $1 AND tenant_id = $2",
     )
-    .bind(id)
+    .bind(&id)
     .bind(&auth.tenant_id)
     .fetch_optional(&state.db)
     .await?
     .ok_or_else(|| ApiError::NotFound("event not found".into()))?;
 
     Ok(Json(row.into()))
+}
+
+/// Validate an event id path parameter against the VARCHAR(64) column:
+/// non-empty, at most 64 bytes, and free of control characters.
+fn is_valid_event_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && !id.bytes().any(|b| b.is_ascii_control())
 }
 
 async fn event_stats(
@@ -285,6 +299,7 @@ struct TimeseriesRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     #[test]
     fn test_event_stats_serialisation() {
@@ -323,6 +338,18 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["event_type"], "opened");
+    }
+
+    #[test]
+    fn test_event_id_validation_matches_varchar64_column() {
+        assert!(is_valid_event_id("evt_0123456789abcdef"));
+        assert!(is_valid_event_id(&"x".repeat(64)));
+        // Empty, over-length, and control-character ids must be rejected
+        // before touching the database (the column is VARCHAR(64)).
+        assert!(!is_valid_event_id(""));
+        assert!(!is_valid_event_id(&"x".repeat(65)));
+        assert!(!is_valid_event_id("evt\u{0}injection"));
+        assert!(!is_valid_event_id("evt\ninjection"));
     }
 
     // ── Stats window bounds (audit J) ────────────────────────────

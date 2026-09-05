@@ -32,10 +32,11 @@ services:
       - /bin/sh
       - -c
       - >
+        urlencode() { printf '%s' "$$1" | od -An -tx1 | tr -d ' \n' | sed 's/\(..\)/%\1/g'; };
         export POSTGRES_PASSWORD="$(cat /run/secrets/postgres_password)";
-        export DATABASE_URL="postgres://apexmail:${POSTGRES_PASSWORD}@postgres:5432/apexmail_mail";
+        export DATABASE_URL="postgres://apexmail:$(urlencode "$POSTGRES_PASSWORD")@postgres:5432/apexmail_mail";
         export REDIS_PASSWORD="$(cat /run/secrets/redis_password)";
-        export REDIS_URL="redis://default:${REDIS_PASSWORD}@redis:6379";
+        export REDIS_URL="redis://:$(urlencode "$REDIS_PASSWORD")@redis:6379";
         exec /usr/bin/tini -- mta-server
     depends_on:
       postgres:
@@ -90,8 +91,9 @@ services:
       - /bin/sh
       - -c
       - >
+        urlencode() { printf '%s' "$$1" | od -An -tx1 | tr -d ' \n' | sed 's/\(..\)/%\1/g'; };
         export POSTGRES_PASSWORD="$(cat /run/secrets/postgres_password)";
-        export DATABASE_URL="postgres://apexmail:${POSTGRES_PASSWORD}@postgres:5432/apexmail_mail";
+        export DATABASE_URL="postgres://apexmail:$(urlencode "$POSTGRES_PASSWORD")@postgres:5432/apexmail_mail";
         exec /usr/bin/tini -- mailstore
     depends_on:
       postgres:
@@ -157,16 +159,22 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    # SECURITY (audit A): the password is read from the Docker secret FILE
-    # inside the container shell ($$ escapes compose interpolation, so sh
-    # evaluates $(cat ...) at runtime). Only REDIS_PASSWORD_FILE is set in
-    # `environment`, so referencing $${REDIS_PASSWORD} would expand to an
-    # empty string and silently DISABLE auth (--requirepass "") on a port
-    # published to 127.0.0.1:6379.
-    command: >
-      sh -c "redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru --requirepass \"$$(cat /run/secrets/redis_password)\""
+    # SECURITY (audit §2): same ACL-file approach as the root dev compose —
+    # deploy/redis/entrypoint.sh reads the password from the Docker secret
+    # FILE and writes it into a 0600 ACL file in sha256-HASHED form. The
+    # previous `--requirepass "$$(cat …)"` command put the PLAINTEXT
+    # password on the redis-server command line, visible to any process via
+    # /proc/<pid>/cmdline and to `docker inspect` readers of the container's
+    # argv. Memory/eviction tuning now rides the REDIS_MAXMEMORY /
+    # REDIS_MAXMEMORY_POLICY env vars the entrypoint reads (a compose
+    # `command:` is only passed as arguments to the entrypoint and ignored).
+    entrypoint: ["sh", "/usr/local/bin/redis-entrypoint.sh"]
+    volumes:
+      - ../../deploy/redis/entrypoint.sh:/usr/local/bin/redis-entrypoint.sh:ro
     environment:
-      - REDIS_PASSWORD_FILE=/run/secrets/redis_password
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      REDIS_MAXMEMORY: "256mb"
+      REDIS_MAXMEMORY_POLICY: "allkeys-lru"
     ports:
       - "127.0.0.1:6379:6379"
     networks:
@@ -222,10 +230,11 @@ services:
       - /bin/sh
       - -c
       - >
+        urlencode() { printf '%s' "$$1" | od -An -tx1 | tr -d ' \n' | sed 's/\(..\)/%\1/g'; };
         export POSTGRES_PASSWORD="$(cat /run/secrets/postgres_password)";
-        export DATABASE_URL="postgres://apexmail:${POSTGRES_PASSWORD}@postgres:5432/apexmail_mail";
+        export DATABASE_URL="postgres://apexmail:$(urlencode "$POSTGRES_PASSWORD")@postgres:5432/apexmail_mail";
         export REDIS_PASSWORD="$(cat /run/secrets/redis_password)";
-        export REDIS_URL="redis://default:${REDIS_PASSWORD}@redis:6379";
+        export REDIS_URL="redis://:$(urlencode "$REDIS_PASSWORD")@redis:6379";
         exec /usr/bin/tini -- worker
     depends_on:
       postgres:
@@ -284,10 +293,11 @@ services:
       - /bin/sh
       - -c
       - >
+        urlencode() { printf '%s' "$$1" | od -An -tx1 | tr -d ' \n' | sed 's/\(..\)/%\1/g'; };
         export POSTGRES_PASSWORD="$(cat /run/secrets/postgres_password)";
-        export DATABASE_URL="postgres://apexmail:${POSTGRES_PASSWORD}@postgres:5432/apexmail_mail";
+        export DATABASE_URL="postgres://apexmail:$(urlencode "$POSTGRES_PASSWORD")@postgres:5432/apexmail_mail";
         export REDIS_PASSWORD="$(cat /run/secrets/redis_password)";
-        export REDIS_URL="redis://default:${REDIS_PASSWORD}@redis:6379";
+        export REDIS_URL="redis://:$(urlencode "$REDIS_PASSWORD")@redis:6379";
         exec /usr/bin/tini -- sales-autopilot
     depends_on:
       postgres:
@@ -389,8 +399,9 @@ services:
           memory: 128M
 
   # Prometheus — metrics collection
+  # Version aligned with the root dev compose (v2.55.1 — audit §2 skew).
   prometheus:
-    image: prom/prometheus:v2.54.1
+    image: prom/prometheus:v2.55.1
     container_name: apexmail-prometheus
     ports:
       - "127.0.0.1:9090:9090"
@@ -424,8 +435,9 @@ services:
           memory: 256M
 
   # Grafana — dashboards & visualization
+  # Version aligned with the root dev compose (11.3.0 — audit §2 skew).
   grafana:
-    image: grafana/grafana:11.2.2
+    image: grafana/grafana:11.3.0
     container_name: apexmail-grafana
     ports:
       - "127.0.0.1:3000:3000"

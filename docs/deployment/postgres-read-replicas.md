@@ -38,7 +38,7 @@ Replication uses PostgreSQL's native **streaming replication** via WAL (Write-Ah
 
 ## 2. Helm Chart Configuration
 
-The ApexMail Helm chart at [`deploy/helm/apexmail/`](../../deploy/helm/apexmail/) supports read replica configuration through `values.yaml`.
+> **Historical note:** there is no Helm chart; the deployment is Docker Compose (see [`deploy/DEPLOYMENT.md`](../../deploy/DEPLOYMENT.md)). Read-replica configuration below is written against the compose/PostgreSQL layer.
 
 ### 2.1 Enabling Replicas
 

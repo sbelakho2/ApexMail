@@ -16,14 +16,21 @@ pub fn router() -> Router<AppState> {
 }
 
 fn build_gdpr_audit_metadata(body: &UpdateGdprRequest) -> serde_json::Value {
-    json!({ "status": body.status })
+    json!({
+        "status": body.status,
+        "evidenceProvided": body.evidence.as_deref().is_some_and(|e| !e.trim().is_empty()),
+    })
 }
 
-async fn log_gdpr_audit(db: &sqlx::PgPool, request_id: &str, metadata: serde_json::Value) {
-    crate::audit_log::insert_audit_log_best_effort(
-        db,
-        None,
-        None,
+/// Audit with full actor attribution (P2-2): the operator's tenant AND user
+/// id must land in the entry — an unattributed GDPR status change is
+/// unverifiable the moment it matters legally.
+async fn log_gdpr_audit(state: &AppState, auth: &AuthUser, request_id: &str, metadata: serde_json::Value) {
+    crate::audit_log::insert_audit_log_best_effort_with_env(
+        &state.db,
+        state.config.environment.is_production(),
+        Some(auth.tenant_id.as_str()),
+        auth.user_id.as_deref(),
         "control_plane.gdpr.request_updated",
         "gdpr_request",
         Some(request_id),
@@ -82,7 +89,10 @@ async fn list_gdpr_requests(
 
     let limit = params.limit.clamp(1, 200);
     let offset = params.offset.max(0);
-    let tenant_scoped = auth.tenant_id != "system";
+    // Slug-aware system-tenant resolution (audit F1): human operators belong
+    // to `system_internal_tenant01`, not the literal `system` sentinel — the
+    // literal comparison silently scoped this console to an empty tenant.
+    let tenant_scoped = !crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await;
 
     // Check if table exists
     let exists: (bool,) = sqlx::query_as("SELECT to_regclass('public.gdpr_requests') IS NOT NULL")
@@ -147,6 +157,57 @@ async fn list_gdpr_requests(
 pub struct UpdateGdprRequest {
     pub id: String,
     pub status: String,
+    /// Operator-supplied proof of execution. Required to complete an
+    /// erasure request (e.g. erasure job reference, verifier note); export
+    /// requests additionally require a materialized `gdpr_exports` artifact.
+    #[serde(default)]
+    pub evidence: Option<String>,
+}
+
+/// A completed GDPR request must point at executed work, never an
+/// operator's say-so (P1-5): an export needs a materialized artifact row
+/// (`gdpr_exports.request_id`, migration 038 — the download the data
+/// subject receives), an erasure needs a non-empty evidence note tying the
+/// completion to the compliance erasure path. Returns Ok(()) only when the
+/// request may legally transition to `completed`.
+async fn ensure_completion_is_evidenced(
+    state: &AppState,
+    request: &GdprRequestRow,
+    evidence: Option<&str>,
+) -> Result<(), ApiError> {
+    let has_evidence = evidence.is_some_and(|e| !e.trim().is_empty());
+    match request.request_type.as_str() {
+        "export" | "access" => {
+            let has_artifact: Option<bool> = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM gdpr_exports WHERE request_id = $1)",
+            )
+            .bind(&request.id)
+            .fetch_optional(&state.db)
+            .await?
+            .flatten();
+            if !has_artifact.unwrap_or(false) {
+                return Err(ApiError::Validation(vec![
+                    "export requests can only be completed after the export artifact has been generated (gdpr_exports row missing)".into(),
+                ]));
+            }
+            // An artifact without any operator evidence still leaves the
+            // completion unattributed — require both.
+            if !has_evidence {
+                return Err(ApiError::Validation(vec![
+                    "completing a request requires non-empty evidence".into(),
+                ]));
+            }
+        }
+        // Erasure and any unrecognized type: fail safe — demand evidence.
+        _ => {
+            if !has_evidence {
+                return Err(ApiError::Validation(vec![
+                    "completing an erasure request requires non-empty evidence (erasure job reference or compliance note)".into(),
+                ]));
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn update_gdpr_request(
@@ -161,7 +222,45 @@ async fn update_gdpr_request(
         return Err(ApiError::Validation(vec!["Invalid status".into()]));
     }
 
-    let tenant_scoped = auth.tenant_id != "system";
+    let tenant_scoped = !crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await;
+
+    // Fetch the request first: completion gating needs its type, and a
+    // tenant-scoped operator must not learn anything about foreign requests.
+    let request: Option<GdprRequestRow> = if tenant_scoped {
+        sqlx::query_as::<_, GdprRequestRow>(
+            "SELECT g.id, g.request_type, g.status, g.email, g.tenant_id,
+                COALESCE(t.name, g.tenant_id) as tenant_name,
+                g.created_at, g.fulfilled_at
+         FROM gdpr_requests g
+         LEFT JOIN tenants t ON t.id = g.tenant_id
+         WHERE g.id = $1 AND g.tenant_id = $2",
+        )
+        .bind(&body.id)
+        .bind(&auth.tenant_id)
+        .fetch_optional(&state.db)
+        .await?
+    } else {
+        sqlx::query_as::<_, GdprRequestRow>(
+            "SELECT g.id, g.request_type, g.status, g.email, g.tenant_id,
+                COALESCE(t.name, g.tenant_id) as tenant_name,
+                g.created_at, g.fulfilled_at
+         FROM gdpr_requests g
+         LEFT JOIN tenants t ON t.id = g.tenant_id
+         WHERE g.id = $1",
+        )
+        .bind(&body.id)
+        .fetch_optional(&state.db)
+        .await?
+    };
+    let request = request.ok_or_else(|| ApiError::NotFound("gdpr request not found".into()))?;
+
+    // P1-5: `fulfilled_at` is legal evidence of execution. It is written
+    // ONLY after the completion gates below pass — never on the operator's
+    // say-so.
+    if body.status == "completed" {
+        ensure_completion_is_evidenced(&state, &request, body.evidence.as_deref()).await?;
+    }
+
     let result = if tenant_scoped {
         sqlx::query(
             "UPDATE gdpr_requests
@@ -191,7 +290,7 @@ async fn update_gdpr_request(
         return Err(ApiError::NotFound("gdpr request not found".into()));
     }
 
-    log_gdpr_audit(&state.db, &body.id, build_gdpr_audit_metadata(&body)).await;
+    log_gdpr_audit(&state, &auth, &body.id, build_gdpr_audit_metadata(&body)).await;
 
     Ok(Json(serde_json::json!({ "success": true })))
 }

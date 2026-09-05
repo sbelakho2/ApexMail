@@ -212,8 +212,18 @@ duplicates that production never used and have no residual references:
   uid 101 (nginx) and reopens `live/` + `archive/` to 0755 with 0644 pem
   files so the mta/imap containers (non-root uid 10001) can read them.
 - `nginx`, `mta` and `imap-server` load certs at startup; after a renewal
-  they pick up the new cert on the next container restart / nginx reload
-  (deploys do this automatically).
+  nginx picks up the new cert on the next reload, while `mta` / `imap-server`
+  need a container restart. That restart is **automated**: the renewal loop
+  drops `renewal-restart-flag` into the cert tree, and a host-side systemd
+  path-unit watcher installed by `deploy.sh`
+  (`deploy/hardening/apexmail-tls-renew-restart.path` →
+  `deploy/hardening/tls-renew-restart.sh`) runs
+  `docker compose -f docker-compose.yml -f docker-compose.prod.yml restart
+  mta imap-server` exactly once per renewal (mtime guard; opt out with
+  `APEXMAIL_TLS_AUTO_RESTART=0`). When the watcher is absent — non-root
+  manual deploy — the certbot container logs the manual restart command.
+  Deploys also recreate the containers, covering renewals between deploys
+  only via the watcher.
 - The host `/etc/letsencrypt` tree is **legacy** — it is no longer mounted
   by any compose service and nothing renews it. Do not use it for new
   TLS wiring.

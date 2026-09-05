@@ -396,8 +396,9 @@ pub(crate) async fn admin_transfer_domain(
     .execute(&mut *tx)
     .await?;
 
-    crate::audit_log::insert_audit_log_in_tx(
+    crate::audit_log::insert_audit_log_in_tx_with_env(
         &mut tx,
+        state.config.environment.is_production(),
         Some(&auth.tenant_id),
         auth.user_id.as_deref(),
         "admin.domain.transfer",

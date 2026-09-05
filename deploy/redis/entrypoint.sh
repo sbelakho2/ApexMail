@@ -34,6 +34,12 @@ fi
 # SECURITY (SEC-103): Use ACL file instead of --requirepass to prevent the
 # password from being visible via /proc/<pid>/cmdline.
 #
+# SECURITY (audit §2): passwords are written to the ACL file in their
+# sha256-HASHED form (`#<hex>`, the Redis ACL convention — AUTH with the
+# plaintext still works; only the stored form is a hash), so the plaintext
+# secret never lands in the acl file either. The hash is computed at
+# entrypoint runtime from the Docker secret/env value.
+#
 # Audit fix (default user was +@all): every application container (api-server,
 # worker, mta, enterprise, billing-service, sales-autopilot, tracking,
 # observability) authenticates as the DEFAULT user — the Rust redis clients
@@ -54,8 +60,13 @@ ACL_DIR="/tmp/redis-acl"
 ACL_FILE="${ACL_DIR}/users.acl"
 mkdir -p "$ACL_DIR"
 
-# Application user (default) — password from the Docker secret.
-echo "user default on >${REDIS_PASSWORD} ~* &* +@all -flushall -flushdb -config -debug -shutdown -acl -slaveof -replicaof -module -migrate -restore" > "$ACL_FILE"
+# sha256 hex of the password — the Redis ACL `#hash` stored form.
+acl_hash() {
+    printf '%s' "$1" | sha256sum | awk '{print $1}'
+}
+
+# Application user (default) — password hash from the Docker secret.
+echo "user default on #$(acl_hash "$REDIS_PASSWORD") ~* &* +@all -flushall -flushdb -config -debug -shutdown -acl -slaveof -replicaof -module -migrate -restore" > "$ACL_FILE"
 
 # Administrator user — full access, on only when its own credential exists.
 REDIS_ADMIN_PASSWORD=""
@@ -65,7 +76,7 @@ elif [ -n "${REDIS_ADMIN_PASSWORD:-}" ]; then
     REDIS_ADMIN_PASSWORD="${REDIS_ADMIN_PASSWORD}"
 fi
 if [ -n "$REDIS_ADMIN_PASSWORD" ]; then
-    echo "user admin on >${REDIS_ADMIN_PASSWORD} ~* &* +@all" >> "$ACL_FILE"
+    echo "user admin on #$(acl_hash "$REDIS_ADMIN_PASSWORD") ~* &* +@all" >> "$ACL_FILE"
     echo "Redis ACL: admin user ENABLED (full access)" >&2
 else
     echo "user admin off ~* &* +@all" >> "$ACL_FILE"

@@ -23,7 +23,7 @@ ApexMail's MTA handles outbound email delivery via:
 - **Dedicated IPs:** For enterprise tenants requiring warm-up and consistent reputation
 - **Direct SMTP:** Fallback for low-volume or non-critical messages
 - **Queue management:** PostgreSQL-backed email queue with dead letter queue for failed deliveries
-- **IP rotation:** Automatic warm-up of new dedicated IPs (see [`ip_rotation.rs`](../../services/mail-server/crates/outbound-queue/src/ip_rotation.rs))
+- **IP rotation:** Automatic warm-up of new dedicated IPs (see [`ip_rotation.rs`](../../../services/mail-server/crates/outbound-queue/src/ip_rotation.rs))
 
 ## Symptoms
 
@@ -282,8 +282,8 @@ kubectl exec -n apexmail deploy/api-server -- psql -U apexmail -d apexmail -c \
    WHERE created_at > now() - interval '30 minutes';"
 
 # 3. Send a test email and verify delivery
-curl -sf -X POST https://api.apexmail.ee/v1/send \
-  -H "Authorization: Bearer <test-key>" \
+curl -sf -X POST https://api.apexmail.ee/v1/messages \
+  -H "X-API-Key: <test-api-key>" \
   -H "Content-Type: application/json" \
   -d '{"to":"test-recovery@example.com","subject":"MTA Recovery Test","text":"This is a recovery test"}'
 
@@ -310,7 +310,7 @@ curl -s http://localhost:9090/metrics | grep 'mta_bounce_rate'
 ## Related
 
 - [Crypto Incident Runbook](./crypto-incidents.md)
-- [Outbound queue module](../../services/mail-server/crates/outbound-queue/src/queue.rs)
-- [IP rotation module](../../services/mail-server/crates/outbound-queue/src/ip_rotation.rs)
+- [Outbound queue module](../../../services/mail-server/crates/outbound-queue/src/queue.rs)
+- [IP rotation module](../../../services/mail-server/crates/outbound-queue/src/ip_rotation.rs)
 - [Incident Response Runbook](./incident-response.md)
-- [DMARC/DKIM/SPF setup docs](../../docs/security/)
+- [DMARC/DKIM/SPF setup docs](../../security)

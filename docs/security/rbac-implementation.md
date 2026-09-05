@@ -26,7 +26,7 @@ ApexMail implements Role-Based Access Control (RBAC) through a **scope-based per
 | **viewer** | `messages:read`, `domains:read`, `templates:read`, `events:read`, `analytics:read`, `contacts:read` | Read-only access |
 | **member** (default) | `messages:read` | Minimal read access |
 
-**Source:** [auth.rs](../services/mail-server/crates/api-server/src/routes/auth.rs#L130-L159)
+**Source:** [auth.rs](../../services/mail-server/crates/api-server/src/routes/auth.rs#L130-L159)
 
 ```rust
 // Fix #24: Assign scopes based on user role instead of blanket wildcard.
@@ -56,7 +56,7 @@ The Rust auth layer maps user roles to scopes rather than applying a separate ra
 | **owner** | Wildcard access via `*` |
 | **fallback/member** | Minimal access via `messages:read` |
 
-**Source:** [routes/auth.rs](../services/mail-server/crates/api-server/src/routes/auth.rs#L37-L56)
+**Source:** [routes/auth.rs](../../services/mail-server/crates/api-server/src/routes/auth.rs#L37-L56)
 
 ---
 
@@ -327,7 +327,7 @@ The Rust auth layer maps user roles to scopes rather than applying a separate ra
 
 ### 6.1 Scope Guard (`require_scopes`)
 
-**Location:** [middleware/auth.rs](../services/mail-server/crates/api-server/src/middleware/auth.rs#L288-L300)
+**Location:** [middleware/auth.rs](../../services/mail-server/crates/api-server/src/middleware/auth.rs#L288-L300)
 
 ```rust
 pub fn require_scopes(user: &AuthUser, required: &[&str]) -> Result<(), ApiError> {
@@ -349,7 +349,7 @@ pub fn require_scopes(user: &AuthUser, required: &[&str]) -> Result<(), ApiError
 
 ### 6.2 Authentication Extractor (`AuthUser`)
 
-**Location:** [middleware/auth.rs](../services/mail-server/crates/api-server/src/middleware/auth.rs#L20-L27)
+**Location:** [middleware/auth.rs](../../services/mail-server/crates/api-server/src/middleware/auth.rs#L20-L27)
 
 ```rust
 pub struct AuthUser {
@@ -362,7 +362,7 @@ pub struct AuthUser {
 
 ### 6.3 Scope Guard (`require_scopes`)
 
-**Location:** [middleware/auth.rs](../services/mail-server/crates/api-server/src/middleware/auth.rs#L453-L465)
+**Location:** [middleware/auth.rs](../../services/mail-server/crates/api-server/src/middleware/auth.rs#L453-L465)
 
 ```rust
 pub fn require_scopes(user: &AuthUser, required: &[&str]) -> Result<(), ApiError> {
@@ -390,7 +390,7 @@ These routes **do not require authentication**:
 | Auth | `/v1/auth/login`, `/v1/auth/logout`, `/v1/auth/refresh` | Authentication flows |
 | SES Notifications | `/v1/ses/notifications` | AWS SES webhook (validated via SNS signature) |
 
-**Source:** [app.rs](../services/mail-server/crates/api-server/src/app.rs#L53-L56)
+**Source:** [app.rs](../../services/mail-server/crates/api-server/src/app.rs#L53-L56)
 
 ---
 
@@ -537,9 +537,9 @@ The following 19 scopes are defined in the [OpenAPI spec](../api/openapi.yaml) a
 
 ## 11. References
 
-- [middleware/auth.rs](../services/mail-server/crates/api-server/src/middleware/auth.rs) — Authentication extractors and scope guards
-- [routes/auth.rs](../services/mail-server/crates/api-server/src/routes/auth.rs) — Role→scope assignment logic
-- [app.rs](../services/mail-server/crates/api-server/src/app.rs) — Route organization and middleware stacking
-- [ssr.rs](../services/mail-server/crates/ui-foundation/src/ssr.rs) — Browser-surface auth and CSRF middleware equivalents
-- [dashboard.rs](../services/mail-server/crates/api-server/src/routes/dashboard.rs) — Dashboard route scope enforcement
-- [docs/adr/0010-security-architecture.md](../docs/adr/0010-security-architecture.md) — Security design decisions
+- [middleware/auth.rs](../../services/mail-server/crates/api-server/src/middleware/auth.rs) — Authentication extractors and scope guards
+- [routes/auth.rs](../../services/mail-server/crates/api-server/src/routes/auth.rs) — Role→scope assignment logic
+- [app.rs](../../services/mail-server/crates/api-server/src/app.rs) — Route organization and middleware stacking
+- [ssr.rs](../../services/mail-server/crates/ui-foundation/src/ssr.rs) — Browser-surface auth and CSRF middleware equivalents
+- [dashboard.rs](../../services/mail-server/crates/api-server/src/routes/dashboard.rs) — Dashboard route scope enforcement
+- [docs/adr/0010-security-architecture.md](../adr/0010-security-architecture.md) — Security design decisions

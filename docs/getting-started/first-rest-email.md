@@ -11,7 +11,7 @@ Send your first email through the ApexMail REST API.
 
 ```bash
 curl -s -X POST https://api.apexmail.ee/v1/messages \
-  -H "Authorization: Bearer $APEXMAIL_API_KEY" \
+  -H "X-API-Key: $APEXMAIL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "from": "hello@example.com",
@@ -38,7 +38,7 @@ Transactional streams allow you to separate sending configurations for different
 
 ```bash
 curl -s -X POST https://api.apexmail.ee/v1/messages \
-  -H "Authorization: Bearer $APEXMAIL_API_KEY" \
+  -H "X-API-Key: $APEXMAIL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "stream": "password-reset",
@@ -70,7 +70,7 @@ response = requests.post(
     url,
     json=payload,
     headers={
-        "Authorization": f"Bearer {API_KEY}",
+        "X-API-Key": API_KEY,
         "Content-Type": "application/json"
     }
 )
@@ -84,7 +84,7 @@ print(response.json())
 const response = await fetch("https://api.apexmail.ee/v1/messages", {
   method: "POST",
   headers: {
-    "Authorization": `Bearer ${process.env.APEXMAIL_API_KEY}`,
+    "X-API-Key": process.env.APEXMAIL_API_KEY,
     "Content-Type": "application/json"
   },
   body: JSON.stringify({
@@ -103,7 +103,7 @@ console.log(await response.json());
 
 ```bash
 curl -s https://api.apexmail.ee/v1/messages/msg_01JABCDEFGHIJKLM \
-  -H "Authorization: Bearer $APEXMAIL_API_KEY" \
+  -H "X-API-Key: $APEXMAIL_API_KEY" \
   | jq .
 ```
 

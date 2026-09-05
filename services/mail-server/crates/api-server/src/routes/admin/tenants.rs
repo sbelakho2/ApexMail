@@ -50,12 +50,138 @@ const TENANT_SCOPED_TABLES_QUERY: &str = "
     WHERE columns.table_schema = 'public'
       AND columns.column_name = 'tenant_id'
       AND columns.table_name <> 'tenants'
+      AND columns.table_name NOT IN ('audit_logs', 'cp_access_log', 'secrets_archive')
       AND tables.table_type = 'BASE TABLE'
     ORDER BY columns.table_name
 ";
 
-pub async fn delete_tenant_records(db: &PgPool, tenant_id: &str) -> Result<bool, sqlx::Error> {
+/// Evidence tables a tenant deletion must NEVER touch (P1-6). Their rows
+/// outlive the tenant: `audit_logs` is the hash-chained compliance record
+/// (destroying it is evidence spoliation), `cp_access_log` records who did
+/// what in the control plane, and `secrets_archive` holds revoked/rotated
+/// secret versions the retention policies still owe. Retention of these is
+/// governed by the compliance retention sweep (crates/compliance), not by
+/// tenant lifecycle.
+const TENANT_DELETION_EVIDENCE_TABLES: [&str; 3] =
+    ["audit_logs", "cp_access_log", "secrets_archive"];
+
+/// Pre-deletion obligations check (P1-6), mirroring the compliance
+/// retention sweeper's semantics (crates/compliance/src/retention_sweep.rs):
+///
+/// - `tenants.legal_hold` (migration 121): a held tenant is excluded from
+///   every purge — deleting its data is evidence spoliation, so deletion is
+///   refused outright.
+/// - `tenants.retention_days` (migration 121): a per-tenant retention
+///   override obliges the platform to keep the tenant's records for N days.
+///   The sweeper keeps rows while `age(row) < retention_days`; a wholesale
+///   delete would destroy rows of ANY age, so deletion is refused until the
+///   tenant's last-activity anchor (`GREATEST(created_at, updated_at)`) has
+///   aged past the window. Rows written after the anchor only extend the
+///   obligation, making this the cheap conservative bound; operators who
+///   must delete sooner must first clear the override (itself an audited
+///   tenant edit).
+///
+/// Pre-121 databases (no `legal_hold`/`retention_days` columns) degrade the
+/// same way the sweeper does: no hold, no override, deletion may proceed.
+async fn check_tenant_deletion_preconditions(db: &PgPool, tenant_id: &str) -> Result<(), ApiError> {
+    #[derive(sqlx::FromRow)]
+    struct TenantObligations {
+        legal_hold: bool,
+        retention_days: Option<i32>,
+        anchor: chrono::DateTime<chrono::Utc>,
+    }
+
+    let obligations: Option<TenantObligations> = match sqlx::query_as(
+        "SELECT legal_hold, retention_days, GREATEST(created_at, updated_at) AS anchor \
+         FROM tenants WHERE id = $1",
+    )
+    .bind(tenant_id)
+    .fetch_optional(db)
+    .await
+    {
+        Ok(row) => row,
+        // Pre-121 columns missing: degrade honestly (sweeper parity).
+        Err(error) if is_missing_column(&error) => {
+            sqlx::query_as(
+                "SELECT false AS legal_hold, NULL::int AS retention_days, \
+                 GREATEST(created_at, updated_at) AS anchor \
+                 FROM tenants WHERE id = $1",
+            )
+            .bind(tenant_id)
+            .fetch_optional(db)
+            .await
+            .map_err(|_| ApiError::Internal("failed to load tenant obligations".into()))?
+        }
+        Err(_) => return Err(ApiError::Internal("failed to load tenant obligations".into())),
+    };
+
+    let Some(obligations) = obligations else {
+        return Err(ApiError::NotFound("tenant not found".into()));
+    };
+
+    if obligations.legal_hold {
+        return Err(ApiError::Forbidden(
+            "tenant is under legal hold — its records must not be deleted".into(),
+        ));
+    }
+
+    if let Some(days) = obligations.retention_days.filter(|days| *days > 0) {
+        let cutoff = obligations.anchor + chrono::Duration::days(i64::from(days));
+        if chrono::Utc::now() < cutoff {
+            return Err(ApiError::Forbidden(format!(
+                "tenant has a {days}-day retention obligation active until {} — \
+                 clear tenants.retention_days before deleting",
+                cutoff.to_rfc3339()
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn is_missing_column(error: &sqlx::Error) -> bool {
+    matches!(
+        error,
+        sqlx::Error::Database(db) if db.message().contains("does not exist")
+    )
+}
+
+/// Delete every tenant-scoped row and the tenant itself, in one transaction.
+///
+/// Ordering invariant (P1-6): the actor-attributed audit entry is written
+/// FIRST, inside the transaction — a failed audit write aborts the deletion
+/// (an unauditable tenant deletion must not happen), and the entry itself
+/// survives because `audit_logs` is excluded from the reflection-driven
+/// delete list via [`TENANT_DELETION_EVIDENCE_TABLES`].
+pub async fn delete_tenant_records(
+    db: &PgPool,
+    tenant_id: &str,
+    actor_tenant_id: &str,
+    actor_user_id: Option<&str>,
+    is_production: bool,
+) -> Result<bool, sqlx::Error> {
     let mut transaction = db.begin().await?;
+
+    // Non-optional audit: propagate failures — never delete a tenant
+    // without leaving evidence of who ordered it.
+    crate::audit_log::insert_audit_log_in_tx_with_env(
+        &mut transaction,
+        is_production,
+        Some(actor_tenant_id),
+        actor_user_id,
+        "control_plane.tenant.deleted",
+        "tenant",
+        Some(tenant_id),
+        json!({
+            "deletedTenantId": tenant_id,
+            "evidenceTablesPreserved": TENANT_DELETION_EVIDENCE_TABLES,
+        }),
+        None,
+        None,
+        chrono::Utc::now(),
+    )
+    .await?;
+
     let mut pending_tables = sqlx::query_scalar::<_, String>(TENANT_SCOPED_TABLES_QUERY)
         .fetch_all(&mut *transaction)
         .await?;
@@ -215,38 +341,59 @@ async fn update_tenant(
             }
         };
 
-        sqlx::query("UPDATE tenants SET status = $1, updated_at = NOW() WHERE id = $2")
-            .bind(new_status)
-            .bind(&id)
-            .execute(&state.db)
-            .await?;
+        // rows_affected distinguishes a no-op edit from a missing tenant:
+        // silently 200-ing on an unknown id hides typos from the operator.
+        let result =
+            sqlx::query("UPDATE tenants SET status = $1, updated_at = NOW() WHERE id = $2")
+                .bind(new_status)
+                .bind(&id)
+                .execute(&state.db)
+                .await?;
+        if result.rows_affected() == 0 {
+            return Err(ApiError::NotFound("tenant not found".into()));
+        }
 
         // Audit log
-        log_tenant_audit(&state, action, Some(&id)).await;
+        log_tenant_audit(&state, &auth, action, Some(&id)).await;
         return Ok(StatusCode::OK);
     }
 
     // Direct field updates — audited like every other control-plane
-    // mutation (the action path above always was).
+    // mutation (the action path above always was). One transaction: a name
+    // update succeeding while the status update fails must not leave a
+    // half-applied edit; rows_affected gates the 404.
+    let mut tx = state.db.begin().await?;
     let mut changed = false;
+    let mut rows_affected: u64 = 0;
     if let Some(name) = &body.name {
-        sqlx::query("UPDATE tenants SET name = $1, updated_at = NOW() WHERE id = $2")
+        rows_affected += sqlx::query("UPDATE tenants SET name = $1, updated_at = NOW() WHERE id = $2")
             .bind(name)
             .bind(&id)
-            .execute(&state.db)
-            .await?;
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
         changed = true;
     }
     if let Some(status) = &body.status {
-        sqlx::query("UPDATE tenants SET status = $1, updated_at = NOW() WHERE id = $2")
-            .bind(status)
-            .bind(&id)
-            .execute(&state.db)
-            .await?;
+        rows_affected += sqlx::query(
+            "UPDATE tenants SET status = $1, updated_at = NOW() WHERE id = $2",
+        )
+        .bind(status)
+        .bind(&id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
         changed = true;
     }
+
+    if rows_affected == 0 {
+        tx.rollback().await?;
+        return Err(ApiError::NotFound("tenant not found".into()));
+    }
+    tx.commit().await?;
+
     if changed {
-        log_tenant_audit(&state, "tenant_edited", Some(&id)).await;
+        log_tenant_audit(&state, &auth, "tenant_edited", Some(&id)).await;
     }
 
     Ok(StatusCode::OK)
@@ -282,17 +429,33 @@ async fn delete_tenant(
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
     crate::middleware::auth::require_system_tenant(&state, &auth).await?;
     validate_delete_confirmation(&body.id, &body.confirmation)?;
-    let deleted = delete_tenant_records(&state.db, &body.id).await?;
+
+    // P1-6: legal hold and retention obligations are checked BEFORE any
+    // row is touched; the evidence-preserving deletion itself writes its
+    // audit entry transactionally (see delete_tenant_records).
+    check_tenant_deletion_preconditions(&state.db, &body.id).await?;
+
+    let deleted = delete_tenant_records(
+        &state.db,
+        &body.id,
+        &auth.tenant_id,
+        auth.user_id.as_deref(),
+        state.config.environment.is_production(),
+    )
+    .await
+    .map_err(|_| ApiError::Internal("tenant deletion failed".into()))?;
 
     if !deleted {
         return Err(ApiError::NotFound("tenant not found".into()));
     }
 
-    log_tenant_audit(&state, "tenant_deleted", None).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn log_tenant_audit(state: &AppState, action: &str, tenant_id: Option<&str>) {
+/// Actor-attributed tenant audit (P2-2): the acting operator's tenant AND
+/// user id land in every entry — `user_id: None` left control-plane
+/// mutations recorded as "someone did this, unknown who".
+async fn log_tenant_audit(state: &AppState, auth: &AuthUser, action: &str, tenant_id: Option<&str>) {
     let resource_id = tenant_id;
     let metadata = if tenant_id.is_some() {
         json!({})
@@ -300,10 +463,11 @@ async fn log_tenant_audit(state: &AppState, action: &str, tenant_id: Option<&str
         json!({"redacted": true})
     };
 
-    crate::audit_log::insert_audit_log_best_effort(
+    crate::audit_log::insert_audit_log_best_effort_with_env(
         &state.db,
+        state.config.environment.is_production(),
         tenant_id,
-        None,
+        auth.user_id.as_deref(),
         action,
         "tenant",
         resource_id,
@@ -317,6 +481,19 @@ async fn log_tenant_audit(state: &AppState, action: &str, tenant_id: Option<&str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// P1-6 source pin: the reflection-driven delete list must never gain a
+    /// clause that lets evidence tables back in.
+    #[test]
+    fn tenant_deletion_never_targets_evidence_tables() {
+        for table in TENANT_DELETION_EVIDENCE_TABLES {
+            assert!(
+                TENANT_SCOPED_TABLES_QUERY.contains(&format!("'{table}'")),
+                "evidence table {table} must be excluded from the delete list"
+            );
+        }
+        assert!(TENANT_SCOPED_TABLES_QUERY.contains("NOT IN"));
+    }
 
     #[test]
     fn delete_confirmation_requires_exact_tenant_phrase() {

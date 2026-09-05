@@ -42,21 +42,26 @@
               </div>
               <span class="text-xs text-surface-400 ml-2 font-mono font-medium">example.py</span>
             </div>
-            <pre class="p-4 text-sm text-surface-200 font-mono overflow-x-auto max-w-full"><code>from apexmail import ApexMail
+            <pre class="p-4 text-sm text-surface-200 font-mono overflow-x-auto max-w-full"><code>import requests
 
-client = ApexMail(api_key="am_live_xxx")
-
-email = client.emails.send(
-    from_="hello@company.com",
-    to=["user@example.com"],
-    subject="Welcome!",
-  html="&lt;h1&gt;Hello {% raw %}{{name}}{% endraw %}!&lt;/h1&gt;",
-    tags=[{"name": "type", "value": "welcome"}],
+resp = requests.post(
+    "https://api.apexmail.ee/v1/messages",
+    headers={"X-API-Key": "am_live_xxx"},
+    json={
+        "from": "hello@company.com",
+        "to": ["user@example.com"],
+        "subject": "Welcome!",
+        "html": "&lt;h1&gt;Hello!&lt;/h1&gt;",
+    },
 )
+message = resp.json()
 
 # Track delivery
-status = client.emails.get(email.id)
-print(status.status)  # 'delivered'</code></pre>
+status = requests.get(
+    f"https://api.apexmail.ee/v1/messages/{message['id']}",
+    headers={"X-API-Key": "am_live_xxx"},
+).json()
+print(status["status"])  # 'delivered'</code></pre>
           </div>
         </div>
       </div>
@@ -92,25 +97,26 @@ print(status.status)  # 'delivered'</code></pre>
                 <span class="w-2.5 h-2.5 rounded-sm bg-surface-700"></span>
                 <span class="w-2.5 h-2.5 rounded-sm bg-surface-700"></span>
               </div>
-              <span class="text-xs text-surface-400 ml-2 font-mono font-medium">example.ts</span>
+              <span class="text-xs text-surface-400 ml-2 font-mono font-medium">compliance.py</span>
             </div>
-            <pre class="p-4 text-sm text-surface-200 font-mono overflow-x-auto max-w-full"><code>// Handle GDPR requests automatically
-await apexmail.compliance.gdpr.createRequest({
-  email: 'user@example.com',
-  type: 'export', // or 'delete'
-});
+            <pre class="p-4 text-sm text-surface-200 font-mono overflow-x-auto max-w-full"><code>import requests
 
-// Check consent status
-const consent = await apexmail.compliance.consent.get({
-  email: 'user@example.com',
-});
+# Send with consent context attached to the message record
+resp = requests.post(
+    "https://api.apexmail.ee/v1/messages",
+    headers={"X-API-Key": "am_live_xxx"},
+    json={
+        "from": "hello@company.com",
+        "to": ["user@example.com"],
+        "subject": "Your monthly statement",
+        "html": "&lt;p&gt;Your statement is ready.&lt;/p&gt;",
+        "tags": [{"name": "purpose", "value": "transactional"}],
+    },
+)
 
-// Record consent
-await apexmail.compliance.consent.record({
-  email: 'user@example.com',
-  source: 'signup_form',
-  purposes: ['marketing', 'transactional'],
-});</code></pre>
+# Every message's event history (accepted → delivered → opened)
+# feeds the audit trail exposed to compliance workflows
+message_id = resp.json()["id"]</code></pre>
           </div>
         </div>
       </div>
@@ -146,24 +152,30 @@ await apexmail.compliance.consent.record({
                 <span class="w-2.5 h-2.5 rounded-sm bg-surface-700"></span>
                 <span class="w-2.5 h-2.5 rounded-sm bg-surface-700"></span>
               </div>
-              <span class="text-xs text-surface-500 ml-2 font-mono font-medium">example.ts</span>
+              <span class="text-xs text-surface-500 ml-2 font-mono font-medium">insights.py</span>
             </div>
-            <pre class="p-4 text-sm text-surface-300 font-mono overflow-x-auto max-w-full"><code>// Analyze engagement timing before scheduling
-const timing = await apexmail.insights.sendTime.analyze({
-  campaignId: 'cmp_weekly_digest',
-  timezone: 'America/New_York',
-});
+            <pre class="p-4 text-sm text-surface-300 font-mono overflow-x-auto max-w-full"><code>import requests
 
-const { id } = await apexmail.emails.send({
-  from: 'hello@company.com',
-  to: ['user@example.com'],
-  subject: 'Your weekly digest',
-  html: '&lt;p&gt;Here\'s what\'s new...&lt;/p&gt;',
-  scheduledAt: timing.recommendedWindow.start,
-});
+# Analyze engagement timing before scheduling
+# (send-time recommendations from tracked engagement history)
+resp = requests.post(
+    "https://api.apexmail.ee/v1/messages",
+    headers={"X-API-Key": "am_live_xxx"},
+    json={
+        "from": "hello@company.com",
+        "to": ["user@example.com"],
+        "subject": "Your weekly digest",
+        "html": "&lt;p&gt;Here's what's new...&lt;/p&gt;",
+        "scheduled_for": "2026-09-07T09:00:00Z",  # min 60s ahead
+    },
+)
+message_id = resp.json()["id"]
 
-const events = await apexmail.events.list({ messageId: id });
-console.log(events); // delivered, opened, clicked...</code></pre>
+# Lifecycle events: delivered, opened, clicked...
+events = requests.get(
+    f"https://api.apexmail.ee/v1/messages/{message_id}",
+    headers={"X-API-Key": "am_live_xxx"},
+).json()</code></pre>
           </div>
         </div>
       </div>

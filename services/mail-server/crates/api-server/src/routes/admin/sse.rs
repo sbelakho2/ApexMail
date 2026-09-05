@@ -26,6 +26,16 @@ use crate::middleware::auth::{require_scopes, AuthUser};
 use crate::routes::helpers::table_exists;
 use crate::state::AppState;
 
+/// Hard stream lifetime: a browser tab left open must not hold a
+/// connection (and its per-tick COUNT queries) open forever — the client
+/// reconnects automatically when the stream ends.
+const MAX_STREAM_DURATION: Duration = Duration::from_secs(30 * 60);
+
+/// Consecutive poll failures tolerated before the stream closes. Erroring
+/// polls previously rendered healthy zeros (`unwrap_or(0)`), which is worse
+/// than no dashboard: operators trust a silently dead metric.
+const MAX_CONSECUTIVE_POLL_ERRORS: u32 = 3;
+
 /// A stream that yields `()` every `period`, implemented with `futures`
 /// primitives so this crate does not need a `tokio-stream` dependency.
 fn interval_stream(period: Duration) -> impl futures::Stream<Item = ()> {
@@ -53,21 +63,21 @@ struct DashboardSsePayload {
     health_status: Option<String>,
 }
 
-async fn query_dashboard_snapshot(db: &sqlx::PgPool) -> DashboardSsePayload {
+/// Errors PROPAGATE (P2): every query previously degraded to `unwrap_or(0)`,
+/// so a DB outage rendered a healthy-looking all-zero dashboard.
+async fn query_dashboard_snapshot(db: &sqlx::PgPool) -> Result<DashboardSsePayload, sqlx::Error> {
     let tenants = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::bigint FROM tenants WHERE status = 'active'",
     )
     .fetch_one(db)
-    .await
-    .unwrap_or(0);
+    .await?;
 
     let queue = if table_exists(db, "queue_jobs").await {
         sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*)::bigint FROM queue_jobs WHERE status = 'pending'",
         )
         .fetch_one(db)
-        .await
-        .unwrap_or(0)
+        .await?
     } else {
         0
     };
@@ -100,10 +110,7 @@ async fn query_dashboard_snapshot(db: &sqlx::PgPool) -> DashboardSsePayload {
              WHERE s.status IN ('active', 'trialing', 'past_due')"
         );
 
-        let cents = sqlx::query_scalar::<_, i64>(&sql)
-            .fetch_one(db)
-            .await
-            .unwrap_or(0);
+        let cents = sqlx::query_scalar::<_, i64>(&sql).fetch_one(db).await?;
         cents as f64 / 100.0
     } else {
         0.0
@@ -114,15 +121,13 @@ async fn query_dashboard_snapshot(db: &sqlx::PgPool) -> DashboardSsePayload {
             "SELECT COUNT(*)::bigint FROM system_alerts WHERE acknowledged = false AND severity = 'critical'",
         )
         .fetch_one(db)
-        .await
-        .unwrap_or(0);
+        .await?;
 
         let high_count = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*)::bigint FROM system_alerts WHERE acknowledged = false AND severity = 'high'",
         )
         .fetch_one(db)
-        .await
-        .unwrap_or(0);
+        .await?;
 
         Some(if critical_count >= 5 {
             "down".to_string()
@@ -135,12 +140,12 @@ async fn query_dashboard_snapshot(db: &sqlx::PgPool) -> DashboardSsePayload {
         None
     };
 
-    DashboardSsePayload {
+    Ok(DashboardSsePayload {
         mrr,
         tenants,
         queue,
         health_status,
-    }
+    })
 }
 
 async fn sse_dashboard(
@@ -150,14 +155,45 @@ async fn sse_dashboard(
     require_scopes(&auth, &["*"])?;
 
     let db = state.db.clone();
-    let stream = interval_stream(Duration::from_secs(5)).then(move |_| {
-        let db = db.clone();
-        async move {
-            let snapshot = query_dashboard_snapshot(&db).await;
-            let json = serde_json::to_string(&snapshot).unwrap_or_default();
-            Ok(Event::default().data(json).event("dashboard"))
-        }
-    });
+    // Bounded stream (P2): ends at MAX_STREAM_DURATION or after
+    // MAX_CONSECUTIVE_POLL_ERRORS failing polls (degraded comment events in
+    // between) — the browser's EventSource reconnects, which both resets
+    // the window and re-runs the auth/scope gates. `unfold` owns the poll
+    // state (scan's closure bounds reject futures that borrow it).
+    let stream = futures::stream::unfold(
+        (db, tokio::time::Instant::now(), 0u32),
+        |mut poll_state| async move {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            if tokio::time::Instant::now() >= poll_state.1 {
+                tracing::info!("admin dashboard SSE stream reached its time cap; closing");
+                return None;
+            }
+            let event = match query_dashboard_snapshot(&poll_state.0).await {
+                Ok(snapshot) => {
+                    poll_state.2 = 0;
+                    let json = serde_json::to_string(&snapshot).unwrap_or_default();
+                    Ok(Event::default().data(json).event("dashboard"))
+                }
+                Err(error) => {
+                    poll_state.2 += 1;
+                    tracing::warn!(
+                        error = %error,
+                        consecutive_errors = poll_state.2,
+                        "dashboard SSE poll failed"
+                    );
+                    if poll_state.2 >= MAX_CONSECUTIVE_POLL_ERRORS {
+                        tracing::error!("dashboard SSE closing after repeated poll failures");
+                        return Some((
+                            Ok(Event::default().comment("dashboard-unavailable-stream-closing")),
+                            poll_state,
+                        ));
+                    }
+                    Ok(Event::default().comment("dashboard-unavailable"))
+                }
+            };
+            Some((event, poll_state))
+        },
+    );
 
     Ok(Sse::new(stream).keep_alive(
         KeepAlive::new()
@@ -230,9 +266,10 @@ async fn sse_alerts(
     let db = state.db.clone();
     let now = Utc::now();
 
-    let initial_alerts = query_new_alerts(&db, now - chrono::Duration::hours(24))
-        .await
-        .unwrap_or_default();
+    // Initial backlog errors propagate to the HTTP response (no stream on a
+    // broken DB); poll errors below degrade to comments and close the
+    // stream after repeated failures.
+    let initial_alerts = query_new_alerts(&db, now - chrono::Duration::hours(24)).await?;
 
     let last_seen = Arc::new(Mutex::new(now));
 
@@ -246,17 +283,22 @@ async fn sse_alerts(
             .collect::<Vec<_>>(),
     )
     .chain(
-        interval_stream(Duration::from_secs(10))
-            .then({
-                let db = db.clone();
-                let last_seen = Arc::clone(&last_seen);
-                move |_| {
-                    let db = db.clone();
-                    let last_seen = Arc::clone(&last_seen);
-                    async move {
-                        let mut ls = last_seen.lock().await;
-                        let alerts = query_new_alerts(&db, *ls).await.unwrap_or_default();
-
+        // Same bounded-poll contract as the dashboard stream; unfold owns
+        // the state (see sse_dashboard).
+        futures::stream::unfold(
+            (db, Arc::clone(&last_seen), tokio::time::Instant::now(), 0u32),
+            |mut poll_state| async move {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                if tokio::time::Instant::now() >= poll_state.2 {
+                    tracing::info!("admin alerts SSE stream reached its time cap; closing");
+                    return None;
+                }
+                let (db, last_seen, consecutive_errors) =
+                    (&poll_state.0, &poll_state.1, &mut poll_state.3);
+                let since = *last_seen.lock().await;
+                let outcome = match query_new_alerts(db, since).await {
+                    Ok(alerts) => {
+                        *consecutive_errors = 0;
                         if let Some(latest) = alerts
                             .iter()
                             .filter_map(|a| {
@@ -266,7 +308,7 @@ async fn sse_alerts(
                             })
                             .max()
                         {
-                            *ls = latest;
+                            *last_seen.lock().await = latest;
                         }
 
                         let events: Vec<Result<Event, Infallible>> = alerts
@@ -283,9 +325,28 @@ async fn sse_alerts(
                             events
                         }
                     }
-                }
-            })
-            .flat_map(futures::stream::iter),
+                    Err(error) => {
+                        *consecutive_errors += 1;
+                        tracing::warn!(
+                            error = %error,
+                            consecutive_errors,
+                            "alerts SSE poll failed"
+                        );
+                        if *consecutive_errors >= MAX_CONSECUTIVE_POLL_ERRORS {
+                            tracing::error!(
+                                "alerts SSE closing after repeated poll failures"
+                            );
+                            vec![Ok(Event::default()
+                                .comment("alerts-unavailable-stream-closing"))]
+                        } else {
+                            vec![Ok(Event::default().comment("alerts-unavailable"))]
+                        }
+                    }
+                };
+                Some((futures::stream::iter(outcome), poll_state))
+            },
+        )
+        .flatten(),
     );
 
     Ok(Sse::new(stream).keep_alive(

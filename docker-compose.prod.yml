@@ -205,8 +205,23 @@ services:
 
   observability:
     image: ghcr.io/sbelakho2/apexmail/observability:latest
+    # P1 auth-bypass fix (audit 1.2): the observability loader is strictly
+    # env-wins-over-file (observability-service config.rs env_or_file), so
+    # merely ADDING the _FILE var — as this overlay did before — left the
+    # base file's public dev default `dev-internal-service-token-change-me`
+    # as the ACTIVE production credential on a service attached to the
+    # monitoring + backend + data networks. Compose cannot unset an
+    # inherited env var, and an empty value still wins over the file, so the
+    # env var is blanked (fail-CLOSED if the wrapper is missing: all authed
+    # endpoints 401) and the shared entrypoint-wrapper is used to overwrite
+    # INTERNAL_SERVICE_TOKEN from the Docker secret before the binary
+    # starts — the exact pattern every other prod service here uses.
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "observability-service"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
     environment:
       NODE_ENV: production
+      INTERNAL_SERVICE_TOKEN: ""
       INTERNAL_SERVICE_TOKEN_FILE: /run/secrets/internal_service_token
       # Redis is only reachable on the internal networks; credentials come
       # from the shared Redis secret so eviction monitoring actually works.
@@ -1463,6 +1478,128 @@ services:
         reservations:
           memory: 64M
 
+  # ===========================================================================
+  # REDIS BACKUP (nightly, encrypted — mirrors postgres/clickhouse backup)
+  # ===========================================================================
+  # Audit §2 (no Redis backup at all): the scheduler runs
+  # deploy/hardening/scripts/redis-backup-encrypt.sh, which snapshots Redis
+  # via `redis-cli --rdb` (a BGSAVE streamed over the network — byte-identical
+  # to dump.rdb, no data volume mounted, no partial-write race), verifies the
+  # RDB magic header, applies the SAME AES-256-CBC + PBKDF2 envelope +
+  # verification-before-delete contract as the other backup jobs, and mirrors
+  # offsite when BACKUP_TARGET is set. Restore: decrypt → stop redis → place
+  # dump.rdb on the redis_data volume → start redis.
+  redis-backup:
+    build:
+      context: ./deploy/hardening
+      dockerfile: Dockerfile.redis-backup
+    image: ${GHCR_NS:-ghcr.io/sbelakho2/apexmail}/redis-backup:latest
+    restart: unless-stopped
+    # Health = scheduler loop alive AND an encrypted snapshot within 25h.
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pgrep -f redis-backup-encrypt.sh >/dev/null && test -n "$$(find /backups -name '*.rdb.enc' -mmin -1500 2>/dev/null)"
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 2m
+    depends_on:
+      redis:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "/usr/local/bin/redis-backup-encrypt.sh"]
+    volumes:
+      - ./deploy/hardening/scripts/redis-backup-encrypt.sh:/usr/local/bin/redis-backup-encrypt.sh:ro
+      - redis_backups:/backups
+      # F1 — SSH key for the BACKUP_TARGET rsync (same mounts as the other
+      # backup containers; only read when BACKUP_TARGET is set).
+      - ${BACKUP_SSH_KEY_FILE:-/var/run/apexmail-backup-ssh/id_ed25519}:/root/.ssh/id_ed25519:ro
+      - ${BACKUP_SSH_KNOWN_HOSTS_FILE:-/var/run/apexmail-backup-ssh/known_hosts}:/root/.ssh/known_hosts:ro
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      BACKUP_DIR: /backups
+      SCHEDULE: "@daily"
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      BACKUP_KEEP_COUNT: ${REDIS_BACKUP_KEEP_COUNT:-30}
+      # Same secret as the other backup jobs (one key, verified restores).
+      BACKUP_ENCRYPTION_KEY_FILE: /run/secrets/backup_encryption_key
+      # Optional offsite mirror (rsync over ssh) — SAME egress contract as
+      # postgres-backup (apexmail_backup_egress network + SSH key binds).
+      BACKUP_TARGET: ${BACKUP_TARGET:-}
+    networks:
+      - apexmail_data_internal
+      - apexmail_backup_egress
+    secrets:
+      - redis_password
+      - backup_encryption_key
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
+
+  # ===========================================================================
+  # ANALYTICS COLD-STORAGE BACKUP (nightly, encrypted tar with retention)
+  # ===========================================================================
+  # Audit §2 (analytics-cold volume had no backup): tars the READ-ONLY
+  # mounted cold store (the analytics-worker's compacted event output),
+  # gzips + encrypts it with the same envelope, applies day/count retention
+  # and the optional BACKUP_TARGET offsite mirror. No data-plane network
+  # needed — the volume is mounted :ro and only the offsite rsync egresses
+  # (on the dedicated apexmail_backup_egress network).
+  analytics-backup:
+    build:
+      context: ./deploy/hardening
+      dockerfile: Dockerfile.analytics-backup
+    image: ${GHCR_NS:-ghcr.io/sbelakho2/apexmail}/analytics-backup:latest
+    restart: unless-stopped
+    # Health = scheduler loop alive AND an encrypted archive within 25h
+    # (an empty cold store still yields a valid empty archive — see the
+    # scheduler script).
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pgrep -f analytics-backup-encrypt.sh >/dev/null && test -n "$$(find /backups -name '*.tar.gz.enc' -mmin -1500 2>/dev/null)"
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 2m
+    entrypoint: ["/bin/sh", "/usr/local/bin/analytics-backup-encrypt.sh"]
+    volumes:
+      - ./deploy/hardening/scripts/analytics-backup-encrypt.sh:/usr/local/bin/analytics-backup-encrypt.sh:ro
+      - analytics-cold:/var/lib/apexmail/analytics:ro
+      - analytics_backups:/backups
+      # F1 — SSH key for the BACKUP_TARGET rsync (same mounts as the other
+      # backup containers; only read when BACKUP_TARGET is set).
+      - ${BACKUP_SSH_KEY_FILE:-/var/run/apexmail-backup-ssh/id_ed25519}:/root/.ssh/id_ed25519:ro
+      - ${BACKUP_SSH_KNOWN_HOSTS_FILE:-/var/run/apexmail-backup-ssh/known_hosts}:/root/.ssh/known_hosts:ro
+    environment:
+      ANALYTICS_STORAGE_PATH: /var/lib/apexmail/analytics
+      BACKUP_DIR: /backups
+      SCHEDULE: "@daily"
+      BACKUP_KEEP_DAYS: ${BACKUP_KEEP_DAYS:-14}
+      BACKUP_KEEP_COUNT: ${ANALYTICS_BACKUP_KEEP_COUNT:-14}
+      # Same secret as the other backup jobs (one key, verified restores).
+      BACKUP_ENCRYPTION_KEY_FILE: /run/secrets/backup_encryption_key
+      BACKUP_TARGET: ${BACKUP_TARGET:-}
+    networks:
+      - apexmail_backup_egress
+    secrets:
+      - backup_encryption_key
+    logging: *default-logging
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+        reservations:
+          memory: 64M
+
   clickhouse:
     ports: !override []  # force-clear dev compose ports (empty list is ignored by merge)
     environment:
@@ -1498,6 +1635,8 @@ volumes:
   certbot_webroot:
   postgres_backups:
   clickhouse_backups:
+  redis_backups:
+  analytics_backups:
 
 # Audit J — apexmail_data_internal is a plain bridge in the base (dev) file;
 # in production it has no egress path (no gateway/NAT), so the data plane

@@ -64,9 +64,15 @@ impl TOTPVerifier {
 
     /// Check whether the given secret is currently locked out.
     pub fn is_locked(&self, secret_base32: &str) -> bool {
+        self.is_locked_at(secret_base32, Instant::now())
+    }
+
+    /// [`is_locked`] with an injectable clock (unit-test seam for lockout
+    /// expiry; not part of the public API).
+    fn is_locked_at(&self, secret_base32: &str, now: Instant) -> bool {
         let map = self.attempts.lock();
         if let Some((_, Some(locked_until))) = map.get(secret_base32) {
-            if Instant::now() < *locked_until {
+            if now < *locked_until {
                 return true;
             }
         }
@@ -75,12 +81,31 @@ impl TOTPVerifier {
 
     /// Record a failed attempt and return whether the secret is now locked.
     pub fn record_failure(&self, secret_base32: &str) -> bool {
+        self.record_failure_at(secret_base32, Instant::now())
+    }
+
+    /// [`record_failure`] with an injectable clock (unit-test seam for
+    /// lockout expiry/re-arm; not part of the public API).
+    ///
+    /// An expired lock RE-ARMS the failure counter: the stale
+    /// `locked_until` used to keep the `locked_until.is_none()` guard
+    /// false forever, so after one historical lockout a secret could never
+    /// lock again — unlimited 6-digit guessing afterwards. When the
+    /// recorded lockout is in the past the entry is treated as unlocked
+    /// and the count restarts from zero, so a fresh threshold of failures
+    /// triggers a fresh lockout.
+    fn record_failure_at(&self, secret_base32: &str, now: Instant) -> bool {
         let mut map = self.attempts.lock();
         let (failures, locked_until) = map.entry(secret_base32.to_string()).or_insert((0, None));
 
+        if matches!(locked_until, Some(until) if now >= *until) {
+            *failures = 0;
+            *locked_until = None;
+        }
+
         *failures += 1;
         if *failures >= MAX_FAILED_ATTEMPTS && locked_until.is_none() {
-            *locked_until = Some(Instant::now() + LOCKOUT_DURATION);
+            *locked_until = Some(now + LOCKOUT_DURATION);
             warn!(
                 "TOTP secret locked out after {} consecutive failures for {:?}",
                 *failures, LOCKOUT_DURATION
@@ -611,5 +636,105 @@ mod tests {
     fn test_totp_verifier_default_is_send() {
         let verifier = TOTPVerifier::default();
         assert!(!verifier.is_locked("default_test"));
+    }
+
+    // ── Lockout expiry / re-arm (audit fix: lockout never re-armed) ──
+
+    #[test]
+    fn test_totp_verifier_relocks_after_lockout_expires() {
+        // Lock → expire → failures again → re-lock. The pre-fix code kept
+        // the stale `locked_until` forever, so `locked_until.is_none()`
+        // stayed false and the secret could NEVER lock a second time —
+        // unlimited 6-digit guessing after one expired lockout.
+        let verifier = TOTPVerifier::new();
+        let secret = "JBSWY3DPEHPK3PXP";
+        let t0 = Instant::now();
+
+        // First lockout after MAX_FAILED_ATTEMPTS failures.
+        for i in 0..MAX_FAILED_ATTEMPTS {
+            let locked = verifier.record_failure_at(secret, t0);
+            assert_eq!(
+                locked,
+                i == MAX_FAILED_ATTEMPTS - 1,
+                "first lockout must happen exactly on failure #{MAX_FAILED_ATTEMPTS}"
+            );
+        }
+        assert!(verifier.is_locked_at(secret, t0));
+
+        // Lockout expired: the secret is usable again.
+        let t_after_lockout = t0 + LOCKOUT_DURATION + Duration::from_secs(1);
+        assert!(!verifier.is_locked_at(secret, t_after_lockout));
+
+        // Failures after expiry re-arm the counter and lock again at the
+        // threshold — not on the first failure, not never.
+        for i in 0..MAX_FAILED_ATTEMPTS {
+            let locked = verifier.record_failure_at(secret, t_after_lockout);
+            assert_eq!(
+                locked,
+                i == MAX_FAILED_ATTEMPTS - 1,
+                "re-lock must happen exactly on failure #{MAX_FAILED_ATTEMPTS} after expiry"
+            );
+        }
+        assert!(verifier.is_locked_at(secret, t_after_lockout));
+    }
+
+    #[test]
+    fn test_totp_verifier_expired_lock_resets_failure_count() {
+        // A single failure after an expired lockout must NOT immediately
+        // re-lock: the counter restarts from zero when the lock expires.
+        let verifier = TOTPVerifier::new();
+        let secret = "JBSWY3DPEHPK3PXP";
+        let t0 = Instant::now();
+
+        for _ in 0..MAX_FAILED_ATTEMPTS {
+            verifier.record_failure_at(secret, t0);
+        }
+        assert!(verifier.is_locked_at(secret, t0));
+
+        let t_after_lockout = t0 + LOCKOUT_DURATION + Duration::from_secs(1);
+        for i in 1..MAX_FAILED_ATTEMPTS {
+            assert!(
+                !verifier.record_failure_at(secret, t_after_lockout),
+                "failure {i} after expiry must not re-lock before the threshold"
+            );
+        }
+        // Reaching the threshold re-locks.
+        assert!(verifier.record_failure_at(secret, t_after_lockout));
+    }
+
+    #[test]
+    fn test_totp_verifier_stays_locked_inside_lockout_window() {
+        // Within the lockout window the secret stays locked regardless of
+        // further failure accounting.
+        let verifier = TOTPVerifier::new();
+        let secret = "JBSWY3DPEHPK3PXP";
+        let t0 = Instant::now();
+
+        for _ in 0..MAX_FAILED_ATTEMPTS {
+            verifier.record_failure_at(secret, t0);
+        }
+        let mid_lockout = t0 + LOCKOUT_DURATION - Duration::from_secs(1);
+        assert!(verifier.is_locked_at(secret, mid_lockout));
+        // Failures while locked do not extend or shorten the current lock.
+        assert!(!verifier.record_failure_at(secret, mid_lockout));
+        assert!(verifier.is_locked_at(secret, mid_lockout));
+    }
+
+    #[test]
+    fn test_totp_verifier_reset_clears_expired_lock_state() {
+        // reset() drops the entry entirely — expiry bookkeeping included.
+        let verifier = TOTPVerifier::new();
+        let secret = "JBSWY3DPEHPK3PXP";
+        let t0 = Instant::now();
+        for _ in 0..MAX_FAILED_ATTEMPTS {
+            verifier.record_failure_at(secret, t0);
+        }
+        verifier.reset(secret);
+        assert!(!verifier.is_locked_at(secret, t0 + LOCKOUT_DURATION * 2));
+        // A full threshold is required again after reset.
+        for i in 0..MAX_FAILED_ATTEMPTS {
+            let locked = verifier.record_failure_at(secret, t0);
+            assert_eq!(locked, i == MAX_FAILED_ATTEMPTS - 1);
+        }
     }
 }

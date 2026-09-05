@@ -29,7 +29,7 @@ zola build --root apps/marketing-zola
 - Prefer small, reviewable pull requests.
 - Keep public API, SDK, and deployment changes documented.
 - Do not commit secrets or environment-specific local overrides.
-- Use SHA-pinned GitHub Actions and avoid floating container image tags.
+- Avoid floating container image tags; the self-hosted pipeline (`ci/pipeline.sh`) records a SHA256 digest manifest for every built image — never pin services to external `vX.Y.Z` tags.
 
 ## Detailed Guidance
 

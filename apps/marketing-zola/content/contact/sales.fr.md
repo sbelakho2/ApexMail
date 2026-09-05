@@ -13,10 +13,10 @@ Pour un achat Enterprise, une revue de sécurité ou la planification d'un cloud
 
 ## Formulaire de demande commerciale
 
-<div id="enquiry-submitted" class="form-banner form-banner--success" role="status">
+<div id="enquiry-submitted" class="form-banner form-banner--success" role="status" hidden>
   <p><strong>Merci — votre demande a bien été reçue.</strong> Notre équipe l'examine et répond sous 2 jours ouvrés.</p>
 </div>
-<div id="enquiry-error" class="form-banner form-banner--error" role="alert">
+<div id="enquiry-error" class="form-banner form-banner--error" role="alert" hidden>
   <p><strong>Votre demande n'a pas pu être acceptée.</strong> Vérifiez les champs obligatoires (une adresse e-mail professionnelle valide est requise) puis réessayez.</p>
 </div>
 <form id="sales-contact-form" class="space-y-6 max-w-2xl" method="POST" action="https://api.apexmail.ee/v1/contact/sales">
@@ -151,7 +151,7 @@ Pour un achat Enterprise, une revue de sécurité ou la planification d'un cloud
     <select id="security-review" name="security_review_needs"
       class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
       <option value="" selected>Sélectionnez le niveau de revue</option>
-      <option value="standard">Standard — dossiers SIG/CAIQ/HECVAT suffisants</option>
+      <option value="standard">Standard — questionnaire de sécurité traité au cas par cas à partir du matériel de revue actuel (aucun pack SIG/CAIQ/HECVAT standardisé n'est inclus dans l'offre)</option>
       <option value="detailed">Détaillé — questionnaire de sécurité personnalisé requis</option>
       <option value="pen_test">Rapport de test d'intrusion requis</option>
       <option value="on_site">Audit sur site ou revue d'architecture requis</option>

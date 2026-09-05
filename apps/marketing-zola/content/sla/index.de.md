@@ -1,5 +1,5 @@
 +++
-title = "Service Level Agreement (SLA)"
+title = "Servicelevel-Vereinbarung (SLA)"
 description = "ApexMail-SLA — vertragliche Betriebszeitverpflichtungen für Scale- und Enterprise-Tarifkunden."
 template = "prose.html"
 

@@ -25,9 +25,9 @@ L'email transactionnel est une infrastructure critique. Des réinitialisations d
 
 ## La solution ApexMail
 
-- **API REST** (`POST /v1/emails`) — Payloads JSON avec clés d'idempotence. Soumettez et n'y pensez plus.
+- **API REST** (`POST /v1/messages`) — Payloads JSON avec clés d'idempotence. Soumettez et n'y pensez plus.
 - **Relais SMTP** (`smtp.apexmail.ee:587` avec STARTTLS) — Remplacement direct pour vos clients SMTP existants.
-- **Flux transactionnels** — Isolez les configurations d'envoi (IP dédiée, domaine personnalisé, liste de suppression) par type d'email.
+- **Configuration d'envoi isolée** — IP dédiées, domaines personnalisés et listes de suppression peuvent être délimités par type d'email.
 - **Webhooks signés** — Événements `delivered`, `bounced`, `complained`, `opened`, `clicked` en temps réel, chacun avec un ID d'événement unique et une signature HMAC.
 - **Idempotence** — Dédupliquez les soumissions grâce aux clés fournies par le client. Renvoyez sans risque après une erreur réseau.
 
@@ -35,8 +35,8 @@ L'email transactionnel est une infrastructure critique. Des réinitialisations d
 
 1. Créez une clé API dans **Dashboard → Settings → API Keys**.
 2. Vérifiez votre domaine d'envoi (SPF, DKIM, return-path personnalisé).
-3. Créez un flux transactionnel pour votre type d'email.
-4. Envoyez via REST ou SMTP avec le nom du flux dans le payload.
+3. Configurez un domaine d'envoi dédié (et, sur les forfaits éligibles, une IP dédiée) pour votre type d'email.
+4. Envoyez via REST ou SMTP.
 5. Enregistrez un point de terminaison webhook pour recevoir les événements de livraison.
 6. Surveillez les métriques de livraison dans le tableau de bord ou via l'API d'analytique.
 
@@ -44,22 +44,21 @@ L'email transactionnel est une infrastructure critique. Des réinitialisations d
 
 | Point de terminaison | Description |
 |---|---|
-| `POST /v1/emails` | Envoyer un email |
-| `GET /v1/emails/:id` | Récupérer le statut et les événements d'un email |
-| `DELETE /v1/emails/:id/schedule` | Annuler un envoi programmé |
-| `POST /v1/emails/batch` | Envoyer jusqu'à 1 000 emails en une requête |
+| `POST /v1/messages` | Envoyer un email |
+| `GET /v1/messages/:id` | Récupérer le statut et les événements d'un email |
+| `POST /v1/messages/:id/cancel` | Annuler un envoi programmé |
+| `POST /v1/messages/batch` | Envoyer jusqu'à 100 messages en une requête |
 
 ## Événements webhook pertinents
 
 | Événement | Déclencheur |
 |---|---|
-| `email.accepted` | L'API a accepté la requête |
-| `email.delivered` | Le serveur du destinataire a accepté le message |
-| `email.bounced` | Rebond dur ou rebond souple |
-| `email.complained` | Le destinataire a signalé l'email comme spam |
-| `email.opened` | Ouverture détectée (pixel de suivi) |
-| `email.clicked` | Clic sur un lien détecté |
-| `email.delayed` | Message différé par le serveur du destinataire |
+| `message.sent` | Message accepté pour livraison |
+| `message.delivered` | Le serveur du destinataire a accepté le message |
+| `message.bounced` | Rebond dur ou rebond souple |
+| `message.complained` | Le destinataire a signalé l'email comme spam |
+| `message.opened` | Ouverture détectée (pixel de suivi) |
+| `message.clicked` | Clic sur un lien détecté |
 
 ## Forfait requis
 
@@ -88,7 +87,7 @@ L'email transactionnel est une infrastructure critique. Des réinitialisations d
 
 ## Limites connues
 
-- Contenu stocké 24 heures seulement sur le forfait Free.
+- L'historique des événements est conservé 30 jours par défaut (7 jours sur le forfait Free) ; contenu des messages 7 jours par défaut, selon le forfait jusqu'à 730 jours.
 - Taille des pièces jointes limitée à 25 MB par message.
 - Le suivi des ouvertures et des clics requiert un corps HTML avec pixel de suivi/liens.
 

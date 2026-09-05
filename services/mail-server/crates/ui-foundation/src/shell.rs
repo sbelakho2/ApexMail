@@ -180,7 +180,7 @@ impl<'a> ShellHeader<'a> {
                     {mobile_toggle}\
                     <form method=\"get\" action=\"/campaigns\" role=\"search\" class=\"relative hidden md:block\">\
                         <label class=\"sr-only\" for=\"global-search\">Search campaigns</label>\
-                        <div class=\"flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-surface-400 bg-surface-50 border border-surface-200/60 rounded-lg focus-within:border-primary min-w-[220px]\">\
+                        <div class=\"flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-surface-500 bg-surface-50 border border-surface-200/60 rounded-lg focus-within:border-primary min-w-[220px]\">\
                             <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"11\" cy=\"11\" r=\"8\"/><path d=\"m21 21-4.3-4.3\"/></svg>\
                             <input id=\"global-search\" type=\"search\" name=\"query\" placeholder=\"Search campaigns…\" class=\"bg-transparent outline-none text-surface-600 placeholder:text-muted-foreground w-full\" />\
                             <button type=\"submit\" class=\"text-[10px] font-bold uppercase tracking-widest text-surface-500 hover:text-surface-900 transition-colors\">Search</button>\
@@ -189,7 +189,7 @@ impl<'a> ShellHeader<'a> {
                 </div>\
                 <div class=\"flex items-center gap-4\">\
                     <div class=\"flex items-center gap-1 pr-4 border-r border-surface-100\" data-plan-label>\
-                        <span class=\"text-[10px] font-semibold tracking-wide text-surface-400\">{plan_label}</span>\
+                        <span class=\"text-[10px] font-semibold tracking-wide text-surface-500\">{plan_label}</span>\
                     </div>\
                     <div class=\"flex items-center gap-3 pl-2\">\
                         {identity_block}\
@@ -394,7 +394,7 @@ impl<'a> ControlPlaneShell<'a> {
                 <header class=\"h-16 border-b border-surface-200/60 bg-card flex items-center justify-between px-8 sticky top-0 z-20\">\
                     <div class=\"flex items-baseline gap-3 min-w-0\">\
                         <h1 class=\"text-lg font-bold text-surface-950 tracking-tight\">{page_title}</h1>\
-                        <p class=\"hidden sm:block text-xs font-medium text-surface-400 truncate\">{page_description}</p>\
+                        <p class=\"hidden sm:block text-xs font-medium text-surface-500 truncate\">{page_description}</p>\
                     </div>\
                 </header>\
                 <main class=\"p-8 flex-1\" id=\"app-main\">\
@@ -453,10 +453,10 @@ fn render_marketing_footer() -> String {
     "<footer data-marketing-shell=\"footer\" class=\"bg-surface-950 text-white py-12\">\
          <div class=\"max-w-7xl mx-auto px-4 sm:px-6 lg:px-8\">\
          <div class=\"grid grid-cols-2 md:grid-cols-4 gap-8 mb-12\">\
-         <div><h4 class=\"text-[11px] font-semibold uppercase tracking-[0.1em] mb-6 opacity-40\">Product</h4><ul class=\"space-y-4 text-sm text-surface-400\"><li><a href=\"/features\">Features</a></li><li><a href=\"/pricing\">Pricing</a></li></ul></div>\
-         <div><h4 class=\"text-[11px] font-semibold uppercase tracking-[0.1em] mb-6 opacity-40\">Platform</h4><ul class=\"space-y-4 text-sm text-surface-400\"><li><a href=\"/docs\">API</a></li><li><a href=\"/status\">Status</a></li></ul></div>\
-         <div><h4 class=\"text-[11px] font-semibold uppercase tracking-[0.1em] mb-6 opacity-40\">Legal</h4><ul class=\"space-y-4 text-sm text-surface-400\"><li><a href=\"/privacy\">Privacy</a></li><li><a href=\"/terms\">Terms</a></li></ul></div>\
-         <div><h4 class=\"text-[11px] font-semibold uppercase tracking-[0.1em] mb-6 opacity-40\">Company</h4><ul class=\"space-y-4 text-sm text-surface-400\"><li><a href=\"/about\">About</a></li><li><a href=\"/contact\">Contact</a></li></ul></div>\
+         <div><h4 class=\"text-[11px] font-semibold uppercase tracking-[0.1em] mb-6 opacity-40\">Product</h4><ul class=\"space-y-4 text-sm text-surface-500\"><li><a href=\"/features\">Features</a></li><li><a href=\"/pricing\">Pricing</a></li></ul></div>\
+         <div><h4 class=\"text-[11px] font-semibold uppercase tracking-[0.1em] mb-6 opacity-40\">Platform</h4><ul class=\"space-y-4 text-sm text-surface-500\"><li><a href=\"/docs\">API</a></li><li><a href=\"/status\">Status</a></li></ul></div>\
+         <div><h4 class=\"text-[11px] font-semibold uppercase tracking-[0.1em] mb-6 opacity-40\">Legal</h4><ul class=\"space-y-4 text-sm text-surface-500\"><li><a href=\"/privacy\">Privacy</a></li><li><a href=\"/terms\">Terms</a></li></ul></div>\
+         <div><h4 class=\"text-[11px] font-semibold uppercase tracking-[0.1em] mb-6 opacity-40\">Company</h4><ul class=\"space-y-4 text-sm text-surface-500\"><li><a href=\"/about\">About</a></li><li><a href=\"/contact\">Contact</a></li></ul></div>\
          </div><div class=\"pt-8 border-t border-white/5 flex flex-col md:flex-row justify-between items-center gap-4 text-[11px] text-surface-500 font-medium\">\
          <p>© 2026 APEXMAIL TECH LTD. ALL RIGHTS RESERVED.</p><div class=\"flex gap-6\"><a href=\"#\">Twitter</a><a href=\"#\">GitHub</a></div>\
          </div></div></footer>"
@@ -502,7 +502,7 @@ fn render_sidebar_content(
                 "flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-md text-surface-600 hover:text-surface-950 hover:bg-surface-50"
             };
 
-            let icon_color = if is_active { "text-brand-700" } else { "text-surface-400" };
+            let icon_color = if is_active { "text-brand-700" } else { "text-surface-500" };
             let icon_wrap = format!(
                 "<span class=\"w-5 h-5 flex items-center justify-center transition-colors {}\">{}</span>",
                 icon_color, icon
@@ -555,7 +555,7 @@ fn render_web_sidebar(current_path: &str, csrf_token: &str) -> String {
     let render_section = |title: &str, items: &[(&str, &str, &str)]| {
         format!(
             "<div class=\"space-y-1 mb-6\">\
-                <h3 class=\"px-6 text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-400 mb-2\">{}</h3>\
+                <h3 class=\"px-6 text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-500 mb-2\">{}</h3>\
                 {}</div>",
             title,
             render_sidebar_content(items, "", current_path)
@@ -610,7 +610,7 @@ fn render_cp_sidebar(current_path: &str, csrf_token: &str) -> String {
     let render_section = |title: &str, items: &[(&str, &str, &str)]| {
         format!(
             "<div class=\"space-y-1 mb-6\">\
-                <h3 class=\"px-6 text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-400 mb-2\">{}</h3>\
+                <h3 class=\"px-6 text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-500 mb-2\">{}</h3>\
                 {}</div>",
             title,
             render_sidebar_content(items, "", current_path)
@@ -628,7 +628,7 @@ fn render_cp_sidebar(current_path: &str, csrf_token: &str) -> String {
         "<div class=\"apex-cp-sidebar flex flex-col h-full bg-card text-surface-900 border-r border-surface-200/60 w-64\">\
          <div class=\"p-6 mb-4\"><div class=\"flex flex-col gap-0.5\">\
          <span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span>\
-         <span class=\"text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-400\">Operations</span></div></div>\
+         <span class=\"text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-500\">Operations</span></div></div>\
          <nav class=\"flex-1 overflow-y-auto cp-sidebar-nav\" data-sidebar=\"primary\" aria-label=\"Control Plane navigation\">{}</nav>\
          <div class=\"p-4 border-t border-surface-100\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf_token}\" /><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 text-sm font-semibold rounded-md text-surface-500 hover:text-surface-950 hover:bg-surface-50 transition-colors\"><span>Sign Out</span></button></form></div></div>",
         content,

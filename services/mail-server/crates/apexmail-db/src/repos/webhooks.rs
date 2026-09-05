@@ -2,7 +2,6 @@
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
-use uuid::Uuid;
 
 use crate::types::Webhook;
 
@@ -71,12 +70,15 @@ impl WebhooksRepo {
 
     /// List webhooks for a tenant using keyset (cursor-based) pagination.
     /// Uses `(created_at, id)` tuple comparison for stable, efficient pagination.
+    ///
+    /// `cursor_id` is the VARCHAR(26) short id of the last row of the
+    /// previous page (migration 075) — bind it as text, never as a UUID.
     pub async fn list_keyset(
         pool: &PgPool,
         tenant_id: &str,
         limit: i64,
         cursor_created_at: Option<DateTime<Utc>>,
-        cursor_id: Option<Uuid>,
+        cursor_id: Option<&str>,
     ) -> Result<Vec<Webhook>, sqlx::Error> {
         let limit = limit.clamp(1, 200);
         let fetch_limit = limit + 1;
@@ -132,7 +134,10 @@ impl WebhooksRepo {
     }
 
     /// Delete a webhook.
-    pub async fn delete(pool: &PgPool, tenant_id: &str, id: Uuid) -> Result<bool, sqlx::Error> {
+    ///
+    /// `id` is the VARCHAR(26) short id stored by [`create`] (migration
+    /// 075) — binding it as text matches the column type.
+    pub async fn delete(pool: &PgPool, tenant_id: &str, id: &str) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM webhooks WHERE id = $1 AND tenant_id = $2")
             .bind(id)
             .bind(tenant_id)

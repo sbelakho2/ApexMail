@@ -50,6 +50,35 @@ fn default_opt_in() -> String {
     "double_opt_in".into()
 }
 
+/// The only accepted `opt_in_mode` values — the field is stored verbatim, so
+/// an arbitrary string used to silently disappear from every opt-in-aware
+/// consumer.
+const VALID_OPT_IN_MODES: &[&str] = &["single_opt_in", "double_opt_in"];
+
+/// Maximum list name length (lists.name is VARCHAR(255); 200 keeps parity
+/// with the campaigns/subject caps).
+const MAX_LIST_NAME_LEN: usize = 200;
+
+/// Validate the caller-supplied list fields. `name` is required on create;
+/// `opt_in_mode`, when present, must be one of [`VALID_OPT_IN_MODES`].
+fn validate_list_fields(name: Option<&str>, opt_in_mode: Option<&str>) -> Result<(), ApiError> {
+    if let Some(name) = name {
+        if name.is_empty() || name.len() > MAX_LIST_NAME_LEN {
+            return Err(ApiError::Validation(vec![format!(
+                "name is required and must be {MAX_LIST_NAME_LEN} characters or fewer"
+            )]));
+        }
+    }
+    if let Some(mode) = opt_in_mode {
+        if !VALID_OPT_IN_MODES.contains(&mode) {
+            return Err(ApiError::Validation(vec![format!(
+                "invalid opt_in_mode '{mode}': must be one of single_opt_in, double_opt_in"
+            )]));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateListRequest {
@@ -192,6 +221,8 @@ async fn create_list(
 ) -> Result<(StatusCode, Json<ListResponse>), ApiError> {
     require_scopes(&auth, &["lists:write"])?;
 
+    validate_list_fields(Some(&body.name), Some(&body.opt_in_mode))?;
+
     let id = Uuid::new_v4().to_string();
     let now = chrono::Utc::now();
 
@@ -262,6 +293,8 @@ async fn update_list(
     Json(body): Json<UpdateListRequest>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_scopes(&auth, &["lists:write"])?;
+
+    validate_list_fields(body.name.as_deref(), body.opt_in_mode.as_deref())?;
 
     let result = sqlx::query(
         "UPDATE lists SET
@@ -384,6 +417,13 @@ async fn list_subscribers(
     })))
 }
 
+/// Maximum contact ids accepted by [`add_subscribers`] — the previous
+/// per-id INSERT loop made this an unbounded-work endpoint.
+const MAX_ADD_SUBSCRIBERS: usize = 10_000;
+
+/// Contact ids per chunked INSERT (one round-trip per 500 ids).
+const ADD_SUBSCRIBERS_CHUNK_SIZE: usize = 500;
+
 async fn add_subscribers(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -391,6 +431,14 @@ async fn add_subscribers(
     Json(body): Json<AddSubscribersRequest>,
 ) -> Result<Json<BulkResult>, ApiError> {
     require_scopes(&auth, &["lists:write"])?;
+
+    if body.contact_ids.len() > MAX_ADD_SUBSCRIBERS {
+        return Err(ApiError::BadRequest(format!(
+            "contact_ids limited to {} entries, got {}",
+            MAX_ADD_SUBSCRIBERS,
+            body.contact_ids.len()
+        )));
+    }
 
     // Verify list belongs to tenant
     let exists: Option<bool> =
@@ -404,21 +452,25 @@ async fn add_subscribers(
         return Err(ApiError::NotFound("list not found".into()));
     }
 
+    // Chunked insert (previously one INSERT per contact id). The join against
+    // contacts keeps the tenant ownership check in the statement itself, and
+    // ON CONFLICT DO NOTHING makes re-adding an existing subscriber a no-op.
+    let all_ids: Vec<String> = body.contact_ids.iter().map(|id| id.to_string()).collect();
     let mut affected = 0i64;
-    for contact_id in &body.contact_ids {
-        let result = sqlx::query(
+    for chunk in all_ids.chunks(ADD_SUBSCRIBERS_CHUNK_SIZE) {
+        affected += sqlx::query(
             "INSERT INTO list_subscribers (list_id, contact_id, status, created_at)
              SELECT $1, c.id, 'active', NOW()
              FROM contacts c
-             WHERE c.id = $2 AND c.tenant_id = $3
+             WHERE c.tenant_id = $2 AND c.id = ANY($3)
              ON CONFLICT (list_id, contact_id) DO NOTHING",
         )
         .bind(&list_id)
-        .bind(contact_id.to_string())
         .bind(&auth.tenant_id)
+        .bind(chunk)
         .execute(&state.db)
-        .await?;
-        affected += result.rows_affected() as i64;
+        .await?
+        .rows_affected() as i64;
     }
 
     Ok(Json(BulkResult { affected }))

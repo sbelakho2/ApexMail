@@ -1,0 +1,14 @@
+# redis-backup scheduler image: redis-cli + openssl + rsync.
+#
+# Built from the official redis image (same pin as the redis service in the
+# compose files) because it ships redis-cli (the --rdb snapshot transfer is
+# the backup mechanism — no data volume is mounted) and busybox (sh/find/
+# stat/pgrep for the healthcheck). openssl + rsync are baked in for the same
+# reason as Dockerfile.postgres-backup: the container runs on the NO-EGRESS
+# apexmail_data_internal network, so a runtime `apk add` can never reach a
+# CDN and the scheduler would silently store PLAINTEXT backups.
+#
+# Entrypoint (set in docker-compose.prod.yml) is
+# deploy/hardening/scripts/redis-backup-encrypt.sh.
+FROM redis:7.4-alpine
+RUN apk add --no-cache openssl rsync

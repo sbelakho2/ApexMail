@@ -17,12 +17,22 @@ use uuid::Uuid;
 /// verification. In production the key MUST be configured — a
 /// publicly-known fallback would make every signature forgeable — so the
 /// function fails closed there. Development keeps a fallback with a warning.
-fn audit_log_signature(hash: &str, previous_hash: &str) -> Result<String, sqlx::Error> {
+///
+/// `is_production` must come from the loaded `Config::environment`, NOT a
+/// raw env read: deployments that set production mode in the config file
+/// (while `ENVIRONMENT` stays unset) would otherwise silently sign with the
+/// public fallback key. The [`state_is_production`] legacy wrapper exists
+/// only for the deprecated delegating writers below.
+fn audit_log_signature(
+    hash: &str,
+    previous_hash: &str,
+    is_production: bool,
+) -> Result<String, sqlx::Error> {
     type HmacSha256 = Hmac<Sha256>;
     let key = match std::env::var("AUDIT_SIGNING_KEY") {
         Ok(k) if !k.is_empty() => k,
         Ok(_) | Err(_) => {
-            if state_is_production() {
+            if is_production {
                 return Err(sqlx::Error::Io(std::io::Error::other(
                     "AUDIT_SIGNING_KEY must be configured in production",
                 )));
@@ -41,6 +51,16 @@ fn audit_log_signature(hash: &str, previous_hash: &str) -> Result<String, sqlx::
     Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
+/// Legacy production probe: reads the raw `ENVIRONMENT` env var.
+///
+/// Kept ONLY so the signature-compatible delegating writers
+/// ([`insert_audit_log`], [`insert_audit_log_in_tx`],
+/// [`insert_audit_log_best_effort`]) keep their historical behaviour for
+/// call sites that have not been migrated to pass the config's environment
+/// flag. New callers must thread `Config::environment.is_production()`
+/// through the `*_with_env` variants instead: this probe cannot see
+/// config-file production deployments and defaults to `false` (the
+/// permissive dev fallback key) when the env var is absent.
 fn state_is_production() -> bool {
     std::env::var("ENVIRONMENT")
         .map(|v| v.eq_ignore_ascii_case("production"))
@@ -80,6 +100,11 @@ fn compute_hash(
 /// table (migration 105), advanced atomically in the same transaction as the
 /// insert, so tampering, deletion, or reordering breaks the chain instead of
 /// passing silently — without serialising writers on `audit_logs` rows.
+///
+/// DEPRECATED call shape: resolves "production" via the raw `ENVIRONMENT`
+/// env var, which misses config-file production deployments (see
+/// [`state_is_production`]). Migrate to [`insert_audit_log_with_env`] with
+/// the loaded config's `environment.is_production()`.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_audit_log(
     db: &PgPool,
@@ -92,9 +117,43 @@ pub async fn insert_audit_log(
     ip_address: Option<&str>,
     user_agent: Option<&str>,
 ) -> Result<(), sqlx::Error> {
+    insert_audit_log_with_env(
+        db,
+        state_is_production(),
+        tenant_id,
+        user_id,
+        action,
+        resource,
+        resource_id,
+        details,
+        ip_address,
+        user_agent,
+    )
+    .await
+}
+
+/// Canonical standalone audit write. `is_production` MUST come from the
+/// loaded config (`Config::environment.is_production()`), never from a raw
+/// env read — in production the signature step fails closed without
+/// `AUDIT_SIGNING_KEY`, and a false negative here would silently sign audit
+/// evidence with the public development fallback key.
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_audit_log_with_env(
+    db: &PgPool,
+    is_production: bool,
+    tenant_id: Option<&str>,
+    user_id: Option<&str>,
+    action: &str,
+    resource: &str,
+    resource_id: Option<&str>,
+    details: Value,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+) -> Result<(), sqlx::Error> {
     let mut tx = db.begin().await?;
-    insert_audit_log_in_tx(
+    insert_audit_log_in_tx_with_env(
         &mut tx,
+        is_production,
         tenant_id,
         user_id,
         action,
@@ -160,9 +219,48 @@ RETURNING prev_hash
 /// Transaction-scoped variant of [`insert_audit_log`] for callers that
 /// already hold a transaction (e.g. billing flows that audit atomically
 /// with the business write).
+///
+/// DEPRECATED call shape: resolves "production" via the raw `ENVIRONMENT`
+/// env var (see [`state_is_production`]). Migrate to
+/// [`insert_audit_log_in_tx_with_env`] with the config's production flag.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_audit_log_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Option<&str>,
+    user_id: Option<&str>,
+    action: &str,
+    resource: &str,
+    resource_id: Option<&str>,
+    details: Value,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+    timestamp: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    insert_audit_log_in_tx_with_env(
+        tx,
+        state_is_production(),
+        tenant_id,
+        user_id,
+        action,
+        resource,
+        resource_id,
+        details,
+        ip_address,
+        user_agent,
+        timestamp,
+    )
+    .await
+}
+
+/// Canonical transaction-scoped audit write. `is_production` MUST come from
+/// the loaded config (`Config::environment.is_production()`); the signature
+/// step fails closed in production without `AUDIT_SIGNING_KEY`, and a raw
+/// env probe would default a config-file production deployment to the
+/// forgeable development fallback key.
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_audit_log_in_tx_with_env(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    is_production: bool,
     tenant_id: Option<&str>,
     user_id: Option<&str>,
     action: &str,
@@ -190,7 +288,11 @@ pub async fn insert_audit_log_in_tx(
     // failure here means migration 105 has not been applied — propagate
     // rather than silently unlinking the chain.
     let previous_hash: Option<String> = advance_chain_head(&mut **tx, &hash).await?;
-    let signature = audit_log_signature(&hash, previous_hash.as_deref().unwrap_or_default())?;
+    let signature = audit_log_signature(
+        &hash,
+        previous_hash.as_deref().unwrap_or_default(),
+        is_production,
+    )?;
 
     sqlx::query(
         "INSERT INTO audit_logs (
@@ -224,6 +326,11 @@ pub async fn insert_audit_log_in_tx(
 
 /// Fire-and-forget variant for admin routes that must not fail the request
 /// when audit logging fails (logged instead).
+///
+/// DEPRECATED call shape: resolves "production" via the raw `ENVIRONMENT`
+/// env var (see [`state_is_production`]). Migrate to
+/// [`insert_audit_log_best_effort_with_env`] with the config's production
+/// flag.
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_audit_log_best_effort(
     db: &PgPool,
@@ -236,8 +343,40 @@ pub async fn insert_audit_log_best_effort(
     ip_address: Option<&str>,
     user_agent: Option<&str>,
 ) {
-    if let Err(error) = insert_audit_log(
+    insert_audit_log_best_effort_with_env(
         db,
+        state_is_production(),
+        tenant_id,
+        user_id,
+        action,
+        resource,
+        resource_id,
+        details,
+        ip_address,
+        user_agent,
+    )
+    .await
+}
+
+/// Canonical fire-and-forget audit write. `is_production` MUST come from
+/// the loaded config (`Config::environment.is_production()`); same fail
+/// closed invariant as [`insert_audit_log_with_env`].
+#[allow(clippy::too_many_arguments)]
+pub async fn insert_audit_log_best_effort_with_env(
+    db: &PgPool,
+    is_production: bool,
+    tenant_id: Option<&str>,
+    user_id: Option<&str>,
+    action: &str,
+    resource: &str,
+    resource_id: Option<&str>,
+    details: Value,
+    ip_address: Option<&str>,
+    user_agent: Option<&str>,
+) {
+    if let Err(error) = insert_audit_log_with_env(
+        db,
+        is_production,
         tenant_id,
         user_id,
         action,
@@ -469,9 +608,12 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
                 row.timestamp,
             );
             assert_eq!(recomputed, row.hash, "hash mismatch for entry {}", row.id);
-            let expected_sig =
-                audit_log_signature(&row.hash, row.previous_hash.as_deref().unwrap_or_default())
-                    .expect("signature computable");
+            let expected_sig = audit_log_signature(
+                &row.hash,
+                row.previous_hash.as_deref().unwrap_or_default(),
+                false,
+            )
+            .expect("signature computable");
             assert_eq!(
                 expected_sig, row.signature,
                 "signature mismatch for entry {}",

@@ -464,32 +464,43 @@ pub async fn check_quota(
 
 /// Reset the real-time Redis counters for a tenant (typically at billing-cycle
 /// rollover).
+///
+/// Both counter-key shapes are cleared: the plain calendar-month label
+/// (`...:{Y}-{M}`) and the ANCHORED billing-cycle label
+/// (`...:c{Y}-{M}` — see [`usage_counter_key_anchored`]). The anchored
+/// pattern was previously missed, so subscription tenants kept stale
+/// counters after a reset for the very cycle the reset was meant to clear.
 pub async fn reset_monthly_counters(
     redis: &RedisPool,
     tenant_id: &str,
     year: i32,
     month: u32,
 ) -> Result<(), UsageError> {
-    let pattern = format!("meter:rt:{tenant_id}:*:{year}-{month:02}");
+    let patterns = [
+        format!("meter:rt:{tenant_id}:*:{year}-{month:02}"),
+        format!("meter:rt:{tenant_id}:*:c{year}-{month:02}"),
+    ];
     let mut conn = redis.get().await.map_err(UsageError::Redis)?;
 
     // Use SCAN instead of KEYS for production safety — KEYS blocks Redis.
-    let mut cursor: u64 = 0;
     let mut all_keys: Vec<String> = Vec::new();
-    loop {
-        let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
-            .arg(cursor)
-            .arg("MATCH")
-            .arg(&pattern)
-            .arg("COUNT")
-            .arg(100)
-            .query_async(&mut conn)
-            .await
-            .map_err(UsageError::RedisCmd)?;
-        all_keys.extend(batch);
-        cursor = next_cursor;
-        if cursor == 0 {
-            break;
+    for pattern in &patterns {
+        let mut cursor: u64 = 0;
+        loop {
+            let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(pattern)
+                .arg("COUNT")
+                .arg(100)
+                .query_async(&mut conn)
+                .await
+                .map_err(UsageError::RedisCmd)?;
+            all_keys.extend(batch);
+            cursor = next_cursor;
+            if cursor == 0 {
+                break;
+            }
         }
     }
 

@@ -18,6 +18,12 @@ use uuid::Uuid;
 use crate::config::AiConfig;
 use crate::types::{AiError, EvalMetrics, JobStatus, TrainingJob};
 
+/// Cap on retained training-job records in the in-memory index. On insert,
+/// the oldest TERMINAL jobs (completed/failed/cancelled — never running)
+/// are evicted beyond this cap; the per-job snapshots under the checkpoint
+/// path keep the full history.
+const MAX_RETAINED_JOBS: usize = 500;
+
 #[derive(Clone)]
 pub struct TrainingManager {
     jobs: Arc<Mutex<HashMap<String, TrainingJob>>>,
@@ -261,7 +267,31 @@ impl TrainingManager {
     }
 
     fn upsert_job(&self, job: TrainingJob) -> Result<(), AiError> {
-        self.jobs.lock().insert(job.id.clone(), job.clone());
+        {
+            let mut jobs = self.jobs.lock();
+            jobs.insert(job.id.clone(), job.clone());
+            // Cap the live index: without an eviction the map grew without
+            // bound for the process's lifetime (the old code never removed
+            // finished jobs). Oldest terminal jobs go first; running jobs
+            // are never dropped.
+            if jobs.len() > MAX_RETAINED_JOBS {
+                let mut terminal: Vec<(chrono::DateTime<Utc>, String)> = jobs
+                    .values()
+                    .filter(|j| {
+                        matches!(
+                            j.status,
+                            JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+                        )
+                    })
+                    .map(|j| (j.started_at, j.id.clone()))
+                    .collect();
+                terminal.sort();
+                let excess = jobs.len() - MAX_RETAINED_JOBS;
+                for (_, id) in terminal.into_iter().take(excess) {
+                    jobs.remove(&id);
+                }
+            }
+        }
         self.write_job_snapshot(&job)
     }
 
@@ -315,5 +345,43 @@ mod tests {
         let manager = TrainingManager::new(&config);
         let result = manager.start_job("apexmail-assistant", 1).await;
         assert!(matches!(result, Err(AiError::TrainingUnavailable(_))));
+    }
+
+    #[test]
+    fn job_index_is_capped_and_running_jobs_are_never_evicted() {
+        // Regression: finished jobs were never removed from the in-memory
+        // map, so it grew for the process's lifetime.
+        let dir = std::env::temp_dir().join(format!("ai-train-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let config = AiConfig {
+            checkpoint_path: dir.display().to_string(),
+            ..AiConfig::default()
+        };
+        let manager = TrainingManager::new(&config);
+
+        let mut job = TrainingJob::new("apexmail-assistant", 1);
+        job.status = JobStatus::Running;
+        let running_id = job.id.clone();
+        manager.upsert_job(job).unwrap();
+
+        let base = Utc::now() - chrono::Duration::hours(MAX_RETAINED_JOBS as i64 + 10);
+        for i in 0..=MAX_RETAINED_JOBS {
+            let mut finished = TrainingJob::new("apexmail-assistant", 1);
+            finished.status = JobStatus::Completed;
+            finished.started_at = base + chrono::Duration::seconds(i as i64);
+            manager.upsert_job(finished).unwrap();
+        }
+
+        let listed = manager.list_jobs();
+        assert!(
+            listed.len() <= MAX_RETAINED_JOBS,
+            "index must stay capped, got {}",
+            listed.len()
+        );
+        assert!(
+            manager.get_job(&running_id).is_ok(),
+            "the running job must survive eviction"
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

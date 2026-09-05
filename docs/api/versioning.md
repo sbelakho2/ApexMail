@@ -9,12 +9,12 @@ ApexMail uses **URL-prefix versioning** for all public API endpoints.
 
 | Component       | Format                    | Example                        |
 |-----------------|---------------------------|--------------------------------|
-| Current version | `/v1/`                    | `POST /v1/email/send`          |
+| Current version | `/v1/`                    | `POST /v1/messages`            |
 | Base URL        | `https://api.apexmail.ee` | `https://api.apexmail.ee/v1/`  |
 
 ### Current Version: `v1`
 
-All documented endpoints use the `/v1/` prefix. There is no unversioned (`/v1/`-less) public API.
+All documented endpoints use the `/v1/` prefix. The only unversioned public endpoints are the health checks (`/health/live`, `/health/ready`, `/health/deep`), which are deliberately version-independent so monitors survive major-version transitions.
 
 ### Version Lifecycle
 
@@ -29,13 +29,14 @@ v1 (current) ──┬──> v2 (next) ──> v1 deprecated ──> v1 sunset
 
 ### 1. URL Prefix
 
-Every public API endpoint MUST include the version prefix:
+Every public API endpoint MUST include the version prefix (health endpoints
+excepted — they are unversioned by design):
 
 ```
-✅ POST /v1/email/send
-✅ GET  /v1/health/liveness
-❌ POST /email/send          (no version — rejected)
-❌ GET  /health/liveness     (no version — rejected)
+✅ POST /v1/messages
+✅ GET  /health/ready
+❌ POST /messages             (no version — rejected)
+❌ GET  /v1/health/ready      (health is not under /v1)
 ```
 
 ### 2. When to Bump the Major Version
@@ -83,7 +84,7 @@ Clients SHOULD monitor the `Sunset` and `Deprecation` headers and plan migration
 The API gateway supports the following version prefixes for routing:
 
 - `/v1/*` — Current stable version
-- `/v1/health/*` — Health endpoints (exempt from auth rate limits)
+- `/health/*` — Health endpoints (unversioned; exempt from auth rate limits)
 - Custom per-tenant prefix via `canonicalCustomerPrefix` configuration
 
 See [`docs/api-contract-manifest.json`](../api-contract-manifest.json) for the full list of registered endpoints and their version prefixes.

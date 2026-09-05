@@ -80,4 +80,3 @@ Each runbook should be self-contained, actionable, and usable by any on-call eng
 | Monitoring guide | [operations/monitoring.md](../monitoring.md) |
 | Disaster recovery | [operations/disaster-recovery.md](../disaster-recovery.md) |
 | SLO management | [operations/slo-management.md](../slo-management.md) |
-| Service mesh & mTLS | [operations/service-mesh.md](../service-mesh.md) |

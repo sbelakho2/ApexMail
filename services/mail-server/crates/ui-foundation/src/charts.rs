@@ -164,7 +164,7 @@ pub fn render_line_chart(data: &[(String, f64)], width: u32, height: u32) -> Str
     // Build path
     let mut path_coords = String::new();
     let mut points_coords = String::new();
-    for (i, (_label, val)) in data.iter().enumerate() {
+    for (i, (label, val)) in data.iter().enumerate() {
         let x = padding_left + chart_w * (i as f64 / (n as f64 - 1.0).max(1.0));
         let y = padding_top + chart_h * (1.0 - (val - min_val) / range);
         if i == 0 {
@@ -172,11 +172,17 @@ pub fn render_line_chart(data: &[(String, f64)], width: u32, height: u32) -> Str
         } else {
             path_coords.push_str(&format!(" L{x:.1},{y:.1}"));
         }
-        // Data point dot
+        // Data point dot — carries a <title> so hover/AT reads the point
+        // (bar charts already did; this matches their affordance).
         let dot_color = "rgb(var(--primary))";
         let dot_stroke = "white";
+        let point_title = format!(
+            "<title>{}: {}</title>",
+            crate::shell::html_escape(label),
+            val
+        );
         points_coords.push_str(&format!(
-            r##"<circle cx="{x:.1}" cy="{y:.1}" r="3" style="fill: {dot_color}" stroke="{dot_stroke}" stroke-width="1.5" />"##,
+            r##"<circle cx="{x:.1}" cy="{y:.1}" r="3" style="fill: {dot_color}" stroke="{dot_stroke}" stroke-width="1.5">{point_title}</circle>"##,
         ));
     }
 
@@ -302,9 +308,27 @@ pub fn render_pie_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
     let mut svg = build_svg_open(width, height, "Pie chart");
     svg.push_str(&build_svg_rect(width, height));
 
-    let mut angle = -90_f64.to_radians();
+    // Screen-reader + tooltip summary first: slices are color-only
+    // otherwise, which drops the labels entirely for sighted users (no
+    // legend) and non-visual users alike.
+    let aria_summary = data
+        .iter()
+        .take(6)
+        .map(|(label, val)| {
+            format!("{} {:.0}%", crate::shell::html_escape(label), val / total * 100.0)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    svg = svg.replacen(
+        "Pie chart",
+        &format!("Pie chart: {aria_summary}"),
+        1,
+    );
 
-    for (i, (_label, val)) in data.iter().enumerate() {
+    let mut angle = -90_f64.to_radians();
+    let mut legend_items = String::new();
+
+    for (i, (label, val)) in data.iter().enumerate() {
         let slice_angle = (val / total) * 2.0 * std::f64::consts::PI;
         let end_angle = angle + slice_angle;
 
@@ -320,10 +344,16 @@ pub fn render_pie_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
         };
         let color = colors[i % colors.len()];
         let separator_color = "white";
+        let escaped_label = crate::shell::html_escape(label);
+        let pct = (val / total * 100.0).round();
+        let slice_title = format!(
+            "<title>{}: {} ({:.0}%)</title>",
+            escaped_label, val, pct
+        );
 
         if slice_angle >= 2.0 * std::f64::consts::PI - 0.001 {
             svg.push_str(&format!(
-                r##"<circle cx="{cx}" cy="{cy}" r="{outer_r}" style="fill: {color}" opacity="0.85" />"##,
+                r##"<circle cx="{cx}" cy="{cy}" r="{outer_r}" style="fill: {color}" opacity="0.85">{slice_title}</circle>"##,
             ));
             if inner_r > 0.0 {
                 svg.push_str(&format!(
@@ -340,11 +370,15 @@ pub fn render_pie_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
                 "M{x1:.2},{y1:.2} A{outer_r},{outer_r} 0 {large_arc},1 {x2:.2},{y2:.2} L{ix2:.2},{iy2:.2} A{inner_r},{inner_r} 0 {large_arc},0 {ix1:.2},{iy1:.2} Z",
             );
             svg.push_str(&format!(
-                r##"<path d="{d}" style="fill: {color}" opacity="0.86" stroke="{separator_color}" stroke-width="1.5" />"##,
+                r##"<path d="{d}" style="fill: {color}" opacity="0.86" stroke="{separator_color}" stroke-width="1.5">{slice_title}</path>"##,
             ));
         }
 
         angle = end_angle;
+
+        legend_items.push_str(&format!(
+            "<li class=\"flex items-center gap-1.5 text-xs text-surface-600\"><span class=\"inline-block h-2.5 w-2.5 rounded-full\" style=\"background: {color}\" aria-hidden=\"true\"></span>{escaped_label}</li>",
+        ));
 
         // Center percentage label
         let mid_angle = angle - slice_angle / 2.0;
@@ -362,7 +396,13 @@ pub fn render_pie_chart(data: &[(String, f64)], width: u32, height: u32) -> Stri
     }
 
     svg.push_str("</svg>");
-    svg
+
+    // The chart is unreadable without its labels: pair the SVG with a
+    // color-keyed legend so every slice is identified outside the graphic
+    // (color-only encoding fails WCAG 1.4.1).
+    format!(
+        "<div class=\"inline-flex flex-col items-center gap-3\">{svg}<ul class=\"flex flex-wrap items-center justify-center gap-x-4 gap-y-1 m-0 p-0 list-none\" aria-label=\"Chart legend\">{legend_items}</ul></div>"
+    )
 }
 
 /// Renders a semi-circular gauge chart as inline SVG.

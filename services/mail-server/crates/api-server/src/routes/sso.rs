@@ -63,6 +63,9 @@ struct GoogleTokenInfoResponse {
     aud: String,
     iss: String,
     exp: Option<String>,
+    /// Google's stable account id (`sub`) — the identity-link key. Never
+    /// an email address: emails change, `sub` does not.
+    sub: Option<String>,
     email: Option<String>,
     email_verified: Option<String>,
     name: Option<String>,
@@ -70,6 +73,7 @@ struct GoogleTokenInfoResponse {
 
 #[derive(Debug, PartialEq, Eq)]
 struct VerifiedGoogleProfile {
+    subject: String,
     email: String,
     name: String,
 }
@@ -219,12 +223,15 @@ async fn sso_google_callback(
 
     let google_profile = verify_google_id_token(&state.http_client, id_token, client_id).await?;
 
-    // Find or create user
+    // Find or create user. Google enforces email_verified above, so the
+    // address is safe as the FIRST-link fallback; repeat logins resolve by
+    // the (google, sub) identity link and survive IdP-side email changes.
     let mut response = complete_sso_login(
         &state,
-        &google_profile.email,
-        &google_profile.name,
         "google",
+        &google_profile.subject,
+        Some(&google_profile.email),
+        &google_profile.name,
         &redirect_target,
     )
     .await?;
@@ -307,40 +314,62 @@ async fn sso_github_callback(
         .await
         .map_err(|e| ApiError::Internal(format!("GitHub user parse failed: {e}")))?;
 
-    // Fetch user emails (may not be public)
-    let email = if let Some(email) = user_data["email"].as_str() {
-        email.to_string()
-    } else {
-        // Fetch from /user/emails endpoint
-        let emails_resp = state
-            .http_client
-            .get("https://api.github.com/user/emails")
-            .header("Authorization", format!("Bearer {access_token}"))
-            .header("User-Agent", "ApexMail/1.0")
-            .send()
-            .await
-            .map_err(|e| ApiError::Internal(format!("GitHub emails fetch failed: {e}")))?;
+    // GitHub's stable account id — the identity-link key. It is minted by
+    // GitHub and cannot be influenced by the account holder, unlike every
+    // email field below.
+    let github_subject = user_data["id"]
+        .as_i64()
+        .map(|id| id.to_string())
+        .or_else(|| user_data["id"].as_str().map(str::to_string))
+        .ok_or_else(|| ApiError::Internal("missing GitHub user id".into()))?;
 
-        let emails: Vec<serde_json::Value> = emails_resp.json().await.map_err(|e| {
-            tracing::warn!(error = %e, "failed to parse GitHub /user/emails response");
-            ApiError::Internal(format!("GitHub emails parse failed: {e}"))
-        })?;
+    // Email resolution: /user/emails is the ONLY source of verification
+    // truth. The top-level profile `email` is a public, settable,
+    // unverified field — it previously took precedence and the fallback
+    // matched on `primary` without checking `verified`, letting an
+    // attacker take over any account by setting their public GitHub email
+    // to the victim's address. Verification data must come from this
+    // endpoint, so its failure fails the login instead of degrading to
+    // the unverified profile field.
+    let profile_email = user_data["email"].as_str();
+    let emails_resp = state
+        .http_client
+        .get("https://api.github.com/user/emails")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("User-Agent", "ApexMail/1.0")
+        .send()
+        .await
+        .map_err(|e| ApiError::Internal(format!("GitHub emails fetch failed: {e}")))?;
 
-        emails
-            .iter()
-            .find(|e| e["primary"].as_bool() == Some(true))
-            .and_then(|e| e["email"].as_str())
-            .or_else(|| emails.first().and_then(|e| e["email"].as_str()))
-            .ok_or_else(|| ApiError::Internal("no email found for GitHub user".into()))?
-            .to_string()
-    };
+    if !emails_resp.status().is_success() {
+        tracing::warn!(status = %emails_resp.status(), "GitHub /user/emails unavailable — refusing SSO login rather than trusting the unverified profile email");
+        return Ok(Redirect::to("/login?error=sso_failed").into_response());
+    }
+
+    let emails: Vec<serde_json::Value> = emails_resp.json().await.map_err(|e| {
+        tracing::warn!(error = %e, "failed to parse GitHub /user/emails response");
+        ApiError::Internal(format!("GitHub emails parse failed: {e}"))
+    })?;
+
+    // None means no VERIFIED address exists: the login may still proceed
+    // through an existing (github, subject) identity link, but can never
+    // match or provision by email.
+    let verified_email = select_verified_github_email(profile_email, &emails);
 
     let name = user_data["name"]
         .as_str()
         .or_else(|| user_data["login"].as_str())
         .unwrap_or("");
 
-    let mut response = complete_sso_login(&state, &email, name, "github", &redirect_target).await?;
+    let mut response = complete_sso_login(
+        &state,
+        "github",
+        &github_subject,
+        verified_email.as_deref(),
+        name,
+        &redirect_target,
+    )
+    .await?;
     clear_state_cookie(
         &mut response,
         "am_sso_state_github",
@@ -353,27 +382,61 @@ async fn sso_github_callback(
 
 async fn complete_sso_login(
     state: &AppState,
-    email: &str,
-    name: &str,
     provider: &str,
+    subject: &str,
+    verified_email: Option<&str>,
+    name: &str,
     redirect_target: &str,
 ) -> Result<Response, ApiError> {
     use chrono::Utc;
     use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 
-    let email_lower = email.to_lowercase();
+    // Resolution order (audit 1.2 fix): (provider, subject) identity link
+    // FIRST — it is the only binding the IdP account holder cannot re-point
+    // at someone else's local account. Email match runs only as the
+    // first-link fallback and only on an IdP-VERIFIED address; every
+    // caller of this function must have enforced that verification
+    // (Google: email_verified claim; GitHub: /user/emails verified flag).
+    // users.id is UUID, users.tenant_id is VARCHAR(26) (migration 064) —
+    // decode user ids as text so sqlx never faces a TEXT→Uuid decode
+    // mismatch.
+    let linked_user_id: Option<String> = sqlx::query_scalar::<_, String>(
+        "SELECT user_id::text FROM user_identities WHERE provider = $1 AND subject = $2 LIMIT 1",
+    )
+    .bind(provider)
+    .bind(subject)
+    .fetch_optional(&state.db)
+    .await?;
 
-    // Look up existing user. users.id is UUID, users.tenant_id is
-    // VARCHAR(26) (migration 064) — decode both as text so the tuple type
-    // matches the auto-provision arm and sqlx never face a TEXT→Uuid
-    // decode mismatch.
-    let existing: Option<(String, String, String, Option<String>, String, String, bool)> =
-        sqlx::query_as(
-            "SELECT id::text, tenant_id, email, name, role, status, mfa_enabled FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1",
+    // ON DELETE CASCADE removes identity rows with their user, so a hit
+    // here always resolves; a miss is still handled defensively by
+    // falling through to the verified-email path.
+    let mut existing: Option<(String, String, String, Option<String>, String, String, bool)> =
+        None;
+    if let Some(linked_id) = linked_user_id.as_deref() {
+        existing = sqlx::query_as(
+            "SELECT id::text, tenant_id, email, name, role, status, mfa_enabled FROM users WHERE id = $1::uuid LIMIT 1",
         )
-        .bind(&email_lower)
+        .bind(linked_id)
         .fetch_optional(&state.db)
         .await?;
+    }
+
+    // First-link fallback: match by email only when no identity link
+    // exists AND the address is IdP-verified. An unverified address must
+    // never bind to (or provision) an account.
+    let matched_by_email = existing.is_none();
+    if existing.is_none() {
+        if let Some(email) = verified_email {
+            let email_lower = email.to_lowercase();
+            existing = sqlx::query_as(
+                "SELECT id::text, tenant_id, email, name, role, status, mfa_enabled FROM users WHERE LOWER(email) = LOWER($1) LIMIT 1",
+            )
+            .bind(&email_lower)
+            .fetch_optional(&state.db)
+            .await?;
+        }
+    }
 
     let (user_id, tenant_id, role) = match existing {
         Some((id, tid, _email, _name, role, status, mfa_enabled)) => {
@@ -400,15 +463,51 @@ async fn complete_sso_login(
             .execute(&state.db)
             .await?;
 
+            // Record the first (provider, subject) → user link in the same
+            // flow that matched by email, so every subsequent login
+            // resolves by identity and an IdP-side email change can never
+            // orphan or re-point the account. ON CONFLICT DO NOTHING keeps
+            // a concurrent callback from failing the login.
+            if matched_by_email {
+                sqlx::query(
+                    "INSERT INTO user_identities (provider, subject, user_id, email_at_link)
+                     VALUES ($1, $2, $3::uuid, $4)
+                     ON CONFLICT (provider, subject) DO NOTHING",
+                )
+                .bind(provider)
+                .bind(subject)
+                .bind(id.as_str())
+                .bind(verified_email)
+                .execute(&state.db)
+                .await?;
+            }
+
             (id, tid, role)
         }
         None => {
-            // Auto-provision:create tenant + user for SSO-first signup.
-            // tenants.id / users.id / users.tenant_id are VARCHAR(26) after
-            // migration 064 — binding a 36-char UUID overflowed the column
-            // and 500'd every first-time SSO signup for a new tenant.
+            // No identity link and no email match. Without a VERIFIED
+            // address there is no takeover-proof way to bind this identity
+            // to an account — refuse rather than fall back to unverified
+            // data (a returning user would have resolved via the identity
+            // link above).
+            let Some(email) = verified_email else {
+                tracing::warn!(
+                    provider = %provider,
+                    "SSO login refused: no verified IdP email and no existing identity link"
+                );
+                return Ok(Redirect::to("/login?error=sso_failed").into_response());
+            };
+            let email_lower = email.to_lowercase();
+
+            // Auto-provision: create tenant + user for SSO-first signup.
+            // Schema note (canonical migrations lineage): tenants.id and
+            // users.tenant_id are VARCHAR(26) (ULID, migrations 052/064)
+            // but users.id is UUID (migration 052) — the 26-char text id
+            // previously bound into users.id failed the UUID column and
+            // broke every first-time SSO signup. Same convention as
+            // `register()`: ULID-shaped tenant id, UUID user id.
             let tenant_id = apexmail_lib::id::generate_id("", 26);
-            let user_id = apexmail_lib::id::generate_id("", 26);
+            let user_id = Uuid::new_v4();
             let now = Utc::now();
             let company_name = name.split_whitespace().next().unwrap_or("My Company");
             let slug = format!(
@@ -425,7 +524,10 @@ async fn complete_sso_login(
                 &uuid::Uuid::new_v4().to_string()[..8]
             );
 
-            // Create placeholder password hash for SSO-only accounts
+            // Create placeholder password hash for SSO-only accounts.
+            // `$sso$`-prefixed rows are refused with a clean 401 by the
+            // password-verification gate (routes/auth.rs) — no password can
+            // ever verify against this value.
             let sso_placeholder_hash = format!("$sso${provider}$no-password-sso-login-only");
 
             sqlx::query(
@@ -448,18 +550,32 @@ async fn complete_sso_login(
                 "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified, mfa_enabled, metadata, created_at, updated_at)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
             )
-            .bind(&user_id)
+            .bind(user_id)
             .bind(&tenant_id)
             .bind(&email_lower)
             .bind(name)
             .bind(&sso_placeholder_hash)
             .bind("owner")
             .bind("active")
-            .bind(true) // SSO emails are pre-verified
+            .bind(true) // the SSO email was IdP-verified before reaching here
             .bind(false)
             .bind(serde_json::json!({"sso_provider": provider}))
             .bind(now)
             .bind(now)
+            .execute(&state.db)
+            .await?;
+
+            // Bind the identity at provisioning time: this user logs in by
+            // (provider, subject) from the next callback onwards.
+            sqlx::query(
+                "INSERT INTO user_identities (provider, subject, user_id, email_at_link)
+                 VALUES ($1, $2, $3, $4)
+                 ON CONFLICT (provider, subject) DO NOTHING",
+            )
+            .bind(provider)
+            .bind(subject)
+            .bind(user_id)
+            .bind(email_lower.as_str())
             .execute(&state.db)
             .await?;
 
@@ -470,7 +586,7 @@ async fn complete_sso_login(
                 "SSO user auto-provisioned"
             );
 
-            (user_id, tenant_id, "owner".to_string())
+            (user_id.to_string(), tenant_id, "owner".to_string())
         }
     };
 
@@ -561,6 +677,47 @@ fn redirect_from_oauth_state(state: &str) -> String {
         .unwrap_or_else(|| "/dashboard".to_string())
 }
 
+/// Select the email a GitHub login may be matched on, from the
+/// `/user/emails` verification data only.
+///
+/// Precedence: verified+primary → the (public, unverified) profile email
+/// IF AND ONLY IF it names a verified entry → first verified. An address
+/// without `verified == true` is never returned: GitHub's profile email
+/// is settable to anything without proof of control, and matching on it
+/// allowed account takeover (audit 1.2). `None` means no verified
+/// address exists — the caller must not match or provision by email.
+fn select_verified_github_email(
+    profile_email: Option<&str>,
+    emails: &[serde_json::Value],
+) -> Option<String> {
+    let verified = |e: &&serde_json::Value| {
+        e["verified"].as_bool() == Some(true)
+            && e["email"].as_str().is_some_and(|a| !a.trim().is_empty())
+    };
+    let address = |e: &serde_json::Value| e["email"].as_str().map(str::to_string);
+
+    // Verified + primary is GitHub's canonical account address.
+    if let Some(primary) = emails.iter().find(|e| verified(e) && e["primary"].as_bool() == Some(true))
+    {
+        return address(primary);
+    }
+
+    // The profile email is honored only when the verification data proves
+    // control of that exact address (case-insensitive match — GitHub
+    // addresses are case-insensitive at delivery).
+    if let Some(profile) = profile_email.filter(|p| !p.trim().is_empty()) {
+        if let Some(matching) = emails
+            .iter()
+            .find(|e| verified(e) && e["email"].as_str().is_some_and(|a| a.eq_ignore_ascii_case(profile)))
+        {
+            return address(matching);
+        }
+    }
+
+    // Any remaining verified address.
+    emails.iter().find(|e| verified(e)).and_then(address)
+}
+
 async fn verify_google_id_token(
     http_client: &reqwest::Client,
     id_token: &str,
@@ -624,7 +781,17 @@ fn validate_google_token_info(
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| ApiError::Unauthorized("invalid Google ID token".into()))?;
 
+    // `sub` is the only takeover-proof identifier: it is minted by Google
+    // and cannot be influenced by the account holder. Without it the login
+    // could only be matched by (changeable, re-pointable) email — the exact
+    // takeover shape the GitHub path was fixed for.
+    let subject = token_info
+        .sub
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| ApiError::Unauthorized("invalid Google ID token".into()))?;
+
     Ok(VerifiedGoogleProfile {
+        subject,
         email,
         name: token_info.name.unwrap_or_default(),
     })
@@ -890,6 +1057,7 @@ mod tests {
                 aud: "google-client-id".into(),
                 iss: "https://accounts.google.com".into(),
                 exp: Some("4102444800".into()),
+                sub: Some("google-subject-1".into()),
                 email: Some("user@example.com".into()),
                 email_verified: Some("true".into()),
                 name: Some("Example User".into()),
@@ -902,6 +1070,7 @@ mod tests {
         assert_eq!(
             profile,
             VerifiedGoogleProfile {
+                subject: "google-subject-1".into(),
                 email: "user@example.com".into(),
                 name: "Example User".into(),
             }
@@ -916,6 +1085,7 @@ mod tests {
                 aud: "other-client".into(),
                 iss: "https://accounts.google.com".into(),
                 exp: Some("4102444800".into()),
+                sub: Some("google-subject-1".into()),
                 email: Some("user@example.com".into()),
                 email_verified: Some("true".into()),
                 name: Some("Example User".into()),
@@ -936,6 +1106,7 @@ mod tests {
                 aud: "google-client-id".into(),
                 iss: "https://accounts.google.com".into(),
                 exp: Some("4102444800".into()),
+                sub: Some("google-subject-1".into()),
                 email: Some("user@example.com".into()),
                 email_verified: Some("false".into()),
                 name: Some("Example User".into()),
@@ -956,6 +1127,7 @@ mod tests {
                 aud: "google-client-id".into(),
                 iss: "https://accounts.google.com".into(),
                 exp: Some("1699999999".into()),
+                sub: Some("google-subject-1".into()),
                 email: Some("user@example.com".into()),
                 email_verified: Some("true".into()),
                 name: Some("Example User".into()),
@@ -976,6 +1148,7 @@ mod tests {
                 aud: "google-client-id".into(),
                 iss: "https://evil-idp.com".into(),
                 exp: Some("4102444800".into()),
+                sub: Some("google-subject-1".into()),
                 email: Some("user@example.com".into()),
                 email_verified: Some("true".into()),
                 name: Some("Example User".into()),
@@ -996,6 +1169,7 @@ mod tests {
                 aud: "google-client-id".into(),
                 iss: "accounts.google.com".into(),
                 exp: Some("4102444800".into()),
+                sub: Some("google-subject-1".into()),
                 email: Some("user@example.com".into()),
                 email_verified: Some("true".into()),
                 name: Some("User".into()),
@@ -1016,6 +1190,7 @@ mod tests {
                 aud: "google-client-id".into(),
                 iss: "https://accounts.google.com".into(),
                 exp: None,
+                sub: Some("google-subject-1".into()),
                 email: Some("user@example.com".into()),
                 email_verified: Some("true".into()),
                 name: Some("User".into()),
@@ -1036,6 +1211,7 @@ mod tests {
                 aud: "google-client-id".into(),
                 iss: "https://accounts.google.com".into(),
                 exp: Some("4102444800".into()),
+                sub: Some("google-subject-1".into()),
                 email: None,
                 email_verified: Some("true".into()),
                 name: Some("User".into()),
@@ -1056,6 +1232,7 @@ mod tests {
                 aud: "google-client-id".into(),
                 iss: "https://accounts.google.com".into(),
                 exp: Some("4102444800".into()),
+                sub: Some("google-subject-1".into()),
                 email: Some("".into()),
                 email_verified: Some("true".into()),
                 name: Some("User".into()),
@@ -1076,6 +1253,7 @@ mod tests {
                 aud: "google-client-id".into(),
                 iss: "https://accounts.google.com".into(),
                 exp: Some("4102444800".into()),
+                sub: Some("google-subject-1".into()),
                 email: Some("user@example.com".into()),
                 email_verified: Some("true".into()),
                 name: None,
@@ -1086,6 +1264,154 @@ mod tests {
         .expect("missing name should be ok");
 
         assert_eq!(profile.name, "");
+    }
+
+    // ── Google `sub` (identity-link key) validation ───────────────
+
+    #[test]
+    fn validate_google_token_info_rejects_missing_sub() {
+        // Without `sub` there is no takeover-proof identity key — the login
+        // could only be matched by (changeable) email, the exact takeover
+        // shape the GitHub path was fixed for.
+        let error = validate_google_token_info(
+            GoogleTokenInfoResponse {
+                aud: "google-client-id".into(),
+                iss: "https://accounts.google.com".into(),
+                exp: Some("4102444800".into()),
+                sub: None,
+                email: Some("user@example.com".into()),
+                email_verified: Some("true".into()),
+                name: Some("User".into()),
+            },
+            "google-client-id",
+            1_700_000_000,
+        )
+        .expect_err("missing sub should fail");
+
+        assert!(matches!(error, ApiError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn validate_google_token_info_rejects_empty_sub() {
+        // A whitespace-only `sub` is as useless as a missing one.
+        let error = validate_google_token_info(
+            GoogleTokenInfoResponse {
+                aud: "google-client-id".into(),
+                iss: "https://accounts.google.com".into(),
+                exp: Some("4102444800".into()),
+                sub: Some("   ".into()),
+                email: Some("user@example.com".into()),
+                email_verified: Some("true".into()),
+                name: Some("User".into()),
+            },
+            "google-client-id",
+            1_700_000_000,
+        )
+        .expect_err("blank sub should fail");
+
+        assert!(matches!(error, ApiError::Unauthorized(_)));
+    }
+
+    // ── GitHub verified-email selection (takeover fix) ────────────
+
+    fn gh_email(address: &str, primary: bool, verified: bool) -> serde_json::Value {
+        serde_json::json!({
+            "email": address,
+            "primary": primary,
+            "verified": verified,
+            "visibility": "public",
+        })
+    }
+
+    #[test]
+    fn github_email_selection_prefers_verified_primary() {
+        let emails = vec![
+            gh_email("secondary@users.noreply.github.com", false, true),
+            gh_email("primary@example.com", true, true),
+        ];
+        assert_eq!(
+            select_verified_github_email(Some("primary@example.com"), &emails),
+            Some("primary@example.com".into())
+        );
+    }
+
+    #[test]
+    fn github_email_selection_never_returns_unverified_primary() {
+        // The exact takeover vector: `primary` without `verified` used to be
+        // matched directly. An unverified primary must never win, even when
+        // it is the only entry.
+        let emails = vec![gh_email("victim@example.com", true, false)];
+        assert_eq!(select_verified_github_email(None, &emails), None);
+    }
+
+    #[test]
+    fn github_email_selection_ignores_unverified_profile_email() {
+        // The attacker-controlled public profile email must not be honored
+        // just because it is present — only when the verification data
+        // proves control of that exact address.
+        let emails = vec![
+            gh_email("attacker-own@example.com", true, true),
+            gh_email("victim@example.com", false, false),
+        ];
+        assert_eq!(
+            select_verified_github_email(Some("victim@example.com"), &emails),
+            Some("attacker-own@example.com".into())
+        );
+    }
+
+    #[test]
+    fn github_email_selection_accepts_profile_email_matching_a_verified_entry() {
+        let emails = vec![
+            gh_email("victim@example.com", false, false),
+            gh_email("real@example.com", false, true),
+        ];
+        assert_eq!(
+            select_verified_github_email(Some("REAL@example.com"), &emails),
+            Some("real@example.com".into())
+        );
+    }
+
+    #[test]
+    fn github_email_selection_falls_back_to_first_verified() {
+        // No primary, profile email absent — any verified address is usable.
+        let emails = vec![
+            gh_email("a@users.noreply.github.com", false, false),
+            gh_email("b@example.com", false, true),
+            gh_email("c@example.com", false, true),
+        ];
+        assert_eq!(
+            select_verified_github_email(None, &emails),
+            Some("b@example.com".into())
+        );
+    }
+
+    #[test]
+    fn github_email_selection_all_unverified_yields_none() {
+        let emails = vec![
+            gh_email("a@example.com", true, false),
+            gh_email("b@example.com", false, false),
+        ];
+        assert_eq!(select_verified_github_email(Some("a@example.com"), &emails), None);
+        assert_eq!(select_verified_github_email(None, &emails), None);
+    }
+
+    #[test]
+    fn github_email_selection_empty_list_yields_none() {
+        assert_eq!(select_verified_github_email(Some("x@example.com"), &[]), None);
+    }
+
+    #[test]
+    fn github_email_selection_skips_verified_entries_without_an_address() {
+        // Malformed entries (verified flag true, no usable email) must not
+        // shadow later valid entries.
+        let emails = vec![
+            serde_json::json!({ "primary": true, "verified": true }),
+            gh_email("ok@example.com", false, true),
+        ];
+        assert_eq!(
+            select_verified_github_email(None, &emails),
+            Some("ok@example.com".into())
+        );
     }
 
     // ── Google email_verified edge cases ──────────────────────────
@@ -1350,12 +1676,14 @@ mod tests {
             "aud": "my-client-id",
             "iss": "https://accounts.google.com",
             "exp": "4102444800",
+            "sub": "1234567890",
             "email": "user@example.com",
             "email_verified": "true",
             "name": "Test User"
         }"#;
         let parsed: GoogleTokenInfoResponse = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.aud, "my-client-id");
+        assert_eq!(parsed.sub, Some("1234567890".into()));
         assert_eq!(parsed.email, Some("user@example.com".into()));
         assert_eq!(parsed.email_verified, Some("true".into()));
     }

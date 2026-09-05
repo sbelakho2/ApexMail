@@ -51,20 +51,13 @@ by external monitoring probes.
 
 ### 2.3 API Throughput
 
-| Plan | Guaranteed Throughput | Burst Capacity |
-|------|----------------------|----------------|
-| Starter | 100 req/s | 200 req/s for 60s |
-| Pro | 200 req/s | 400 req/s for 60s |
-| Growth | 500 req/s | 1000 req/s for 120s |
-| Scale | 1000 req/s | 2000 req/s for 120s |
-| Enterprise | Custom (per contract) | Custom (per contract) |
+Throughput tiers are plan-based; the single canonical table lives in
+[`docs/api/rate-limits.md`](api/rate-limits.md) (Free 10 req/s;
+Starter/Pro/PAYG 100 req/s; Growth/Scale 500 req/s; Enterprise 5,000 req/s).
+Exceeding sustained throughput triggers rate limiting as described there.
 
-Throughput guarantees apply to all paid plans; the *uptime credit* regime in
-§4 is a Scale and Enterprise entitlement.
-
-> **Note:** Throughput guarantees apply per API key. Exceeding sustained
-> throughput limits will trigger rate limiting as described in
-> [`docs/api/rate-limits.md`](api/rate-limits.md).
+Throughput limits apply to all plans; the *uptime credit* regime in
+§3 is a Scale and Enterprise entitlement.
 
 ### 2.4 Authentication
 
@@ -81,11 +74,18 @@ as outlined below.
 
 ### 3.1 Credit Schedule
 
-| Monthly Uptime Percentage | Credit Percentage |
-|---------------------------|-------------------|
-| < 99.9% but ≥ 99.0% | 10% of monthly fee |
-| < 99.0% but ≥ 95.0% | 25% of monthly fee |
-| < 95.0% | 50% of monthly fee |
+The uncapped credit ladder scales with the size of the breach:
+
+| Uptime shortfall below 99.9% | Credit (before plan cap) |
+|------------------------------|--------------------------|
+| ≥ 5.0 percentage points | 100% of monthly fee |
+| ≥ 1.0 percentage points | 50% of monthly fee |
+| ≥ 0.5 percentage points | 25% of monthly fee |
+| ≥ 0.1 percentage points | 10% of monthly fee |
+
+**Plan caps (§3.4) always apply** — for Scale plans the credit is capped at
+10% of the monthly fee and for Enterprise plans at 25%, regardless of the
+ladder value above.
 
 ### 3.2 Latency and Delivery Credits
 
@@ -106,8 +106,10 @@ as outlined below.
 
 ### 3.4 Maximum Credit
 
-Total credits issued in any single billing month **shall not exceed 50%** of
-the monthly fee for that month.
+Total credits issued in any single billing month are capped by plan:
+**10%** of the monthly fee on the Scale plan and **25%** on the Enterprise
+plan. These caps match the billing system's enforced limits
+(`sla_credit_percentage` per plan).
 
 ---
 
@@ -123,7 +125,7 @@ This SLA does **not** apply to:
    - Exceeding rate limits or throughput caps
    - Misconfigured DNS, SPF, DKIM, or DMARC records
    - Sending to invalid, non-existent, or hard-bounced recipient addresses
-   - Sending content that violates the [Acceptable Use Policy](acceptable-use.md)
+   - Sending content that violates the [Acceptable Use Policy](compliance/acceptable-use-policy.md)
    - Using revoked, expired, or incorrect API keys
 4. **Third-party dependencies** — Failures of upstream ISPs, DNS providers,
    cloud infrastructure (AWS/Azure/GCP), or certificate authorities.
@@ -145,9 +147,10 @@ This SLA does **not** apply to:
 - **Status page:** [`https://status.apexmail.ee`](https://status.apexmail.ee)
 - **Incident notifications:** Subscribe via the status page to receive email,
   SMS, or Slack notifications for active incidents.
-- **API health endpoints:**
-  - `GET /v1/health/liveness` — Lightweight process health
-  - `GET /v1/health/readiness` — Full dependency check
+- **API health endpoints** (unversioned — they survive version transitions):
+  - `GET /health/live` — Lightweight process health
+  - `GET /health/ready` — Full dependency check
+  - `GET /health/deep` — Deep dependency and data-store diagnostics
 
 ### 5.2 Monthly Reports
 

@@ -25,9 +25,9 @@ El email transaccional es infraestructura de misión crítica. Los restablecimie
 
 ## Solución de ApexMail
 
-- **API REST** (`POST /v1/emails`) — Payloads JSON con claves de idempotencia. Envíe y olvídese.
+- **API REST** (`POST /v1/messages`) — Payloads JSON con claves de idempotencia. Envíe y olvídese.
 - **Relé SMTP** (`smtp.apexmail.ee:587` con STARTTLS) — Sustitución directa para clientes SMTP existentes.
-- **Flujos transaccionales** — Aísle configuraciones de envío (IP dedicada, dominio personalizado, lista de supresión) por tipo de email.
+- **Configuración de envío aislada** — Las IP dedicadas, dominios personalizados y listas de supresión pueden delimitarse por tipo de email.
 - **Webhooks firmados** — Eventos `delivered`, `bounced`, `complained`, `opened` y `clicked` en tiempo real, cada uno con un ID de evento único y firma HMAC.
 - **Idempotencia** — Deduplique envíos con claves suministradas por el cliente. Reenvíe con seguridad tras errores de red.
 
@@ -35,8 +35,8 @@ El email transaccional es infraestructura de misión crítica. Los restablecimie
 
 1. Cree una clave de API en **Panel → Configuración → Claves de API**.
 2. Verifique su dominio de envío (SPF, DKIM, return-path personalizado).
-3. Cree un flujo transaccional para su tipo de email.
-4. Envíe mediante REST o SMTP incluyendo el nombre del flujo en el payload.
+3. Configure un dominio de envío dedicado (y, en planes elegibles, una IP dedicada) para su tipo de email.
+4. Envíe mediante REST o SMTP.
 5. Registre un endpoint de webhook para recibir los eventos de entrega.
 6. Supervise las métricas de entrega en el panel o mediante la API de analítica.
 
@@ -44,22 +44,21 @@ El email transaccional es infraestructura de misión crítica. Los restablecimie
 
 | Endpoint | Descripción |
 |---|---|
-| `POST /v1/emails` | Enviar un email |
-| `GET /v1/emails/:id` | Obtener el estado y los eventos de un email |
-| `DELETE /v1/emails/:id/schedule` | Cancelar un envío programado |
-| `POST /v1/emails/batch` | Enviar hasta 1.000 emails en una sola solicitud |
+| `POST /v1/messages` | Enviar un email |
+| `GET /v1/messages/:id` | Obtener el estado y los eventos de un email |
+| `POST /v1/messages/:id/cancel` | Cancelar un envío programado |
+| `POST /v1/messages/batch` | Enviar hasta 100 mensajes en una sola solicitud |
 
 ## Eventos de webhooks relevantes
 
 | Evento | Desencadenante |
 |---|---|
-| `email.accepted` | La API aceptó la solicitud |
-| `email.delivered` | El servidor receptor aceptó el mensaje |
-| `email.bounced` | Rebote duro o blando |
-| `email.complained` | El destinatario lo reportó como spam |
-| `email.opened` | Apertura detectada (píxel de seguimiento) |
-| `email.clicked` | Clic en un enlace detectado |
-| `email.delayed` | Mensaje aplazado por el servidor receptor |
+| `message.sent` | Mensaje aceptado para entrega |
+| `message.delivered` | El servidor receptor aceptó el mensaje |
+| `message.bounced` | Rebote duro o blando |
+| `message.complained` | El destinatario lo reportó como spam |
+| `message.opened` | Apertura detectada (píxel de seguimiento) |
+| `message.clicked` | Clic en un enlace detectado |
 
 ## Plan requerido
 
@@ -88,7 +87,7 @@ El email transaccional es infraestructura de misión crítica. Los restablecimie
 
 ## Limitaciones conocidas
 
-- El contenido del plan Free se almacena solo durante 24 horas.
+- El historial de eventos se conserva 30 días por defecto (7 días en el plan Free); el contenido de los mensajes 7 días por defecto, según el plan hasta 730 días.
 - El tamaño de los adjuntos está limitado a 25 MB por mensaje.
 - El seguimiento de aperturas y clics requiere cuerpo HTML con píxel de seguimiento o enlaces.
 

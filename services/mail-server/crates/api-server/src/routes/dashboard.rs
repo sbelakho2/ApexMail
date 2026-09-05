@@ -45,6 +45,18 @@ struct DashboardMessageStats {
     clicked: i64,
 }
 
+/// Row for the single combined resource-count query (audit: the dashboard
+/// used to run six sequential COUNT queries per request — five scalar
+/// resource counts plus the messages aggregate).
+#[derive(sqlx::FromRow)]
+struct DashboardResourceCounts {
+    contacts: i64,
+    lists: i64,
+    campaigns: i64,
+    templates: i64,
+    active_domains: i64,
+}
+
 // ─── Handler ───────────────────────────────────────────────────
 
 async fn dashboard_stats(
@@ -92,33 +104,14 @@ async fn dashboard_stats(
         0.0
     };
 
-    // Resource counts
-    let contacts =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM contacts WHERE tenant_id = $1")
-            .bind(auth.tenant_id.to_string())
-            .fetch_one(&state.db)
-            .await?;
-
-    let lists =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM lists WHERE tenant_id = $1")
-            .bind(auth.tenant_id.to_string())
-            .fetch_one(&state.db)
-            .await?;
-
-    let campaigns =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM campaigns WHERE tenant_id = $1")
-            .bind(auth.tenant_id.to_string())
-            .fetch_one(&state.db)
-            .await?;
-
-    let templates =
-        sqlx::query_scalar::<_, i64>("SELECT COUNT(*)::bigint FROM templates WHERE tenant_id = $1")
-            .bind(auth.tenant_id.to_string())
-            .fetch_one(&state.db)
-            .await?;
-
-    let domains = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint FROM domains WHERE tenant_id = $1 AND status = 'verified'",
+    // Resource counts — one round-trip instead of five sequential COUNTs.
+    let counts = sqlx::query_as::<_, DashboardResourceCounts>(
+        r#"SELECT
+            (SELECT COUNT(*)::bigint FROM contacts WHERE tenant_id = $1) AS contacts,
+            (SELECT COUNT(*)::bigint FROM lists WHERE tenant_id = $1) AS lists,
+            (SELECT COUNT(*)::bigint FROM campaigns WHERE tenant_id = $1) AS campaigns,
+            (SELECT COUNT(*)::bigint FROM templates WHERE tenant_id = $1) AS templates,
+            (SELECT COUNT(*)::bigint FROM domains WHERE tenant_id = $1 AND status = 'verified') AS active_domains"#,
     )
     .bind(auth.tenant_id.to_string())
     .fetch_one(&state.db)
@@ -133,11 +126,11 @@ async fn dashboard_stats(
         bounce_rate,
         open_rate,
         click_rate,
-        total_contacts: contacts,
-        total_lists: lists,
-        total_campaigns: campaigns,
-        total_templates: templates,
-        active_domains: domains,
+        total_contacts: counts.contacts,
+        total_lists: counts.lists,
+        total_campaigns: counts.campaigns,
+        total_templates: counts.templates,
+        active_domains: counts.active_domains,
         period: "last_30_days".into(),
     }))
 }

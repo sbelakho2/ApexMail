@@ -15,7 +15,7 @@ For complete documentation on creating, listing, testing, and managing webhooks,
 | POST | `/v1/webhooks` | Register a new webhook endpoint |
 | GET | `/v1/webhooks` | List all registered webhooks |
 | GET | `/v1/webhooks/:id` | Get webhook details |
-| PATCH | `/v1/webhooks/:id` | Update webhook configuration |
+| PUT | `/v1/webhooks/:id` | Update webhook configuration |
 | DELETE | `/v1/webhooks/:id` | Delete a webhook |
 | POST | `/v1/webhooks/:id/test` | Send a test event to the webhook |
 

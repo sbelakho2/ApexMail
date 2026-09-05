@@ -1,7 +1,6 @@
 //! Suppressions repository.
 
 use sqlx::PgPool;
-use uuid::Uuid;
 
 use crate::types::Suppression;
 
@@ -70,7 +69,10 @@ impl SuppressionsRepo {
     }
 
     /// Remove an email from the suppression list.
-    pub async fn delete(pool: &PgPool, tenant_id: &str, id: Uuid) -> Result<bool, sqlx::Error> {
+    ///
+    /// `id` is the VARCHAR(26) short id stored by [`create`]/[`bulk_create`]
+    /// (migration 075/088) — binding it as text matches the column type.
+    pub async fn delete(pool: &PgPool, tenant_id: &str, id: &str) -> Result<bool, sqlx::Error> {
         let result = sqlx::query("DELETE FROM suppressions WHERE id = $1 AND tenant_id = $2")
             .bind(id)
             .bind(tenant_id)
@@ -96,6 +98,10 @@ impl SuppressionsRepo {
     }
 
     /// Bulk-create suppressions (upsert).
+    ///
+    /// Rows are inserted in chunks of [`BULK_CHUNK_SIZE`] so a large batch
+    /// can never exceed Postgres's 65535 bind-parameter limit and fail the
+    /// whole call.
     pub async fn bulk_create(
         pool: &PgPool,
         tenant_id: &str,
@@ -106,6 +112,22 @@ impl SuppressionsRepo {
             return Ok(Vec::new());
         }
 
+        let mut all = Vec::with_capacity(entries.len());
+        for chunk in entries.chunks(Self::BULK_CHUNK_SIZE) {
+            all.extend(Self::bulk_create_chunk(pool, tenant_id, chunk).await?);
+        }
+        Ok(all)
+    }
+
+    /// Insert parameters per bulk row (id, tenant, email, reason, source).
+    const BULK_CHUNK_SIZE: usize = 1000;
+
+    /// One chunked multi-row upsert (see [`bulk_create`]).
+    async fn bulk_create_chunk(
+        pool: &PgPool,
+        tenant_id: &str,
+        entries: &[(&str, &str, &str)], // (email, reason, source)
+    ) -> Result<Vec<Suppression>, sqlx::Error> {
         let mut query = String::from(
             "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at) VALUES ",
         );

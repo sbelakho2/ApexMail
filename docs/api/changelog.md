@@ -32,7 +32,7 @@ Example:
 ```
 Deprecation: Mon, 01 Jun 2026 00:00:00 GMT
 Sunset: Mon, 01 Dec 2026 00:00:00 GMT
-Link: <https://docs.apexmail.dev/migration/2026-06>; rel="successor-version"
+Link: <https://docs.apexmail.ee/migration/2026-06>; rel="successor-version"
 ```
 
 ### SDK Versioning
@@ -164,11 +164,11 @@ Stay informed about API changes through these channels:
 
 | Channel                 | Description                                          |
 | ----------------------- | ---------------------------------------------------- |
-| **Changelog RSS feed**  | `https://docs.apexmail.dev/api/changelog.rss`        |
+| **Changelog RSS feed**  | `https://apexmail.ee/docs/api/changelog.rss`        |
 | **Email notifications** | Account owners receive deprecation and major change notices automatically. Opt in under **Settings → Notifications**. |
 | **Dashboard banner**    | Deprecation warnings appear in the ApexMail dashboard. |
 | **API response headers**| `Deprecation` and `Sunset` headers on affected endpoints. |
-| **Status page**         | `https://status.apexmail.dev` — subscribe for incident and maintenance updates. |
+| **Status page**         | `https://status.apexmail.ee` — subscribe for incident and maintenance updates. |
 | **GitHub releases**     | SDK releases are published on GitHub with changelogs. |
 
 ---
@@ -217,7 +217,7 @@ The inaugural stable release of the ApexMail API. All endpoints are production-r
 | `/v1/domains/:id`               | GET    | Get domain details and verification status. |
 | `/v1/domains/:id/verify`        | POST   | Trigger DNS verification.               |
 | `/v1/domains/:id/dns-records`   | GET    | Get required DNS records.               |
-| `/v1/domains/:id/auth-score`    | GET    | Get authentication score (SPF, DKIM, DMARC). |
+| `/v1/domains/:id/auth-status`    | GET    | Get authentication score (SPF, DKIM, DMARC). |
 | `/v1/domains/:id/health`        | GET    | Get domain health metrics.              |
 | `/v1/domains/:id/mta-sts`       | GET    | Get MTA-STS policy status.              |
 | `/v1/domains/:id/bimi`          | GET    | Get BIMI configuration status.          |

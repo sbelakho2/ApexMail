@@ -542,7 +542,7 @@ fi
 # 2. API key validation
 echo "2. Testing API key validation..."
 API_RESULT=$(curl -s -o /dev/null -w "%{http_code}" \
-  -H "Authorization: Bearer $(cat test-api-key)" \
+  -H "X-API-Key: $(cat test-api-key)" \
   https://api.apexmail.ee/v1/account)
 if [ "$API_RESULT" -eq 200 ]; then
   echo "   ✅ API key validation OK"

@@ -27,7 +27,7 @@ ApexMail uses multiple cryptographic key layers:
 | **API Key Hash Secret** (`API_KEY_HASH_SECRET`) | HMAC key for API key hashing | Environment variable | [`api-server/src/middleware/auth.rs`](../../services/mail-server/crates/api-server/src/middleware/auth.rs) |
 | **DKIM Private Keys** | Email signing | Filesystem / env (`Zeroizing<String>`) | [`outbound-queue/src/dkim.rs`](../../services/mail-server/crates/outbound-queue/src/dkim.rs) |
 | **JWT Signing Keys** | Session tokens | Filesystem (PEM) | [`api-server/src/routes/auth.rs`](../../services/mail-server/crates/api-server/src/routes/auth.rs) |
-| **Webhook Signing Secret** | Webhook payload signing | Environment variable | [`worker-processors/src/webhooks.rs`](../../services/mail-server/crates/worker-processors/src/webhooks.rs) |
+| **Webhook Signing Secret** | Webhook payload signing | Environment variable | [`worker-processors/src/webhook/`](../../services/mail-server/crates/worker-processors/src/webhook/) |
 | **Session Secret** | Session cookie encryption | Environment variable | [`api-server/src/routes/auth.rs`](../../services/mail-server/crates/api-server/src/routes/auth.rs) |
 
 All key material is managed with [`Zeroizing<String>`](https://docs.rs/zeroize) wrappers to ensure memory zeroization on drop. See [`isolation/src/encryption.rs`](../../services/mail-server/crates/isolation/src/encryption.rs) for the envelope encryption implementation.
@@ -79,7 +79,7 @@ Revokes one or more cryptographic keys immediately. Requires `admin` role with `
 
 #### Implementation Location
 
-The endpoint should be implemented in [`api-server/src/routes/admin.rs`](../../services/mail-server/crates/api-server/src/routes/admin.rs) as a new handler:
+The endpoint should be implemented in [`api-server/src/routes/admin/`](../../services/mail-server/crates/api-server/src/routes/admin/) as a new handler:
 
 ```rust
 // Pseudocode for the revocation handler
@@ -220,7 +220,7 @@ pub struct EncryptionMetadata {
    - Identify affected tenants and API keys
    - Check if the compromise extends to derived keys
 
-6. **Escalate to security team** via the incident response process in [`docs/operations/runbooks/incident-response.md`](incident-response.md).
+6. **Escalate to security team** via the incident response process in [`docs/operations/runbooks/incident-response.md`](runbooks/incident-response.md).
 
 ### Phase 3: Recover (10–60 minutes)
 
@@ -294,7 +294,7 @@ When `notify_affected_tenants: true` is set in the revocation request, the syste
 
 1. **Identifies affected tenants** by querying `api_keys` and `encryption_keys` tables for the compromised `key_kid`
 2. **Creates incident record** in the `security_incidents` table
-3. **Queues notifications** via the notification queue (see [`worker-processors/src/notifications.rs`](../../services/mail-server/crates/worker-processors/src/notifications.rs))
+3. **Queues notifications** via the notification queue (see `worker-processors/src/notifications.rs` (planned — does not exist yet))
 4. **Sends email** to tenant billing and technical contacts
 5. **Logs the notification** in the audit log
 

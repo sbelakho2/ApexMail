@@ -59,6 +59,17 @@ pub struct ProtectorConfig {
     /// regardless of their score. 0 uses the default (1 hour).
     pub reputation_stale_after: Duration,
 
+    /// Penalize requests that carry NO TLS fingerprint. Defaults to FALSE:
+    /// no HTTP deployment in this repo populates `tls_fingerprint` (rustls
+    /// does not expose the JA4 inputs), so a missing-fingerprint penalty
+    /// drained EVERY client's reputation by 1 per request and false-blocked
+    /// legitimate traffic within minutes of sustained use — with no
+    /// redemption path in the compiled feature set. Enable only when a
+    /// trusted proxy actually forwards fingerprints AND the challenge
+    /// redemption route is wired; a PRESENT suspicious fingerprint is
+    /// penalized regardless of this flag.
+    pub penalize_missing_fingerprint: bool,
+
     // ─── Session Tracking ─────────────────────────────────────
     /// Session tracking window
     pub session_window: Duration,
@@ -121,6 +132,7 @@ impl Default for ProtectorConfig {
             initial_reputation: 50,
             max_reputation_entries: 250_000,
             reputation_stale_after: Duration::from_secs(3600),
+            penalize_missing_fingerprint: false,
 
             // Session tracking
             session_window: Duration::from_secs(300),

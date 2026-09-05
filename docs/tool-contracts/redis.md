@@ -8,8 +8,8 @@
 | **Role** | Cache, rate limiting, session storage, pub/sub event bus |
 | **Hosting** | Hetzner Cloud ARM server (currently CAX41) (co-located with API) |
 | **Persistence** | RDB snapshots every 60 s if ≥ 1000 keys changed; AOF disabled |
-| **Max Memory** | 2 GB (`maxmemory 2gb`) |
-| **Eviction Policy** | `allkeys-lru` |
+| **Max Memory** | Dev: 512 MB (`REDIS_MAXMEMORY=512mb`) — Prod: 1 GB (`REDIS_MAXMEMORY=1gb` in the prod overlay) |
+| **Eviction Policy** | Dev: `allkeys-lru` — Prod: `volatile-lru` |
 
 ---
 

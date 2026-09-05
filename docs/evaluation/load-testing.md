@@ -25,16 +25,16 @@ This document defines the load-testing strategy for ApexMail. Every release that
 
 | Type | Location |
 |------|----------|
-| Rust unit-level throughput tests | [`services/mail-server/crates/load-tests/tests/`](services/mail-server/crates/load-tests/tests/) |
-| Rust performance benchmarks | [`services/mail-server/crates/perf-tests/`](services/mail-server/crates/perf-tests/) |
-| k6 API journey tests | [`services/mail-server/crates/load-tests/tests/k6/`](services/mail-server/crates/load-tests/tests/k6/) |
-| k6 browser-level SSR tests | [`services/mail-server/crates/load-tests/tests/k6/browser-ssr-test.js`](services/mail-server/crates/load-tests/tests/k6/browser-ssr-test.js) |
-| k6 tracking pixel tests | [`services/mail-server/crates/load-tests/tests/k6/tracking-pixel-test.js`](services/mail-server/crates/load-tests/tests/k6/tracking-pixel-test.js) |
-| k6 billing tests | [`services/mail-server/crates/load-tests/tests/k6/billing-load-test.js`](services/mail-server/crates/load-tests/tests/k6/billing-load-test.js) |
-| Baseline files | [`docs/evaluation/baselines/`](docs/evaluation/baselines/) |
-| Grafana dashboard | [`deploy/grafana/dashboards/load-testing-overview.json`](deploy/grafana/dashboards/load-testing-overview.json) |
+| Rust unit-level throughput tests | [`services/mail-server/crates/load-tests/tests/`](../../services/mail-server/crates/load-tests/tests) |
+| Rust performance benchmarks | [`services/mail-server/crates/perf-tests/`](../../services/mail-server/crates/perf-tests) |
+| k6 API journey tests | [`services/mail-server/crates/load-tests/tests/k6/`](../../services/mail-server/crates/load-tests/tests/k6) |
+| k6 browser-level SSR tests | [`services/mail-server/crates/load-tests/tests/k6/browser-ssr-test.js`](../../services/mail-server/crates/load-tests/tests/k6/browser-ssr-test.js) |
+| k6 tracking pixel tests | [`services/mail-server/crates/load-tests/tests/k6/tracking-pixel-test.js`](../../services/mail-server/crates/load-tests/tests/k6/tracking-pixel-test.js) |
+| k6 billing tests | [`services/mail-server/crates/load-tests/tests/k6/billing-load-test.js`](../../services/mail-server/crates/load-tests/tests/k6/billing-load-test.js) |
+| Baseline files | [`docs/evaluation/baselines/`](baselines) |
+| Grafana dashboard | [`deploy/grafana/dashboards/load-testing-overview.json`](../../deploy/grafana/dashboards/load-testing-overview.json) |
 | CI integration | manual/periodic (archived with the GitHub workflows — see `.github/workflows-archive/` and `ci/README.md` §2) |
-| Docker Compose environment | [`deploy/load-test-infra/docker-compose.yml`](deploy/load-test-infra/docker-compose.yml) |
+| Docker Compose environment | [`deploy/load-test-infra/docker-compose.yml`](../../deploy/load-test-infra/docker-compose.yml) |
 
 ### Running Load Tests
 
@@ -72,12 +72,12 @@ Exercises in-process throughput for core library operations (ID generation, emai
 
 | Scenario | Minimum Throughput | Location |
 |----------|-------------------|----------|
-| ID generation | 10,000 ops/sec | [`load_throughput.rs`](services/mail-server/crates/load-tests/tests/load_throughput.rs) |
-| Email validation | 50,000 ops/sec | [`load_throughput.rs`](services/mail-server/crates/load-tests/tests/load_throughput.rs) |
-| Prediction scoring | 5,000 ops/sec | [`load_throughput.rs`](services/mail-server/crates/load-tests/tests/load_throughput.rs) |
-| Pattern matching | 10,000 ops/sec | [`load_throughput.rs`](services/mail-server/crates/load-tests/tests/load_throughput.rs) |
-| Billing calculations | 50,000 ops/sec | [`load_throughput.rs`](services/mail-server/crates/load-tests/tests/load_throughput.rs) |
-| Trust scoring | 50,000 ops/sec | [`load_throughput.rs`](services/mail-server/crates/load-tests/tests/load_throughput.rs) |
+| ID generation | 10,000 ops/sec | [`load_throughput.rs`](../../services/mail-server/crates/load-tests/tests/load_throughput.rs) |
+| Email validation | 50,000 ops/sec | [`load_throughput.rs`](../../services/mail-server/crates/load-tests/tests/load_throughput.rs) |
+| Prediction scoring | 5,000 ops/sec | [`load_throughput.rs`](../../services/mail-server/crates/load-tests/tests/load_throughput.rs) |
+| Pattern matching | 10,000 ops/sec | [`load_throughput.rs`](../../services/mail-server/crates/load-tests/tests/load_throughput.rs) |
+| Billing calculations | 50,000 ops/sec | [`load_throughput.rs`](../../services/mail-server/crates/load-tests/tests/load_throughput.rs) |
+| Trust scoring | 50,000 ops/sec | [`load_throughput.rs`](../../services/mail-server/crates/load-tests/tests/load_throughput.rs) |
 
 ### 2. API Journey Coverage — k6 HTTP Tests
 
@@ -85,13 +85,13 @@ End-to-end HTTP journey tests exercising all major API endpoints via external bl
 
 | Flow | Endpoints | Weight | k6 Script |
 |------|-----------|--------|-----------|
-| 1. Auth | `POST /v1/auth/login`, `POST /v1/auth/refresh` | 5% | [`full-journey-test.js`](services/mail-server/crates/load-tests/tests/k6/full-journey-test.js) |
-| 2. Email Send | `POST /v1/email/send` | 25% | [`full-journey-test.js`](services/mail-server/crates/load-tests/tests/k6/full-journey-test.js), [`api-load-test.js`](services/mail-server/crates/load-tests/tests/k6/api-load-test.js) |
-| 3. Email List + Analytics | `GET /v1/email`, `GET /v1/analytics/summary` | 20% | [`full-journey-test.js`](services/mail-server/crates/load-tests/tests/k6/full-journey-test.js), [`api-load-test.js`](services/mail-server/crates/load-tests/tests/k6/api-load-test.js) |
-| 4. Template CRUD | `POST/GET/PUT/DELETE /v1/templates` | 20% | [`full-journey-test.js`](services/mail-server/crates/load-tests/tests/k6/full-journey-test.js), [`api-load-test.js`](services/mail-server/crates/load-tests/tests/k6/api-load-test.js) |
-| 5. Suppression Management | `POST/GET/DELETE /v1/suppressions` | 15% | [`full-journey-test.js`](services/mail-server/crates/load-tests/tests/k6/full-journey-test.js) |
-| 6. Domain Management | `GET/POST /v1/domains` | 15% | [`full-journey-test.js`](services/mail-server/crates/load-tests/tests/k6/full-journey-test.js), [`api-load-test.js`](services/mail-server/crates/load-tests/tests/k6/api-load-test.js) |
-| SMTP Submission | `POST /v1/email/send` (SMTP proxy) | — | [`smtp-load-test.js`](services/mail-server/crates/load-tests/tests/k6/smtp-load-test.js) |
+| 1. Auth | `POST /v1/auth/login`, `POST /v1/auth/refresh` | 5% | [`full-journey-test.js`](../../services/mail-server/crates/load-tests/tests/k6/full-journey-test.js) |
+| 2. Email Send | `POST /v1/email/send` | 25% | [`full-journey-test.js`](../../services/mail-server/crates/load-tests/tests/k6/full-journey-test.js), [`api-load-test.js`](../../services/mail-server/crates/load-tests/tests/k6/api-load-test.js) |
+| 3. Email List + Analytics | `GET /v1/email`, `GET /v1/analytics/summary` | 20% | [`full-journey-test.js`](../../services/mail-server/crates/load-tests/tests/k6/full-journey-test.js), [`api-load-test.js`](../../services/mail-server/crates/load-tests/tests/k6/api-load-test.js) |
+| 4. Template CRUD | `POST/GET/PUT/DELETE /v1/templates` | 20% | [`full-journey-test.js`](../../services/mail-server/crates/load-tests/tests/k6/full-journey-test.js), [`api-load-test.js`](../../services/mail-server/crates/load-tests/tests/k6/api-load-test.js) |
+| 5. Suppression Management | `POST/GET/DELETE /v1/suppressions` | 15% | [`full-journey-test.js`](../../services/mail-server/crates/load-tests/tests/k6/full-journey-test.js) |
+| 6. Domain Management | `GET/POST /v1/domains` | 15% | [`full-journey-test.js`](../../services/mail-server/crates/load-tests/tests/k6/full-journey-test.js), [`api-load-test.js`](../../services/mail-server/crates/load-tests/tests/k6/api-load-test.js) |
+| SMTP Submission | `POST /v1/email/send` (SMTP proxy) | — | [`smtp-load-test.js`](../../services/mail-server/crates/load-tests/tests/k6/smtp-load-test.js) |
 
 **Targets:**
 
@@ -115,7 +115,7 @@ High-volume GET requests through the tracking service. Validates throughput, lat
 | Data loss | 0 — every event must reach the database |
 | Error rate | < 0.1% |
 
-**Endpoints under test:** [`tracking-pixel-test.js`](services/mail-server/crates/load-tests/tests/k6/tracking-pixel-test.js)
+**Endpoints under test:** [`tracking-pixel-test.js`](../../services/mail-server/crates/load-tests/tests/k6/tracking-pixel-test.js)
 
 - `GET /t/{tracking_id}` — open pixel (70% weight)
 - `GET /c/{tracking_id}` — click redirect (25% weight)
@@ -136,7 +136,7 @@ Browser-level load for the Rust-served `control-plane` and `web` surfaces behind
 | SSR render p99 | < 1,000 ms |
 | Error rate | < 2% |
 
-**Pages under test:** [`browser-ssr-test.js`](services/mail-server/crates/load-tests/tests/k6/browser-ssr-test.js)
+**Pages under test:** [`browser-ssr-test.js`](../../services/mail-server/crates/load-tests/tests/k6/browser-ssr-test.js)
 
 Control Plane: Dashboard, Analytics, Domains, Templates, Suppressions, Billing, Settings
 Web: Email List, Compose, Analytics, Templates, Settings
@@ -152,7 +152,7 @@ Tests billing calculations under concurrent tenant load. Exercises multi-tenant 
 | Billing calc p99 | < 500 ms |
 | Error rate | < 1% |
 
-**Script:** [`billing-load-test.js`](services/mail-server/crates/load-tests/tests/k6/billing-load-test.js)
+**Script:** [`billing-load-test.js`](../../services/mail-server/crates/load-tests/tests/k6/billing-load-test.js)
 
 ---
 
@@ -200,17 +200,17 @@ For production-scale load testing, provision dedicated Hetzner Cloud ARM servers
 
 ### Baseline Files
 
-Performance baselines are stored at [`docs/evaluation/baselines/`](docs/evaluation/baselines/).
+Performance baselines are stored at [`docs/evaluation/baselines/`](baselines).
 
 | File | Type | Description |
 |------|------|-------------|
-| [`v0.1.json`](docs/evaluation/baselines/v0.1.json) | Full baseline | Initial baseline for all load and performance test scenarios |
-| [`criterion-baseline.json`](docs/evaluation/baselines/criterion-baseline.json) | Microbenchmarks | Criterion benchmark baselines for hot-path operations |
-| [`README.md`](docs/evaluation/baselines/README.md) | Specification | Baseline format specification and schema reference |
+| [`v0.1.json`](baselines/v0.1.json) | Full baseline | Initial baseline for all load and performance test scenarios |
+| [`criterion-baseline.json`](baselines/criterion-baseline.json) | Microbenchmarks | Criterion benchmark baselines for hot-path operations |
+| [`README.md`](baselines/README.md) | Specification | Baseline format specification and schema reference |
 
 ### Baseline Format
 
-Baseline files follow a strict JSON schema. See [`docs/evaluation/baselines/README.md`](docs/evaluation/baselines/README.md) for the full specification.
+Baseline files follow a strict JSON schema. See [`docs/evaluation/baselines/README.md`](baselines/README.md) for the full specification.
 
 Key sections:
 - `meta` — Version, timestamp, environment metadata
@@ -285,7 +285,7 @@ Any metric that degrades by more than **10%** compared to the active baseline tr
 
 Dashboard UID: `load-testing-overview`
 
-Dashboard definition: [`deploy/grafana/dashboards/load-testing-overview.json`](deploy/grafana/dashboards/load-testing-overview.json)
+Dashboard definition: [`deploy/grafana/dashboards/load-testing-overview.json`](../../deploy/grafana/dashboards/load-testing-overview.json)
 
 ### Panels
 
@@ -327,7 +327,7 @@ The tracking service exposes Prometheus metrics on port 9092:
 
 ### load-tests vs perf-tests
 
-Both [`load-tests`](services/mail-server/crates/load-tests/) and [`perf-tests`](services/mail-server/crates/perf-tests/) crates exist with complementary purposes:
+Both [`load-tests`](../../services/mail-server/crates/load-tests) and [`perf-tests`](../../services/mail-server/crates/perf-tests) crates exist with complementary purposes:
 
 | Aspect | `load-tests` | `perf-tests` |
 |--------|-------------|--------------|
@@ -360,12 +360,12 @@ Both crates intentionally avoid linking `api-server`:
 
 | Document | Description |
 |----------|-------------|
-| [`docs/evaluation/baselines/README.md`](docs/evaluation/baselines/README.md) | Baseline format specification |
-| [`load-tests/README.md`](services/mail-server/crates/load-tests/README.md) | Load tests crate documentation |
-| [`perf-tests/README.md`](services/mail-server/crates/perf-tests/README.md) | Performance tests crate documentation |
+| [`docs/evaluation/baselines/README.md`](baselines/README.md) | Baseline format specification |
+| [`load-tests/README.md`](../../services/mail-server/crates/load-tests/README.md) | Load tests crate documentation |
+| [`perf-tests/README.md`](../../services/mail-server/crates/perf-tests/README.md) | Performance tests crate documentation |
 | `deploy/load-test-infra/` + k6 suites | load gate (manual/periodic) |
-| [`deploy/load-test-infra/docker-compose.yml`](deploy/load-test-infra/docker-compose.yml) | Load test Docker Compose environment |
-| [`deploy/load-test-infra/setup.sh`](deploy/load-test-infra/setup.sh) | Environment setup script |
-| [`scripts/compare-baseline.sh`](scripts/compare-baseline.sh) | Baseline comparison tool |
-| [`deploy/grafana/dashboards/load-testing-overview.json`](deploy/grafana/dashboards/load-testing-overview.json) | Grafana dashboard definition |
-| [`docs/deployment/HETZNER_SIMULATION_CHECKLIST.md`](docs/deployment/HETZNER_SIMULATION_CHECKLIST.md) | Production-scale infrastructure guide |
+| [`deploy/load-test-infra/docker-compose.yml`](../../deploy/load-test-infra/docker-compose.yml) | Load test Docker Compose environment |
+| [`deploy/load-test-infra/setup.sh`](../../deploy/load-test-infra/setup.sh) | Environment setup script |
+| [`scripts/compare-baseline.sh`](../../scripts/compare-baseline.sh) | Baseline comparison tool |
+| [`deploy/grafana/dashboards/load-testing-overview.json`](../../deploy/grafana/dashboards/load-testing-overview.json) | Grafana dashboard definition |
+| [`docs/deployment/HETZNER_SIMULATION_CHECKLIST.md`](../deployment/HETZNER_SIMULATION_CHECKLIST.md) | Production-scale infrastructure guide |

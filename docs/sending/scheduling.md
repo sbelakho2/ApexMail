@@ -57,8 +57,8 @@ If sent outside the stream's send window, the email is queued for the next avail
 ## Cancel Scheduled Email
 
 ```bash
-curl -s -X DELETE https://api.apexmail.ee/v1/messages/msg_xxx/schedule \
-  -H "Authorization: Bearer $APEXMAIL_API_KEY" \
+curl -s -X POST https://api.apexmail.ee/v1/messages/msg_xxx/cancel \
+  -H "X-API-Key: $APEXMAIL_API_KEY" \
   | jq .
 ```
 
@@ -76,7 +76,7 @@ Only emails with `status: "scheduled"` can be cancelled.
 
 ```bash
 curl -s "https://api.apexmail.ee/v1/messages?status=scheduled" \
-  -H "Authorization: Bearer $APEXMAIL_API_KEY" \
+  -H "X-API-Key: $APEXMAIL_API_KEY" \
   | jq .
 ```
 

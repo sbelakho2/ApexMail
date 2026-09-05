@@ -571,7 +571,7 @@ Poll `GET /v1/suppressions/export/:export_id` until `status` is `completed` and 
     "status": "completed",
     "format": "csv",
     "total_entries": 8120,
-    "download_url": "https://exports.apexmail.dev/exp_5b6c7d8e.csv?token=...",
+    "download_url": "https://exports.apexmail.ee/exp_5b6c7d8e.csv?token=...",
     "expires_at": "2026-01-26T14:10:00Z",
     "completed_at": "2026-01-25T14:08:00Z"
   }

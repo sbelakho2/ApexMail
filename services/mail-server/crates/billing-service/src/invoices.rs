@@ -132,6 +132,14 @@ pub struct CreateInvoiceInput {
     pub period_end: DateTime<Utc>,
     pub due_at: Option<DateTime<Utc>>,
     pub currency: Option<String>,
+    /// Idempotency marker for the usage sweeps (migration 126): the
+    /// billing-cycle start (overage) or calendar-month start (PAYG) this
+    /// invoice settles. `invoices.overage_period` is written in the SAME
+    /// INSERT as the invoice row, so the check-then-insert idempotency in
+    /// `overage::claim_period_slot` can never observe a marker-less
+    /// invoice. `None` for non-sweep writers (Stripe webhook invoice
+    /// persistence, the admin invoice writer).
+    pub overage_period: Option<DateTime<Utc>>,
 }
 
 pub struct NewLineItem {
@@ -238,13 +246,13 @@ pub async fn create_invoice(
             id, tenant_id, stripe_invoice_id, invoice_number, status,
             currency, amount, subtotal, vat_total, total, line_items,
             issued_at, due_at, period_start, period_end,
-            billing_country, vat_rate,
+            billing_country, vat_rate, overage_period,
             created_at, updated_at
         ) VALUES (
             $1, $2, $3, $4, 'draft',
             $5, $8, $6, $7, $8, $9,
             $10, $11, $12, $13,
-            $14, $15,
+            $14, $15, $16,
             $10, $10
         )
         "#,
@@ -264,6 +272,7 @@ pub async fn create_invoice(
     .bind(input.period_end)
     .bind(addr.country.to_uppercase())
     .bind(vat_rate)
+    .bind(input.overage_period)
     .execute(pool)
     .await
     .map_err(InvoiceError::Db)?;

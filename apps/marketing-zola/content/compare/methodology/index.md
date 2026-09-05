@@ -9,7 +9,7 @@ last_updated = "2026-07-29"
 
 ## Purpose
 
-ApexMail publishes factual, evidence-based comparisons to help developers and procurement teams evaluate transactional email providers. Every claim in every comparison is traceable to a public source.
+ApexMail publishes factual, evidence-based comparisons to help developers and procurement teams evaluate transactional email providers. Claims are based on publicly available documentation and pricing pages at the stated review date.
 
 ## Disclosure Standards
 
@@ -31,27 +31,26 @@ Every comparison page discloses:
 
 ## Evidence Fields per Comparison Row
 
-Every row in a comparison table is backed by:
+What actually backs a comparison row today:
 
-| Evidence field | Required |
-|----------------|----------|
-| Feature name | Yes |
-| ApexMail implementation | Yes |
-| Competitor implementation | Yes |
-| Exact plan or tier | Yes |
-| Official source URL | Yes |
-| Source date | Yes |
-| Verification date | Yes |
-| Reviewer | Yes |
-| Qualification (if any) | Required if claim is qualified |
-| Screenshot or archived evidence | Retained internally |
+| Evidence field | Status |
+|----------------|--------|
+| Feature name | On every row |
+| ApexMail implementation | On every row |
+| Competitor implementation | On every row |
+| Winner callout | Only where a row is objectively decidable; many rows deliberately declare none |
+| Inline source references with URLs | Only on the Amazon SES and Mailgun pages, which carry per-row numbered source links |
+| Verification date | One review date per page (per-page `pricing_as_of`, rendered under the table) |
+| Reviewer | ApexMail marketing engineering (named on the SES/Mailgun source footnotes) |
+
+Rows on pages without inline source links (SendGrid, Postmark, Resend) summarize publicly documented provider behavior as of the page's review date, without per-row citation. Where we cannot verify a competitor figure, the cell says so ("not publicly documented", "see provider pricing") rather than asserting a number.
 
 ## Pricing Comparison Rules
 
 - Pricing comparisons use **equivalent monthly volumes** on both sides.
 - Annual billing is compared only when each provider's current public catalog expressly supports it; no assumed discount is applied.
 - Where competitor pricing varies by volume tier, the tier closest to the stated volume assumption is selected.
-- Currencies are displayed in their native denomination. Where conversion context is useful, the ECB reference rate at the verification date is noted.
+- Prices are shown in EUR, converted from the provider's published list price where a provider publishes only USD (reference rate stated on each page; the provider's native price is shown in parentheses).
 
 ## Feature Comparison Rules
 

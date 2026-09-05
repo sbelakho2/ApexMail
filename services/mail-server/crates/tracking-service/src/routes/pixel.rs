@@ -8,6 +8,7 @@
 //! fire-and-forget in a detached Tokio task — never blocks the response.
 
 use std::net::SocketAddr;
+use std::sync::LazyLock;
 
 use axum::{
     extract::{ConnectInfo, Path, Query, State},
@@ -15,6 +16,7 @@ use axum::{
     response::Response,
 };
 use serde::Deserialize;
+use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 use crate::processor::OpenData;
@@ -22,6 +24,16 @@ use crate::routes::{extract_client_ip, TRANSPARENT_GIF};
 use crate::state::AppState;
 
 const PIXEL_CSP: &str = "default-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'none'; img-src 'self' data:; script-src 'none'; style-src 'none'; object-src 'none'";
+
+/// Bound on concurrently running open-recorder tasks. The pixel endpoint is
+/// fire-and-forget, so without a bound a burst of pixel requests spawns an
+/// unbounded number of recorder tasks (each holding Redis pool resources).
+/// When all permits are taken the excess open is dropped and counted —
+/// recording is best-effort by design and must never amplify load.
+const MAX_CONCURRENT_OPEN_RECORDERS: usize = 64;
+
+static OPEN_RECORDER_SEMAPHORE: LazyLock<Semaphore> =
+    LazyLock::new(|| Semaphore::new(MAX_CONCURRENT_OPEN_RECORDERS));
 
 /// Pre-built response headers for the pixel — computed once; cloned per request.
 /// Shared pixel response headers.
@@ -112,6 +124,18 @@ async fn record_open(tracking_id: String, headers: &HeaderMap, addr: SocketAddr,
 
     let processor = state.processor.clone();
     tokio::spawn(async move {
+        // Bound concurrent recorders: a burst of pixels must not spawn an
+        // unbounded fleet of tasks each holding pool resources. Excess opens
+        // are dropped (counted) — recording is best-effort.
+        let permit = match OPEN_RECORDER_SEMAPHORE.try_acquire() {
+            Ok(permit) => permit,
+            Err(_) => {
+                metrics::counter!("apexmail_tracking_open_recorder_dropped_total").increment(1);
+                warn!("Open-recorder concurrency limit reached; dropping open event");
+                return;
+            }
+        };
+        let _permit = permit;
         if let Err(e) = processor
             .record_open(OpenData {
                 tenant_id: data.tenant_id,

@@ -8,7 +8,7 @@ Send an `Idempotency-Key` header with your request. If ApexMail receives the sam
 
 ```bash
 curl -s -X POST https://api.apexmail.ee/v1/messages \
-  -H "Authorization: Bearer $APEXMAIL_API_KEY" \
+  -H "X-API-Key: $APEXMAIL_API_KEY" \
   -H "Content-Type: application/json" \
   -H "Idempotency-Key: ord_78901_send_confirmation" \
   -d '{
@@ -145,7 +145,7 @@ def send_email_safe(payload):
                 "https://api.apexmail.ee/v1/messages",
                 json=payload,
                 headers={
-                    "Authorization": f"Bearer {API_KEY}",
+                    "X-API-Key": API_KEY,
                     "Idempotency-Key": idempotency_key
                 },
                 timeout=10

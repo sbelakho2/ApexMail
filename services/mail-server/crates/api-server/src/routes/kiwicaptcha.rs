@@ -106,7 +106,52 @@ async fn check_challenge_rate_limit(
 }
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/challenge", post(issue_challenge_handler))
+    Router::new()
+        .route("/challenge", post(issue_challenge_handler))
+        .route("/challenge/cancel", post(cancel_challenge_handler))
+}
+
+// ─── Abandoned-challenge notification ───────────────────────────────
+//
+// The widget fire-and-forget POSTs `{nonce}` here when it abandons a
+// challenge (solver exhaustion / deadline), so the server can retire the
+// record instead of waiting out the TTL. Best-effort by contract (the
+// driver ignores failures and rate-limits itself per nonce): a Redis
+// unavailability is acknowledged, never an error — the record dies with
+// its TTL regardless.
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CancelChallengeRequest {
+    nonce: String,
+}
+
+async fn cancel_challenge_handler(
+    State(state): State<AppState>,
+    Json(body): Json<CancelChallengeRequest>,
+) -> axum::http::StatusCode {
+    // Shape-validate the nonce before it becomes part of a Redis key:
+    // canonical base64url characters, bounded length — anything else is
+    // ignored (the record still expires via TTL).
+    let nonce = body.nonce.trim();
+    let well_formed = (1..=64).contains(&nonce.len())
+        && nonce
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_');
+    if !well_formed {
+        return axum::http::StatusCode::NO_CONTENT;
+    }
+    let key = format!("{KIWI_CHALLENGE_PREFIX}{nonce}");
+    if let Ok(mut conn) = state.redis.get().await {
+        // Best-effort retire: the TTL bounds the record even when the
+        // delete fails, so the result is intentionally dropped.
+        let deleted: Result<(), deadpool_redis::redis::RedisError> =
+            deadpool_redis::redis::AsyncCommands::del(&mut *conn, &key).await;
+        let _ = deleted;
+    } else {
+        tracing::debug!("kiwi cancel: store unavailable (TTL still bounds the record)");
+    }
+    axum::http::StatusCode::NO_CONTENT
 }
 
 // ─── Request / Response ────────────────────────────────────────
@@ -179,7 +224,7 @@ async fn issue_challenge_handler(
     let scope = body.scope.as_str();
     if !matches!(
         scope,
-        "login" | "signup" | "forgot-password" | "reset-password"
+        "login" | "signup" | "forgot-password" | "reset-password" | "cp-login"
     ) {
         return Err(ApiError::Validation(vec!["invalid captcha scope".into()]));
     }

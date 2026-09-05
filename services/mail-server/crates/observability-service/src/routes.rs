@@ -104,7 +104,7 @@ pub fn router(state: AppState) -> Router {
         .route("/metrics", get(metrics))
         .route("/metrics/summary", get(metrics_summary))
         .route("/traces", get(traces_list))
-        .route("/logs", get(logs_query))
+        .route("/logs", get(logs_query).post(logs_ingest))
         .route("/alerts", get(alerts_list).post(alerts_ingest))
         .route("/slos", get(slos_list))
         .route_layer(middleware::from_fn_with_state(
@@ -216,6 +216,38 @@ fn default_alert_status() -> String {
     "firing".to_string()
 }
 
+/// Maximum log entries accepted by one POST /logs ingest call.
+const MAX_LOG_INGEST_BATCH: usize = 1_000;
+
+/// Maximum stored characters per ingested log message (mirrors the default
+/// `logging.max_message_length`; longer messages arrive truncated).
+const MAX_LOG_INGEST_MESSAGE_CHARS: usize = 10_000;
+
+/// A single structured log line submitted to POST /logs by an internal
+/// service.
+///
+/// No `deny_unknown_fields`: internal producers may carry extra fields;
+/// unknown ones are ignored so producer evolution never breaks ingestion.
+/// The level vocabulary is validated server-side — an unknown level rejects
+/// the whole batch rather than silently dropping entries.
+#[derive(Debug, Deserialize)]
+struct LogIngestEntry {
+    level: String,
+    message: String,
+    #[serde(default)]
+    service: Option<String>,
+    #[serde(default)]
+    trace_id: Option<String>,
+    #[serde(default)]
+    span_id: Option<String>,
+    #[serde(default)]
+    context: Option<HashMap<String, serde_json::Value>>,
+    #[serde(default)]
+    metadata: Option<HashMap<String, serde_json::Value>>,
+    #[serde(default)]
+    duration_ms: Option<i64>,
+}
+
 // ---------------------------------------------------------------------------
 // Response types
 // ---------------------------------------------------------------------------
@@ -290,6 +322,88 @@ async fn logs_query(
             .logs
             .query(level_filter, params.service.as_deref(), limit),
     )
+}
+
+/// POST /logs — ingest structured log lines from internal services.
+///
+/// This is the producer for the `observability_log_error_rate` metric and
+/// therefore for the `high_log_error_rate` Critical alert rule: without an
+/// ingest path the aggregator stays empty, the gauge is permanently 0.0,
+/// and the rule can never fire. Token-authenticated like every other
+/// protected route (the same internal-service-token callers already use
+/// for POST /alerts).
+async fn logs_ingest(
+    State(state): State<AppState>,
+    Json(entries): Json<Vec<LogIngestEntry>>,
+) -> Response {
+    if entries.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "log batch must not be empty" })),
+        )
+            .into_response();
+    }
+    if entries.len() > MAX_LOG_INGEST_BATCH {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": format!("log batch exceeds {MAX_LOG_INGEST_BATCH} entries")
+            })),
+        )
+            .into_response();
+    }
+
+    let mut parsed = Vec::with_capacity(entries.len());
+    for entry in entries {
+        let level = match parse_log_level(&entry.level) {
+            Some(level) => level,
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("unknown log level: {:?}", entry.level)
+                    })),
+                )
+                    .into_response()
+            }
+        };
+        let service = entry
+            .service
+            .unwrap_or_else(|| "unknown".to_string());
+        let message = truncate_chars(&entry.message, MAX_LOG_INGEST_MESSAGE_CHARS);
+        parsed.push(crate::types::LogEntry {
+            id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            level,
+            message,
+            service,
+            trace_id: entry.trace_id,
+            span_id: entry.span_id,
+            context: entry.context,
+            error_info: None,
+            duration_ms: entry.duration_ms,
+            metadata: entry.metadata,
+        });
+    }
+
+    let count = parsed.len();
+    for entry in parsed {
+        state.logs.ingest(entry);
+    }
+    (
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({ "accepted": count })),
+    )
+        .into_response()
+}
+
+/// Truncate `text` to at most `max_chars` characters (char-boundary safe).
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        text.to_string()
+    } else {
+        text.chars().take(max_chars).collect()
+    }
 }
 
 async fn alerts_list(State(state): State<AppState>) -> Json<Vec<Alert>> {
@@ -889,5 +1003,113 @@ mod tests {
         };
 
         persist_alerts_to_system_alerts(&None, &[alert]).await;
+    }
+
+    // ── POST /logs ingest (producer for high_log_error_rate) ──────────
+
+    fn log_ingest_request(body: serde_json::Value, token: bool) -> Request<Body> {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/logs")
+            .header("content-type", "application/json");
+        if token {
+            builder = builder.header("x-api-key", "test-token");
+        }
+        builder.body(Body::from(body.to_string())).unwrap()
+    }
+
+    #[tokio::test]
+    async fn log_ingest_feeds_the_aggregator_and_the_error_rate_metric() {
+        // Regression: nothing ever called LogAggregator::ingest, so the
+        // observability_log_error_rate gauge was permanently 0.0 and the
+        // high_log_error_rate Critical rule could never fire.
+        let state = test_state();
+        let app = router(state.clone());
+        let payload = json!([
+            { "level": "info", "service": "api", "message": "request handled" },
+            { "level": "info", "service": "api", "message": "request handled" },
+            { "level": "error", "service": "api", "message": "db timeout" },
+            { "level": "warn", "service": "worker", "message": "slow job",
+              "trace_id": "abc", "duration_ms": 1200, "unexpected": "ignored" }
+        ]);
+
+        let resp = app
+            .clone()
+            .oneshot(log_ingest_request(payload, true))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        // The stored entries feed the error-rate window the alert metric
+        // reads: one Error entry among four ⇒ 0.25.
+        let rate = state.logs.get_error_rate(60);
+        assert!(
+            (rate - 0.25).abs() < 1e-9,
+            "one error among four entries ⇒ 0.25, got {rate}"
+        );
+
+        // And the query surface sees them.
+        let req = Request::builder()
+            .uri("/logs?level=error")
+            .header("x-api-key", "test-token")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json.len(), 1);
+        assert_eq!(json[0]["message"], "db timeout");
+    }
+
+    #[tokio::test]
+    async fn log_ingest_requires_the_service_token() {
+        let app = router(test_state());
+        let resp = app
+            .oneshot(log_ingest_request(json!([{ "level": "info", "message": "x" }]), false))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn log_ingest_rejects_empty_oversized_and_unknown_level_batches() {
+        let app = router(test_state());
+
+        let resp = app
+            .clone()
+            .oneshot(log_ingest_request(json!([]), true))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let oversize: Vec<serde_json::Value> = (0..=MAX_LOG_INGEST_BATCH)
+            .map(|i| json!({ "level": "info", "message": format!("entry {i}") }))
+            .collect();
+        let resp = app
+            .clone()
+            .oneshot(log_ingest_request(json!(oversize), true))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        let resp = app
+            .oneshot(log_ingest_request(
+                json!([{ "level": "loud", "message": "x" }]),
+                true,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn truncate_chars_is_char_boundary_safe() {
+        assert_eq!(truncate_chars("hello", 10), "hello");
+        let cjk = "你好世界";
+        assert_eq!(truncate_chars(cjk, 2), "你好");
+        assert_eq!(truncate_chars("é€", 1), "é");
     }
 }

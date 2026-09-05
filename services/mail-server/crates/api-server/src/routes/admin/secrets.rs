@@ -33,10 +33,16 @@ struct SecretRow {
     name: String,
     #[sqlx(rename = "type")]
     secret_type: String,
-    description: String,
+    description: Option<String>,
     rotation_policy: String,
-    status: String,
-    access_count: i64,
+    /// The canonical schema (migration 038) has no lifecycle `status`
+    /// column — revoked secrets leave this table for `secrets_archive`.
+    /// `None` is the honest value; the previous `'active'` literal asserted
+    /// a fact nothing in the database backs.
+    status: Option<String>,
+    /// No access counter exists on the canonical table — `None`, never a
+    /// fabricated zero that reads as "never accessed but tracked".
+    access_count: Option<i64>,
     last_accessed: Option<chrono::DateTime<chrono::Utc>>,
     last_rotated: Option<chrono::DateTime<chrono::Utc>>,
     expires_at: Option<chrono::DateTime<chrono::Utc>>,
@@ -51,10 +57,10 @@ pub struct SecretResponse {
     pub name: String,
     #[serde(rename = "type")]
     pub secret_type: String,
-    pub description: String,
+    pub description: Option<String>,
     pub rotation_policy: String,
-    pub status: String,
-    pub access_count: i64,
+    pub status: Option<String>,
+    pub access_count: Option<i64>,
     pub last_accessed: Option<String>,
     pub last_rotated: Option<String>,
     pub expires_at: Option<String>,
@@ -94,16 +100,18 @@ fn default_limit() -> i64 {
     50
 }
 
-/// Canonical list query: `description`/`status`/`access_count`/`last_accessed`
-/// are presentation aliases — the canonical table stores rotation_schedule and
-/// rotation timestamps instead.
+/// Canonical list query: `description` comes from the stored
+/// `rotation_schedule` JSONB (where create_secret puts it); the fields the
+/// canonical table does not carry (`status`, `access_count`,
+/// `last_accessed`) surface as honest SQL NULLs — never fabricated
+/// constants that assert facts the database cannot back.
 fn build_list_secrets_sql() -> &'static str {
     // RS-050: Scoped by tenant_id to prevent cross-tenant secret exposure.
     "SELECT id, name, type,
-            '' AS description,
+            rotation_schedule->>'description' AS description,
             COALESCE(rotation_schedule->>'policy', 'manual') AS rotation_policy,
-            'active' AS status,
-            0::bigint AS access_count,
+            NULL::text AS status,
+            NULL::bigint AS access_count,
             NULL::timestamptz AS last_accessed,
             last_rotated_at AS last_rotated, expires_at,
             created_at, updated_at
@@ -112,16 +120,20 @@ fn build_list_secrets_sql() -> &'static str {
      LIMIT $1 OFFSET $2"
 }
 
+/// Actor-attributed secret audit (P2-2): secret lifecycle mutations record
+/// the acting operator's tenant AND user id, not `None, None`.
 async fn log_secret_audit(
-    db: &sqlx::PgPool,
+    state: &AppState,
+    auth: &AuthUser,
     action: &str,
     secret_id: &str,
     metadata: serde_json::Value,
 ) {
-    crate::audit_log::insert_audit_log_best_effort(
-        db,
-        None,
-        None,
+    crate::audit_log::insert_audit_log_best_effort_with_env(
+        &state.db,
+        state.config.environment.is_production(),
+        Some(auth.tenant_id.as_str()),
+        auth.user_id.as_deref(),
         action,
         "secret",
         Some(secret_id),
@@ -228,30 +240,47 @@ async fn create_secret(
 
     let id = apexmail_lib::id::generate_id("sec", 22);
     let created_by = auth.user_id.clone().unwrap_or_else(|| "system".to_string());
-    let encrypted_value = apexmail_lib::secret_at_rest::encrypt_at_rest(
-        &generate_secret_value(),
-        b"apexmail.secrets",
-    )
-    .unwrap_or_else(|_| {
-        // Encryption key unset (dev mode): store the plaintext marker.
-        format!("plain:{}", generate_secret_value())
-    });
+    // Production refuses the plaintext fallback LOUDLY (audit P1): an unset
+    // encryption key used to silently store `plain:`-marked secrets —
+    // at-rest protection that exists only in the label. Non-production
+    // keeps the marked fallback with a warning so local flows stay usable.
+    let encrypted_value =
+        match apexmail_lib::secret_at_rest::encrypt_at_rest(&generate_secret_value(), b"apexmail.secrets") {
+            Ok(encrypted) => encrypted,
+            Err(error) => {
+                if state.config.environment.is_production() {
+                    tracing::error!(
+                        error = %error,
+                        "secret encryption key unset in production — refusing plaintext fallback"
+                    );
+                    return Err(ApiError::Internal(
+                        "secret encryption is not configured; refusing to store plaintext".into(),
+                    ));
+                }
+                tracing::warn!(
+                    error = %error,
+                    "secret encryption key unset (non-production) — storing plaintext-marked secret"
+                );
+                format!("plain:{}", generate_secret_value())
+            }
+        };
     let next_rotation_at =
         next_rotation_offset(&body.rotation_policy).map(|d| chrono::Utc::now() + d);
     let rotation_schedule =
         serde_json::json!({ "policy": body.rotation_policy, "description": body.description });
 
-    // RS-050: Include tenant_id from authenticated session in INSERT.
+    // RS-050: Include tenant_id from authenticated session in INSERT. The
+    // RETURNING shape mirrors the honest list query (no fabricated columns).
     let row = sqlx::query_as::<_, SecretRow>(
         "INSERT INTO secrets (
             id, tenant_id, name, type, encrypted_value, version, rotation_schedule,
             last_rotated_at, next_rotation_at, created_by, created_at, updated_at
          ) VALUES ($1, $2, $3, $4, $5, 1, $6, NOW(), $7, $8, NOW(), NOW())
          RETURNING id, name, type,
-                   '' AS description,
+                   rotation_schedule->>'description' AS description,
                    COALESCE(rotation_schedule->>'policy', 'manual') AS rotation_policy,
-                   'active' AS status,
-                   0::bigint AS access_count,
+                   NULL::text AS status,
+                   NULL::bigint AS access_count,
                    NULL::timestamptz AS last_accessed,
                    last_rotated_at AS last_rotated, expires_at,
                    created_at, updated_at",
@@ -268,7 +297,8 @@ async fn create_secret(
     .await?;
 
     log_secret_audit(
-        &state.db,
+        &state,
+        &auth,
         "control_plane.secret.created",
         &row.id,
         serde_json::json!({ "type": body.secret_type, "name": body.name }),
@@ -326,7 +356,8 @@ async fn update_secret(
             match row {
                 Some((id, last_rotated)) => {
                     log_secret_audit(
-                        &state.db,
+                        &state,
+                        &auth,
                         "control_plane.secret.rotated",
                         &body.id,
                         serde_json::json!({}),
@@ -386,7 +417,8 @@ async fn archive_and_delete(
     tx.commit().await?;
 
     log_secret_audit(
-        &state.db,
+        state,
+        auth,
         &format!("control_plane.secret.{reason}"),
         id,
         serde_json::json!({}),

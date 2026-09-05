@@ -87,7 +87,8 @@ declare -A BUILD_TARGETS=(
     [status-server]=auth-server
 )
 ALL_IMAGES="${GHCR_NS}/marketing:latest ${GHCR_NS}/tracking-service:latest
-            ${GHCR_NS}/postgres-backup:latest ${GHCR_NS}/clickhouse-backup:latest"
+            ${GHCR_NS}/postgres-backup:latest ${GHCR_NS}/clickhouse-backup:latest
+            ${GHCR_NS}/redis-backup:latest ${GHCR_NS}/analytics-backup:latest"
 for s in "${ALL_SERVICES[@]}"; do ALL_IMAGES+=" ${GHCR_NS}/${s}:latest"; done
 
 # Services with separate Dockerfiles
@@ -207,6 +208,34 @@ else
     warn "No previous images found — this looks like a first deploy; no rollback baseline exists."
 fi
 
+# ── Step 1.7: TLS renewal auto-restart watcher (systemd path unit) ───────────
+step "Step 1.7: TLS renewal auto-restart watcher"
+
+# Audit 1.9 (cert renewal gap): mta + imap-server load certs at startup
+# only. The certbot loop drops renewal-restart-flag after each renewal;
+# this systemd path-unit watcher restarts the two containers exactly once
+# per renewal (see deploy/hardening/tls-renew-restart.sh). Installed here —
+# not in hetzner-bootstrap.sh — because the unit files live in the repo
+# tree that is synced to the deploy dir. Non-fatal for non-root/manual runs
+# (the certbot loop still logs the manual restart command as before).
+if [[ $EUID -eq 0 ]] && command -v systemctl >/dev/null 2>&1; then
+    TLS_RENEW_FLAG="${NGINX_SSL_DIR}/renewal-restart-flag"
+    install -m 0755 "${DEPLOY_DIR}/deploy/hardening/tls-renew-restart.sh" \
+        /usr/local/sbin/apexmail-tls-renew-restart.sh
+    for _unit in apexmail-tls-renew-restart.service apexmail-tls-renew-restart.path; do
+        sed -e "s|@FLAG_PATH@|${TLS_RENEW_FLAG}|g" \
+            -e "s|@DEPLOY_DIR@|${DEPLOY_DIR}|g" \
+            "${DEPLOY_DIR}/deploy/hardening/${_unit}" \
+            > "/etc/systemd/system/${_unit}"
+    done
+    systemctl daemon-reload
+    systemctl enable --now apexmail-tls-renew-restart.path
+    log "TLS renewal auto-restart watcher active (watching ${TLS_RENEW_FLAG})."
+else
+    warn "not root / no systemd — TLS renewal auto-restart watcher NOT installed."
+    warn "Renewals will log the manual restart command instead (audit 1.9 regression)."
+fi
+
 # ── Step 2: Build Rust workspace ─────────────────────────────────────────────
 if ! $NO_BUILD; then
     step "Step 2: Build Rust workspace"
@@ -236,7 +265,7 @@ if ! $NO_BUILD; then
 
     # Build services with separate Dockerfiles (marketing, tracking,
     # backup sidecars).
-    for separate_svc in marketing tracking-service postgres-backup clickhouse-backup; do
+    for separate_svc in marketing tracking-service postgres-backup clickhouse-backup redis-backup analytics-backup; do
         should_build=false
         if [[ -z "$SERVICES_TO_BUILD" ]] || echo "$SERVICES_TO_BUILD" | grep -q "$separate_svc"; then
             should_build=true
@@ -267,6 +296,18 @@ if ! $NO_BUILD; then
                     log "Building: ${GHCR_NS}/clickhouse-backup:latest"
                     docker build --tag "${GHCR_NS}/clickhouse-backup:latest" \
                         -f "${DEPLOY_DIR}/deploy/hardening/Dockerfile.clickhouse-backup" \
+                        "${DEPLOY_DIR}/deploy/hardening" 2>&1 | tail -2
+                    ;;
+                redis-backup)
+                    log "Building: ${GHCR_NS}/redis-backup:latest"
+                    docker build --tag "${GHCR_NS}/redis-backup:latest" \
+                        -f "${DEPLOY_DIR}/deploy/hardening/Dockerfile.redis-backup" \
+                        "${DEPLOY_DIR}/deploy/hardening" 2>&1 | tail -2
+                    ;;
+                analytics-backup)
+                    log "Building: ${GHCR_NS}/analytics-backup:latest"
+                    docker build --tag "${GHCR_NS}/analytics-backup:latest" \
+                        -f "${DEPLOY_DIR}/deploy/hardening/Dockerfile.analytics-backup" \
                         "${DEPLOY_DIR}/deploy/hardening" 2>&1 | tail -2
                     ;;
             esac
@@ -366,7 +407,8 @@ verify_stack() {
     local services="api-server mta imap-server mailstore worker enterprise tracking
                     observability marketing status-server billing-service sales-autopilot
                     compliance
-                    postgres-backup clickhouse-backup nginx certbot postgres redis clickhouse
+                    postgres-backup clickhouse-backup redis-backup analytics-backup
+                    nginx certbot postgres redis clickhouse
                     prometheus grafana loki alertmanager tempo otel-collector
                     node-exporter blackbox-exporter postgres-exporter redis-exporter
                     clickhouse-exporter synthetic-monitor"

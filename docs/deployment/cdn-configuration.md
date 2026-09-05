@@ -249,7 +249,7 @@ Expires: 0
 
 ## 4. Helm Chart Ingress Configuration
 
-The ApexMail ingress template at [`deploy/helm/apexmail/templates/ingress.yaml`](../../deploy/helm/apexmail/templates/ingress.yaml) supports CDN integration.
+The ApexMail reverse proxy ([`deploy/nginx/nginx.conf`](../../deploy/nginx/nginx.conf)) is the CDN-facing origin and supports CDN integration.
 
 ### 4.1 Values Configuration
 
@@ -326,7 +326,7 @@ spec:
                 name: api-server
                 port:
                   number: 3000
-          - path: /v1/health
+          - path: /health/live
             pathType: Prefix
             backend:
               service:

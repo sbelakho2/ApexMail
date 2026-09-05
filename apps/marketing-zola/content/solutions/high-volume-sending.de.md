@@ -19,7 +19,7 @@ Bei hohen Volumina haben kleine Zustellbarkeitsänderungen große Umsatzauswirku
 ## Kernproblem
 
 - Gemeinsam genutzte IP-Pools akkumulieren Reputationsrisiken anderer Absender.
-- Warteschlangen-Gegendruck bei Anbieter-Drosselung beeinträchtigt ohne Isolation alle Streams.
+- Warteschlangen-Gegendruck bei Anbieter-Drosselung beeinträchtigt ohne Isolation den gesamten Versand.
 - Manuelles IP-Warm-up ist fehleranfällig und langsam.
 - Ratenbegrenzungen in Standard-Tarifen begrenzen den Durchsatz unterhalb der geschäftlichen Anforderungen.
 - Ohne dedizierte Infrastruktur konkurriert Spitzenverkehr mit anderen Kunden.
@@ -28,8 +28,8 @@ Bei hohen Volumina haben kleine Zustellbarkeitsänderungen große Umsatzauswirku
 
 - **Dedizierte IPs** — Freigegebenes Add-on ab Pro; 1 enthalten ab Growth, 3 ab Scale, 10 ab Enterprise. Vertraglich vereinbarte Bereitstellungsoptionen werden separat geprüft.
 - **Automatisches Warm-Up** — Allmählicher Volumenanstieg nach anbieterspezifischen Zeitplänen. Überwachung auf Reputationssignale. Manuelles Override verfügbar.
-- **Warteschlangen-Priorisierung** — Prioritätskonfiguration je Stream. Transaktionale Streams werden vor Rundsendungen verarbeitet. Time-to-Inbox-Ziele werden überwacht.
-- **Batch-API** (`POST /v1/emails/batch`) — Reichen Sie bis zu 1.000 E-Mails pro Anfrage ein. Geringerer Aufwand pro Nachricht als bei einzelnen API-Aufrufen.
+- **Warteschlangen-Priorisierung** — Transaktionaler Verkehr wird bei Last vor Massensendungen priorisiert. Time-to-Inbox-Ziele werden überwacht.
+- **Batch-API** (`POST /v1/messages/batch`) — Reichen Sie bis zu 100 Nachrichten pro Anfrage ein. Geringerer Aufwand pro Nachricht als bei einzelnen API-Aufrufen.
 - **Ratenbegrenzungen** — Limits werden je API-Key und Tarif durchgesetzt; siehe die aktuelle API-Dokumentation für die öffentlichen Limits.
 - **Vertragliche SLA** — Scale und Enterprise enthalten Tarif-SLA-Bedingungen; nicht standardisierte Bereitstellungen erfordern eine separate Vertragsprüfung.
 
@@ -38,8 +38,8 @@ Bei hohen Volumina haben kleine Zustellbarkeitsänderungen große Umsatzauswirku
 1. Fordern Sie die Prüfung der Eignung für dedizierte IPs beim Support oder Vertrieb an.
 2. Nach Freigabe werden dedizierte IPs bereitgestellt und Ihrem Konto zugewiesen.
 3. Das automatische Warm-up beginnt. Verfolgen Sie den Warm-up-Fortschritt im Dashboard.
-4. Weisen Sie dedizierte IPs transaktionalen Streams für die Reputationsisolation zu.
-5. Konfigurieren Sie Warteschlangen-Priorität und Parallelitäts-Limits je Stream.
+4. Weisen Sie dedizierte IPs Ihrem transaktionalen Versand zu, um die Reputation zu isolieren.
+5. Konfigurieren Sie Warteschlangen-Priorität und Parallelitäts-Limits.
 6. Nutzen Sie die Batch-API für Szenarien mit hohem Durchsatz.
 7. Überwachen Sie Zustell-Latenz, Warteschlangentiefe und anbieterspezifische Annahmequoten.
 
@@ -47,10 +47,9 @@ Bei hohen Volumina haben kleine Zustellbarkeitsänderungen große Umsatzauswirku
 
 | Endpunkt | Beschreibung |
 |---|---|
-| `POST /v1/emails` | Einzelne E-Mail senden |
-| `POST /v1/emails/batch` | Bis zu 1.000 E-Mails in einer Anfrage senden |
+| `POST /v1/messages` | Einzelne E-Mail senden |
+| `POST /v1/messages/batch` | Bis zu 100 Nachrichten in einer Anfrage senden |
 | `GET /v1/dedicated-ips` | Dedizierte IPs und Warm-up-Status auflisten |
-| `GET /v1/streams/:id/stats` | Durchsatz- und Latenzmetriken je Stream |
 | `GET /v1/analytics/delivery` | Aggregierte Zustellmetriken nach Anbieter |
 
 ## Erforderlicher Tarif
@@ -64,7 +63,7 @@ Bei hohen Volumina haben kleine Zustellbarkeitsänderungen große Umsatzauswirku
 ## Sicherheitshinweise
 
 - Die Reputation dedizierter IPs wird ausschließlich für Ihr Konto verwaltet. Änderungen erfordern die Zustimmung des Kontoinhabers.
-- Batch-API-Anfragen sind atomar: Alle Nachrichten eines Batches werden gemeinsam erfolgreich oder abgelehnt (keine teilweise Ausführung).
+- Jede Nachricht in einem Batch wird einzeln validiert; die API meldet die Annahme je Nachricht.
 - Warteschlangentiefe und Verarbeitungs-Latenz sind in Echtzeit über Dashboard und API sichtbar.
 - Rate-Limit-Header werden mit jeder Antwort zurückgegeben. Überwachen Sie `X-RateLimit-Remaining`, um Drosselung zu vermeiden.
 
@@ -72,7 +71,7 @@ Bei hohen Volumina haben kleine Zustellbarkeitsänderungen große Umsatzauswirku
 
 - Die Eignung für dedizierte IPs erfordert eine Prüfung der Versandhistorie. Neue Konten starten auf gemeinsam genutzten IPs.
 - Das IP-Warm-up dauert je nach Zielvolumen und Anbieter-Richtlinien in der Regel 2-4 Wochen.
-- Die maximale Batch-Größe beträgt 1.000 E-Mails pro Anfrage. Größere Volumina erfordern mehrere Batch-Aufrufe.
+- Die maximale Batch-Größe beträgt 100 Nachrichten pro Anfrage. Größere Volumina erfordern mehrere Batch-Aufrufe.
 - Der Durchsatz bei Anbieter-Ausfällen hängt von der Konfiguration der Warteschlangen-Wiederholungen und der Wiederherstellungszeit des Anbieters ab.
 
 ## Empfohlener nächster Schritt

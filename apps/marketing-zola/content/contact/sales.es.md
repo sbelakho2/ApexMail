@@ -13,10 +13,10 @@ Para compras empresariales, revisiones de seguridad o planificación de nube pri
 
 ## Formulario de consulta de ventas
 
-<div id="enquiry-submitted" class="form-banner form-banner--success" role="status">
+<div id="enquiry-submitted" class="form-banner form-banner--success" role="status" hidden>
   <p><strong>Gracias — su solicitud se ha recibido correctamente.</strong> Nuestro equipo la revisa y responde en un plazo de 2 días laborables.</p>
 </div>
-<div id="enquiry-error" class="form-banner form-banner--error" role="alert">
+<div id="enquiry-error" class="form-banner form-banner--error" role="alert" hidden>
   <p><strong>No se ha podido aceptar su solicitud.</strong> Compruebe los campos obligatorios (se necesita un correo electrónico profesional válido) e inténtelo de nuevo.</p>
 </div>
 <form id="sales-contact-form" class="space-y-6 max-w-2xl" method="POST" action="https://api.apexmail.ee/v1/contact/sales">
@@ -151,7 +151,7 @@ Para compras empresariales, revisiones de seguridad o planificación de nube pri
     <select id="security-review" name="security_review_needs"
       class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
       <option value="" selected>Seleccione el nivel de revisión</option>
-      <option value="standard">Estándar — Los paquetes SIG/CAIQ/HECVAT son suficientes</option>
+      <option value="standard">Estándar — cuestionario de seguridad respondido caso por caso con material de revisión actual (ningún paquete SIG/CAIQ/HECVAT estandarizado forma parte del producto)</option>
       <option value="detailed">Detallada — Se requiere un cuestionario de seguridad personalizado</option>
       <option value="pen_test">Se requiere informe de test de intrusión</option>
       <option value="on_site">Se requiere auditoría presencial o revisión de arquitectura</option>

@@ -1,226 +1,120 @@
 # Network Partition Runbook
 
-**Severity:** SEV1–SEV2 (partial or full region isolation)
+**Severity:** SEV1–SEV2 (host cut off from the internet, or internal Docker
+network segmentation between services)
 
-## Table of Contents
-- [Architecture Context](#architecture-context)
-- [Symptoms](#symptoms)
-- [Initial Diagnosis](#initial-diagnosis)
-- [Recovery Procedures](#recovery-procedures)
-  - [Procedure 1: Single Service Partition](#procedure-1-single-service-partition)
-  - [Procedure 2: Cross-Region Partition (Finland ↔ Germany)](#procedure-2-cross-region-partition-finland--germany)
-  - [Procedure 3: Full Region Isolation](#procedure-3-full-region-isolation)
-- [Post-Recovery Verification](#post-recovery-verification)
-- [Prevention](#prevention)
-
-## Architecture Context
-
-ApexMail runs across two Hetzner regions (Finland primary, Germany standby) with:
-- **WireGuard tunnel** for cross-region PostgreSQL streaming replication
-- **Redis replication** across regions for cache and circuit breaker state
-- **Zone.ee DNS** for regional failover routing
-- **Kubernetes Network Policies** for intra-service communication
-- **Circuit breakers** with Redis-backed state to prevent cascading failures
+> **Reality note (2026-09-05):** earlier versions of this runbook described
+> cross-region partitions between Finland and Germany over WireGuard with
+> Kubernetes tooling. None of that exists — production is a **single Hetzner
+> host (Finland)** running Docker Compose, so a "network partition" here means
+> either (a) the host lost internet connectivity, (b) an internal Docker
+> network between compose services broke, or (c) DNS resolution failed. There
+> is no region to fail over to; see
+> [disaster-recovery.md](../disaster-recovery.md).
 
 ## Symptoms
 
-- Alerts: `PodNetworkUnavailable`, `ApiHighLatencyP99` (timeout errors), replication lag spike
-- Application errors: `connection timeout`, `connection reset by peer`, `i/o timeout`
-- Metrics: dropped packets on WireGuard interface, TCP retransmit rate > 5%
-- Users: intermittent errors, partial data visibility
+- External probes fail (`make verify` red) while the host itself is up
+- Service logs show `connection timeout`, `connection reset by peer`, `i/o timeout` against postgres/redis/clickhouse
+- Healthchecks flip unhealthy (`docker compose ps` shows unhealthy while the process runs)
+- Mail flow stalls: MTA cannot reach the internet (no MX delivery), or api-server cannot reach postgres
 
 ## Initial Diagnosis
 
-1. **Check cross-region connectivity:**
+All commands run on the deploy host (`/opt/apexmail/src`).
+
+1. **Check host internet connectivity:**
    ```bash
-   # Ping WireGuard tunnel endpoint
-   kubectl exec -n apexmail deploy/api-server -- ping -c 5 <standby-wireguard-ip>
-   
-   # Check WireGuard interface status
-   kubectl exec -n apexmail deploy/wireguard -- wg show
+   curl -sf --connect-timeout 5 https://1.1.1.1 > /dev/null && echo egress-ok || echo egress-down
+   ping -c 3 1.1.1.1
    ```
 
-2. **Check Kubernetes network policies:**
+2. **Check internal Docker networks:**
    ```bash
-   kubectl get networkpolicies -n apexmail
-   kubectl describe networkpolicies -n apexmail
+   docker network ls
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env ps
+   # The stack spans dedicated networks (apexmail_backend, apexmail_data_internal,
+   # apexmail_backup_egress, monitoring); a service attached to the wrong
+   # network after a partial recreate is a classic self-inflicted partition.
+   docker inspect <container> --format '{{json .NetworkSettings.Networks}}' | jq 'keys'
    ```
 
-3. **Check DNS resolution:**
+3. **Check service-to-dependency connectivity:**
    ```bash
-   kubectl exec -n apexmail deploy/api-server -- nslookup postgres.apexmail.svc.cluster.local
-   kubectl exec -n apexmail deploy/api-server -- nslookup api.apexmail.ee
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env \
+     exec api-server sh -c 'wget -q -T 5 -O /dev/null http://postgres:5432 && echo pg-ok'
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env \
+     exec api-server sh -c 'redis-cli -h redis ping'
    ```
 
-4. **Check circuit breaker states:**
+4. **Check DNS resolution** (both external and Docker's internal DNS):
    ```bash
-   # Circuit breaker keys stored in Redis
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli KEYS "circuit-breaker:*"
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli GET "circuit-breaker:postgres-primary"
-   kubectl exec -n apexmail deploy/redis-master -- redis-clI GET "circuit-breaker:redis-standby"
+   docker compose ... exec api-server sh -c 'nslookup postgres; nslookup api.apexmail.ee'
    ```
 
-5. **Check replication lag:**
+5. **Check the host firewall** (UFW is configured by the bootstrap script):
    ```bash
-   kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
-     "SELECT pid, application_name, state, sync_state,
-             pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) AS lag_bytes
-      FROM pg_stat_replication;"
+   ufw status verbose
+   iptables -L DOCKER-USER -n -v | head -20
    ```
 
 ## Recovery Procedures
 
-### Procedure 1: Single Service Partition
+### Procedure 1: Internal Partition (service cannot reach a dependency)
 
-A single service (e.g., `api-server`) cannot reach a dependency.
-
-1. **Identify which service is partitioned:**
+1. Identify the partitioned service from healthchecks/logs.
+2. Restart it (re-establishes DNS + network attachment):
    ```bash
-   # Check connectivity from each service to its dependencies
-   kubectl exec -n apexmail deploy/api-server -- curl -sf --connect-timeout 5 http://postgres:5432
-   kubectl exec -n apexmail deploy/api-server -- curl -sf --connect-timeout 5 http://redis-master:6379
+   docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env \
+     up -d --force-recreate <service>
    ```
+3. If a whole internal network vanished or a manual `docker run` interfered,
+   recreate the stack (`docker compose ... up -d`); the deploy script aborts
+   on conflicting non-compose containers for exactly this reason.
+4. Verify with `/health/ready` on the affected service.
 
-2. **Restart the affected pods** (may re-establish connections):
-   ```bash
-   kubectl rollout restart deployment/api-server -n apexmail
-   ```
+### Procedure 2: Host Egress Loss (host online internally, internet down)
 
-3. **Check if NetworkPolicy is blocking:**
-   ```bash
-   # Check if there are dropped packets
-   kubectl exec -n apexmail deploy/api-server -- iptables -L -n -v 2>/dev/null | grep DROP
-   ```
+1. Confirm the scope: Hetzner status page, `ufw status`, uplink errors
+   (`ip -s link show`).
+2. If UFW/iptables rules were changed (e.g. a blocked OUTPUT chain), restore
+   the bootstrap-script baseline (`deploy/scripts/hetzner-bootstrap.sh`).
+3. If it is a Hetzner-side outage: nothing to do but wait; in-host services
+   keep running, outbound mail retries on the queue's retry schedule, and
+   Let's Encrypt renewal retries later.
+4. If egress is down for longer than the mail queue's retry window, expect
+   deferred/bounced mail once TTLs expire; watch the queue depth metrics.
 
-4. **Temporarily relax NetworkPolicy** for diagnosis:
-   ```bash
-   kubectl label pod -n apexmail -l app=api-server network-policy=debug
-   ```
+### Procedure 3: Host Unreachable Externally (nothing responds)
 
-### Procedure 2: Cross-Region Partition (Finland ↔ Germany)
-
-The WireGuard tunnel between regions is down.
-
-1. **Check WireGuard status on both sides:**
-   ```bash
-   # Finland
-   kubectl exec -n apexmail deploy/wireguard-fi -- wg show
-   # Germany
-   kubectl exec -n apexmail deploy/wireguard-de -- wg show
-   ```
-
-2. **Restart WireGuard on both sides:**
-   ```bash
-   kubectl rollout restart deploy/wireguard-fi -n apexmail
-   kubectl rollout restart deploy/wireguard-de -n apexmail
-   ```
-
-3. **Check firewall rules** (Hetzner Cloud Firewall):
-   ```bash
-   # Verify UDP port 51820 is open on both sides
-   # Check for any Hetzner Cloud Firewall changes
-   # Review: https://console.hetzner.cloud/firewall
-   ```
-
-4. **If tunnel cannot be restored, enter failover state:**
-   Promote the Germany replica (the `FailoverService` state machine in the
-   `ha` crate coordinates this when deployed; manual compose equivalent):
-   ```bash
-   # On the Germany host
-   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres \
-     psql -U apexmail -c "SELECT pg_promote();"
-   ```
-
-5. **While partitioned, both regions operate independently:**
-   - Finland continues with local PostgreSQL
-   - Germany processes writes on promoted primary
-   - Data sync must be resolved when partition heals
-
-### Procedure 3: Full Region Isolation
-
-The entire Finland (primary) region is isolated from the internet.
-
-1. **Check external connectivity:**
-   ```bash
-   # From a Finland node
-   kubectl exec -n apexmail deploy/api-server -- curl -sf https://api.apexmail.ee/v1/health
-   # From external monitoring (e.g., Grafana, external probes)
-   curl -sf https://api.apexmail.ee/v1/health
-   ```
-
-2. **If Finland is isolated but Germany is reachable:**
-   - Execute failover to Germany as per Procedure 2 in disaster-recovery.md
-   - Update DNS to point to Germany ingress IP
-   ```bash
-   # On the Germany host (manual path; the ha crate's FailoverService
-   # provides the coordinated version)
-   docker compose -f docker-compose.yml -f docker-compose.prod.yml exec postgres \
-     psql -U apexmail -c "SELECT pg_promote();"
-   ```
-
-3. **If Germany is isolated but Finland is healthy:**
-   - Verify replication is paused (not failing)
-   - Check circuit breaker: Germany should be marked as `half-open`
-   - Monitor for partition healing — replication resumes automatically
-   ```bash
-   # Set Germany circuit breaker to half-open
-   kubectl exec -n apexmail deploy/redis-master -- redis-cli SET "circuit-breaker:germany" "half-open" EX 300
-   ```
-
-4. **During partition, consider degraded mode:**
-   - Disable non-critical cross-region features (cross-region analytics queries)
-   - Increase circuit breaker timeouts to avoid premature tripping
-   - Alert on-call infrastructure team with timeline
+This is a host outage, not a partition — follow the DR procedure:
+[disaster-recovery.md](../disaster-recovery.md) (host rebuild + backup
+restore). There is no standby host to fail over to.
 
 ## Post-Recovery Verification
 
-After the network partition heals:
-
 ```bash
-# 1. Verify WireGuard tunnel
-kubectl exec -n apexmail deploy/wireguard-fi -- wg show | grep -c "latest handshake"
-# Should be > 0 (handshake completed)
+# 1. All services healthy
+docker compose -f docker-compose.yml -f docker-compose.prod.yml --env-file .env ps
 
-# 2. Verify replication resumed
-kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
-  "SELECT pg_wal_lsn_diff(pg_current_wal_lsn(), replay_lsn) AS lag_bytes
-   FROM pg_stat_replication;"
-# Should be < 100MB
+# 2. Public endpoints
+make verify
 
-# 3. Verify data consistency (compare checksums)
-kubectl exec -n apexmail deploy/postgres -- psql -U apexmail -c \
-  "SELECT schemaname, tablename, n_live_tup
-   FROM pg_stat_user_tables
-   ORDER BY n_live_tup DESC;"
+# 3. Deep dependency health (unversioned path)
+curl -sf https://api.apexmail.ee/health/deep | jq '.'
 
-# 4. Reset circuit breakers
-kubectl exec -n apexmail deploy/redis-master -- redis-cli DEL "circuit-breaker:germany" "circuit-breaker:postgres-standby"
-
-# 5. Verify application health
-curl -sf https://api.apexmail.ee/v1/health | jq '.'
+# 4. Mail path: send a test message through the API and confirm it leaves the queue
 ```
 
 ## Prevention
 
-- **Monitor WireGuard handshake age** (< 5 min is healthy). Alert in Prometheus:
-  ```yaml
-  # Prometheus alert rule
-  - alert: WireGuardHandshakeStale
-    expr: time() - node_network_up{device="wg0"} > 300
-    for: 1m
-  ```
-
-- **Configure keepalive** on WireGuard (25 seconds):
-  ```
-  PersistentKeepalive = 25
-  ```
-
-- **Test network partition quarterly** as part of DR testing.
-- **Review Kubernetes NetworkPolicy** log entries for blocked traffic patterns.
-- **Circuit breakers** should have Redis-backed persistence to survive pod restarts.
+- External probes (the pipeline's verify stage / `make verify`) catch egress loss quickly.
+- Keep the compose networks declarative — never attach containers to internal networks by hand.
+- Test the host-rebuild drill quarterly
+  ([disaster-recovery-testing.md](../disaster-recovery-testing.md)).
 
 ## Related
 
 - [Disaster Recovery & Backup Procedures](../disaster-recovery.md)
-- [Infrastructure alerting rules](../../deploy/alerting-rules.yml)
+- [Infrastructure alerting rules](../../../deploy/alerting-rules.yml)
 - [Deployment model](../../../deploy/DEPLOYMENT.md)

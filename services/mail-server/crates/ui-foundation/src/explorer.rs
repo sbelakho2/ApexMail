@@ -1,10 +1,10 @@
 //! Server-driven public sandbox renderers (API Explorer + Pricing Calculator).
 //!
 //! These pages are served by the api-server (zero-JS: the marketing forms
-//! POST here and this module renders the full result page). The stylesheet
-//! is the marketing build, linked absolutely so the visual language matches
-//! apexmail.ee; a small inline fallback keeps the page readable if that CSS
-//! ever fails to load.
+//! POST here and this module renders the full result page). The pages are
+//! self-contained: the embedded stylesheet below is the whole styling
+//! (host-relative back-links, no cross-origin dependencies), so they render
+//! identically on any host and offline.
 
 /// Escape text for HTML element content and attribute values.
 fn esc(s: &str) -> String {
@@ -77,10 +77,9 @@ fn sandbox_shell(title: &str, back_href: &str, back_label: &str, body: &str) -> 
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex">
 <title>{title} — ApexMail Sandbox</title>
-<link rel="stylesheet" href="https://apexmail.ee/css/styles.css">
 <style>{fallback}</style>
 </head>
-<body class="min-h-screen" style="margin:0;background:#09090b;color:#fafafa;font-family:Inter,system-ui,sans-serif">
+<body class="min-h-screen" style="margin:0;background:#09090b;color:#fafafa;font-family:system-ui,-apple-system,sans-serif">
 <main style="max-width:64rem;margin:0 auto;padding:1.5rem 1rem 4rem">
 <p style="margin:0 0 1.25rem"><a href="{back_href}" style="color:#fafafa;text-decoration:underline;font-size:.875rem">&larr; {back_label}</a></p>
 {body}
@@ -96,7 +95,11 @@ fn sandbox_shell(title: &str, back_href: &str, back_label: &str, body: &str) -> 
 }
 
 fn inline_fallback_css() -> String {
-    // Readable even without the marketing stylesheet (dark panel look).
+    // The sandbox result pages are STANDALONE documents: they ride no
+    // console shell and load no cross-origin stylesheet (a remote
+    // styles.css made the page render-blocking on another origin and
+    // blank offline/intranet). Everything they need is embedded here; the
+    // palette stays the pinned zinc-dark sandbox look on purpose.
     ".apx-sb{border:1px solid #27272a;border-radius:2px;background:#09090b;overflow:hidden}
      .apx-sb-bar{background:#18181b;border-bottom:1px solid #27272a;padding:.9rem 1.1rem;display:flex;flex-wrap:wrap;gap:.7rem;align-items:center}
      .apx-chip{font-family:monospace;font-size:.7rem;font-weight:700;padding:.2rem .5rem;border-radius:2px;background:#dc2626;color:#fff}
@@ -160,7 +163,7 @@ pub fn explorer_response_page(outcome: &ExplorerOutcome) -> String {
     );
     sandbox_shell(
         "Sandbox result",
-        "https://apexmail.ee/api-explorer/",
+        "/api-explorer",
         "Back to the API Explorer",
         &body,
     )
@@ -214,7 +217,7 @@ pub fn calculator_response_page(
     );
     sandbox_shell(
         "Pricing estimate",
-        "https://apexmail.ee/pricing/calculator/",
+        "/pricing/calculator",
         "Back to the calculator",
         &body,
     )

@@ -3,7 +3,9 @@ name = "apexmail-canonical-config"
 version = "1.0.0"
 edition = "2021"
 description = "ApexMail legal-entity and public-claim constants; billing catalog is runtime-owned"
-license = "AGPL-3.0-or-later"
+# Proprietary — matches the root LICENSE (Bel Consulting OÜ) and the workspace
+# default (services/mail-server/Cargo.toml `license = "PROPRIETARY"`).
+license = "PROPRIETARY"
 
 [lib]
 name = "apexmail_canonical_config"

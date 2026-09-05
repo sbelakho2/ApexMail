@@ -182,9 +182,9 @@ k6 run billing-load-test.js
 ### How to Add New Baseline Metrics
 
 1. **Add a new test** in the appropriate crate:
-   - [`services/mail-server/crates/perf-tests/tests/`](services/mail-server/crates/perf-tests/tests/) for latency-focused performance tests
-   - [`services/mail-server/crates/load-tests/tests/`](services/mail-server/crates/load-tests/tests/) for throughput-focused load tests
-   - [`services/mail-server/crates/load-tests/tests/k6/`](services/mail-server/crates/load-tests/tests/k6/) for HTTP-level k6 tests
+   - [`services/mail-server/crates/perf-tests/tests/`](../../../services/mail-server/crates/perf-tests/tests) for latency-focused performance tests
+   - [`services/mail-server/crates/load-tests/tests/`](../../../services/mail-server/crates/load-tests/tests) for throughput-focused load tests
+   - [`services/mail-server/crates/load-tests/tests/k6/`](../../../services/mail-server/crates/load-tests/tests/k6) for HTTP-level k6 tests
 
 2. **Run the new test** and record its output metrics.
 
@@ -195,7 +195,7 @@ k6 run billing-load-test.js
 
 4. **Update the load-gate** thresholds in the k6 suites under `deploy/load-test-infra/` to include the new metric.
 
-5. **Document the new metric** in [`docs/evaluation/load-testing.md`](docs/evaluation/load-testing.md) under the relevant test scenario section.
+5. **Document the new metric** in [`docs/evaluation/load-testing.md`](../load-testing.md) under the relevant test scenario section.
 
 ## Baseline Files
 

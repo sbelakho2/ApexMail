@@ -37,12 +37,31 @@ struct UiQueryParams {
     resource_id: Option<String>,
     return_to: Option<String>,
     sig: Option<String>,
+    /// `error=<code>` — machine-readable failure codes (today: the SSO
+    /// redirect `?error=sso_denied`). Only known codes map to a banner;
+    /// it is never a free-text channel.
+    error: Option<String>,
     /// `mfa=1` — step two of the multi-step SSR login (challenge form).
     mfa_challenge: bool,
     /// `refresh=10|30|60` — opt-in auto-refresh for live metrics pages.
     /// Parsed ONLY for the pages in [`LIVE_METRICS_PATHS`]; every other
     /// route ignores the parameter entirely.
     refresh_secs: Option<u32>,
+}
+
+/// Map a login `?error=<code>` to the user-facing banner text. Unknown
+/// codes render nothing (the code space stays server-controlled — the
+/// query string can never put arbitrary prose on the page).
+fn login_query_error_message(error: Option<&str>) -> Option<String> {
+    match error? {
+        "sso_denied" => Some(
+            "Single sign-in was declined or could not be completed. Try again, or sign in with your password.".to_string(),
+        ),
+        "sso_failed" => Some(
+            "Single sign-in failed. Try again, or sign in with your password.".to_string(),
+        ),
+        _ => None,
+    }
 }
 
 /// Paths that may opt into a `<meta http-equiv="refresh">` auto-reload.
@@ -98,6 +117,11 @@ fn parse_query_params(query: Option<&str>) -> UiQueryParams {
             "mfa" if value == "1" || value.eq_ignore_ascii_case("true") => {
                 params.mfa_challenge = true;
             }
+            // `error=<code>` — machine-readable failure codes (today: the
+            // SSO redirect `?error=sso_denied`). Deliberately NOT a free
+            // text channel: only known codes map to a banner, so a query
+            // string can never put arbitrary prose on the login page.
+            "error" if !value.is_empty() => params.error = Some(value),
             "refresh" => {
                 if let Ok(secs) = value.parse::<u32>() {
                     if ALLOWED_REFRESH_SECS.contains(&secs) {
@@ -1601,7 +1625,10 @@ fn render_web(
                     ));
                 }
             }
-            leptos_views::web_login_page(&token)
+            leptos_views::web_login_page_with_state(
+                login_query_error_message(params.error.as_deref()).as_deref(),
+                &token,
+            )
         }
         "/signup" => {
             let token = csrf_token.to_string();

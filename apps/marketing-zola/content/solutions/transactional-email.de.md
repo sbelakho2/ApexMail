@@ -25,9 +25,9 @@ Transaktions-E-Mails sind geschäftskritische Infrastruktur. Verzögerte Passwor
 
 ## Die ApexMail-Lösung
 
-- **REST-API** (`POST /v1/emails`) — JSON-Payloads mit Idempotenzschlüsseln. Einreichen und fertig.
+- **REST-API** (`POST /v1/messages`) — JSON-Payloads mit Idempotenzschlüsseln. Einreichen und fertig.
 - **SMTP-Relay** (`smtp.apexmail.ee:587` mit STARTTLS) — Direkter Ersatz für bestehende SMTP-Clients.
-- **Transaktionale Streams** — Isolieren Sie Sendekonfigurationen (dedizierte IP, benutzerdefinierte Domain, Suppressionsliste) je E-Mail-Typ.
+- **Isolierte Sendekonfiguration** — Dedizierte IPs, benutzerdefinierte Domains und Suppressionslisten lassen sich je E-Mail-Typ abgrenzen.
 - **Signierte Webhooks** — Echtzeit-Ereignisse `delivered`, `bounced`, `complained`, `opened`, `clicked`, jedes mit eindeutiger Ereignis-ID und HMAC-Signatur.
 - **Idempotenz** — Deduplizieren Sie Übermittlungen mit clientseitig bereitgestellten Schlüsseln. Nach Netzwerkfehlern sicher erneut übermitteln.
 
@@ -35,8 +35,8 @@ Transaktions-E-Mails sind geschäftskritische Infrastruktur. Verzögerte Passwor
 
 1. Erstellen Sie einen API-Key unter **Dashboard → Einstellungen → API-Keys**.
 2. Verifizieren Sie Ihre Sende-Domain (SPF, DKIM, benutzerdefinierter Return-Path).
-3. Erstellen Sie einen transaktionalen Stream für Ihren E-Mail-Typ.
-4. Senden Sie über REST oder SMTP mit dem Stream-Namen im Payload.
+3. Konfigurieren Sie eine dedizierte Sende-Domain (und auf berechtigten Tarifen eine dedizierte IP) für Ihren E-Mail-Typ.
+4. Senden Sie über REST oder SMTP.
 5. Registrieren Sie einen Webhook-Endpunkt für den Empfang von Zustellereignissen.
 6. Überwachen Sie Zustellmetriken im Dashboard oder über die Analytik-API.
 
@@ -44,22 +44,21 @@ Transaktions-E-Mails sind geschäftskritische Infrastruktur. Verzögerte Passwor
 
 | Endpunkt | Beschreibung |
 |---|---|
-| `POST /v1/emails` | E-Mail senden |
-| `GET /v1/emails/:id` | E-Mail-Status und Ereignisse abrufen |
-| `DELETE /v1/emails/:id/schedule` | Geplanten Versand abbrechen |
-| `POST /v1/emails/batch` | Bis zu 1.000 E-Mails in einer Anfrage senden |
+| `POST /v1/messages` | E-Mail senden |
+| `GET /v1/messages/:id` | E-Mail-Status und Ereignisse abrufen |
+| `POST /v1/messages/:id/cancel` | Geplanten Versand abbrechen |
+| `POST /v1/messages/batch` | Bis zu 100 Nachrichten in einer Anfrage senden |
 
 ## Relevante Webhook-Ereignisse
 
 | Ereignis | Auslöser |
 |---|---|
-| `email.accepted` | API hat die Anfrage angenommen |
-| `email.delivered` | Empfangender Server hat die Nachricht angenommen |
-| `email.bounced` | Hard- oder Soft-Bounce |
-| `email.complained` | Empfänger hat als Spam gemeldet |
-| `email.opened` | Öffnung erkannt (Tracking-Pixel) |
-| `email.clicked` | Linkklick erkannt |
-| `email.delayed` | Nachricht vom empfangenden Server verzögert |
+| `message.sent` | Nachricht zur Zustellung angenommen |
+| `message.delivered` | Empfangender Server hat die Nachricht angenommen |
+| `message.bounced` | Hard- oder Soft-Bounce |
+| `message.complained` | Empfänger hat als Spam gemeldet |
+| `message.opened` | Öffnung erkannt (Tracking-Pixel) |
+| `message.clicked` | Linkklick erkannt |
 
 ## Erforderlicher Tarif
 
@@ -88,7 +87,7 @@ Transaktions-E-Mails sind geschäftskritische Infrastruktur. Verzögerte Passwor
 
 ## Bekannte Einschränkungen
 
-- Inhalte werden im Free-Tarif nur 24 Stunden gespeichert.
+- Ereignisprotokolle werden standardmäßig 30 Tage aufbewahrt (7 Tage im Free-Tarif); Nachrichteninhalte standardmäßig 7 Tage, tarifabhängig bis zu 730 Tage.
 - Die Anhangsgröße ist auf 25 MB pro Nachricht begrenzt.
 - Öffnungs- und Klick-Tracking erfordern einen HTML-Body mit Tracking-Pixel bzw. Links.
 

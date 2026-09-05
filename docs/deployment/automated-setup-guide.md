@@ -84,7 +84,7 @@ Create a programmatic IAM user with the following least-privilege policy:
 }
 ```
 
-Generate an access key and secret. These go into the environment as [`AWS_ACCESS_KEY_ID`](.env.production.example:136) and [`AWS_SECRET_ACCESS_KEY`](.env.production.example:137).
+Generate an access key and secret. These go into the environment as [`AWS_ACCESS_KEY_ID`](../../.env.production.example:136) and [`AWS_SECRET_ACCESS_KEY`](../../.env.production.example:137).
 
 > **Security note**: No customer data is stored in AWS. SES receives email content transiently for delivery only. All persistent data (accounts, domains, queue, logs, metrics) lives in PostgreSQL on Hetzner infrastructure.
 
@@ -139,9 +139,9 @@ aws sns subscribe \
     --notification-endpoint https://api.apexmail.ee/v1/ses/notifications
 ```
 
-Confirm the subscription when AWS SNS sends the `SubscriptionConfirmation` POST to the webhook endpoint. The [`ses_notifications.rs`](services/mail-server/crates/worker-processors/src/email/transport_router.rs) handler processes `SubscriptionConfirmation`, `Notification` (bounce, complaint, delivery), and `UnsubscribeConfirmation` payloads.
+Confirm the subscription when AWS SNS sends the `SubscriptionConfirmation` POST to the webhook endpoint. The [`ses_notifications.rs`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs) handler processes `SubscriptionConfirmation`, `Notification` (bounce, complaint, delivery), and `UnsubscribeConfirmation` payloads.
 
-> For a detailed step-by-step SES setup guide, see [`ses-setup.md`](docs/deployment/ses-setup.md).
+> For a detailed step-by-step SES setup guide, see [`ses-setup.md`](ses-setup.md).
 
 #### 6. DNS Records for Your Own Sending Domain
 
@@ -168,12 +168,12 @@ Create a project named `apexmail-production` in the [Hetzner Cloud Console](http
 
 #### 2. Generate an API Token
 
-Generate a read/write API token with the following scopes required by [`DedicatedIpProvider`](services/mail-server/crates/worker-processors/src/email/transport_router.rs):
+Generate a read/write API token with the following scopes required by [`DedicatedIpProvider`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs):
 
 - `read` + `write` for `floating_ip`
 - `read` + `write` for `server`
 
-Store this as [`HETZNER_API_TOKEN`](.env.production.example:153).
+Store this as [`HETZNER_API_TOKEN`](../../.env.production.example:153).
 
 #### 3. Provision MTA Servers
 
@@ -256,7 +256,7 @@ Increase Floating IP quota for project "apexmail-production" to at least 200.
 We are an email delivery platform and each customer requires a dedicated IP.
 ```
 
-See the [Plan Allocation table](docs/tool-contracts/ses.md:141) to estimate how many you need.
+See the [Plan Allocation table](../tool-contracts/ses.md:141) to estimate how many you need.
 
 ---
 
@@ -268,41 +268,41 @@ Set these environment variables on the API server (`apx-api-1`) and the worker s
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| [`AWS_ACCESS_KEY_ID`](.env.production.example:136) | **Yes** | — | IAM access key for SES |
-| [`AWS_SECRET_ACCESS_KEY`](.env.production.example:137) | **Yes** | — | IAM secret key for SES |
-| [`AWS_REGION`](.env.production.example:138) | No | `eu-west-1` | AWS region for SES |
-| [`SES_CONFIGURATION_SET`](.env.production.example:140) | No | `apexmail-ses-events` | SES configuration set for event tracking |
-| [`SES_MAX_SEND_RATE`](services/mail-server/crates/worker-processors/src/common/config.rs:236) | No | `50` | Max emails per second via SES |
-| [`SES_FROM_NAME`](.env.production.example:141) | No | `ApexMail` | Default from-name for SES-sent emails |
-| [`SES_FROM_EMAIL`](.env.production.example:142) | No | `noreply@apexmail.ee` | Default from-address for SES-sent emails |
+| [`AWS_ACCESS_KEY_ID`](../../.env.production.example:136) | **Yes** | — | IAM access key for SES |
+| [`AWS_SECRET_ACCESS_KEY`](../../.env.production.example:137) | **Yes** | — | IAM secret key for SES |
+| [`AWS_REGION`](../../.env.production.example:138) | No | `eu-west-1` | AWS region for SES |
+| [`SES_CONFIGURATION_SET`](../../.env.production.example:140) | No | `apexmail-ses-events` | SES configuration set for event tracking |
+| [`SES_MAX_SEND_RATE`](../../services/mail-server/crates/worker-processors/src/common/config.rs:236) | No | `50` | Max emails per second via SES |
+| [`SES_FROM_NAME`](../../.env.production.example:141) | No | `ApexMail` | Default from-name for SES-sent emails |
+| [`SES_FROM_EMAIL`](../../.env.production.example:142) | No | `noreply@apexmail.ee` | Default from-address for SES-sent emails |
 
 #### Hetzner Cloud Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| [`HETZNER_API_TOKEN`](.env.production.example:153) | **Yes** | — | Hetzner Cloud API read/write token |
-| [`HETZNER_DEFAULT_LOCATION`](.env.production.example:154) | No | `fsn1` | Default location for Floating IPs |
-| [`HETZNER_MTA_SERVER_ID`](.env.production.example:155) | **Yes** | — | Hetzner server ID of the MTA worker for IP assignment |
-| [`HETZNER_MTA_SERVER_IP`](.env.production.example:156) | **Yes** | — | Public IP of the MTA worker (for `assign` action) |
-| [`HETZNER_DEFAULT_RDNS`](.env.production.example:157) | No | `ip<N>.dedicated.apexmail.ee` | rDNS pattern for Floating IPs |
-| [`HETZNER_POOL_MIN_FREE`](.env.production.example:158) | No | `5` | Minimum free Floating IPs before auto-provision alert |
+| [`HETZNER_API_TOKEN`](../../.env.production.example:153) | **Yes** | — | Hetzner Cloud API read/write token |
+| [`HETZNER_DEFAULT_LOCATION`](../../.env.production.example:154) | No | `fsn1` | Default location for Floating IPs |
+| [`HETZNER_MTA_SERVER_ID`](../../.env.production.example:155) | **Yes** | — | Hetzner server ID of the MTA worker for IP assignment |
+| [`HETZNER_MTA_SERVER_IP`](../../.env.production.example:156) | **Yes** | — | Public IP of the MTA worker (for `assign` action) |
+| [`HETZNER_DEFAULT_RDNS`](../../.env.production.example:157) | No | `ip<N>.dedicated.apexmail.ee` | rDNS pattern for Floating IPs |
+| [`HETZNER_POOL_MIN_FREE`](../../.env.production.example:158) | No | `5` | Minimum free Floating IPs before auto-provision alert |
 
 #### Application Variables
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| [`DATABASE_URL`](.env.production.example:5) | **Yes** | — | PostgreSQL connection string (points to `10.0.1.4:5432`) |
-| [`REDIS_URL`](.env.production.example:15) | **Yes** | — | Redis connection string (points to `10.0.1.4:6379`) |
-| [`STRIPE_SECRET_KEY`](.env.production.example:84) | **Yes** | — | Stripe secret key for webhook verification |
-| [`STRIPE_WEBHOOK_SECRET`](.env.production.example:85) | **Yes** | — | Stripe webhook signing secret |
-| [`JWT_SECRET`](.env.production.example:55) | **Yes** | — | Secret for JWT token signing |
-| [`JWT_PUBLIC_KEY`](.env.production.example:59) | **Yes** | — | RSA public key for JWT verification |
+| [`DATABASE_URL`](../../.env.production.example:5) | **Yes** | — | PostgreSQL connection string (points to `10.0.1.4:5432`) |
+| [`REDIS_URL`](../../.env.production.example:15) | **Yes** | — | Redis connection string (points to `10.0.1.4:6379`) |
+| [`STRIPE_SECRET_KEY`](../../.env.production.example:84) | **Yes** | — | Stripe secret key for webhook verification |
+| [`STRIPE_WEBHOOK_SECRET`](../../.env.production.example:85) | **Yes** | — | Stripe webhook signing secret |
+| [`JWT_SECRET`](../../.env.production.example:55) | **Yes** | — | Secret for JWT token signing |
+| [`JWT_PUBLIC_KEY`](../../.env.production.example:59) | **Yes** | — | RSA public key for JWT verification |
 | `DKIM_PRIVATE_KEY_ENCRYPTION_KEY` | **Yes** | — | 64 hexadecimal characters used to encrypt generated per-domain private keys |
 | `DKIM_ENABLED` | SMTP only | `true` | Enables local signing when SMTP transport is selected |
-| [`TRACKING_DOMAIN`](.env.production.example:178) | No | — | Custom tracking domain for open/click tracking |
-| [`APP_ENCRYPTION_KEY`](.env.production.example:97) | **Yes** | — | 32-byte base64 key for encrypting sensitive data |
+| [`TRACKING_DOMAIN`](../../.env.production.example:178) | No | — | Custom tracking domain for open/click tracking |
+| [`APP_ENCRYPTION_KEY`](../../.env.production.example:97) | **Yes** | — | 32-byte base64 key for encrypting sensitive data |
 
-> For the complete list, see [`.env.production.example`](.env.production.example) and [`configuration.md`](docs/deployment/configuration.md).
+> For the complete list, see [`.env.production.example`](../../.env.production.example) and [`configuration.md`](configuration.md).
 
 #### Complete `.env` Template
 
@@ -373,7 +373,7 @@ sqlx migrate run --database-url postgres://apexmail@10.0.1.4:5432/apexmail
 
 #### 2. Verify the Routing Cache Trigger
 
-The DB trigger [`trg_update_transport_routing`](services/mail-server/crates/worker-processors/src/email/transport_router.rs:18) fires on `INSERT`, `UPDATE`, and `DELETE` on the [`dedicated_ips`](docs/tool-contracts/hetzner.md:253) table. It automatically populates the [`transport_routing_cache`](docs/tool-contracts/hetzner.md:257) table used by the [`TransportRouter`](services/mail-server/crates/worker-processors/src/email/transport_router.rs:134).
+The DB trigger [`trg_update_transport_routing`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:18) fires on `INSERT`, `UPDATE`, and `DELETE` on the [`dedicated_ips`](../tool-contracts/hetzner.md:253) table. It automatically populates the [`transport_routing_cache`](../tool-contracts/hetzner.md:257) table used by the [`TransportRouter`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:134).
 
 ```sql
 -- Verify the trigger exists
@@ -394,7 +394,7 @@ WHERE tgname = 'trg_update_transport_routing';
 
 #### 3. Verify Dedicated IPs Table
 
-The [`dedicated_ips`](docs/tool-contracts/hetzner.md:261) table is the source of truth. Key columns:
+The [`dedicated_ips`](../tool-contracts/hetzner.md:261) table is the source of truth. Key columns:
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -422,7 +422,7 @@ Once Phase 1 is complete, customer provisioning is fully automated. Here is exac
 2. A new tenant record is created with `plan = 'free'`.
 3. **No dedicated IPs are provisioned** — free-tier tenants use the SES shared pool.
 4. An account verification email is sent via SES (the default transport).
-5. The [`TransportRouter`](services/mail-server/crates/worker-processors/src/email/transport_router.rs:225) resolves:
+5. The [`TransportRouter`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:225) resolves:
 
 ```
 cache.entries.get(tenant_id) → None (no routing entry for new tenant)
@@ -440,7 +440,7 @@ When the customer upgrades (e.g., from Free to Growth), Stripe sends a `checkout
 
 #### Step 2: Auto-Provision Background Job
 
-The webhook handler calls [`auto_provision_dedicated_ips_background()`](services/mail-server/crates/worker-processors/src/email/transport_router.rs) — a background async job that:
+The webhook handler calls [`auto_provision_dedicated_ips_background()`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs) — a background async job that:
 
 1. Reads the plan allocation (e.g., Growth = 1 dedicated IP, Scale = 3, Enterprise = 10+).
 2. Calls the **Hetzner Cloud API** to create Floating IPs:
@@ -473,11 +473,11 @@ POST /v1/floating_ips/{id}/actions/change_dns_ptr
 }
 ```
 
-5. Inserts rows into the [`dedicated_ips`](docs/tool-contracts/hetzner.md:261) table with `status = 'warming'` and `warmup_progress = 0`.
+5. Inserts rows into the [`dedicated_ips`](../tool-contracts/hetzner.md:261) table with `status = 'warming'` and `warmup_progress = 0`.
 
 #### Step 3: DB Trigger Populates the Routing Cache
 
-The `INSERT` on `dedicated_ips` fires the [`trg_update_transport_routing`](services/mail-server/crates/worker-processors/src/email/transport_router.rs:18) trigger, which:
+The `INSERT` on `dedicated_ips` fires the [`trg_update_transport_routing`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:18) trigger, which:
 
 ```sql
 INSERT INTO transport_routing_cache (tenant_id, has_dedicated_ips, preferred_dedicated_ip, dedicated_ip_count)
@@ -491,7 +491,7 @@ ON CONFLICT (tenant_id) DO UPDATE SET
 
 #### Step 4: TransportRouter Picks Up the Change
 
-The [`TransportRouter::ensure_cache_fresh()`](services/mail-server/crates/worker-processors/src/email/transport_router.rs:252) method refreshes the in-memory routing cache every **30 seconds**:
+The [`TransportRouter::ensure_cache_fresh()`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:252) method refreshes the in-memory routing cache every **30 seconds**:
 
 ```rust
 if cache.last_refresh.elapsed() > Duration::from_secs(30) {
@@ -499,13 +499,13 @@ if cache.last_refresh.elapsed() > Duration::from_secs(30) {
 }
 ```
 
-The next time the customer sends an email, [`resolve_transport_kind()`](services/mail-server/crates/worker-processors/src/email/transport_router.rs:188) returns `TransportKind::Smtp` with the `preferred_dedicated_ip` as the `bind_ip`.
+The next time the customer sends an email, [`resolve_transport_kind()`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:188) returns `TransportKind::Smtp` with the `preferred_dedicated_ip` as the `bind_ip`.
 
 #### Step 5: Warmup Begins
 
-The `DedicatedIpProvider` background task calls [`tick_warmup()`](services/mail-server/crates/worker-processors/src/email/transport_router.rs) daily, incrementing `warmup_progress` from 0 to 60.
+The `DedicatedIpProvider` background task calls [`tick_warmup()`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs) daily, incrementing `warmup_progress` from 0 to 60.
 
-The worker's [`EmailProcessor`](services/mail-server/crates/worker-processors/src/email/processor.rs:463) enforces daily sending limits via Redis atomic counters:
+The worker's [`EmailProcessor`](../../services/mail-server/crates/worker-processors/src/email/processor.rs:463) enforces daily sending limits via Redis atomic counters:
 
 ```rust
 // processor.rs line 472-514
@@ -516,7 +516,7 @@ async fn check_warmup_limit(&self, job: &EmailJob) -> ProcessorResult<bool> {
 }
 ```
 
-**Warmup schedule** (60-day graduated, from [`warmup-schedule.md`](docs/operations/warmup-schedule.md:14)):
+**Warmup schedule** (60-day graduated, from [`warmup-schedule.md`](../operations/warmup-schedule.md:14)):
 
 | Day Range | Daily Limit | Cumulative |
 |-----------|-------------|------------|
@@ -595,7 +595,7 @@ WHERE has_dedicated_ips = TRUE;
 
 ### B. SES Bounce/Complaint Monitoring
 
-Suppressions are cached and checked by the [`EmailProcessor`](services/mail-server/crates/worker-processors/src/email/processor.rs:275) before sending. Monitor:
+Suppressions are cached and checked by the [`EmailProcessor`](../../services/mail-server/crates/worker-processors/src/email/processor.rs:275) before sending. Monitor:
 
 - **Bounce rate**: Should stay below 5%. Investigate if it exceeds 10%.
 - **Complaint rate**: Should stay below 0.1%. Investigate if it exceeds 0.5%.
@@ -617,7 +617,7 @@ Compare against your Hetzner project quota. If `HETZNER_POOL_MIN_FREE` (default:
 
 ### D. Worker Logs & Metrics
 
-**Key log lines to watch** (from [`processor.rs`](services/mail-server/crates/worker-processors/src/email/processor.rs)):
+**Key log lines to watch** (from [`processor.rs`](../../services/mail-server/crates/worker-processors/src/email/processor.rs)):
 
 | Log Pattern | What It Means |
 |-------------|---------------|
@@ -659,7 +659,7 @@ Compare against your Hetzner project quota. If `HETZNER_POOL_MIN_FREE` (default:
    POST /api/v1/admin/transport-cache/invalidate
    ```
 
-4. **Check the 30-second refresh window**: The [`TransportRouter`](services/mail-server/crates/worker-processors/src/email/transport_router.rs:252) caches routing for up to 30 seconds. Wait or force invalidate.
+4. **Check the 30-second refresh window**: The [`TransportRouter`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs:252) caches routing for up to 30 seconds. Wait or force invalidate.
 
 ### Warmup progress is stuck
 
@@ -685,7 +685,7 @@ Compare against your Hetzner project quota. If `HETZNER_POOL_MIN_FREE` (default:
 
 ### SES sending rate exceeded
 
-The [`SesConfig`](services/mail-server/crates/worker-processors/src/common/config.rs:217) defaults to `max_send_rate: 50` emails/second. If you hit SES rate limits:
+The [`SesConfig`](../../services/mail-server/crates/worker-processors/src/common/config.rs:217) defaults to `max_send_rate: 50` emails/second. If you hit SES rate limits:
 
 1. Increase `SES_MAX_SEND_RATE` in the environment.
 2. Request a sending limit increase from AWS Support.
@@ -697,17 +697,17 @@ The [`SesConfig`](services/mail-server/crates/worker-processors/src/common/confi
 
 | Document | Description |
 |----------|-------------|
-| [`hybrid-email-infrastructure.md`](docs/architecture/hybrid-email-infrastructure.md) | Architecture overview and routing decision flow |
-| [`delivery-transport.md`](docs/architecture/delivery-transport.md) | Transport layer design and warmup behavior |
-| [`ses-setup.md`](docs/deployment/ses-setup.md) | Detailed SES IAM, configuration set, and DNS setup |
-| [`PRODUCTION_SETUP.md`](docs/deployment/PRODUCTION_SETUP.md) | Full production deployment reference |
-| [`configuration.md`](docs/deployment/configuration.md) | All environment variables and their descriptions |
-| [`hetzner.md`](docs/tool-contracts/hetzner.md) | Hetzner infrastructure contract (servers, network, firewall, costs) |
-| [`ses.md`](docs/tool-contracts/ses.md) | AWS SES tool contract (IAM, rate limits, SNS pipeline, data residency) |
-| [`warmup-schedule.md`](docs/operations/warmup-schedule.md) | Canonical 60-day warmup schedule and code reference |
-| [`HETZNER_SIMULATION_CHECKLIST.md`](docs/deployment/HETZNER_SIMULATION_CHECKLIST.md) | Staging simulation runbook for pre-production validation |
-| [`config.rs`](services/mail-server/crates/worker-processors/src/common/config.rs) | Rust config structs with defaults |
-| [`transport_router.rs`](services/mail-server/crates/worker-processors/src/email/transport_router.rs) | Per-message routing implementation |
-| [`processor.rs`](services/mail-server/crates/worker-processors/src/email/processor.rs) | Email processing pipeline with warmup and suppression |
-| [`transport.rs`](services/mail-server/crates/worker-processors/src/email/transport.rs) | SES and SMTP transport implementations |
-| [`types.rs`](services/mail-server/crates/worker-processors/src/email/types.rs) | Warmup limit schedule and email types |
+| [`hybrid-email-infrastructure.md`](../architecture/hybrid-email-infrastructure.md) | Architecture overview and routing decision flow |
+| [`delivery-transport.md`](../architecture/delivery-transport.md) | Transport layer design and warmup behavior |
+| [`ses-setup.md`](ses-setup.md) | Detailed SES IAM, configuration set, and DNS setup |
+| [`PRODUCTION_SETUP.md`](PRODUCTION_SETUP.md) | Full production deployment reference |
+| [`configuration.md`](configuration.md) | All environment variables and their descriptions |
+| [`hetzner.md`](../tool-contracts/hetzner.md) | Hetzner infrastructure contract (servers, network, firewall, costs) |
+| [`ses.md`](../tool-contracts/ses.md) | AWS SES tool contract (IAM, rate limits, SNS pipeline, data residency) |
+| [`warmup-schedule.md`](../operations/warmup-schedule.md) | Canonical 60-day warmup schedule and code reference |
+| [`HETZNER_SIMULATION_CHECKLIST.md`](HETZNER_SIMULATION_CHECKLIST.md) | Staging simulation runbook for pre-production validation |
+| [`config.rs`](../../services/mail-server/crates/worker-processors/src/common/config.rs) | Rust config structs with defaults |
+| [`transport_router.rs`](../../services/mail-server/crates/worker-processors/src/email/transport_router.rs) | Per-message routing implementation |
+| [`processor.rs`](../../services/mail-server/crates/worker-processors/src/email/processor.rs) | Email processing pipeline with warmup and suppression |
+| [`transport.rs`](../../services/mail-server/crates/worker-processors/src/email/transport.rs) | SES and SMTP transport implementations |
+| [`types.rs`](../../services/mail-server/crates/worker-processors/src/email/types.rs) | Warmup limit schedule and email types |

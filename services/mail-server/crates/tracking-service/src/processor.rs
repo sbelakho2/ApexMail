@@ -14,9 +14,11 @@
 //! carry only the first 8 hex chars (32 bits) — a corruption heuristic,
 //! NOT a security integrity check — and remain readable for backward
 //! compatibility with entries already queued in Redis.
-//! • Dedup via Redis SETNX (EX 86400, open; EX 1 s, rapid clicks) — the key
-//! is rolled back (DEL) when the subsequent WAL enqueue fails, so a failed
-//! enqueue never swallows the client's retry as a "duplicate".
+//! • Dedup via Redis SETNX (EX 86400) keyed (message, recipient) for BOTH
+//! opens and clicks — click tokens carry no expiry (see `codec.rs`), so the
+//! 24 h dedup window is the replay bound; token-level expiry remains future
+//! work. The key is rolled back (DEL) when the subsequent WAL enqueue fails,
+//! so a failed enqueue never swallows the client's retry as a "duplicate".
 //! • Unsubscribes are durable-or-failed (F2):when the suppression INSERT
 //! fails, a pending-retry record is RPUSH'd to
 //! `apexmail:suppressions:pending` (drained by the flush loop with the
@@ -407,16 +409,16 @@ impl EventProcessor {
     }
 
     /// Record a click event into the Redis WAL.
+    ///
+    /// Dedup:clicks are deduped per (message, recipient) over 24 h, exactly
+    /// mirroring opens — the previous 1-second window let a replayed token
+    /// (tokens carry no expiry; see the module notes in `codec.rs`) inflate
+    /// click counts indefinitely. Token-level expiry remains future work and
+    /// would be a wire-format change; the dedup window is the replay bound.
     pub async fn record_click(&self, data: ClickData) -> Result<()> {
-        // Dedup rapid-fire clicks within 1 second
-        let dedup_key = dedup_key(
-            "click",
-            &data.message_id,
-            &data.recipient,
-            Some(&data.link_id),
-        );
-        if !self.try_set_dedup("click", &dedup_key, 1).await? {
-            debug!(message_id = %data.message_id, link_id = %data.link_id, "Rapid duplicate click, skipping");
+        let dedup_key = dedup_key("click", &data.message_id, &data.recipient, None);
+        if !self.try_set_dedup("click", &dedup_key, 86400).await? {
+            debug!(message_id = %data.message_id, link_id = %data.link_id, "Duplicate click within 24h dedup window, skipping");
             return Ok(());
         }
 
@@ -445,8 +447,8 @@ impl EventProcessor {
         };
 
         if let Err(e) = self.enqueue_event(&event).await {
-            // Roll back the rapid-click dedup key (1 s TTL) so a retried
-            // click is not swallowed.
+            // Roll back the click dedup key (24 h TTL) so a retried click is
+            // not swallowed.
             self.clear_dedup(&dedup_key).await;
             return Err(e);
         }
@@ -724,15 +726,20 @@ impl EventProcessor {
                 EventType::Unsubscribed => e.2 += 1,
             }
         }
+        // messages.id is UUID (runtime + migration chains agree); the update
+        // below casts the VALUE once per unnest row instead of casting the
+        // column — `m.id::text = v.id` forced a per-row text conversion of
+        // the PK and defeated the index on every WAL flush. Ids that are not
+        // valid UUIDs can never match a UUID PK and are skipped here (they
+        // would abort the `::uuid` cast for the whole batch otherwise).
         for (id, (o, c, u)) in &stats {
-            if *o > 0 || *c > 0 || *u > 0 {
+            if (*o > 0 || *c > 0 || *u > 0) && Uuid::parse_str(id).is_ok() {
                 msg_ids.push(id.to_string());
                 open_counts.push(*o);
                 click_counts.push(*c);
                 unsub_counts.push(*u);
             }
         }
-
         if !msg_ids.is_empty() {
             sqlx::query(
                 r#"
@@ -750,9 +757,7 @@ impl EventProcessor {
                         unnest($3::int[])  AS clicks,
                         unnest($4::int[])  AS unsubs
                 ) AS v
-                -- messages.id may be UUID or text depending on environment;
-                -- comparing via text avoids "operator does not exist: uuid = text".
-                WHERE m.id::text = v.id
+                WHERE m.id = v.id::uuid
                 "#,
             )
             .bind(&msg_ids)

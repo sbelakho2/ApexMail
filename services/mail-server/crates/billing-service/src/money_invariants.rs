@@ -451,6 +451,40 @@ const MONEY_PATH_FILES: &[(&str, &str)] = &[
     ("src/credit_notes.rs", "src/credit_notes.rs"),
     ("src/subscriptions.rs", "src/subscriptions.rs"),
     (
+        // The sweep + collection path (wallet debit, Stripe invoice item,
+        // overage/PAYG pricing) is money movement — gated.
+        "src/overage.rs",
+        "src/overage.rs",
+    ),
+    (
+        // The billing HTTP surface: PAYG/overage estimates, wallet and
+        // dunning reads, proration preview, report SQL.
+        "src/routes.rs",
+        "src/routes.rs",
+    ),
+    (
+        // Invoice payment events move wallet/dunning money; VAT rate
+        // snapshots are rates, not amounts.
+        "src/stripe_webhooks.rs",
+        "src/stripe_webhooks.rs",
+    ),
+    (
+        // Auto-pay retries, SLA credit issuance (percent-of-cents ladder)
+        // and the wallet expiry sweep all move or compute money.
+        "src/maintenance.rs",
+        "src/maintenance.rs",
+    ),
+    (
+        // Derived usage aggregates feed the PAYG/overage invoices.
+        "src/usage_ingest.rs",
+        "src/usage_ingest.rs",
+    ),
+    (
+        // KMD aggregation of taxable cents / VAT cents.
+        "src/vat_kmd.rs",
+        "src/vat_kmd.rs",
+    ),
+    (
         "../billing-common/src/proration.rs",
         "billing-common/proration.rs",
     ),
@@ -467,8 +501,12 @@ const MONEY_PATH_FILES: &[(&str, &str)] = &[
     ),
 ];
 
-/// A float mention is a VAT-rate context, not money math. Rates in percent
-/// may be fractional (25.5); amounts never are.
+/// A float mention is a rate/percent/metric context, not money math.
+/// Statutory VAT rates in percent may be fractional (25.5); SLA/cost-margin
+/// percentages, uptime metrics and alert thresholds are ratios, never
+/// amounts. Every monetary amount stays in integer cents — a money amount
+/// can never legitimately be `f64`, `Option<f64>` or part of an `(f64, …)`
+/// return, which is exactly what this predicate carves out.
 fn is_vat_rate_context(line: &str) -> bool {
     line.contains("vat_rate")
         || line.contains("rate_percent")
@@ -479,6 +517,7 @@ fn is_vat_rate_context(line: &str) -> bool {
         || line.contains("DEFAULT_VAT_RATES")
         || line.contains("EU_VAT_RATES")
         || line.contains("fallback_rate")
+        || line.contains("stored_rate")
         // JSON truthiness on a parsed number, not money math.
         || line.contains("as_f64()")
         // Rate-returning signatures: (f64, i64) = (rate, cents).
@@ -489,6 +528,19 @@ fn is_vat_rate_context(line: &str) -> bool {
         || line.contains("(&str, f64)")
         || line.contains("as f64")
         || line.contains("parse::<f64>")
+        // A float-typed optional is de-facto a rate/percent: money is
+        // Option<i64> (cents), never Option<f64>.
+        || line.contains("Option<f64>")
+        // Rate-typed tuple returns, e.g. (f64, Option<&str>) bucket keys.
+        || line.contains("(f64,")
+        // Percent contexts: usage-, uptime-, margin-, breach- and
+        // threshold-percent computations (ratios, not amounts).
+        || line.contains("percent")
+        // Alert/cost-margin thresholds and the SLA availability target are
+        // ratios too.
+        || line.contains("THRESHOLD")
+        || line.contains("threshold: f64")
+        || line.contains("SLA_AVAILABILITY_TARGET")
 }
 
 #[test]

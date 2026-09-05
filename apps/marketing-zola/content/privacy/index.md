@@ -52,8 +52,8 @@ We retain personal data only as long as necessary for the purposes for which it 
 |---------------|-----------------|
 | Account data | Duration of contract + 30 days |
 | Billing records | 7 years (Estonian accounting law) |
-| Email content (body, subject, headers, attachments) | 7 days by default; plan-dependent maximum (from 1 day on the Free plan up to 730 days on Enterprise) |
-| Event logs (delivery, open, and click events) | 30 days by default; plan-dependent maximum (up to 730 days on Enterprise) |
+| Email content (body, subject, headers, attachments) | 7 days by default; plan-dependent, up to 730 days on Enterprise |
+| Event logs (delivery, open, and click events) | 30 days by default (7 days on the Free plan); plan-dependent, up to 730 days on Enterprise |
 | Support tickets | 2 years after resolution |
 
 See our [Data Retention Policy](/compliance/#data-retention) for full details.

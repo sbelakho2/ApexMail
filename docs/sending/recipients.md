@@ -24,7 +24,7 @@ For broadcast streams, manage lists:
 
 ```bash
 curl -s https://api.apexmail.ee/v1/lists \
-  -H "Authorization: Bearer $APEXMAIL_API_KEY" \
+  -H "X-API-Key: $APEXMAIL_API_KEY" \
   | jq .
 ```
 
@@ -32,7 +32,7 @@ curl -s https://api.apexmail.ee/v1/lists \
 
 ```bash
 curl -s -X POST https://api.apexmail.ee/v1/lists \
-  -H "Authorization: Bearer $APEXMAIL_API_KEY" \
+  -H "X-API-Key: $APEXMAIL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"name": "All Subscribers", "stream_id": "str_xxxx"}' \
   | jq .
@@ -42,7 +42,7 @@ curl -s -X POST https://api.apexmail.ee/v1/lists \
 
 ```bash
 curl -s -X POST https://api.apexmail.ee/v1/lists/lst_xxxx/contacts/import \
-  -H "Authorization: Bearer $APEXMAIL_API_KEY" \
+  -H "X-API-Key: $APEXMAIL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "contacts": [
@@ -67,7 +67,7 @@ curl -s -X POST https://api.apexmail.ee/v1/lists/lst_xxxx/contacts/import \
 
 ```bash
 curl -s https://api.apexmail.ee/v1/suppressions/user@example.org \
-  -H "Authorization: Bearer $APEXMAIL_API_KEY" \
+  -H "X-API-Key: $APEXMAIL_API_KEY" \
   | jq .
 ```
 
@@ -86,7 +86,7 @@ ApexMail automatically skips suppressed recipients — you don't need to filter 
 
 ```bash
 curl -s -X POST https://api.apexmail.ee/v1/suppressions \
-  -H "Authorization: Bearer $APEXMAIL_API_KEY" \
+  -H "X-API-Key: $APEXMAIL_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"email": "user@example.org", "reason": "manual"}' \
   | jq .
@@ -96,7 +96,7 @@ curl -s -X POST https://api.apexmail.ee/v1/suppressions \
 
 ```bash
 curl -s -X DELETE https://api.apexmail.ee/v1/suppressions/user@example.org \
-  -H "Authorization: Bearer $APEXMAIL_API_KEY" \
+  -H "X-API-Key: $APEXMAIL_API_KEY" \
   | jq .
 ```
 

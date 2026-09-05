@@ -1,0 +1,14 @@
+# ApexMail — restart mta + imap-server after a TLS certificate renewal.
+#
+# Triggered by apexmail-tls-renew-restart.path when certbot touches the
+# renewal-restart-flag. The script guards against restarting more than once
+# per renewal and honours APEXMAIL_TLS_AUTO_RESTART=0 (see
+# deploy/hardening/tls-renew-restart.sh for the full reasoning).
+[Unit]
+Description=ApexMail — restart mta + imap-server after a TLS certificate renewal
+
+[Service]
+Type=oneshot
+Environment=DEPLOY_DIR=@DEPLOY_DIR@
+Environment=FLAG_FILE=@FLAG_PATH@
+ExecStart=/usr/local/sbin/apexmail-tls-renew-restart.sh

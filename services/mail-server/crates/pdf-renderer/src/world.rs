@@ -44,6 +44,27 @@ pub static TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 // External template loader (O-14.3)
 // ---------------------------------------------------------------------------
 
+/// Validate a caller-supplied template name before it is ever joined onto
+/// a filesystem path.
+///
+/// Allowlist: non-empty, at most 64 characters, each `[A-Za-z0-9_-]`. This
+/// excludes path separators, `..`, extensions and every other path-shaped
+/// input, so `{PDF_TEMPLATES_DIR}/{template_name}.typ` can only ever
+/// address a file directly inside the templates directory (previously
+/// `../../secrets/key` style names turned the loader into a read oracle).
+pub fn validate_template_name(name: &str) -> Result<(), WorldError> {
+    if name.is_empty() || name.len() > 64 {
+        return Err(WorldError::InvalidTemplateName(name.to_string()));
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(WorldError::InvalidTemplateName(name.to_string()));
+    }
+    Ok(())
+}
+
 /// Load a template source, preferring an external file over the embedded copy.
 ///
 /// When `PDF_TEMPLATES_DIR` is set, the function first tries to read
@@ -53,7 +74,18 @@ pub static TEMPLATES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
 /// This allows operators to update template logic without recompiling the
 /// binary, while keeping the compile‑time embedded version as a secure
 /// default.
+///
+/// `template_name` must pass [`validate_template_name`] (defense in depth:
+/// callers validate too, but the path join happens here).
 pub fn load_template_source(template_name: &str) -> Option<String> {
+    if let Err(error) = validate_template_name(template_name) {
+        warn!(
+            template = template_name,
+            %error,
+            "Rejected path-shaped template name"
+        );
+        return None;
+    }
     // Try external directory first (env‑var driven)
     if let Ok(dir) = std::env::var("PDF_TEMPLATES_DIR") {
         let path: PathBuf = [dir.as_str(), &format!("{}.typ", template_name)]
@@ -113,6 +145,9 @@ impl TypstWorld {
     /// # Errors
     /// Returns `Err` if the template name is not found in either location.
     pub fn new(template_name: &str, data_json: String) -> Result<Self, WorldError> {
+        // Reject path-shaped names before any filesystem join — a 400 for
+        // the caller, not a filesystem read.
+        validate_template_name(template_name)?;
         let source = load_template_source(template_name)
             .ok_or_else(|| WorldError::TemplateNotFound(template_name.to_string()))?;
 
@@ -144,6 +179,50 @@ pub static FONT_DIRS: &[&str] = &[
 pub enum WorldError {
     #[error("template not found: {0}")]
     TemplateNotFound(String),
+    #[error("invalid template name: {0}")]
+    InvalidTemplateName(String),
     #[error("font loading error: {0}")]
     FontError(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_template_names_validate() {
+        for name in TEMPLATES.keys() {
+            assert!(
+                validate_template_name(name).is_ok(),
+                "embedded template {name} must pass validation"
+            );
+        }
+        assert!(validate_template_name("invoice_v2-EU").is_ok());
+    }
+
+    #[test]
+    fn path_shaped_template_names_are_rejected() {
+        // Regression: `../../` names were joined onto PDF_TEMPLATES_DIR and
+        // read whatever they resolved to (a filesystem read oracle).
+        for bad in [
+            "../../etc/passwd",
+            "../secrets/stripe",
+            "foo/bar",
+            "foo\\bar",
+            "invoice.typ",
+            "invoice typ",
+            "",
+            "中文模板",
+            &"x".repeat(65),
+        ] {
+            assert!(
+                validate_template_name(bad).is_err(),
+                "name {bad:?} must be rejected"
+            );
+            assert!(
+                load_template_source(bad).is_none(),
+                "name {bad:?} must never reach the filesystem"
+            );
+        }
+    }
 }

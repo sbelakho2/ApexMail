@@ -74,15 +74,26 @@ pub enum ProcessorError {
     /// pattern so the processor never has to substring-match a flattened
     /// `Transport("SES send failed: …")` string.
     ///
-    /// `permanent: true` (400/Validation/MailboxDoesNotExist/MessageRejected
-    /// class) takes the hard-bounce path: recipient suppressed, never
-    /// retried. `permanent: false` (5xx / network) retries with the standard
-    /// exponential backoff. Throttle-class errors keep the distinct
-    /// [`ProcessorError::RateLimited`] variant.
+    /// * `permanent: true` takes the no-retry (hard-bounce) path for THIS
+    ///   message: 5xx-class service refusals and address-shaped rejections.
+    /// * `permanent: false` (4xx / network / dispatch) retries with the
+    ///   standard exponential backoff, bounded by `max_retries`.
+    /// * `address_proving` is the SUPPRESSION verdict and is independent of
+    ///   `permanent`: only address-proving failures (mailbox does not
+    ///   exist / malformed recipient) may suppress the recipient
+    ///   tenant-wide. Account/configuration states (sending paused,
+    ///   suspended, missing resource) can permanent-fail a message without
+    ///   saying anything about the validity of the mailbox — suppressing on
+    ///   those silences valid recipients for the whole tenant.
+    /// * Throttle-class errors keep the distinct
+    ///   [`ProcessorError::RateLimited`] variant.
     #[error("ses error: {message}")]
     Ses {
         /// Retry disposition decided from the typed SDK error.
         permanent: bool,
+        /// Whether the failure PROVES the recipient address is invalid —
+        /// the sole justification for tenant-wide suppression.
+        address_proving: bool,
         /// SDK error message (already classified; not re-parsed downstream).
         message: String,
     },

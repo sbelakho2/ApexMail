@@ -1,6 +1,6 @@
 //! Automation / workflow routes.
 
-use super::helpers::{clamp_limit, default_limit};
+use super::helpers::{clamp_limit, decode_cursor, encode_cursor, has_more};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
@@ -24,6 +24,49 @@ pub fn router() -> Router<AppState> {
         )
         .route("/:id/enable", post(enable_automation))
         .route("/:id/disable", post(disable_automation))
+}
+
+// ─── Keyset cursor helpers ─────────────────────────────────────
+//
+// The list cursor encodes the `(created_at, id)` pair of the last row of the
+// previous page (automations.id is UUID, migration 075). The previous
+// implementation returned a numeric OFFSET as "nextCursor" while calling it
+// a cursor — rows were skipped or duplicated whenever rows shared a
+// created_at value, and the "cursor" restarted the scan on every page.
+
+/// Separator between the RFC3339 timestamp and the row id inside the
+/// hex-encoded cursor payload (RFC3339 and UUID ids never contain it).
+const KEYSET_CURSOR_SEP: char = '\n';
+
+/// Encode a `(created_at, id)` keyset cursor as an opaque hex string.
+fn encode_keyset_cursor(created_at: &DateTime<Utc>, id: &str) -> String {
+    encode_cursor(&format!("{created_at}{KEYSET_CURSOR_SEP}{id}"))
+}
+
+/// Decode and validate a `(created_at, id)` keyset cursor. Malformed input
+/// is a client error (400), never a database 500.
+fn decode_keyset_cursor(encoded: &str) -> Result<(DateTime<Utc>, String), ApiError> {
+    let Some(decoded) = decode_cursor(encoded) else {
+        return Err(ApiError::BadRequest(
+            "invalid cursor: malformed encoding".into(),
+        ));
+    };
+    let Some((timestamp, id)) = decoded.split_once(KEYSET_CURSOR_SEP) else {
+        return Err(ApiError::BadRequest(
+            "invalid cursor: must encode a created_at timestamp and row id".into(),
+        ));
+    };
+    let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map_err(|_| {
+            ApiError::BadRequest(
+                "invalid cursor: must be an encoded created_at timestamp".into(),
+            )
+        })?
+        .with_timezone(&Utc);
+    if id.is_empty() || id.len() > 64 || id.bytes().any(|b| b.is_ascii_control()) {
+        return Err(ApiError::BadRequest("invalid cursor: malformed row id".into()));
+    }
+    Ok((timestamp, id.to_string()))
 }
 
 // ─── Types ─────────────────────────────────────────────────────
@@ -70,8 +113,15 @@ pub struct ListAutomationsQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
+    /// Cursor for cursor-based pagination — hex-encoded `created_at` + row id
+    /// pair of the last item from the previous page. When provided, overrides
+    /// `offset`.
     #[serde(default)]
-    pub cursor: Option<i64>,
+    pub cursor: Option<String>,
+}
+
+fn default_limit() -> i64 {
+    50
 }
 
 // ─── Handlers ──────────────────────────────────────────────────
@@ -129,7 +179,15 @@ async fn list_automations(
     require_scopes(&auth, &["automations:read"])?;
 
     let limit = clamp_limit(params.limit, 100);
-    let offset = params.cursor.unwrap_or(params.offset).clamp(0, 100_000);
+
+    // Real keyset pagination on (created_at, id): decode and validate the
+    // cursor BEFORE binding, and page with a total-ordering tuple
+    // comparison instead of the numeric offset this endpoint used to
+    // return under the "nextCursor" name.
+    let cursor_value = match params.cursor.as_deref() {
+        Some(encoded) => Some(decode_keyset_cursor(encoded)?),
+        None => None,
+    };
 
     let total: i64 = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*)::bigint FROM automations WHERE tenant_id = $1",
@@ -139,23 +197,41 @@ async fn list_automations(
     .await?;
 
     // Fetch limit + 1 rows so we can detect whether another page exists.
-    let rows = sqlx::query_as::<_, AutomationRow>(
-        "SELECT id, name, trigger_config, actions, conditions, status, created_at, updated_at
-         FROM automations WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
-    )
-    .bind(&auth.tenant_id)
-    .bind(limit + 1)
-    .bind(offset)
-    .fetch_all(&state.db)
-    .await?;
+    let rows = if let Some((ref cursor_ts, ref cursor_id)) = cursor_value {
+        sqlx::query_as::<_, AutomationRow>(
+            "SELECT id, name, trigger_config, actions, conditions, status, created_at, updated_at
+             FROM automations WHERE tenant_id = $1
+               AND (created_at < $2::timestamp OR (created_at = $2::timestamp AND id < $3::uuid))
+             ORDER BY created_at DESC, id DESC LIMIT $4",
+        )
+        .bind(&auth.tenant_id)
+        .bind(cursor_ts)
+        .bind(cursor_id)
+        .bind(limit + 1)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        let offset = params.offset.clamp(0, 100_000);
+        sqlx::query_as::<_, AutomationRow>(
+            "SELECT id, name, trigger_config, actions, conditions, status, created_at, updated_at
+             FROM automations WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3",
+        )
+        .bind(&auth.tenant_id)
+        .bind(limit + 1)
+        .bind(offset)
+        .fetch_all(&state.db)
+        .await?
+    };
 
     let mut details: Vec<AutomationResponse> = rows.into_iter().map(Into::into).collect();
-    let has_more = details.len() as i64 > limit;
-    if has_more {
-        details.truncate(limit as usize);
-    }
+    let has_more = has_more(&mut details, limit as usize);
 
-    let next_cursor = if has_more { Some(offset + limit) } else { None };
+    // Next (created_at, id) keyset cursor — a genuine cursor, not an offset.
+    let next_cursor = details.last().and_then(|r| {
+        chrono::DateTime::parse_from_rfc3339(&r.created_at)
+            .ok()
+            .map(|ts| encode_keyset_cursor(&ts.with_timezone(&Utc), &r.id))
+    });
 
     // Wrap in the standard {data, error, meta} envelope with pagination meta.
     Ok(Json(serde_json::json!({

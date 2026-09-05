@@ -114,7 +114,10 @@ async fn get_compliance_overview(
     crate::middleware::auth::require_scopes(&auth, &["*"])?;
 
     let db = &state.db;
-    let tenant_scoped = auth.tenant_id != "system";
+    // Slug-aware system-tenant resolution (audit F1): operators live in
+    // `system_internal_tenant01`, not the literal `system` sentinel — the
+    // literal comparison rendered this overview empty for every human operator.
+    let tenant_scoped = !crate::routes::web::is_system_tenant(&state, &auth.tenant_id).await;
 
     let has_gdpr = table_exists(db, "gdpr_requests").await;
     let has_alerts = table_exists(db, "system_alerts").await;

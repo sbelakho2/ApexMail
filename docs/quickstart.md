@@ -109,13 +109,13 @@ Rate limits are **plan-based** and enforced per API key. See the [rate limits do
 We operate **async-first** support. Most answers live in the docs and the in-app diagnostics — please check those before opening a ticket.
 
 - 📚 [Full API Documentation](https://apexmail.ee/docs) — first stop, includes self-debug walkthroughs
-- 🩺 In-app domain diagnostics: `GET /v1/domains/{id}/auth-score` returns structured `expected → actual → fix` output
+- 🩺 In-app domain diagnostics: `GET /v1/domains/{id}/auth-status` returns structured `expected → actual → fix` output
 - Community — email support@apexmail.ee (a public forum opens with the first stable SDK release)
 - 📧 [Email Support](mailto:support@apexmail.ee) — Starter/Growth: 24–48h async response
 - 🛡️ [Login KiwiCaptcha Protection](./security/kiwicaptcha-login.md)
 - Report a bug — support@apexmail.ee (include your tenant ID and the message ID)
 
-> We do **not** run per-customer Discord servers, 24/7 live chat, or white-glove real-time support. Scale customers get priority email + a shared Slack hub; Enterprise customers get a dedicated async channel + SLA. Calls are scheduled, not on-demand.
+> The authoritative support-tier table (Growth = email, Scale = priority email + shared Slack hub, Enterprise = dedicated async channel) lives in [enterprise/support.md](enterprise/support.md) — do not restate tier numbers elsewhere.
 
 ---
 

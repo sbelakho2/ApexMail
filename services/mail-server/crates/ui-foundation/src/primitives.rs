@@ -1507,7 +1507,16 @@ impl<'a> Table<'a> {
         }).collect::<Vec<_>>().join("");
         let rows = if self.rows.is_empty() {
             let colspan = self.columns.len().max(1);
-            format!("<tr class=\"border-b\"><td colspan=\"{}\" class=\"p-6 text-center text-sm text-muted-foreground\">No rows to display</td></tr>", colspan)
+            // A bare "No rows to display" is a dead end: render a real
+            // empty state inside the table instead (title + guidance),
+            // matching the standalone EmptyState styling.
+            format!(
+                "<tr class=\"border-b\"><td colspan=\"{colspan}\" class=\"p-10\">\
+<div class=\"apex-empty-state flex flex-col items-center justify-center px-6 text-center\">\
+<h3 class=\"text-[15px] font-bold text-foreground mb-1\">Nothing here yet</h3>\
+<p class=\"mx-auto max-w-[320px] text-sm text-muted-foreground leading-relaxed\">Entries appear here as soon as one is created. Use the page's create action to add the first one.</p>\
+</div></td></tr>"
+            )
         } else {
             self.rows.iter().map(|row| {
                 let cells = row.iter().enumerate().map(|(index, value)| {

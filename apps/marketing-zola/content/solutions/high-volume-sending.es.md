@@ -19,7 +19,7 @@ A alto volumen, los pequeños cambios de entregabilidad tienen un gran impacto e
 ## Problema principal
 
 - Los pools de IP compartidas acumulan riesgo de reputación de otros remitentes.
-- La contrapresión de colas durante la limitación del proveedor afecta a todos los flujos si no se aísla.
+- La contrapresión de colas durante la limitación del proveedor afecta a todo el envío si no se aísla.
 - El calentamiento manual de IP es propenso a errores y lento.
 - Los límites de velocidad de los planes estándar limitan el rendimiento por debajo de las necesidades del negocio.
 - Sin infraestructura dedicada, el tráfico punta compite con el de otros clientes.
@@ -28,8 +28,8 @@ A alto volumen, los pequeños cambios de entregabilidad tienen un gran impacto e
 
 - **IP dedicadas** — Complemento aprobado en Pro; 1 incluida en Growth, 3 en Scale y 10 en Enterprise. Las opciones de despliegue de ámbito contractual se revisan por separado.
 - **Calentamiento automatizado** — Ramp gradual de volumen según calendarios específicos de cada proveedor. Supervisado por señales de reputación. Anulación manual disponible.
-- **Priorización de colas** — Configuración de prioridad por flujo. Los flujos transaccionales se procesan antes que los masivos. Objetivos de tiempo hasta bandeja supervisados.
-- **API por lotes** (`POST /v1/emails/batch`) — Envíe hasta 1.000 emails por solicitud. Menor sobrecoste por mensaje que las llamadas individuales a la API.
+- **Priorización de colas** — El tráfico transaccional se prioriza por delante del masivo en momentos de carga. Objetivos de tiempo hasta bandeja supervisados.
+- **API por lotes** (`POST /v1/messages/batch`) — Envíe hasta 100 mensajes por solicitud. Menor sobrecoste por mensaje que las llamadas individuales a la API.
 - **Límites de velocidad** — Los límites se aplican por clave de API y plan; consulte la documentación pública actual de la API para conocer los límites públicos.
 - **SLA contractual** — Scale y Enterprise incluyen condiciones de SLA a nivel de plan; los despliegues no estándar requieren una revisión contractual separada.
 
@@ -38,7 +38,7 @@ A alto volumen, los pequeños cambios de entregabilidad tienen un gran impacto e
 1. Solicite la revisión de elegibilidad de IP dedicada a soporte o ventas.
 2. Una vez aprobado, las IP dedicadas se aprovisionan y se asignan a su cuenta.
 3. Comienza el calentamiento automatizado. Supervise el progreso en el panel.
-4. Asigne IP dedicadas a los flujos transaccionales para aislar la reputación.
+4. Asigne IP dedicadas a su envío transaccional para aislar la reputación.
 5. Configure la prioridad de cola y los límites de concurrencia por flujo.
 6. Use la API por lotes para escenarios de envío de alto rendimiento.
 7. Supervise la latencia de entrega, la profundidad de cola y las tasas de aceptación por proveedor.
@@ -47,10 +47,9 @@ A alto volumen, los pequeños cambios de entregabilidad tienen un gran impacto e
 
 | Endpoint | Descripción |
 |---|---|
-| `POST /v1/emails` | Enviar un email individual |
-| `POST /v1/emails/batch` | Enviar hasta 1.000 emails en una sola solicitud |
+| `POST /v1/messages` | Enviar un email individual |
+| `POST /v1/messages/batch` | Enviar hasta 100 mensajes en una sola solicitud |
 | `GET /v1/dedicated-ips` | Listar IP dedicadas y estado de calentamiento |
-| `GET /v1/streams/:id/stats` | Métricas de rendimiento y latencia por flujo |
 | `GET /v1/analytics/delivery` | Métricas agregadas de entrega por proveedor |
 
 ## Plan requerido
@@ -64,7 +63,7 @@ A alto volumen, los pequeños cambios de entregabilidad tienen un gran impacto e
 ## Consideraciones de seguridad
 
 - La reputación de la IP dedicada se gestiona en exclusiva para su cuenta. Los cambios requieren la aprobación del titular de la cuenta.
-- Las solicitudes a la API por lotes son atómicas: todos los mensajes de un lote se completan o fallan juntos (sin finalización parcial).
+- Cada mensaje de un lote se valida individualmente; la API informa la aceptación por mensaje.
 - La profundidad de cola y la latencia de procesamiento son visibles en tiempo real mediante el panel y la API.
 - Cabeceras de límite de velocidad en cada respuesta. Vigile `X-RateLimit-Remaining` para evitar limitaciones.
 
@@ -72,7 +71,7 @@ A alto volumen, los pequeños cambios de entregabilidad tienen un gran impacto e
 
 - La elegibilidad para IP dedicada requiere una revisión del historial de envíos. Las cuentas nuevas comienzan en IP compartidas.
 - El calentamiento de IP suele tardar de 2 a 4 semanas según el volumen objetivo y las políticas del proveedor.
-- El tamaño máximo de lote es de 1.000 emails por solicitud. Los volúmenes mayores requieren varias llamadas por lotes.
+- El tamaño máximo de lote es de 100 mensajes por solicitud. Los volúmenes mayores requieren varias llamadas por lotes.
 - El rendimiento durante caídas del proveedor depende de la configuración de reintentos de cola y del tiempo de recuperación del proveedor.
 
 ## Siguiente paso recomendado

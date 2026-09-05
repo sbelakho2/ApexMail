@@ -179,7 +179,9 @@ impl TrackingCodec {
 
     /// Verify and decode an unsubscribe token.
     /// Supports two formats:/// 1. **New (GCM-encrypted)** — IV[12] || AuthTag[16] || Ciphertext.
-    /// 2. **Legacy (HMAC-signed)** — payload-bytes || 16-byte truncated HMAC-SHA-256.
+    /// 2. **Legacy (HMAC-signed)** — payload-bytes || HMAC-SHA-256 suffix,
+    ///    either the full 32-byte digest or the legacy 16-byte truncation
+    ///    (#194).
     /// `max_age_days` defaults to 90 days.
     pub fn verify_unsubscribe_token(
         &self,
@@ -286,23 +288,39 @@ impl TrackingCodec {
     }
 
     fn try_legacy_hmac_verify(&self, combined: &[u8]) -> Option<String> {
-        // #194:Legacy tokens used 16-byte truncated HMAC. Accept both truncated
-        // (backward compat) and full 32-byte HMAC for newly generated tokens.
+        // #194:Legacy tokens used a 16-byte truncated HMAC; tokens minted after
+        // that fix carry the full 32-byte digest. The previous implementation
+        // always compared the LAST 16 bytes against the FIRST 16 bytes of the
+        // full digest, so full-32 signatures could never verify. Accept both
+        // shapes by sizing the expected signature to the actual suffix.
         // Truncated verification is weaker (128 bits) but still sufficient for
-        // unsubscribe tokens; log a warning for monitoring migration progress.
-        if combined.len() < 17 {
-            return None;
+        // unsubscribe tokens; log a debug line for monitoring migration
+        // progress.
+        let verify = |sig_len: usize| -> Option<String> {
+            if combined.len() < sig_len + 1 {
+                return None;
+            }
+            let payload_bytes = &combined[..combined.len() - sig_len];
+            let expected = hmac_sha256(&self.sig_key.0, payload_bytes);
+            if !constant_time_eq(&combined[combined.len() - sig_len..], &expected[..sig_len]) {
+                return None;
+            }
+            String::from_utf8(payload_bytes.to_vec()).ok()
+        };
+
+        // Full 32-byte signature (current legacy format) first, then the
+        // truncated 16-byte form. A truncated token cannot accidentally pass
+        // the 32-byte check: the two candidate payloads differ, so both
+        // expectations would have to collide on 256 bits.
+        match verify(32).or_else(|| verify(16)) {
+            Some(payload) => {
+                tracing::debug!(
+                    "Legacy HMAC unsubscribe token verified — consider re-issuing with the GCM format"
+                );
+                Some(payload)
+            }
+            None => None,
         }
-        let payload_bytes = &combined[..combined.len() - 16];
-        let provided_sig = &combined[combined.len() - 16..];
-        let expected_full = hmac_sha256(&self.sig_key.0, payload_bytes);
-        if !constant_time_eq(provided_sig, &expected_full[..16]) {
-            return None;
-        }
-        tracing::debug!(
-            "Legacy 16-byte truncated HMAC token verified — consider re-issuing with full HMAC"
-        );
-        String::from_utf8(payload_bytes.to_vec()).ok()
     }
 }
 
@@ -692,5 +710,38 @@ mod tests {
         assert_eq!(data.recipient, "usr");
         assert_eq!(data.link_id, None);
         assert!(data.original_url.is_none());
+    }
+
+    /// #194:legacy HMAC tokens must verify with EITHER the full 32-byte
+    /// digest or the 16-byte truncation — the old code compared the last 16
+    /// bytes against the first 16 of the full digest, so full-32 signatures
+    /// never verified.
+    #[test]
+    fn legacy_hmac_token_accepts_full_and_truncated_signatures() {
+        let codec = make_codec();
+        let payload = b"tenant_1:user@domain.com:1700000000000";
+        let digest = hmac_sha256(&codec.sig_key.0, payload);
+
+        // Full 32-byte signature suffix verifies.
+        let mut full = payload.to_vec();
+        full.extend_from_slice(&digest);
+        let verified = codec
+            .try_legacy_hmac_verify(&full)
+            .expect("full 32-byte legacy HMAC must verify");
+        assert_eq!(verified.as_bytes(), payload);
+
+        // Legacy 16-byte truncation still verifies.
+        let mut truncated = payload.to_vec();
+        truncated.extend_from_slice(&digest[..16]);
+        assert!(codec.try_legacy_hmac_verify(&truncated).is_some());
+
+        // A signature under a different key must fail BOTH sizes.
+        let wrong = hmac_sha256(b"not-the-signing-key", payload);
+        let mut forged = payload.to_vec();
+        forged.extend_from_slice(&wrong);
+        assert!(codec.try_legacy_hmac_verify(&forged).is_none());
+        let mut forged_trunc = payload.to_vec();
+        forged_trunc.extend_from_slice(&wrong[..16]);
+        assert!(codec.try_legacy_hmac_verify(&forged_trunc).is_none());
     }
 }

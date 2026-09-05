@@ -517,11 +517,18 @@ impl EmailTransport for SmtpTransport {
 /// (see [`classify_ses_failure`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SesFailureDisposition {
-    /// Permanent rejection (400/Validation/MailboxDoesNotExist/MessageRejected
-    /// class): hard-bounce the recipient and suppress the address — retrying
-    /// cannot succeed.
-    Permanent,
-    /// Temporary failure (5xx / network / dispatch): retry with backoff.
+    /// Permanent for THIS message, and the failure PROVES the recipient
+    /// address is invalid (MailboxDoesNotExist / InvalidRecipient /
+    /// malformed-recipient MessageRejected): hard-bounce AND the only
+    /// disposition that may suppress the address tenant-wide.
+    AddressBounce,
+    /// Permanent for THIS message, but NOT address-proving (service or
+    /// configuration refusal — sending paused, resource not found):
+    /// dead-letter the message; retrying it through the queue cannot
+    /// succeed, but the recipient must NOT be suppressed.
+    PermanentNonAddress,
+    /// Temporary failure (4xx / network / dispatch / account states that
+    /// can recover): retry with backoff, bounded by `max_retries`.
     Transient,
     /// Throttle-class (TooManyRequests/Throttling/LimitExceeded): keep the
     /// distinct `ProcessorError::RateLimited` outcome.
@@ -531,17 +538,25 @@ pub(crate) enum SesFailureDisposition {
 /// Classify an SES failure from the modeled SDK exception code and/or the
 /// HTTP status of the raw response.
 ///
-/// * Modeled code wins when recognized. Permanent modeled errors:
-///   `BadRequestException` (invalid input), `MessageRejected` (invalid
-///   content — includes malformed/undeliverable recipient content),
-///   `NotFoundException` / `MailFromDomainNotVerifiedException` /
-///   `AccountSuspendedException` / `SendingPausedException` (configuration
-///   or account states a retry cannot repair), plus
-///   MailboxDoesNotExist/Validation-shaped codes surfaced through Unhandled.
+/// "Permanent" is split by what the failure PROVES:
+///
+/// * [`SesFailureDisposition::AddressBounce`] — the failure proves the
+///   RECIPIENT ADDRESS is invalid: `MailboxDoesNotExist`/`InvalidRecipient`
+///   codes surfaced through Unhandled, and `MessageRejected` (SES rejects
+///   the message as undeliverable to this recipient — malformed recipient
+///   content). This is the only suppression-causing class.
+/// * [`SesFailureDisposition::PermanentNonAddress`] — determinate refusals
+///   a retry of the same request cannot repair (`NotFoundException`,
+///   `SendingPausedException`): dead-letter, never suppress.
+/// * Everything that can recover — `AccountSuspendedException` (accounts
+///   are reactivated), `MailFromDomainNotVerifiedException` (the domain
+///   gets verified), `BadRequestException` (request-shape bugs worth a
+///   finite retry, not proof of a bad mailbox), the blanket 4xx family,
+///   5xx, and signal-less network failures — maps to
+///   [`SesFailureDisposition::Transient`] and is retried with the standard
+///   finite backoff ladder. The previous blanket 4xx→Permanent mapping
+///   permanently suppressed valid recipients on any client error.
 /// * Throttle-class codes map to [`SesFailureDisposition::Throttled`].
-/// * Otherwise the HTTP status decides: 4xx → Permanent (the request itself
-///   is bad), 429 → Throttled, 5xx → Transient.
-/// * Neither signal (pure network/dispatch failure) → Transient.
 pub(crate) fn classify_ses_failure(
     code: Option<&str>,
     http_status: Option<u16>,
@@ -553,23 +568,28 @@ pub(crate) fn classify_ses_failure(
         {
             return SesFailureDisposition::Throttled;
         }
-        if matches!(
-            code,
-            "BadRequestException"
-                | "MessageRejected"
-                | "NotFoundException"
-                | "MailFromDomainNotVerifiedException"
-                | "AccountSuspendedException"
-                | "SendingPausedException"
-        ) || code.contains("MailboxDoesNotExist")
-            || code.contains("Validation")
+        // Address-proving: only these prove the mailbox itself is bad.
+        if code == "MessageRejected"
+            || code.contains("MailboxDoesNotExist")
+            || code.contains("InvalidRecipient")
         {
-            return SesFailureDisposition::Permanent;
+            return SesFailureDisposition::AddressBounce;
         }
+        // Determinate non-address refusals: dead-letter, never suppress.
+        if code == "NotFoundException" || code == "SendingPausedException" {
+            return SesFailureDisposition::PermanentNonAddress;
+        }
+        // AccountSuspendedException / MailFromDomainNotVerifiedException /
+        // BadRequestException / *Validation*: account and request states
+        // that can be repaired — retryable-with-finite-attempts, and never
+        // address proof. Fall through to the status mapping.
     }
     match http_status {
         Some(429) => SesFailureDisposition::Throttled,
-        Some(status) if (400..=499).contains(&status) => SesFailureDisposition::Permanent,
+        // 4xx is NOT permanent: an API client hiccup (throttle adjacency,
+        // auth-token skew, payload too large this instant) must not
+        // dead-letter the row, let alone suppress the recipient. The
+        // finite retry ladder (max_retries) bounds the cost of retrying.
         // 5xx responses and signal-less (network/dispatch) failures retry.
         _ => SesFailureDisposition::Transient,
     }
@@ -664,12 +684,19 @@ impl SesTransport {
                 warn!(error = %msg, "SES rate limit hit");
                 ProcessorError::RateLimited(format!("SES: {msg}"))
             }
-            SesFailureDisposition::Permanent => ProcessorError::Ses {
+            SesFailureDisposition::AddressBounce => ProcessorError::Ses {
                 permanent: true,
+                address_proving: true,
+                message: format!("SES send failed: {msg}"),
+            },
+            SesFailureDisposition::PermanentNonAddress => ProcessorError::Ses {
+                permanent: true,
+                address_proving: false,
                 message: format!("SES send failed: {msg}"),
             },
             SesFailureDisposition::Transient => ProcessorError::Ses {
                 permanent: false,
+                address_proving: false,
                 message: format!("SES send failed: {msg}"),
             },
         }
@@ -915,30 +942,53 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn ses_mailbox_does_not_exist_style_error_is_permanent() {
+    fn ses_mailbox_does_not_exist_style_error_is_address_bounce() {
         // A MailboxDoesNotExist-style code is a permanent per-recipient
-        // rejection: it must hard-bounce (suppress the address), never retry.
+        // rejection that PROVES the address bad: hard-bounce + suppress,
+        // never retry.
         assert_eq!(
             classify_ses_failure(Some("MailboxDoesNotExist"), None),
-            SesFailureDisposition::Permanent
+            SesFailureDisposition::AddressBounce
+        );
+        assert_eq!(
+            classify_ses_failure(Some("InvalidRecipientException"), None),
+            SesFailureDisposition::AddressBounce
+        );
+        assert_eq!(
+            classify_ses_failure(Some("MessageRejected"), None),
+            SesFailureDisposition::AddressBounce
         );
     }
 
     #[test]
-    fn ses_bad_request_validation_and_message_rejected_are_permanent() {
+    fn ses_account_and_config_states_are_retryable_not_permanent() {
+        // Account/configuration states say nothing about the mailbox: a
+        // suspended account gets reinstated, a domain gets verified, a
+        // request-shape bug gets fixed — retryable-with-finite-attempts,
+        // and NEVER suppression-causing.
         for code in [
             "BadRequestException",
-            "MessageRejected",
-            "NotFoundException",
             "MailFromDomainNotVerifiedException",
             "AccountSuspendedException",
-            "SendingPausedException",
             "ValidationError",
         ] {
             assert_eq!(
                 classify_ses_failure(Some(code), None),
-                SesFailureDisposition::Permanent,
-                "modeled SES code {code} must classify permanent"
+                SesFailureDisposition::Transient,
+                "modeled SES code {code} must retry (finite attempts), not permanent-suppress"
+            );
+        }
+    }
+
+    #[test]
+    fn ses_determinate_non_address_refusals_dead_letter_without_suppressing() {
+        // Determinate refusals a retry of the same request cannot repair:
+        // permanent for the message, but not address proof.
+        for code in ["NotFoundException", "SendingPausedException"] {
+            assert_eq!(
+                classify_ses_failure(Some(code), None),
+                SesFailureDisposition::PermanentNonAddress,
+                "modeled SES code {code} must dead-letter without suppression"
             );
         }
     }
@@ -959,15 +1009,17 @@ mod tests {
     }
 
     #[test]
-    fn ses_http_400_classifies_permanent_and_429_throttled() {
-        assert_eq!(
-            classify_ses_failure(None, Some(400)),
-            SesFailureDisposition::Permanent
-        );
-        assert_eq!(
-            classify_ses_failure(None, Some(403)),
-            SesFailureDisposition::Permanent
-        );
+    fn ses_http_4xx_retries_and_429_throttles() {
+        // The blanket 4xx→Permanent mapping permanently suppressed valid
+        // recipients on client-side errors; 4xx now retries (bounded by
+        // max_retries) exactly like 5xx.
+        for status in [400u16, 403, 452] {
+            assert_eq!(
+                classify_ses_failure(None, Some(status)),
+                SesFailureDisposition::Transient,
+                "HTTP {status} must retry, not permanent-suppress"
+            );
+        }
         assert_eq!(
             classify_ses_failure(None, Some(429)),
             SesFailureDisposition::Throttled
@@ -995,7 +1047,7 @@ mod tests {
         // An unmapped modeled error defers to the HTTP status it arrived on.
         assert_eq!(
             classify_ses_failure(Some("SomeFutureException"), Some(400)),
-            SesFailureDisposition::Permanent
+            SesFailureDisposition::Transient
         );
         assert_eq!(
             classify_ses_failure(Some("SomeFutureException"), Some(503)),

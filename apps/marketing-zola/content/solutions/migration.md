@@ -47,8 +47,8 @@ Email provider migration is a high-risk operation. Dropped delivery during cutov
 
 | Endpoint | Description |
 |---|---|
-| `POST /v1/emails` | Send an email |
-| `POST /v1/emails/batch` | Batch send up to 1,000 emails |
+| `POST /v1/messages` | Send an email |
+| `POST /v1/messages/batch` | Batch send up to 100 messages |
 | `POST /v1/templates` | Create a template |
 | `GET /v1/templates` | List templates |
 | `PUT /v1/templates/:id` | Update a template |
@@ -57,9 +57,8 @@ Email provider migration is a high-risk operation. Dropped delivery during cutov
 
 | Event | Trigger |
 |---|---|
-| `email.delivered` | Receiving server accepted the message |
-| `email.bounced` | Hard or soft bounce |
-| `email.delayed` | Message deferred by receiving server |
+| `message.delivered` | Receiving server accepted the message |
+| `message.bounced` | Hard or soft bounce |
 
 ## Required Plan
 

@@ -72,7 +72,7 @@ The system defines two token surface layers:
 - **`default`** — used by the Rust dashboard (`services/mail-server/crates/ui-foundation`). Sources: `globals.css`, `icons.rs`.
 - **`marketing`** — used by the Zola marketing site (`apps/marketing-zola`). Sources: `styles.css`, `tailwind.config.js`. Mirrors the indigo brand palette from the dashboard.
 
-Refer to [`docs/development/ui-design-token-baseline.json`](docs/development/ui-design-token-baseline.json) for the canonical token snapshot of both surfaces.
+Refer to [`docs/development/ui-design-token-baseline.json`](ui-design-token-baseline.json) for the canonical token snapshot of both surfaces.
 
 ### Contract Rules
 
@@ -217,7 +217,7 @@ All animations and transitions must be overridable via the user's system prefere
 }
 ```
 
-This block is defined in [`globals.css`](services/mail-server/crates/ui-foundation/assets/globals.css) and applies globally across all surfaces.
+This block is defined in [`globals.css`](../../services/mail-server/crates/ui-foundation/assets/globals.css) and applies globally across all surfaces.
 
 ## Spacing Token System
 
@@ -257,7 +257,7 @@ These map to Tailwind's spacing scale so utility classes like `p-4`, `gap-6`, `p
 
 ### Keyboard Navigation Patterns
 
-See [`docs/development/interactive-state-matrix.md`](docs/development/interactive-state-matrix.md) for the complete keyboard interaction contract.
+See [`docs/development/interactive-state-matrix.md`](interactive-state-matrix.md) for the complete keyboard interaction contract.
 
 ## Apex Icons Standard
 

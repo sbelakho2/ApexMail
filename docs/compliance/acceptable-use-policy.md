@@ -95,14 +95,17 @@ All recipients must have provided consent through one of:
 
 ### 5.1 Volume Limits by Plan
 
-| Plan | Daily Limit | Monthly Limit | Burst Rate (per minute) |
-|------|-------------|---------------|------------------------|
-| Free | 300 | 3,000 | 10 |
-| Starter | 5,000 | 50,000 | 100 |
-| Pro | 15,000 | 150,000 | 250 |
-| Growth | 50,000 | 500,000 | 500 |
-| Scale | 200,000 | 2,000,000 | 1,000 |
-| Enterprise | Custom | Custom | Custom |
+| Plan | Daily Limit | Monthly Limit | API Throughput |
+|------|-------------|---------------|----------------|
+| Free | 300 | 30,000 | 10 requests/second |
+| Starter | 5,000 | 50,000 | 100 requests/second |
+| Pro | 15,000 | 150,000 | 100 requests/second |
+| Growth | 50,000 | 500,000 | 500 requests/second |
+| Scale | 200,000 | 2,000,000 | 500 requests/second |
+| Enterprise | Custom | Custom | 5,000 requests/second (per contract) |
+
+Throughput tiers are enforced per API key with a sliding window; the canonical
+table is [docs/api/rate-limits.md](../api/rate-limits.md).
 
 ### 5.2 Warm-up Requirements
 

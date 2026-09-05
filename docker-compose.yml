@@ -73,11 +73,17 @@ services:
     restart: unless-stopped
     # SECURITY: Password read from Docker secret file, not visible via docker inspect
     entrypoint: ["sh", "/usr/local/bin/redis-entrypoint.sh"]
-    # Performance: Override maxmemory and eviction policy for production workloads.
-    # 512mb is appropriate for a dev instance; adjust for production based on
-    # available RAM and data volume.  allkeys-lru ensures stale keys are evicted
-    # rather than writes failing when memory is exhausted.
-    command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru
+    # NOTE: there is deliberately NO `command:` here (a previous
+    # `redis-server --maxmemory …` command was dead config). With a custom
+    # entrypoint, compose only passes `command:` as ARGUMENTS to the
+    # entrypoint script — and deploy/redis/entrypoint.sh ignores them and
+    # execs `redis-server` itself with --appendonly/--maxmemory/
+    # --maxmemory-policy derived from the REDIS_MAXMEMORY /
+    # REDIS_MAXMEMORY_POLICY env vars below (plus the ACL file). Tune
+    # memory/eviction via those env vars; the entrypoint owns the config.
+    # Dev: 512mb + allkeys-lru (stale keys evicted rather than write
+    # failures when memory fills). The prod overlay raises memory to 1gb
+    # and switches the policy to volatile-lru.
     environment:
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
       REDIS_MAXMEMORY: "512mb"
@@ -163,7 +169,11 @@ services:
   # OPENTELEMETRY COLLECTOR
   # =========================================================================
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.106.1
+    # Version aligned with the mail-server dev stack (0.112.0 was the newer
+    # of the two diverging pins — audit §2 toolchain/version skew); both
+    # stacks share deploy/otel-collector/config.yaml, which the
+    # mail-server stack already ran against 0.112.0.
+    image: otel/opentelemetry-collector-contrib:0.112.0
     container_name: apexmail-otel-collector
     restart: unless-stopped
     command: ["--config=/etc/otelcol/config.yaml"]
@@ -350,8 +360,12 @@ services:
       REDIS_PASSWORD_FILE: /run/secrets/redis_password
       REDIS_POOL_SIZE: ${REDIS_POOL_SIZE:-16}
       # ── Server bind ───────────────────────────────────────────────────────
-      API_HOST: 0.0.0.0
-      API_PORT: 8080
+      # The api-server binary reads HOST / PORT (the previous API_HOST /
+      # API_PORT names were dead vars nothing consumed). PORT stays 8080 to
+      # match the healthcheck and the host port mapping below, so a base-only
+      # `docker compose up` comes up healthy.
+      HOST: 0.0.0.0
+      PORT: "8080"
       # ── Internal service auth (shared with pdf-renderer) ──────────────────
       INTERNAL_SERVICE_TOKEN: ${INTERNAL_SERVICE_TOKEN:-dev-internal-service-token-change-me}
       # Per-domain DKIM private keys are encrypted before database storage.
@@ -489,6 +503,17 @@ services:
       dockerfile: services/mail-server/Dockerfile
       target: mta
     restart: unless-stopped
+    # Dev/prod parity fix (audit §2 "dev MTA DB auth can't succeed"): the
+    # shared entrypoint wrapper assembles DATABASE_URL / REDIS_URL from the
+    # DB_* / REDIS_* parts below + the mounted Docker secrets, percent-
+    # encoding the passwords for the URI user-info component. Compose cannot
+    # read a secret file into an interpolated URL, so the previous hardcoded
+    # `postgres://apexmail:apexmail@…` / passwordless `redis://…` defaults
+    # could never match the secret-file POSTGRES_PASSWORD / the ACL-enabled
+    # Redis. The wrapper is the same path the prod overlay uses.
+    entrypoint: ["/bin/sh", "/opt/apexmail/entrypoint-wrapper.sh", "mta-server"]
+    volumes:
+      - ./deploy/scripts/entrypoint-wrapper.sh:/opt/apexmail/entrypoint-wrapper.sh:ro
     # Drain in-flight SMTP transactions before SIGKILL (default 10s kills
     # accepted-but-unpersisted submission DATA on every redeploy).
     stop_grace_period: 90s
@@ -499,11 +524,20 @@ services:
     environment:
       RUST_LOG: ${RUST_LOG:-info}
       HOSTNAME: ${MAIL_SERVER_HOSTNAME:-mail.apexmail.ee}
-      # ── Backend datastores (crates/mta/src/config.rs reads these names) ────
+      # ── Backend datastores (URLs assembled by the entrypoint wrapper) ────
       # Without DATABASE_URL/REDIS_URL the MTA silently falls back to
-      # localhost defaults and crashes/loops on first DB or Redis use.
-      DATABASE_URL: ${DATABASE_URL:-postgres://apexmail:apexmail@postgres:5432/apexmail}
-      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
+      # localhost defaults and crashes/loops on first DB or Redis use; the
+      # blanks force the wrapper to rebuild both from the secret files.
+      DATABASE_URL: ""
+      REDIS_URL: ""
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${POSTGRES_DB:-apexmail}
+      DB_USER: ${POSTGRES_USER:-apexmail}
+      DB_PASSWORD_FILE: /run/secrets/postgres_password
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD_FILE: /run/secrets/redis_password
       # gRPC endpoint of the mailstore service (inbound mailbox delivery).
       # Matches the config default format (http:// scheme) and the prod overlay.
       MAILSTORE_GRPC_ADDR: ${MAILSTORE_GRPC_ADDR:-http://mailstore:50051}
@@ -535,6 +569,9 @@ services:
     read_only: true
     tmpfs:
       - /tmp
+    secrets:
+      - postgres_password
+      - redis_password
     logging: *default-logging
 
   # ===========================================================================
@@ -1167,7 +1204,12 @@ services:
       CLICKHOUSE_PASSWORD_FILE: /run/secrets/clickhouse_password
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
     ports:
-      - "${GRAFANA_PORT:-127.0.0.1:3003}:3000"
+      # The loopback binding is HARDCODED OUTSIDE the variable (audit §2
+      # GRAFANA_PORT footgun): the old "${GRAFANA_PORT:-127.0.0.1:3003}:3000"
+      # made a bare GRAFANA_PORT=3003 expand to "3003:3000" — a 0.0.0.0 bind
+      # of the Grafana UI. The variable now selects ONLY the host port
+      # number; the UI stays loopback-restricted.
+      - "127.0.0.1:${GRAFANA_PORT:-3003}:3000"
     networks:
       - apexmail_monitoring
       # The ClickHouse/PostgreSQL datasources point at clickhouse:8123 /

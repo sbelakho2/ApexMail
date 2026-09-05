@@ -9,7 +9,7 @@ use apexmail_dns_resolver::lookup::DnsLookup;
 use apexmail_dns_resolver::records::{DmarcPolicy, MxRecord, SpfRecord};
 use dashmap::DashMap;
 use futures::stream::{FuturesUnordered, StreamExt};
-use mta::auth::email_authentication::{AuthenticationResults, EmailAuthenticator, SpfVerdict};
+use mta::auth::email_authentication::{AuthenticationResults, EmailAuthenticator};
 use mta::config::EmailAuthConfig;
 use spam_filter::content_scorer::{score_content, ContentScore};
 use spam_filter::engine::{SpamEngine, SpamVerdict};
@@ -675,7 +675,7 @@ impl GraderEngine {
         let spam_verdict = self.analyze_spam(submission, auth_header);
         let content_score = spam_verdict.content_score.clone();
 
-        let auth_score = self.compute_auth_score(&domain_check, auth_results.as_ref());
+        let auth_score = self.compute_auth_score(&domain_check);
         let spam_likelihood = scoring::invert_spam_score(spam_verdict.score);
         let content_quality = scoring::invert_content_score(content_score.score);
 
@@ -851,17 +851,17 @@ impl GraderEngine {
         score_content(&combined)
     }
 
-    fn compute_auth_score(
-        &self,
-        domain_check: &GraderResponse,
-        auth_results: Option<&AuthenticationResults>,
-    ) -> u16 {
-        let domain_auth = domain_check.breakdown.authentication.score;
-        let bonus = match auth_results {
-            Some(r) if r.spf.result == SpfVerdict::Pass => 10u16,
-            _ => 0,
-        };
-        (domain_auth + bonus).min(100)
+    /// Authentication dimension for a submitted message.
+    ///
+    /// The DNS-level auth score (`breakdown.authentication`, which already
+    /// weighs the published SPF record at up to 30/100) is used as-is: the
+    /// old code added a flat +10 whenever the live SPF verdict passed,
+    /// double-counting SPF and letting a single passing mechanism push the
+    /// dimension past what the DNS evidence supports. The live message-level
+    /// verdicts remain visible in `auth_details` and the spam engine, they
+    /// just no longer inflate the auth score.
+    fn compute_auth_score(&self, domain_check: &GraderResponse) -> u16 {
+        domain_check.breakdown.authentication.score.min(100)
     }
 }
 
@@ -940,6 +940,13 @@ pub(crate) fn validate_submission(
     if from.is_empty() {
         return Err(GraderError::InvalidDomain("`from` is required".into()));
     }
+    // Header-injection guard: `from` becomes the synthesized MIME's From:
+    // line, so CR/LF anywhere in it rejects the submission outright (same
+    // policy as the subject — it is a single required field, there is
+    // nothing sensible to skip).
+    if from.contains('\r') || from.contains('\n') {
+        return Err(GraderError::InvalidDomain("`from` contains CR/LF".into()));
+    }
     let domain_input = request
         .domain
         .clone()
@@ -952,12 +959,31 @@ pub(crate) fn validate_submission(
             "too many recipients (max {MAX_RECIPIENTS})"
         )));
     }
+    // Recipients are spliced into the synthesized To: line — any entry
+    // carrying CR/LF is skipped and flagged (same policy as custom
+    // headers), never spliced into the MIME.
+    let mut skipped_recipients = 0usize;
     let to: Vec<String> = request
         .to
         .iter()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter(|s| {
+            if s.is_empty() {
+                return false;
+            }
+            if s.contains('\r') || s.contains('\n') {
+                skipped_recipients += 1;
+                return false;
+            }
+            true
+        })
         .collect();
+    if skipped_recipients > 0 {
+        tracing::warn!(
+            skipped = skipped_recipients,
+            "grader: dropped recipients containing CR/LF (header-injection guard)"
+        );
+    }
 
     let subject = request.subject.as_deref().unwrap_or("").to_string();
     if subject.len() > MAX_SUBJECT_LEN {
@@ -1190,6 +1216,55 @@ mod tests {
         assert_eq!(v.domain, "example.com");
         assert_eq!(v.from, "alice@Example.com");
         assert_eq!(v.mail_from, "alice@Example.com");
+    }
+
+    #[test]
+    fn validate_submission_rejects_crlf_from() {
+        // `from` is spliced into the synthesized From: line — a CR/LF there
+        // is a header-injection attempt and rejects the whole submission.
+        let req = EmailSubmitRequest {
+            domain: Some("example.com".into()),
+            from: Some("a@example.com\r\nBcc: leak@evil.com".into()),
+            to: vec![],
+            subject: Some("hi".into()),
+            body_text: None,
+            body_html: None,
+            headers: None,
+            selectors: vec![],
+            sender_ip: None,
+            helo_hostname: None,
+            mail_from: None,
+        };
+        assert!(validate_submission(&req, &cfg()).is_err());
+    }
+
+    #[test]
+    fn validate_submission_skips_crlf_recipients_and_never_splices_them() {
+        let req = EmailSubmitRequest {
+            domain: Some("example.com".into()),
+            from: Some("a@example.com".into()),
+            to: vec![
+                "bob@example.org".into(),
+                "evil@example.org\r\nBcc: leak@evil.com".into(),
+                "carol@example.org".into(),
+            ],
+            subject: Some("hi".into()),
+            body_text: Some("body".into()),
+            body_html: None,
+            headers: None,
+            selectors: vec![],
+            sender_ip: None,
+            helo_hostname: None,
+            mail_from: None,
+        };
+        let v = validate_submission(&req, &cfg()).unwrap();
+        assert_eq!(v.to, vec!["bob@example.org", "carol@example.org"]);
+
+        // And the synthesized MIME never contains the injected header line.
+        let raw = String::from_utf8_lossy(&build_raw_message(&v)).into_owned();
+        assert!(!raw.contains("Bcc:"));
+        assert!(!raw.contains("\r\nBcc"));
+        assert!(raw.contains("To: bob@example.org, carol@example.org"));
     }
 
     #[test]

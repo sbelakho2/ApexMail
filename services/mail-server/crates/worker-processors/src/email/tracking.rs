@@ -312,12 +312,20 @@ pub fn add_tracking_pixel(html: &str, job: &EmailJob, config: &TrackingConfig) -
 /// Rewrite links in HTML content for click tracking.
 ///
 /// Uses DOM parsing (via `scraper`/`html5ever`) with CSS selector `a[href]`
-/// to iterate only legitimate `<a>` elements. Builds a replacement map from
-/// original href → tracked URL, then applies replacements to the original
-/// HTML to preserve its structure.
+/// to decide WHICH links are trackable (only real anchors, minus
+/// mailto/tel/anchor/template/unsubscribe hrefs). The rewrite is then
+/// applied to the ORIGINAL HTML in a SINGLE left-to-right scan (see
+/// [`rewrite_href_spans`]) keyed by the href VALUE, so every attribute
+/// spelling resolves — double-quoted, single-quoted, unquoted, and
+/// entity-encoded (`&amp;`) — preserving the document's structure. The
+/// previous implementation substring-searched the whole document once per
+/// replacement key and only ever matched the double-quoted DOM-decoded
+/// spelling, silently losing analytics for the rest.
 pub fn rewrite_links(html: &str, job: &EmailJob, config: &TrackingConfig) -> String {
     let doc = Html::parse_document(html);
-    let mut replacements: HashMap<String, String> = HashMap::new();
+    // href VALUE (entity-decoded) → tracked URL. Keyed by value so the
+    // single raw scan can match any quoting/encoding of that value.
+    let mut tracked_by_value: HashMap<String, String> = HashMap::new();
 
     for element in doc.select(&ANCHOR_SELECTOR) {
         let href_attr = match element.value().attr("href") {
@@ -347,7 +355,7 @@ pub fn rewrite_links(html: &str, job: &EmailJob, config: &TrackingConfig) -> Str
                     env = missing,
                     "link rewriting skipped: {missing} is not configured (>= 32 chars, shared with tracking-service)"
                 );
-                replacements.clear();
+                tracked_by_value.clear();
                 break;
             }
         };
@@ -356,58 +364,127 @@ pub fn rewrite_links(html: &str, job: &EmailJob, config: &TrackingConfig) -> Str
             config.base_url, config.click_redirect_path, tracking_id
         );
 
-        // Build a proper href attribute replacement
-        let original_attr = format!(r#"href="{}""#, href_attr);
-        let new_attr = format!(r#"href="{}""#, tracked_url);
-        replacements.insert(original_attr, new_attr);
+        tracked_by_value.insert(href_attr.to_string(), tracked_url);
     }
 
-    if replacements.is_empty() {
+    if tracked_by_value.is_empty() {
         return html.to_string();
     }
 
-    // Apply replacements to the original HTML.
-    // We process in order of appearance by scanning left-to-right.
+    rewrite_href_spans(html, &tracked_by_value)
+}
+
+/// Decode the handful of entities that can legally appear inside an href
+/// attribute value (`&amp;` overwhelmingly; the rest for completeness) to
+/// its DOM value, so a raw `?a=1&amp;b=2` matches the decoded `?a=1&b=2`
+/// the DOM pass indexed.
+fn decode_href_entities(value: &str) -> String {
+    if !value.contains('&') {
+        return value.to_string();
+    }
+    value
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+}
+
+/// One span of the original document to replace: `[start, end)` → text.
+struct HrefSpan {
+    start: usize,
+    end: usize,
+    replacement: String,
+}
+
+/// Single left-to-right scan of `html` for `href=` (case-insensitive),
+/// resolving the attribute value under ANY quoting style and replacing the
+/// whole attribute with the double-quoted tracked URL when the
+/// (entity-decoded) value is in `tracked_by_value`.
+///
+/// Invariants:
+/// * ONE pass, O(hrefs) map lookups — no per-key full-document scans.
+/// * Spans are emitted in document order and never overlap (each starts at
+///   a distinct `href=` occurrence and ends before the next scan position).
+/// * ASCII lowercasing is byte-length preserving, so indices found in the
+///   lowercased copy address the original string exactly.
+fn rewrite_href_spans(html: &str, tracked_by_value: &HashMap<String, String>) -> String {
+    let lower = html.to_ascii_lowercase();
+    let mut spans: Vec<HrefSpan> = Vec::new();
+    let mut search_from = 0usize;
+    const NEEDLE: &str = "href=";
+
+    while let Some(rel) = lower[search_from..].find(NEEDLE) {
+        let attr_start = search_from + rel;
+        let mut cursor = attr_start + NEEDLE.len();
+        search_from = cursor;
+        // HTML allows ASCII whitespace between `=` and the value.
+        let bytes = html.as_bytes();
+        while cursor < bytes.len() && (bytes[cursor] == b' ' || bytes[cursor] == b'\t') {
+            cursor += 1;
+        }
+        let Some((value_start, quote)) = next_value_boundary(bytes, cursor) else {
+            continue;
+        };
+        let value_end = match quote {
+            Some(q) => match html[value_start..].find(q) {
+                Some(rel_end) => value_start + rel_end,
+                None => continue, // unterminated quote — leave untouched
+            },
+            // Unquoted values end at the first whitespace or `>`.
+            None => {
+                let mut end = value_start;
+                while end < bytes.len()
+                    && bytes[end] != b' '
+                    && bytes[end] != b'\t'
+                    && bytes[end] != b'\r'
+                    && bytes[end] != b'\n'
+                    && bytes[end] != b'>'
+                {
+                    end += 1;
+                }
+                end
+            }
+        };
+        search_from = search_from.max(value_end);
+
+        let raw_value = &html[value_start..value_end];
+        let decoded = decode_href_entities(raw_value);
+        let Some(tracked) = tracked_by_value.get(&decoded) else {
+            continue;
+        };
+        spans.push(HrefSpan {
+            start: attr_start,
+            end: value_end,
+            replacement: format!("href=\"{tracked}\""),
+        });
+    }
+
+    if spans.is_empty() {
+        return html.to_string();
+    }
+
     let mut result = String::with_capacity(html.len());
-    let mut last_end = 0;
-
-    // Collect sorted positions of all replacement keys in the source HTML
-    let mut positions: Vec<(usize, &str)> = Vec::new();
-    for old in replacements.keys() {
-        let mut search_start = 0;
-        while let Some(pos) = html[search_start..].find(old.as_str()) {
-            let abs_pos = search_start + pos;
-            positions.push((abs_pos, old.as_str()));
-            search_start = abs_pos + 1;
-        }
-    }
-
-    // Sort by position (ascending)
-    positions.sort_by_key(|(pos, _)| *pos);
-
-    // Apply replacements without overlapping
-    let mut applied: Vec<(usize, &str)> = Vec::new();
-    for (pos, old) in &positions {
-        if applied.iter().any(|(ap, ao)| {
-            let end = *ap + ao.len();
-            *pos >= *ap && *pos < end
-        }) {
-            continue; // Skip overlapping
-        }
-        applied.push((*pos, old));
-    }
-
-    // Sort again by position
-    applied.sort_by_key(|(pos, _)| *pos);
-
-    for (pos, old) in &applied {
-        let new = &replacements[*old];
-        result.push_str(&html[last_end..*pos]);
-        result.push_str(new);
-        last_end = pos + old.len();
+    let mut last_end = 0usize;
+    for span in spans {
+        result.push_str(&html[last_end..span.start]);
+        result.push_str(&span.replacement);
+        last_end = span.end;
     }
     result.push_str(&html[last_end..]);
     result
+}
+
+/// Boundary of the attribute value after `href=` (+ optional whitespace):
+/// returns the byte index where the value starts and the quoting
+/// character, if any.
+fn next_value_boundary(bytes: &[u8], at: usize) -> Option<(usize, Option<char>)> {
+    match bytes.get(at)? {
+        b'"' => Some((at + 1, Some('"'))),
+        b'\'' => Some((at + 1, Some('\''))),
+        _ if at < bytes.len() => Some((at, None)),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

@@ -1,7 +1,7 @@
 # Advanced Analytics & Engagement Features
 
 
-ApexMail includes cutting-edge analytics and engagement features that provide a competitive advantage in email deliverability and subscriber relationship management.
+ApexMail includes analytics and engagement features that cover email deliverability and subscriber relationship management.
 
 ## Overview
 

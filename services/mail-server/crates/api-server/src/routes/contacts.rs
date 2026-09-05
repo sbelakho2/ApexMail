@@ -33,6 +33,49 @@ pub fn router() -> Router<AppState> {
         .route("/import", post(import_contacts))
 }
 
+// ─── Keyset cursor helpers ─────────────────────────────────────
+//
+// The list cursor encodes the `(created_at, id)` pair of the last row of the
+// previous page. A timestamp alone skips or duplicates rows that share a
+// `created_at` value; the tie-break `created_at = $ts AND id < $id` makes
+// the ordering total.
+
+/// Separator between the RFC3339 timestamp and the row id inside the
+/// hex-encoded cursor payload (RFC3339 and contact ids never contain it).
+const KEYSET_CURSOR_SEP: char = '\n';
+
+/// Encode a `(created_at, id)` keyset cursor as an opaque hex string.
+fn encode_keyset_cursor(created_at: &DateTime<Utc>, id: &str) -> String {
+    encode_cursor(&format!("{created_at}{KEYSET_CURSOR_SEP}{id}"))
+}
+
+/// Decode and validate a `(created_at, id)` keyset cursor. Malformed
+/// encodings, unparsable timestamps, or bogus ids are client errors (400) —
+/// an unvalidated cursor used to reach the database and surface as a 500.
+fn decode_keyset_cursor(encoded: &str) -> Result<(DateTime<Utc>, String), ApiError> {
+    let Some(decoded) = decode_cursor(encoded) else {
+        return Err(ApiError::BadRequest(
+            "invalid cursor: malformed encoding".into(),
+        ));
+    };
+    let Some((timestamp, id)) = decoded.split_once(KEYSET_CURSOR_SEP) else {
+        return Err(ApiError::BadRequest(
+            "invalid cursor: must encode a created_at timestamp and row id".into(),
+        ));
+    };
+    let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map_err(|_| {
+            ApiError::BadRequest(
+                "invalid cursor: must be an encoded created_at timestamp".into(),
+            )
+        })?
+        .with_timezone(&Utc);
+    if id.is_empty() || id.len() > 64 || id.bytes().any(|b| b.is_ascii_control()) {
+        return Err(ApiError::BadRequest("invalid cursor: malformed row id".into()));
+    }
+    Ok((timestamp, id.to_string()))
+}
+
 // ─── Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -79,8 +122,9 @@ pub struct ListContactsQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
-    /// Cursor for cursor-based pagination — hex-encoded `created_at` timestamp
-    /// of the last item from the previous page. When provided, overrides `offset`.
+    /// Cursor for cursor-based pagination — hex-encoded `created_at` + row id
+    /// pair of the last item from the previous page. When provided, overrides
+    /// `offset`.
     #[serde(default)]
     pub cursor: Option<String>,
     #[serde(default)]
@@ -170,19 +214,27 @@ async fn list_contacts(
 
     let limit = clamp_limit(params.limit, 200);
 
-    // Cursor-based pagination: decode the cursor (hex-encoded created_at timestamp)
-    let cursor_value = params.cursor.as_deref().and_then(decode_cursor);
+    // Cursor-based pagination: decode and validate the hex-encoded
+    // `created_at\nid` pair BEFORE binding — a bogus cursor used to reach
+    // the `::timestamp` cast and surface as a database 500 instead of a
+    // client 400.
+    let cursor_value = match params.cursor.as_deref() {
+        Some(encoded) => Some(decode_keyset_cursor(encoded)?),
+        None => None,
+    };
 
     let fetch_limit = limit + 1; // fetch one extra to detect has_more
 
-    let rows = if let Some(ref cursor) = cursor_value {
+    let rows = if let Some((ref cursor_ts, ref cursor_id)) = cursor_value {
         sqlx::query_as::<_, ContactRow>(
             "SELECT id, email, name, tags, metadata, status, created_at, updated_at
-             FROM contacts WHERE tenant_id = $1 AND created_at < $2::timestamp
-             ORDER BY created_at DESC LIMIT $3",
+             FROM contacts WHERE tenant_id = $1
+               AND (created_at < $2::timestamp OR (created_at = $2::timestamp AND id < $3))
+             ORDER BY created_at DESC, id DESC LIMIT $4",
         )
         .bind(&auth.tenant_id)
-        .bind(cursor)
+        .bind(cursor_ts)
+        .bind(cursor_id)
         .bind(fetch_limit)
         .fetch_all(&state.db)
         .await?
@@ -191,7 +243,7 @@ async fn list_contacts(
         let offset = params.offset.clamp(0, 100_000);
         sqlx::query_as::<_, ContactRow>(
             "SELECT id, email, name, tags, metadata, status, created_at, updated_at
-             FROM contacts WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+             FROM contacts WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3",
         )
         .bind(&auth.tenant_id)
         .bind(fetch_limit)
@@ -204,8 +256,12 @@ async fn list_contacts(
     let mut details: Vec<ContactResponse> = rows.into_iter().map(Into::into).collect();
     let more = has_more(&mut details, limit as usize);
 
-    // Compute the next cursor from the last row
-    let next_cursor = details.last().map(|r| encode_cursor(&r.created_at));
+    // Compute the next cursor from the last row's (created_at, id) pair.
+    let next_cursor = details.last().and_then(|r| {
+        chrono::DateTime::parse_from_rfc3339(&r.created_at)
+            .ok()
+            .map(|ts| encode_keyset_cursor(&ts.with_timezone(&Utc), &r.id))
+    });
     let meta = pagination_meta(more, next_cursor);
 
     // Build the response body and compute ETag
@@ -260,6 +316,23 @@ async fn update_contact(
     let metadata = body.metadata.or(existing.metadata);
     let status = body.status.unwrap_or(existing.status);
 
+    // Status is stored verbatim — an unknown value would silently disappear
+    // from every status-filtered view (counts, segments, sends).
+    const VALID_CONTACT_STATUSES: &[&str] = &[
+        "active",
+        "subscribed",
+        "unsubscribed",
+        "bounced",
+        "complained",
+        "deleted",
+    ];
+    if !VALID_CONTACT_STATUSES.contains(&status.as_str()) {
+        return Err(ApiError::Validation(vec![format!(
+            "invalid status '{}'; expected one of: active, subscribed, unsubscribed, bounced, complained, deleted",
+            status
+        )]));
+    }
+
     sqlx::query(
         "UPDATE contacts SET name=$1, tags=$2, metadata=$3, status=$4, updated_at=NOW()
          WHERE id=$5 AND tenant_id=$6",
@@ -304,6 +377,11 @@ async fn delete_contact(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Rows per chunked multi-row upsert in [`bulk_import`] — mirrors the CSV
+/// import path's [`IMPORT_CHUNK_SIZE`] (one round-trip per 500 rows instead
+/// of one per row, comfortably under the 65,535 bind-parameter limit).
+const BULK_IMPORT_CHUNK_SIZE: usize = 500;
+
 async fn bulk_import(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -319,57 +397,107 @@ async fn bulk_import(
         )]));
     }
 
-    let mut created = 0usize;
-    let mut updated = 0usize;
+    // Validate, normalise, and dedupe up front so the database phase is a
+    // clean all-or-nothing chunked upsert:
+    // - invalid emails count as `failed` and never reach the database;
+    // - emails are lowercased so the case-sensitive unique index on
+    //   (tenant_id, email) dedupes consistently with create_contact;
+    // - in-request duplicates collapse to their first occurrence (a
+    //   multi-row upsert cannot touch the same conflict row twice in one
+    //   statement) and count as `updated`, matching the per-row behaviour
+    //   they used to produce.
     let mut failed = 0usize;
-
+    let mut updated = 0usize;
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut valid: Vec<&CreateContactRequest> = Vec::with_capacity(body.contacts.len());
     for contact in &body.contacts {
         if !apexmail_lib::validation::is_valid_email(&contact.email) {
             failed += 1;
             continue;
         }
+        if !seen.insert(contact.email.to_lowercase()) {
+            updated += 1;
+            continue;
+        }
+        valid.push(contact);
+    }
 
-        // Normalise to lowercase so the case-sensitive unique index on
-        // (tenant_id, email) dedupes consistently with create_contact.
-        let email = contact.email.to_lowercase();
-        let tags = contact.tags.as_ref().map(|t| serde_json::json!(t));
-        // xmax = 0 means a fresh insert; non-zero means update.
-        let res: Result<Option<i64>, _> = sqlx::query_scalar(
-            r#"INSERT INTO contacts (id, tenant_id, email, name, tags, metadata, status, created_at, updated_at)
-               VALUES ($1,$2,$3,$4,$5,$6,'active',NOW(),NOW())
-               ON CONFLICT (tenant_id, email) DO UPDATE SET
-                 name = COALESCE(EXCLUDED.name, contacts.name),
-                 tags = COALESCE(EXCLUDED.tags, contacts.tags),
-                 metadata = COALESCE(EXCLUDED.metadata, contacts.metadata),
-                 updated_at = NOW()
-               RETURNING (xmax::text::bigint)"#,
-        )
-        .bind(Uuid::new_v4())
-        .bind(&auth.tenant_id)
-        .bind(&email)
-        .bind(&contact.name)
-        .bind(&tags)
-        .bind(&contact.metadata)
-        .fetch_optional(&state.db)
-        .await;
+    // Chunked multi-row upsert inside ONE transaction (previously one query
+    // per contact — 10,000 sequential round-trips for a max-size import).
+    // `xmax = 0` means a fresh insert; non-zero means the conflict path
+    // updated an existing row.
+    let mut created = 0usize;
+    if !valid.is_empty() {
+        let mut tx = state.db.begin().await.map_err(|error| {
+            tracing::error!(error = %error, tenant_id = %auth.tenant_id, "bulk import failed to begin transaction");
+            ApiError::Internal("database error".into())
+        })?;
 
-        match res {
-            Ok(Some(xmax)) => {
+        for chunk in valid.chunks(BULK_IMPORT_CHUNK_SIZE) {
+            let mut query = String::from(
+                "INSERT INTO contacts (id, tenant_id, email, name, tags, metadata, status, created_at, updated_at) VALUES ",
+            );
+            let mut param_idx = 1u32;
+            for (i, _) in chunk.iter().enumerate() {
+                if i > 0 {
+                    query.push_str(", ");
+                }
+                query.push_str(&format!(
+                    "(${}, ${}, ${}, ${}, ${}, ${}, 'active', NOW(), NOW())",
+                    param_idx,
+                    param_idx + 1,
+                    param_idx + 2,
+                    param_idx + 3,
+                    param_idx + 4,
+                    param_idx + 5,
+                ));
+                param_idx += 6;
+            }
+            query.push_str(
+                " ON CONFLICT (tenant_id, email) DO UPDATE SET \
+                   name = COALESCE(EXCLUDED.name, contacts.name), \
+                   tags = COALESCE(EXCLUDED.tags, contacts.tags), \
+                   metadata = COALESCE(EXCLUDED.metadata, contacts.metadata), \
+                   updated_at = NOW() \
+                 RETURNING (xmax::text::bigint)",
+            );
+
+            let mut q = sqlx::query_scalar::<_, i64>(&query);
+            for contact in chunk {
+                q = q
+                    .bind(Uuid::new_v4())
+                    .bind(&auth.tenant_id)
+                    .bind(contact.email.to_lowercase())
+                    .bind(&contact.name)
+                    .bind(contact.tags.as_ref().map(|t| serde_json::json!(t)))
+                    .bind(&contact.metadata);
+            }
+
+            let xmaxes = match q.fetch_all(&mut *tx).await {
+                Ok(xmaxes) => xmaxes,
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    tracing::error!(
+                        error = %error,
+                        tenant_id = %auth.tenant_id,
+                        "bulk import chunk failed — transaction rolled back"
+                    );
+                    return Err(ApiError::Internal("database error".into()));
+                }
+            };
+            for xmax in xmaxes {
                 if xmax == 0 {
                     created += 1;
                 } else {
                     updated += 1;
                 }
             }
-            Ok(None) => {
-                // Shouldn't happen with RETURNING, but count as created
-                created += 1;
-            }
-            Err(e) => {
-                tracing::error!(email = %apexmail_lib::pii::redact_email(&contact.email), error = %e, "Failed to upsert contact in bulk import");
-                failed += 1;
-            }
         }
+
+        tx.commit().await.map_err(|error| {
+            tracing::error!(error = %error, tenant_id = %auth.tenant_id, "bulk import commit failed");
+            ApiError::Internal("database error".into())
+        })?;
     }
 
     Ok(Json(BulkImportResponse {

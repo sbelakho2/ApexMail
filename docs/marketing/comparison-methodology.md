@@ -18,14 +18,7 @@ All comparison pages must prominently display:
 
 ### Plans Compared
 
-| Provider | Plan(s) Compared | Billing Period |
-|----------|-----------------|----------------|
-| ApexMail | [Plan name] | Monthly |
-| SendGrid | [Plan name] | Monthly |
-| Resend | [Plan name] | Monthly |
-| Postmark | [Plan name] | Monthly |
-
-Plans are selected as the closest functional equivalent in the comparable tier. Legacy, promotional, and free plans are clearly separated and labeled.
+Plans are selected as the closest functional equivalent in the comparable tier at the assumed volume (see below); monthly billing is assumed unless stated otherwise. The specific plan chosen for each provider is recorded in the per-provider evidence records (`docs/marketing/comparison-evidence.json`) and shown on each comparison page. Legacy, promotional, and free plans are clearly separated and labeled.
 
 ### Usage Volume Assumed
 

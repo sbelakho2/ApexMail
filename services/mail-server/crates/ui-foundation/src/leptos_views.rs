@@ -117,7 +117,7 @@ pub fn web_home_page() -> String {
 <a href=\"/login\" class=\"inline-flex min-h-[48px] items-center justify-center rounded-sm border border-surface-300 bg-card px-8 py-3 text-sm font-bold text-surface-950 transition-colors hover:border-surface-950\">Sign In</a>\
 </div></div>\
 <div class=\"border border-surface-200 bg-card shadow-premium\">\
-<div class=\"border-b border-surface-200 px-5 py-4\"><p class=\"text-[10px] font-bold uppercase tracking-[0.24em] text-surface-400\">Workspace Snapshot</p></div>\
+<div class=\"border-b border-surface-200 px-5 py-4\"><p class=\"text-[10px] font-bold uppercase tracking-[0.24em] text-surface-500\">Workspace Snapshot</p></div>\
 <div class=\"grid divide-y divide-surface-200\">\
 <div class=\"flex items-center justify-between gap-4 px-5 py-5\"><div><p class=\"text-sm font-bold text-surface-950\">Campaign workbench</p><p class=\"mt-1 text-xs text-surface-500\">Drafts, audiences, templates, and scheduling.</p></div><span class=\"text-xs font-bold uppercase tracking-widest text-primary\">Ready</span></div>\
 <div class=\"flex items-center justify-between gap-4 px-5 py-5\"><div><p class=\"text-sm font-bold text-surface-950\">Domain operations</p><p class=\"mt-1 text-xs text-surface-500\">Authentication, tracking, dedicated IPs, and webhooks.</p></div><span class=\"text-xs font-bold uppercase tracking-widest text-primary\">Live</span></div>\
@@ -196,7 +196,7 @@ fn pagination_storage_key(scope: &str) -> String {
 
 fn render_page_breadcrumbs(current_page: &str) -> String {
     format!(
-        "<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"/\" class=\"hover:text-surface-900 transition-colors\">Dashboard</a></li><li class=\"text-surface-400\">/</li><li class=\"text-surface-900 font-medium\" aria-current=\"page\">{}</li></ol></nav>",
+        "<nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"/\" class=\"hover:text-surface-900 transition-colors\">Dashboard</a></li><li class=\"text-surface-500\">/</li><li class=\"text-surface-900 font-medium\" aria-current=\"page\">{}</li></ol></nav>",
         current_page,
     )
 }
@@ -415,7 +415,7 @@ fn domain_detail_section(data: &ListPageData) -> String {
                     .unwrap_or_default()
             };
             format!(
-                "<div class=\"rounded-sm border border-surface-200 bg-card p-4 shadow-premium\"><div class=\"flex flex-wrap items-center justify-between gap-3\"><p class=\"text-xs font-bold uppercase tracking-widest text-surface-400\">{record_type} · {host}</p>{state}</div><div class=\"mt-3 space-y-2\"><div><p class=\"text-[10px] font-bold uppercase tracking-[0.18em] text-surface-400\">Value — select to copy</p><code class=\"mt-1 block font-mono text-xs bg-muted/40 rounded px-2 py-1.5 break-all select-text text-surface-800\">{value}</code></div></div></div>",
+                "<div class=\"rounded-sm border border-surface-200 bg-card p-4 shadow-premium\"><div class=\"flex flex-wrap items-center justify-between gap-3\"><p class=\"text-xs font-bold uppercase tracking-widest text-surface-500\">{record_type} · {host}</p>{state}</div><div class=\"mt-3 space-y-2\"><div><p class=\"text-[10px] font-bold uppercase tracking-[0.18em] text-surface-500\">Value — select to copy</p><code class=\"mt-1 block font-mono text-xs bg-muted/40 rounded px-2 py-1.5 break-all select-text text-surface-800\">{value}</code></div></div></div>",
                 record_type = cell(0),
                 host = cell(1),
                 state = cell(3),
@@ -494,7 +494,7 @@ fn campaign_detail_section(data: &ListPageData) -> String {
                 )
             } else {
                 format!(
-                    "<button type=\"button\" disabled aria-disabled=\"true\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-surface-400 cursor-not-allowed\" title=\"Not available in this campaign's current status\">{label}</button>",
+                    "<button type=\"button\" disabled aria-disabled=\"true\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-surface-500 cursor-not-allowed\" title=\"Not available in this campaign's current status\">{label}</button>",
                     label = html_escape(&label),
                 )
             };
@@ -505,15 +505,15 @@ fn campaign_detail_section(data: &ListPageData) -> String {
 
     format!(
         "<section class=\"space-y-4\" data-page=\"campaign-detail\">\
-        <div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-4\">Lifecycle</h2><div class=\"flex flex-wrap gap-3\">{actions}</div><p class=\"mt-3 text-xs text-muted-foreground\">Actions validate the campaign's current status server-side and flash the honest outcome.</p></div>\
+        <div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-4\">Lifecycle</h2><div class=\"flex flex-wrap gap-3\">{actions}</div><p class=\"mt-3 text-xs text-muted-foreground\">Actions validate the campaign's current status server-side and flash the honest outcome.</p></div>\
         {recipients}\
-        <div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-2\">Monitor</h2><p class=\"text-sm text-muted-foreground\">While the campaign sends, reload this page to watch counts update — every number is rendered server-side from live data.</p></div>\
+        <div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">Monitor</h2><p class=\"text-sm text-muted-foreground\">While the campaign sends, reload this page to watch counts update — every number is rendered server-side from live data.</p></div>\
         </section>",
         actions = actions,
         recipients = recipients_form.map(|form| format!(
-            "<div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-4\">Audience</h2>{form}</div>",
+            "<div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-4\">Audience</h2>{form}</div>",
             form = form
-        )).unwrap_or_else(|| "<div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-2\">Audience</h2><p class=\"text-sm text-muted-foreground\">No lists exist yet — create a list first, then wire this campaign's recipients.</p></div>".to_string()),
+        )).unwrap_or_else(|| "<div class=\"rounded-sm border border-surface-200 bg-card p-6 shadow-premium\"><h2 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">Audience</h2><p class=\"text-sm text-muted-foreground\">No lists exist yet — create a list first, then wire this campaign's recipients.</p></div>".to_string()),
     )
 }
 
@@ -726,7 +726,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
     let cp = cp_flavored(&data.base_path);
     let eyebrow = if cp {
         format!(
-            "<p class=\"apex-eyebrow text-[11px] font-bold uppercase tracking-[0.18em] text-surface-400\"><span>{}</span></p>",
+            "<p class=\"apex-eyebrow text-[11px] font-bold uppercase tracking-[0.18em] text-surface-500\"><span>{}</span></p>",
             html_escape(&data.title)
         )
     } else {
@@ -993,7 +993,7 @@ fn render_campaign_editor_page(
     primary_action_label: &str,
 ) -> String {
     let breadcrumbs = format!(
-        "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-400\">/</li><li class=\"text-surface-900 font-medium\">{}</li></ol></nav>",
+        "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-500\">/</li><li class=\"text-surface-900 font-medium\">{}</li></ol></nav>",
         return_href,
         breadcrumb_label,
     );
@@ -1457,22 +1457,22 @@ pub fn control_plane_home_page() -> String {
                 <p class="mt-2"><span data-sample-data class="inline-flex items-center rounded-sm border border-surface-300 bg-surface-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-[0.18em] text-surface-600">Sample data</span></p>
                 <div class="mt-6 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
                     <article class="rounded-sm border border-surface-200 bg-surface-50 p-4">
-                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-400">Tenants armed</p>
+                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Tenants armed</p>
                         <p class="mt-2 text-2xl font-bold tracking-tight text-surface-950">12</p>
                         <p class="mt-1 text-xs text-surface-500">9 production, 3 launch window</p>
                     </article>
                     <article class="rounded-sm border border-surface-200 bg-surface-50 p-4">
-                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-400">Live incidents</p>
+                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Live incidents</p>
                         <p class="mt-2 text-2xl font-bold tracking-tight text-warning-700">1</p>
                         <p class="mt-1 text-xs text-surface-500">Queue latency breach in eu-central</p>
                     </article>
                     <article class="rounded-sm border border-surface-200 bg-surface-50 p-4">
-                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-400">Approvals pending</p>
+                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Approvals pending</p>
                         <p class="mt-2 text-2xl font-bold tracking-tight text-surface-950">7</p>
                         <p class="mt-1 text-xs text-surface-500">Security + sales handoff backlog</p>
                     </article>
                     <article class="rounded-sm border border-surface-200 bg-surface-50 p-4">
-                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-400">Expansion ARR</p>
+                        <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Expansion ARR</p>
                         <p class="mt-2 text-2xl font-bold tracking-tight text-success-700">$196k</p>
                         <p class="mt-1 text-xs text-surface-500">Weighted by confidence score</p>
                     </article>
@@ -1511,27 +1511,27 @@ pub fn control_plane_home_page() -> String {
     <section class="grid gap-4 lg:grid-cols-[1.1fr_0.9fr]">
         <article class="rounded-sm border border-surface-200 bg-card shadow-premium">
             <div class="border-b border-surface-200 px-5 py-4">
-                <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-400">Operational Lanes</p>
+                <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Operational Lanes</p>
                 <h2 class="mt-1 text-lg font-bold tracking-tight text-surface-950">Enterprise readiness · Launch choreography</h2>
             </div>
             <div class="divide-y divide-surface-200">
                 <div class="px-5 py-5">
-                    <p class="text-xs font-bold uppercase tracking-[0.2em] text-surface-400">01 · Tenant readiness</p>
+                    <p class="text-xs font-bold uppercase tracking-[0.2em] text-surface-500">01 · Tenant readiness</p>
                     <p class="mt-2 text-sm font-bold text-surface-950">Provision workspace, verify operators, bind billing plan</p>
                     <p class="mt-1 text-xs leading-5 text-surface-500">Includes role policy, API scope checks, and mandatory MFA posture.</p>
                 </div>
                 <div class="px-5 py-5">
-                    <p class="text-xs font-bold uppercase tracking-[0.2em] text-surface-400">02 · Fleet checkpoint</p>
+                    <p class="text-xs font-bold uppercase tracking-[0.2em] text-surface-500">02 · Fleet checkpoint</p>
                     <p class="mt-2 text-sm font-bold text-surface-950">Validate domain health, queue depth, and node distribution</p>
                     <p class="mt-1 text-xs leading-5 text-surface-500">Blocks promotion if regional queue pressure exceeds threshold.</p>
                 </div>
                 <div class="px-5 py-5">
-                    <p class="text-xs font-bold uppercase tracking-[0.2em] text-surface-400">03 · Trust evidence gate</p>
+                    <p class="text-xs font-bold uppercase tracking-[0.2em] text-surface-500">03 · Trust evidence gate</p>
                     <p class="mt-2 text-sm font-bold text-surface-950">Compile SOC2, HIPAA BAA, and SIG/CAIQ/HECVAT packs</p>
                     <p class="mt-1 text-xs leading-5 text-surface-500">Route security questionnaire manifests to legal and procurement reviewers.</p>
                 </div>
                 <div class="px-5 py-5">
-                    <p class="text-xs font-bold uppercase tracking-[0.2em] text-surface-400">04 · Expansion motion</p>
+                    <p class="text-xs font-bold uppercase tracking-[0.2em] text-surface-500">04 · Expansion motion</p>
                     <p class="mt-2 text-sm font-bold text-surface-950">Trigger operator outreach, approvals, and conversion sequence</p>
                     <p class="mt-1 text-xs leading-5 text-surface-500">Runs through sales cockpit with deterministic approval loop.</p>
                 </div>
@@ -1540,7 +1540,7 @@ pub fn control_plane_home_page() -> String {
 
         <article class="rounded-sm border border-surface-200 bg-card shadow-premium">
             <div class="border-b border-surface-200 px-5 py-4">
-                <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-400">Command Actions</p>
+                <p class="text-[10px] font-bold uppercase tracking-[0.22em] text-surface-500">Command Actions</p>
                 <h2 class="mt-1 text-lg font-bold tracking-tight text-surface-950">Shortcuts by desk</h2>
             </div>
             <div class="grid gap-3 p-5 text-xs font-bold">
@@ -1564,7 +1564,7 @@ pub fn control_plane_not_found_page() -> String {
     "<main class=\"flex min-h-screen flex-col items-center justify-center bg-surface-950 text-surface-100\">\
 <div class=\"text-center\">\
 <h1 class=\"text-6xl font-bold tracking-tighter\">404</h1>\
-<p class=\"mt-4 text-lg text-surface-400\">Page not found</p>\
+<p class=\"mt-4 text-lg text-surface-500\">Page not found</p>\
 <a href=\"/\" class=\"mt-6 inline-block rounded-sm bg-primary px-6 py-3 text-sm font-bold text-white hover:bg-brand-700\">Go Home</a>\
 </div></main>"
         .to_string()
@@ -1632,33 +1632,33 @@ pub fn control_plane_sales_page() -> String {
                         <article class="rounded-sm border border-white/10 bg-black/25 p-4">
                             <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Pipeline value</p>
                             <p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p>
-                            <p class="mt-1 text-xs text-surface-400">Weighted annual contract value</p>
+                            <p class="mt-1 text-xs text-surface-500">Weighted annual contract value</p>
                         </article>
                         <article class="rounded-sm border border-white/10 bg-black/25 p-4">
                             <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Approvals queue</p>
                             <p class="mt-2 text-2xl font-bold tracking-tight text-warning-200">—</p>
-                            <p class="mt-1 text-xs text-surface-400">7 high confidence, 4 review required</p>
+                            <p class="mt-1 text-xs text-surface-500">7 high confidence, 4 review required</p>
                         </article>
                         <article class="rounded-sm border border-white/10 bg-black/25 p-4">
                             <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Campaigns live</p>
                             <p class="mt-2 text-2xl font-bold tracking-tight text-success-200">—</p>
-                            <p class="mt-1 text-xs text-surface-400">1,268 recipients in active cadence</p>
+                            <p class="mt-1 text-xs text-surface-500">1,268 recipients in active cadence</p>
                         </article>
                         <article class="rounded-sm border border-white/10 bg-black/25 p-4">
                             <p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Conversion pace</p>
                             <p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p>
-                            <p class="mt-1 text-xs text-surface-400">From qualified to contract signature</p>
+                            <p class="mt-1 text-xs text-surface-500">From qualified to contract signature</p>
                         </article>
                     </div>
                 </div>
 
                 <section class="rounded-sm border border-white/10 bg-[#111b2e] p-5">
                     <div>
-                        <p class="text-xs uppercase tracking-[0.24em] text-surface-400">Session</p>
+                        <p class="text-xs uppercase tracking-[0.24em] text-surface-500">Session</p>
                         <h2 class="mt-2 text-xl font-bold text-white">Same-origin operator session</h2>
                     </div>
-                    <p class="mt-4 text-xs leading-5 text-surface-400">This console authenticates with your operator session cookie; every form below posts to <code class="rounded bg-black/30 px-1 py-0.5 text-brand-100">/web/admin/sales/*</code> routes that enforce system-tenant access server-side. No API keys are handled in the browser.</p>
-                    <p class="mt-4 text-xs uppercase tracking-[0.2em] text-surface-400">Status · Cookie session</p>
+                    <p class="mt-4 text-xs leading-5 text-surface-500">This console authenticates with your operator session cookie; every form below posts to <code class="rounded bg-black/30 px-1 py-0.5 text-brand-100">/web/admin/sales/*</code> routes that enforce system-tenant access server-side. No API keys are handled in the browser.</p>
+                    <p class="mt-4 text-xs uppercase tracking-[0.2em] text-surface-500">Status · Cookie session</p>
                 </section>
             </div>
         </header>
@@ -1668,7 +1668,7 @@ pub fn control_plane_sales_page() -> String {
                 <section class="apex-cp-dark-panel apex-cp-dark-panel--accent min-w-0 rounded-sm border border-white/10 bg-white/5 p-6">
                     <form method="get" action="/sales" role="search" class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
                         <div class="min-w-0">
-                            <p class="text-xs uppercase tracking-[0.28em] text-surface-400">Triage Queue</p>
+                            <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Triage Queue</p>
                             <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Lead inventory</h2>
                         </div>
                         <div class="grid w-full gap-3 md:w-auto md:grid-cols-[minmax(0,1fr)_minmax(8rem,11rem)_auto]">
@@ -1691,10 +1691,10 @@ pub fn control_plane_sales_page() -> String {
                     </form>
 
                     <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Total leads</p><p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p><p class="mt-1 text-xs text-surface-400">Across all active stages</p></div>
-                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Ready now</p><p class="mt-2 text-2xl font-bold tracking-tight text-success-200">—</p><p class="mt-1 text-xs text-surface-400">No blockers, proposal eligible</p></div>
-                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Needs legal</p><p class="mt-2 text-2xl font-bold tracking-tight text-warning-200">—</p><p class="mt-1 text-xs text-surface-400">DPA or procurement exception</p></div>
-                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Average score</p><p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p><p class="mt-1 text-xs text-surface-400">Weighted by buying intent + fit</p></div>
+                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Total leads</p><p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p><p class="mt-1 text-xs text-surface-500">Across all active stages</p></div>
+                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Ready now</p><p class="mt-2 text-2xl font-bold tracking-tight text-success-200">—</p><p class="mt-1 text-xs text-surface-500">No blockers, proposal eligible</p></div>
+                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Needs legal</p><p class="mt-2 text-2xl font-bold tracking-tight text-warning-200">—</p><p class="mt-1 text-xs text-surface-500">DPA or procurement exception</p></div>
+                        <div class="rounded-sm border border-white/10 bg-black/25 p-4"><p class="text-[10px] uppercase tracking-[0.22em] text-surface-500">Average score</p><p class="mt-2 text-2xl font-bold tracking-tight text-white">—</p><p class="mt-1 text-xs text-surface-500">Weighted by buying intent + fit</p></div>
                     </div>
 
                     <form method="post" action="/web/admin/sales/leads/update" class="mt-6 block">
@@ -1711,13 +1711,13 @@ pub fn control_plane_sales_page() -> String {
                                 </thead>
                                 <tbody class="divide-y divide-white/10 text-surface-200">
                                     <tr>
-                                        <td class="px-4 py-3 text-surface-400" colspan="5">No leads loaded — rows appear here when the discovery pipeline has data for this tenant.</td>
+                                        <td class="px-4 py-3 text-surface-500" colspan="5">No leads loaded — rows appear here when the discovery pipeline has data for this tenant.</td>
                                     </tr>
                                     </tbody>
                             </table>
                         </div>
                         <div class="mt-4 flex flex-wrap items-center gap-3">
-                            <label for="lead-stage" class="text-xs uppercase tracking-[0.2em] text-surface-400">Move selected to</label>
+                            <label for="lead-stage" class="text-xs uppercase tracking-[0.2em] text-surface-500">Move selected to</label>
                             <select id="lead-stage" name="status" class="rounded-sm border border-white/10 bg-surface-900 px-3 py-2 text-sm text-white outline-none focus:border-primary">
                                 <option value="qualified">qualified</option>
                                 <option value="proposal">proposal</option>
@@ -1729,7 +1729,7 @@ pub fn control_plane_sales_page() -> String {
                     </form>
 
                     <div class="flex flex-wrap items-center justify-between gap-4 px-4 py-3 border-t border-white/10">
-                        <div class="flex items-center gap-2 text-xs text-surface-400">
+                        <div class="flex items-center gap-2 text-xs text-surface-500">
                             <span>Sample view — the live lead inventory and its real pagination render once the database is connected</span>
                         </div>
                         <div class="flex items-center gap-2">
@@ -1742,15 +1742,15 @@ pub fn control_plane_sales_page() -> String {
                 <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-[#0f1726] p-6">
                     <div class="flex items-center justify-between">
                         <div>
-                            <p class="text-xs uppercase tracking-[0.28em] text-surface-400">Stage Flow</p>
+                            <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Stage Flow</p>
                             <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Outreach inventory</h2>
                         </div>
                     </div>
                     <div class="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-4 text-xs">
-                        <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Qualify</p><p class="mt-2 text-2xl font-bold text-white">63</p><p class="mt-1 text-surface-400">Intent verified</p></article>
-                        <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Security</p><p class="mt-2 text-2xl font-bold text-white">29</p><p class="mt-1 text-surface-400">Questionnaire + legal</p></article>
-                        <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Proposal</p><p class="mt-2 text-2xl font-bold text-white">18</p><p class="mt-1 text-surface-400">Commercial package sent</p></article>
-                        <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Contract</p><p class="mt-2 text-2xl font-bold text-white">7</p><p class="mt-1 text-surface-400">Final approvals in flight</p></article>
+                        <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Qualify</p><p class="mt-2 text-2xl font-bold text-white">63</p><p class="mt-1 text-surface-500">Intent verified</p></article>
+                        <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Security</p><p class="mt-2 text-2xl font-bold text-white">29</p><p class="mt-1 text-surface-500">Questionnaire + legal</p></article>
+                        <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Proposal</p><p class="mt-2 text-2xl font-bold text-white">18</p><p class="mt-1 text-surface-500">Commercial package sent</p></article>
+                        <article class="rounded-sm border border-white/10 bg-black/15 p-4"><p class="uppercase tracking-[0.2em] text-surface-500">Contract</p><p class="mt-2 text-2xl font-bold text-white">7</p><p class="mt-1 text-surface-500">Final approvals in flight</p></article>
                     </div>
                 </section>
             </div>
@@ -1759,7 +1759,7 @@ pub fn control_plane_sales_page() -> String {
                 <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-white/5 p-6">
                     <div class="flex items-center justify-between gap-3">
                         <div>
-                            <p class="text-xs uppercase tracking-[0.28em] text-surface-400">Approval loop</p>
+                            <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Approval loop</p>
                             <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Autopilot loop</h2>
                         </div>
                         <span class="rounded-sm bg-warning-300/15 px-3 py-1 text-xs font-bold text-warning-100">Safe mode</span>
@@ -1767,28 +1767,28 @@ pub fn control_plane_sales_page() -> String {
                     <div class="mt-5 grid gap-3 text-sm">
                         <form method="post" action="/web/admin/sales/discovery" class="contents">
                             <input type="hidden" name="action" value="start-cycle" />
-                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Start cycle</span><span class="mt-1 block text-xs text-surface-400">Fetch candidates and stage risk filters</span></button>
+                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Start cycle</span><span class="mt-1 block text-xs text-surface-500">Fetch candidates and stage risk filters</span></button>
                         </form>
                         <form method="post" action="/web/admin/sales/leads/update" class="grid gap-2">
                             <input type="hidden" name="status" value="approved" />
-                            <label for="sales-approve-ids" class="text-xs text-surface-400">Lead IDs to approve (comma-separated, from the queue)</label>
+                            <label for="sales-approve-ids" class="text-xs text-surface-500">Lead IDs to approve (comma-separated, from the queue)</label>
                             <input id="sales-approve-ids" name="lead_ids" value="" required class="rounded-sm border border-white/10 bg-surface-950 px-3 py-2 text-sm text-white outline-none transition focus:border-primary" />
-                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Approve listed leads</span><span class="mt-1 block text-xs text-surface-400">Promote high-confidence accounts only</span></button>
+                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Approve listed leads</span><span class="mt-1 block text-xs text-surface-500">Promote high-confidence accounts only</span></button>
                         </form>
                         <form method="post" action="/web/admin/sales/leads/update" class="grid gap-2">
                             <input type="hidden" name="status" value="escalated" />
-                            <label for="sales-escalate-ids" class="text-xs text-surface-400">Lead IDs to escalate (comma-separated)</label>
+                            <label for="sales-escalate-ids" class="text-xs text-surface-500">Lead IDs to escalate (comma-separated)</label>
                             <input id="sales-escalate-ids" name="lead_ids" value="" required class="rounded-sm border border-white/10 bg-surface-950 px-3 py-2 text-sm text-white outline-none transition focus:border-primary" />
-                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Escalate listed leads</span><span class="mt-1 block text-xs text-surface-400">Route legal or security blockers to desk owners</span></button>
+                            <button type="submit" class="rounded-sm border border-white/15 px-4 py-2 text-left text-white transition hover:border-white/30 hover:bg-white/10"><span class="font-bold">Escalate listed leads</span><span class="mt-1 block text-xs text-surface-500">Route legal or security blockers to desk owners</span></button>
                         </form>
                     </div>
                 </section>
 
                 <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-[#11192a] p-6">
                     <div>
-                        <p class="text-xs uppercase tracking-[0.28em] text-surface-400">Discovery</p>
+                        <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Discovery</p>
                         <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Source intake</h2>
-                        <p class="mt-2 text-xs text-surface-400">Import from enriched company cache</p>
+                        <p class="mt-2 text-xs text-surface-500">Import from enriched company cache</p>
                     </div>
                     <form method="post" action="/web/admin/sales/discovery" class="mt-5 grid gap-4">
                         <div class="space-y-2 text-sm">
@@ -1805,7 +1805,7 @@ pub fn control_plane_sales_page() -> String {
 
                 <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-surface-900 p-6">
                     <div>
-                        <p class="text-xs uppercase tracking-[0.28em] text-surface-400">Outreach Command</p>
+                        <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Outreach Command</p>
                         <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Launch campaign from selected leads</h2>
                     </div>
                     <form method="post" action="/web/admin/sales/outreach" class="mt-5 grid gap-4">
@@ -1827,7 +1827,7 @@ pub fn control_plane_sales_page() -> String {
 
                 <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-white/5 p-6">
                     <div>
-                        <p class="text-xs uppercase tracking-[0.28em] text-surface-400">Runtime Policy</p>
+                        <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Runtime Policy</p>
                         <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Sales runtime configuration</h2>
                     </div>
                     <div class="mt-5 rounded-sm border border-white/10 bg-black/15 p-4 text-xs text-surface-300">
@@ -1905,7 +1905,7 @@ fn web_auth_social_footer(agreement_prefix: &str) -> String {
         "<div class=\"px-8 pb-8 bg-white\">\
 <div class=\"relative mb-6\">\
 <div class=\"absolute inset-0 flex items-center\"><div class=\"w-full border-t border-surface-200/60\"></div></div>\
-<div class=\"relative flex justify-center text-[10px] uppercase font-bold tracking-[0.2em]\"><span class=\"bg-white px-4 text-surface-400\">Or continue with</span></div>\
+<div class=\"relative flex justify-center text-[10px] uppercase font-bold tracking-[0.2em]\"><span class=\"bg-white px-4 text-surface-500\">Or continue with</span></div>\
 </div>\
 <div class=\"flex flex-col gap-3\">\
 <a href=\"/v1/auth/sso/google\" aria-label=\"Continue with Google\" class=\"flex items-center justify-center gap-3 px-4 py-3 rounded-md border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]\">{google}<span class=\"text-sm font-semibold text-surface-950\">Google</span></a>\
@@ -2052,23 +2052,23 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
 <div class=\"grid grid-cols-1 sm:grid-cols-2 gap-4\">\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"signup-name\">Full name</label>\
-<input id=\"signup-name\" name=\"name\" type=\"text\" required autocomplete=\"name\" placeholder=\"Jane Doe\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<input id=\"signup-name\" name=\"name\" type=\"text\" required autocomplete=\"name\" placeholder=\"Jane Doe\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"signup-company\">Company</label>\
-<input id=\"signup-company\" name=\"company_name\" type=\"text\" required autocomplete=\"organization\" placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<input id=\"signup-company\" name=\"company_name\" type=\"text\" required autocomplete=\"organization\" placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"signup-email\">Email</label>\
-<input id=\"signup-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<input id=\"signup-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"signup-password\">Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 12 characters\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950\" />\
+<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 12 characters\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 {password_hint}\
 </div>\
@@ -2100,7 +2100,7 @@ pub fn web_forgot_password_page(csrf_token: &str) -> String {
 {csrf}\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"reset-email\">Email</label>\
-<input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Send Reset Link</span>{arrow}</button>\
@@ -2168,14 +2168,14 @@ pub fn web_reset_password_page_with_state(
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"new-password\">New password</label>\
 <div class=\"relative\">\
-<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950\" />\
+<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 {password_hint}\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"confirm-password\">Confirm password</label>\
 <div class=\"relative\">\
-<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950\" />\
+<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 </div>\
 
@@ -2292,7 +2292,7 @@ pub fn web_dashboard_page() -> String {
 <div class=\"bg-white rounded-2xl border border-surface-200/60 shadow-sm overflow-hidden\">\
 <div class=\"px-8 py-6 border-b border-surface-100 flex items-center justify-between\">\
 <h2 class=\"text-xs font-bold text-surface-950 uppercase tracking-[0.2em]\">Send Volume</h2>\
-<span class=\"text-[10px] font-bold text-surface-400 uppercase tracking-widest\">Last 30 days</span>\
+<span class=\"text-[10px] font-bold text-surface-500 uppercase tracking-widest\">Last 30 days</span>\
 </div>\
 <div class=\"px-8 py-24 flex flex-col items-center justify-center text-center\">\
 <p class=\"text-sm font-bold text-surface-950\">No sending activity recorded</p>\
@@ -2302,14 +2302,14 @@ pub fn web_dashboard_page() -> String {
 </div>\
 <div class=\"grid grid-cols-1 md:grid-cols-2 gap-6\">\
 <article class=\"bg-white rounded-2xl border border-surface-200/60 p-8 shadow-sm\">\
-<h3 class=\"text-xs font-bold text-surface-400 uppercase tracking-[0.2em] mb-6\">Delivery Health <span class=\"ml-2 rounded-sm border border-surface-300 bg-surface-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-widest text-surface-600\" data-sample-data>Sample data</span></h3>\
+<h3 class=\"text-xs font-bold text-surface-500 uppercase tracking-[0.2em] mb-6\">Delivery Health <span class=\"ml-2 rounded-sm border border-surface-300 bg-surface-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-widest text-surface-600\" data-sample-data>Sample data</span></h3>\
 <div class=\"flex items-center gap-3\">\
 <span class=\"text-3xl font-bold text-success-600\">99.9%</span>\
-<span class=\"text-xs font-bold text-surface-400\">success rate</span>\
+<span class=\"text-xs font-bold text-surface-500\">success rate</span>\
 </div>\
 </article>\
 <article class=\"bg-white rounded-2xl border border-surface-200/60 p-8 shadow-sm\">\
-<h3 class=\"text-xs font-bold text-surface-400 uppercase tracking-[0.2em] mb-6\">Account Status</h3>\
+<h3 class=\"text-xs font-bold text-surface-500 uppercase tracking-[0.2em] mb-6\">Account Status</h3>\
 <div class=\"flex items-center gap-3\">\
 <span class=\"w-2 h-2 rounded-full bg-success-500 animate-pulse\"></span>\
 <span class=\"text-sm font-bold text-surface-950\">All systems operational</span>\
@@ -2428,7 +2428,7 @@ pub fn web_campaigns_page() -> String {
 /// Campaign detail page.
 pub fn web_campaign_detail_page() -> String {
     format!(
-        "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-400\">/</li><li class=\"text-surface-900 font-medium\">Campaign Detail</li></ol></nav><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Campaign Detail</h1><p class=\"text-sm text-muted-foreground\">Breadcrumbs preserve the active list page and filter query when you navigate back.</p></div><div class=\"flex flex-col gap-3 sm:flex-row\"><a href=\"/campaigns/c_spring/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Edit</a><a href=\"/confirm?intent=delete-campaign&amp;id=c_spring&amp;return_to=%2Fcampaigns\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete Campaign</a></div></div><div class=\"grid gap-6 md:grid-cols-3\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Recipients</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">4,280</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Open Rate</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">41.2%</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Click Rate</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">8.6%</p></div></div></div>",
+        "<div class=\"space-y-6\"><nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"{}\" class=\"hover:text-surface-900 transition-colors\">Campaigns</a></li><li class=\"text-surface-500\">/</li><li class=\"text-surface-900 font-medium\">Campaign Detail</li></ol></nav><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Campaign Detail</h1><p class=\"text-sm text-muted-foreground\">Breadcrumbs preserve the active list page and filter query when you navigate back.</p></div><div class=\"flex flex-col gap-3 sm:flex-row\"><a href=\"/campaigns/c_spring/edit?returnTo=%2Fcampaigns%3Fpage%3D2%26status%3Ddraft%26query%3Dspring\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold border border-input bg-background hover:bg-accent h-12 px-6 py-3\">Edit</a><a href=\"/confirm?intent=delete-campaign&amp;id=c_spring&amp;return_to=%2Fcampaigns\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold bg-destructive text-destructive-foreground hover:bg-destructive/90 h-12 px-6 py-3\">Delete Campaign</a></div></div><div class=\"grid gap-6 md:grid-cols-3\"><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Recipients</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">4,280</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Open Rate</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">41.2%</p></div><div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-sm font-medium text-muted-foreground\">Click Rate</h3><p class=\"text-2xl font-bold text-surface-950 tracking-tight\">8.6%</p></div></div></div>",
         CAMPAIGNS_RETURN_HREF,
     )
 }
@@ -2593,7 +2593,7 @@ pub fn web_contacts_new_page() -> String {
         "<div class=\"max-w-2xl\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
 <li><a href=\"/contacts\" class=\"hover:text-surface-900 transition-colors\">Contacts</a></li>\
-<li class=\"text-surface-400\">/</li>\
+<li class=\"text-surface-500\">/</li>\
 <li class=\"text-surface-900 font-medium\">New Contact</li></ol></nav>\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight mb-6\">Add Contact</h1>\
 <form class=\"space-y-6\" method=\"post\" action=\"/web/contacts\">\
@@ -2709,7 +2709,7 @@ pub fn web_list_detail_page() -> String {
     "<div class=\"space-y-6\" data-page=\"list-detail\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
 <li><a href=\"/lists\" class=\"hover:text-surface-900 transition-colors\">Lists</a></li>\
-<li class=\"text-surface-400\">/</li>\
+<li class=\"text-surface-500\">/</li>\
 <li class=\"text-surface-900 font-medium\" aria-current=\"page\">List Detail</li></ol></nav>\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\">\
 <div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\" data-list-name>List</h1>\
@@ -2874,7 +2874,7 @@ pub fn web_templates_new_page() -> String {
 /// or edited body server-side in a new tab. Failed posts re-populate via
 /// the signed field-map cookie.
 pub fn web_template_edit_page(template_id: &str) -> String {
-    let breadcrumbs = "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"/templates\" class=\"hover:text-surface-900 transition-colors\">Templates</a></li><li class=\"text-surface-400\">/</li><li class=\"text-surface-900 font-medium\" aria-current=\"page\">Edit Template</li></ol></nav>".to_string();
+    let breadcrumbs = "<nav aria-label=\"Breadcrumb\" class=\"mb-6\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\"><li><a href=\"/templates\" class=\"hover:text-surface-900 transition-colors\">Templates</a></li><li class=\"text-surface-500\">/</li><li class=\"text-surface-900 font-medium\" aria-current=\"page\">Edit Template</li></ol></nav>".to_string();
     format!(
         "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\">\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Edit Template</h1><p class=\"text-sm text-muted-foreground\">Saving creates a new version snapshot — the previous one can be restored.</p></div><a href=\"/templates\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm border border-input bg-background px-4 py-2 text-sm font-bold text-foreground transition-colors hover:bg-accent hover:text-accent-foreground\">Back to templates</a></div>\
@@ -2919,13 +2919,13 @@ pub fn web_reports_deliverability_page() -> String {
         "<div class=\"space-y-6\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
 <li><a href=\"/reports\" class=\"hover:text-surface-900 transition-colors\">Reports</a></li>\
-<li class=\"text-surface-400\">/</li>\
+<li class=\"text-surface-500\">/</li>\
 <li class=\"text-surface-900 font-medium\">Deliverability</li></ol></nav>\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Deliverability Report</h1>\
 <div class=\"grid gap-4 md:grid-cols-4\">\
 {inbox}{spam}{bounced}{deferred}\
 </div>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Deliverability Trend</h3><div class=\"h-64\">{chart}</div></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">Deliverability Trend</h3><div class=\"h-64\">{chart}</div></div>\
 </div>",
         inbox = inbox,
         spam = spam,
@@ -2948,7 +2948,7 @@ pub fn web_inbox_placement_page() -> String {
         "<div class=\"space-y-6\" data-page=\"inbox-placement\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
 <li><a href=\"/dashboard\" class=\"hover:text-surface-900 transition-colors\">Dashboard</a></li>\
-<li class=\"text-surface-400\">/</li>\
+<li class=\"text-surface-500\">/</li>\
 <li class=\"text-surface-900 font-medium\">Inbox Placement</li></ol></nav>\
 <div class=\"flex items-center justify-between\">\
 <div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Inbox Placement</h1>\
@@ -2983,7 +2983,7 @@ pub fn web_inbox_placement_new_page() -> String {
         "<div class=\"space-y-6\" data-page=\"inbox-placement-new\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
 <li><a href=\"/inbox-placement\" class=\"hover:text-surface-900 transition-colors\">Inbox Placement</a></li>\
-<li class=\"text-surface-400\">/</li>\
+<li class=\"text-surface-500\">/</li>\
 <li class=\"text-surface-900 font-medium\">New test</li></ol></nav>\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Run a new placement test</h1>\
 <p class=\"text-sm text-surface-600\">We'll send your message to active seed inboxes at the providers you select and report inbox vs. spam folder placement.</p>\
@@ -3033,7 +3033,7 @@ pub fn web_inbox_placement_detail_page() -> String {
         "<div class=\"space-y-6\" data-page=\"inbox-placement-detail\">\
 <nav aria-label=\"Breadcrumb\" class=\"mb-2\"><ol class=\"flex items-center gap-2 text-sm text-surface-500\">\
 <li><a href=\"/inbox-placement\" class=\"hover:text-surface-900 transition-colors\">Inbox Placement</a></li>\
-<li class=\"text-surface-400\">/</li>\
+<li class=\"text-surface-500\">/</li>\
 <li class=\"text-surface-900 font-medium\">Test detail</li></ol></nav>\
 <div class=\"flex flex-col md:flex-row md:items-center md:justify-between gap-4\">\
 <div><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Placement test</h1>\
@@ -3042,7 +3042,7 @@ pub fn web_inbox_placement_detail_page() -> String {
 <a href=\"/inbox-placement\" class=\"text-sm text-surface-600 hover:text-surface-900\">← Back to tests</a>\
 </div></div>\
 {empty_state}\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Inbox rate over time</h3><div class=\"h-64\">{chart}</div></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">Inbox rate over time</h3><div class=\"h-64\">{chart}</div></div>\
 </div>",
         empty_state = EmptyState {
             title: "Results appear once the test completes",
@@ -3065,7 +3065,7 @@ pub fn web_analytics_page() -> String {
 <div class=\"grid gap-4 md:grid-cols-2 lg:grid-cols-4\">\
 {card_sent}{card_opens}{card_clicks}{card_unsubs}\
 </div>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Engagement Over Time</h3><div class=\"h-64\">{chart}</div></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">Engagement Over Time</h3><div class=\"h-64\">{chart}</div></div>\
 </section></div>",
         card_sent = Card { title: "Total Sent", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
         card_opens = Card { title: "Unique Opens", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">All time</p>", variant: "default", padding: "default", interactive: false }.render_html(),
@@ -3301,7 +3301,7 @@ pub fn web_settings_billing_page() -> String {
 </div>\
 </div>\
 </div>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Usage This Month</h3>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">Usage This Month</h3>\
 {progress}\
 <p class=\"text-sm text-muted-foreground mt-2\">0 of 1,000 emails sent</p>\
 </div>\
@@ -3500,7 +3500,7 @@ pub fn control_plane_dashboard_page() -> String {
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
         <section class="bg-white rounded-2xl border border-surface-200/60 p-8 shadow-sm transition-all hover:shadow-md">
             <div class="flex items-center justify-between mb-8">
-                <h2 class="text-[10px] font-bold text-surface-400 uppercase tracking-[0.2em]">Fleet Health</h2>
+                <h2 class="text-[10px] font-bold text-surface-500 uppercase tracking-[0.2em]">Fleet Health</h2>
                 <span class="inline-flex items-center gap-2 px-2 py-1 bg-success-50 rounded-full border border-success-100">
                     <span class="h-1.5 w-1.5 rounded-full bg-success-500"></span>
                     <span class="text-[9px] font-bold text-success-700 uppercase tracking-widest">Operational</span>
@@ -3509,12 +3509,12 @@ pub fn control_plane_dashboard_page() -> String {
             <div class="space-y-6">
                 <div class="flex items-end justify-between">
                     <div>
-                        <p class="text-[10px] font-bold text-surface-400 uppercase tracking-widest mb-1">Active Tenants</p>
+                        <p class="text-[10px] font-bold text-surface-500 uppercase tracking-widest mb-1">Active Tenants</p>
                         <p class="text-3xl font-bold text-surface-950 tracking-tighter" data-metric="cp.tenants.active">&mdash;</p>
                         <p class="text-[10px] font-medium text-surface-500 mt-1">Live count renders when the database is connected</p>
                     </div>
                     <div class="text-right">
-                        <p class="text-[10px] font-bold text-surface-400 uppercase tracking-widest mb-1">MTD Volume</p>
+                        <p class="text-[10px] font-bold text-surface-500 uppercase tracking-widest mb-1">MTD Volume</p>
                         <p class="text-xl font-bold text-surface-950 tracking-tighter" data-metric="cp.volume.mtd">&mdash;</p>
                     </div>
                 </div>
@@ -3523,8 +3523,8 @@ pub fn control_plane_dashboard_page() -> String {
 
         <section class="bg-white rounded-2xl border border-surface-200/60 p-8 shadow-sm transition-all hover:shadow-md">
             <div class="flex items-center justify-between mb-8">
-                <h2 class="text-[10px] font-bold text-surface-400 uppercase tracking-[0.2em]">Security posture</h2>
-                <span class="text-[9px] font-bold text-surface-400 uppercase tracking-widest">Last 24h</span>
+                <h2 class="text-[10px] font-bold text-surface-500 uppercase tracking-[0.2em]">Security posture</h2>
+                <span class="text-[9px] font-bold text-surface-500 uppercase tracking-widest">Last 24h</span>
             </div>
             <div class="py-4 flex flex-col items-center justify-center text-center">
                 <div class="w-10 h-10 rounded-full bg-success-50 flex items-center justify-center mb-3">
@@ -3539,13 +3539,13 @@ pub fn control_plane_dashboard_page() -> String {
     <section class="bg-white rounded-2xl border border-surface-200/60 shadow-sm overflow-hidden">
         <div class="px-8 py-6 border-b border-surface-100 flex items-center justify-between">
             <h2 class="text-xs font-bold text-surface-950 uppercase tracking-[0.2em]">System Status</h2>
-            <div class="flex items-center gap-2 text-[10px] font-bold text-surface-400 uppercase tracking-widest">
+            <div class="flex items-center gap-2 text-[10px] font-bold text-surface-500 uppercase tracking-widest">
                 <span class="w-2 h-2 rounded-full bg-success-500"></span>
                 <span>All nodes healthy</span>
             </div>
         </div>
         <div class="p-12 text-center">
-            <p class="text-sm font-medium text-surface-400">Detailed system metrics and infrastructure telemetry will be available in the next deployment.</p>
+            <p class="text-sm font-medium text-surface-500">Detailed system metrics and infrastructure telemetry will be available in the next deployment.</p>
         </div>
     </section>
 </div>
@@ -3559,7 +3559,7 @@ fn render_cp_signal_grid(signals: &[(&str, &str, &str)]) -> String {
         .iter()
         .map(|(label, value, description)| {
             format!(
-                "<article class=\"apex-signal-card rounded-sm border border-surface-200 bg-card p-4 shadow-premium\"><p class=\"text-[10px] font-bold uppercase tracking-[0.2em] text-surface-400\">{}</p><p class=\"mt-3 text-2xl font-bold tracking-tight text-surface-950\">{}</p><p class=\"mt-1 text-xs leading-5 text-surface-500\">{}</p></article>",
+                "<article class=\"apex-signal-card rounded-sm border border-surface-200 bg-card p-4 shadow-premium\"><p class=\"text-[10px] font-bold uppercase tracking-[0.2em] text-surface-500\">{}</p><p class=\"mt-3 text-2xl font-bold tracking-tight text-surface-950\">{}</p><p class=\"mt-1 text-xs leading-5 text-surface-500\">{}</p></article>",
                 label, value, description
             )
         })
@@ -3621,7 +3621,7 @@ fn render_cp_collection_page(
                     <h2 class=\"text-xs font-bold text-surface-950 uppercase tracking-[0.2em]\">{}</h2>\
                     <div class=\"flex items-center gap-2\">\
                         <span class=\"w-1.5 h-1.5 rounded-full bg-primary\"></span>\
-                        <span class=\"text-[10px] font-bold text-surface-400 uppercase tracking-widest\">Real-time</span>\
+                        <span class=\"text-[10px] font-bold text-surface-500 uppercase tracking-widest\">Real-time</span>\
                     </div>\
                 </div>\
                 {}\
@@ -3862,7 +3862,7 @@ pub fn control_plane_analytics_page() -> String {
 <div class=\"grid gap-4 md:grid-cols-2 lg:grid-cols-4\">\
 {volume}{latency}{errors}{uptime}\
 </div>\
-<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">System Volume</h3><div class=\"h-64\">{chart}</div></div>\
+<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\"><h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">System Volume</h3><div class=\"h-64\">{chart}</div></div>\
 </div>",
         volume = Card { title: "Messages/hr", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0</p><p class=\"text-sm text-muted-foreground\">Current</p>", variant: "default", padding: "default", interactive: false }.render_html(),
         latency = Card { title: "P99 Latency", body: "<p class=\"text-2xl font-bold text-surface-950 tracking-tight\">0ms</p><p class=\"text-sm text-muted-foreground\">Last hour</p>", variant: "default", padding: "default", interactive: false }.render_html(),
@@ -3879,7 +3879,7 @@ pub fn control_plane_discovery_page() -> String {
     "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Lead Sources</h1>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
-<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Discovery intake</h3>\
+<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">Discovery intake</h3>\
 <p class=\"text-sm text-muted-foreground\">Discovery runs register the lead sources they enriched here, with per-source yield. No sources have reported yet — run a discovery cycle from the Sales Console to populate this page.</p>\
 </div></div>".to_string()
 }
@@ -4120,7 +4120,7 @@ pub fn control_plane_gdpr_page() -> String {
     "<div class=\"space-y-6\">\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">GDPR Compliance</h1>\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8 shadow-premium\">\
-<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Data Subject Requests</h3>\
+<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">Data Subject Requests</h3>\
 <p class=\"text-sm text-muted-foreground\">Process data access, export, and deletion requests.</p>\
 </div></div>"
         .to_string()
@@ -4226,18 +4226,18 @@ pub fn control_plane_security_page() -> String {
 pub fn control_plane_security_page_with_setup(setup: Option<&MfaSetupView<'_>>) -> String {
     let mfa_section: String = match setup {
         None => "<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8\">\
-<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">MFA Configuration</h3>\
+<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">MFA Configuration</h3>\
 <p class=\"text-sm text-surface-500 mb-4\">Multi-factor authentication protects operator accounts. Status is checked server-side on every page load.</p>\
 <form method=\"post\" action=\"/web/auth/mfa/setup\">\
 <button type=\"submit\" class=\"rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2\">Set up MFA</button>\
 </form></div>".to_string(),
         Some(view) => format!(
             "<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8\">\
-<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">MFA Configuration — step 2 of 2</h3>\
+<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">MFA Configuration — step 2 of 2</h3>\
 <p class=\"text-sm text-surface-700 mb-4\">Scan this QR with your authenticator app (e.g. Google Authenticator, Authy, 1Password), then enter a code to confirm. The QR is generated on the server — the secret never leaves this origin.</p>\
 <div class=\"flex flex-col items-center gap-4 mb-6\" aria-label=\"MFA QR code (server-rendered)\">{qr_svg}\
 <div class=\"w-full max-w-md text-left\">\
-<p class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-2\">No camera? Enter this manually</p>\
+<p class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">No camera? Enter this manually</p>\
 <p class=\"text-xs text-surface-600 mb-1\">Secret key (selectable)</p>\
 <code class=\"mb-3 block font-mono text-sm bg-surface-50 border border-surface-200 rounded px-3 py-2 break-all select-text text-surface-800\">{secret}</code>\
 <p class=\"text-xs text-surface-600 mb-1\">otpauth URI (selectable)</p>\
@@ -4261,7 +4261,7 @@ pub fn control_plane_security_page_with_setup(setup: Option<&MfaSetupView<'_>>) 
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Security Settings</h1>\
 {mfa_section}\
 <div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8\">\
-<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-400 mb-6\">Session policy</h3>\
+<h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">Session policy</h3>\
 <p class=\"text-sm text-muted-foreground\">Operator sessions are cookie-based, CSRF-protected on every state-changing POST, and rate-limited server-side.</p>\
 </div>\
 </div>"
@@ -4593,20 +4593,38 @@ fn confirm_intent_verb(intent: &str) -> &'static str {
 /// Login page for the web app. Reproduces the form structure, field IDs,
 /// aria labels, and error-message data attributes from the React version.
 pub fn web_login_page(csrf_token: &str) -> String {
+    web_login_page_with_state(None, csrf_token)
+}
+
+/// Login page with an optional notice banner. The banner exists for the
+/// SSO failure redirect (`/login?error=sso_denied`): without it the user
+/// lands back on a pristine form with zero explanation of why Google or
+/// GitHub sign-in did not complete.
+pub fn web_login_page_with_state(message: Option<&str>, csrf_token: &str) -> String {
     let csrf = csrf_hidden_input(csrf_token);
+    let banner = message
+        .filter(|m| !m.is_empty())
+        .map(|m| {
+            format!(
+                "<div class=\"mb-6 rounded-md border border-error/30 bg-error/5 px-4 py-3\" role=\"alert\"><p class=\"text-sm font-medium text-error\">{}</p></div>",
+                crate::shell::html_escape(m),
+            )
+        })
+        .unwrap_or_default();
     let form_html = format!(
         "<form class=\"p-8 space-y-6\" action=\"/web/auth/login\" method=\"POST\">\
 {csrf}\
+{banner}\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"login-email\">Email</label>\
-<input id=\"login-email\" name=\"email\" type=\"email\" required autocomplete=\"username\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<input id=\"login-email\" name=\"email\" type=\"email\" required autocomplete=\"username\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"password\">Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950\" />\
+<input id=\"password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 </div>\
 <div class=\"flex items-center justify-between py-1\">\
@@ -4621,6 +4639,7 @@ pub fn web_login_page(csrf_token: &str) -> String {
 <div class=\"text-center text-xs font-medium text-surface-500\">No account? <a href=\"/signup\" class=\"text-primary font-bold hover:underline\">Sign up</a></div>\
 </form>",
         csrf = csrf,
+        banner = banner,
         arrow = web_auth_arrow_icon(),
     );
 
@@ -4667,7 +4686,7 @@ pub fn web_login_mfa_challenge_page(csrf_token: &str, email: &str, return_to: &s
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"mfaCode\">Authenticator code</label>\
-<input id=\"mfaCode\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" minlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" aria-describedby=\"mfa-code-hint\" class=\"flex h-12 w-full rounded-md border border-surface-200 bg-surface-50 px-4 py-2 text-sm font-mono text-center tracking-widest focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all\" />\
+<input id=\"mfaCode\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" minlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" aria-describedby=\"mfa-code-hint\" class=\"flex h-12 w-full rounded-md border border-surface-200 bg-surface-50 px-4 py-2 text-sm font-mono text-center tracking-widest focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all\" />\
 <p id=\"mfa-code-hint\" class=\"text-xs text-surface-500\">The code refreshes every 30 seconds in your app.</p>\
 </div>\
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Verify and sign in</span>{arrow}</button>\
@@ -4699,14 +4718,14 @@ pub fn control_plane_login_page(csrf_token: &str) -> String {
 {csrf}\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"login-email\">Operator Identity</label>\
-<input id=\"login-email\" name=\"email\" type=\"text\" required autocomplete=\"username\" placeholder=\"Email or username\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<input id=\"login-email\" name=\"email\" type=\"text\" required autocomplete=\"username\" placeholder=\"Email or username\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"login-password\">Access Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus:border-primary focus:ring-4 focus:ring-primary/5 outline-none transition-all bg-surface-50 text-surface-950\" />\
+<input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 </div>\
 <div class=\"flex items-center gap-2 py-1\">\

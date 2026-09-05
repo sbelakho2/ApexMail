@@ -22,7 +22,7 @@ competitor_wins = 0
 comparison_sections = [
   { title = "DELIVERABILITY", rows = [
     { feature = "Delivery Rate", apex = '<span class="text-brand-600 font-semibold">High</span>', comp = '<span class="text-surface-600">High</span>', winner = "none" },
-    { feature = "P95 acceptance to first attempt", apex = '<span class="text-brand-600 font-semibold">&le;30s (P95)</span>', comp = '<span class="text-surface-600">Not publicly documented</span>', winner = "none" },
+    { feature = "P95 acceptance to first attempt", apex = '<span class="text-brand-600 font-semibold">&le;30s (P95) &mdash; internal engineering target, not an independently verified figure</span>', comp = '<span class="text-surface-600">Not publicly documented</span>', winner = "none" },
     { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth, 3 on Scale</span>', comp = '<span class="text-surface-600">See provider pricing</span>', winner = "none" },
     { feature = "Automatic IP Warming", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-600">Automatic (Postmark-managed)</span>', winner = "none" },
     { feature = "BIMI Support", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
@@ -61,7 +61,7 @@ comparison_sections = [
 # quote ("provider's") and double-quoted HTML attributes; the leading \ trims
 # the opening newline and literal newlines collapse to spaces per TOML spec.
 methodology_note = """\
-<strong>Methodology:</strong> Feature comparisons are based on publicly available documentation, pricing pages, and official sources. Plans compared: ApexMail self-service tiers and Postmark standard plans. Pricing snapshot date: 2026-05-09. Last verified: 2026-07-30. Data may change; verify with each provider's current documentation. See our <a href="/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">comparison methodology</a> for sourcing details."""
+<strong>Methodology:</strong> Feature comparisons are based on publicly available documentation, pricing pages, and official sources. Plans compared: ApexMail self-service tiers and Postmark standard plans. Pricing and plan details last reviewed: 2026-08-19. Data may change; verify with each provider's current documentation. See our <a href="/compare/methodology/" class="text-brand-600 hover:text-brand-700 underline">comparison methodology</a> for sourcing details."""
 +++
 
 <!-- Comparison rows are rendered from the [extra].comparison_sections array

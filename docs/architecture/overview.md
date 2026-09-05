@@ -1,48 +1,50 @@
 # Architecture Overview
 
-> **Implementation Note (2026-02):** The backend services have been consolidated into a single Rust mail-server binary. This document reflects the current production architecture.
+> **Implementation Note (2026-09):** The platform runs as **separate Rust services orchestrated by Docker Compose** (`docker-compose.yml` + `docker-compose.prod.yml`) on a single Hetzner host — one container per service (api-server, mta, imap-server, mailstore, worker, enterprise, tracking, billing-service, sales-autopilot, compliance, ai-service, pdf-renderer, analytics-worker, observability, status-server, marketing), not a single binary. This document reflects the current production architecture. The authoritative infrastructure reference is [`ARCHITECTURE.md`](../../ARCHITECTURE.md) at the repo root.
 
 ## System Architecture
 
-ApexMail uses a Rust-first architecture with SSR browser surfaces, a dedicated tracking service, enterprise service, admin control-plane, devex service, sales autopilot, and Zola-generated marketing exports:
+ApexMail uses a Rust-first architecture with SSR browser surfaces (served by `api-server`), a dedicated tracking service, enterprise service, sales autopilot, and Zola-generated marketing exports served by nginx:
 
 ```text
 ┌────────────────────────────────────────────────────────────────────────────────────┐
-│                              Load Balancer                                          │
-│                         (nginx reverse proxy)                                       │
+│                          nginx reverse proxy (TLS termination)                     │
+│                        single Hetzner host, Finland                                │
 └────────────────────────────────────────────────────────────────────────────────────┘
                                   │
+         ┌────────────────┬───────┴────────┬─────────────────┬─────────────┐
+         │                │                │                 │             │
+         ▼                ▼                ▼                 ▼             ▼
+ ┌────────────────┐ ┌───────────────┐ ┌──────────────┐ ┌───────────┐ ┌──────────┐
+ │  API Server    │ │    Tracking   │ │  Enterprise  │ │ Compliance│ │ AI Service│
+ │  (Rust/Axum)   │ │   Service     │ │  Service     │ │ Service   │ │ (Rust)   │
+ │ REST + SSR UI  │ │ pixels/redirect│ │ Enterprise  │ │ GDPR/audit│ │ Port:    │
+ │ + admin CP     │ │ Port: 3001    │ │ routes/supp. │ │ Port: 3011│ │ 3012     │
+ │ Port: 3000     │ │               │ │ Port: 3008   │ │           │ │          │
+ │ (prod; 8080    │ │               │ │ (prod; 3002  │ │           │ │          │
+ │  in dev)       │ │               │ │  in dev)     │ │           │ │          │
+ └───────┬────────┘ └──────┬────────┘ └──────┬───────┘ └─────┬─────┘ └────┬─────┘
+         │                 │                 │               │            │
+         ▼                 ▼                 ▼               ▼            ▼
+ ┌────────────────┐ ┌───────────────┐ ┌──────────────┐ ┌──────────────────────┐
+ │ Sales Autopilot│ │ Billing Svc   │ │ PDF Renderer │ │        MTA           │
+ │ (Rust/Axum)    │ │ (Rust)        │ │ Port: 3004   │ │ SMTP inbound+submit  │
+ │ Port: 3010     │ │ Port: 4100    │ │              │ │ 25, 465, 587         │
+ │ (internal)     │ │ (internal)    │ │              │ │ (+2525/2526 in prod  │
+ │                │ │               │ │              │ │  bounce/FBL)         │
+ └────────────────┘ └───────────────┘ └──────────────┘ └──────────────────────┘
+                                  │
          ┌────────────────────────┼────────────────────┬───────────────────┐
-         │                        │                    │                   │
          ▼                        ▼                    ▼                   ▼
- ┌──────────────────┐   ┌──────────────────┐   ┌──────────────┐   ┌──────────────┐
- │   API Server     │   │ Tracking Service │   │  Enterprise  │   │  Admin CP    │
- │  (Rust/Axum)     │   │   (Rust/Axum)    │   │  Service     │   │  (Rust/Axum) │
- │ REST + SSR UI    │   │ pixels/redirects │   │ Enterprise   │   │  Admin-only  │
- │ Port: 3000       │   │ Port: 3001       │   │ routes/support│   │  Port: 3003  │
- │ Metrics: 9090    │   │ Metrics: 9092    │   │ Port: 3002   │   │              │
- └────────┬─────────┘   └────────┬─────────┘   └──────┬───────┘   └──────┬───────┘
-          │                      │                    │                   │
-          ▼                      ▼                    ▼                   ▼
- ┌──────────────────┐   ┌──────────────────┐   ┌──────────────┐   ┌──────────────┐
- │   Devex Service  │   │  Sales Autopilot │   │  Submission  │   │     MTA      │
- │  (Rust/Axum)     │   │   (Rust/Axum)    │   │  Service     │   │  SMTP nodes  │
- │ SDK generation   │   │ Lead gen/sales   │   │ SMTP submit  │   │  Port: 25    │
- │ Port: 3004       │   │ Port: 3010       │   │ Port: 587    │   │  465, 587    │
- └──────────────────┘   └──────────────────┘   └──────────────┘   └──────────────┘
-          │                      │                    │                   │
-          └──────────────────────┼────────────────────┼───────────────────┘
-                                 │                    │
-         ┌───────────────────────┼────────────────────┼───────────────────┐
-         │                       │                    │                   │
-         ▼                       ▼                    ▼                   ▼
  ┌──────────────┐       ┌──────────────┐       ┌──────────────┐   ┌──────────────┐
  │  PostgreSQL  │       │  ClickHouse  │       │    Redis     │   │   Mailpit    │
- │   (OLTP)     │       │   (OLAP)     │       │   (Cache)    │   │  (Dev SMTP)  │
+ │   16 (OLTP)  │       │   (OLAP)     │       │   (Cache)    │   │  (Dev SMTP)  │
  └──────────────┘       └──────────────┘       └──────────────┘   └──────────────┘
 ```
 
-Marketing pages are generated from `apps/marketing-zola` and served through the Rust browser-surface stack.
+Also part of the runtime: `imap-server` (IMAPS 993), `mailstore` (gRPC 50051), the
+`worker` (queue processors), `observability`, `status-server` (status page), and
+the `marketing` static site (built from `apps/marketing-zola`, served by nginx).
 
 ## Service Breakdown
 
@@ -50,22 +52,26 @@ Marketing pages are generated from `apps/marketing-zola` and served through the 
 
 | Service | Port | Technology | Purpose |
 | ------- | ---- | ---------- | ------- |
-| API Server | 3000 | Rust/Axum + `ui-foundation` | REST API plus SSR `web` and `control-plane` surfaces |
+| API Server | 3000 (prod; 8080 in dev) | Rust/Axum + `ui-foundation` | REST API plus SSR `web` and admin `control-plane` surfaces (the control plane is part of api-server — there is no separate admin-CP service) |
 | Tracking Service | 3001 | Rust/Axum | Tracking redirects, pixels, unsubscribe flows, webhooks |
-| Enterprise Service | 3002 | Rust/Axum | Enterprise-only routes, support surfaces, private cloud APIs |
-| Admin Control-Plane | 3003 | Rust/Axum | Admin-only operational UI (separate from tenant surfaces) |
-| Devex Service | 3004 | Rust/Axum | SDK generation, webhook tester, onboarding flows |
-| Sales Autopilot | 3010 | Rust/Axum | Lead generation, sales pipeline automation |
-| Submission | 587 | Rust/Axum | SMTP message submission (RFC 6409) |
+| Enterprise Service | 3008 (prod; 3002 in dev) | Rust/Axum | Enterprise-only routes, support surfaces, private cloud APIs |
+| Compliance Service | 3011 | Rust/Axum | GDPR console, compliance overview, audit tooling |
+| AI Service | 3012 | Rust/Axum | AI assistant/chat surface |
+| Sales Autopilot | 3010 | Rust/Axum | Lead generation, sales pipeline automation (internal only) |
+| Billing Service | 4100 (internal) | Rust/Axum | Stripe billing, invoices, overage sweep (internal only) |
+| PDF Renderer | 3004 | Rust | PDF report/export rendering |
+| MTA | 25, 465, 587 (+2525/2526 in prod) | Rust-native SMTP | SMTP inbound + submission (RFC 6409), bounce/FBL receivers on 2525/2526 |
+| IMAP Server | 993 | Rust | IMAP/IMAPS mailbox access |
+| Mailstore | 50051 (gRPC, internal) | Rust | Mailbox storage backend |
 
 ### Supporting Runtime Outputs
 
 | Service | Port | Technology | Purpose |
 | ------- | ---- | ---------- | ------- |
-| Marketing Export | n/a | Zola static export | Generated marketing documents consumed by production routing |
-| Metrics (API) | 9090 | Prometheus | API server observability |
-| Metrics (Tracking) | 9092 | Prometheus | Tracking service observability |
-| MTA | 25, 465, 587 | Rust-native SMTP | Outbound mail transfer (SES shared pool + dedicated IPs) |
+| Marketing | n/a | Zola static export via nginx | Public marketing site (`apexmail.ee`) |
+| Status Server | n/a | Rust/Axum | Public status page (`status.apexmail.ee`) |
+| Observability | 4400 (internal) | Rust | Alert ingestion, dashboards pipeline |
+| Worker | n/a | Rust | Background queue processors (email send pipeline) |
 
 ### Infrastructure (Docker)
 
@@ -74,7 +80,7 @@ Marketing pages are generated from `apps/marketing-zola` and served through the 
 | Database | PostgreSQL 16 | Primary OLTP data store |
 | Analytics | ClickHouse 24.8 | OLAP analytics (billions of events) |
 | Cache | Redis 7 | Caching, rate limiting |
-| Email Delivery | AWS SES (shared) + Hetzner SMTP (dedicated IPs) | Hybrid per-message routing |
+| Email Delivery | AWS SES (default) or configured SMTP relay | Deployment-wide transport selection (`EMAIL_TRANSPORT_TYPE`) |
 | SMTP (dev) | Mailpit | Local email testing |
 
 ## Monorepo Structure
@@ -166,12 +172,12 @@ services/mail-server/crates/
 
 ### Email Sending Flow
 ```
-1. API receives send request (tracking-service)
+1. API receives send request (api-server, POST /v1/messages)
 2. Validation (syntax, MX, suppression)
 3. Write to PostgreSQL queue
 4. Worker processor picks up job
 5. Render template
-6. Send via SMTP
+6. Send via configured transport (SES or SMTP relay)
 7. Track delivery events
 8. Update status
 ```

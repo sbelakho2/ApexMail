@@ -119,6 +119,66 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(error, sqlx::Error::Database(db_error) if db_error.code().as_deref() == Some("23505"))
 }
 
+/// Actor-attributed audit for SCIM mutations (P1-8): provisioning changes
+/// arrive bearer-token-authenticated, so the API key's tenant AND user id
+/// are the actor. Without this, silent directory rewrites were invisible in
+/// the compliance trail.
+async fn log_scim_audit(
+    state: &AppState,
+    auth: &AuthUser,
+    action: &str,
+    resource: &str,
+    resource_id: Option<&str>,
+    details: serde_json::Value,
+) {
+    crate::audit_log::insert_audit_log_best_effort_with_env(
+        &state.db,
+        state.config.environment.is_production(),
+        Some(auth.tenant_id.as_str()),
+        auth.user_id.as_deref(),
+        action,
+        resource,
+        resource_id,
+        details,
+        None,
+        None,
+    )
+    .await;
+}
+
+/// Structural email gate shared by SCIM create/update — SCIM clients send
+/// whatever the IdP holds; a blank or @-less value must never reach the
+/// UNIQUE index or the login lookup.
+fn is_plausible_email(email: &str) -> bool {
+    let email = email.trim();
+    if !(3..=320).contains(&email.len()) || email.chars().any(char::is_whitespace) {
+        return false;
+    }
+    match email.split_once('@') {
+        Some((local, domain)) => {
+            !local.is_empty()
+                && domain.contains('.')
+                && !domain.starts_with('.')
+                && !domain.ends_with('.')
+        }
+        None => false,
+    }
+}
+
+/// Parse a SCIM `remove` filter path of the exact form
+/// `members[value eq "<uuid>"]`. Prefix/suffix are stripped EXACTLY ONCE
+/// and the remainder rejected if it still contains quoting characters —
+/// the previous repeated trim_start/trim_end matches mangled ids
+/// containing `"` or `]` into different, silently-wrong deletions.
+fn parse_member_removal_path(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("members[value eq \"")?;
+    let value = rest.strip_suffix("\"]")?;
+    if value.contains('"') || value.contains(']') {
+        return None;
+    }
+    Some(value)
+}
+
 /// Validate that every SCIM group member reference resolves to a user that
 /// exists AND belongs to the caller's tenant (audit C).
 ///
@@ -181,7 +241,9 @@ async fn list_users(
 
     let start_index = params.cursor.unwrap_or(params.start_index);
     let offset = (start_index - 1).max(0);
-    let count = params.count.min(MAX_SCIM_COUNT);
+    // Clamp, not just min (P3): count=0 or negative used to reach LIMIT as-is
+    // and 500 on bind.
+    let count = params.count.clamp(1, MAX_SCIM_COUNT);
     let total = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE tenant_id = $1")
         .bind(&auth.tenant_id)
         .fetch_one(&state.db)
@@ -234,10 +296,20 @@ async fn create_user(
         .emails
         .first()
         .map(|e| e.value.clone())
-        .unwrap_or(body.user_name.clone());
+        .unwrap_or(body.user_name.clone())
+        .trim()
+        .to_lowercase();
+    if !is_plausible_email(&email) {
+        return Err(ApiError::BadRequest(format!(
+            "userName/emails[0].value must be a valid address, got '{email}'"
+        )));
+    }
 
     let name = body.name.as_ref().and_then(|n| n.given_name.clone());
-    let id = apexmail_lib::id::generate_id("", 26);
+    // users.id is UUID on the canonical schema (audit 1.6) — the previous
+    // text-id insert (generate_id) failed at runtime exactly like the SSO
+    // twin did before its fix.
+    let id = Uuid::new_v4();
     let now = Utc::now();
 
     // SCIM users must authenticate via SSO; direct password login is blocked.
@@ -245,7 +317,7 @@ async fn create_user(
         "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, created_at, updated_at)
          VALUES ($1,$2,$3,$4,$5,'member','active',$6,$6)",
     )
-    .bind(&id)
+    .bind(id)
     .bind(&auth.tenant_id)
     .bind(&email)
     .bind(&name)
@@ -261,11 +333,21 @@ async fn create_user(
         Err(error) => return Err(error.into()),
     }
 
+    log_scim_audit(
+        &state,
+        &auth,
+        "scim.user.created",
+        "scim_user",
+        Some(&id.to_string()),
+        serde_json::json!({ "email": email, "role": "member" }),
+    )
+    .await;
+
     Ok((
         StatusCode::CREATED,
         Json(ScimUser {
             schemas: vec![SCIM_USER_SCHEMA.into()],
-            id: id.clone(),
+            id: id.to_string(),
             user_name: email.clone(),
             name: name.map(|n| ScimName {
                 given_name: Some(n),
@@ -324,12 +406,42 @@ async fn update_user(
         .emails
         .first()
         .map(|e| e.value.clone())
-        .unwrap_or(body.user_name.clone());
+        .unwrap_or(body.user_name.clone())
+        .trim()
+        .to_lowercase();
+    // Never blank: an empty email locks every lookup path (login, password
+    // reset, SCIM get) for the user.
+    if !is_plausible_email(&email) {
+        return Err(ApiError::BadRequest(format!(
+            "userName/emails[0].value must be a valid address, got '{email}'"
+        )));
+    }
     let name = body.name.as_ref().and_then(|n| n.given_name.clone());
     let status = if body.active { "active" } else { "deactivated" };
 
+    // Privilege-surface guard (P2-1): rewriting an admin/owner's email
+    // moves their identity to an address the SCIM caller controls — an
+    // in-tenant takeover primitive for any scim:write holder. Members may
+    // be re-emailed by the IdP; privileged roles must be changed through
+    // the console, not SCIM.
+    let current: Option<(String, String)> =
+        sqlx::query_as("SELECT email, role FROM users WHERE id = $1::uuid AND tenant_id = $2")
+            .bind(&id)
+            .bind(&auth.tenant_id)
+            .fetch_optional(&state.db)
+            .await?;
+    let Some((current_email, current_role)) = current else {
+        return Err(ApiError::NotFound("user not found".into()));
+    };
+    let email_changed = email != current_email;
+    if email_changed && matches!(current_role.as_str(), "admin" | "owner") {
+        return Err(ApiError::Forbidden(
+            "SCIM cannot change the email of an admin or owner user".into(),
+        ));
+    }
+
     let result = sqlx::query(
-        "UPDATE users SET email=$1, name=$2, status=$3, updated_at=NOW() WHERE id=$4 AND tenant_id=$5",
+        "UPDATE users SET email=$1, name=$2, status=$3, updated_at=NOW() WHERE id=$4::uuid AND tenant_id=$5",
     )
     .bind(&email)
     .bind(&name)
@@ -344,6 +456,20 @@ async fn update_user(
     }
 
     invalidate_user_status_cache(&id, &auth.tenant_id, &state).await;
+
+    log_scim_audit(
+        &state,
+        &auth,
+        "scim.user.updated",
+        "scim_user",
+        Some(&id),
+        serde_json::json!({
+            "email": email,
+            "emailChanged": email_changed,
+            "status": status,
+        }),
+    )
+    .await;
 
     Ok(Json(ScimUser {
         schemas: vec![SCIM_USER_SCHEMA.into()],
@@ -382,6 +508,16 @@ async fn delete_user(
 
     invalidate_user_status_cache(&id, &auth.tenant_id, &state).await;
 
+    log_scim_audit(
+        &state,
+        &auth,
+        "scim.user.deleted",
+        "scim_user",
+        Some(&id),
+        serde_json::json!({ "deactivated": true }),
+    )
+    .await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -394,7 +530,8 @@ async fn list_groups(
 
     let start_index = params.cursor.unwrap_or(params.start_index);
     let offset = (start_index - 1).max(0);
-    let count = params.count.min(MAX_SCIM_COUNT);
+    // Clamp, not just min (P3) — see list_users.
+    let count = params.count.clamp(1, MAX_SCIM_COUNT);
     let total =
         sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM scim_groups WHERE tenant_id = $1")
             .bind(&auth.tenant_id)
@@ -514,6 +651,19 @@ async fn create_group(
         .await?;
     }
 
+    log_scim_audit(
+        &state,
+        &auth,
+        "scim.group.created",
+        "scim_group",
+        Some(&scim_id),
+        serde_json::json!({
+            "displayName": body.display_name,
+            "memberCount": body.members.len(),
+        }),
+    )
+    .await;
+
     Ok((
         StatusCode::CREATED,
         Json(ScimGroup {
@@ -585,19 +735,9 @@ async fn update_group(
     .await?
     .ok_or_else(|| ApiError::NotFound("group not found".into()))?;
 
-    sqlx::query("UPDATE scim_groups SET display_name = $1, updated_at = NOW() WHERE id = $2")
-        .bind(&body.display_name)
-        .bind(&row.id)
-        .execute(&state.db)
-        .await?;
-
-    // Replace members entirely
-    sqlx::query("DELETE FROM scim_group_members WHERE group_id = $1 AND tenant_id = $2")
-        .bind(&row.id)
-        .bind(auth.tenant_id.to_string())
-        .execute(&state.db)
-        .await?;
-
+    // Validate the REPLACEMENT member list BEFORE any mutation (P3): the
+    // previous order deleted the existing members first and validated
+    // after — a bad replacement list left the group permanently emptied.
     let now = Utc::now();
     // Audit C: every replacement member must belong to the caller's tenant.
     let member_ids = validate_members_in_tenant(
@@ -610,6 +750,24 @@ async fn update_group(
             .collect::<Vec<_>>(),
     )
     .await?;
+
+    // One transaction for delete+insert (P3): a mid-flight failure used to
+    // leave the group with members deleted but replacements missing.
+    let mut tx = state.db.begin().await?;
+
+    sqlx::query("UPDATE scim_groups SET display_name = $1, updated_at = NOW() WHERE id = $2")
+        .bind(&body.display_name)
+        .bind(&row.id)
+        .execute(&mut *tx)
+        .await?;
+
+    // Replace members entirely
+    sqlx::query("DELETE FROM scim_group_members WHERE group_id = $1 AND tenant_id = $2")
+        .bind(&row.id)
+        .bind(auth.tenant_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+
     for (member, user_id) in body.members.iter().zip(member_ids) {
         sqlx::query(
             "INSERT INTO scim_group_members (group_id, user_id, tenant_id, display, created_at)
@@ -620,9 +778,24 @@ async fn update_group(
         .bind(auth.tenant_id.to_string())
         .bind(&member.display)
         .bind(now)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
     }
+
+    tx.commit().await?;
+
+    log_scim_audit(
+        &state,
+        &auth,
+        "scim.group.updated",
+        "scim_group",
+        Some(&scim_id),
+        serde_json::json!({
+            "displayName": body.display_name,
+            "memberCount": body.members.len(),
+        }),
+    )
+    .await;
 
     Ok(Json(ScimGroup {
         schemas: vec![SCIM_GROUP_SCHEMA.into()],
@@ -667,6 +840,9 @@ async fn patch_group(
 
     let mut display_name = row.display_name.clone();
     let now = Utc::now();
+    // Count of operations that actually mutated the group — the audit entry
+    // distinguishes "nothing applied" (bad paths) from real changes.
+    let mut applied_ops = 0u32;
 
     for op in body.operations {
         match op.op.to_lowercase().as_str() {
@@ -679,6 +855,7 @@ async fn patch_group(
                             .bind(&row.id)
                             .execute(&state.db)
                             .await?;
+                        applied_ops += 1;
                     }
                 }
             }
@@ -712,25 +889,27 @@ async fn patch_group(
                             .execute(&state.db)
                             .await?;
                         }
+                        applied_ops += 1;
                     }
                 }
             }
             "remove" => {
                 if let Some(path) = &op.path {
-                    // Path like:members[value eq "user-uuid"]
-                    if path.starts_with("members[value eq \"") {
-                        let user_id_str = path
-                            .trim_start_matches("members[value eq \"")
-                            .trim_end_matches("\"]");
+                    // Path like: members[value eq "user-uuid"]. Parse EXACTLY
+                    // once (parse_member_removal_path) — the previous
+                    // repeated trim matches mangled ids containing '"' or ']'
+                    // into silently-wrong deletions.
+                    if let Some(user_id_str) = parse_member_removal_path(path) {
                         if let Ok(user_id) = Uuid::parse_str(user_id_str) {
                             sqlx::query(
                                 "DELETE FROM scim_group_members WHERE group_id = $1 AND user_id = $2 AND tenant_id = $3",
                             )
-                                .bind(&row.id)
-                                .bind(user_id)
-                                .bind(auth.tenant_id.to_string())
-                                .execute(&state.db)
-                                .await?;
+                            .bind(&row.id)
+                            .bind(user_id)
+                            .bind(auth.tenant_id.to_string())
+                            .execute(&state.db)
+                            .await?;
+                            applied_ops += 1;
                         }
                     }
                 }
@@ -750,6 +929,16 @@ async fn patch_group(
     .bind(auth.tenant_id.to_string())
     .fetch_all(&state.db)
     .await?;
+
+    log_scim_audit(
+        &state,
+        &auth,
+        "scim.group.patched",
+        "scim_group",
+        Some(&scim_id),
+        serde_json::json!({ "appliedOperations": applied_ops }),
+    )
+    .await;
 
     Ok(Json(ScimGroup {
         schemas: vec![SCIM_GROUP_SCHEMA.into()],
@@ -781,6 +970,17 @@ async fn delete_group(
     if result.rows_affected() == 0 {
         return Err(ApiError::NotFound("group not found".into()));
     }
+
+    log_scim_audit(
+        &state,
+        &auth,
+        "scim.group.deleted",
+        "scim_group",
+        Some(&scim_id),
+        serde_json::json!({}),
+    )
+    .await;
+
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -1265,6 +1465,37 @@ mod tests {
         let pg_unique_code = "23505";
         assert_eq!(pg_unique_code.len(), 5);
         assert!(pg_unique_code.chars().all(|c| c.is_ascii_digit()));
+    }
+
+    // ── Patch member-removal path parsing (P3) ──────────────────
+
+    #[test]
+    fn member_removal_path_parses_plain_uuids() {
+        assert_eq!(
+            parse_member_removal_path("members[value eq \"u-001\"]"),
+            Some("u-001")
+        );
+    }
+
+    #[test]
+    fn member_removal_path_rejects_quoting_garbage_instead_of_mangling() {
+        // Ids containing '"' or ']' previously had those characters
+        // repeatedly trimmed off, silently deleting a DIFFERENT member.
+        assert_eq!(parse_member_removal_path("members[value eq \"a\"]\"]"), None);
+        assert_eq!(parse_member_removal_path("members[value eq \"]\"]"), None);
+        // Wrong shapes are rejected, not guessed.
+        assert_eq!(parse_member_removal_path("displayName"), None);
+        assert_eq!(parse_member_removal_path("members[value eq \"u-001\""), None);
+    }
+
+    // ── Email gate (P2-1) ───────────────────────────────────────
+
+    #[test]
+    fn plausible_email_gate_rejects_blank_and_malformed() {
+        assert!(is_plausible_email("user@example.com"));
+        for bad in ["", "   ", "noat", "@example.com", "user@", "user@nodot", "a b@example.com"] {
+            assert!(!is_plausible_email(bad), "{bad:?} must be rejected");
+        }
     }
 
     // ── Cross-tenant member injection (audit C) ─────────────────

@@ -156,7 +156,7 @@ MFA is enforced for:
 
 Sensitive fields (email addresses, names, custom metadata) are individually encrypted using AES-256-GCM. This ensures that even if an attacker gains access to the underlying storage, individual fields remain protected.
 
-- Key rotation happens seamlessly without downtime.
+- Key rotation happens without downtime.
 - Encrypted fields remain searchable through your API and dashboard.
 
 ### Data in Transit

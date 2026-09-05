@@ -7,8 +7,8 @@
 
 | Review Date | Reviewer | Competitors Verified | Changes Found | Claims Updated | Claims Removed | Prices Updated | Notes |
 |-------------|----------|---------------------|---------------|----------------|----------------|----------------|-------|
-| 2026-07-29 | [Name] | SendGrid, Resend, Postmark | Initial evidence database created | 6 records created | 0 | N/A | Baseline established |
-| _Next review due by 2026-08-28_ | | | | | | | |
+| 2026-07-29 | Product Marketing | SendGrid, Resend, Postmark | Initial evidence database created | 6 records created | 0 | N/A | Baseline established |
+| _Next review: overdue since 2026-08-28 — schedule and record above_ | | | | | | | |
 
 ---
 

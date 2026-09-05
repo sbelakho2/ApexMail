@@ -20,6 +20,12 @@ pub const KMD_PERIOD_TIMEZONE: &str = "Europe/Tallinn";
 /// non-EUR invoices are reported in `excluded_other_currency` instead.
 pub(crate) const EUR_INVOICE_FILTER: &str = "UPPER(currency) = 'EUR'";
 
+/// Filed KMD returns count only COLLECTED output VAT: `paid` invoices.
+/// The previous `('paid', 'pending')` filter booked uncollected overage and
+/// dunning invoices as remitted VAT — a filed return must not include
+/// output VAT that was never collected.
+pub(crate) const PAID_INVOICE_FILTER: &str = "status = 'paid'";
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -332,6 +338,15 @@ pub(crate) fn effective_vat_bucket(
 /// Fix B — only EUR invoices feed the Estonian VAT return; non-EUR invoices
 /// are aggregated into `excluded_other_currency` so they stay visible to
 /// finance without corrupting the EUR figures.
+///
+/// Only `paid` invoices are counted: a filed VAT return must not include
+/// output VAT that was never collected (the previous `('paid', 'pending')`
+/// filter booked uncollected overage/dunning invoices as VAT liability).
+///
+/// Concurrency: generation is serialized per (year, month) with a
+/// `pg_advisory_xact_lock` and backed by the
+/// `uq_vat_kmd_returns_period` unique index (migration 126) — two sweep
+/// replicas used to be able to double-generate the same period.
 pub async fn generate_kmd_return(
     db: &PgPool,
     tax_year: i32,
@@ -339,7 +354,20 @@ pub async fn generate_kmd_return(
 ) -> Result<VatKmdResult, String> {
     let (period_start, period_end) = kmd_period_bounds_utc(tax_year, tax_month)?;
 
-    // Query invoice totals for the period (EUR only — Fix B).
+    // Serialize per period: the fetch-aggregate-insert sequence below is
+    // otherwise a check-then-insert race across maintenance replicas.
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|e| format!("Failed to begin KMD generation transaction: {e}"))?;
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("kmd_return:{tax_year}-{tax_month:02}"))
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| format!("Failed to acquire KMD generation lock: {e}"))?;
+
+    // Query invoice totals for the period (EUR only — Fix B; paid only —
+    // filed returns must not include uncollected output VAT).
     let totals: (i64, i64, i64, i64) = sqlx::query_as(&format!(
         r#"
         SELECT
@@ -350,13 +378,13 @@ pub async fn generate_kmd_return(
         FROM invoices
         WHERE issued_at >= $1
           AND issued_at < $2
-          AND status IN ('paid', 'pending')
+          AND {PAID_INVOICE_FILTER}
           AND {EUR_INVOICE_FILTER}
-        "#,
+        "#
     ))
     .bind(period_start)
     .bind(period_end)
-    .fetch_optional(db)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|e| format!("Failed to query invoice totals: {e}"))?
     .unwrap_or((0, 0, 0, 0));
@@ -374,15 +402,15 @@ pub async fn generate_kmd_return(
         FROM invoices
         WHERE issued_at >= $1
           AND issued_at < $2
-          AND status IN ('paid', 'pending')
+          AND {PAID_INVOICE_FILTER}
           AND NOT ({EUR_INVOICE_FILTER})
         GROUP BY UPPER(currency)
         ORDER BY currency
-        "#,
+        "#
     ))
     .bind(period_start)
     .bind(period_end)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await
     .map_err(|e| format!("Failed to query excluded-currency invoices: {e}"))?;
 
@@ -426,7 +454,7 @@ pub async fn generate_kmd_return(
         ) ba ON true
         WHERE i.issued_at >= $1
           AND i.issued_at < $2
-          AND i.status IN ('paid', 'pending')
+          AND {PAID_INVOICE_FILTER}
           AND UPPER(i.currency) = 'EUR'
         GROUP BY COALESCE(i.billing_country, ba.country, 'EE'), i.vat_rate,
                  (ba.vat_number IS NOT NULL AND ba.vat_number <> '')
@@ -434,7 +462,7 @@ pub async fn generate_kmd_return(
     )
     .bind(period_start)
     .bind(period_end)
-    .fetch_all(db)
+    .fetch_all(&mut *tx)
     .await
     .map_err(|e| format!("Failed to query rate breakdown: {e}"))?;
 
@@ -508,9 +536,13 @@ pub async fn generate_kmd_return(
     .bind(now)
     .bind(now)
     .bind(now)
-    .execute(db)
+    .execute(&mut *tx)
     .await
     .map_err(|e| format!("Failed to insert KMD return: {e}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| format!("Failed to commit KMD return: {e}"))?;
 
     Ok(VatKmdResult {
         tax_year,
@@ -750,6 +782,18 @@ mod tests {
     #[test]
     fn test_kmd_invoice_queries_filter_to_eur() {
         assert!(EUR_INVOICE_FILTER.contains("UPPER(currency) = 'EUR'"));
+    }
+
+    // ------------------------------------------------------------------
+    // Filed returns count only collected output VAT — `pending` (dunning)
+    // and `draft` invoices must stay out of the KMD aggregate.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn test_kmd_invoice_queries_count_only_paid() {
+        assert_eq!(PAID_INVOICE_FILTER, "status = 'paid'");
+        assert!(!PAID_INVOICE_FILTER.contains("pending"));
+        assert!(!PAID_INVOICE_FILTER.contains("draft"));
     }
 
     #[test]

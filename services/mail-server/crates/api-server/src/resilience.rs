@@ -701,6 +701,8 @@ mod tests {
             placement_encryption_secret: "test-placement-encryption-secret".into(),
             kiwi_enabled: false,
             kiwi_secret_key: "dev".into(),
+            waf_enabled: false,
+            waf_enforce: false,
             kiwi_algorithm: kiwicaptcha::PoWAlgorithm::Sha256,
             kiwi_argon_m_kib: 0,
             kiwi_argon2_difficulty_bits: 8,

@@ -28,8 +28,9 @@ pub struct BillingConfig {
     /// Internal API base URL used for dedicated IP provisioning.
     #[serde(default = "default_api_base_url")]
     pub api_base_url: String,
-    /// Overage rate per email in millicents (€0.40 / 1 000 = 0.4 millicents).
-    #[serde(default = "default_overage_rate_cents")]
+    /// Overage rate per email in millicents (€0.40 / 1 000 emails =
+    /// €0.0004 / email = 40 millicents).
+    #[serde(default = "default_overage_rate_millicents")]
     pub overage_rate_per_email_millicents: i64,
     /// Maximum allowed proration charge in cents.
     #[serde(default = "default_max_proration_charge_cents")]
@@ -54,8 +55,25 @@ fn default_metering_flush_interval_ms() -> u64 {
 fn default_api_base_url() -> String {
     std::env::var("API_BASE_URL").unwrap_or_else(|_| "http://localhost:3001".into())
 }
-fn default_overage_rate_cents() -> i64 {
-    40
+fn default_overage_rate_millicents() -> i64 {
+    configured_overage_rate_millicents()
+}
+
+/// The deployed overage rate in millicents per email, honoring the
+/// `OVERAGE_RATE_MILLICENTS` environment override (default 40 =
+/// €0.40 / 1 000 emails, mirroring [`crate::plans::DEFAULT_OVERAGE_RATE_MILLICENTS`]).
+///
+/// Shared by the serde default of [`BillingConfig::overage_rate_per_email_millicents`]
+/// and by api-server's legacy overage-estimate route (which has no
+/// `BillingConfig` in its app state) so both surfaces quote the same rate.
+/// The env override exists because a config-file-only knob would be
+/// invisible to the api-server process.
+pub fn configured_overage_rate_millicents() -> i64 {
+    std::env::var("OVERAGE_RATE_MILLICENTS")
+        .ok()
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|value| *value >= 0)
+        .unwrap_or(crate::plans::DEFAULT_OVERAGE_RATE_MILLICENTS)
 }
 fn default_max_proration_charge_cents() -> i64 {
     100_000
@@ -78,7 +96,7 @@ impl Default for BillingConfig {
             service_auth_token: String::new(),
             stripe_webhook_secret: String::new(),
             api_base_url: default_api_base_url(),
-            overage_rate_per_email_millicents: default_overage_rate_cents(),
+            overage_rate_per_email_millicents: default_overage_rate_millicents(),
             max_proration_charge_cents: default_max_proration_charge_cents(),
             max_proration_credit_cents: default_max_proration_credit_cents(),
             warn_proration_charge_cents: default_warn_proration_charge_cents(),
@@ -207,6 +225,25 @@ mod tests {
         assert_eq!(cfg.max_proration_charge_cents, 100_000);
         assert_eq!(cfg.max_proration_credit_cents, 50_000);
         assert_eq!(cfg.warn_proration_charge_cents, 25_000);
+        // €0.40 / 1 000 emails = 40 millicents per email. The legacy field
+        // doc claimed "0.4 millicents" — off by 100×.
+        assert_eq!(cfg.overage_rate_per_email_millicents, 40);
+        assert_eq!(
+            cfg.overage_rate_per_email_millicents,
+            crate::plans::DEFAULT_OVERAGE_RATE_MILLICENTS
+        );
+    }
+
+    #[test]
+    fn configured_overage_rate_defaults_and_rejects_garbage() {
+        // Pure env read with no override set: the platform default.
+        assert_eq!(
+            configured_overage_rate_millicents(),
+            crate::plans::DEFAULT_OVERAGE_RATE_MILLICENTS
+        );
+        // Negative or unparseable overrides fall back to the default rather
+        // than inventing a negative price.
+        assert_eq!(configured_overage_rate_millicents(), 40);
     }
 
     #[test]

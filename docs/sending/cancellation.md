@@ -10,7 +10,7 @@ POST /v1/messages/:id/cancel
 
 ```bash
 curl -s -X POST https://api.apexmail.ee/v1/messages/msg_xxx/cancel \
-  -H "Authorization: Bearer $APEXMAIL_API_KEY" \
+  -H "X-API-Key: $APEXMAIL_API_KEY" \
   | jq .
 ```
 
@@ -30,22 +30,8 @@ curl -s -X POST https://api.apexmail.ee/v1/messages/msg_xxx/cancel \
 - Only emails in `status: "scheduled"` state can be cancelled.
 - Emails already being delivered (status: `sending`) cannot be cancelled.
 - Cancellation is immediate and final.
-- Cancelled emails trigger a `cancelled` webhook event.
+- There is no `cancelled` webhook event; cancellation is visible via the API (`status: "cancelled"`).
 - Cancelled emails do not count toward your sending quota.
-
-## Webhook Event
-
-```json
-{
-  "id": "evt_01JABCDEFGHIJKLN",
-  "type": "cancelled",
-  "data": {
-    "id": "msg_xxx",
-    "original_scheduled_at": "2026-02-01T08:00:00Z",
-    "cancelled_at": "2026-01-15T11:00:00Z"
-  }
-}
-```
 
 ## Bulk Cancellation
 
@@ -55,7 +41,7 @@ To cancel multiple scheduled emails, retrieve their IDs and cancel each:
 import requests
 
 def cancel_scheduled_emails(tag):
-    headers = {"Authorization": f"Bearer {API_KEY}"}
+    headers = {"X-API-Key": API_KEY}
 
     # List scheduled emails by tag
     url = f"https://api.apexmail.ee/v1/messages?status=scheduled&tag={tag}"
@@ -63,7 +49,7 @@ def cancel_scheduled_emails(tag):
 
     for email in emails["data"]:
         cancel_url = f"https://api.apexmail.ee/v1/messages/{email['id']}/cancel"
-        resp = requests.delete(cancel_url, headers=headers)
+        resp = requests.post(cancel_url, headers=headers)
         print(f"Cancelled {email['id']}: {resp.json()['status']}")
 ```
 

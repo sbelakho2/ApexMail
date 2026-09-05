@@ -82,10 +82,25 @@ pub static EU_COUNTRIES: LazyLock<HashSet<String>> = LazyLock::new(|| {
 ///
 /// The map can be overridden at runtime via the `EU_VAT_RATES` environment
 /// variable (comma-separated `CODE=rate` pairs, e.g. `DE=19,FI=25.5`).
-/// When unset, the built-in defaults below are used.
-pub static EU_VAT_RATES: LazyLock<HashMap<String, f64>> = LazyLock::new(|| {
-    let mut map = HashMap::new();
-    if let Ok(raw) = std::env::var("EU_VAT_RATES") {
+/// The override is a PARTIAL overlay: defaults are loaded first and user
+/// entries replace them key-by-key, so setting one country's rate no longer
+/// silently drops the other 26 to "map miss" (the previous all-or-nothing
+/// behaviour turned every partial override into a fallback-rate fallback
+/// for the rest of the union). When unset, the built-in defaults below are
+/// used verbatim.
+pub static EU_VAT_RATES: LazyLock<HashMap<String, f64>> =
+    LazyLock::new(|| merged_vat_rates(std::env::var("EU_VAT_RATES").ok().as_deref()));
+
+/// Pure core of the [`EU_VAT_RATES`] initializer (unit-tested): the built-in
+/// defaults overlaid with the parsed `EU_VAT_RATES` payload. Partial
+/// overrides win per key; every country the payload omits keeps its default
+/// rate. Unparseable pairs are skipped rather than aborting the whole map.
+fn merged_vat_rates(env_raw: Option<&str>) -> HashMap<String, f64> {
+    let mut map: HashMap<String, f64> = DEFAULT_VAT_RATES
+        .iter()
+        .map(|&(code, rate)| (code.to_string(), rate))
+        .collect();
+    if let Some(raw) = env_raw {
         for pair in raw.split(',') {
             let mut parts = pair.split('=');
             if let (Some(country), Some(rate)) = (parts.next(), parts.next()) {
@@ -95,13 +110,8 @@ pub static EU_VAT_RATES: LazyLock<HashMap<String, f64>> = LazyLock::new(|| {
             }
         }
     }
-    if map.is_empty() {
-        for &(code, rate) in DEFAULT_VAT_RATES {
-            map.insert(code.to_string(), rate);
-        }
-    }
     map
-});
+}
 
 // ---------------------------------------------------------------------------
 // Public helpers
@@ -439,6 +449,41 @@ mod tests {
         }
         // Verify the count is exactly 27
         assert_eq!(EU_COUNTRIES.len(), 27);
+    }
+
+    // ------------------------------------------------------------------
+    // Partial EU_VAT_RATES overrides merge OVER the defaults instead of
+    // replacing the whole map (the old all-or-nothing behaviour dropped
+    // the 26 unlisted countries to fallback-rate treatment).
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn partial_vat_rate_override_keeps_defaults_for_unlisted_countries() {
+        let merged = merged_vat_rates(Some("FI=26"));
+        // All 27 defaults survive…
+        assert_eq!(merged.len(), DEFAULT_VAT_RATES.len());
+        // …the overridden key wins…
+        assert_eq!(merged.get("FI").copied(), Some(26.0));
+        // …and an unlisted key keeps its built-in rate.
+        assert_eq!(merged.get("EE").copied(), Some(ESTONIA_VAT_RATE));
+        assert_eq!(merged.get("DE").copied(), Some(19.0));
+    }
+
+    #[test]
+    fn vat_rate_override_parser_skips_garbage_pairs_without_nuking_defaults() {
+        let merged = merged_vat_rates(Some("not-a-pair,XX=abc,DE=19"));
+        assert_eq!(merged.len(), DEFAULT_VAT_RATES.len());
+        assert_eq!(merged.get("DE").copied(), Some(19.0));
+        // "XX=abc" fails to parse and must not insert a key at all.
+        assert_eq!(merged.get("XX"), None);
+        assert_eq!(merged.get("FR").copied(), Some(20.0));
+    }
+
+    #[test]
+    fn vat_rate_override_absent_yields_verbatim_defaults() {
+        let merged = merged_vat_rates(None);
+        assert_eq!(merged.len(), DEFAULT_VAT_RATES.len());
+        assert_eq!(merged.get("FI").copied(), Some(25.5));
     }
 
     #[test]

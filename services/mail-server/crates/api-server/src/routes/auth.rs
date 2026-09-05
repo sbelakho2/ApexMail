@@ -518,6 +518,18 @@ async fn tenant_sso_enforced(db: &sqlx::PgPool, tenant_id: &str) -> Result<bool,
 }
 
 fn verify_password_or_log(password: &str, hash: &str, subject: &str) -> Result<bool, ApiError> {
+    // SSO-only accounts (auto-provisioned by routes/sso.rs) carry a
+    // `$sso$…` placeholder that no password can ever verify; routing it
+    // into the hash verifiers below fails with an Internal error on every
+    // password attempt. Refuse with a clean 401 directing the user to
+    // their IdP instead.
+    if hash.starts_with("$sso$") {
+        tracing::info!(subject = %subject, "password login refused for SSO-only account");
+        return Err(ApiError::Unauthorized(
+            "This account uses single sign-on".into(),
+        ));
+    }
+
     let result = if hash.starts_with("$2a$") || hash.starts_with("$2b$") || hash.starts_with("$2y$")
     {
         bcrypt::verify(password, hash).map_err(|error| error.to_string())
@@ -1803,39 +1815,55 @@ async fn login(
     )
     .await?;
 
-    if let Ok(mut conn) = state.redis.get().await {
-        let ip_rate_key = format!("apexmail:login_rate:ip:{client_ip}");
+    // The limiter fails CLOSED in production: an unreachable Redis used to
+    // silently skip this check (if-let-Ok), removing brute-force protection
+    // exactly while the platform is degraded. Outside production it fails
+    // open so local development works without Redis. Script errors remain
+    // rate-limited (count treated as exceeded) in every environment.
+    match state.redis.get().await {
+        Ok(mut conn) => {
+            let ip_rate_key = format!("apexmail:login_rate:ip:{client_ip}");
 
-        // Atomic rate-limit check using Lua script to avoid INCR + EXPIRE race condition.
-        let count: i64 = deadpool_redis::redis::Script::new(
-            r#"
-                local ip_key = KEYS[1]
-                local max_ip = tonumber(ARGV[1])
-                local window_secs = tonumber(ARGV[2])
+            // Atomic rate-limit check using Lua script to avoid INCR + EXPIRE race condition.
+            let count: i64 = deadpool_redis::redis::Script::new(
+                r#"
+                    local ip_key = KEYS[1]
+                    local max_ip = tonumber(ARGV[1])
+                    local window_secs = tonumber(ARGV[2])
 
-                local ip_count = redis.call('INCR', ip_key)
-                if ip_count == 1 then
-                    redis.call('EXPIRE', ip_key, window_secs)
-                end
+                    local ip_count = redis.call('INCR', ip_key)
+                    if ip_count == 1 then
+                        redis.call('EXPIRE', ip_key, window_secs)
+                    end
 
-                if ip_count > max_ip then
-                    return 1
-                end
-                return 0
-            "#,
-        )
-        .key(&ip_rate_key)
-        .arg(LOGIN_IP_RATE_LIMIT)
-        .arg(LOGIN_IP_RATE_LIMIT_WINDOW_SECS)
-        .invoke_async::<i64>(&mut *conn)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!(error = %e, ip = %client_ip, "login IP rate-limit Lua script failed; treating as rate-limited");
-            1
-        });
+                    if ip_count > max_ip then
+                        return 1
+                    end
+                    return 0
+                "#,
+            )
+            .key(&ip_rate_key)
+            .arg(LOGIN_IP_RATE_LIMIT)
+            .arg(LOGIN_IP_RATE_LIMIT_WINDOW_SECS)
+            .invoke_async::<i64>(&mut *conn)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, ip = %client_ip, "login IP rate-limit Lua script failed; treating as rate-limited");
+                1
+            });
 
-        if count > 0 {
-            return Err(ApiError::RateLimited);
+            if count > 0 {
+                return Err(ApiError::RateLimited);
+            }
+        }
+        Err(error) => {
+            if state.config.environment.is_production() {
+                tracing::error!(error = %error, ip = %client_ip, "login IP rate limiter unavailable — failing closed in production");
+                return Err(ApiError::ServiceUnavailable(
+                    "login is temporarily unavailable; please retry shortly".into(),
+                ));
+            }
+            tracing::warn!(error = %error, ip = %client_ip, "login IP rate limiter unavailable — failing open outside production");
         }
     }
 
@@ -3427,6 +3455,33 @@ async fn refresh_token(
     // Check if the session has been revoked since the token was issued
     let revoked_after = lookup_session_revoked_after(&tenant_id, &user_id, &state).await?;
     if issued_before_or_at_revocation(old_claims.iat, revoked_after) {
+        return Err(ApiError::Unauthorized("session has been revoked".into()));
+    }
+
+    // Per-token blacklist (logout / a prior refresh's rotation): the
+    // registry above only encodes user-wide revocation, so a token that
+    // logout blacklisted could still mint a brand-new session here. Same
+    // key scheme and fail-closed Redis handling as the middleware's
+    // blacklist check (middleware::auth::is_token_blacklisted).
+    let blacklist_key = token_blacklist_key(&token);
+    let blacklisted: bool = {
+        let mut conn = state.redis.get().await.map_err(|error| {
+            tracing::error!(error = %error, "Redis unavailable for token blacklist check on refresh");
+            ApiError::ServiceUnavailable(
+                "authentication service temporarily unavailable".into(),
+            )
+        })?;
+        deadpool_redis::redis::AsyncCommands::exists(&mut *conn, &blacklist_key)
+            .await
+            .map_err(|error| {
+                tracing::error!(error = %error, "Redis EXISTS failed for token blacklist check on refresh");
+                ApiError::ServiceUnavailable(
+                    "authentication service temporarily unavailable".into(),
+                )
+            })?
+    };
+    if blacklisted {
+        tracing::info!(user_id = %user_id, "refresh refused for blacklisted token");
         return Err(ApiError::Unauthorized("session has been revoked".into()));
     }
 

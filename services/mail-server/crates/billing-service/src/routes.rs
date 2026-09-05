@@ -1036,24 +1036,24 @@ fn preview_plan_proration(
 
     if net_amount > config.max_proration_charge_cents {
         return Err(format!(
-            "Proration charge exceeds maximum allowed: ${:.2} > ${:.2}. Please contact support for assistance with this plan change.",
-            net_amount as f64 / 100.0,
-            config.max_proration_charge_cents as f64 / 100.0,
+            "Proration charge exceeds maximum allowed: {} > {}. Please contact support for assistance with this plan change.",
+            proration::cents_to_eur_string(net_amount),
+            proration::cents_to_eur_string(config.max_proration_charge_cents),
         ));
     }
 
     if net_amount < 0 && net_amount.abs() > config.max_proration_credit_cents {
         return Err(format!(
-            "Proration credit exceeds maximum allowed: ${:.2} > ${:.2}. Please contact support for assistance with this plan change.",
-            net_amount.abs() as f64 / 100.0,
-            config.max_proration_credit_cents as f64 / 100.0,
+            "Proration credit exceeds maximum allowed: {} > {}. Please contact support for assistance with this plan change.",
+            proration::cents_to_eur_string(net_amount.abs()),
+            proration::cents_to_eur_string(config.max_proration_credit_cents),
         ));
     }
 
     let warnings = if net_amount > config.warn_proration_charge_cents {
         Some(vec![format!(
-            "This plan change will result in a charge of ${:.2}. Please confirm this is intended.",
-            net_amount as f64 / 100.0,
+            "This plan change will result in a charge of {}. Please confirm this is intended.",
+            proration::cents_to_eur_string(net_amount),
         )])
     } else {
         None
@@ -1588,20 +1588,12 @@ fn yearly_price_to_monthly_mrr(price_yearly: i64) -> i64 {
     (price_yearly + 6) / 12
 }
 
-async fn get_mrr_report(
-    State(state): State<Arc<AppState>>,
-    Extension(scope): Extension<TenantAuthScope>,
-) -> Result<Response, ApiError> {
-    if let Err(response) = require_any_scope(&scope) {
-        return Ok(response);
-    }
-    // Fix C — MRR is computed from stripe_subscriptions (the table the
-    // webhook writers populate) joined via tenants.plan to plans pricing.
-    // Fix I9 — yearly prices are normalized with proper rounding and rows
-    // are bucketed by the subscription's active month (billing cycle start,
-    // falling back to creation), not by raw creation date.
-    let report: serde_json::Value = sqlx::query_scalar(
-        r#"
+/// Shared MRR report SQL (Fix C + Fix I9) — the single source for both the
+/// billing-service route and api-server's twin admin route, so the two
+/// consoles cannot diverge again (audit 2: api-server's copy retained the
+/// bugs this fixed — truncated yearly/12, creation-date bucketing, no
+/// tenants join).
+pub const MRR_REPORT_SQL: &str = r#"
         SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.month DESC), '[]'::json)
         FROM (
             SELECT
@@ -1621,11 +1613,24 @@ async fn get_mrr_report(
             ORDER BY month DESC
             LIMIT 12
         ) report_row
-        "#,
-    )
-    .fetch_one(&state.db)
-    .await
-    .map_err(ApiError::Plans)?;
+        "#;
+
+async fn get_mrr_report(
+    State(state): State<Arc<AppState>>,
+    Extension(scope): Extension<TenantAuthScope>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = require_any_scope(&scope) {
+        return Ok(response);
+    }
+    // Fix C — MRR is computed from stripe_subscriptions (the table the
+    // webhook writers populate) joined via tenants.plan to plans pricing.
+    // Fix I9 — yearly prices are normalized with proper rounding and rows
+    // are bucketed by the subscription's active month (billing cycle start,
+    // falling back to creation), not by raw creation date.
+    let report: serde_json::Value = sqlx::query_scalar(MRR_REPORT_SQL)
+        .fetch_one(&state.db)
+        .await
+        .map_err(ApiError::Plans)?;
 
     Ok(Json(serde_json::json!({ "report": report })).into_response())
 }
@@ -1639,16 +1644,11 @@ async fn get_mrr_report(
 /// resolvable price (snapshot missing AND tenant already downgraded to
 /// free) are EXCLUDED from `churned_mrr` and reported separately as
 /// `churned_mrr_unpriced` so the metric's coverage is explicit.
-async fn get_churn_report(
-    State(state): State<Arc<AppState>>,
-    Extension(scope): Extension<TenantAuthScope>,
-) -> Result<Response, ApiError> {
-    if let Err(response) = require_any_scope(&scope) {
-        return Ok(response);
-    }
-    // Fix C — churn computed from stripe_subscriptions (join tenants/plans).
-    let report: serde_json::Value = sqlx::query_scalar(
-        r#"
+/// Shared churn report SQL (Fix C + Fix F10) — single source for both the
+/// billing-service route and api-server's twin admin route. Prices churn
+/// from the subscription's own `stripe_price_id` snapshot (falling back to
+/// the tenant's plan only while still non-free); rounds yearly/12.
+pub const CHURN_REPORT_SQL: &str = r#"
         SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.month DESC), '[]'::json)
         FROM (
             WITH churned AS (
@@ -1671,16 +1671,6 @@ async fn get_churn_report(
                     COUNT(*) FILTER (WHERE sp.id IS NULL AND tp.id IS NULL) as churned_mrr_unpriced
                 FROM stripe_subscriptions s
                 JOIN tenants t ON t.id = s.tenant_id
-                -- Fix F10 — price the CHURNED SUBSCRIPTION, not the tenant's
-                -- current plan: subscription cancellation downgrades
-                -- tenants.plan to 'free', so the previous
-                -- `plans p ON p.name = t.plan` priced all churn at the free
-                -- plan (churned_mrr was structurally ~0). Preferred source:
-                -- the subscription's own Stripe price snapshot
-                -- (stripe_price_id, written when the subscription was
-                -- stored and never downgraded). Fallback: the tenant's plan
-                -- only while it is still non-free; otherwise the row is
-                -- excluded from churned_mrr and counted as unpriced.
                 LEFT JOIN plans sp ON s.stripe_price_id IS NOT NULL AND (
                     (s.billing_interval = 'yearly'
                         AND sp.stripe_price_id_yearly = s.stripe_price_id)
@@ -1711,11 +1701,23 @@ async fn get_churn_report(
             ORDER BY c.month DESC
             LIMIT 12
         ) report_row
-        "#,
-    )
-    .fetch_one(&state.db)
-    .await
-    .map_err(ApiError::Plans)?;
+        "#;
+
+async fn get_churn_report(
+    State(state): State<Arc<AppState>>,
+    Extension(scope): Extension<TenantAuthScope>,
+) -> Result<Response, ApiError> {
+    if let Err(response) = require_any_scope(&scope) {
+        return Ok(response);
+    }
+    // Fix C — churn computed from stripe_subscriptions (join tenants/plans).
+    // Fix F10 — churned_mrr prices the CHURNED SUBSCRIPTION via its own
+    // stripe_price_id snapshot, not the tenant's (post-cancellation, free)
+    // plan; see CHURN_REPORT_SQL above.
+    let report: serde_json::Value = sqlx::query_scalar(CHURN_REPORT_SQL)
+        .fetch_one(&state.db)
+        .await
+        .map_err(ApiError::Plans)?;
 
     Ok(Json(serde_json::json!({ "report": report })).into_response())
 }
@@ -2981,11 +2983,11 @@ mod tests {
         assert!(payload["explanation"]
             .as_str()
             .expect("explanation should be a string")
-            .contains("$120.00 / 365 days × 183 days"));
+            .contains("€120.00 / 365 days × 183 days"));
         assert!(payload["explanation"]
             .as_str()
             .expect("explanation should be a string")
-            .contains("$240.00 / 365 days × 183 days"));
+            .contains("€240.00 / 365 days × 183 days"));
     }
 
     #[test]
@@ -3205,7 +3207,7 @@ mod tests {
             .expect("preview must calculate");
         let warnings = preview.warnings.expect("49 500 > 10 000 warn threshold");
         assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("$495.00"));
+        assert!(warnings[0].contains("€495.00"));
 
         // Default warn threshold (25 000) also fires for this size.
         let preview = preview_plan_proration(

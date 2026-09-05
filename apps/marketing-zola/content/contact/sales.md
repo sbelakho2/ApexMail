@@ -13,10 +13,13 @@ For enterprise buying, security review, or private-cloud planning, complete the 
 
 ## Sales Enquiry Form
 
-<div id="enquiry-submitted" class="form-banner form-banner--success" role="status">
+<!-- Status banners: hidden by default. The api-server PRG flow unhides the
+     matching one via a signed single-minute flash cookie after the redirect;
+     before that flow runs they must not render as if a submission happened. -->
+<div id="enquiry-submitted" class="form-banner form-banner--success" role="status" hidden>
   <p><strong>Thank you — your submission was received.</strong> Our team reviews submissions and responds within 2 business days.</p>
 </div>
-<div id="enquiry-error" class="form-banner form-banner--error" role="alert">
+<div id="enquiry-error" class="form-banner form-banner--error" role="alert" hidden>
   <p><strong>We could not accept your submission.</strong> Please check the required fields (a valid work email is required) and try again.</p>
 </div>
 <form id="sales-contact-form" class="space-y-6 max-w-2xl" method="POST" action="https://api.apexmail.ee/v1/contact/sales">
@@ -151,7 +154,7 @@ For enterprise buying, security review, or private-cloud planning, complete the 
     <select id="security-review" name="security_review_needs"
       class="w-full px-4 py-3 border border-surface-300 text-sm text-surface-950 bg-surface-50 focus:border-brand-500 focus:ring-1 focus:ring-brand-500 outline-none">
       <option value="" selected>Select review level</option>
-      <option value="standard">Standard — SIG/CAIQ/HECVAT packs sufficient</option>
+        <option value="standard">Standard — security questionnaire answered case by case from current review material (no standardized SIG/CAIQ/HECVAT pack is a product entitlement)</option>
       <option value="detailed">Detailed — Custom security questionnaire required</option>
       <option value="pen_test">Penetration test report required</option>
       <option value="on_site">On-site audit or architecture review required</option>

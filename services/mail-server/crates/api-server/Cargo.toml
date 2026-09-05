@@ -70,6 +70,7 @@ billing-common = { path = "../billing-common" }
 ui-foundation = { path = "../ui-foundation" }
 mail-common = { path = "../mail-common" }
 ddos-protection = { path = "../ddos-protection" }
+waf-engine = { path = "../waf-engine" }
 apexmail-analytics = { path = "../analytics", package = "analytics" }
 observability-service = { path = "../observability-service" }
 inbox-placement = { path = "../inbox-placement" }

@@ -9,7 +9,7 @@ Complete reference for all ApexMail configuration options.
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `ENVIRONMENT` | ✓ | `development` | Environment: `development`, `production`, `test` |
-| `PORT` | | `3001` | API server port |
+| `PORT` | | `3000` | API server port |
 | `HOST` | | `0.0.0.0` | Server bind address |
 | `LOG_LEVEL` | | `info` | Logging level: `debug`, `info`, `warn`, `error` |
 

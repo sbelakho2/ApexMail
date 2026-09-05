@@ -1,3 +1,26 @@
+//! UNWIRED, KNOWN-BUGGY DEAD CODE — do NOT declare in lib.rs.
+//!
+//! This module is compiled by nothing: `lib.rs` has no
+//! `mod admin_report_scheduler;`, and the route module it was written to
+//! serve (`routes/admin/reports.rs`) has been deleted (report export is
+//! served live by `routes/admin/analytics_export`). It must stay dead until
+//! BOTH known defects are fixed:
+//!
+//! 1. **Duplicate generation** — `should_generate` gates on
+//!    `generated_at > now - 1h` per (type, period_start), so after one hour
+//!    the same period regenerates on every 30 s tick until the period rolls
+//!    over: up to ~2,880 duplicate `report_history` rows per period per
+//!    type. There is no unique constraint on
+//!    (report_type, period_start) to back an upsert.
+//! 2. **numeric→f64 decode** — `collect_metrics` reads
+//!    `SUM(CASE ...)` aggregates into `(i64, i64, i64, i64)` via
+//!    `query_as`, but untyped `SUM` over INT columns yields NUMERIC, which
+//!    sqlx cannot decode into i64 — the query (and therefore every
+//!    scheduled report) fails at runtime.
+//!
+//! Wiring this module without fixing both would produce a scheduler that
+//! either floods report_history with duplicates or writes nothing at all.
+
 use chrono::{Datelike, Duration, NaiveDate, NaiveTime, Timelike, Utc};
 use serde::Serialize;
 use sqlx::PgPool;

@@ -63,7 +63,10 @@
       </div>
     </div>
 
-    {% set pricing_review_date = config.extra.pricing_as_of | default(value=page.extra.pricing_as_of) %}
+    {# Per-page review date wins; the config value is only the fallback.
+       (The previous order made the config default always win, so every
+       compare page rendered the same date regardless of its frontmatter.) #}
+    {% set pricing_review_date = page.extra.pricing_as_of | default(value=config.extra.pricing_as_of) %}
     {% if pricing_review_date %}
     <p class="mt-4 text-xs font-medium text-surface-500">
       Competitor pricing and plan snapshots were last reviewed on {{ pricing_review_date }} and may change.

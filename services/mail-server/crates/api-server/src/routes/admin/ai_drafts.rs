@@ -2,8 +2,10 @@
 //!
 //! The email agent (ai-service) writes drafts with `pending_approval = true`
 //! and NEVER sends anything. This surface is the missing reader: operators
-//! list pending drafts, approve (which sends the reply through the normal
-//! tenant email queue) or reject them. Every action is audit-logged.
+//! list pending drafts, approve (which sends the reply through the
+//! platform's verified system sender — `queue_system_email`, attributed to
+//! the system tenant that owns the sending domain) or reject them. Every
+//! decision is audit-logged with full actor attribution.
 
 use axum::extract::{Path, State};
 use axum::http::StatusCode;
@@ -83,6 +85,31 @@ struct ApproveBody {
     pub note: String,
 }
 
+/// Actor-attributed audit for AI-draft decisions (P1-4/P2-2): an approved
+/// AI reply is a platform-sent message to a customer — the operator who
+/// approved it (tenant + user) and the routed tenant must be on record.
+async fn log_draft_audit(
+    state: &AppState,
+    auth: &AuthUser,
+    action: &str,
+    draft_id: &str,
+    metadata: serde_json::Value,
+) {
+    crate::audit_log::insert_audit_log_best_effort_with_env(
+        &state.db,
+        state.config.environment.is_production(),
+        Some(auth.tenant_id.as_str()),
+        auth.user_id.as_deref(),
+        action,
+        "ai_draft",
+        Some(draft_id),
+        metadata,
+        None,
+        None,
+    )
+    .await;
+}
+
 async fn approve_draft(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -136,33 +163,25 @@ async fn approve_draft(
         ]));
     }
 
-    // Enqueue the reply through the normal tenant queue (the platform's own
-    // verified sending path — SPF/DKIM apply as usual).
-    let message_uuid = Uuid::new_v4();
-    let insert = sqlx::query(
-        r#"
-        INSERT INTO email_queue (
-            id, from_address, to_addresses, subject, text_body,
-            "from", "to", html, text, status, priority, tenant_id, message_id,
-            domain_id, metadata, created_at, updated_at
-        ) VALUES (
-            $1, $2, $3, $4, $5,
-            $2, $3, NULL, $5, 'pending', 5, $6, $1,
-            NULL, '{}'::jsonb, NOW(), NOW()
-        )
-        "#,
+    // P1-4: route through the platform's verified system sender. The
+    // previous hand-rolled email_queue INSERT hardcoded
+    // `support@apexmail.ee` as the from-address while attributing the row to
+    // the CUSTOMER's tenant — the customer neither owns apexmail.ee (SPF/
+    // DKIM alignment broken) nor sent the mail. `queue_system_email`
+    // enforces system-sender readiness under lock and attributes the queue
+    // row to the system tenant that actually owns the sending domain.
+    let queued = crate::routes::system_sender::queue_system_email(
+        &state.db,
+        &from_email,
+        &subject,
+        "",
+        &reply,
+        vec!["ai-draft-approval".to_string()],
     )
-    .bind(message_uuid)
-    .bind("support@apexmail.ee")
-    .bind([from_email.as_str()])
-    .bind(&subject)
-    .bind(&reply)
-    .bind(&tenant_id)
-    .execute(&state.db)
     .await;
 
-    match insert {
-        Ok(_) => {
+    match queued {
+        Ok(message_uuid) => {
             tracing::info!(
                 operator = %auth.user_id.clone().unwrap_or_default(),
                 draft_id = %id,
@@ -170,6 +189,19 @@ async fn approve_draft(
                 note = %note,
                 "AI reply draft APPROVED and queued"
             );
+            log_draft_audit(
+                &state,
+                &auth,
+                "control_plane.ai_draft.approved",
+                &id,
+                serde_json::json!({
+                    "note": note,
+                    "routedTenantId": tenant_id,
+                    "recipient": from_email,
+                    "queuedMessageId": message_uuid.to_string(),
+                }),
+            )
+            .await;
             Ok(Json(serde_json::json!({
                 "approved": true,
                 "queued_message_id": message_uuid.to_string(),
@@ -220,6 +252,14 @@ async fn reject_draft(
         note = %note,
         "AI reply draft REJECTED"
     );
+    log_draft_audit(
+        &state,
+        &auth,
+        "control_plane.ai_draft.rejected",
+        &id,
+        serde_json::json!({ "note": note }),
+    )
+    .await;
     Ok(Json(serde_json::json!({ "rejected": true })))
 }
 

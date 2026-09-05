@@ -1,6 +1,18 @@
 {# Private Cloud page template #}
 {% extends "base.html" %}
 
+{% block title %}{% if section.title %}{{ section.title }} | {{ config.extra.site_name }}{% elif page.title %}{{ page.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}{% endblock title %}
+
+{% block description %}{% if section.description %}{{ section.description }}{% elif page.description %}{{ page.description }}{% else %}{{ config.description }}{% endif %}{% endblock description %}
+
+{% block og_title %}
+  {% if page.title %}{{ page.title }} | {{ config.extra.site_name }}{% else %}{{ config.title }}{% endif %}
+{% endblock og_title %}
+
+{% block og_description %}
+  {% if page.description %}{{ page.description }}{% else %}{{ config.description }}{% endif %}
+{% endblock og_description %}
+
 {% block content %}
 {% include "partials/private-cloud/hero.html" %}
 

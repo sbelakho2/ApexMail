@@ -527,25 +527,29 @@ async fn process_analytics_export(
         .execute(&db)
         .await?;
 
-    // Query analytics data
+    // Query analytics data. Written against the real `messages` schema
+    // (migration 073 / runtime CREATE_MESSAGES): id UUID, subject TEXT,
+    // to_emails JSONB, created_at TIMESTAMPTZ — the previous query selected
+    // nonexistent columns (m.message_id, m.recipient, m.sent_at) and keyed
+    // the events join on them, so every export failed.
     let rows: Vec<ExportRow> = sqlx::query_as(
         "SELECT
-            m.message_id,
+            m.id::text AS message_id,
             m.subject,
-            m.recipient,
-            m.sent_at,
+            m.to_emails->>0 AS recipient,
+            m.created_at AS created_at,
             COALESCE(e.event_type, 'sent') as last_event,
-            e.created_at as event_time
+            e.timestamp as event_time
          FROM messages m
          LEFT JOIN LATERAL (
-             SELECT event_type, created_at
+             SELECT event_type, timestamp
              FROM events
-             WHERE message_id = m.message_id
-             ORDER BY created_at DESC
+             WHERE message_id = m.id::text
+             ORDER BY timestamp DESC
              LIMIT 1
          ) e ON true
-         WHERE m.tenant_id = $1 AND m.sent_at >= $2 AND m.sent_at < $3
-         ORDER BY m.sent_at DESC
+         WHERE m.tenant_id = $1 AND m.created_at >= $2 AND m.created_at < $3
+         ORDER BY m.created_at DESC
          LIMIT 100000",
     )
     .bind(&tenant_id)
@@ -565,14 +569,14 @@ async fn process_analytics_export(
         _ => {
             // CSV format (default)
             let mut csv =
-                String::from("message_id,subject,recipient,sent_at,last_event,event_time\n");
+                String::from("message_id,subject,recipient,created_at,last_event,event_time\n");
             for row in &rows {
                 csv.push_str(&format!(
                     "{},{},{},{},{},{}\n",
                     escape_csv(&row.message_id),
                     escape_csv(&row.subject),
-                    escape_csv(&row.recipient),
-                    escape_csv(&row.sent_at.to_rfc3339()),
+                    escape_csv(row.recipient.as_deref().unwrap_or("")),
+                    escape_csv(&row.created_at.to_rfc3339()),
                     escape_csv(&row.last_event),
                     escape_csv(&row.event_time.map(|t| t.to_rfc3339()).unwrap_or_default())
                 ));
@@ -708,8 +712,9 @@ async fn store_export_file(key: &str, content: &[u8]) -> anyhow::Result<()> {
 struct ExportRow {
     message_id: String,
     subject: String,
-    recipient: String,
-    sent_at: DateTime<Utc>,
+    /// First entry of the JSONB `to_emails` array (NULL when empty).
+    recipient: Option<String>,
+    created_at: DateTime<Utc>,
     last_event: String,
     event_time: Option<DateTime<Utc>>,
 }
@@ -895,30 +900,44 @@ async fn export_pdf(
 
     let (from, to) = resolve_analytics_range(params.from, params.to)?;
 
-    // Gather summary data for the PDF template
-    let summary: Option<DashboardRow> = sqlx::query_as(
+    // Gather summary data for the PDF template. Sent/delivered/bounced come
+    // from message statuses; opens/clicks come from the events table — the
+    // previous query counted `messages.status = 'opened'/'clicked'`, statuses
+    // that never exist, so PDFs always reported zero engagement.
+    let counts = sqlx::query_as::<_, DashboardCountsRow>(
         "SELECT
-            COUNT(*) as total_sent,
+            COUNT(*) FILTER (WHERE status IN ('sent','delivered')) as total_sent,
             COUNT(*) FILTER (WHERE status = 'delivered') as total_delivered,
-            COUNT(*) FILTER (WHERE status = 'bounced') as total_bounced,
-            COUNT(*) FILTER (WHERE status = 'opened') as total_opened,
-            COUNT(*) FILTER (WHERE status = 'clicked') as total_clicked
+            COUNT(*) FILTER (WHERE status = 'bounced') as total_bounced
          FROM messages
-         WHERE tenant_id = $1 AND sent_at >= $2 AND sent_at < $3",
+         WHERE tenant_id = $1 AND created_at >= $2 AND created_at <= $3",
     )
     .bind(&auth.tenant_id)
     .bind(from)
     .bind(to)
-    .fetch_optional(&state.db)
+    .fetch_one(&state.db)
     .await?;
 
-    let s = summary.unwrap_or(DashboardRow {
-        total_sent: 0,
-        total_delivered: 0,
-        total_bounced: 0,
-        total_opened: 0,
-        total_clicked: 0,
-    });
+    let events = sqlx::query_as::<_, DashboardEventsRow>(
+        "SELECT
+            COUNT(*) FILTER (WHERE event_type = 'opened') as opened,
+            COUNT(*) FILTER (WHERE event_type = 'clicked') as clicked
+         FROM events
+         WHERE tenant_id = $1 AND timestamp >= $2 AND timestamp <= $3",
+    )
+    .bind(&auth.tenant_id)
+    .bind(from)
+    .bind(to)
+    .fetch_one(&state.db)
+    .await?;
+
+    let s = DashboardRow {
+        total_sent: counts.total_sent,
+        total_delivered: counts.total_delivered,
+        total_bounced: counts.total_bounced,
+        total_opened: events.opened,
+        total_clicked: events.clicked,
+    };
 
     let total = s.total_sent as f64;
 
@@ -964,12 +983,13 @@ async fn export_pdf(
     let pdf_renderer_url =
         std::env::var("PDF_RENDERER_URL").unwrap_or_else(|_| "http://pdf-renderer:3004".into());
 
-    let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| ApiError::Internal(format!("http client error: {e}")))?;
-    let mut req = http_client
+    // Reuse the shared process-wide client (state.http_client) instead of
+    // building a fresh reqwest stack per export; the per-request timeout
+    // below bounds the render round-trip.
+    let mut req = state
+        .http_client
         .post(format!("{pdf_renderer_url}/v1/pdf/render"))
+        .timeout(std::time::Duration::from_secs(30))
         .json(&render_request);
     // pdf-renderer requires the shared internal service token; only attach the
     // header when one is configured (empty token would 401 anyway).

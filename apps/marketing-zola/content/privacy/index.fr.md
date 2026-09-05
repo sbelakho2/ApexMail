@@ -52,8 +52,8 @@ Nous conservons les données personnelles uniquement aussi longtemps que nécess
 |---|---|
 | Données de compte | Durée du contrat + 30 jours |
 | Documents de facturation | 7 ans (droit comptable estonien) |
-| Contenu des emails (corps, objet, en-têtes, pièces jointes) | 7 jours par défaut ; maximum dépendant du plan (de 1 jour en plan gratuit jusqu'à 730 jours en Enterprise) |
-| Journaux d'événements (événements de livraison, d'ouverture et de clic) | 30 jours par défaut ; maximum dépendant du plan (jusqu'à 730 jours en Enterprise) |
+| Contenu des emails (corps, objet, en-têtes, pièces jointes) | 7 jours par défaut ; selon le plan, jusqu'à 730 jours en Enterprise |
+| Journaux d'événements (événements de livraison, d'ouverture et de clic) | 30 jours par défaut (7 jours en plan gratuit) ; selon le plan, jusqu'à 730 jours en Enterprise |
 | Tickets de support | 2 ans après résolution |
 
 Consultez notre [Politique de conservation des données](/compliance/#data-retention) pour plus de détails.

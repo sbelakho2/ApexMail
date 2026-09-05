@@ -240,21 +240,44 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                 }
             }
 
-            // End-of-period overage invoicing (idempotent per tenant+period;
-            // paid subscriptions may send into an overage allowance — see
-            // usage::record_with_quota_check and the overage module).
+            // End-of-period overage + PAYG invoicing (idempotent per
+            // tenant+period; paid subscriptions may send into an overage
+            // allowance — see usage::record_with_quota_check and the
+            // overage module). Every created invoice is COLLECTED: wallet
+            // first, then Stripe invoice item / dunning (see overage.rs).
             match crate::overage::sweep_period_overage(sla_state.as_ref()).await {
-                Ok(result) if result.invoices_created > 0 || result.skipped_no_address > 0 => {
+                Ok(result)
+                    if result.invoices_created > 0
+                        || result.payg_invoices_created > 0
+                        || result.skipped_no_address > 0
+                        || result.skipped_unknown_plan > 0 =>
+                {
                     info!(
                         periods_checked = result.periods_checked,
                         invoices_created = result.invoices_created,
+                        payg_invoices_created = result.payg_invoices_created,
+                        wallet_paid = result.wallet_paid,
+                        pending_dunning = result.pending_dunning,
                         deferred_no_address = result.skipped_no_address,
-                        "processed period overage invoices"
+                        skipped_unknown_plan = result.skipped_unknown_plan,
+                        "processed period usage invoices"
                     );
                 }
                 Ok(_) => {}
                 Err(error_message) => {
                     error!(error = %error_message, "failed to sweep period overage");
+                }
+            }
+
+            // ToS 6.4 wallet-credit expiry (12 months) — see
+            // expire_stale_wallet_credits.
+            match expire_stale_wallet_credits(sla_state.as_ref()).await {
+                Ok(expired) if expired > 0 => {
+                    info!(expired, "expired stale wallet credits per ToS 6.4");
+                }
+                Ok(_) => {}
+                Err(error_message) => {
+                    error!(error = %error_message, "failed to expire stale wallet credits");
                 }
             }
         }
@@ -1697,9 +1720,12 @@ async fn process_scheduled_retries(
                 return Ok(());
             };
 
-            stripe_post_json::<serde_json::Value>(
+            stripe_post_json_idempotent::<serde_json::Value>(
                 client,
                 &format!("/v1/invoices/{}/pay", invoice.id),
+                // One key per invoice: a retry after a lost response must
+                // replay the SAME Stripe pay call, not charge twice.
+                &format!("autopay_{}", invoice.id),
             )
             .await?;
 
@@ -2036,7 +2062,16 @@ async fn process_monthly_sla_credits(state: &AppState) -> Result<SlaCreditSweepR
                p.features
         FROM sla_metrics sm
         JOIN tenants t ON t.id = sm.tenant_id
-        JOIN plans p ON p.name = t.plan
+        -- Override-aware plan resolution, exactly like plans.rs
+        -- get_plan_for_tenant: an active admin plan override (e.g. an
+        -- Enterprise override on a Scale-tier tenant row) carries the SLA
+        -- entitlement and the credit cap of the OVERRIDING plan — joining
+        -- only on t.plan silently dropped the override's SLA features.
+        LEFT JOIN plan_overrides po
+          ON po.tenant_id = t.id
+         AND po.active = true
+         AND (po.expires_at IS NULL OR po.expires_at > NOW())
+        JOIN plans p ON p.name = COALESCE(po.plan, t.plan)
         WHERE sm.period_month = $1
           AND t.status = 'active'
         ORDER BY sm.tenant_id
@@ -3022,6 +3057,132 @@ struct ExpiredWalletReservationRow {
     released_count: i64,
 }
 
+/// ToS 6.4 — "Credits expire after 12 months unless otherwise stated."
+/// The published policy previously had NO enforcement mechanism, so wallet
+/// balances sat forever. This sweep expires UNCONSUMED credits older than
+/// 12 months: under the FIFO convention (debits consume the oldest credit
+/// first, matching how every settlement path spends the wallet) the
+/// expire-eligible amount for a tenant is
+/// `max(credits_older_than_12mo − all_debits, 0)`, capped at the current
+/// balance. The expiry is a normal debit with its own ledger row and an
+/// audit event, and it is self-limiting: yesterday's expiry debit counts
+/// as consumption in tomorrow's computation. Runs daily.
+async fn expire_stale_wallet_credits(state: &AppState) -> Result<u64, String> {
+    let candidates: Vec<(String, i64)> = sqlx::query_as(
+        r#"
+        WITH candidate_wallets AS (
+            SELECT tenant_id, balance
+            FROM wallets
+            WHERE balance > 0
+            ORDER BY updated_at ASC
+            LIMIT 500
+        ),
+        ledger AS (
+            SELECT wt.tenant_id,
+                   COALESCE(SUM(amount) FILTER (
+                       WHERE wt.type = 'credit'
+                         AND wt.created_at < NOW() - INTERVAL '12 months'
+                   ), 0)::bigint AS stale_credits,
+                   COALESCE(SUM(amount) FILTER (WHERE wt.type = 'debit'), 0)::bigint AS total_debits
+            FROM wallet_transactions wt
+            JOIN candidate_wallets cw ON cw.tenant_id = wt.tenant_id
+            GROUP BY wt.tenant_id
+        )
+        SELECT cw.tenant_id,
+               LEAST(cw.balance, GREATEST(l.stale_credits - l.total_debits, 0))::bigint AS expire_amount
+        FROM candidate_wallets cw
+        JOIN ledger l ON l.tenant_id = cw.tenant_id
+        WHERE GREATEST(l.stale_credits - l.total_debits, 0) > 0
+        "#,
+    )
+    .fetch_all(&state.db)
+    .await
+    .map_err(|error| format!("Failed to load stale wallet credits: {error}"))?;
+
+    let mut expired_count = 0_u64;
+    for (tenant_id, expire_amount) in candidates {
+        if expire_amount <= 0 {
+            continue;
+        }
+
+        let mut tx = state.db.begin().await.map_err(|error| {
+            format!("Failed to begin wallet credit expiry tx for {tenant_id}: {error}")
+        })?;
+
+        let debited = sqlx::query(
+            r#"
+            WITH debit_wallet AS (
+                UPDATE wallets
+                SET balance = balance - $2, updated_at = NOW()
+                WHERE tenant_id = $1 AND balance >= $2
+                RETURNING id, balance
+            )
+            INSERT INTO wallet_transactions
+                (wallet_id, tenant_id, type, amount, balance_after, description, reference, created_at)
+            SELECT id, $1, 'debit', $2, balance, $3, 'wallet_credit_expiry', NOW()
+            FROM debit_wallet
+            "#,
+        )
+        .bind(&tenant_id)
+        .bind(expire_amount)
+        .bind("Expired credit — 12-month wallet credit policy (ToS 6.4)")
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| {
+            format!("Failed to expire stale wallet credit for {tenant_id}: {error}")
+        })?
+        .rows_affected();
+
+        if debited == 0 {
+            // Balance moved between the candidate scan and the debit — skip
+            // rather than force-below zero.
+            let _ = tx.rollback().await;
+            continue;
+        }
+
+        if let Err(error) = append_audit_log(
+            &mut tx,
+            &tenant_id,
+            "billing.wallet_credit_expired",
+            "wallet",
+            Some(&tenant_id),
+            serde_json::json!({
+                "expiredAmount": expire_amount,
+                "policy": "credits expire 12 months after grant (ToS 6.4)",
+            }),
+            Utc::now(),
+        )
+        .await
+        {
+            let _ = tx.rollback().await;
+            return Err(format!(
+                "Failed to audit wallet credit expiry for {tenant_id}: {error}"
+            ));
+        }
+
+        tx.commit().await.map_err(|error| {
+            format!("Failed to commit wallet credit expiry for {tenant_id}: {error}")
+        })?;
+
+        info!(
+            tenant_id = %tenant_id,
+            expired_amount = expire_amount,
+            "expired unconsumed wallet credits older than 12 months (ToS 6.4)"
+        );
+        expired_count += 1;
+
+        if let Ok(mut conn) = state.redis.get().await {
+            let key = format!("wallet:balance:{tenant_id}");
+            let deletion: Result<i64, _> = conn.del(&key).await;
+            if let Err(error) = deletion {
+                warn!(tenant_id = %tenant_id, error = %error, "failed to clear wallet balance cache after credit expiry");
+            }
+        }
+    }
+
+    Ok(expired_count)
+}
+
 /// Fix I12 — release a wallet reservation in BIGINT arithmetic.
 /// The previous SQL cast the summed reservations to INTEGER before
 /// subtracting, so a released total above 2^31-1 cents (~21.5M EUR) would
@@ -3212,6 +3373,29 @@ async fn stripe_post_json<T: DeserializeOwned>(client: &Client, path: &str) -> R
     let response = client
         .post(format!("{}{}", stripe_api_base_url(), path))
         .bearer_auth(secret_key)
+        .send()
+        .await
+        .map_err(|error| format!("Stripe request failed: {error}"))?;
+
+    decode_stripe_response(response).await
+}
+
+/// `stripe_post_json` with an `Idempotency-Key` header (mirrors the
+/// dedicated-IP charge call below): money-moving POSTs must be safe to
+/// retry — a timeout between Stripe executing the pay call and the
+/// response reaching us used to cause a SECOND charge on the retry sweep.
+async fn stripe_post_json_idempotent<T: DeserializeOwned>(
+    client: &Client,
+    path: &str,
+    idempotency_key: &str,
+) -> Result<T, String> {
+    let secret_key = std::env::var("STRIPE_SECRET_KEY")
+        .map_err(|_| "Stripe secret key is not configured".to_string())?;
+
+    let response = client
+        .post(format!("{}{}", stripe_api_base_url(), path))
+        .bearer_auth(secret_key)
+        .header("Idempotency-Key", idempotency_key)
         .send()
         .await
         .map_err(|error| format!("Stripe request failed: {error}"))?;

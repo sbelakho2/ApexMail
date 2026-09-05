@@ -366,6 +366,10 @@ async fn list_ticket_messages(
     })))
 }
 
+/// Maximum ticket-message body length (64 KiB) — an unbounded body would
+/// be stored verbatim in ticket_messages and echoed back in list views.
+const MAX_MESSAGE_BODY_BYTES: usize = 64 * 1024;
+
 async fn create_ticket_message(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -373,6 +377,15 @@ async fn create_ticket_message(
     Json(body): Json<CreateMessageRequest>,
 ) -> Result<(StatusCode, Json<TicketMessageResponse>), ApiError> {
     require_scopes(&auth, &["support:write"])?;
+
+    if body.body.trim().is_empty() {
+        return Err(ApiError::Validation(vec!["body is required".into()]));
+    }
+    if body.body.len() > MAX_MESSAGE_BODY_BYTES {
+        return Err(ApiError::BadRequest(format!(
+            "message body must be {MAX_MESSAGE_BODY_BYTES} bytes or fewer"
+        )));
+    }
 
     // Verify ticket belongs to tenant
     let exists: bool = sqlx::query_scalar(
@@ -391,10 +404,14 @@ async fn create_ticket_message(
     let now = chrono::Utc::now();
     let user_id_str = auth.user_id.as_ref().map(|id| id.to_string());
 
+    // Bind the generated id so the 201 response returns the id that was
+    // actually persisted — the previous statement used gen_random_uuid()
+    // and discarded this one, so responses named a row that did not exist.
     sqlx::query(
         "INSERT INTO ticket_messages (id, ticket_id, author_id, body, is_internal, created_at)
-         VALUES (gen_random_uuid(), $1, $2, $3, false, $4)",
+         VALUES ($1, $2, $3, $4, false, $5)",
     )
+    .bind(id)
     .bind(&ticket_id)
     .bind(&user_id_str)
     .bind(&body.body)

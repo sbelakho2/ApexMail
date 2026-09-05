@@ -17,9 +17,14 @@
 #      in place. This container deliberately no longer mounts
 #      /var/run/docker.sock (audit: a root container with the engine socket
 #      is host-root-equivalent), so it cannot restart them either. A
-#      restart-flag file is left and a loud warning logged — run
-#      `docker compose ... restart mta imap-server` (or the next deploy) to
-#      refresh their TLS material.
+#      restart-flag file is written and a loud warning logged. The restart
+#      itself is automated HOST-SIDE: deploy.sh installs a systemd path-unit
+#      (deploy/hardening/apexmail-tls-renew-restart.path) that watches this
+#      flag and runs deploy/hardening/tls-renew-restart.sh — which restarts
+#      mta + imap-server exactly once per renewal (mtime guard) with
+#      APEXMAIL_TLS_AUTO_RESTART=0 as the documented opt-out. When the
+#      watcher is absent (non-root manual deploy), the flag + warning below
+#      remain the manual runbook.
 # =============================================================================
 set -eu
 
@@ -28,7 +33,10 @@ OUT_DIR="/etc/letsencrypt"
 WEBROOT="/var/www/certbot"
 # Sentinel watched by the nginx sidecar loop (shared certbot_webroot volume).
 RELOAD_SENTINEL="${WEBROOT}/reload-requested"
-# Marker for the mta/imap restart a human still needs to perform.
+# Marker consumed by the host-side systemd watcher
+# (apexmail-tls-renew-restart.path -> tls-renew-restart.sh). When the
+# watcher is not installed this flag + the warning below are the manual
+# runbook.
 TLS_RELOAD_FLAG="${TLS_RELOAD_FLAG:-/etc/letsencrypt/renewal-restart-flag}"
 # UID/GID matrix for key permissions (see the deploy-hook below):
 #   nginx container runs as 101:101 (docker-compose.prod.yml `user:`).
@@ -48,8 +56,9 @@ reload_services() {
   else
     echo "[certbot] WARN: could not write ${RELOAD_SENTINEL} — reload nginx manually (nginx -s reload)"
   fi
-  echo "[certbot] ACTION REQUIRED: mta + imap-server load TLS certs at startup only."
-  echo "[certbot] Run on the host: docker compose -f docker-compose.yml -f docker-compose.prod.yml restart mta imap-server"
+  echo "[certbot] ACTION: mta + imap-server load TLS certs at startup only."
+  echo "[certbot] Host-side watcher (apexmail-tls-renew-restart.path) restarts them from this flag —"
+  echo "[certbot] if it is NOT installed, run on the host: docker compose -f docker-compose.yml -f docker-compose.prod.yml restart mta imap-server"
   touch "$TLS_RELOAD_FLAG" 2>/dev/null || true
 }
 

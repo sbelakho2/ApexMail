@@ -310,17 +310,22 @@ impl DdosProtector {
         //
         // Audit F2b: the full penalty requires `ctx.tls_fingerprint`, which
         // HTTP callers never set — Layer 1 could therefore never lower a
-        // reputation. When the fingerprint is absent a smaller fixed penalty
-        // is applied instead, so unattributed clients still trend downward
-        // (operators that forward JA4 fingerprints from their proxy avoid
-        // the penalty entirely; the periodic cleanup decays scores back
-        // toward neutral).
+        // reputation from this arm. The missing-fingerprint penalty is
+        // gated on `penalize_missing_fingerprint` (default OFF, audit
+        // F-DDOS-1): with no fingerprint-populating proxy in this repo and
+        // no compiled redemption path, the unconditional penalty drained
+        // EVERY client's reputation by 1 per request and false-blocked
+        // legitimate traffic. A PRESENT suspicious fingerprint is always
+        // penalized regardless of the flag.
         match ctx.tls_fingerprint.as_deref() {
             Some(fp) if self.is_suspicious_fingerprint(fp) => {
                 self.decrease_reputation(&ctx.ip, FINGERPRINT_PENALTY);
             }
             Some(_) => {}
-            None => self.decrease_reputation(&ctx.ip, MISSING_FINGERPRINT_PENALTY),
+            None if self.config.penalize_missing_fingerprint => {
+                self.decrease_reputation(&ctx.ip, MISSING_FINGERPRINT_PENALTY);
+            }
+            None => {}
         }
 
         // Re-read reputation after potential fingerprint penalty so the
@@ -1472,9 +1477,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_missing_fingerprint_still_lowers_reputation() {
-        // Audit F2b: with no TLS fingerprint (what HTTP callers send), the
-        // Layer-1 penalty previously never fired; a small fixed penalty must
-        // still apply so reputation can fall.
+        // Audit F2b + F-DDOS-1: a missing fingerprint is the NORM for every
+        // HTTP caller (rustls never exposes the JA4 inputs), so the default
+        // MUST NOT penalize it — the unconditional penalty drained every
+        // legitimate client. The penalty exists only for deployments that
+        // opt in via `penalize_missing_fingerprint` (a proxy forwards
+        // fingerprints AND redemption is wired).
         let config = ProtectorConfig {
             block_threshold: 0, // never block in this test
             challenge_threshold: 5,
@@ -1506,9 +1514,33 @@ mod tests {
             .get(&ip)
             .map(|e| e.score)
             .expect("reputation entry exists");
+        assert_eq!(
+            score, 50,
+            "default config must not penalize a missing fingerprint (score {score})"
+        );
+
+        // Opt-in deployments keep the signal: the penalty lowers reputation
+        // when `penalize_missing_fingerprint` is set.
+        let config = ProtectorConfig {
+            block_threshold: 0,
+            challenge_threshold: 5,
+            penalize_missing_fingerprint: true,
+            ..ProtectorConfig::default()
+        };
+        let protector = DdosProtector::new(config)
+            .await
+            .expect("test should succeed");
+        let _ = protector.evaluate(&ctx).await;
+        let _ = protector.evaluate(&ctx).await;
+        let _ = protector.evaluate(&ctx).await;
+        let score = protector
+            .reputation_db
+            .get(&ip)
+            .map(|e| e.score)
+            .expect("reputation entry exists");
         assert!(
             score < 50,
-            "missing-fingerprint penalty must lower reputation (score {score})"
+            "opt-in missing-fingerprint penalty must lower reputation (score {score})"
         );
 
         // A suspicious (unparseable/short) fingerprint takes the full hit.

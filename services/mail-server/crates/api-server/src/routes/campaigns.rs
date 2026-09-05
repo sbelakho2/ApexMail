@@ -26,6 +26,49 @@ pub fn router() -> Router<AppState> {
         .route("/:id/resend", post(resend_campaign))
 }
 
+// ─── Keyset cursor helpers ─────────────────────────────────────
+//
+// The list cursor encodes the `(created_at, id)` pair of the last row of the
+// previous page. A timestamp alone skips or duplicates rows that share a
+// `created_at` value; the tie-break `created_at = $ts AND id < $id` makes
+// the ordering total.
+
+/// Separator between the RFC3339 timestamp and the row id inside the
+/// hex-encoded cursor payload (RFC3339 and UUID ids never contain it).
+const KEYSET_CURSOR_SEP: char = '\n';
+
+/// Encode a `(created_at, id)` keyset cursor as an opaque hex string.
+fn encode_keyset_cursor(created_at: &DateTime<Utc>, id: &str) -> String {
+    encode_cursor(&format!("{created_at}{KEYSET_CURSOR_SEP}{id}"))
+}
+
+/// Decode and validate a `(created_at, id)` keyset cursor. Malformed
+/// encodings, unparsable timestamps, or bogus ids are client errors (400) —
+/// an unvalidated cursor used to reach the database and surface as a 500.
+fn decode_keyset_cursor(encoded: &str) -> Result<(DateTime<Utc>, String), ApiError> {
+    let Some(decoded) = decode_cursor(encoded) else {
+        return Err(ApiError::BadRequest(
+            "invalid cursor: malformed encoding".into(),
+        ));
+    };
+    let Some((timestamp, id)) = decoded.split_once(KEYSET_CURSOR_SEP) else {
+        return Err(ApiError::BadRequest(
+            "invalid cursor: must encode a created_at timestamp and row id".into(),
+        ));
+    };
+    let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map_err(|_| {
+            ApiError::BadRequest(
+                "invalid cursor: must be an encoded created_at timestamp".into(),
+            )
+        })?
+        .with_timezone(&Utc);
+    if id.is_empty() || id.len() > 64 || id.bytes().any(|b| b.is_ascii_control()) {
+        return Err(ApiError::BadRequest("invalid cursor: malformed row id".into()));
+    }
+    Ok((timestamp, id.to_string()))
+}
+
 // ─── Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -59,8 +102,9 @@ pub struct ListCampaignsQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
-    /// Cursor for cursor-based pagination — hex-encoded `created_at` timestamp
-    /// of the last item from the previous page. When provided, overrides `offset`.
+    /// Cursor for cursor-based pagination — hex-encoded `created_at` + row id
+    /// pair of the last item from the previous page. When provided, overrides
+    /// `offset`.
     #[serde(default)]
     pub cursor: Option<String>,
 }
@@ -150,19 +194,29 @@ async fn list_campaigns(
 
     let limit = clamp_limit(params.limit, 100);
 
-    // Cursor-based pagination: decode the cursor (hex-encoded created_at timestamp)
-    let cursor_value = params.cursor.as_deref().and_then(decode_cursor);
+    // Cursor-based pagination: decode and validate the hex-encoded
+    // `created_at\nid` pair BEFORE binding — a bogus cursor used to reach
+    // the `::timestamp` cast and surface as a database 500 instead of a
+    // client 400.
+    let cursor_value = match params.cursor.as_deref() {
+        Some(encoded) => Some(decode_keyset_cursor(encoded)?),
+        None => None,
+    };
 
     let fetch_limit = limit + 1; // fetch one extra to detect has_more
 
-    let rows = if let Some(ref cursor) = cursor_value {
+    let rows = if let Some((ref cursor_ts, ref cursor_id)) = cursor_value {
+        // campaigns.id is UUID — the VALUE is cast once, never the column,
+        // so the primary-key index remains usable for the tie-break.
         sqlx::query_as::<_, CampaignRow>(
             "SELECT id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at
-             FROM campaigns WHERE tenant_id = $1 AND created_at < $2::timestamp
-             ORDER BY created_at DESC LIMIT $3",
+             FROM campaigns WHERE tenant_id = $1
+               AND (created_at < $2::timestamp OR (created_at = $2::timestamp AND id < $3::uuid))
+             ORDER BY created_at DESC, id DESC LIMIT $4",
         )
         .bind(&auth.tenant_id)
-        .bind(cursor)
+        .bind(cursor_ts)
+        .bind(cursor_id)
         .bind(fetch_limit)
         .fetch_all(&state.db)
         .await?
@@ -171,7 +225,7 @@ async fn list_campaigns(
         let offset = params.offset.clamp(0, 100_000);
         sqlx::query_as::<_, CampaignRow>(
             "SELECT id, name, subject, template_id, status, scheduled_at, sent_count, created_at, updated_at
-             FROM campaigns WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+             FROM campaigns WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3",
         )
         .bind(&auth.tenant_id)
         .bind(fetch_limit)
@@ -184,8 +238,12 @@ async fn list_campaigns(
     let mut details: Vec<CampaignResponse> = rows.into_iter().map(Into::into).collect();
     let more = has_more(&mut details, limit as usize);
 
-    // Compute the next cursor from the last row
-    let next_cursor = details.last().map(|r| encode_cursor(&r.created_at));
+    // Compute the next cursor from the last row's (created_at, id) pair.
+    let next_cursor = details.last().and_then(|r| {
+        chrono::DateTime::parse_from_rfc3339(&r.created_at)
+            .ok()
+            .map(|ts| encode_keyset_cursor(&ts.with_timezone(&Utc), &r.id))
+    });
     let meta = pagination_meta(more, next_cursor);
 
     // Build the response body and compute ETag

@@ -17,6 +17,22 @@
 /// Number of milliseconds in one standard day (24 × 60 × 60 × 1000).
 pub const MILLISECONDS_PER_DAY: i64 = 86_400_000;
 
+/// Format integer cents as a euro amount ("€123.45") using integer math only.
+///
+/// The platform bills exclusively in EUR; the previous `${:.2}` formatter
+/// quoted a currency that is never charged and routed the amount through
+/// f64. Display code everywhere (billing-service routes, api-server invoice
+/// renderers, these explanation strings) must render euros with this
+/// integer helper — money formatting never round-trips through a float.
+pub fn cents_to_eur_string(cents: i64) -> String {
+    // The sign leads the currency symbol ("-€59.18"): a negative amount
+    // is a negative quantity of euros, and the explanation strings that
+    // consume this formatter pass abs() anyway.
+    let sign = if cents < 0 { "-" } else { "" };
+    let abs = cents.unsigned_abs();
+    format!("{}€{}.{:02}", sign, abs / 100, abs % 100)
+}
+
 /// Compute the ceiling number of days for a duration given in milliseconds.
 ///
 /// Returns `0` when `duration_ms ≤ 0`.
@@ -87,7 +103,7 @@ pub fn build_proration_explanation(
     charge_amount: i64,
     net_amount: i64,
 ) -> String {
-    let format_currency = |cents: i64| format!("${:.2}", cents.abs() as f64 / 100.0);
+    let format_currency = |cents: i64| cents_to_eur_string(cents.abs());
 
     let mut lines = vec![
         format!(
@@ -234,9 +250,9 @@ mod tests {
             "Starter", "Growth", 12000, 24000, 180, 365, 5918, 11836, 5918,
         );
         assert!(explanation.contains("365 days"));
-        assert!(explanation.contains("$120.00 / 365 days × 180 days"));
-        assert!(explanation.contains("$240.00 / 365 days × 180 days"));
-        assert!(explanation.contains("Net charge: $59.18"));
+        assert!(explanation.contains("€120.00 / 365 days × 180 days"));
+        assert!(explanation.contains("€240.00 / 365 days × 180 days"));
+        assert!(explanation.contains("Net charge: €59.18"));
     }
 
     #[test]
@@ -244,7 +260,28 @@ mod tests {
         let explanation = build_proration_explanation(
             "Growth", "Starter", 24000, 12000, 180, 365, 11836, 5918, -5918,
         );
-        assert!(explanation.contains("Net credit: $59.18"));
+        assert!(explanation.contains("Net credit: €59.18"));
+    }
+
+    // ------------------------------------------------------------------
+    // Euro display formatting — integer math only, never f64.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn cents_to_eur_string_renders_two_fraction_digits() {
+        assert_eq!(cents_to_eur_string(0), "€0.00");
+        assert_eq!(cents_to_eur_string(5), "€0.05");
+        assert_eq!(cents_to_eur_string(5918), "€59.18");
+        assert_eq!(cents_to_eur_string(12000), "€120.00");
+        assert_eq!(cents_to_eur_string(1_000_000), "€10000.00");
+    }
+
+    #[test]
+    fn cents_to_eur_string_handles_negative_amounts() {
+        // Net credits render with a leading sign; the explanation strings
+        // pass `abs()` so the sign normally never reaches this path.
+        assert_eq!(cents_to_eur_string(-5918), "-€59.18");
+        assert_eq!(cents_to_eur_string(-5), "-€0.05");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # DSAR (Data Subject Access Request) Rate Limiting
 
 > **Last Updated:** 2026-05-11
-> **Related:** [`faults.md`](../faults.md) §33.6 — DSAR Verification Token Uses SHA-256 Hash with No Rate Limiting
+> **Related:** historical `faults.md` audit findings §33.6 — DSAR Verification Token Uses SHA-256 Hash with No Rate Limiting (the faults.md audit document has since been removed from the repo).
 
 ## Table of Contents
 
@@ -19,14 +19,14 @@
 
 ## Problem Statement
 
-**Finding ([`faults.md`](../faults.md) §33.6):** DSAR verification tokens use SHA-256 hashing with no rate limiting on verification attempts. Additionally, there is no rate limiting on the DSAR submission endpoint itself.
+**Finding (historical `faults.md` §33.6):** DSAR verification tokens use SHA-256 hashing with no rate limiting on verification attempts. Additionally, there is no rate limiting on the DSAR submission endpoint itself.
 
 **Risk:** An attacker can:
 1. Flood the DSAR submission endpoint to exhaust system resources
 2. Brute-force DSAR verification tokens (no rate limiting + SHA-256 hash without sufficient entropy)
 3. Submit repeated DSAR requests for the same data subject to harass or overwhelm the compliance team
 
-**Current state:** DSAR functionality is not yet fully implemented in the codebase — [`dsar.rs`](../../services/mail-server/crates/compliance/src/dsar.rs) does not exist. This document provides the implementation plan and rate limiting strategy for when DSAR is built.
+**Current state:** DSAR functionality is not yet fully implemented in the codebase — `dsar.rs` in the compliance crate does not exist. This document provides the implementation plan and rate limiting strategy for when DSAR is built.
 
 ---
 
@@ -38,8 +38,8 @@ DSAR processing touches the following crates:
 |-------|------|------|
 | `compliance` | DSAR submission, verification, fulfillment | [`compliance/src/routes.rs`](../../services/mail-server/crates/compliance/src/routes.rs) |
 | `rate-limiter` | Distributed rate limiting (Redis-backed) | [`rate-limiter/src/redis_limiter.rs`](../../services/mail-server/crates/rate-limiter/src/redis_limiter.rs) |
-| `api-server` | Admin DSAR management endpoints | [`api-server/src/routes/admin.rs`](../../services/mail-server/crates/api-server/src/routes/admin.rs) |
-| `worker-processors` | Async DSAR fulfillment (data collection, redaction) | [`worker-processors/src/dsar.rs`](../../services/mail-server/crates/worker-processors/src/dsar.rs) |
+| `api-server` | Admin DSAR management endpoints | [`api-server/src/routes/admin/`](../../services/mail-server/crates/api-server/src/routes/admin/) |
+| `worker-processors` | Async DSAR fulfillment (data collection, redaction) | `worker-processors/src/dsar.rs` (planned — does not exist yet) |
 
 The existing rate limiter infrastructure provides:
 
@@ -558,4 +558,4 @@ groups:
 - [GDPR Article 15](https://gdpr-info.eu/art-15-gdpr/) — Right of access by the data subject
 - [Rate Limiter Crate](../../services/mail-server/crates/rate-limiter/src/redis_limiter.rs) — Redis-backed distributed rate limiter
 - [Compliance Crate Routes](../../services/mail-server/crates/compliance/src/routes.rs) — Compliance API endpoints
-- [Emergency Key Revocation](emergency-key-revocation.md) — Related: key revocation procedures
+- [Emergency Key Revocation](../operations/emergency-key-revocation.md) — Related: key revocation procedures

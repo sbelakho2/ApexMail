@@ -171,6 +171,10 @@ pub struct Config {
     /// CAPTCHA — no external services, no iframe, no external JS.
     /// Enable KiwiCaptcha verification on auth routes (login, signup).
     pub kiwi_enabled: bool,
+    /// WAF request screening (audit F-WIRING-1). Monitor mode by default:
+    /// would-block verdicts are logged; `waf_enforce` turns them into 403s.
+    pub waf_enabled: bool,
+    pub waf_enforce: bool,
     /// HMAC secret key used to sign and verify KiwiCaptcha challenges.
     /// In development, set to "dev" to bypass verification.
     pub kiwi_secret_key: String,
@@ -756,8 +760,24 @@ impl Config {
         let placement_encryption_secret =
             env_or("PLACEMENT_ENCRYPTION_SECRET", "change-me-in-production");
 
-        let kiwi_enabled = env_or("KIWI_ENABLED", "false").parse().unwrap_or(false);
+        // Safe default ON: the SSR auth forms verify the token and the pages
+        // render the widget, so the out-of-the-box binary is protected. The
+        // dev compose stack sets KIWI_ENABLED=false explicitly for local
+        // iteration; disabling in production must be a deliberate act (a
+        // startup warning fires below when it happens).
+        let kiwi_enabled = env_or("KIWI_ENABLED", "true").parse().unwrap_or(true);
+        // Monitor-first WAF (see the field docs): visible in logs from day
+        // one, enforcement is a deliberate operator decision.
+        let waf_enabled = env_or("WAF_ENABLED", "true").parse().unwrap_or(true);
+        let waf_enforce = env_or("WAF_ENFORCE", "false").parse().unwrap_or(false);
         let kiwi_secret_key = env_or("KIWI_SECRET_KEY", "dev");
+        if !kiwi_enabled {
+            tracing::warn!(
+                "KiwiCaptcha is DISABLED (KIWI_ENABLED=false): every login, signup, \
+                 password-reset and control-plane-login form runs WITHOUT the \
+                 proof-of-work CAPTCHA. Production deployments must not ship this way."
+            );
+        }
         // Proof-of-work algorithm: explicit, never inferred from a numeric
         // flag. KIWI_ALGORITHM accepts "sha256" (default) or "argon2id".
         let kiwi_algorithm_raw = env_or("KIWI_ALGORITHM", "sha256").to_ascii_lowercase();
@@ -823,7 +843,8 @@ impl Config {
             .min(SOLVER_MAX_TARGET_BITS);
         if !environment.is_production() && kiwi_secret_key == "dev" {
             tracing::info!(
-                "KiwiCaptcha configured with dev key — CAPTCHA verification will be bypassed"
+                "KiwiCaptcha configured with dev key — debug builds bypass \
+                 verification; release builds still verify (HMAC under the dev key)"
             );
         }
         if kiwi_algorithm == kiwicaptcha::PoWAlgorithm::Argon2id
@@ -996,6 +1017,8 @@ impl Config {
 
             kiwi_enabled,
             kiwi_secret_key,
+            waf_enabled,
+            waf_enforce,
             kiwi_algorithm,
             kiwi_argon_m_kib,
             kiwi_argon_t,
@@ -1453,6 +1476,8 @@ pub(crate) mod tests {
 
             kiwi_enabled: true,
             kiwi_secret_key: "prod-kiwi-secret-key-67890".into(),
+            waf_enabled: false,
+            waf_enforce: false,
             kiwi_algorithm: kiwicaptcha::PoWAlgorithm::Sha256,
             kiwi_argon_m_kib: 0,
             kiwi_argon_t: 1,
@@ -1600,6 +1625,8 @@ pub(crate) mod tests {
 
             kiwi_enabled: false,
             kiwi_secret_key: "dev".into(),
+            waf_enabled: false,
+            waf_enforce: false,
             kiwi_algorithm: kiwicaptcha::PoWAlgorithm::Sha256,
             kiwi_argon_m_kib: 0,
             kiwi_argon2_difficulty_bits: 8,

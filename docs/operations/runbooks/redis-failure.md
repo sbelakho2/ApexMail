@@ -26,8 +26,8 @@ Redis is used by ApexMail for:
 - **Analytics counters:** Real-time metrics (will reset, no data loss)
 - **Distributed locking:** Failover coordination (locks auto-expire)
 
-**Eviction policy:** `allkeys-lru` (configured in [`values.yaml`](../../deploy/helm/apexmail/values.yaml:380))
-**Max memory:** 512MB (configuration), 1Gi limit (values.yaml:390)
+**Eviction policy:** dev `allkeys-lru`, prod `volatile-lru` (configured via `REDIS_MAXMEMORY_POLICY` in [`docker-compose.yml`](../../docker-compose.yml))
+**Max memory:** dev 512MB / prod 1GB (`REDIS_MAXMEMORY`; container memory limit set in the compose files)
 **Persistence:** AOF with `appendfsync everysec`
 
 ## Symptoms
@@ -142,7 +142,7 @@ Redis is used by ApexMail for:
    kubectl exec -n apexmail deploy/redis-master -- redis-cli DBSIZE
    ```
 
-5. **Permanent fix update [`values.yaml`](../../deploy/helm/apexmail/values.yaml:379):**
+5. **Permanent fix — update `REDIS_MAXMEMORY` / `REDIS_MAXMEMORY_POLICY` in the compose env:**
    ```yaml
    redis:
      configuration: |-
@@ -239,7 +239,7 @@ kubectl exec -n apexmail deploy/redis-master -- redis-cli GET test-key
 kubectl exec -n apexmail deploy/redis-master -- redis-cli INCR "rate-limiter:test:counter"
 
 # 5. Application health
-curl -sf https://api.apexmail.ee/v1/health | jq '.components.redis'
+curl -sf https://api.apexmail.ee/health/deep | jq '.components.redis'
 ```
 
 ## Data Reconciliation
@@ -263,6 +263,6 @@ Run the cache warming script to speed up recovery:
 ## Related
 
 - [Cache Warming Strategy](../cache-warming.md)
-- [Helm chart values (Redis)](../../deploy/helm/apexmail/values.yaml:374)
-- [Cache warming script](../../deploy/scripts/cache-warm.sh)
+- [docker-compose.yml (Redis service)](../../docker-compose.yml)
+- [Cache warming script](../../../deploy/scripts/cache-warm.sh)
 - [Incident Response Runbook](./incident-response.md)

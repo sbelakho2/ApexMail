@@ -47,8 +47,8 @@ La migración de proveedor de email es una operación de alto riesgo. Una caída
 
 | Endpoint | Descripción |
 |---|---|
-| `POST /v1/emails` | Enviar un email |
-| `POST /v1/emails/batch` | Envío por lotes de hasta 1.000 emails |
+| `POST /v1/messages` | Enviar un email |
+| `POST /v1/messages/batch` | Envío por lotes de hasta 100 mensajes |
 | `POST /v1/templates` | Crear una plantilla |
 | `GET /v1/templates` | Listar plantillas |
 | `PUT /v1/templates/:id` | Actualizar una plantilla |
@@ -57,9 +57,8 @@ La migración de proveedor de email es una operación de alto riesgo. Una caída
 
 | Evento | Desencadenante |
 |---|---|
-| `email.delivered` | El servidor receptor aceptó el mensaje |
-| `email.bounced` | Rebote duro o blando |
-| `email.delayed` | Mensaje aplazado por el servidor receptor |
+| `message.delivered` | El servidor receptor aceptó el mensaje |
+| `message.bounced` | Rebote duro o blando |
 
 ## Plan requerido
 

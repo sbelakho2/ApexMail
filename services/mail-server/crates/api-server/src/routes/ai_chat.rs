@@ -210,9 +210,12 @@ async fn account_context(state: &AppState, tenant_id: &str) -> serde_json::Value
     .await
     .ok();
 
+    // tenants/users/domains/email_queue all carry VARCHAR(26) tenant ids —
+    // the previous `$1::uuid` casts made these counts fail (and return nulls
+    // via `.ok()`) on every deployment.
     let bounces: Option<(i64,)> = sqlx::query_as(
         "SELECT COUNT(*) FROM email_queue \
-         WHERE tenant_id = $1::uuid AND status = 'bounced' \
+         WHERE tenant_id = $1 AND status = 'bounced' \
            AND created_at > NOW() - INTERVAL '7 days'",
     )
     .bind(tenant_id)
@@ -221,7 +224,7 @@ async fn account_context(state: &AppState, tenant_id: &str) -> serde_json::Value
     .ok();
 
     let domains: Option<(i64,)> = sqlx::query_as(
-        "SELECT COUNT(*) FROM domains WHERE tenant_id = $1::uuid AND verified = true",
+        "SELECT COUNT(*) FROM domains WHERE tenant_id = $1 AND verified = true",
     )
     .bind(tenant_id)
     .fetch_one(&state.db)

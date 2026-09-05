@@ -90,33 +90,22 @@ Downtime is measured from the moment an incident is confirmed (not detected) to 
 
 ## 5. Service Credits
 
-### 5.1 Scale Plan
+### 5.1 Credit Ladder
 
-| Monthly Uptime | Credit (% of monthly fee) |
+Credits are calculated as a percentage of the monthly fee based on the size of the availability breach:
+
+| Availability Breach (below target) | Credit (% of monthly fee) |
 |---|---|
-| < 99.9% – ≥ 99.0% | 10% |
-| < 99.0% – ≥ 95.0% | 25% |
-| < 95.0% | 50% |
+| ≥ 0.1 percentage points | 10% |
+| ≥ 0.5 percentage points | 25% |
+| ≥ 1.0 percentage point | 50% |
+| ≥ 5.0 percentage points | 100% |
 
-### 5.2 Enterprise Plan
+### 5.2 Credit Caps
 
-| Monthly Uptime | Credit (% of monthly fee) |
-|---|---|
-| < 99.9% – ≥ 99.0% | 10% |
-| < 99.0% – ≥ 95.0% | 25% |
-| < 95.0% | 50% |
+The ladder above is capped per plan: **Scale** credits never exceed 10% of the monthly fee, and **Enterprise** credits never exceed 25% of the monthly fee. Credits in a calendar month never exceed the Customer's plan cap. Dedicated Tenant and custom agreements may negotiate different caps as part of the contract; absent an agreed cap, the ladder in 5.1 applies in full.
 
-### 5.3 Dedicated Tenant
-
-| Monthly Uptime | Credit (% of monthly fee) |
-|---|---|
-| < 99.95% – ≥ 99.9% | 10% |
-| < 99.9% – ≥ 99.0% | 25% |
-| < 99.0% | 50% |
-
-### 5.4 Credit Caps
-
-The maximum monthly credit is capped at the percentages above per incident. Total credits in a calendar month are capped at 50% of the monthly fee. Credits are the sole and exclusive remedy for SLA breaches.
+Credits are the sole and exclusive remedy for SLA breaches.
 
 ## 6. Exclusions
 

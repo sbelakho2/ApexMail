@@ -266,6 +266,14 @@ pub async fn submit_email(
         }
     }
 
+    // Validate the submission BEFORE charging the per-tenant DNS budget:
+    // the budget admission consumes units, and a malformed request used to
+    // burn a tenant's allowance while getting nothing in return.
+    let submission = match state.engine.validate_submission(&body) {
+        Ok(s) => s,
+        Err(e) => return map_grader_error(e),
+    };
+
     // Per-tenant DNS budget admission.
     if !state
         .engine
@@ -277,11 +285,6 @@ pub async fn submit_email(
             "tenant DNS budget exhausted; retry later",
         );
     }
-
-    let submission = match state.engine.validate_submission(&body) {
-        Ok(s) => s,
-        Err(e) => return map_grader_error(e),
-    };
 
     let result = match state.engine.analyze_email(&submission, tenant_id).await {
         Ok(r) => r,

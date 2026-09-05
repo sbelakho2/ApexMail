@@ -91,4 +91,4 @@ The following table provides the current status of ApexMail's alignment with ind
 - [GDPR Compliance Framework](../compliance/gdpr-compliance.md)
 - [BAA Template](../compliance/baa-template.md)
 - [Data Location Summary](../compliance/data-retention.md)
-- [Subprocessor List](../templates/compliance/subprocessors.md)
+- [Subprocessor List](../../templates/compliance/subprocessors.md)

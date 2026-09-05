@@ -176,19 +176,22 @@ pub fn delivery_category(folder: &InboxFolder) -> &'static str {
 /// Deterministic rules first, provider classifier as fallback:
 /// 1. `INBOX` under any casing → `"inbox"` (RFC 3501 interprets INBOX
 ///    case-insensitively).
-/// 2. Folders matching `(?i)spam|junk|bulk|promotions` → `"spam"`.
-/// 3. Anything else → [`classify_folder`] + [`delivery_category`] for the
-///    provider (e.g. Gmail Social/Updates tabs, Archive, custom folders).
+/// 2. Folders matching `(?i)spam|junk|bulk` → `"spam"`.
+/// 3. Anything else — including Promotions — → [`classify_folder`] +
+///    [`delivery_category`] for the provider (e.g. Gmail Social/Updates
+///    tabs, Archive, custom folders).
+///
+/// Promotions deliberately does NOT short-circuit to `"spam"`: tabbed
+/// placement earns the documented partial credit in
+/// [`crate::types::PlacementScore`] (a 100 %-promotions run scores 20 of
+/// the 60-point placement component), so it must be recorded as
+/// `"promotions"`, not counted as a spam failure.
 pub fn placement_from_folder(folder_name: &str, provider: &ProviderName) -> String {
     if folder_name.eq_ignore_ascii_case("inbox") {
         return "inbox".to_string();
     }
     let lower = folder_name.to_lowercase();
-    if lower.contains("spam")
-        || lower.contains("junk")
-        || lower.contains("bulk")
-        || lower.contains("promotions")
-    {
+    if lower.contains("spam") || lower.contains("junk") || lower.contains("bulk") {
         return "spam".to_string();
     }
     let folder = classify_folder(folder_name, provider);
@@ -378,7 +381,6 @@ mod tests {
             "Junk",
             "JUNK",
             "Bulk Mail",
-            "[Gmail]/Promotions",
         ] {
             assert_eq!(
                 placement_from_folder(name, &ProviderName::Other("prov".into())),
@@ -386,6 +388,27 @@ mod tests {
                 "folder {name} should classify as spam"
             );
         }
+    }
+
+    #[test]
+    fn test_placement_from_folder_promotions_earns_partial_credit() {
+        // Regression: Promotions used to short-circuit into "spam",
+        // miscounting every tabbed delivery as a spam failure (and locking
+        // the behavior in via the spam-conventions test). The documented
+        // scoring grants promotions partial credit, so the placement value
+        // must be "promotions".
+        for name in ["[Gmail]/Promotions", "Promotions", "Offers & Deals"] {
+            assert_eq!(
+                placement_from_folder(name, &ProviderName::Other("prov".into())),
+                "promotions",
+                "folder {name} should classify as promotions"
+            );
+        }
+        // Plain Gmail spam stays spam.
+        assert_eq!(
+            placement_from_folder("[Gmail]/Spam", &ProviderName::Gmail),
+            "spam"
+        );
     }
 
     #[test]

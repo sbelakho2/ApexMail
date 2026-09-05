@@ -4,6 +4,10 @@
 //! - GET  /v1/admin/audit/search  — ranked FTS with tsvector/tsquery
 //! - POST /v1/admin/audit/export  — CSV export of filtered audit logs
 
+use std::future::Future;
+// Stream combinators (chain) resolve against futures, not Iterator.
+use futures::StreamExt as _;
+
 use axum::extract::{Query, State};
 use axum::http::header;
 use axum::response::IntoResponse;
@@ -348,6 +352,64 @@ async fn execute_search(
 
 // ─── CSV Export ────────────────────────────────────────────
 
+/// Audit export row shape (timestamp .. error_message).
+type AuditExportRow = (
+    chrono::DateTime<chrono::Utc>,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    String,
+    Option<String>,
+);
+
+/// One CSV record as bytes. A fresh per-row writer is stateless and correct:
+/// `write_record` emits a complete, self-delimited, properly quoted record,
+/// so records can be streamed independently of each other.
+fn csv_record_bytes(header: bool, row: Option<&AuditExportRow>) -> Result<Vec<u8>, std::io::Error> {
+    let mut writer = csv::Writer::from_writer(Vec::new());
+    if header {
+        writer.write_record([
+            "timestamp",
+            "action",
+            "resource",
+            "resource_id",
+            "user_id",
+            "tenant_id",
+            "ip_address",
+            "outcome",
+            "error_message",
+        ])?;
+    } else if let Some((
+        timestamp,
+        action,
+        resource,
+        resource_id,
+        user_id,
+        tenant_id,
+        ip_address,
+        outcome,
+        error_message,
+    )) = row
+    {
+        writer.write_record([
+            timestamp.to_rfc3339(),
+            action.clone(),
+            resource.clone(),
+            resource_id.clone().unwrap_or_default(),
+            user_id.clone().unwrap_or_default(),
+            tenant_id.clone().unwrap_or_default(),
+            ip_address.clone().unwrap_or_default(),
+            outcome.clone(),
+            error_message.clone().unwrap_or_default(),
+        ])?;
+    }
+    writer.flush()?;
+    writer.into_inner().map_err(|e| std::io::Error::other(e))
+}
+
 async fn audit_export(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -396,85 +458,55 @@ async fn audit_export(
         )
     };
 
-    let mut csv_writer = csv::Writer::from_writer(Vec::new());
-    csv_writer
-        .write_record([
-            "timestamp",
-            "action",
-            "resource",
-            "resource_id",
-            "user_id",
-            "tenant_id",
-            "ip_address",
-            "outcome",
-            "error_message",
-        ])
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    // The export itself is audited (P2): an unaudited bulk export of the
+    // compliance trail is precisely the read the trail exists to record.
+    crate::audit_log::insert_audit_log_best_effort_with_env(
+        &state.db,
+        state.config.environment.is_production(),
+        Some(auth.tenant_id.as_str()),
+        auth.user_id.as_deref(),
+        "control_plane.audit.exported",
+        "audit_log",
+        None,
+        serde_json::json!({
+            "filters": {
+                "q": body.q,
+                "tenantId": body.tenant_id,
+                "action": body.action,
+                "from": body.from,
+                "to": body.to,
+            },
+            "limit": limit,
+            "windowStart": window_start.to_rfc3339(),
+            "windowEnd": window_end.to_rfc3339(),
+        }),
+        None,
+        None,
+    )
+    .await;
 
-    let rows = sqlx::query_as::<
-        _,
-        (
-            chrono::DateTime<chrono::Utc>,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-            String,
-            Option<String>,
-        ),
-    >(&sql)
-    .bind(window_start)
-    .bind(window_end);
-
-    let rows = if let Some(ref tenant_id) = body.tenant_id {
-        rows.bind(tenant_id)
-    } else {
-        rows
+    // Chunked streaming body (P2): the previous shape buffered up to 50k
+    // rows (and the whole CSV) in memory before responding. Rows are now
+    // fetched in bounded chunks (keyed by OFFSET on the same ordered query)
+    // and each chunk flushed as one body write; a mid-stream DB error ends
+    // the response instead of blocking on full materialization.
+    let chunk_state = ExportChunkState {
+        pool: state.db.clone(),
+        tenant_id: body.tenant_id.clone(),
+        action: body.action.clone(),
+        q: body
+            .q
+            .as_ref()
+            .map(|q| q.trim().to_string())
+            .filter(|q| !q.is_empty()),
+        window_start,
+        window_end,
+        offset: 0,
+        remaining: limit,
     };
 
-    let rows = if let Some(ref action) = body.action {
-        rows.bind(action)
-    } else {
-        rows
-    };
-
-    let rows = if let Some(ref q) = body.q {
-        if !q.trim().is_empty() {
-            rows.bind(q.trim())
-        } else {
-            rows
-        }
-    } else {
-        rows
-    };
-
-    let rows = rows.bind(limit).fetch_all(&state.db).await?;
-
-    for row in rows {
-        csv_writer
-            .write_record(&[
-                row.0.to_rfc3339(),
-                row.1,
-                row.2,
-                row.3.unwrap_or_default(),
-                row.4.unwrap_or_default(),
-                row.5.unwrap_or_default(),
-                row.6.unwrap_or_default(),
-                row.7,
-                row.8.unwrap_or_default(),
-            ])
-            .map_err(|e| ApiError::Internal(e.to_string()))?;
-    }
-
-    csv_writer
-        .flush()
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
-
-    let csv_data = csv_writer
-        .into_inner()
-        .map_err(|e| ApiError::Internal(e.to_string()))?;
+    let body_stream =
+        futures::stream::once(async { csv_record_bytes(true, None) }).chain(chunk_state);
 
     let filename = format!("audit_export_{}.csv", Utc::now().format("%Y%m%dT%H%M%SZ"));
 
@@ -484,13 +516,138 @@ async fn audit_export(
 
     let mut response = (
         [(header::CONTENT_TYPE, "text/csv; charset=utf-8")],
-        csv_data,
+        axum::body::Body::from_stream(body_stream),
     )
         .into_response();
     response
         .headers_mut()
         .insert(header::CONTENT_DISPOSITION, disposition_value);
     Ok(response)
+}
+
+/// Rows fetched per chunk — bounded memory per step while keeping the
+/// per-query bind count trivial.
+const EXPORT_CHUNK_ROWS: i64 = 1_000;
+
+/// Owned state for the chunked export stream. Every field is owned (no
+/// borrows of handler locals): the stream outlives the handler.
+struct ExportChunkState {
+    pool: sqlx::PgPool,
+    tenant_id: Option<String>,
+    action: Option<String>,
+    q: Option<String>,
+    window_start: DateTime<Utc>,
+    window_end: DateTime<Utc>,
+    offset: i64,
+    remaining: i64,
+}
+
+/// Render the WHERE clause shared by every chunk; parameter order is
+/// window-start, window-end, then optional tenant/action/fts binds, then
+/// LIMIT and OFFSET — binds MUST follow exactly that sequence.
+fn build_export_chunk_conditions(state: &ExportChunkState) -> String {
+    let mut conditions: Vec<String> = vec!["timestamp >= $1".into(), "timestamp <= $2".into()];
+    if state.tenant_id.is_some() {
+        conditions.push("tenant_id = $3".into());
+    }
+    if state.action.is_some() {
+        let idx = 3 + usize::from(state.tenant_id.is_some());
+        conditions.push(format!("action = ${idx}"));
+    }
+    if state.q.is_some() {
+        let idx = 3 + usize::from(state.tenant_id.is_some()) + usize::from(state.action.is_some());
+        conditions.push(format!("fts_vector @@ plainto_tsquery('english', ${idx})"));
+    }
+    conditions.join(" AND ")
+}
+
+impl futures::Stream for ExportChunkState {
+    type Item = Result<Vec<u8>, std::io::Error>;
+
+    fn poll_next(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        if self.remaining <= 0 {
+            return std::task::Poll::Ready(None);
+        }
+        let state = &mut *self;
+        let chunk_limit = state.remaining.min(EXPORT_CHUNK_ROWS);
+
+        let conditions = build_export_chunk_conditions(state);
+        let filter_count = usize::from(state.tenant_id.is_some())
+            + usize::from(state.action.is_some())
+            + usize::from(state.q.is_some());
+        let limit_idx = 3 + filter_count;
+        let offset_idx = limit_idx + 1;
+        let sql = format!(
+            "SELECT timestamp, action, resource, resource_id, user_id, tenant_id, \
+             ip_address, outcome, error_message
+             FROM audit_logs
+             WHERE {conditions}
+             ORDER BY timestamp DESC
+             LIMIT ${limit_idx} OFFSET ${offset_idx}"
+        );
+
+        // The future OWNS every bind input (pool clone is an Arc bump):
+        // nothing borrows `state`, so the offset/remaining mutations after
+        // the ready branch stay legal.
+        let window_start = state.window_start;
+        let window_end = state.window_end;
+        let tenant_id = state.tenant_id.clone();
+        let action = state.action.clone();
+        let q = state.q.clone();
+        let offset = state.offset;
+        let pool = state.pool.clone();
+
+        let mut fut = std::pin::pin!(async move {
+            let mut query = sqlx::query_as::<_, AuditExportRow>(&sql)
+                .bind(window_start)
+                .bind(window_end);
+            if let Some(ref tenant_id) = tenant_id {
+                query = query.bind(tenant_id.clone());
+            }
+            if let Some(ref action) = action {
+                query = query.bind(action.clone());
+            }
+            if let Some(ref q) = q {
+                query = query.bind(q.clone());
+            }
+            query
+                .bind(chunk_limit)
+                .bind(offset)
+                .fetch_all(&pool)
+                .await
+        });
+
+        match fut.as_mut().poll(cx) {
+            std::task::Poll::Ready(Ok(rows)) => {
+                let fetched = rows.len() as i64;
+                state.remaining -= fetched;
+                state.offset += fetched;
+                if fetched < chunk_limit {
+                    // Last chunk: stop the stream after draining it.
+                    state.remaining = 0;
+                }
+                if rows.is_empty() {
+                    return std::task::Poll::Ready(None);
+                }
+                let mut buffer = Vec::with_capacity(rows.len() * 128);
+                for row in &rows {
+                    let record = csv_record_bytes(false, Some(row))?;
+                    buffer.extend_from_slice(&record);
+                }
+                std::task::Poll::Ready(Some(Ok(buffer)))
+            }
+            std::task::Poll::Ready(Err(error)) => {
+                // End the body after surfacing the failure — a truncated,
+                // error-terminated download beats a hung one.
+                state.remaining = 0;
+                std::task::Poll::Ready(Some(Err(std::io::Error::other(error))))
+            }
+            std::task::Poll::Pending => std::task::Poll::Pending,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -596,6 +753,32 @@ mod tests {
             .await
             .expect("search query must execute (no parameter mismatch)");
         assert_eq!(results.len(), 3);
+    }
+
+    /// Streamed export records are self-contained CSV lines: quoting of
+    /// embedded separators/newlines must survive the per-row writer.
+    #[test]
+    fn csv_record_bytes_quotes_embedded_separators() {
+        let header = csv_record_bytes(true, None).expect("header renders");
+        let header_str = String::from_utf8(header).unwrap();
+        assert!(header_str.starts_with("timestamp,action,resource"));
+
+        let row = (
+            Utc::now(),
+            "user.login".into(),
+            "session".into(),
+            Some("id,with,commas".into()),
+            None,
+            Some("tenant-a".into()),
+            Some("203.0.113.9".into()),
+            "success".into(),
+            Some("boom\nsecond line".into()),
+        );
+        let record = csv_record_bytes(false, Some(&row)).expect("record renders");
+        let record_str = String::from_utf8(record).unwrap();
+        assert!(record_str.contains("\"id,with,commas\""));
+        assert!(record_str.contains("\"boom\nsecond line\""));
+        assert_eq!(record_str.lines().count(), 2, "embedded newline stays quoted");
     }
 
     /// Time-window parity with the audit list route: an unbounded window

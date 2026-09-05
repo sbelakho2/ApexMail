@@ -400,6 +400,12 @@ struct PaygEstimateBody {
 struct OverageEstimateBody {
     emails_sent: i64,
     email_limit: i64,
+    /// Optional tenant for server-side limit recomputation. When present the
+    /// client-supplied email_limit is ignored — the server resolves the
+    /// tenant's override-aware plan limit (mirror of billing-service Fix
+    /// I13; plan limits are published pricing, not tenant secrets).
+    #[serde(default)]
+    tenant_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1281,8 +1287,15 @@ fn admin_invoice_export_query(use_legacy_schema: bool) -> &'static str {
 /// system-tenant capability, exactly like the `/v1/admin/*` control plane
 /// (see `require_system_tenant_middleware`), so the caller must BOTH be a
 /// system-tenant user AND carry an admin scope.
+///
+/// Slug-aware (same fix class as the control plane's): the literal `system`
+/// is carried only by static API keys — every human operator authenticates
+/// as the SEEDED system tenant (`system_internal_tenant01`, migration 072;
+/// see `routes::system_sender::SYSTEM_TENANT_ID`). Accepting only the
+/// literal 403'd every human platform operator from billing admin.
 fn has_admin_access(auth: &AuthUser) -> bool {
-    auth.tenant_id == "system"
+    (auth.tenant_id == "system"
+        || auth.tenant_id == crate::routes::system_sender::SYSTEM_TENANT_ID)
         && auth
             .scopes
             .iter()
@@ -1980,8 +1993,24 @@ fn render_invoice_xml(invoice: &LegacyInvoiceDto) -> String {
         block
     };
 
+    // <PaidAmount> must reflect the invoice's settlement state: a paid
+    // invoice carries its full total as paid (and nothing payable), an
+    // open one shows 0.00 paid. The hardcoded 0.00 told every recipient's
+    // accounting package that settled invoices were still outstanding.
+    let is_paid = invoice.paid_at.is_some() || invoice.status.eq_ignore_ascii_case("paid");
+    let paid_amount = if is_paid {
+        cents_to_decimal_string(invoice.total)
+    } else {
+        cents_to_decimal_string(0)
+    };
+    let payable_amount = if is_paid {
+        cents_to_decimal_string(0)
+    } else {
+        cents_to_decimal_string(invoice.total)
+    };
+
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<E_Invoice xmlns=\"http://www.pangaliit.ee/e-arve/e-arve\">\n  <Header>\n    <Date>{issued_at}</Date>\n    <FileId>{file_id}</FileId>\n    <Version>1.2</Version>\n  </Header>\n  <Invoice>\n    <InvoiceParties>\n      <SellerParty>\n        <Name>{company_name}</Name>\n        <RegNumber>{registry_code}</RegNumber>\n        <VATRegNumber>{company_vat}</VATRegNumber>\n        <ContactData>\n          <LegalAddress>\n            <PostalAddress1>{company_street}</PostalAddress1>\n            <City>{company_city}</City>\n            <PostalCode>{company_postal_code}</PostalCode>\n            <Country>EE</Country>\n          </LegalAddress>\n          {phone_xml_block}<E-mailAddress>{billing_email}</E-mailAddress>\n        </ContactData>\n{account_info}      </SellerParty>\n      <BuyerParty>\n        <Name>{buyer_name}</Name>\n{buyer_vat_number}        <ContactData>\n          <LegalAddress>\n            <PostalAddress1>{buyer_line1}</PostalAddress1>\n{buyer_address_line_2}            <City>{buyer_city}</City>\n            <PostalCode>{buyer_postal_code}</PostalCode>\n            <Country>{buyer_country}</Country>\n          </LegalAddress>\n          <E-mailAddress>{buyer_email}</E-mailAddress>\n        </ContactData>\n      </BuyerParty>\n    </InvoiceParties>\n    <InvoiceInformation>\n      <Type Type=\"DEB\"/>\n      <InvoiceNumber>{invoice_number}</InvoiceNumber>\n      <InvoiceDate>{issued_at}</InvoiceDate>\n      <DueDate>{due_at}</DueDate>\n      <InvoiceContentCode>SERVICES</InvoiceContentCode>\n      <Currency>{currency}</Currency>\n{reference_number}    </InvoiceInformation>\n    <InvoiceSumGroup>\n      <InvoiceSum>{total}</InvoiceSum>\n      <PaidAmount>0.00</PaidAmount>\n      <PayableAmount>{total}</PayableAmount>\n      <Currency>{currency}</Currency>\n    </InvoiceSumGroup>\n    <InvoiceItem>\n{item_entries}    </InvoiceItem>\n    <PaymentInfo>\n      <Currency>{currency}</Currency>\n      <PaymentDescription>Invoice {invoice_number}</PaymentDescription>\n      <Payable>YES</Payable>\n      <DueDate>{due_at}</DueDate>\n      <PaymentId>{invoice_number}</PaymentId>\n      <PaymentTotalSum>{total}</PaymentTotalSum>\n      <PayerName>{buyer_name}</PayerName>\n{payto_block}      <PayToName>{company_name}</PayToName>\n    </PaymentInfo>\n  </Invoice>\n</E_Invoice>",
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<E_Invoice xmlns=\"http://www.pangaliit.ee/e-arve/e-arve\">\n  <Header>\n    <Date>{issued_at}</Date>\n    <FileId>{file_id}</FileId>\n    <Version>1.2</Version>\n  </Header>\n  <Invoice>\n    <InvoiceParties>\n      <SellerParty>\n        <Name>{company_name}</Name>\n        <RegNumber>{registry_code}</RegNumber>\n        <VATRegNumber>{company_vat}</VATRegNumber>\n        <ContactData>\n          <LegalAddress>\n            <PostalAddress1>{company_street}</PostalAddress1>\n            <City>{company_city}</City>\n            <PostalCode>{company_postal_code}</PostalCode>\n            <Country>EE</Country>\n          </LegalAddress>\n          {phone_xml_block}<E-mailAddress>{billing_email}</E-mailAddress>\n        </ContactData>\n{account_info}      </SellerParty>\n      <BuyerParty>\n        <Name>{buyer_name}</Name>\n{buyer_vat_number}        <ContactData>\n          <LegalAddress>\n            <PostalAddress1>{buyer_line1}</PostalAddress1>\n{buyer_address_line_2}            <City>{buyer_city}</City>\n            <PostalCode>{buyer_postal_code}</PostalCode>\n            <Country>{buyer_country}</Country>\n          </LegalAddress>\n          <E-mailAddress>{buyer_email}</E-mailAddress>\n        </ContactData>\n      </BuyerParty>\n    </InvoiceParties>\n    <InvoiceInformation>\n      <Type Type=\"DEB\"/>\n      <InvoiceNumber>{invoice_number}</InvoiceNumber>\n      <InvoiceDate>{issued_at}</InvoiceDate>\n      <DueDate>{due_at}</DueDate>\n      <InvoiceContentCode>SERVICES</InvoiceContentCode>\n      <Currency>{currency}</Currency>\n{reference_number}    </InvoiceInformation>\n    <InvoiceSumGroup>\n      <InvoiceSum>{total}</InvoiceSum>\n      <PaidAmount>{paid_amount}</PaidAmount>\n      <PayableAmount>{payable_amount}</PayableAmount>\n      <Currency>{currency}</Currency>\n    </InvoiceSumGroup>\n    <InvoiceItem>\n{item_entries}    </InvoiceItem>\n    <PaymentInfo>\n      <Currency>{currency}</Currency>\n      <PaymentDescription>Invoice {invoice_number}</PaymentDescription>\n      <Payable>YES</Payable>\n      <DueDate>{due_at}</DueDate>\n      <PaymentId>{invoice_number}</PaymentId>\n      <PaymentTotalSum>{total}</PaymentTotalSum>\n      <PayerName>{buyer_name}</PayerName>\n{payto_block}      <PayToName>{company_name}</PayToName>\n    </PaymentInfo>\n  </Invoice>\n</E_Invoice>",
         issued_at = format_invoice_date(invoice.issued_at),
         file_id = escape_xml(&invoice.id),
         company_name = escape_xml(BILLING_COMPANY_NAME),
@@ -2007,6 +2036,8 @@ fn render_invoice_xml(invoice: &LegacyInvoiceDto) -> String {
         due_at = format_invoice_date(invoice.due_at),
         reference_number = reference_number,
         total = cents_to_decimal_string(invoice.total),
+        paid_amount = paid_amount,
+        payable_amount = payable_amount,
         item_entries = item_entries,
     )
 }
@@ -2731,6 +2762,7 @@ async fn get_payg_usage(
 }
 
 async fn estimate_overage_cost(
+    State(state): State<AppState>,
     Json(body): Json<OverageEstimateBody>,
 ) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
     let emails_sent = validate_non_negative(body.emails_sent, "emailsSent")? as i64;
@@ -2740,13 +2772,34 @@ async fn estimate_overage_cost(
         ]));
     }
 
-    let overage_cost_cents =
-        plans::calculate_overage_cost_with_rate(emails_sent, body.email_limit, 40);
+    // Fix I13 mirror (billing-service routes.rs) — recompute the limit
+    // server-side when a tenant is named: a client-supplied limit is only a
+    // display default, never the billing truth. The resolved limit honours
+    // active admin plan overrides via plans::get_plan_for_tenant.
+    let email_limit = match body.tenant_id.as_deref() {
+        Some(tenant_id) => {
+            plans::get_plan_for_tenant(&state.db, tenant_id)
+                .await?
+                .map(|plan| plan.email_limit)
+                // Unknown tenant: fall back to the validated client value
+                // (legacy callers) — the estimate is advisory.
+                .unwrap_or(body.email_limit)
+        }
+        None => body.email_limit,
+    };
+
+    // The deployed overage rate (env-configurable), not a hardcoded 40 —
+    // must quote the same rate the overage sweep invoices with.
+    let overage_cost_cents = plans::calculate_overage_cost_with_rate(
+        emails_sent,
+        email_limit,
+        billing_service::config::configured_overage_rate_millicents(),
+    );
 
     Ok(billing_success(serde_json::json!({
         "usage": {
             "emailsSent": emails_sent,
-            "emailLimit": body.email_limit,
+            "emailLimit": email_limit,
         },
         "overageCostCents": overage_cost_cents,
         "overageCostUsd": cents_to_usd_string(overage_cost_cents),
@@ -3531,11 +3584,43 @@ async fn admin_apply_credit(
             .into_response());
     }
 
+    // Currency guard (mirrors credit_notes.rs): the credit lands in the
+    // tenant's BILLING currency, and a wallet that already exists in a
+    // DIFFERENT currency is refused instead of mixed — a 10 000-cent USD
+    // credit in a EUR wallet is €100.00 of phantom money. New wallets are
+    // created with the billing currency rather than the column's legacy
+    // 'USD' default.
+    let billing_currency = resolve_tenant_billing_currency(&state, &tenant_id).await;
+    let existing_wallet_currency: Option<String> =
+        sqlx::query_scalar("SELECT currency FROM wallets WHERE tenant_id = $1")
+            .bind(&tenant_id)
+            .fetch_optional(&state.db)
+            .await?;
+    if let Some(wallet_currency) = existing_wallet_currency {
+        if !wallet_currency.eq_ignore_ascii_case(&billing_currency) {
+            tracing::error!(
+                tenant_id = %tenant_id,
+                wallet_currency = %wallet_currency,
+                billing_currency = %billing_currency,
+                "admin wallet credit currency mismatch refused — refund via the payment provider instead"
+            );
+            return Ok((
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": format!(
+                        "Wallet currency {wallet_currency} does not match tenant billing currency {billing_currency}; refund via the payment provider instead"
+                    )
+                })),
+            )
+                .into_response());
+        }
+    }
+
     let transaction = sqlx::query_as::<_, LegacyWalletTransactionRow>(
         r#"
         WITH ensure_wallet AS (
             INSERT INTO wallets (tenant_id, balance, reserved, currency, created_at, updated_at)
-            VALUES ($2, 0, 0, DEFAULT, NOW(), NOW())
+            VALUES ($2, 0, 0, $5, NOW(), NOW())
             ON CONFLICT (tenant_id) DO UPDATE SET updated_at = wallets.updated_at
             RETURNING id AS wallet_id, tenant_id
         ),
@@ -3572,6 +3657,7 @@ async fn admin_apply_credit(
     .bind(&tenant_id)
     .bind(format!("Admin credit: {}", body.reason))
     .bind(idempotency_key)
+    .bind(&billing_currency)
     .fetch_one(&state.db)
     .await?;
 
@@ -3964,22 +4050,56 @@ async fn admin_create_invoice(
     let invoice_number = billing_service::invoices::generate_invoice_number(&state.db)
         .await
         .map_err(|error| ApiError::BadRequest(format!("invoice numbering failed: {error}")))?;
-    let base_line_items: Vec<(String, i64, i64, i64)> = body
-        .line_items
-        .iter()
-        .map(|item| {
-            (
-                item.description.clone(),
-                item.quantity,
-                item.unit_price,
-                item.quantity * item.unit_price,
+
+    // Line-item validation (audit 2): quantity must be strictly positive,
+    // unit price non-negative, and each line total computed with checked
+    // multiplication — the previous unchecked `quantity * unit_price`
+    // accepted negative quantities/prices (negative totals netting out
+    // other lines) and could overflow.
+    let mut base_line_items: Vec<(String, i64, i64, i64)> = Vec::with_capacity(body.line_items.len());
+    for item in &body.line_items {
+        if item.quantity <= 0 {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "Line item quantity must be greater than zero"
+                })),
             )
-        })
-        .collect();
+                .into_response());
+        }
+        if item.unit_price < 0 {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "Line item unitPrice must be non-negative"
+                })),
+            )
+                .into_response());
+        }
+        let amount = item
+            .quantity
+            .checked_mul(item.unit_price)
+            .ok_or_else(|| ApiError::Validation(vec!["Line total overflows".into()]))?;
+        base_line_items.push((
+            item.description.clone(),
+            item.quantity,
+            item.unit_price,
+            amount,
+        ));
+    }
     let subtotal: i64 = base_line_items
         .iter()
         .map(|(_, _, _, amount)| *amount)
         .sum();
+    if subtotal < 0 {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Invoice subtotal must be non-negative"
+            })),
+        )
+            .into_response());
+    }
     let (vat_rate, vat_total) = billing_service::invoices::calculate_vat(
         subtotal,
         &billing_address.country,
@@ -4136,31 +4256,14 @@ async fn admin_get_mrr_report(
         return Ok(response);
     }
 
-    let report: serde_json::Value = sqlx::query_scalar(
-        r#"
-        SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.month DESC), '[]'::json)
-        FROM (
-            SELECT
-                DATE_TRUNC('month', s.created_at) as month,
-                COUNT(DISTINCT s.tenant_id) as active_subscriptions,
-                COALESCE(SUM(
-                    CASE
-                        WHEN s.billing_interval = 'monthly' THEN COALESCE(p.price_monthly, 0)
-                        WHEN s.billing_interval = 'yearly' THEN COALESCE(p.price_yearly, 0) / 12
-                        ELSE 0
-                    END
-                ), 0) as mrr
-            FROM stripe_subscriptions s
-            LEFT JOIN plans p ON p.name = s.plan
-            WHERE s.status = 'active'
-            GROUP BY DATE_TRUNC('month', s.created_at)
-            ORDER BY month DESC
-            LIMIT 12
-        ) report_row
-        "#,
-    )
-    .fetch_one(&state.db)
-    .await?;
+    // Shared with billing-service (audit 2: this local copy retained the
+    // bugs billing-service fixed — truncated yearly/12 pricing,
+    // creation-date instead of billing-cycle-start bucketing, and no
+    // tenants join). Single source: billing_service::routes::MRR_REPORT_SQL.
+    let report: serde_json::Value =
+        sqlx::query_scalar(billing_service::routes::MRR_REPORT_SQL)
+            .fetch_one(&state.db)
+            .await?;
 
     Ok(billing_success_response(
         serde_json::json!({ "report": report }),
@@ -4175,50 +4278,15 @@ async fn admin_get_churn_report(
         return Ok(response);
     }
 
-    let report: serde_json::Value = sqlx::query_scalar(
-        r#"
-        SELECT COALESCE(json_agg(row_to_json(report_row) ORDER BY report_row.month DESC), '[]'::json)
-        FROM (
-            WITH churned AS (
-                SELECT
-                    DATE_TRUNC('month', s.canceled_at) as month,
-                    COUNT(*) as churned_count,
-                    COALESCE(SUM(
-                        CASE
-                            WHEN s.billing_interval = 'monthly' THEN COALESCE(p.price_monthly, 0)
-                            WHEN s.billing_interval = 'yearly' THEN COALESCE(p.price_yearly, 0) / 12
-                            ELSE 0
-                        END
-                    ), 0) as churned_mrr
-                FROM stripe_subscriptions s
-                LEFT JOIN plans p ON p.name = s.plan
-                WHERE s.status = 'canceled' AND s.canceled_at IS NOT NULL
-                GROUP BY DATE_TRUNC('month', s.canceled_at)
-            ),
-            starting AS (
-                SELECT
-                    c.month,
-                    COUNT(DISTINCT s.tenant_id) as starting_count
-                FROM churned c
-                LEFT JOIN stripe_subscriptions s
-                  ON s.status = 'active'
-                 AND s.created_at < c.month
-                GROUP BY c.month
-            )
-            SELECT
-                c.month,
-                c.churned_count,
-                c.churned_mrr,
-                COALESCE(s.starting_count, 0) as starting_count
-            FROM churned c
-            LEFT JOIN starting s ON s.month = c.month
-            ORDER BY c.month DESC
-            LIMIT 12
-        ) report_row
-        "#,
-    )
-    .fetch_one(&state.db)
-    .await?;
+    // Shared with billing-service (audit 2: this local copy priced churn
+    // from the tenant's post-cancellation 'free' plan — structurally ~0 —
+    // and truncated yearly/12). Single source:
+    // billing_service::routes::CHURN_REPORT_SQL (stripe_price_id snapshot
+    // join + unpriced-churn coverage).
+    let report: serde_json::Value =
+        sqlx::query_scalar(billing_service::routes::CHURN_REPORT_SQL)
+            .fetch_one(&state.db)
+            .await?;
 
     Ok(billing_success_response(
         serde_json::json!({ "report": report }),
@@ -4550,6 +4618,8 @@ mod tests {
             placement_encryption_secret: "test-placement-encryption-secret-32b".into(),
             kiwi_enabled: false,
             kiwi_secret_key: "dev".into(),
+            waf_enabled: false,
+            waf_enforce: false,
             kiwi_algorithm: kiwicaptcha::PoWAlgorithm::Sha256,
             kiwi_argon_m_kib: 0,
             kiwi_argon2_difficulty_bits: 8,
@@ -4660,6 +4730,9 @@ mod tests {
         // System-tenant admins (platform staff) still pass.
         assert!(has_admin_access(&auth_user(&["*"], "system")));
         assert!(has_admin_access(&auth_user(&["billing:admin"], "system")));
+        // Human operators authenticate as the SEEDED system tenant, not the
+        // literal sentinel — the gate must accept both.
+        assert!(has_admin_access(&auth_user(&["*"], "system_internal_tenant01")));
         // System tenant WITHOUT an admin scope is rejected.
         assert!(!has_admin_access(&auth_user(&["tenant:*"], "system")));
         assert!(!has_admin_access(&auth_user(&["messages:read"], "system")));

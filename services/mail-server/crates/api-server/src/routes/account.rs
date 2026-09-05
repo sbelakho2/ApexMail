@@ -83,6 +83,44 @@ async fn get_profile(
 
 // ─── Delete account handler ────────────────────────────────────
 
+/// Verify a password against a stored hash on the dual scheme the login
+/// path accepts (mirrors `verify_password_or_log` in routes/auth.rs, which
+/// is module-private): Argon2id for current hashes, bcrypt for legacy
+/// ones. The plain `verify_password` used here before only understood
+/// Argon2id, so any account with a legacy bcrypt hash could NEVER delete
+/// its own account (always "invalid password").
+fn verify_password_dual_scheme(password: &str, hash: &str, subject: &str) -> Result<bool, ApiError> {
+    let result = if hash.starts_with("$2a$") || hash.starts_with("$2b$") || hash.starts_with("$2y$") {
+        bcrypt::verify(password, hash).map_err(|error| error.to_string())
+    } else if hash.starts_with("$argon2") {
+        apexmail_lib::verify_password(password, hash).map_err(|error| error.to_string())
+    } else {
+        let prefix: String = hash.chars().take(10).collect();
+        tracing::error!(
+            hash_prefix = %prefix,
+            subject = %subject,
+            "unknown password hash scheme — rejecting account deletion"
+        );
+        return Err(ApiError::Internal(
+            "password verification is unavailable for this account".into(),
+        ));
+    };
+
+    match result {
+        Ok(valid) => Ok(valid),
+        Err(error) => {
+            tracing::error!(
+                error = %error,
+                subject = %subject,
+                "password verification failed during account deletion"
+            );
+            Err(ApiError::Internal(
+                "password verification is temporarily unavailable".into(),
+            ))
+        }
+    }
+}
+
 async fn delete_account(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -108,8 +146,11 @@ async fn delete_account(
 
     let (password_hash,) = user.ok_or_else(|| ApiError::NotFound("user not found".into()))?;
 
-    let password_valid = apexmail_lib::crypto::verify_password(&body.password, &password_hash)
-        .map_err(|e| ApiError::Internal(format!("password verification failed: {e}")))?;
+    let password_valid = verify_password_dual_scheme(
+        &body.password,
+        &password_hash,
+        &auth.user_id.clone().unwrap_or_default(),
+    )?;
 
     if !password_valid {
         return Err(ApiError::Unauthorized("invalid password".into()));

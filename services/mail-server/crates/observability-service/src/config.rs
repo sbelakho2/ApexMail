@@ -207,18 +207,26 @@ impl ObservabilityConfig {
             std::env::var(key).unwrap_or_else(|_| default.to_string())
         }
 
-        /// Read a secret from `<KEY>` or, when unset, from the file named by
-        /// `<KEY>_FILE` (Docker secret convention). Returns `None` when both
-        /// are absent so callers can distinguish "unset" from "empty".
+        /// Read a secret: when the `<KEY>_FILE` variable (Docker secret
+        /// convention) points at a readable file, the FILE WINS over the
+        /// plain `<KEY>` variable. The prod compose overlay mounts the real
+        /// secret via `_FILE` while the base environment still carries the
+        /// public default value of `<KEY>` — an env-first policy would
+        /// authenticate production with that public constant. Falls back to
+        /// `<KEY>` (non-compose runs) and then to `default`.
         fn env_or_file(key: &str, default: &str) -> String {
-            if let Ok(value) = std::env::var(key) {
-                return value;
-            }
             if let Ok(path) = std::env::var(format!("{key}_FILE")) {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     return content.trim().to_string();
                 }
-                tracing::warn!(key, path = %path, "Secret file configured but unreadable");
+                tracing::warn!(
+                    key,
+                    path = %path,
+                    "Secret file configured but unreadable — falling back to the environment variable"
+                );
+            }
+            if let Ok(value) = std::env::var(key) {
+                return value;
             }
             default.to_string()
         }
@@ -450,6 +458,18 @@ impl ObservabilityConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    /// Serializes tests that mutate process environment variables (cargo
+    /// test runs them in parallel inside one process).
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env lock poisoned")
+    }
 
     #[test]
     fn test_default_config_values() {
@@ -533,13 +553,7 @@ mod tests {
 
     #[test]
     fn test_internal_service_token_reads_file_fallback() {
-        use std::sync::{Mutex, OnceLock};
-
-        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        let _guard = ENV_LOCK
-            .get_or_init(|| Mutex::new(()))
-            .lock()
-            .expect("env lock poisoned");
+        let _guard = env_guard();
 
         std::env::remove_var("INTERNAL_SERVICE_TOKEN");
         let dir = std::env::temp_dir().join(format!("obs-token-{}", uuid::Uuid::new_v4()));
@@ -552,6 +566,42 @@ mod tests {
         assert_eq!(cfg.internal_service_token, "file-secret-token");
 
         std::env::remove_var("INTERNAL_SERVICE_TOKEN_FILE");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// File-wins precedence: the prod compose overlay mounts the real secret
+    /// via `_FILE` while the base environment still carries the public
+    /// default of the plain variable — env-first authenticated production
+    /// with a public constant.
+    #[test]
+    fn test_secret_file_takes_precedence_over_env_variable() {
+        let _guard = env_guard();
+
+        let dir = std::env::temp_dir().join(format!("obs-token-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("token.txt");
+        std::fs::write(&path, "file-secret-wins\n").unwrap();
+        std::env::set_var("INTERNAL_SERVICE_TOKEN", "dev-internal-service-token-change-me");
+        std::env::set_var("INTERNAL_SERVICE_TOKEN_FILE", &path);
+
+        let cfg = ObservabilityConfig::from_env().unwrap();
+        assert_eq!(
+            cfg.internal_service_token, "file-secret-wins",
+            "a readable secret file must override the env variable"
+        );
+
+        // Unreadable file → warn + fall back to the env variable (keeps
+        // non-compose deployments working when the mount is missing).
+        std::env::set_var("INTERNAL_SERVICE_TOKEN_FILE", dir.join("missing.txt"));
+        let cfg = ObservabilityConfig::from_env().unwrap();
+        assert_eq!(cfg.internal_service_token, "dev-internal-service-token-change-me");
+
+        // No file configured at all → plain env variable, then cleanup.
+        std::env::remove_var("INTERNAL_SERVICE_TOKEN_FILE");
+        let cfg = ObservabilityConfig::from_env().unwrap();
+        assert_eq!(cfg.internal_service_token, "dev-internal-service-token-change-me");
+
+        std::env::remove_var("INTERNAL_SERVICE_TOKEN");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

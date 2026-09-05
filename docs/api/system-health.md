@@ -18,7 +18,7 @@ Internal high-availability (HA) monitoring endpoint for the ApexMail control pla
 
 ```http
 GET /v1/admin/system/health
-Authorization: Bearer am_live_xxxxxxxxxxxxx
+X-API-Key: am_live_xxxxxxxxxxxxx
 ```
 
 ### Response — `200 OK`

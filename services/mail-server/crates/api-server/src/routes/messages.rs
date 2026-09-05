@@ -55,6 +55,10 @@ const TENANT_MESSAGE_CIRCUIT_FAILURE_THRESHOLD: i64 = 5;
 const TENANT_MESSAGE_CIRCUIT_FAILURE_WINDOW_SECONDS: i64 = 60;
 const TENANT_MESSAGE_CIRCUIT_OPEN_SECONDS: i64 = 300;
 
+/// Maximum subject length accepted by the send endpoints (RFC 5321 header
+/// line limit).
+const MAX_SUBJECT_CHARS: usize = 998;
+
 // ─── Types ─────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -107,8 +111,9 @@ pub struct ListMessagesQuery {
     pub limit: i64,
     #[serde(default)]
     pub offset: i64,
-    /// Cursor for cursor-based pagination — hex-encoded `created_at` timestamp
-    /// of the last item from the previous page. When provided, overrides `offset`.
+    /// Cursor for cursor-based pagination — hex-encoded `created_at` + row id
+    /// pair of the last item from the previous page. When provided, overrides
+    /// `offset` (only valid with the default `created_at` sort).
     #[serde(default)]
     pub cursor: Option<String>,
     #[serde(default)]
@@ -121,6 +126,50 @@ pub struct ListMessagesQuery {
 
 fn default_sort_column() -> String {
     "created_at".into()
+}
+
+// ─── Keyset cursor helpers ─────────────────────────────────────
+//
+// The list cursor encodes the `(created_at, id)` pair of the last row of the
+// previous page. A timestamp alone skips or duplicates rows that share a
+// `created_at` value (bulk inserts do this constantly): the tie-break
+// `created_at = $ts AND id < $id` makes the ordering total.
+
+/// Separator between the RFC3339 timestamp and the row id inside the
+/// hex-encoded cursor payload (RFC3339 and UUID ids never contain it).
+const KEYSET_CURSOR_SEP: char = '\n';
+
+/// Encode a `(created_at, id)` keyset cursor as an opaque hex string.
+fn encode_keyset_cursor(created_at: &DateTime<Utc>, id: &str) -> String {
+    encode_cursor(&format!("{created_at}{KEYSET_CURSOR_SEP}{id}"))
+}
+
+/// Decode and validate a `(created_at, id)` keyset cursor. Malformed
+/// encodings, unparsable timestamps, or ids that cannot name a row id
+/// (empty, over 64 bytes, control characters) are client errors (400) —
+/// they used to surface as database 500s.
+fn decode_keyset_cursor(encoded: &str) -> Result<(DateTime<Utc>, String), ApiError> {
+    let Some(decoded) = decode_cursor(encoded) else {
+        return Err(ApiError::BadRequest(
+            "invalid cursor: malformed encoding".into(),
+        ));
+    };
+    let Some((timestamp, id)) = decoded.split_once(KEYSET_CURSOR_SEP) else {
+        return Err(ApiError::BadRequest(
+            "invalid cursor: must encode a created_at timestamp and row id".into(),
+        ));
+    };
+    let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map_err(|_| {
+            ApiError::BadRequest(
+                "invalid cursor: must be an encoded created_at timestamp".into(),
+            )
+        })?
+        .with_timezone(&Utc);
+    if id.is_empty() || id.len() > 64 || id.bytes().any(|b| b.is_ascii_control()) {
+        return Err(ApiError::BadRequest("invalid cursor: malformed row id".into()));
+    }
+    Ok((timestamp, id.to_string()))
 }
 
 /// Validate the sort column against the allowlist.
@@ -377,31 +426,69 @@ async fn insert_message_and_queue(
         return Ok(None);
     }
 
-    for recipient in delivery_recipients(body) {
-        sqlx::query(
+    // Batched email_queue inserts (previously one INSERT per delivery
+    // recipient — up to MAX_RECIPIENTS sequential round-trips per message).
+    // 13 bind parameters per row × 500 rows stays far below Postgres's
+    // 65,535-parameter statement limit.
+    const EMAIL_QUEUE_CHUNK_SIZE: usize = 500;
+    for chunk in delivery_recipients(body).chunks(EMAIL_QUEUE_CHUNK_SIZE) {
+        let mut query = String::from(
             "INSERT INTO email_queue (
                 id, message_id, tenant_id, domain_id, from_address, to_addresses, subject,
                 \"from\", \"to\", html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at
-             ) VALUES (
-                $1::uuid, $2::uuid, $3, $4::uuid, $5, ARRAY[$6], $7,
-                $5, $6, $8, $9, $10, $11, $12, 5, 'pending', $13, $13
-             )",
-        )
-        .bind(Uuid::new_v4())
-        .bind(&message_id)
-        .bind(tenant_id)
-        .bind(&domain_id)
-        .bind(&body.from)
-        .bind(recipient)
-        .bind(&body.subject)
-        .bind(&body.html)
-        .bind(&body.text)
-        .bind(body.tags.clone())
-        .bind(metadata)
-        .bind(body.scheduled_at)
-        .bind(created_at)
-        .execute(&mut **tx)
-        .await?;
+             ) VALUES ",
+        );
+        let mut param_idx = 1u32;
+        for (i, _) in chunk.iter().enumerate() {
+            if i > 0 {
+                query.push_str(", ");
+            }
+            // Parameter layout per row — "from"/"to" reuse the same values
+            // as from_address/to_addresses, and created_at doubles as
+            // updated_at, exactly like the single-row form.
+            let (i_id, i_msg, i_ten, i_dom, i_from, i_rcpt) = (
+                param_idx,
+                param_idx + 1,
+                param_idx + 2,
+                param_idx + 3,
+                param_idx + 4,
+                param_idx + 5,
+            );
+            let (i_subj, i_html, i_text, i_tags, i_meta, i_sched, i_created) = (
+                param_idx + 6,
+                param_idx + 7,
+                param_idx + 8,
+                param_idx + 9,
+                param_idx + 10,
+                param_idx + 11,
+                param_idx + 12,
+            );
+            query.push_str(&format!(
+                "(${i_id}::uuid, ${i_msg}::uuid, ${i_ten}, ${i_dom}::uuid, ${i_from}, ARRAY[${i_rcpt}], ${i_subj}, \
+                 ${i_from}, ${i_rcpt}, ${i_html}, ${i_text}, ${i_tags}, ${i_meta}, ${i_sched}, 5, 'pending', \
+                 ${i_created}, ${i_created}"
+            ));
+            param_idx += 13;
+        }
+
+        let mut q = sqlx::query(&query);
+        for recipient in chunk {
+            q = q
+                .bind(Uuid::new_v4())
+                .bind(&message_id)
+                .bind(tenant_id)
+                .bind(domain_id.clone())
+                .bind(&body.from)
+                .bind(recipient)
+                .bind(&body.subject)
+                .bind(&body.html)
+                .bind(&body.text)
+                .bind(body.tags.clone())
+                .bind(metadata)
+                .bind(body.scheduled_at)
+                .bind(created_at);
+        }
+        q.execute(&mut **tx).await?;
     }
 
     Ok(Some(PersistedMessage {
@@ -892,57 +979,49 @@ async fn list_messages(
     }
     let limit = clamp_limit(params.limit, 100);
 
-    // Cursor-based pagination: the cursor is a base64-encoded RFC3339
-    // `created_at` timestamp. Validate it parses BEFORE binding — a
+    // Cursor-based pagination: the cursor is a hex-encoded
+    // `created_at\nid` pair. Both halves are validated BEFORE binding — a
     // decoded-but-bogus cursor used to reach the `::timestamp` cast and
-    // surface as a database 500 instead of a client 400.
+    // surface as a database 500 instead of a client 400. The `id`
+    // tie-break makes the ordering total so rows sharing a `created_at`
+    // are neither skipped nor duplicated across pages.
     let cursor_value = match params.cursor.as_deref() {
-        Some(encoded) => match decode_cursor(encoded) {
-            Some(decoded) => match chrono::DateTime::parse_from_rfc3339(&decoded) {
-                Ok(timestamp) => Some(timestamp.with_timezone(&chrono::Utc)),
-                Err(_) => {
-                    return Err(ApiError::BadRequest(
-                        "invalid cursor: must be an encoded created_at timestamp".into(),
-                    ))
-                }
-            },
-            None => {
-                return Err(ApiError::BadRequest(
-                    "invalid cursor: malformed encoding".into(),
-                ))
-            }
-        },
+        Some(encoded) => Some(decode_keyset_cursor(encoded)?),
         None => None,
     };
 
     let fetch_limit = limit + 1; // fetch one extra to detect has_more
 
-    let rows = if let Some(ref cursor) = cursor_value {
-        // Cursor-based: WHERE created_at < $cursor (for created_at DESC ordering)
+    let rows = if let Some((ref cursor_ts, ref cursor_id)) = cursor_value {
+        // Cursor-based: strictly-less tuple comparison (for created_at DESC,
+        // id DESC ordering). The VALUE is cast once (`$k::uuid` /
+        // `$k::timestamp`), never the indexed column.
         if let Some(ref status) = params.status {
             let query = format!(
                 "SELECT id::text AS id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
-                 FROM messages WHERE tenant_id = $1 AND status = $2 AND created_at < $3::timestamp
-                 ORDER BY {} DESC LIMIT $4",
-                sort_column
+                 FROM messages WHERE tenant_id = $1 AND status = $2
+                   AND (created_at < $3::timestamp OR (created_at = $3::timestamp AND id < $4::uuid))
+                 ORDER BY created_at DESC, id DESC LIMIT $5",
             );
             sqlx::query_as::<_, MessageRow>(&query)
                 .bind(&auth.tenant_id)
                 .bind(status)
-                .bind(cursor)
+                .bind(cursor_ts)
+                .bind(cursor_id)
                 .bind(fetch_limit)
                 .fetch_all(&state.db)
                 .await?
         } else {
             let query = format!(
                 "SELECT id::text AS id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
-                 FROM messages WHERE tenant_id = $1 AND created_at < $2::timestamp
-                 ORDER BY {} DESC LIMIT $3",
-                sort_column
+                 FROM messages WHERE tenant_id = $1
+                   AND (created_at < $2::timestamp OR (created_at = $2::timestamp AND id < $3::uuid))
+                 ORDER BY created_at DESC, id DESC LIMIT $4",
             );
             sqlx::query_as::<_, MessageRow>(&query)
                 .bind(&auth.tenant_id)
-                .bind(cursor)
+                .bind(cursor_ts)
+                .bind(cursor_id)
                 .bind(fetch_limit)
                 .fetch_all(&state.db)
                 .await?
@@ -953,7 +1032,7 @@ async fn list_messages(
         if let Some(ref status) = params.status {
             let query = format!(
                 "SELECT id::text AS id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
-                 FROM messages WHERE tenant_id = $1 AND status = $2 ORDER BY {} DESC LIMIT $3 OFFSET $4",
+                 FROM messages WHERE tenant_id = $1 AND status = $2 ORDER BY {} DESC, id DESC LIMIT $3 OFFSET $4",
                 sort_column
             );
             sqlx::query_as::<_, MessageRow>(&query)
@@ -966,7 +1045,7 @@ async fn list_messages(
         } else {
             let query = format!(
                 "SELECT id::text AS id, from_email, to_emails, subject, status, tags, metadata, scheduled_at, sent_at, created_at
-                 FROM messages WHERE tenant_id = $1 ORDER BY {} DESC LIMIT $2 OFFSET $3",
+                 FROM messages WHERE tenant_id = $1 ORDER BY {} DESC, id DESC LIMIT $2 OFFSET $3",
                 sort_column
             );
             sqlx::query_as::<_, MessageRow>(&query)
@@ -982,8 +1061,18 @@ async fn list_messages(
     let mut details: Vec<MessageDetail> = rows.into_iter().map(row_to_detail).collect();
     let more = has_more(&mut details, limit as usize);
 
-    // Compute the next cursor from the last row
-    let next_cursor = details.last().map(|r| encode_cursor(&r.created_at));
+    // Compute the next cursor from the last row. The (created_at, id) pair is
+    // only a valid cursor for created_at ordering — other sort columns emit
+    // no cursor and clients fall back to offset paging.
+    let next_cursor = if sort_column == "created_at" {
+        details.last().and_then(|r| {
+            chrono::DateTime::parse_from_rfc3339(&r.created_at)
+                .ok()
+                .map(|ts| encode_keyset_cursor(&ts.with_timezone(&Utc), &r.id))
+        })
+    } else {
+        None
+    };
     let meta = pagination_meta(more, next_cursor);
 
     // Build the response body and compute ETag
@@ -1147,6 +1236,13 @@ async fn validate_send_with_domain_cache(
     // CRLF in a subject breaks header folding and enables header injection.
     if body.subject.contains('\r') || body.subject.contains('\n') {
         errors.push("subject must not contain line breaks".into());
+    }
+    // RFC 5321 caps a header line at 998 characters — an over-long subject
+    // would be folded or rejected downstream by the MTA.
+    if body.subject.chars().count() > MAX_SUBJECT_CHARS {
+        errors.push(format!(
+            "subject must be {MAX_SUBJECT_CHARS} characters or fewer"
+        ));
     }
     if body.html.is_none() && body.text.is_none() {
         errors.push("html or text body is required".into());
