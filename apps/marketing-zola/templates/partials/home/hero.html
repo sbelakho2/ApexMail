@@ -4,6 +4,24 @@
    the ratified section padding is py-20 lg:py-32. #}
 <section aria-label="Introduction" class="relative min-h-[90vh] flex items-center py-20 lg:py-32 overflow-hidden bg-surface-50">
   <div class="relative w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+      {# Unified design language (2026-09-05): the checksum ribbon — seven
+         mono slots settling to APEXMAIL, the same flip-cell motif as the
+         security widget — plus hairline stat meters. One motif, three
+         surfaces (hero ribbon / CP service strip / console quota rows). #}
+      <div class="mb-10 flex flex-col sm:flex-row sm:items-center gap-6 sm:gap-10" aria-hidden="true">
+        <div class="flex items-center gap-1.5 font-mono text-[11px] font-bold tracking-[0.08em] select-none">
+          <span class="inline-grid place-items-center min-w-[22px] h-[26px] rounded bg-surface-200/70 text-surface-600">A</span><span class="inline-grid place-items-center min-w-[22px] h-[26px] rounded bg-surface-200/70 text-surface-600">P</span><span class="inline-grid place-items-center min-w-[22px] h-[26px] rounded bg-surface-200/70 text-surface-600">E</span><span class="inline-grid place-items-center min-w-[22px] h-[26px] rounded bg-surface-200/70 text-surface-600">X</span><span class="inline-grid place-items-center min-w-[22px] h-[26px] rounded bg-brand-500 text-white">M</span><span class="inline-grid place-items-center min-w-[22px] h-[26px] rounded bg-surface-200/70 text-surface-600">A</span><span class="inline-grid place-items-center min-w-[22px] h-[26px] rounded bg-surface-200/70 text-surface-600">I</span><span class="inline-grid place-items-center min-w-[22px] h-[26px] rounded bg-surface-200/70 text-surface-600">L</span>
+        </div>
+        <div class="flex-1 min-w-[180px] max-w-md">
+          <div class="flex justify-between text-[10px] font-mono uppercase tracking-[0.14em] text-surface-500 mb-1.5"><span>proof of delivery</span><span>every message</span></div>
+          <div class="h-0.5 rounded bg-surface-200 overflow-hidden"><div class="h-full rounded bg-brand-500" style="width:96%"></div></div>
+        </div>
+        <div class="hidden md:block flex-1 min-w-[180px] max-w-md">
+          <div class="flex justify-between text-[10px] font-mono uppercase tracking-[0.14em] text-surface-500 mb-1.5"><span>EEA processing</span><span>fi · de</span></div>
+          <div class="h-0.5 rounded bg-surface-200 overflow-hidden"><div class="h-full rounded bg-surface-500" style="width:100%"></div></div>
+        </div>
+      </div>
+    
     <div class="grid min-w-0 lg:grid-cols-2 gap-12 lg:gap-20 items-center">
       <div class="min-w-0">
         {# Eyebrow badge on the calculator grammar (design audit item 11):

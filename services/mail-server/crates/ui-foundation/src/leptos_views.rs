@@ -2289,6 +2289,23 @@ pub fn web_dashboard_page() -> String {
 <h1 class=\"text-2xl font-bold tracking-tight text-surface-950\">Overview</h1>\
 <p class=\"text-surface-500 font-medium\">Monitor your campaign performance and delivery health.</p>\
 </header>\
+<div class=\"grid grid-cols-1 sm:grid-cols-3 gap-6\" aria-label=\"Plan usage\">\
+<div class=\"bg-white rounded-2xl border border-surface-200/60 px-6 py-5 shadow-sm\">\
+<p class=\"font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-surface-500 mb-2\">sends · month</p>\
+<p class=\"text-lg font-bold text-surface-950 tracking-tight mb-3\">0 <span class=\"text-sm font-medium text-surface-500\">/ 30,000</span></p>\
+<div class=\"h-0.5 rounded bg-surface-100 overflow-hidden\"><div class=\"h-full rounded bg-brand-500\" style=\"width:2%\"></div></div>\
+</div>\
+<div class=\"bg-white rounded-2xl border border-surface-200/60 px-6 py-5 shadow-sm\">\
+<p class=\"font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-surface-500 mb-2\">api · month</p>\
+<p class=\"text-lg font-bold text-surface-950 tracking-tight mb-3\">0 <span class=\"text-sm font-medium text-surface-500\">/ 300,000</span></p>\
+<div class=\"h-0.5 rounded bg-surface-100 overflow-hidden\"><div class=\"h-full rounded bg-brand-500\" style=\"width:1%\"></div></div>\
+</div>\
+<div class=\"bg-white rounded-2xl border border-surface-200/60 px-6 py-5 shadow-sm\">\
+<p class=\"font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-surface-500 mb-2\">recipients · msg</p>\
+<p class=\"text-lg font-bold text-surface-950 tracking-tight mb-3\">&mdash; <span class=\"text-sm font-medium text-surface-500\">/ 1,000</span></p>\
+<div class=\"h-0.5 rounded bg-surface-100 overflow-hidden\"><div class=\"h-full rounded bg-surface-400\" style=\"width:0%\"></div></div>\
+</div>\
+</div>\
 <div class=\"bg-white rounded-2xl border border-surface-200/60 shadow-sm overflow-hidden\">\
 <div class=\"px-8 py-6 border-b border-surface-100 flex items-center justify-between\">\
 <h2 class=\"text-xs font-bold text-surface-950 uppercase tracking-[0.2em]\">Send Volume</h2>\
@@ -3496,6 +3513,21 @@ pub fn control_plane_dashboard_page() -> String {
         <h1 class="text-3xl font-bold tracking-tight text-surface-950">System Overview</h1>
         <p class="text-surface-500 font-medium">Monitor fleet health, tenant activity, and system performance.</p>
     </header>
+
+    <!-- Unified design language (2026-09-05): the service-slot ribbon —
+         platform services as flip-cells, the all-nominal cell solid. The
+         CP surface of the same motif that renders the marketing hero
+         ribbon and the console quota meters. -->
+    <section aria-label="Platform services" class="flex items-center gap-2 flex-wrap font-mono text-[10px] font-bold tracking-[0.08em] select-none">
+        <span class="text-surface-400 uppercase tracking-[0.14em] mr-1">services</span>
+        <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">api</span>
+        <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">mta</span>
+        <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">imap</span>
+        <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">worker</span>
+        <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">queue</span>
+        <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">billing</span>
+        <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-success-500 text-white">all nominal</span>
+    </section>
 
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
         <section class="bg-white rounded-2xl border border-surface-200/60 p-8 shadow-sm transition-all hover:shadow-md">

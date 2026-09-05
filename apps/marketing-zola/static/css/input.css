@@ -1480,3 +1480,31 @@ html.dark .z-variable {
 
 
 
+
+/* ── Unified design language (2026-09-05): needle nav + receipt footer ──
+   The active nav link is the winning nonce: a solid slot among faint
+   siblings. Scoped to header/footer nav links carrying aria-current. */
+nav a[aria-current="page"],
+header a[aria-current="page"] {
+  background: var(--brand-500, #dc2626);
+  color: #fff !important;
+  border-radius: 4px;
+  padding-left: 10px;
+  padding-right: 10px;
+}
+/* The mono micro-label system: shared with the widget + consoles. */
+.k-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+/* Receipt rows (challenge · work · proof) — the footer closes with one. */
+.k-receipt {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.9;
+  color: var(--surface-500, #71717a);
+}
+.k-receipt .ok { color: var(--brand-500, #dc2626); font-weight: 600; }

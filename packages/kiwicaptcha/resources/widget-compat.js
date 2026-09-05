@@ -100,7 +100,7 @@
 
   var COMPAT_FIELD = { recaptcha: "g-recaptcha-response", hcaptcha: "h-captcha-response", turnstile: "cf-turnstile-response" }[compat];
   var COMPAT_SELECTOR = { recaptcha: ".g-recaptcha", hcaptcha: ".h-captcha", turnstile: ".cf-turnstile" }[compat];
-  var COMPAT_SVG = '<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">  <path d="M 5 42 C 12 30, 18 24, 23.9 22.9 A 20 20 0 1 1 18.3 33.5 C 14 35, 9 40, 5 42 Z" fill="currentColor"/></svg>';
+  var COMPAT_SVG = '<svg viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg"><g stroke="currentColor" stroke-width="6.6" stroke-linecap="round" fill="none"><path d="M32 36.5 c0 -4 5.4 -4 5.4 0 c0 5.4 -8.1 6.8 -11 1.4 c-4.1 -6.8 2.7 -14.9 10.4 -13.5 c10.8 1.4 13.5 13.5 6.8 21.6 c-8.1 10.8 -25.7 8.1 -31.1 -5.4 c-5.4 -14.9 6.8 -29.7 23 -28.4"/></g><path d="M21 26 v-4 a11 11 0 0 1 22 0 v4" stroke="currentColor" stroke-width="6.6" stroke-linecap="round" fill="none"/></svg>';
   function compatInjectCss() {
     if (!compatScriptUrl || document.querySelector('link[data-kiwi-css]')) return;
     var link = document.createElement("link");
@@ -132,9 +132,9 @@
   function compatMarkup() {
     return '<div class="kiwi-container"' + compatLocalesAttrs + '><input type="hidden" name="kiwi__token" data-kiwi-token value="">' +
       '<div class="kiwi-widget" data-kiwi-widget data-kiwi-started="1" data-state="idle" role="group" aria-label="KiwiCaptcha security check">' +
-      '<div class="kiwi-icon-wrapper" aria-hidden="true">' + COMPAT_SVG + '<div class="kiwi-glow"></div></div>' +
+      '<div class="kiwi-icon-wrapper" aria-hidden="true">' + COMPAT_SVG + '</div>' +
       '<div class="kiwi-main"><div class="kiwi-top"><span class="kiwi-label" data-kiwi-label>Security Check</span><span class="kiwi-badge" data-kiwi-badge>Idle</span></div>' +
-      '<div class="kiwi-track" aria-hidden="true"><div class="kiwi-bar" data-kiwi-bar></div></div>' +
+      '<div class="kiwi-slots" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><div class="kiwi-track" aria-hidden="true"><div class="kiwi-bar" data-kiwi-bar></div></div>' +
       '<div class="kiwi-bottom"><p class="kiwi-info" data-kiwi-info>Protected by KiwiCaptcha</p><span class="kiwi-timer" data-kiwi-timer></span></div></div>' +
       '<span class="kiwi-sr-only" data-kiwi-status role="status" aria-live="polite"></span></div></div>';
   }

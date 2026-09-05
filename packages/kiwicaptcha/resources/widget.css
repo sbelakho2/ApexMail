@@ -1,34 +1,25 @@
 /* ==========================================================================
-   KiwiCaptcha widget — industry-aligned design system
-   ==========================================================================
-   Redesigned to match the converged industry standard derived from
-   Google reCAPTCHA, Cloudflare Turnstile, hCaptcha, and Friendly Captcha.
+   KiwiCaptcha widget — Mono Checksum design language (2026-09-05)
+   ============================================================================
+   The unified platform language: four motifs, zero ornament.
 
-   Key decisions (each backed by industry research):
-   - Radius 4px (not 12px): security widgets use small radii (reCAPTCHA 3px,
-     Friendly 0px) for a "serious/institutional" feel.
-   - Accent #146de2 (Google-blue family, AA-adjusted): the most
-     "trustworthy" accent per hCaptcha (#00838F teal) and Google (#1a73e8)
-     — darkened from the raw token so 11px text clears 4.5:1 on #FAFAFA.
-     Coral red was reading as "error".
-   - Text #333333 (not #1a1a1a): softer, "premium" per all 4 products.
-   - Background #FAFAFA (not pure white): reduces eye strain, per hCaptcha.
-   - Font system-ui stack (not Inter): no third-party font fetch (CSP-safe).
-   - Label weight 400 (not 600): reCAPTCHA and Friendly both use regular.
-   - Badge min 11px (was 9px): Cloudflare explicitly fixed their 10px as too
-     small; 11px is the safe floor.
-   - Red restricted to error ICON only (Cloudflare rule): text stays neutral.
-   - Focus ring 2px solid #1a73e8 (4.3:1 against #FAFAFA, >3:1): WCAG
-     2.4.7 visible focus.
-   - !important eliminated: proper CSS specificity instead.
+   - SLOT: the flip-cell. The badge and the seven-cell checksum strip are
+     slots; states recolor them. Motion: settle 250ms, stagger 120ms —
+     never a loop faster than the eye can dismiss.
+   - NEEDLE: one solid among faint (the winning nonce). The icon chip in
+     its faint state is the search space; done is the found proof.
+   - RECEIPT: mono rows (challenge · work · proof) — the info line's
+     typography, ready for pipeline detail.
+   - HAIRLINE: the 2px progress track. No gradients, no glow, no shine
+     sweep, no scale bounce. State changes are color + width, 200ms.
+
+   A11y contract preserved from the prior skin: sr-only live region,
+     >=44px retry target, 2px focus ring at >=3:1, red never used for
+     text (icon/chip only), badge text >=11px, prefers-reduced-motion
+     kills every decorative animation.
    ========================================================================== */
 
-  /* No external font fetches — system-ui stack keeps CSP strict and matches
-     the industry convention (reCAPTCHA uses Roboto/system; Turnstile and
-     Friendly inherit the host page's system font). */
-  /* Screen-reader-only live region: visually hidden, but
-     kept in the layout tree so role=status announcements reach assistive
-     tech without any visual footprint. */
+  /* Screen-reader-only live region (unchanged contract). */
   .kiwi-sr-only {
     position: absolute;
     width: 1px;
@@ -42,55 +33,39 @@
   }
 
   .kiwi-container {
-    /* The widget's typography scales from this variable (WCAG 1.4.4).
-       (1 = design size). A test can set it to 2 to exercise a
-       TRUE 200% text enlargement — the fixed-pixel sizes below are all
-       derived from it. */
     --kiwi-font-scale: 1;
-    /* Brand accent — Google blue. Trustworthy, not alarming. */
+    /* Brand accent stays the widget token (integrators override). */
     --kiwi-primary: #146de2;
     --kiwi-primary-rgb: 20, 109, 226;
     --kiwi-success: #008457;
     --kiwi-success-rgb: 0, 132, 87;
     --kiwi-error: #dc2626;
     --kiwi-error-rgb: 220, 38, 38;
-
-    /* Surfaces — softer than pure white/black (industry convention). */
     --kiwi-bg: #fafafa;
     --kiwi-text: #333333;
     --kiwi-text-muted: #737373;
-    /* Semantic badge foregrounds per theme — the state
-       selectors reference ONLY these variables (never hard-coded colors),
-       and both themes clear >= 5:1 on their 12% tint surfaces:
-       light: neutral 5.07:1, solving 5.85:1, success 6.27:1, failure
-       5.17:1; dark: neutral 5.01:1, solving 9.15:1, success 9.84:1,
-       failure 9.23:1. */
     --kiwi-badge-neutral-text: #5c5c5c;
     --kiwi-badge-solving-text: #1055ad;
     --kiwi-badge-success-text: #00603e;
     --kiwi-badge-error-text: #b91c1c;
     --kiwi-border: #e0e0e0;
-
-    /* Shadow — subtle, single-layer (Turnstile-style, not heavy). */
-    --kiwi-shadow: 0 1px 3px rgb(0 0 0 / 0.08), 0 1px 2px rgb(0 0 0 / 0.06);
-
-    /* Radius — 4px (security-widget convention: small, serious). */
-    --kiwi-radius: 4px;
+    --kiwi-track: #e4e4e4;
+    --kiwi-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
     display: inline-flex;
     align-items: center;
     width: 100%;
-    max-width: 312px;
+    max-width: 336px;
     font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
     position: relative;
     box-sizing: border-box;
   }
   @media (prefers-color-scheme: dark) {
     .kiwi-container {
-      --kiwi-bg: #222222;
-      --kiwi-text: #f5f5f5;
-      --kiwi-text-muted: #a3a3a3;
-      --kiwi-badge-neutral-text: #a3a3a3;
+      --kiwi-bg: #1c1c1f;
+      --kiwi-text: #f4f4f5;
+      --kiwi-text-muted: #a1a1aa;
+      --kiwi-badge-neutral-text: #a1a1aa;
       --kiwi-badge-solving-text: #bfdbfe;
       --kiwi-badge-success-text: #a7f3d0;
       --kiwi-badge-error-text: #fecaca;
@@ -101,120 +76,95 @@
       --kiwi-error: #f87171;
       --kiwi-error-rgb: 248, 113, 113;
       --kiwi-border: #333333;
-      --kiwi-shadow: 0 1px 3px rgb(0 0 0 / 0.4), 0 1px 2px rgb(0 0 0 / 0.3);
+      --kiwi-track: #2e2e32;
     }
   }
+
+  /* ── Card: 1px border, no shadow, no hover lift — quiet chrome ── */
   .kiwi-widget {
     display: flex;
     align-items: center;
     gap: 12px;
-    padding: 12px 16px;
+    padding: 12px 14px;
     background: var(--kiwi-bg);
     border: 1px solid var(--kiwi-border);
-    border-radius: var(--kiwi-radius);
+    border-radius: 8px;
     color: var(--kiwi-text);
-    box-shadow: var(--kiwi-shadow);
-    transition: border-color 0.2s ease, box-shadow 0.2s ease;
     width: 100%;
     position: relative;
     overflow: hidden;
     cursor: default;
     user-select: none;
+    transition: border-color 0.2s ease;
   }
-  .kiwi-widget:hover {
-    border-color: var(--kiwi-primary);
-    box-shadow: 0 2px 6px rgb(0 0 0 / 0.1);
-  }
-  /* The widget itself is never focusable (no tabindex, no
-     checkbox semantics — an auto-solving PoW is a status/group, not a
-     control). The manual Retry button carries the visible focus ring
-     (WCAG 2.4.7); it is the only interactive element in the widget. */
+  .kiwi-widget:hover { border-color: var(--kiwi-primary); }
+  /* The widget is never focusable (status, not control); the Retry button
+     carries the only visible focus ring (2px, >=3:1). */
   .kiwi-retry:focus-visible {
     outline: 2px solid var(--kiwi-primary);
     outline-offset: 1px;
   }
 
-  /* --- Icon wrapper --- */
+  /* ── Icon chip: the NEEDLE motif — faint until found ── */
   .kiwi-icon-wrapper {
     flex-shrink: 0;
-    width: 32px;
-    height: 32px;
-    border-radius: var(--kiwi-radius);
+    width: 30px;
+    height: 30px;
+    border-radius: 7px;
     display: flex;
     align-items: center;
     justify-content: center;
     background: rgba(var(--kiwi-primary-rgb), 0.08);
     color: var(--kiwi-primary);
-    transition: background .3s ease, color 0.3s ease, transform 0.3s ease;
-    position: relative;
+    transition: background 0.2s ease, color 0.2s ease;
   }
-  .kiwi-icon-wrapper svg { width: 20px; height: 20px; }
-
-  /* --- State: solving (pulsing icon) --- */
-  .kiwi-widget[data-state="solving"] .kiwi-icon-wrapper {
-    animation: kiwi-pulse 2s infinite ease-in-out;
-  }
-  /* --- State: done (success checkmark treatment) --- */
+  .kiwi-icon-wrapper svg { width: 18px; height: 18px; }
   .kiwi-widget[data-state="done"] .kiwi-icon-wrapper {
     background: rgb(var(--kiwi-success-rgb));
     color: #ffffff;
-    transform: scale(1.05);
   }
-  /* --- State: failed (error icon — red on ICON only, per Cloudflare rule) --- */
   .kiwi-widget[data-state="failed"] .kiwi-icon-wrapper {
     background: rgba(var(--kiwi-error-rgb), 0.1);
     color: var(--kiwi-error);
   }
-  @keyframes kiwi-pulse {
-    0%, 100% { transform: scale(1); opacity: 1; }
-    50% { transform: scale(0.95); opacity: 0.8; }
-  }
+  /* No pulse while solving; no scale on done. The slot strip carries the
+     activity; the chip stays still. */
 
-  /* --- Main content column --- */
+  /* ── Main column ── */
   .kiwi-main { flex: 1; min-width: 0; }
   .kiwi-top {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 4px;
+    gap: 8px;
   }
-
-  /* --- Label (14px / weight 400 — reCAPTCHA/Friendly convention) --- */
   .kiwi-label {
-    font-size: calc(0.875rem * var(--kiwi-font-scale));
-    font-weight: 400;
-    line-height: 1.2;
+    font-size: calc(13px * var(--kiwi-font-scale));
     color: var(--kiwi-text);
-    letter-spacing: -0.01em;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
-  /* --- Badge (11px floor — Cloudflare fixed their 10px as too small) --- */
+  /* ── Badge: the primary SLOT ── */
   .kiwi-badge {
-    font-size: calc(0.6875rem * var(--kiwi-font-scale));
+    flex-shrink: 0;
+    font-family: var(--kiwi-mono);
+    font-size: calc(11px * var(--kiwi-font-scale));
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.03em;
-    padding: 2px 6px;
-    border-radius: var(--kiwi-radius);
-    background: var(--kiwi-border);
+    line-height: 1;
+    padding: 4px 6px;
+    border-radius: 4px;
+    background: var(--kiwi-track);
     color: var(--kiwi-badge-neutral-text);
-    /* NO color transition — a 0.3s cross-fade passes through
-       low-contrast mixes of the two state colors (the badge changes
-       instantly; WCAG 1.4.3 applies to every visible state). */
+    transition: background 0.2s ease, color 0.2s ease;
   }
-  /* The state colors on their 12% tints measured
-     3.86-3.96:1 — below the 4.5:1 normal-text threshold. The badge
-     foregrounds are darkened (blue 5.71:1, green 6.09:1, red 5.05:1 on
-     the #FAFAFA-tinted surfaces) so antialiasing and future palette
-     changes keep >= 5:1 headroom. Color is never the only state signal:
-     the badge TEXT ("Working"/"Success"/"Failed") and the live-region
-     announcements carry the state for non-color users. */
   .kiwi-widget[data-state="solving"] .kiwi-badge {
-    background: rgba(var(--kiwi-primary-rgb), 0.12);
+    background: rgba(var(--kiwi-primary-rgb), 0.14);
     color: var(--kiwi-badge-solving-text);
   }
   .kiwi-widget[data-state="done"] .kiwi-badge {
-    background: rgba(var(--kiwi-success-rgb), 0.12);
+    background: rgba(var(--kiwi-success-rgb), 0.16);
     color: var(--kiwi-badge-success-text);
   }
   .kiwi-widget[data-state="failed"] .kiwi-badge {
@@ -222,22 +172,54 @@
     color: var(--kiwi-badge-error-text);
   }
 
-  /* --- Progress bar (4px — Friendly Captcha convention) --- */
-  .kiwi-track {
+  /* ── The checksum strip: seven decorative slots ──
+     Solving: cells shimmer by opacity stagger (no position motion);
+     Done: all settle to success; Failed: all error; idle: faint. */
+  .kiwi-slots {
+    display: flex;
+    gap: 3px;
+    margin-top: 7px;
+  }
+  .kiwi-slots i {
+    flex: 1;
     height: 4px;
-    width: 100%;
     border-radius: 2px;
-    background: var(--kiwi-border);
+    background: var(--kiwi-track);
+    transition: background 0.25s ease;
+  }
+  .kiwi-widget[data-state="solving"] .kiwi-slots i {
+    background: rgba(var(--kiwi-primary-rgb), 0.55);
+    animation: kiwi-slot-cycle 1.2s ease-in-out infinite;
+  }
+  .kiwi-widget[data-state="solving"] .kiwi-slots i:nth-child(2) { animation-delay: 0.12s; }
+  .kiwi-widget[data-state="solving"] .kiwi-slots i:nth-child(3) { animation-delay: 0.24s; }
+  .kiwi-widget[data-state="solving"] .kiwi-slots i:nth-child(4) { animation-delay: 0.36s; }
+  .kiwi-widget[data-state="solving"] .kiwi-slots i:nth-child(5) { animation-delay: 0.48s; }
+  .kiwi-widget[data-state="solving"] .kiwi-slots i:nth-child(6) { animation-delay: 0.60s; }
+  .kiwi-widget[data-state="solving"] .kiwi-slots i:nth-child(7) { animation-delay: 0.72s; }
+  .kiwi-widget[data-state="done"] .kiwi-slots i { background: rgb(var(--kiwi-success-rgb)); }
+  .kiwi-widget[data-state="failed"] .kiwi-slots i { background: rgb(var(--kiwi-error-rgb)); }
+  @keyframes kiwi-slot-cycle {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.3; }
+  }
+
+  /* ── HAIRLINE track (kept: the driver writes data-progress widths) ── */
+  .kiwi-track {
+    margin-top: 7px;
+    width: 100%;
+    height: 2px;
+    background: var(--kiwi-track);
+    border-radius: 2px;
     overflow: hidden;
   }
   .kiwi-bar {
     height: 100%;
-    background: var(--kiwi-primary);
-    transition: width 0.5s linear;
     width: 0%;
+    background: var(--kiwi-primary);
+    border-radius: 2px;
+    transition: width 0.25s ease;
   }
-  /* Progress driven by data-progress attribute (CSP3-safe: no inline styles).
-     11 discrete steps from 0% to 100%. */
   .kiwi-bar[data-progress="10"] { width: 10%; }
   .kiwi-bar[data-progress="20"] { width: 20%; }
   .kiwi-bar[data-progress="30"] { width: 30%; }
@@ -251,60 +233,50 @@
   .kiwi-widget[data-state="done"] .kiwi-bar { background: var(--kiwi-success); }
   .kiwi-widget[data-state="failed"] .kiwi-bar { background: var(--kiwi-error); }
 
-  /* --- Bottom row --- */
+  /* ── Bottom row: the RECEIPT typography (mono, muted) ── */
   .kiwi-bottom {
     display: flex;
+    align-items: baseline;
     justify-content: space-between;
-    align-items: center;
-    margin-top: 8px;
     gap: 8px;
-    flex-wrap: wrap;
+    margin-top: 6px;
   }
-  /* Info text — neutral color, never red (Cloudflare rule). */
   .kiwi-info {
-    font-size: calc(0.6875rem * var(--kiwi-font-scale));
-    color: var(--kiwi-text-muted);
-    font-weight: 400;
     margin: 0;
-  }
-  /* Timer — uses muted color, not primary (was red before; now neutral). */
-  .kiwi-timer {
-    font-size: calc(0.6875rem * var(--kiwi-font-scale));
-    font-weight: 600;
+    font-family: var(--kiwi-mono);
+    font-size: calc(10.5px * var(--kiwi-font-scale));
     color: var(--kiwi-text-muted);
-    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .kiwi-timer {
+    font-family: var(--kiwi-mono);
+    font-size: calc(10.5px * var(--kiwi-font-scale));
+    color: var(--kiwi-text-muted);
+    flex-shrink: 0;
   }
 
-  /* --- Manual Retry ---
-     A genuine native <button> (focusable; Enter/Space activation is
-     built-in). Hidden in every state except the error/unavailable states:
-     the widget is passive and never focusable itself. */
+  /* ── Retry: >=44px target, mono, quiet ── */
   .kiwi-retry {
+    min-height: 44px;
+    min-width: 44px;
+    margin-top: 8px;
+    align-self: flex-start;
     display: none;
-    font-size: calc(0.6875rem * var(--kiwi-font-scale));
+    align-items: center;
+    justify-content: center;
+    padding: 6px 12px;
+    border: 1px solid var(--kiwi-border);
+    border-radius: 6px;
+    background: var(--kiwi-bg);
+    color: var(--kiwi-text);
+    font-family: var(--kiwi-mono);
+    font-size: calc(12px * var(--kiwi-font-scale));
     font-weight: 600;
-    font-family: inherit;
-    line-height: 1.2;
-    padding: 4px 10px;
-    /* The 11px/1.2/4px-padding/1px-border button (WCAG 2.5.8)
-       measured ~23.2 CSS px tall — below the 24x24 AA baseline. The
-       target is a full 32px minimum height (an accessibility/security
-       control has no reason to be cramped) and 24px minimum width. */
-    min-height: 32px;
-    min-width: 24px;
-    border: 1px solid var(--kiwi-primary);
-    border-radius: var(--kiwi-radius);
-    background: transparent;
-    color: var(--kiwi-primary);
     cursor: pointer;
   }
-  .kiwi-retry:hover {
-    background: rgba(var(--kiwi-primary-rgb), 0.08);
-  }
-  /* Idle also shows the native Retry (WCAG 2.5.2/2.1.1) —
-     after a reset/BFCache restore the widget needs manual reacquisition,
-     and the button is the keyboard-accessible path (the widget itself
-     stays a passive, non-focusable group). */
+  .kiwi-retry:hover { border-color: var(--kiwi-primary); color: var(--kiwi-primary); }
   .kiwi-widget[data-state="idle"] .kiwi-retry,
   .kiwi-widget[data-state="failed"] .kiwi-retry,
   .kiwi-widget[data-state="expired"] .kiwi-retry,
@@ -312,74 +284,23 @@
     display: inline-flex;
   }
 
-  /* --- Narrow aria-live announcer ---
-     The ONLY aria-live traffic in the widget. Visually hidden but present
-     in the accessibility tree (role=status => polite); announces only
-     meaningful transitions, never the countdown/progress (visual only). */
+  /* ── Status text (driver-visible line under the card) ── */
   .kiwi-status {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    margin: -1px;
-    padding: 0;
-    border: 0;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
+    font-family: var(--kiwi-mono);
+    font-size: calc(10.5px * var(--kiwi-font-scale));
+    color: var(--kiwi-text-muted);
+    margin-top: 6px;
   }
 
-  /* --- Premium Finish Animation --- */
-  .kiwi-glow {
-    position: absolute;
-    top: 0; left: -100%; width: 50%; height: 100%;
-    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.2), transparent);
-    transform: skewX(-25deg);
-    pointer-events: none;
-  }
-  .kiwi-widget[data-state="done"] .kiwi-glow {
-    animation: kiwi-shine 0.8s ease-in-out forwards;
-  }
-  @keyframes kiwi-shine {
-    0% { left: -100%; }
-    100% { left: 150%; }
-  }
-
-  /* --- Reduced motion ---
-     Kills every decorative animation/transition (solving pulse, success
-     shine, logo blink, state transitions) for users who ask for it; the
-     widget remains fully functional, just static. */
+  /* ── Reduced motion: every decorative animation stops; state colors and
+     the hairline width remain (they are information, not decoration). ── */
   @media (prefers-reduced-motion: reduce) {
-    .kiwi-widget,
-    .kiwi-icon-wrapper,
-    .kiwi-badge,
-    .kiwi-bar,
-    .kiwi-glow,
-    .kiwi-retry {
-      animation: none !important;
-      transition: none !important;
-    }
+    .kiwi-widget, .kiwi-badge, .kiwi-bar, .kiwi-slots i, .kiwi-icon-wrapper,
+    .kiwi-retry { transition: none; animation: none; }
   }
 
-  /* The widget's custom palette is replaced by the user's system colors
-     (forced-colors): the Retry button keeps its border/background contrast
-     from the OS palette and the focus ring stays visible. */
+  /* High-contrast mode: borders carry the states alone. */
   @media (forced-colors: active) {
-    .kiwi-widget {
-      border: 1px solid CanvasText;
-    }
-    .kiwi-retry {
-      border: 1px solid ButtonText;
-      background: ButtonFace;
-      color: ButtonText;
-    }
-    .kiwi-badge,
-    .kiwi-widget[data-state="solving"] .kiwi-badge,
-    .kiwi-widget[data-state="done"] .kiwi-badge,
-    .kiwi-widget[data-state="failed"] .kiwi-badge {
-      background: transparent;
-      color: CanvasText;
-    }
-    .kiwi-track {
-      border: 1px solid CanvasText;
-    }
+    .kiwi-widget { border: 1px solid CanvasText; }
+    .kiwi-badge, .kiwi-slots i { border: 1px solid CanvasText; }
   }
