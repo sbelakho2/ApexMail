@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ApexMail — Unified Language · Full-Page Previews (2026-09-06)</title>
+<style>
+/* ═══════════ DESIGN TOKENS — the system every element below is built from ═══════════ */
+:root{
+  --bg:#fafafa; --card:#ffffff; --card2:#f4f4f5; --line:#e4e4e7; --line2:#d4d4d8;
+  --fg:#111113; --fg2:#71717a; --fg3:#a1a1aa;
+  --brand:#dc2626; --brand-ink:#b91c1c; --brand-tint:#fee2e2;
+  --ok:#059669; --ok-tint:#d1fae5; --err:#dc2626; --err-tint:#fee2e2;
+  --warn:#d97706; --warn-tint:#fef3c7; --info:#2563eb; --info-tint:#dbeafe;
+  --track:#e4e4e7; --radius:8px; --radius-lg:12px;
+  --sans:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+  --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  --shadow:0 1px 2px rgba(0,0,0,.04);
+}
+.dark{
+  --bg:#0f0f10; --card:#18181b; --card2:#1f1f23; --line:#27272a; --line2:#3f3f46;
+  --fg:#f4f4f5; --fg2:#a1a1aa; --fg3:#71717a;
+  --brand:#ef4444; --brand-ink:#f87171; --brand-tint:#3f1d1d;
+  --ok:#34d399; --ok-tint:#0d2b21; --err:#f87171; --err-tint:#3f1d1d;
+  --warn:#fbbf24; --warn-tint:#2d2410; --info:#60a5fa; --info-tint:#12233f;
+  --track:#27272a; --shadow:none;
+}
+*{box-sizing:border-box;margin:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--fg);font:14px/1.55 var(--sans);-webkit-font-smoothing:antialiased}
+
+/* ── topbar / switcher ── */
+.topbar{position:fixed;inset:0 0 auto 0;z-index:99;display:flex;gap:6px;align-items:center;
+  padding:8px 14px;background:var(--card);border-bottom:1px solid var(--line);flex-wrap:wrap}
+.topbar .brandchip{display:flex;align-items:center;gap:8px;margin-right:10px;font-weight:700;font-size:13px}
+.topbar button{font:600 12px/1 var(--sans);padding:8px 12px;border-radius:6px;border:1px solid var(--line);
+  background:transparent;color:var(--fg2);cursor:pointer}
+.topbar button[aria-selected="true"]{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.topbar .spacer{flex:1}
+.page{display:none;padding:76px 0 60px}
+.page.show{display:block}
+.wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+
+/* ── ELEMENT SYSTEM ── */
+.mono{font-family:var(--mono)}
+.klabel{font:600 10px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--fg2)}
+.slot{display:inline-grid;place-items:center;min-width:20px;height:22px;padding:0 6px;border-radius:4px;
+  background:var(--track);color:var(--fg2);font:600 11px/1 var(--mono)}
+.slot.brand{background:var(--brand);color:#fff}
+.slot.ok{background:var(--ok);color:#fff}
+.slot.err{background:var(--err);color:#fff}
+.slot.line{background:transparent;border:1px solid var(--line2)}
+.meter{height:2px;background:var(--track);border-radius:2px;overflow:hidden;position:relative}
+.meter>i{position:absolute;inset:0;background:var(--brand);border-radius:2px}
+.meter.ok>i{background:var(--ok)}
+.receipt{font:11.5px/2 var(--mono);color:var(--fg2)}
+.receipt .ok{color:var(--ok);font-weight:700}
+.receipt .on{color:var(--brand);font-weight:700}
+.hair{height:1px;background:var(--line)}
+
+/* buttons */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:38px;padding:0 16px;
+  border-radius:6px;font:600 13px/1 var(--sans);cursor:pointer;border:1px solid transparent;
+  transition:background .15s ease,border-color .15s ease,color .15s ease;text-decoration:none}
+.btn.primary{background:var(--brand);color:#fff}
+.btn.primary:hover{background:var(--brand-ink)}
+.btn.secondary{background:var(--card);border-color:var(--line2);color:var(--fg)}
+.btn.secondary:hover{border-color:var(--fg2)}
+.btn.ghost{background:transparent;color:var(--fg2)}
+.btn.ghost:hover{color:var(--fg);background:var(--card2)}
+.btn.danger{background:transparent;border-color:var(--err);color:var(--err)}
+.btn.danger:hover{background:var(--err);color:#fff}
+.btn.lg{height:44px;padding:0 20px;font-size:14px}
+.btn.sm{height:30px;padding:0 10px;font-size:12px}
+.btn.mono{font:700 11px/1 var(--mono);letter-spacing:.08em;text-transform:uppercase}
+.btn:focus-visible{outline:2px solid var(--brand);outline-offset:2px}
+
+/* fields */
+.field{display:flex;flex-direction:column;gap:6px}
+.field>label{font:600 10px/1 var(--mono);letter-spacing:.16em;text-transform:uppercase;color:var(--fg2)}
+.input{height:42px;padding:0 12px;border:1px solid var(--line2);border-radius:7px;background:var(--card);
+  color:var(--fg);font:14px var(--sans);width:100%}
+.input.mono{font:13px var(--mono)}
+.input:focus{outline:none;border-color:var(--brand);box-shadow:0 0 0 1px var(--brand)}
+.field .help{font:11px var(--mono);color:var(--fg3)}
+.field.err .input{border-color:var(--err);box-shadow:0 0 0 1px var(--err)}
+.field.err .help{color:var(--err)}
+
+/* cards, tables, tags */
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius-lg);box-shadow:var(--shadow)}
+.card-h{display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--line)}
+.card-b{padding:18px}
+.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{font:600 10px/1 var(--mono);letter-spacing:.14em;text-transform:uppercase;color:var(--fg2);
+  text-align:left;padding:10px 14px;border-bottom:1px solid var(--line)}
+.tbl td{padding:11px 14px;border-bottom:1px solid var(--line)}
+.tbl tr:last-child td{border-bottom:none}
+.tbl tbody tr:hover{background:var(--card2)}
+.tbl td.num{font:12.5px var(--mono)}
+.tbl .idx{font:11px var(--mono);color:var(--fg3)}
+.dot{width:6px;height:6px;border-radius:50%;display:inline-block}
+.dot.brand{background:var(--brand)}.dot.ok{background:var(--ok)}.dot.mut{background:var(--line2)}
+
+/* ── page: login ── */
+.auth{min-height:calc(100vh - 136px);display:grid;place-items:center}
+.auth-card{width:400px;max-width:100%;padding:32px}
+.auth-card h1{font-size:22px;letter-spacing:-.02em;margin:14px 0 2px}
+.auth-card .sub{color:var(--fg2);font-size:13px;margin-bottom:22px}
+.auth-row{display:flex;justify-content:space-between;align-items:center;margin:14px 0 18px}
+
+/* the widget (production contract, Mono Checksum skin) */
+.kw{border:1px solid var(--line2);border-radius:8px;padding:12px 14px;display:flex;gap:12px;background:var(--card);margin:18px 0}
+.kw .chip{width:30px;height:30px;border-radius:7px;background:var(--brand-tint);color:var(--brand);
+  display:grid;place-items:center;flex-shrink:0}
+.kw .body{flex:1;min-width:0}
+.kw .row1{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.kw .lbl{font-size:13px;font-weight:560}
+.kw .slots{display:flex;gap:3px;margin-top:7px}
+.kw .slots i{flex:1;height:4px;border-radius:2px;background:var(--track)}
+.kw .slots i:nth-child(5){background:var(--ok)}
+.kw .row3{display:flex;justify-content:space-between;margin-top:6px;
+  font:10.5px var(--mono);color:var(--fg2)}
+
+/* ── page: marketing ── */
+.mnav{display:flex;align-items:center;gap:22px;padding:14px 0}
+.mnav .logo{display:flex;align-items:center;gap:9px;font-weight:750;font-size:15px;letter-spacing:-.01em}
+.mnav .links{display:flex;gap:4px;margin-left:auto}
+.mnav a{font:600 11px var(--mono);letter-spacing:.06em;text-transform:uppercase;color:var(--fg2);
+  text-decoration:none;padding:7px 10px;border-radius:4px}
+.mnav a.on{background:var(--brand);color:#fff}
+.hero{padding:64px 0 40px;display:grid;grid-template-columns:1.1fr .9fr;gap:48px;align-items:center}
+.hero h1{font-size:52px;line-height:1.02;letter-spacing:-.03em;font-weight:750}
+.hero h1 em{font-style:normal;color:var(--brand)}
+.hero p{color:var(--fg2);font-size:16px;max-width:44ch;margin:18px 0 26px}
+.hero .ctas{display:flex;gap:12px}
+.ribbon{display:flex;gap:4px;margin-bottom:18px}
+.ribbon span{display:grid;place-items:center;min-width:24px;height:27px;padding:0 4px;border-radius:4px;
+  background:var(--card2);color:var(--fg2);font:700 12px var(--mono)}
+.ribbon span.m{background:var(--brand);color:#fff}
+.term{background:#101012;color:#e4e4e7;border:1px solid #27272a;border-radius:10px;overflow:hidden;font:12.5px/1.7 var(--mono)}
+.term .bar{display:flex;gap:6px;align-items:center;padding:9px 14px;border-bottom:1px solid #27272a;color:#71717a}
+.term .bar b{font-weight:600;letter-spacing:.1em;font-size:10px}
+.term pre{padding:18px;overflow-x:auto}
+.term .c{color:#5c5c66}.term .k{color:#f87171}.term .s{color:#34d399}
+.stats{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;background:var(--line);border:1px solid var(--line);border-radius:var(--radius-lg);overflow:hidden;margin:8px 0 56px}
+.stats>div{background:var(--card);padding:20px 22px}
+.stats .v{font:700 26px var(--mono);letter-spacing:-.02em;margin:6px 0 8px}
+.feat{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:20px 0 56px}
+.feat .card{padding:18px}
+.feat .tagrow{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.feat h3{font-size:15px;letter-spacing:-.01em;margin-bottom:6px}
+.feat p{color:var(--fg2);font-size:12.5px}
+.price{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin:20px 0 56px}
+.price .card{padding:22px;position:relative}
+.price .rec{outline:2px solid var(--brand);outline-offset:-1px}
+.price .amt{display:flex;gap:3px;align-items:baseline;margin:12px 0 4px}
+.price .amt b{display:grid;place-items:center;min-width:26px;height:33px;border-radius:5px;
+  font:700 22px var(--mono)}
+.price .amt .u{font:600 13px var(--sans);color:var(--fg2);margin-left:4px}
+.price ul{list-style:none;margin:14px 0 18px;display:grid;gap:8px}
+.price li{display:flex;gap:8px;font-size:12.5px;color:var(--fg2)}
+.price li::before{content:"✓";color:var(--ok);font-family:var(--mono);font-weight:700}
+.mfoot{border-top:1px solid var(--line);padding:28px 0;display:flex;gap:40px;align-items:flex-start;flex-wrap:wrap}
+
+/* ── page: app shell (console + cp) ── */
+.shell{display:grid;grid-template-columns:200px 1fr;gap:0;border:1px solid var(--line);border-radius:var(--radius-lg);
+  overflow:hidden;background:var(--card);min-height:640px}
+.rail{background:var(--card2);border-right:1px solid var(--line);padding:16px 10px;display:flex;flex-direction:column;gap:2px}
+.rail .rl{display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:5px;color:var(--fg2);
+  font:600 12.5px var(--sans);text-decoration:none}
+.rail .rl.on{background:var(--brand);color:#fff}
+.rail .rl .ix{font:700 10px var(--mono);opacity:.6;margin-left:auto}
+.rail .sect{margin:14px 10px 6px}
+.main{padding:22px 24px;min-width:0}
+.main h1{font-size:21px;letter-spacing:-.02em}
+.main .sub{color:var(--fg2);font-size:13px;margin:2px 0 18px}
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:18px}
+.kpi{border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+.kpi .v{font:700 22px var(--mono);letter-spacing:-.02em;margin:6px 0 8px}
+.kpi .d{font:10.5px var(--mono);color:var(--fg2)}
+.svc{display:flex;gap:5px;align-items:center;margin-bottom:18px;flex-wrap:wrap}
+.svc .klabel{margin-right:6px}
+.svc span.c{display:grid;place-items-center;min-width:36px;height:23px;padding:0 7px;border-radius:4px;
+  background:var(--track);color:var(--fg2);font:700 10px var(--mono)}
+.svc span.c.ok{background:var(--ok);color:#fff}
+.chart{display:flex;align-items:flex-end;gap:5px;height:110px;padding:8px 2px 0}
+.chart i{flex:1;background:var(--track);border-radius:2px 2px 0 0}
+.chart i.hi{background:var(--brand)}
+.chart-x{display:flex;justify-content:space-between;font:9.5px var(--mono);color:var(--fg3);padding-top:6px}
+.alert{display:flex;gap:10px;align-items:center;border:1px solid var(--line);border-radius:8px;padding:10px 14px;margin-bottom:8px;font-size:12.5px}
+.alert.fire{background:var(--brand);color:#fff;border-color:var(--brand)}
+.alert .t{flex:1}
+.flds{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.flds .full{grid-column:1/-1}
+
+/* tokens page */
+.tok{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:16px}
+.tok .card-b{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.swatch{width:100%;height:44px;border-radius:8px;display:flex;align-items:center;justify-content:center;
+  font:600 11px var(--mono);color:#fff}
+.type-row{display:flex;justify-content:space-between;align-items:baseline;gap:14px;padding:10px 0;border-bottom:1px solid var(--line)}
+.type-row:last-child{border:none}
+.type-row .ex{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+
+<div class="topbar" role="tablist">
+  <span class="brandchip">
+    <svg viewBox="0 0 64 64" width="20" height="20" fill="none" style="color:var(--brand)"><g stroke="currentColor" stroke-width="6.6" stroke-linecap="round" fill="none"><path d="M32 36.5 c0 -4 5.4 -4 5.4 0 c0 5.4 -8.1 6.8 -11 1.4 c-4.1 -6.8 2.7 -14.9 10.4 -13.5 c10.8 1.4 13.5 13.5 6.8 21.6 c-8.1 10.8 -25.7 8.1 -31.1 -5.4 c-5.4 -14.9 6.8 -29.7 23 -28.4"/></g><path d="M21 26 v-4 a11 11 0 0 1 22 0 v4" stroke="currentColor" stroke-width="6.6" stroke-linecap="round" fill="none"/></svg>
+    Unified language</span>
+  <button data-p="tokens" aria-selected="true">Element system</button>
+  <button data-p="login" aria-selected="false">Auth · login</button>
+  <button data-p="mkt" aria-selected="false">Marketing · home</button>
+  <button data-p="console" aria-selected="false">Console · dashboard</button>
+  <button data-p="form" aria-selected="false">Console · form</button>
+  <button data-p="cp" aria-selected="false">Control plane</button>
+  <span class="spacer"></span>
+  <button id="theme" class="mono">☾ dark</button>
+</div>
+
+<!-- ═══════════ 1 · ELEMENT SYSTEM ═══════════ -->
+<div class="page show" id="p-tokens"><div class="wrap">
+  <h1 style="font-size:24px;letter-spacing:-.02em">The element system</h1>
+  <p style="color:var(--fg2);margin:4px 0 22px;max-width:70ch">Every control in the platform, restyled to one grammar: sans for voice, mono for data; 1px zinc structure; the brand red reserved for the needle (the one solid thing that matters); radii 6/8/12; motion 150ms.</p>
+  <div class="tok">
+    <div class="card"><div class="card-h"><span class="klabel">buttons</span><span class="slot line">5×3 sizes</span></div><div class="card-b">
+      <button class="btn primary">Send message</button>
+      <button class="btn secondary">Save draft</button>
+      <button class="btn ghost">Cancel</button>
+      <button class="btn danger">Delete domain</button>
+      <button class="btn secondary mono">retry</button>
+      <button class="btn primary sm">View</button>
+      <button class="btn primary lg">Start free →</button>
+    </div></div>
+    <div class="card"><div class="card-h"><span class="klabel">inputs</span><span class="slot line">mono labels</span></div><div class="card-b" style="flex-direction:column;align-items:stretch">
+      <div class="field"><label>api key</label><input class="input mono" value="am_live_7f3a…9c2" readonly><span class="help">created 2026-09-06 · rotates 90d</span></div>
+      <div class="field"><label>from address</label><input class="input" placeholder="hello@yourcompany.com"></div>
+      <div class="field err"><label>webhook url</label><input class="input mono" value="htp://bad"><span class="help">must be https</span></div>
+    </div></div>
+    <div class="card"><div class="card-h"><span class="klabel">slots · status</span><span class="slot line">the motif</span></div><div class="card-b">
+      <span class="slot">idle</span><span class="slot brand">solving</span><span class="slot ok">verified</span><span class="slot err">failed</span>
+      <span class="slot line">0x41f2</span><span class="slot ok">delivered</span><span class="slot">queued</span>
+      <div style="width:100%;display:flex;gap:10px;margin-top:6px"><span class="klabel">needle</span><span class="dot brand"></span><span class="dot ok"></span><span class="dot mut"></span></div>
+    </div></div>
+    <div class="card"><div class="card-h"><span class="klabel">meters · receipt</span><span class="slot line">data voice</span></div><div class="card-b" style="flex-direction:column;align-items:stretch;gap:10px">
+      <div><div style="display:flex;justify-content:space-between" class="klabel"><span>sends</span><span>12.4k/50k</span></div><div class="meter" style="margin-top:6px"><i style="width:25%"></i></div></div>
+      <div><div style="display:flex;justify-content:space-between" class="klabel"><span>api</span><span>1.2m/5m</span></div><div class="meter ok" style="margin-top:6px"><i style="width:24%"></i></div></div>
+      <div class="receipt"><span class="ok">✓</span> challenge issued<br><span class="ok">✓</span> work done · 1.8s<br><span class="on">…</span> proof pending</div>
+    </div></div>
+    <div class="card"><div class="card-h"><span class="klabel">typography</span><span class="slot line">two voices</span></div><div class="card-b" style="flex-direction:column;align-items:stretch">
+      <div class="type-row"><span style="font-size:26px;font-weight:750;letter-spacing:-.03em">Display 26</span><span class="klabel">sans · voice</span></div>
+      <div class="type-row"><span style="font-size:15px;font-weight:600">Body strong 15</span><span class="klabel">sans</span></div>
+      <div class="type-row"><span style="font-size:13px;color:var(--fg2)">Body 13 — explanations, help</span><span class="klabel">sans</span></div>
+      <div class="type-row"><span style="font:700 22px var(--mono);letter-spacing:-.02em">0x41F2 · 48,201</span><span class="klabel">mono · data</span></div>
+      <div class="type-row"><span class="klabel" style="font-size:11px">MICRO LABEL 11</span><span class="klabel">mono caps</span></div>
+    </div></div>
+    <div class="card"><div class="card-h"><span class="klabel">palette</span><span class="slot line">unchanged</span></div><div class="card-b" style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div class="swatch" style="background:#dc2626">brand 600</div>
+      <div class="swatch" style="background:#059669">success</div>
+      <div class="swatch" style="background:#18181b;border:1px solid var(--line)">ink</div>
+      <div class="swatch" style="background:#e4e4e7;color:#18181b">zinc line</div>
+    </div></div>
+  </div>
+</div></div>
+
+<!-- ═══════════ 2 · AUTH ═══════════ -->
+<div class="page" id="p-login"><div class="wrap"><div class="auth">
+  <div class="auth-card card">
+    <div style="display:flex;gap:8px;align-items:center">
+      <svg viewBox="0 0 64 64" width="26" height="26" fill="none" style="color:var(--brand)"><g stroke="currentColor" stroke-width="6.6" stroke-linecap="round" fill="none"><path d="M32 36.5 c0 -4 5.4 -4 5.4 0 c0 5.4 -8.1 6.8 -11 1.4 c-4.1 -6.8 2.7 -14.9 10.4 -13.5 c10.8 1.4 13.5 13.5 6.8 21.6 c-8.1 10.8 -25.7 8.1 -31.1 -5.4 c-5.4 -14.9 6.8 -29.7 23 -28.4"/></g><path d="M21 26 v-4 a11 11 0 0 1 22 0 v4" stroke="currentColor" stroke-width="6.6" stroke-linecap="round" fill="none"/></svg>
+      <span class="klabel">apexmail · console</span>
+    </div>
+    <h1>Welcome back</h1>
+    <p class="sub">Sign in to your ApexMail account.</p>
+    <div style="display:grid;gap:14px">
+      <div class="field"><label>email</label><input class="input" placeholder="you@example.com"></div>
+      <div class="field"><label>password</label><input class="input" type="password" placeholder="••••••••"></div>
+    </div>
+    <div class="kw" role="group" aria-label="Security check">
+      <span class="chip"><svg viewBox="0 0 64 64" width="18" height="18" fill="none"><g stroke="currentColor" stroke-width="6.6" stroke-linecap="round" fill="none"><path d="M32 36.5 c0 -4 5.4 -4 5.4 0 c0 5.4 -8.1 6.8 -11 1.4 c-4.1 -6.8 2.7 -14.9 10.4 -13.5 c10.8 1.4 13.5 13.5 6.8 21.6 c-8.1 10.8 -25.7 8.1 -31.1 -5.4 c-5.4 -14.9 6.8 -29.7 23 -28.4"/></g><path d="M21 26 v-4 a11 11 0 0 1 22 0 v4" stroke="currentColor" stroke-width="6.6" stroke-linecap="round" fill="none"/></svg></span>
+      <span class="body">
+        <span class="row1"><span class="lbl">Security check</span><span class="slot ok">verified</span></span>
+        <span class="slots"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></span>
+        <span class="row3"><span>proof 0x0042 accepted · 1.8s</span><span></span></span>
+      </span>
+    </div>
+    <div class="auth-row">
+      <label style="display:flex;gap:8px;align-items:center;font-size:12.5px;color:var(--fg2)"><input type="checkbox" checked> Keep me signed in</label>
+      <a href="#" style="font:600 12px var(--sans);color:var(--brand);text-decoration:none">Forgot password?</a>
+    </div>
+    <button class="btn primary lg" style="width:100%">Sign in</button>
+    <p style="text-align:center;font-size:12.5px;color:var(--fg2);margin-top:16px">No account? <a href="#" style="color:var(--brand);font-weight:600;text-decoration:none">Sign up</a></p>
+  </div>
+</div></div></div>
+
+<!-- ═══════════ 3 · MARKETING HOME ═══════════ -->
+<div class="page" id="p-mkt"><div class="wrap">
+  <nav class="mnav">
+    <span class="logo"><svg viewBox="0 0 64 64" width="24" height="24" fill="none" style="color:var(--brand)"><rect width="64" height="64" rx="14" fill="#f8fafc" opacity="0"/><path d="M14 22 L32 50 L50 22 L42 22 L32 38 L22 22 Z" fill="currentColor"/></svg>ApexMail</span>
+    <div class="links"><a href="#">features</a><a class="on" href="#">pricing</a><a href="#">docs</a><a href="#">compare</a><a href="#">status</a></div>
+    <button class="btn primary sm">Sign up</button>
+  </nav>
+  <div class="hair"></div>
+  <section class="hero">
+    <div>
+      <div class="ribbon" aria-hidden="true"><span>A</span><span>P</span><span>E</span><span>X</span><span class="m">M</span><span>A</span><span>I</span><span>L</span></div>
+      <h1>The email API,<br>built for <em>proof.</em></h1>
+      <p>Transactional email with signed proof of delivery on every message. EEA-hosted, GDPR-oriented, no puzzles.</p>
+      <div class="ctas"><button class="btn primary lg">Start free →</button><button class="btn secondary lg">Open API explorer</button></div>
+    </div>
+    <div class="term">
+      <div class="bar"><span style="width:9px;height:9px;border-radius:50%;background:#3f3f46"></span><span style="width:9px;height:9px;border-radius:50%;background:#3f3f46"></span><span style="width:9px;height:9px;border-radius:50%;background:#3f3f46"></span><b style="margin-left:8px">POST /v1/messages</b></div>
+<pre><span class="c">// signed proof on every send</span>
+<span class="k">await</span> apex.messages.create({
+  from: <span class="s">'hello@yourcompany.com'</span>,
+  to: <span class="s">'customer@example.com'</span>,
+  proof: <span class="k">true</span>
+});
+<span class="c">→ 202 accepted · proof 0x41f2</span>
+<span class="c">→ delivered ✓ 1.8s · eeu</span></pre>
+    </div>
+  </section>
+  <div class="stats">
+    <div><span class="klabel">uptime · 12mo</span><div class="v">99.9<span style="color:var(--fg3)">%</span></div><div class="meter ok"><i style="width:99%"></i></div></div>
+    <div><span class="klabel">median delivery</span><div class="v">1.8<span style="color:var(--fg3)">s</span></div><div class="meter"><i style="width:62%"></i></div></div>
+    <div><span class="klabel">messages / month</span><div class="v">5.2<span style="color:var(--fg3)">m</span></div><div class="meter"><i style="width:78%"></i></div></div>
+  </div>
+  <span class="klabel">§ features</span>
+  <div class="feat">
+    <div class="card"><div class="tagrow"><span class="klabel" style="color:var(--brand)">01</span><span style="display:flex;gap:2px"><span class="slot" style="min-width:14px;height:17px;font-size:9px">A1</span><span class="slot" style="min-width:14px;height:17px;font-size:9px">F2</span></span></div><h3>Delivery API</h3><p>One call, signed proof of work per send. Idempotent, replay-safe, honest status codes.</p></div>
+    <div class="card"><div class="tagrow"><span class="klabel" style="color:var(--brand)">02</span><span style="display:flex;gap:2px"><span class="slot" style="min-width:14px;height:17px;font-size:9px">B4</span><span class="slot" style="min-width:14px;height:17px;font-size:9px">C7</span></span></div><h3>Warmup & reputation</h3><p>Automated IP warmup with per-ISP pacing. Your sender reputation, defended while you sleep.</p></div>
+    <div class="card"><div class="tagrow"><span class="klabel" style="color:var(--brand)">03</span><span style="display:flex;gap:2px"><span class="slot" style="min-width:14px;height:17px;font-size:9px">D9</span><span class="slot" style="min-width:14px;height:17px;font-size:9px">E1</span></span></div><h3>Proof receipts</h3><p>Every message closes with a hash-chained receipt — challenge, work, delivery. Exportable.</p></div>
+  </div>
+  <span class="klabel">§ pricing</span>
+  <div class="price">
+    <div class="card"><span class="klabel">free</span><div class="amt"><b>0</b><span class="u">€ / mo</span></div><ul><li>30,000 emails</li><li>7-day retention</li><li>Community support</li></ul><button class="btn secondary" style="width:100%">Start free</button></div>
+    <div class="card rec"><span class="klabel" style="color:var(--brand)">pro · most verified</span><div class="amt"><b style="background:var(--brand);color:#fff">6</b><b style="background:var(--brand);color:#fff">5</b><span class="u">€ / mo</span></div><ul><li>150,000 emails</li><li>60-day retention</li><li>Warmup automation</li></ul><button class="btn primary" style="width:100%">Choose Pro</button></div>
+    <div class="card"><span class="klabel">scale</span><div class="amt"><b>3</b><b>5</b><b>0</b><span class="u">€ / mo</span></div><ul><li>2,000,000 emails</li><li>365-day retention</li><li>Dedicated IP · SSO</li></ul><button class="btn secondary" style="width:100%">Choose Scale</button></div>
+  </div>
+  <div class="mfoot">
+    <div style="display:flex;flex-direction:column;gap:6px">
+      <span style="font-weight:750">ApexMail</span>
+      <span class="klabel">eeu-hosted · est. 2025</span>
+    </div>
+    <div class="receipt"><span class="ok">✓</span> challenge issued<br><span class="ok">✓</span> work done · fi/de<br><span class="ok">✓</span> proof — every message</div>
+    <div style="margin-left:auto;display:flex;gap:18px" class="klabel"><a href="#" style="color:var(--fg2);text-decoration:none">terms</a><a href="#" style="color:var(--fg2);text-decoration:none">privacy</a><a href="#" style="color:var(--fg2);text-decoration:none">status</a></div>
+  </div>
+</div></div>
+
+<!-- ═══════════ 4 · CONSOLE DASHBOARD ═══════════ -->
+<div class="page" id="p-console"><div class="wrap">
+<div class="shell">
+  <aside class="rail">
+    <div style="display:flex;align-items:center;gap:8px;padding:4px 10px 14px">
+      <svg viewBox="0 0 64 64" width="20" height="20" fill="none" style="color:var(--brand)"><g stroke="currentColor" stroke-width="6.6" stroke-linecap="round" fill="none"><path d="M32 36.5 c0 -4 5.4 -4 5.4 0 c0 5.4 -8.1 6.8 -11 1.4 c-4.1 -6.8 2.7 -14.9 10.4 -13.5 c10.8 1.4 13.5 13.5 6.8 21.6 c-8.1 10.8 -25.7 8.1 -31.1 -5.4 c-5.4 -14.9 6.8 -29.7 23 -28.4"/></g><path d="M21 26 v-4 a11 11 0 0 1 22 0 v4" stroke="currentColor" stroke-width="6.6" stroke-linecap="round" fill="none"/></svg>
+      <span style="font-weight:750;font-size:13.5px">ApexMail</span></div>
+    <span class="klabel sect">workspace</span>
+    <a class="rl on" href="#">Dashboard <span class="ix">0x01</span></a>
+    <a class="rl" href="#">Messages <span class="ix">0x02</span></a>
+    <a class="rl" href="#">Campaigns <span class="ix">0x03</span></a>
+    <a class="rl" href="#">Contacts <span class="ix">0x04</span></a>
+    <a class="rl" href="#">Domains <span class="ix">0x05</span></a>
+    <span class="klabel sect">account</span>
+    <a class="rl" href="#">Billing <span class="ix">0x06</span></a>
+    <a class="rl" href="#">Settings <span class="ix">0x07</span></a>
+  </aside>
+  <main class="main">
+    <h1>Overview</h1>
+    <p class="sub">Monitor campaign performance and delivery health.</p>
+    <div class="kpis">
+      <div class="kpi"><span class="klabel">sends · month</span><div class="v">12,431</div><div class="meter"><i style="width:25%"></i></div><div class="d">/ 50,000 · pro</div></div>
+      <div class="kpi"><span class="klabel">delivered · 30d</span><div class="v">98.9%</div><div class="meter ok"><i style="width:98%"></i></div><div class="d">inbox placement 96.2%</div></div>
+      <div class="kpi"><span class="klabel">api · month</span><div class="v">1.21m</div><div class="meter"><i style="width:24%"></i></div><div class="d">/ 5m requests</div></div>
+    </div>
+    <div class="card" style="margin-bottom:18px">
+      <div class="card-h"><span class="klabel">send volume · 14 days</span><span class="slot line" style="font-size:9px">live</span></div>
+      <div class="card-b">
+        <div class="chart"><i style="height:22%"></i><i style="height:38%"></i><i style="height:30%"></i><i style="height:55%"></i><i style="height:44%"></i><i class="hi" style="height:82%"></i><i style="height:60%"></i><i style="height:48%"></i><i style="height:66%"></i><i style="height:58%"></i><i style="height:74%"></i><i class="hi" style="height:92%"></i><i style="height:70%"></i><i style="height:64%"></i></div>
+        <div class="chart-x"><span>aug 23</span><span>aug 30</span><span>sep 6</span></div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-h"><span class="klabel">recent messages</span><button class="btn ghost sm">View all →</button></div>
+      <table class="tbl">
+        <thead><tr><th></th><th>subject</th><th>recipient</th><th>status</th><th style="text-align:right">sent</th></tr></thead>
+        <tbody>
+          <tr><td><span class="dot brand"></span></td><td>Invoice #204 — Acme</td><td class="num">billing@acme.com</td><td><span class="slot brand">opened</span></td><td class="num" style="text-align:right">21:02</td></tr>
+          <tr><td><span class="dot mut"></span></td><td>Welcome v2</td><td class="num">grace@hopper.dev</td><td><span class="slot ok">delivered</span></td><td class="num" style="text-align:right">20:44</td></tr>
+          <tr><td><span class="dot mut"></span></td><td>Password reset</td><td class="num">bob@initech.io</td><td><span class="slot err">bounced</span></td><td class="num" style="text-align:right">19:58</td></tr>
+          <tr><td><span class="dot mut"></span></td><td>Trial ending soon</td><td class="num">sam@ Globex co</td><td><span class="slot">queued</span></td><td class="num" style="text-align:right">19:31</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </main>
+</div>
+</div></div>
+
+<!-- ═══════════ 5 · CONSOLE FORM ═══════════ -->
+<div class="page" id="p-form"><div class="wrap">
+<div class="shell">
+  <aside class="rail">
+    <div style="display:flex;align-items:center;gap:8px;padding:4px 10px 14px">
+      <svg viewBox="0 0 64 64" width="20" height="20" fill="none" style="color:var(--brand)"><g stroke="currentColor" stroke-width="6.6" stroke-linecap="round" fill="none"><path d="M32 36.5 c0 -4 5.4 -4 5.4 0 c0 5.4 -8.1 6.8 -11 1.4 c-4.1 -6.8 2.7 -14.9 10.4 -13.5 c10.8 1.4 13.5 13.5 6.8 21.6 c-8.1 10.8 -25.7 8.1 -31.1 -5.4 c-5.4 -14.9 6.8 -29.7 23 -28.4"/></g><path d="M21 26 v-4 a11 11 0 0 1 22 0 v4" stroke="currentColor" stroke-width="6.6" stroke-linecap="round" fill="none"/></svg>
+      <span style="font-weight:750;font-size:13.5px">ApexMail</span></div>
+    <span class="klabel sect">workspace</span>
+    <a class="rl" href="#">Dashboard <span class="ix">0x01</span></a>
+    <a class="rl" href="#">Messages <span class="ix">0x02</span></a>
+    <a class="rl on" href="#">Campaigns <span class="ix">0x03</span></a>
+    <a class="rl" href="#">Contacts <span class="ix">0x04</span></a>
+    <a class="rl" href="#">Domains <span class="ix">0x05</span></a>
+  </aside>
+  <main class="main">
+    <h1>New campaign</h1>
+    <p class="sub">Compose the message, pick the audience, prove the send.</p>
+    <div class="card"><div class="card-b">
+      <div class="flds">
+        <div class="field full"><label>subject</label><input class="input" value="Welcome to Acme — let's get started"></div>
+        <div class="field"><label>from · verified</label><input class="input mono" value="hello@acme.com" readonly></div>
+        <div class="field"><label>reply-to</label><input class="input mono" placeholder="support@acme.com"></div>
+        <div class="field full"><label>recipients · list</label>
+          <div style="display:flex;gap:4px;flex-wrap:wrap;padding:8px;border:1px solid var(--line2);border-radius:7px;background:var(--card)">
+            <span class="slot">newsletter · 4,812</span><span class="slot">trial-users · 214</span><span class="slot brand">+ add list</span>
+          </div><span class="help">5,026 recipients · deduplicated</span></div>
+        <div class="field full"><label>tags</label>
+          <div style="display:flex;gap:4px"><span class="slot">welcome</span><span class="slot ok">v2</span><span class="slot line">+ tag</span></div></div>
+        <div class="field full"><label>body · html</label>
+          <div class="term" style="border-radius:7px"><pre style="padding:12px">&lt;h1&gt;Welcome aboard&lt;/h1&gt;
+&lt;p&gt;Your workspace is ready…</pre></div></div>
+      </div>
+      <div style="display:flex;gap:10px;margin-top:20px;align-items:center">
+        <button class="btn primary">Send campaign</button>
+        <button class="btn secondary">Save draft</button>
+        <span class="receipt" style="margin-left:auto"><span class="ok">✓</span> recipients verified · <span class="on">…</span> content check</span>
+      </div>
+    </div></div>
+  </main>
+</div>
+</div></div>
+
+<!-- ═══════════ 6 · CONTROL PLANE ═══════════ -->
+<div class="page" id="p-cp"><div class="wrap">
+<div class="shell" style="grid-template-columns:190px 1fr">
+  <aside class="rail">
+    <div style="display:flex;align-items:center;gap:8px;padding:4px 10px 14px">
+      <svg viewBox="0 0 64 64" width="20" height="20" fill="none" style="color:var(--brand)"><g stroke="currentColor" stroke-width="6.6" stroke-linecap="round" fill="none"><path d="M32 36.5 c0 -4 5.4 -4 5.4 0 c0 5.4 -8.1 6.8 -11 1.4 c-4.1 -6.8 2.7 -14.9 10.4 -13.5 c10.8 1.4 13.5 13.5 6.8 21.6 c-8.1 10.8 -25.7 8.1 -31.1 -5.4 c-5.4 -14.9 6.8 -29.7 23 -28.4"/></g><path d="M21 26 v-4 a11 11 0 0 1 22 0 v4" stroke="currentColor" stroke-width="6.6" stroke-linecap="round" fill="none"/></svg>
+      <span style="font-weight:750;font-size:13.5px">Control plane</span></div>
+    <span class="klabel sect">operations</span>
+    <a class="rl on" href="#">System overview <span class="ix">0x01</span></a>
+    <a class="rl" href="#">Tenants <span class="ix">0x02</span></a>
+    <a class="rl" href="#">Audit <span class="ix">0x03</span></a>
+    <a class="rl" href="#">Alerts <span class="ix">0x04</span></a>
+    <a class="rl" href="#">Revenue <span class="ix">0x05</span></a>
+  </aside>
+  <main class="main">
+    <h1>System overview</h1>
+    <p class="sub">Fleet health, tenant activity, and system performance.</p>
+    <div class="svc" aria-label="Platform services">
+      <span class="klabel">services</span>
+      <span class="c">api</span><span class="c">mta</span><span class="c">imap</span><span class="c">worker</span><span class="c">queue</span><span class="c">billing</span><span class="c ok">all nominal</span>
+    </div>
+    <div class="kpis">
+      <div class="kpi"><span class="klabel">0xA1 · active tenants</span><div class="v">48,201</div><div class="meter ok"><i style="width:88%"></i></div><div class="d">+312 this week</div></div>
+      <div class="kpi"><span class="klabel">0xB2 · queue depth</span><div class="v">1,204</div><div class="meter"><i style="width:18%"></i></div><div class="d">drain 96/s</div></div>
+      <div class="kpi"><span class="klabel">0xC3 · alerts</span><div class="v" style="color:var(--brand)">2</div><div class="meter" ><i style="width:4%;background:var(--brand)"></i></div><div class="d" style="color:var(--brand)">1 firing · 1 ack</div></div>
+    </div>
+    <div style="display:grid;grid-template-columns:1.4fr 1fr;gap:16px">
+      <div class="card">
+        <div class="card-h"><span class="klabel">tenants · ledger</span><button class="btn ghost sm">All tenants →</button></div>
+        <table class="tbl">
+          <thead><tr><th>idx</th><th>tenant</th><th>plan</th><th>state</th><th style="text-align:right">volume</th></tr></thead>
+          <tbody>
+            <tr><td class="idx">0x01</td><td>acme</td><td><span class="slot">scale</span></td><td><span class="slot ok">active</span></td><td class="num" style="text-align:right">412k</td></tr>
+            <tr style="background:var(--brand);color:#fff"><td class="idx" style="color:rgba(255,255,255,.6)">0x02</td><td>initech</td><td><span class="slot" style="background:rgba(255,255,255,.2);color:#fff">pro</span></td><td><span class="slot" style="background:#fff;color:var(--brand)">suspended</span></td><td class="num" style="text-align:right">88</td></tr>
+            <tr><td class="idx">0x03</td><td>globex</td><td><span class="slot">free</span></td><td><span class="slot">trial</span></td><td class="num" style="text-align:right">12k</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="card">
+        <div class="card-h"><span class="klabel">alerts · needle</span></div>
+        <div class="card-b" style="padding:12px 14px">
+          <div class="alert fire"><span class="t">MTA europe — queue drain below SLO</span><span class="klabel" style="color:#fff">firing</span></div>
+          <div class="alert"><span class="t">TLS cert · smtp — renews in 12d</span><span class="klabel">ok</span></div>
+          <div class="alert"><span class="t">ClickHouse backup — verified 03:00</span><span class="klabel">ok</span></div>
+          <div class="receipt" style="margin-top:10px"><span class="ok">✓</span> 2026-09-06 03:00 nightly audit<br><span class="ok">✓</span> hash-chain intact · 0x9f3<br><span class="on">…</span> replication pending</div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+</div></div>
+
+<script>
+document.querySelectorAll('[data-p]').forEach(b=>b.onclick=()=>{
+  document.querySelectorAll('[data-p]').forEach(x=>x.setAttribute('aria-selected', String(x===b)));
+  document.querySelectorAll('.page').forEach(p=>p.classList.toggle('show', p.id==='p-'+b.dataset.p));
+  window.scrollTo({top:0});
+});
+const t=document.getElementById('theme');
+t.onclick=()=>{document.body.classList.toggle('dark');t.textContent=document.body.classList.contains('dark')?'☀ light':'☾ dark';};
+</script>
+</body>
+</html>
