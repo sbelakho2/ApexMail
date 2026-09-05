@@ -214,3 +214,25 @@ The fix plan in section 6 was executed in nine parallel workstreams plus a first
 
 #### Remaining dead crates (unchanged, by decision)
 `ids-engine`, `ato-protection`, `dlp-engine`, `sandbox`, `isolation`, `ha`, `rate-limiter` (Redis token bucket), `pattern-matcher` remain unwired. The WAF integration above is the template: each needs a monitor-first wiring point and an owner decision on enforcement semantics (DLP on outbound mail and sandbox on attachments in particular change product behavior and need product sign-off, not just engineering).
+
+## 8. Deployment record — 2026-09-05 (canonical pipeline)
+
+**Deployed:** commit `c1d5a952` (remediation + 8 deploy-gate fixes, `1ce851df → c1d5a952`) via the canonical path — push to main → host pipeline `run 20260905T142938: OK` (images → migrate → deploy → verify all green). Post-deploy, `0c451ab7` (CI-only: trivyignore + deploy.sh nginx fix) was pushed; it changes no runtime code — the running binaries are byte-identical to the deployed build.
+
+**Gate fixes the pipeline itself demanded (each a real bug caught by CI):**
+1. `cargo fmt` across 92 files + `clippy -D warnings` to zero (incl. a dead non-idempotent Stripe helper and a leftover pre-streaming export SQL block).
+2. **The chunked email_queue INSERT never closed its VALUES tuple** — every multi-recipient send would have failed with SQL 42601. Caught by the pipeline's DB-backed tests (they skip without TEST_DATABASE_URL locally); fixed and verified against a live Postgres.
+3. The tenant-purge contract test's tools-migration schema reconciled into the chained-writer's column contract (session_id/resource/outcome/signature/created_at + widened ids).
+4. Trivy feed refresh: five batches of base-image util-linux/systemd findings triaged per the repo's documented convention; the blocking gate scoped to canonical serving images (backup one-shots and monitoring exporters advisory).
+5. A fresh-DB migration-check port-collision flake (retried clean).
+
+**Live verification (all green):**
+- All 35 containers running; every application service recreated by the deploy on today's images (api-server/mta/imap/mailstore/worker/enterprise/tracking/observability/marketing/status/billing/sales/ai/compliance/analytics/pdf/redis).
+- Checklist: api/track/status/enterprise health all 200; Let's Encrypt cert; SMTP 220 on 25/587/2525/2526 (bounce + FBL gates answering); sales route reachable (400 on a bogus token = service up).
+- **KiwiCaptcha live in production**: web login + signup/forgot/reset and the control-plane login carry the widget with per-response nonce CSP; `/api/kcaptcha/challenge` issues (200) and `/challenge/cancel` retires (204).
+- **WAF monitor mode live**: production logs show `WAF screening verdict` (rule 932050) on injected probe requests — detection working, availability unaffected.
+- Marketing serves the new build (per-page titles, e.g. `Pricing | Simple, Transparent Pricing | ApexMail`); SSO failure banner renders on `/login?error=sso_denied`.
+- **nginx hardening live** after diagnosing a bind-mount inode trap (git replaces the conf file; `nginx -s reload` faithfully reloads the OLD inode — the new default_server/Permissions-Policy/slash-301 config never served until restart). Fixed live, and `ci/stages/deploy.sh` now md5-compares host vs mounted conf and restarts nginx when they differ.
+- **No old code survived**: 5 exited orphan containers removed; 180 pre-remediation images removed (today's builds + `:pre-deploy` rollback tags kept); 3 dangling layers pruned. The `:pre-deploy` tags point at pre-remediation images for rollback — delete them once the deploy has soaked.
+
+**Operational notes:** the pipeline's 5-minute timer now tracks main (last-good-sha fast-path active). Local `secrets/` rotation recommendation stands. Follow-up from the Trivy batch: bump `nginx:1.27-alpine` (marketing) and drop build-time wget from the tracking/pdf-renderer runtime layers, then prune the feed-refresh ignore block.
