@@ -655,6 +655,12 @@ video {
   --radius-lg: 12px;
   --radius-xl: 16px;
   --radius-full: 9999px;
+  /* Spiral-Lock DNA (v2, 2026-09-06): ARCH — the shackle crown; every
+       container arches at the top. POINT — meters/dials terminate in the
+       found nonce. CONCENTRIC — focus/selection are the spiral's arms. */
+  --radius-arch-lg: 16px 16px 9px 9px;
+  --radius-arch: 9px 9px 7px 7px;
+  --radius-arch-btn: 8px 8px 7px 7px;
 }
 
 .dark {
@@ -803,7 +809,6 @@ a {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: var(--radius-md);
   --tw-bg-opacity: 1;
   background-color: rgb(var(--primary) / var(--tw-bg-opacity, 1));
   padding-left: 1.25rem;
@@ -820,6 +825,8 @@ a {
   transition-duration: 200ms;
   transition-timing-function: cubic-bezier(0.23, 1, 0.32, 1);
   letter-spacing: 0;
+  /* ARCH (mark DNA): the shackle crown on every primary action. */
+  border-radius: var(--radius-arch-btn);
 }
 
 .btn-primary:hover {
@@ -829,7 +836,6 @@ a {
 }
 
 .apex-card {
-  border-radius: var(--radius-lg);
   border-width: 1px;
   --tw-border-opacity: 1;
   border-color: rgb(var(--surface-200) / var(--tw-border-opacity, 1));
@@ -853,6 +859,11 @@ a {
   /* AA dark-mode steps (media-query twin of the .dark block above). */
 
   /* Eyebrows: brand-600 on near-black is 4.1:1 in dark — brand-400 (media twin). */
+}
+
+.apex-card {
+  border-radius: var(--radius-arch-lg);
+  /* ARCH (mark DNA) */
 }
 
 .apex-card:hover {
@@ -922,7 +933,12 @@ a {
   .apex-cp-shell textarea:focus,
   .apex-cp-shell select:focus {
   border-color: rgb(var(--primary));
-  box-shadow: 0 0 0 3px rgb(var(--primary) / 0.12);
+  /* CONCENTRIC (mark DNA): the spiral's two arms — inner solid ring,
+       outer hairline ring separated by the surface. */
+  box-shadow:
+      0 0 0 1px rgb(var(--primary)),
+      0 0 0 4px rgb(var(--card)),
+      0 0 0 5px rgb(var(--border));
 }
 
 /* Sidebars are white (reference design) — NOT dark. Cool hairline border on
@@ -2133,6 +2149,10 @@ input:user-invalid:focus-visible,
   display: grid;
 }
 
+.inline-grid {
+  display: inline-grid;
+}
+
 .contents {
   display: contents;
 }
@@ -2219,6 +2239,10 @@ input:user-invalid:focus-visible,
 
 .h-9 {
   height: 2.25rem;
+}
+
+.h-\[22px\] {
+  height: 22px;
 }
 
 .h-\[calc\(100\%-2rem\)\] {
@@ -2407,6 +2431,10 @@ input:user-invalid:focus-visible,
 
 .min-w-\[220px\] {
   min-width: 220px;
+}
+
+.min-w-\[34px\] {
+  min-width: 34px;
 }
 
 .min-w-\[44px\] {
@@ -2658,6 +2686,10 @@ input:user-invalid:focus-visible,
 
 .flex-wrap {
   flex-wrap: wrap;
+}
+
+.place-items-center {
+  place-items: center;
 }
 
 .items-start {
@@ -3902,8 +3934,16 @@ input:user-invalid:focus-visible,
   letter-spacing: 0.01em;
 }
 
+.tracking-\[0\.08em\] {
+  letter-spacing: 0.08em;
+}
+
 .tracking-\[0\.12em\] {
   letter-spacing: 0.12em;
+}
+
+.tracking-\[0\.14em\] {
+  letter-spacing: 0.14em;
 }
 
 .tracking-\[0\.16em\] {
@@ -5405,6 +5445,165 @@ input::placeholder,
   font-style: italic;
 
   font-display: swap;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   SPIRAL-LOCK DNA — v2 component layer (2026-09-06)
+   The mark as the generative idea (inspiration only, never stamped):
+   ARCH (shackle crown radii) · SPIRAL (arc section markers, winding
+   receipts) · MONOLINE (1px structure / 2px emphasis / 3px data,
+   round caps) · POINT (meters/dials/charts end in the found nonce)
+   · CONCENTRIC (focus/selection as double rings).
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* CONCENTRIC selection: the active nav cell is solid + an outer ring. */
+
+.apex-nav-cell {
+  position: relative;
+  border-radius: 7px;
+}
+
+.apex-nav-cell.is-active {
+  box-shadow: 0 0 0 1px rgb(var(--card)), 0 0 0 2.5px rgb(var(--primary));
+}
+
+/* POINT meters: a terminal dot rides the fill at its leading edge. */
+
+.apex-meter {
+  position: relative;
+  height: 2px;
+  background: rgb(var(--muted));
+  border-radius: 2px;
+  overflow: visible;
+}
+
+.apex-meter > .apex-meter-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  background: rgb(var(--primary));
+  border-radius: 2px;
+}
+
+.apex-meter.is-ok > .apex-meter-fill {
+  background: rgb(var(--success));
+}
+
+.apex-meter > .apex-meter-point {
+  position: absolute;
+  top: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: rgb(var(--primary));
+  border: 2px solid rgb(var(--card));
+  transform: translate(-50%, -50%);
+}
+
+.apex-meter.is-ok > .apex-meter-point {
+  background: rgb(var(--success));
+}
+
+/* MONOLINE chart strokes: 3px round-cap bars (data = strokes, not fills). */
+
+.apex-chart-monoline .apex-bar {
+  width: 3px;
+  border-radius: 3px;
+  background: rgb(var(--border));
+}
+
+.apex-chart-monoline .apex-bar.is-peak {
+  background: rgb(var(--primary));
+}
+
+.apex-chart-monoline .apex-peak-point {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: rgb(var(--primary));
+}
+
+/* KLABEL with the shackle arc (SPIRAL DNA): inline-flex + gap set by the
+   caller; the arc is a 10px svg with class apex-arc. */
+
+.apex-klabel {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: rgb(var(--muted-foreground));
+}
+
+.apex-arc {
+  color: rgb(var(--primary));
+  flex-shrink: 0;
+}
+
+/* WINDING receipts: arc markers rotate stepwise down the rows. */
+
+.apex-receipt {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px;
+  line-height: 2.1;
+  color: rgb(var(--muted-foreground));
+}
+
+.apex-receipt > div {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.apex-receipt .apex-r-arc {
+  flex-shrink: 0;
+}
+
+.apex-receipt .ok {
+  color: rgb(var(--success));
+  font-weight: 700;
+}
+
+.apex-receipt .on {
+  color: rgb(var(--primary));
+  font-weight: 700;
+}
+
+/* ARCH on inputs/auth fields (the crown at the top of every field). */
+
+.apex-input {
+  border-radius: 9px 9px 7px 7px;
+}
+
+.apex-input:focus,
+.apex-input:focus-visible {
+  outline: none;
+  border-color: rgb(var(--primary));
+  box-shadow:
+    0 0 0 1px rgb(var(--primary)),
+    0 0 0 4px rgb(var(--card)),
+    0 0 0 5px rgb(var(--border));
+}
+
+/* DIAL (mark-native radial KPI): the SVG carries track + arc + terminal;
+   this positions and typesets the value over it. */
+
+.apex-dial {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+}
+
+.apex-dial .apex-dial-val {
+  position: absolute;
+  text-align: center;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 700;
+  letter-spacing: -0.02em;
 }
 
 .file\:border-0::file-selector-button {

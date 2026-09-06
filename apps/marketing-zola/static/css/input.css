@@ -1508,3 +1508,33 @@ header a[aria-current="page"] {
   color: var(--surface-500, #71717a);
 }
 .k-receipt .ok { color: var(--brand-500, #dc2626); font-weight: 600; }
+
+
+/* ── Spiral-Lock DNA v2 (2026-09-06) — the mark's geometry, platform-wide ── */
+:root {
+  --radius-arch-lg: 16px 16px 9px 9px;
+  --radius-arch-btn: 8px 8px 7px 7px;
+  --radius-arch-input: 9px 9px 7px 7px;
+}
+/* ARCH: every card/panel and button carries the shackle crown. */
+.apex-card, .card, [class*="rounded-2xl"] { border-radius: var(--radius-arch-lg) !important; }
+.btn-primary, .btn-secondary, button[class*="btn"] { border-radius: var(--radius-arch-btn) !important; }
+/* CONCENTRIC: focus is the spiral's two arms. */
+.btn-primary:focus-visible, .btn-secondary:focus-visible, a:focus-visible, button:focus-visible,
+input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--brand-500, #dc2626);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 5px var(--surface-50, #fafafa), 0 0 0 6px var(--surface-300, #d4d4d8);
+}
+/* POINT: meters terminate in the found nonce. */
+.k-meter { position: relative; height: 2px; background: var(--surface-200, #e4e4e7); border-radius: 2px; }
+.k-meter > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: var(--brand-500, #dc2626); }
+.k-meter.k-ok > i { background: var(--success-500, #059669); }
+.k-meter > b { position: absolute; top: 50%; width: 6px; height: 6px; border-radius: 50%;
+  background: var(--brand-500, #dc2626); border: 2px solid var(--surface-50, #fff); transform: translate(-50%, -50%); }
+.k-meter.k-ok > b { background: var(--success-500, #059669); }
+/* ARC labels: the shackle crown before every mono section label. */
+.k-arc { color: var(--brand-500, #dc2626); flex-shrink: 0; }
+/* WINDING receipts: arcs rotate stepwise down the rows. */
+.k-receipt div { display: flex; align-items: center; gap: 9px; }
+.k-receipt svg { flex-shrink: 0; }

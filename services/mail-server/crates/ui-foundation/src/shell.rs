@@ -496,8 +496,10 @@ fn render_sidebar_content(
                 || (href == &"/dashboard" && (current_path == "/" || current_path == "/cp" || current_path == "/dashboard"));
             let active_class = " aria-current=\"page\"";
 
+            // CONCENTRIC (mark DNA): the active cell is solid + an outer
+            // ring — the spiral's two arms (apex-nav-cell in globals.css).
             let classes = if is_active {
-                "flex items-center gap-3 px-3 py-2 text-sm font-semibold transition-all rounded-md bg-brand-50 text-brand-700"
+                "apex-nav-cell is-active flex items-center gap-3 px-3 py-2 text-sm font-semibold transition-all bg-primary text-white"
             } else {
                 "flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-md text-surface-600 hover:text-surface-950 hover:bg-surface-50"
             };

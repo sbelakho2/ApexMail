@@ -2052,23 +2052,23 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
 <div class=\"grid grid-cols-1 sm:grid-cols-2 gap-4\">\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"signup-name\">Full name</label>\
-<input id=\"signup-name\" name=\"name\" type=\"text\" required autocomplete=\"name\" placeholder=\"Jane Doe\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<input id=\"signup-name\" name=\"name\" type=\"text\" required autocomplete=\"name\" placeholder=\"Jane Doe\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"signup-company\">Company</label>\
-<input id=\"signup-company\" name=\"company_name\" type=\"text\" required autocomplete=\"organization\" placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<input id=\"signup-company\" name=\"company_name\" type=\"text\" required autocomplete=\"organization\" placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"signup-email\">Email</label>\
-<input id=\"signup-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<input id=\"signup-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"signup-password\">Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 12 characters\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all bg-surface-50 text-surface-950\" />\
+<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 12 characters\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 {password_hint}\
 </div>\
@@ -2100,7 +2100,7 @@ pub fn web_forgot_password_page(csrf_token: &str) -> String {
 {csrf}\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"reset-email\">Email</label>\
-<input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Send Reset Link</span>{arrow}</button>\
@@ -2168,14 +2168,14 @@ pub fn web_reset_password_page_with_state(
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"new-password\">New password</label>\
 <div class=\"relative\">\
-<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all bg-surface-50 text-surface-950\" />\
+<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 {password_hint}\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"confirm-password\">Confirm password</label>\
 <div class=\"relative\">\
-<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all bg-surface-50 text-surface-950\" />\
+<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 </div>\
 
@@ -2291,19 +2291,19 @@ pub fn web_dashboard_page() -> String {
 </header>\
 <div class=\"grid grid-cols-1 sm:grid-cols-3 gap-6\" aria-label=\"Plan usage\">\
 <div class=\"bg-white rounded-2xl border border-surface-200/60 px-6 py-5 shadow-sm\">\
-<p class=\"font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-surface-500 mb-2\">sends · month</p>\
+<p class=\"apex-klabel mb-2\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>sends · month</p>\
 <p class=\"text-lg font-bold text-surface-950 tracking-tight mb-3\">0 <span class=\"text-sm font-medium text-surface-500\">/ 30,000</span></p>\
-<div class=\"h-0.5 rounded bg-surface-100 overflow-hidden\"><div class=\"h-full rounded bg-brand-500\" style=\"width:2%\"></div></div>\
+<div class=\"apex-meter\"><div class=\"apex-meter-fill\" style=\"width:2%\"></div><span class=\"apex-meter-point\" style=\"left:2%\"></span></div>\
 </div>\
 <div class=\"bg-white rounded-2xl border border-surface-200/60 px-6 py-5 shadow-sm\">\
-<p class=\"font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-surface-500 mb-2\">api · month</p>\
+<p class=\"apex-klabel mb-2\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>api · month</p>\
 <p class=\"text-lg font-bold text-surface-950 tracking-tight mb-3\">0 <span class=\"text-sm font-medium text-surface-500\">/ 300,000</span></p>\
-<div class=\"h-0.5 rounded bg-surface-100 overflow-hidden\"><div class=\"h-full rounded bg-brand-500\" style=\"width:1%\"></div></div>\
+<div class=\"apex-meter\"><div class=\"apex-meter-fill\" style=\"width:1%\"></div><span class=\"apex-meter-point\" style=\"left:1%\"></span></div>\
 </div>\
 <div class=\"bg-white rounded-2xl border border-surface-200/60 px-6 py-5 shadow-sm\">\
-<p class=\"font-mono text-[10px] font-bold uppercase tracking-[0.14em] text-surface-500 mb-2\">recipients · msg</p>\
+<p class=\"apex-klabel mb-2\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>recipients · msg</p>\
 <p class=\"text-lg font-bold text-surface-950 tracking-tight mb-3\">&mdash; <span class=\"text-sm font-medium text-surface-500\">/ 1,000</span></p>\
-<div class=\"h-0.5 rounded bg-surface-100 overflow-hidden\"><div class=\"h-full rounded bg-surface-400\" style=\"width:0%\"></div></div>\
+<div class=\"apex-meter\"><div class=\"apex-meter-fill\" style=\"width:0%\"></div><span class=\"apex-meter-point\" style=\"left:0%\"></span></div>\
 </div>\
 </div>\
 <div class=\"bg-white rounded-2xl border border-surface-200/60 shadow-sm overflow-hidden\">\
@@ -4648,15 +4648,15 @@ pub fn web_login_page_with_state(message: Option<&str>, csrf_token: &str) -> Str
 {csrf}\
 {banner}\
 <div class=\"space-y-2\">\
-<label class=\"text-xs font-bold text-surface-900\" for=\"login-email\">Email</label>\
-<input id=\"login-email\" name=\"email\" type=\"email\" required autocomplete=\"username\" placeholder=\"you@example.com\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<label class=\"apex-klabel\" for=\"login-email\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
+<input id=\"login-email\" name=\"email\" type=\"email\" required autocomplete=\"username\" placeholder=\"you@example.com\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
-<label class=\"text-xs font-bold text-surface-900\" for=\"password\">Password</label>\
+<label class=\"apex-klabel\" for=\"password\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all bg-surface-50 text-surface-950\" />\
+<input id=\"password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 </div>\
 <div class=\"flex items-center justify-between py-1\">\
@@ -4750,14 +4750,14 @@ pub fn control_plane_login_page(csrf_token: &str) -> String {
 {csrf}\
 <div class=\"space-y-2\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"login-email\">Operator Identity</label>\
-<input id=\"login-email\" name=\"email\" type=\"text\" required autocomplete=\"username\" placeholder=\"Email or username\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+<input id=\"login-email\" name=\"email\" type=\"text\" required autocomplete=\"username\" placeholder=\"Email or username\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
 <label class=\"text-xs font-bold text-surface-900\" for=\"login-password\">Access Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"w-full px-4 py-3 rounded-md border border-surface-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all bg-surface-50 text-surface-950\" />\
+<input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 </div>\
 <div class=\"flex items-center gap-2 py-1\">\

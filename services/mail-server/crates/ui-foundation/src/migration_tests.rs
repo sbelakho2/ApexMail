@@ -570,8 +570,9 @@ fn migration_web_and_cp_share_primitives() {
         "cp login missing common button class"
     );
 
-    // Both should use input class pattern
-    let input_class = "rounded-md border border-surface-200";
+    // Both should use the shared ARCH input class (Spiral-Lock DNA v2:
+    // apex-input carries the crown radius + concentric focus).
+    let input_class = "apex-input w-full px-4 py-3 border border-surface-200";
     assert!(
         web_login.contains(input_class),
         "web login missing common input class"

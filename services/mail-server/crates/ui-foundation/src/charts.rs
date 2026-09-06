@@ -636,6 +636,103 @@ fn render_empty_chart(width: u32, height: u32, reason: &str) -> String {
     )
 }
 
+// ─── Spiral-Lock DNA primitives (v2, 2026-09-06) ────────────────────────────
+
+/// The ARC helper: the shackle crown as a tiny inline SVG — the section
+/// marker that rides every mono label (SPIRAL DNA). Pure stroke, round
+/// caps, currentColor: the mark's own geometry at 12px.
+pub fn arc_mark_svg() -> &'static str {
+    r#"<svg class="apex-arc" viewBox="0 0 24 14" width="17" height="11" fill="none" aria-hidden="true"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>"#
+}
+
+/// A receipt row marker — the same arc, rotated stepwise so the receipt
+/// winds down the page (the pipeline as a spiral path).
+pub fn receipt_arc_svg(degrees: i32) -> String {
+    format!(
+        r#"<svg class="apex-r-arc" viewBox="0 0 24 14" width="14" height="9" fill="none" aria-hidden="true" style="transform:rotate({degrees}deg)"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>"#
+    )
+}
+
+/// MONOLINE bar chart (POINT DNA): each value is a 3px round-cap stroke,
+/// not a filled bar; peak bars carry the terminal point above them. The
+/// data reads as drawn strokes — the mark's stroke discipline.
+pub fn render_monoline_bar_chart(data: &[(String, f64)], width: u32, height: u32) -> String {
+    if data.is_empty() {
+        return render_empty_chart(width, height, "No data");
+    }
+    let n = data.len();
+    let max_val = data
+        .iter()
+        .map(|(_, v)| *v)
+        .fold(0.0_f64, f64::max)
+        .max(1.0);
+    let h = f64::from(height);
+    let chart_h = h - 18.0;
+    let step = f64::from(width) / (n as f64);
+
+    let mut bars = String::new();
+    for (i, (label, val)) in data.iter().enumerate() {
+        let frac = (val / max_val).clamp(0.02, 1.0);
+        let bar_h = chart_h * frac;
+        let x = step * (i as f64 + 0.5);
+        let y = chart_h - bar_h;
+        let is_peak = frac >= 0.8;
+        let cls = if is_peak {
+            "apex-bar is-peak"
+        } else {
+            "apex-bar"
+        };
+        bars.push_str(&format!(
+            r#"<g><line x1="{x:.1}" y1="{y:.1}" x2="{x:.1}" y2="{chart_h:.1}" class="{cls}" stroke-width="3" stroke-linecap="round"><title>{}: {}</title></line>"#,
+            crate::shell::html_escape(label),
+            val
+        ));
+        if is_peak {
+            bars.push_str(&format!(
+                r#"<circle cx="{x:.1}" cy="{:.1}" r="3.5" class="apex-peak-point" stroke="none"/>"#,
+                y - 7.0
+            ));
+        }
+        bars.push_str("</g>");
+    }
+    format!(
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" viewBox="0 0 {width} {height}" role="img" aria-label="Monoline chart, {n} points" class="apex-chart-monoline" style="color: rgb(var(--border))"><g>{bars}</g></svg>"#
+    )
+}
+
+/// DIAL (mark-native radial KPI — the shackle arc as a gauge): a 270° arc
+/// track, the value arc drawn with round caps, and the terminal point at
+/// the arc's end (POINT DNA). `pct` in 0.0..=1.0.
+pub fn render_dial(pct: f64, label: &str, value_text: &str, ok: bool) -> String {
+    let pct = pct.clamp(0.0, 1.0);
+    // 270° arc from 225° to 135° (going clockwise over the top) in a 64-box.
+    let r = 26.0_f64;
+    let start: (f64, f64) = (
+        32.0 - r * std::f64::consts::FRAC_1_SQRT_2,
+        32.0 + r * std::f64::consts::FRAC_1_SQRT_2,
+    );
+    let end: (f64, f64) = (
+        32.0 + r * std::f64::consts::FRAC_1_SQRT_2,
+        32.0 + r * std::f64::consts::FRAC_1_SQRT_2,
+    );
+    let arc_len = 2.0 * std::f64::consts::PI * r * 0.75;
+    let filled = arc_len * pct;
+    let color = if ok {
+        "rgb(var(--success))"
+    } else {
+        "rgb(var(--primary))"
+    };
+    let class = "apex-dial";
+    format!(
+        r#"<span class="{class}"><svg viewBox="0 0 64 64" width="64" height="64" fill="none" role="img" aria-label="{label}: {value_text}"><path d="M{sx:.1} {sy:.1} A {r} {r} 0 1 1 {ex:.1} {ey:.1}" stroke="rgb(var(--muted))" stroke-width="3" stroke-linecap="round" fill="none"/><path d="M{sx:.1} {sy:.1} A {r} {r} 0 1 1 {ex:.1} {ey:.1}" stroke="{color}" stroke-width="3" stroke-linecap="round" fill="none" stroke-dasharray="{filled:.1} {arc_len:.1}"/></svg><span class="apex-dial-val" style="font-size:13px;color:rgb(var(--foreground))">{value}</span></span>"#,
+        sx = start.0,
+        sy = start.1,
+        ex = end.0,
+        ey = end.1,
+        value = crate::shell::html_escape(value_text),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
