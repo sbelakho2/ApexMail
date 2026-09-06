@@ -335,3 +335,13 @@ Deployed via pipelines `20260906T042619`/`20260906T094951: OK`. **Terminal proof
 **The real implementation (from the approved preview, in the templates):** hero rebuilt (checksum ribbon with M solid, the proof headline, the POST /v1/messages terminal with proof:true and the accepted/delivered trace, the 3-up stats band with point-meters; the old eyebrow/checkmark hero deleted); header plain links → the slot nav (mono flip-cells, active page = solid needle); features → eight ledger cards (red mono indices 01–08, hex tag slots, arch cards); pricing → split-flap digits (every digit a slot cell, the recommended plan's digits solid brand); the v2 component block in input.css. The pipeline's own i18n gate caught the three missing de/fr/es stat keys — the gate worked as designed.
 
 **Deployed via pipeline `20260906T131529: OK`.** LIVE verification is now structure-based (against the preview's structures, not my tokens): 10/10 homepage (ribbon/M-solid, proof headline, terminal, stats, slot nav, ledger ×8, arc labels, receipt, old copy gone, old panel gone) + 2/2 pricing — checked against the fetched live HTML.
+
+## 19. Three mobile/visual bug fixes — 2026-09-06
+
+User-reported from live; all root-caused, fixed, deployed (pipeline `20260906T152808: OK`), and live-verified at phone widths:
+
+1. **The invisible M** (ribbon): the site's `--brand-500` is an RGB *triplet* (`239 68 68`) for Tailwind's `rgb(var(...))` pattern; my v2 components used raw `var(--brand-500, #hex)` → resolves to the invalid `background: 239 68 68` → transparent → white-on-white. Every raw var() in the component block converted to `rgb(var(...))`. **Live: `M background: rgb(239, 68, 68)` — visible.**
+2. **The mobile right-break**: the stats band and feature ledger had no responsive breakpoints — `repeat(3,1fr)` at 375px squeezed columns to ~113px and the third stat overflowed to 395px. Now stacked 1fr on phones, 3-up ≥640px; arc labels wrap. **Live at 375px: `pageScrollW 375 == viewport` — zero horizontal overflow.**
+3. **The widget text clip at phone widths**: `nowrap + ellipsis` inside a ~206px widget truncated the receipt line. The info line now wraps ≤480px (all mirrors, parity OK). **Live at 320px: `clipped: false, white-space: normal`.** (The "Protected" short text is the driver's own locale string replacing the server text on init — by design; the clipping was the bug.)
+
+Also noted while diagnosing: the local `file://` preview of the built site loads the LIVE absolute-URL CSS (Zola bakes `config.base_url` links) — local visual checks of the marketing build are unreliable; verified against production instead.
