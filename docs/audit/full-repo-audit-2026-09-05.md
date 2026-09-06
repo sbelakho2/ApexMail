@@ -345,3 +345,9 @@ User-reported from live; all root-caused, fixed, deployed (pipeline `20260906T15
 3. **The widget text clip at phone widths**: `nowrap + ellipsis` inside a ~206px widget truncated the receipt line. The info line now wraps ≤480px (all mirrors, parity OK). **Live at 320px: `clipped: false, white-space: normal`.** (The "Protected" short text is the driver's own locale string replacing the server text on init — by design; the clipping was the bug.)
 
 Also noted while diagnosing: the local `file://` preview of the built site loads the LIVE absolute-URL CSS (Zola bakes `config.base_url` links) — local visual checks of the marketing build are unreliable; verified against production instead.
+
+## 20. Full mobile analysis + fix — all three apps — 2026-09-06
+
+**Method:** automated Playwright sweep at 375px AND 320px across both marketing pages and both consoles' auth surfaces, collecting every element past the viewport edge (with intentional off-canvas nav and scroll-container children excluded), plus page `scrollWidth` (the page-break indicator), plus screenshots.
+
+**Results after fix (pipeline `20260906T170823: OK`):** all surfaces at both widths report `pageWidth == viewport` (zero page-level horizontal break). Console login/signup and CP login: **zero** overflowing elements. Marketing pricing: **zero**. Marketing home: the one previously broken section (the platform-capabilities band — 36 overflowing elements) fixed by widening the scroll-track selector (`.testimonial-card` → also `.apex-card`/`.card-dna`, restoring `flex: 0 0 100%` snap cards); the remaining 9 flagged elements are the carousel's second/third swipe cards positioned off-viewport by design (verified: `snap: x mandatory`, first card 343px, track scrollable — a swipe carousel, not a break).
