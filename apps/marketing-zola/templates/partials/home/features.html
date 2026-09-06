@@ -27,26 +27,8 @@
         <h3 class="text-base font-bold text-surface-950 mb-4 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_4_title"] %}{{ i18n_data[l]["home_features"]["card_4_title"] }}{% else %}Delivery Analytics{% endif %}</h3>
         <p class="text-surface-600 text-[13px] leading-[1.6]">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_4_desc"] %}{{ i18n_data[l]["home_features"]["card_4_desc"] }}{% else %}Opens, clicks, bounces, and complaints feed analytics and webhooks, with Enterprise webhook delivery targets measured at P95.{% endif %}</p>
       </div>
-      <div class="card-dna">
-        <div class="flex items-center justify-between mb-4"><span class="ix">05</span><span class="tag-slots"><span>B8</span><span>C2</span></span></div>
-        <h3 class="text-base font-bold text-surface-950 mb-4 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_5_title"] %}{{ i18n_data[l]["home_features"]["card_5_title"] }}{% else %}Smart Routing{% endif %}</h3>
-        <p class="text-surface-600 text-[13px] leading-[1.6]">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_5_desc"] %}{{ i18n_data[l]["home_features"]["card_5_desc"] }}{% else %}Dedicated IP reputation monitoring and warm-up. Route your emails through the optimal delivery path.{% endif %}</p>
+      <div class="card-dna flex items-center justify-center" style="min-height:140px">
+          <a href="{{ lp }}/features/" class="k-arc-label" style="color:rgb(var(--brand-500))">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["see_all"] %}{{ i18n_data[l]["home_features"]["see_all"] }}{% else %}All features →{% endif %}</a>
+        </div>
       </div>
-      <div class="card-dna">
-        <div class="flex items-center justify-between mb-4"><span class="ix">06</span><span class="tag-slots"><span>D4</span><span>E6</span></span></div>
-        <h3 class="text-base font-bold text-surface-950 mb-4 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_6_title"] %}{{ i18n_data[l]["home_features"]["card_6_title"] }}{% else %}Developer First{% endif %}</h3>
-        <p class="text-surface-600 text-[13px] leading-[1.6]">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_6_desc"] %}{{ i18n_data[l]["home_features"]["card_6_desc"] }}{% else %}REST API and webhooks, plus first-party SDKs for Python, Go, PHP, Ruby, and Java (in development; source in the monorepo). Ship email features in minutes, not days.{% endif %}</p>
-      </div>
-      <div class="card-dna">
-        <div class="flex items-center justify-between mb-4"><span class="ix">07</span><span class="tag-slots"><span>A1</span><span>F2</span></span></div>
-        <h3 class="text-base font-bold text-surface-950 mb-4 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_7_title"] %}{{ i18n_data[l]["home_features"]["card_7_title"] }}{% else %}Email Grader{% endif %}</h3>
-        <p class="text-surface-600 text-[13px] leading-[1.6]">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_7_desc"] %}{{ i18n_data[l]["home_features"]["card_7_desc"] }}{% else %}Score your email deliverability with deterministic DNS, authentication, content, and reputation checks.{% endif %}</p>
-      </div>
-      <div class="card-dna">
-        <div class="flex items-center justify-between mb-4"><span class="ix">08</span><span class="tag-slots"><span>B4</span><span>C7</span></span></div>
-        <h3 class="text-base font-bold text-surface-950 mb-4 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_8_title"] %}{{ i18n_data[l]["home_features"]["card_8_title"] }}{% else %}Inbox Placement{% endif %}</h3>
-        <p class="text-surface-600 text-[13px] leading-[1.6]">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_8_desc"] %}{{ i18n_data[l]["home_features"]["card_8_desc"] }}{% else %}Test deliverability across Gmail, Outlook, Yahoo, iCloud, AOL & Zoho. Automatically detects inbox, promotions, and spam placement.{% endif %}</p>
-      </div>
-    </div>
-  </div>
 </section>
