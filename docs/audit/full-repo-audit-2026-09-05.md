@@ -287,3 +287,11 @@ The fix plan in section 6 was executed in nine parallel workstreams plus a first
 - **Marketing**: arch radii + concentric focus platform-wide via the DNA block in `input.css` (rebuilt into `styles.css`), hero meters carry terminal points, footer receipt winds.
 
 **Live-verified:** login serves the arched concentric inputs with arc labels under the Spiral Lock; the globals bundle carries every DNA class (radius-arch ×5, meter-point, nav-cell, dial, klabel, receipt ×5, monoline ×3); marketing serves point meters and arch styles; health green. Gates: 6,083 workspace tests exit 0, clippy clean, zola clean.
+
+## 13. Completeness verification — 2026-09-06
+
+**Method:** systematic source audit (every DNA primitive's usage count, every remaining old-style label/input pattern) followed by a live 6-surface matrix after redeploy.
+
+**Gaps the verification found (and fixed — completeness pass `1e6e6b66`, pipeline `20260906T012918: OK`):** the four new chart primitives (`render_dial`, `render_monoline_bar_chart`, `arc_mark_svg`, `receipt_arc_svg`) were defined but wired nowhere; 18 auth labels remained on the old style; the CP dashboard lacked its receipt. Fixed: the console dashboard's Send Volume card now carries the 270° delivery dial + monoline stroke chart (wired via a replace-token through the page's continued-string literal); the winding receipt sits under the CP service ribbon; all remaining labels (signup ×4, reset, new/confirm password, plan upgrade, checkbox groups) are `apex-klabel` with the shackle arc — **zero old-style labels remain in the codebase**.
+
+**Live matrix (all 6/6 pass):** login, signup, forgot-password, reset-password, CP login each serve arc labels + arched concentric inputs (+ the Spiral Lock widget on both logins); marketing serves the ribbon, point-meters and winding receipt. The globals bundle carries every DNA class family (radius-arch ×5, apex-input ×3, apex-klabel, apex-arc, apex-meter ×5 + point, nav-cell, dial, receipt ×5, monoline ×3). Gates: 6,083 tests exit 0, clippy clean.
