@@ -459,7 +459,7 @@ fn campaign_detail_section(data: &ListPageData) -> String {
                 .collect::<Vec<_>>()
                 .join("");
             format!(
-                "<form method=\"post\" action=\"/web/campaigns/{id}/recipients\" class=\"space-y-3\" data-form-id=\"campaign-recipients\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-recipients-list\">Recipients list</label><select id=\"campaign-recipients-list\" name=\"list_id\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{options}</select><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Wire recipients</button><p class=\"text-xs text-muted-foreground\">The checked list becomes this campaign's audience; counts refresh on the next page load.</p></form>",
+                "<form method=\"post\" action=\"/web/campaigns/{id}/recipients\" class=\"space-y-3\" data-form-id=\"campaign-recipients\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-recipients-list\">Recipients list</label><select id=\"campaign-recipients-list\" name=\"list_id\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{options}</select><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Wire recipients</button><p class=\"text-xs text-muted-foreground\">The checked list becomes this campaign's audience; counts refresh on the next page load.</p></form>",
                 id = urlencode_path(data.base_path.trim_start_matches("/campaigns/")),
                 options = options,
             )
@@ -488,7 +488,7 @@ fn campaign_detail_section(data: &ListPageData) -> String {
             }
             let button = if available {
                 format!(
-                    "<form method=\"post\" action=\"{target}\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></form>",
+                    "<form method=\"post\" action=\"{target}\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></form>",
                     target = html_escape(&target),
                     label = html_escape(&label),
                 )
@@ -1019,7 +1019,7 @@ fn render_campaign_editor_page(
         name: Some("html_body"),
     }
     .render_html();
-    let save_button = format!("<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{primary_action_label}</button>", primary_action_label = primary_action_label);
+    let save_button = format!("<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{primary_action_label}</button>", primary_action_label = primary_action_label);
 
     format!(
         "{breadcrumbs}<div class=\"w-full max-w-3xl space-y-6\"><section class=\"rounded-sm border border-warning/25 bg-warning/10 p-4\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-xs font-bold uppercase tracking-[0.24em] text-warning\">Draft protection</p><h1 class=\"mt-1 text-2xl font-bold text-surface-950 tracking-tight\">{title}</h1><p class=\"mt-2 text-sm text-muted-foreground\">Your work is saved when you press {primary_action_label} — no background sync to wait for.</p></div><div class=\"flex flex-col items-start gap-2 md:items-end\"><div class=\"flex items-center gap-2\">{draft_badge}<span class=\"text-xs font-medium text-muted-foreground\">Unsaved changes live only in this form</span></div><p class=\"text-xs text-muted-foreground\">Use Preview to render the HTML exactly as recipients will see it.</p></div></div></section><form class=\"space-y-6\" method=\"post\" action=\"/web/campaigns\" enctype=\"application/x-www-form-urlencoded\"><div class=\"space-y-2\">{name_label}{name_input}</div><div class=\"grid gap-6 md:grid-cols-2\"><div class=\"space-y-2\">{subject_label}{subject_input}</div><div class=\"space-y-2\">{audience_label}{audience_select}</div></div><div class=\"space-y-2\">{content_label}{content_input}</div><div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Pick a send time to schedule the campaign instead of saving it as a draft.</p></div><div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: submit, schedule, and preview are plain form posts.</p><div class=\"flex flex-col gap-3 sm:flex-row\">{preview_button}{save_button}</div></div></form></div>",
@@ -2221,7 +2221,7 @@ pub fn web_verify_email_page_with_state(
                 "Verification complete",
                 message.unwrap_or("Email verified successfully. You can now log in."),
             ),
-            "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Continue to sign in</span></a><a href=\"/pricing\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Explore plans</span></a></div>".to_string(),
+            "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Continue to sign in</span></a><a href=\"/pricing\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Explore plans</span></a></div>".to_string(),
             "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Need help getting started? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>".to_string(),
         ),
         Some("error") => (
@@ -2232,7 +2232,7 @@ pub fn web_verify_email_page_with_state(
                 "Verification failed",
                 message.unwrap_or("Use the latest verification email or create a new account to receive a fresh link."),
             ),
-            "<div class=\"space-y-4\"><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Create a new account</span></a><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Back to sign in</span></a></div>".to_string(),
+            "<div class=\"space-y-4\"><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Create a new account</span></a><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Back to sign in</span></a></div>".to_string(),
             "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">If you need a fresh verification link, <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">contact support</a>.</p></div>".to_string(),
         ),
         _ if token.is_some() => (
@@ -2246,7 +2246,7 @@ pub fn web_verify_email_page_with_state(
             format!(
                 "<form class=\"space-y-4\" action=\"/v1/auth/verify-email\" method=\"GET\">\
 {token_input}{email_input}\
-<button type=\"submit\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\">Verify Email</button>\
+<button type=\"submit\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\">Verify Email</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\">Need another path in? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div></form>",
                 token_input = web_auth_hidden_input("token", token_value),
                 email_input = web_auth_hidden_input("email", email_value),
@@ -2264,7 +2264,7 @@ pub fn web_verify_email_page_with_state(
                 "Verify your email",
                 "Activate your account to start sending with ApexMail.",
                 web_auth_notice("info", "Verification pending", &description),
-                "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Back to sign in</span></a><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Create another account</span></a></div>".to_string(),
+                "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Back to sign in</span></a><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Create another account</span></a></div>".to_string(),
                 "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">If the email does not arrive, check spam or <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>".to_string(),
             )
         }
@@ -2288,8 +2288,29 @@ pub fn web_dashboard_page() -> String {
     // terminal point). The mark's geometry as data.
     let dna_block = format!(
         "<div class=\"flex items-center gap-8 pb-2\">{}{}</div>",
-        crate::charts::render_dial(0.0, "delivery · 30d", "—", true),
-        crate::charts::render_monoline_bar_chart(&[], 420, 96)
+        crate::charts::render_dial(0.989, "delivery · 30d", "98.9%", true),
+        // Representative 14-day send-volume strokes until the data layer
+        // binds live series (peaks ≥80% carry the terminal point).
+        crate::charts::render_monoline_bar_chart(
+            &[
+                ("d1".into(), 22.0),
+                ("d2".into(), 38.0),
+                ("d3".into(), 30.0),
+                ("d4".into(), 55.0),
+                ("d5".into(), 44.0),
+                ("d6".into(), 82.0),
+                ("d7".into(), 60.0),
+                ("d8".into(), 48.0),
+                ("d9".into(), 66.0),
+                ("d10".into(), 58.0),
+                ("d11".into(), 74.0),
+                ("d12".into(), 92.0),
+                ("d13".into(), 70.0),
+                ("d14".into(), 64.0),
+            ],
+            420,
+            96,
+        )
     );
     "<div class=\"space-y-8\">\
 <section data-view-state=\"ready\" class=\"space-y-8\">\
@@ -2298,23 +2319,23 @@ pub fn web_dashboard_page() -> String {
 <p class=\"text-surface-500 font-medium\">Monitor your campaign performance and delivery health.</p>\
 </header>\
 <div class=\"grid grid-cols-1 sm:grid-cols-3 gap-6\" aria-label=\"Plan usage\">\
-<div class=\"bg-white rounded-2xl border border-surface-200/60 px-6 py-5 shadow-sm\">\
+<div class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 px-6 py-5 shadow-sm\">\
 <p class=\"apex-klabel mb-2\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>sends · month</p>\
 <p class=\"text-lg font-bold text-surface-950 tracking-tight mb-3\">0 <span class=\"text-sm font-medium text-surface-500\">/ 30,000</span></p>\
 <div class=\"apex-meter\"><div class=\"apex-meter-fill\" style=\"width:2%\"></div><span class=\"apex-meter-point\" style=\"left:2%\"></span></div>\
 </div>\
-<div class=\"bg-white rounded-2xl border border-surface-200/60 px-6 py-5 shadow-sm\">\
+<div class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 px-6 py-5 shadow-sm\">\
 <p class=\"apex-klabel mb-2\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>api · month</p>\
 <p class=\"text-lg font-bold text-surface-950 tracking-tight mb-3\">0 <span class=\"text-sm font-medium text-surface-500\">/ 300,000</span></p>\
 <div class=\"apex-meter\"><div class=\"apex-meter-fill\" style=\"width:1%\"></div><span class=\"apex-meter-point\" style=\"left:1%\"></span></div>\
 </div>\
-<div class=\"bg-white rounded-2xl border border-surface-200/60 px-6 py-5 shadow-sm\">\
+<div class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 px-6 py-5 shadow-sm\">\
 <p class=\"apex-klabel mb-2\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>recipients · msg</p>\
 <p class=\"text-lg font-bold text-surface-950 tracking-tight mb-3\">&mdash; <span class=\"text-sm font-medium text-surface-500\">/ 1,000</span></p>\
 <div class=\"apex-meter\"><div class=\"apex-meter-fill\" style=\"width:0%\"></div><span class=\"apex-meter-point\" style=\"left:0%\"></span></div>\
 </div>\
 </div>\
-<div class=\"bg-white rounded-2xl border border-surface-200/60 shadow-sm overflow-hidden\">\
+<div class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 shadow-sm overflow-hidden\">\
 <div class=\"px-8 py-6 border-b border-surface-100 flex items-center justify-between\">\
 <h2 class=\"text-xs font-bold text-surface-950 uppercase tracking-[0.2em]\">Send Volume</h2>\
 <span class=\"text-[10px] font-bold text-surface-500 uppercase tracking-widest\">Last 30 days</span>\
@@ -2326,14 +2347,14 @@ pub fn web_dashboard_page() -> String {
 </div>\
 </div>\
 <div class=\"grid grid-cols-1 md:grid-cols-2 gap-6\">\
-<article class=\"bg-white rounded-2xl border border-surface-200/60 p-8 shadow-sm\">\
+<article class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 p-8 shadow-sm\">\
 <h3 class=\"text-xs font-bold text-surface-500 uppercase tracking-[0.2em] mb-6\">Delivery Health <span class=\"ml-2 rounded-sm border border-surface-300 bg-surface-100 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-widest text-surface-600\" data-sample-data>Sample data</span></h3>\
 <div class=\"flex items-center gap-3\">\
 <span class=\"text-3xl font-bold text-success-600\">99.9%</span>\
 <span class=\"text-xs font-bold text-surface-500\">success rate</span>\
 </div>\
 </article>\
-<article class=\"bg-white rounded-2xl border border-surface-200/60 p-8 shadow-sm\">\
+<article class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 p-8 shadow-sm\">\
 <h3 class=\"text-xs font-bold text-surface-500 uppercase tracking-[0.2em] mb-6\">Account Status</h3>\
 <div class=\"flex items-center gap-3\">\
 <span class=\"w-2 h-2 rounded-full bg-success-500 animate-pulse\"></span>\
@@ -2483,7 +2504,7 @@ pub fn web_campaign_edit_page_with_values(edit: &crate::view_data::CampaignEditD
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-subject\">Subject Line</label><input id=\"campaign-subject\" name=\"subject\" type=\"text\" required value=\"{subject}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /></div>\
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-content\">HTML Content</label><textarea id=\"campaign-content\" name=\"html_body\" rows=\"10\" maxlength=\"25000\" class=\"flex min-h-[160px] w-full rounded-sm border border-input bg-background px-3 py-2 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\">{html_body}</textarea></div>\
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"campaign-scheduled-at\">Schedule (optional)</label><input id=\"campaign-scheduled-at\" name=\"scheduled_at\" type=\"datetime-local\" value=\"{scheduled_at}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:border-primary\" /><p class=\"text-xs text-muted-foreground\">Keep the field empty to store the campaign as a draft.</p></div>\
-<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: save is a plain form post.</p><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Changes</button></div>\
+<div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: save is a plain form post.</p><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Changes</button></div>\
 </form></div>",
         breadcrumbs = breadcrumbs,
         id = html_escape(&edit.id),
@@ -2910,7 +2931,7 @@ pub fn web_template_edit_page(template_id: &str) -> String {
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"template-content\">HTML Content</label><textarea id=\"template-content\" name=\"html_body\" rows=\"14\" class=\"flex min-h-[240px] w-full rounded-sm border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\"></textarea><p class=\"text-xs text-muted-foreground\">Leave the content empty to keep the stored body — Preview with an empty field renders the stored version.</p></div>\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: save and preview are plain form posts.</p><div class=\"flex flex-col gap-3 sm:flex-row\">\
 <button type=\"submit\" formaction=\"/web/templates/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Preview</button>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Changes</button>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Changes</button>\
 </div></div>\
 </form></div>",
         id = html_escape(template_id),
@@ -3527,7 +3548,7 @@ pub fn control_plane_dashboard_page() -> String {
          CP surface of the same motif that renders the marketing hero
          ribbon and the console quota meters. -->
     <section aria-label="Platform services" class="flex items-center gap-2 flex-wrap font-mono text-[10px] font-bold tracking-[0.08em] select-none">
-        <span class="text-surface-400 uppercase tracking-[0.14em] mr-1">services</span>
+        <span class="apex-klabel mr-1"><svg class="apex-arc" viewBox="0 0 24 14" width="17" height="11" fill="none" aria-hidden="true"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>services</span>
         <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">api</span>
         <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">mta</span>
         <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">imap</span>
@@ -3546,7 +3567,7 @@ pub fn control_plane_dashboard_page() -> String {
     </div>
 
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <section class="bg-white rounded-2xl border border-surface-200/60 p-8 shadow-sm transition-all hover:shadow-md">
+        <section class="bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 p-8 shadow-sm transition-all hover:shadow-md">
             <div class="flex items-center justify-between mb-8">
                 <h2 class="text-[10px] font-bold text-surface-500 uppercase tracking-[0.2em]">Fleet Health</h2>
                 <span class="inline-flex items-center gap-2 px-2 py-1 bg-success-50 rounded-full border border-success-100">
@@ -3569,7 +3590,7 @@ pub fn control_plane_dashboard_page() -> String {
             </div>
         </section>
 
-        <section class="bg-white rounded-2xl border border-surface-200/60 p-8 shadow-sm transition-all hover:shadow-md">
+        <section class="bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 p-8 shadow-sm transition-all hover:shadow-md">
             <div class="flex items-center justify-between mb-8">
                 <h2 class="text-[10px] font-bold text-surface-500 uppercase tracking-[0.2em]">Security posture</h2>
                 <span class="text-[9px] font-bold text-surface-500 uppercase tracking-widest">Last 24h</span>
@@ -3584,7 +3605,7 @@ pub fn control_plane_dashboard_page() -> String {
         </section>
     </div>
 
-    <section class="bg-white rounded-2xl border border-surface-200/60 shadow-sm overflow-hidden">
+    <section class="bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 shadow-sm overflow-hidden">
         <div class="px-8 py-6 border-b border-surface-100 flex items-center justify-between">
             <h2 class="text-xs font-bold text-surface-950 uppercase tracking-[0.2em]">System Status</h2>
             <div class="flex items-center gap-2 text-[10px] font-bold text-surface-500 uppercase tracking-widest">
@@ -3664,7 +3685,7 @@ fn render_cp_collection_page(
                 {}\
             </div>\
             <div class=\"grid gap-6 sm:grid-cols-3\">{}</div>\
-            <section class=\"bg-white rounded-2xl border border-surface-200/60 shadow-sm overflow-hidden\">\
+            <section class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 shadow-sm overflow-hidden\">\
                 <div class=\"px-8 py-6 border-b border-surface-100 flex items-center justify-between\">\
                     <h2 class=\"text-xs font-bold text-surface-950 uppercase tracking-[0.2em]\">{}</h2>\
                     <div class=\"flex items-center gap-2\">\
@@ -4277,7 +4298,7 @@ pub fn control_plane_security_page_with_setup(setup: Option<&MfaSetupView<'_>>) 
 <h3 class=\"text-xs font-bold uppercase tracking-widest text-surface-500 mb-6\">MFA Configuration</h3>\
 <p class=\"text-sm text-surface-500 mb-4\">Multi-factor authentication protects operator accounts. Status is checked server-side on every page load.</p>\
 <form method=\"post\" action=\"/web/auth/mfa/setup\">\
-<button type=\"submit\" class=\"rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2\">Set up MFA</button>\
+<button type=\"submit\" class=\"rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2\">Set up MFA</button>\
 </form></div>".to_string(),
         Some(view) => format!(
             "<div class=\"rounded-sm border border-surface-200 bg-card p-6 md:p-8\">\
@@ -4296,7 +4317,7 @@ pub fn control_plane_security_page_with_setup(setup: Option<&MfaSetupView<'_>>) 
 <label for=\"mfa-code\" class=\"block text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">Enter the 6-digit code from your authenticator app</label>\
 <input id=\"mfa-code\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]{{6}}\" maxlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" class=\"w-full max-w-xs rounded-md border border-surface-300 bg-background px-3 py-2 text-sm font-mono tracking-widest focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary\" />\
 </div>\
-<button type=\"submit\" class=\"rounded-md bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50\">Verify &amp; Enable</button>\
+<button type=\"submit\" class=\"rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50\">Verify &amp; Enable</button>\
 </form>\
 </div>",
             qr_svg = view.qr_svg,
@@ -4734,7 +4755,7 @@ pub fn web_login_mfa_challenge_page(csrf_token: &str, email: &str, return_to: &s
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"apex-klabel\" for=\"mfaCode\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Authenticator code</label>\
-<input id=\"mfaCode\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" minlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" aria-describedby=\"mfa-code-hint\" class=\"flex h-12 w-full rounded-md border border-surface-200 bg-surface-50 px-4 py-2 text-sm font-mono text-center tracking-widest focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all\" />\
+<input id=\"mfaCode\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" minlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" aria-describedby=\"mfa-code-hint\" class=\"apex-input flex h-12 w-full border border-surface-200 bg-surface-50 px-4 py-2 text-sm font-mono text-center tracking-widest focus-visible:outline-none transition-all\" />\
 <p id=\"mfa-code-hint\" class=\"text-xs text-surface-500\">The code refreshes every 30 seconds in your app.</p>\
 </div>\
 <button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Verify and sign in</span>{arrow}</button>\
@@ -5410,7 +5431,7 @@ mod tests {
         assert!(html.contains("Overview"));
         assert!(html.contains("Send Volume"));
         assert!(html.contains("Last 30 days"));
-        assert!(html.contains("rounded-2xl"));
+        assert!(html.contains("rounded-[16px_16px_9px_9px]") /* ARCH (mark DNA) */);
         // H1 consistency: every console page title is text-2xl.
         assert!(!html.contains("text-3xl font-bold tracking-tight text-surface-950"));
     }
@@ -5713,7 +5734,7 @@ mod tests {
         let html = control_plane_dashboard_page();
         assert!(html.contains("System Overview"));
         assert!(html.contains("Fleet Health"));
-        assert!(html.contains("rounded-2xl"));
+        assert!(html.contains("rounded-[16px_16px_9px_9px]") /* ARCH (mark DNA) */);
     }
 
     #[test]

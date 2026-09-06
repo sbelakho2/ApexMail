@@ -2906,6 +2906,22 @@ input:user-invalid:focus-visible,
   border-radius: var(--radius-xl);
 }
 
+.rounded-\[12px_12px_8px_8px\] {
+  border-radius: 12px 12px 8px 8px;
+}
+
+.rounded-\[16px_16px_9px_9px\] {
+  border-radius: 16px 16px 9px 9px;
+}
+
+.rounded-\[8px_8px_7px_7px\] {
+  border-radius: 8px 8px 7px 7px;
+}
+
+.rounded-\[9px_9px_7px_7px\] {
+  border-radius: 9px 9px 7px 7px;
+}
+
 .rounded-full {
   border-radius: 9999px;
 }
@@ -3948,10 +3964,6 @@ input:user-invalid:focus-visible,
 
 .tracking-\[0\.12em\] {
   letter-spacing: 0.12em;
-}
-
-.tracking-\[0\.14em\] {
-  letter-spacing: 0.14em;
 }
 
 .tracking-\[0\.16em\] {

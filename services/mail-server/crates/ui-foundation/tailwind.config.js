@@ -57,6 +57,12 @@ module.exports = {
     'tracking-[0.28em]',
     'tracking-[0.32em]',
     'leading-[1.55]',
+    // Spiral-Lock DNA arch radii (the shackle crown) — safelisted because
+    // the extractor's token regex lacks '_' and multiple bracket values.
+    'rounded-[8px_8px_7px_7px]',
+    'rounded-[16px_16px_9px_9px]',
+    'rounded-[12px_12px_8px_8px]',
+    'rounded-[9px_9px_7px_7px]',
     'leading-[1.6]',
     'opacity-[0.03]',
     'w-[min(20rem,calc(100vw-2rem))]',
