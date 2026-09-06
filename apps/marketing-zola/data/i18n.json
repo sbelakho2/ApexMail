@@ -423,7 +423,10 @@
       "email_grader_cta_secondary": "Mehr erfahren",
       "email_grader_description": "Erhalten Sie eine deterministische Note mit Zustellbarkeitsprüfungen Ihrer DNS, Authentifizierung, Inhalte und Reputation.",
       "email_grader_grade_label": "Deterministische Note",
-      "email_grader_title": "E-Mail-Zustellbarkeits-Grader"
+      "email_grader_title": "E-Mail-Zustellbarkeits-Grader",
+      "stat_uptime_label": "Betriebszeit · 12 Monate",
+      "stat_delivery_label": "mediane Zustellung",
+      "stat_volume_label": "Nachrichten / Monat"
     },
     "home_features": {
       "eyebrow": "Funktionsumfang",
@@ -1093,7 +1096,10 @@
       "email_grader_description": "Obtenez une note déterministe avec des vérifications de délivrabilité de vos DNS, authentification, contenu et réputation.",
       "email_grader_cta_primary": "Essayer l'API",
       "email_grader_cta_secondary": "En savoir plus",
-      "email_grader_grade_label": "Note Déterministe"
+      "email_grader_grade_label": "Note Déterministe",
+      "stat_uptime_label": "disponibilité · 12 mois",
+      "stat_delivery_label": "livraison médiane",
+      "stat_volume_label": "messages / mois"
     },
     "a11y": {
       "back_to_top": "Retour en haut",
@@ -1763,7 +1769,10 @@
       "email_grader_description": "Obtenga una calificación determinista con verificaciones de entregabilidad de DNS, autenticación, contenido y reputación.",
       "email_grader_cta_primary": "Probar la API",
       "email_grader_cta_secondary": "Más información",
-      "email_grader_grade_label": "Calificación Determinista"
+      "email_grader_grade_label": "Calificación Determinista",
+      "stat_uptime_label": "disponibilidad · 12 meses",
+      "stat_delivery_label": "entrega mediana",
+      "stat_volume_label": "mensajes / mes"
     },
     "a11y": {
       "back_to_top": "Volver arriba",
