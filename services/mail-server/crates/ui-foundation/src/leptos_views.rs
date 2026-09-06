@@ -2051,21 +2051,21 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
 {plan_notice}\
 <div class=\"grid grid-cols-1 sm:grid-cols-2 gap-4\">\
 <div class=\"space-y-2\">\
-<label class=\"text-xs font-bold text-surface-900\" for=\"signup-name\">Full name</label>\
+<label class=\"apex-klabel\" for=\"signup-name\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Full name</label>\
 <input id=\"signup-name\" name=\"name\" type=\"text\" required autocomplete=\"name\" placeholder=\"Jane Doe\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
-<label class=\"text-xs font-bold text-surface-900\" for=\"signup-company\">Company</label>\
+<label class=\"apex-klabel\" for=\"signup-company\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Company</label>\
 <input id=\"signup-company\" name=\"company_name\" type=\"text\" required autocomplete=\"organization\" placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 </div>\
 <div class=\"space-y-2\">\
-<label class=\"text-xs font-bold text-surface-900\" for=\"signup-email\">Email</label>\
+<label class=\"apex-klabel\" for=\"signup-email\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
 <input id=\"signup-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
-<label class=\"text-xs font-bold text-surface-900\" for=\"signup-password\">Password</label>\
+<label class=\"apex-klabel\" for=\"signup-password\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Password</label>\
 </div>\
 <div class=\"relative\">\
 <input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 12 characters\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
@@ -2099,7 +2099,7 @@ pub fn web_forgot_password_page(csrf_token: &str) -> String {
         "<form class=\"p-8 space-y-6\" action=\"/web/auth/forgot-password\" method=\"POST\">\
 {csrf}\
 <div class=\"space-y-2\">\
-<label class=\"text-xs font-bold text-surface-900\" for=\"reset-email\">Email</label>\
+<label class=\"apex-klabel\" for=\"reset-email\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
 <input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 
@@ -2166,14 +2166,14 @@ pub fn web_reset_password_page_with_state(
 {token_input}{email_input}\
 {header_notice}\
 <div class=\"space-y-2\">\
-<label class=\"text-xs font-bold text-surface-900\" for=\"new-password\">New password</label>\
+<label class=\"apex-klabel\" for=\"new-password\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>New password</label>\
 <div class=\"relative\">\
 <input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 {password_hint}\
 </div>\
 <div class=\"space-y-2\">\
-<label class=\"text-xs font-bold text-surface-900\" for=\"confirm-password\">Confirm password</label>\
+<label class=\"apex-klabel\" for=\"confirm-password\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Confirm password</label>\
 <div class=\"relative\">\
 <input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
@@ -2283,6 +2283,14 @@ pub fn web_verify_email_page_with_state(
 
 /// Dashboard overview page with summary cards.
 pub fn web_dashboard_page() -> String {
+    // Spiral-Lock DNA: the dashboard's flagship data block — the 270°
+    // delivery-health dial + the monoline stroke chart (peaks carry the
+    // terminal point). The mark's geometry as data.
+    let dna_block = format!(
+        "<div class=\"flex items-center gap-8 pb-2\">{}{}</div>",
+        crate::charts::render_dial(0.0, "delivery · 30d", "—", true),
+        crate::charts::render_monoline_bar_chart(&[], 420, 96)
+    );
     "<div class=\"space-y-8\">\
 <section data-view-state=\"ready\" class=\"space-y-8\">\
 <header class=\"flex flex-col gap-2\">\
@@ -2311,8 +2319,8 @@ pub fn web_dashboard_page() -> String {
 <h2 class=\"text-xs font-bold text-surface-950 uppercase tracking-[0.2em]\">Send Volume</h2>\
 <span class=\"text-[10px] font-bold text-surface-500 uppercase tracking-widest\">Last 30 days</span>\
 </div>\
-<div class=\"px-8 py-24 flex flex-col items-center justify-center text-center\">\
-<p class=\"text-sm font-bold text-surface-950\">No sending activity recorded</p>\
+<div class=\"px-8 pt-6 pb-2 flex flex-col items-center justify-center text-center\">{DNA_DASH}<div class=\"py-14 flex flex-col items-center justify-center text-center\">\
+<div class=\"flex items-center gap-8 pb-6\">{DNA}</div>\
 <p class=\"text-xs text-surface-500 mt-2 max-w-xs leading-relaxed\">Once you send your first campaign, detailed metrics and performance charts will appear here.</p>\
 <a href=\"/campaigns/new\" class=\"mt-6 inline-flex items-center justify-center px-6 py-2.5 rounded-xl bg-primary text-white text-xs font-bold hover:bg-brand-700 transition-all active:scale-[0.98]\">Create Campaign</a>\
 </div>\
@@ -2334,7 +2342,7 @@ pub fn web_dashboard_page() -> String {
 </article>\
 </div>\
 </section>
-</div>".to_string()
+</div>".to_string().replace("{DNA_DASH}", &dna_block)
 }
 
 /// Campaigns list page.
@@ -3239,7 +3247,7 @@ pub fn web_settings_api_keys_page() -> String {
         "<div class=\"space-y-6\">\
 <div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">API Keys</h1></div>\
 <form class=\"flex flex-col gap-3 sm:flex-row sm:items-end\" method=\"post\" action=\"/web/api-keys\">\
-<div class=\"flex-1 space-y-2\"><label class=\"text-xs font-bold text-surface-900\" for=\"api-key-name\">Key name</label>\
+<div class=\"flex-1 space-y-2\"><label class=\"apex-klabel\" for=\"api-key-name\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Key name</label>\
 <input id=\"api-key-name\" name=\"name\" type=\"text\" required maxlength=\"100\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\" placeholder=\"Production sender\" /></div>\
 <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Create API Key</button>\
 </form>\
@@ -3276,9 +3284,9 @@ pub fn web_settings_team_page() -> String {
         "<div class=\"space-y-6\">\
 <div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Team</h1></div>\
 <form class=\"flex flex-col gap-3 sm:flex-row sm:items-end\" method=\"post\" action=\"/web/team/invite\">\
-<div class=\"flex-1 space-y-2\"><label class=\"text-xs font-bold text-surface-900\" for=\"invite-email\">Email</label>\
+<div class=\"flex-1 space-y-2\"><label class=\"apex-klabel\" for=\"invite-email\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
 <input id=\"invite-email\" name=\"userName\" type=\"email\" required class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\" placeholder=\"teammate@company.com\" /></div>\
-<div class=\"flex-1 space-y-2\"><label class=\"text-xs font-bold text-surface-900\" for=\"invite-role\">Role</label>\
+<div class=\"flex-1 space-y-2\"><label class=\"apex-klabel\" for=\"invite-role\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Role</label>\
 <select id=\"invite-role\" name=\"role\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\"><option value=\"member\">Member</option><option value=\"admin\">Admin</option></select></div>\
 <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Invite Member</button>\
 </form>\
@@ -3298,7 +3306,7 @@ pub fn web_settings_billing_page() -> String {
 <p class=\"text-sm text-muted-foreground\">Free Tier</p>\
 <p class=\"text-3xl font-bold mt-4\">$0<span class=\"text-sm font-normal text-muted-foreground\">/month</span></p>\
 <form class=\"mt-4\" method=\"post\" action=\"/web/billing/checkout\">\
-<label class=\"block text-xs font-bold text-surface-900 mb-2\" for=\"upgrade-plan\">Plan</label>\
+<label class=\"apex-klabel mb-2\" for=\"upgrade-plan\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Plan</label>\
 <select id=\"upgrade-plan\" name=\"plan\" class=\"w-full max-w-xs px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\"><option value=\"starter\">Starter — €25/mo</option><option value=\"pro\">Pro — €65/mo</option><option value=\"growth\">Growth — €150/mo</option><option value=\"scale\">Scale — €350/mo</option></select>\
 <button type=\"submit\" class=\"mt-3 inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Upgrade Plan</button>\
 </form>\
@@ -3357,11 +3365,11 @@ pub fn web_settings_webhooks_page() -> String {
         "<div class=\"space-y-6\">\
 <div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Webhooks</h1></div>\
 <form class=\"flex flex-col gap-3 sm:flex-row sm:items-end\" method=\"post\" action=\"/web/webhooks\">\
-<div class=\"flex-1 space-y-2\"><label class=\"text-xs font-bold text-surface-900\" for=\"webhook-url\">Endpoint URL</label>\
+<div class=\"flex-1 space-y-2\"><label class=\"apex-klabel\" for=\"webhook-url\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Endpoint URL</label>\
 <input id=\"webhook-url\" name=\"url\" type=\"url\" required class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\" placeholder=\"https://example.com/hooks/apexmail\" /></div>\
-<label class=\"inline-flex items-center gap-2 text-xs font-bold text-surface-900\"><input type=\"checkbox\" name=\"events\" value=\"message.sent\" checked class=\"rounded border-surface-300\" /> Sent</label>\
-<label class=\"inline-flex items-center gap-2 text-xs font-bold text-surface-900\"><input type=\"checkbox\" name=\"events\" value=\"message.bounced\" checked class=\"rounded border-surface-300\" /> Bounced</label>\
-<label class=\"inline-flex items-center gap-2 text-xs font-bold text-surface-900\"><input type=\"checkbox\" name=\"events\" value=\"message.complained\" class=\"rounded border-surface-300\" /> Complained</label>\
+<label class=\"inline-flex items-center gap-2 apex-klabel text-surface-900\"><input type=\"checkbox\" name=\"events\" value=\"message.sent\" checked class=\"rounded border-surface-300\" /> Sent</label>\
+<label class=\"inline-flex items-center gap-2 apex-klabel text-surface-900\"><input type=\"checkbox\" name=\"events\" value=\"message.bounced\" checked class=\"rounded border-surface-300\" /> Bounced</label>\
+<label class=\"inline-flex items-center gap-2 apex-klabel text-surface-900\"><input type=\"checkbox\" name=\"events\" value=\"message.complained\" class=\"rounded border-surface-300\" /> Complained</label>\
 <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Add Webhook</button>\
 </form>\
 {table}</div>",
@@ -3528,6 +3536,14 @@ pub fn control_plane_dashboard_page() -> String {
         <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-surface-100 text-surface-500">billing</span>
         <span class="inline-grid place-items-center min-w-[34px] h-[22px] rounded bg-success-500 text-white">all nominal</span>
     </section>
+
+    <!-- WINDING receipt (mark DNA): the platform's proof line under the
+         service ribbon — challenge/work/proof, arcs rotating stepwise. -->
+    <div class="apex-receipt mb-4" aria-hidden="true">
+      <div><svg viewBox="0 0 24 14" width="14" height="9" fill="none" aria-hidden="true" style="transform:rotate(-24deg)"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg><span class="ok">✓</span> challenge · config verified</div>
+      <div><svg viewBox="0 0 24 14" width="14" height="9" fill="none" aria-hidden="true" style="transform:rotate(0deg)"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg><span class="ok">✓</span> work · migrations applied</div>
+      <div><svg viewBox="0 0 24 14" width="14" height="9" fill="none" aria-hidden="true" style="transform:rotate(24deg)"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg><span class="on">…</span> proof · delivery health</div>
+    </div>
 
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
         <section class="bg-white rounded-2xl border border-surface-200/60 p-8 shadow-sm transition-all hover:shadow-md">
@@ -4717,7 +4733,7 @@ pub fn web_login_mfa_challenge_page(csrf_token: &str, email: &str, return_to: &s
 <p class=\"mt-1 text-sm leading-relaxed\">Password accepted for <strong>{email}</strong>. Enter the 6-digit code from your authenticator app to finish signing in.</p>\
 </div>\
 <div class=\"space-y-2\">\
-<label class=\"text-xs font-bold text-surface-900\" for=\"mfaCode\">Authenticator code</label>\
+<label class=\"apex-klabel\" for=\"mfaCode\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Authenticator code</label>\
 <input id=\"mfaCode\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" minlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" aria-describedby=\"mfa-code-hint\" class=\"flex h-12 w-full rounded-md border border-surface-200 bg-surface-50 px-4 py-2 text-sm font-mono text-center tracking-widest focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 transition-all\" />\
 <p id=\"mfa-code-hint\" class=\"text-xs text-surface-500\">The code refreshes every 30 seconds in your app.</p>\
 </div>\
@@ -4749,12 +4765,12 @@ pub fn control_plane_login_page(csrf_token: &str) -> String {
         "<form class=\"p-8 space-y-6\" action=\"/web/cp/login\" method=\"POST\">\
 {csrf}\
 <div class=\"space-y-2\">\
-<label class=\"text-xs font-bold text-surface-900\" for=\"login-email\">Operator Identity</label>\
+<label class=\"apex-klabel\" for=\"login-email\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Operator Identity</label>\
 <input id=\"login-email\" name=\"email\" type=\"text\" required autocomplete=\"username\" placeholder=\"Email or username\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 <div class=\"space-y-2\">\
 <div class=\"flex items-center justify-between\">\
-<label class=\"text-xs font-bold text-surface-900\" for=\"login-password\">Access Password</label>\
+<label class=\"apex-klabel\" for=\"login-password\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Access Password</label>\
 </div>\
 <div class=\"relative\">\
 <input id=\"login-password\" name=\"password\" type=\"password\" required autocomplete=\"current-password\" placeholder=\"Enter password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
