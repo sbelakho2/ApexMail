@@ -553,7 +553,7 @@ impl<'a> Select<'a> {
                     };
                     let disabled = if option.disabled { " data-disabled=\"true\"" } else { "" };
                     format!(
-                        "<div id=\"select-option-{}\" data-value=\"{}\" class=\"relative flex w-full cursor-default select-none items-center rounded-md py-3 pl-8 pr-2 text-sm outline-none hover:bg-surface-50 focus:bg-surface-100 focus:text-surface-900 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 min-h-[44px]\" role=\"option\" aria-selected=\"{}\"{}>{}<span>{}</span></div>",
+                        "<div id=\"select-option-{}\" data-value=\"{}\" class=\"relative flex w-full cursor-default select-none items-center rounded-[8px_8px_7px_7px] py-3 pl-8 pr-2 text-sm outline-none hover:bg-surface-50 focus:bg-surface-100 focus:text-surface-900 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 min-h-[44px]\" role=\"option\" aria-selected=\"{}\"{}>{}<span>{}</span></div>",
                         i, option.value, option.selected,
                         disabled,
                         selected,
@@ -583,7 +583,7 @@ impl<'a> Select<'a> {
                     };
                     let disabled = if option.disabled { " data-disabled=\"true\"" } else { "" };
                     format!(
-                        "<div id=\"select-option-{}\" data-value=\"{}\" class=\"relative flex w-full cursor-default select-none items-center rounded-md py-3 pl-8 pr-2 text-sm outline-none hover:bg-surface-50 focus:bg-surface-100 focus:text-surface-900 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 min-h-[44px]\" role=\"option\" aria-selected=\"{}\"{}>{}<span>{}</span></div>",
+                        "<div id=\"select-option-{}\" data-value=\"{}\" class=\"relative flex w-full cursor-default select-none items-center rounded-[8px_8px_7px_7px] py-3 pl-8 pr-2 text-sm outline-none hover:bg-surface-50 focus:bg-surface-100 focus:text-surface-900 data-[disabled]:pointer-events-none data-[disabled]:opacity-50 min-h-[44px]\" role=\"option\" aria-selected=\"{}\"{}>{}<span>{}</span></div>",
                         i, option.value, option.selected,
                         disabled,
                         selected,
@@ -915,7 +915,7 @@ pub struct EmptyState<'a> {
 
 impl<'a> EmptyState<'a> {
     pub fn render_html(&self) -> String {
-        let icon = self.icon_markup.map(|icon| format!("<div class=\"mb-4 flex h-16 w-16 items-center justify-center rounded-lg bg-muted/50 border border-border/50\">{}</div>", icon)).unwrap_or_default();
+        let icon = self.icon_markup.map(|icon| format!("<div class=\"mb-4 flex h-16 w-16 items-center justify-center rounded-[16px_16px_9px_9px] bg-muted/50 border border-border/50\">{}</div>", icon)).unwrap_or_default();
         let description = self.description.map(|text| format!("<p class=\"mx-auto max-w-[320px] text-sm text-muted-foreground leading-relaxed\">{}</p>", text)).unwrap_or_default();
         let action = match (self.action_label, self.action_href) {
             (Some(label), Some(href)) => format!("<a href=\"{}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 h-10 px-3 text-sm min-h-[44px] mt-6\">{}</a>", href, label),
@@ -1063,10 +1063,10 @@ impl<'a> Dialog<'a> {
         let close = if self.hide_close_button {
             String::new()
         } else {
-            format!("<button data-dialog-close data-focus-initial=\"true\" class=\"absolute right-4 top-4 rounded-md opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2\" aria-label=\"Close\">{}<span class=\"sr-only\">Close</span></button>", primitive_icon("x", "h-4 w-4"))
+            format!("<button data-dialog-close data-focus-initial=\"true\" class=\"absolute right-4 top-4 rounded-[8px_8px_7px_7px] opacity-70 ring-offset-background transition-opacity hover:opacity-100 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2\" aria-label=\"Close\">{}<span class=\"sr-only\">Close</span></button>", primitive_icon("x", "h-4 w-4"))
         };
         format!(
-            "<div class=\"fixed inset-0 z-50 bg-black/40 backdrop-blur-sm data-[state=open]:animate-in\"></div><div role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"{dialog_id}\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"[data-focus-initial]\" class=\"fixed left-[50%] top-[50%] z-50 grid w-full translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 duration-200 sm:rounded-lg {} {}\"><div class=\"flex flex-col space-y-1.5 text-center sm:text-left\"><h2 id=\"{dialog_id}\" class=\"text-lg font-bold leading-none tracking-tight\">{}</h2>{}</div><div>{}</div>{}</div>",
+            "<div class=\"fixed inset-0 z-50 bg-black/40 backdrop-blur-sm data-[state=open]:animate-in\"></div><div role=\"dialog\" aria-modal=\"true\" aria-labelledby=\"{dialog_id}\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"[data-focus-initial]\" class=\"fixed left-[50%] top-[50%] z-50 grid w-full translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 duration-200 sm:rounded-[16px_16px_9px_9px] {} {}\"><div class=\"flex flex-col space-y-1.5 text-center sm:text-left\"><h2 id=\"{dialog_id}\" class=\"text-lg font-bold leading-none tracking-tight\">{}</h2>{}</div><div>{}</div>{}</div>",
             dialog_size_class(self.size),
             dialog_variant_class(self.variant),
             self.title,
@@ -1097,14 +1097,14 @@ impl<'a> AlertDialog<'a> {
         };
         let cancel = if self.dialog_type == "confirm" {
             format!(
-                "<button data-alert-dialog-cancel class=\"px-4 py-2 rounded-md text-sm font-medium bg-muted text-foreground hover:bg-muted/80 transition-colors\">{}</button>",
+                "<button data-alert-dialog-cancel class=\"px-4 py-2 rounded-[8px_8px_7px_7px] text-sm font-medium bg-muted text-foreground hover:bg-muted/80 transition-colors\">{}</button>",
                 self.cancel_label.unwrap_or("Cancel")
             )
         } else {
             String::new()
         };
         format!(
-            "<div class=\"fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm\"><div class=\"bg-card border border-border rounded-lg p-6 max-w-md w-full mx-4 animate-in fade-in zoom-in-95 duration-200\" role=\"alertdialog\" aria-modal=\"true\" aria-labelledby=\"{alert_id}-title\" aria-describedby=\"{alert_id}-message\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"{}\"><h2 id=\"{alert_id}-title\" class=\"text-lg font-bold text-foreground mb-2\">{}</h2><p id=\"{alert_id}-message\" class=\"text-sm text-muted-foreground mb-6\">{}</p><div class=\"flex justify-end gap-3\">{}<button data-alert-dialog-confirm class=\"px-4 py-2 rounded-md text-sm font-medium transition-colors {}\">{}</button></div></div></div>",
+            "<div class=\"fixed inset-0 z-[200] flex items-center justify-center bg-black/50 backdrop-blur-sm\"><div class=\"bg-card border border-border rounded-[16px_16px_9px_9px] p-6 max-w-md w-full mx-4 animate-in fade-in zoom-in-95 duration-200\" role=\"alertdialog\" aria-modal=\"true\" aria-labelledby=\"{alert_id}-title\" aria-describedby=\"{alert_id}-message\" tabindex=\"-1\" data-focus-trap=\"true\" data-escape-dismiss=\"true\" data-initial-focus=\"{}\"><h2 id=\"{alert_id}-title\" class=\"text-lg font-bold text-foreground mb-2\">{}</h2><p id=\"{alert_id}-message\" class=\"text-sm text-muted-foreground mb-6\">{}</p><div class=\"flex justify-end gap-3\">{}<button data-alert-dialog-confirm class=\"px-4 py-2 rounded-[8px_8px_7px_7px] text-sm font-medium transition-colors {}\">{}</button></div></div></div>",
             initial_focus,
             self.title,
             self.message,
@@ -1130,7 +1130,7 @@ pub struct Popover<'a> {
 impl<'a> Popover<'a> {
     pub fn render_html(&self) -> String {
         format!(
-            "<div class=\"relative min-h-[180px] rounded-lg border border-border bg-muted/10 p-4\"><div class=\"flex items-start justify-between gap-4\"><div><p class=\"text-sm font-semibold text-foreground\">{}</p><p class=\"text-xs text-muted-foreground\">{}</p></div><button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 border border-surface-200 bg-background text-foreground hover:border-surface-300 h-12 px-4 py-2\">Review segment health</button></div><div class=\"absolute right-4 top-16 z-10 w-[280px] rounded-lg border border-border bg-popover p-4 text-popover-foreground\"><p class=\"text-sm font-semibold\">{}</p><p class=\"mt-1 text-xs text-muted-foreground\">{}</p><div class=\"mt-3 flex items-center justify-between rounded-md border border-border bg-background px-3 py-2 text-xs\"><span>{}</span>{}</div><div class=\"mt-3 flex justify-end gap-2\"><button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 text-foreground hover:bg-surface-50 h-10 px-3 text-sm min-h-[44px]\">{}</button><button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-white hover:bg-primary/90 h-10 px-3 text-sm min-h-[44px]\">{}</button></div></div></div>",
+            "<div class=\"relative min-h-[180px] rounded-[16px_16px_9px_9px] border border-border bg-muted/10 p-4\"><div class=\"flex items-start justify-between gap-4\"><div><p class=\"text-sm font-semibold text-foreground\">{}</p><p class=\"text-xs text-muted-foreground\">{}</p></div><button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 border border-surface-200 bg-background text-foreground hover:border-surface-300 h-12 px-4 py-2\">Review segment health</button></div><div class=\"absolute right-4 top-16 z-10 w-[280px] rounded-[16px_16px_9px_9px] border border-border bg-popover p-4 text-popover-foreground\"><p class=\"text-sm font-semibold\">{}</p><p class=\"mt-1 text-xs text-muted-foreground\">{}</p><div class=\"mt-3 flex items-center justify-between rounded-[8px_8px_7px_7px] border border-border bg-background px-3 py-2 text-xs\"><span>{}</span>{}</div><div class=\"mt-3 flex justify-end gap-2\"><button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 text-foreground hover:bg-surface-50 h-10 px-3 text-sm min-h-[44px]\">{}</button><button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-colors duration-150 ease-out !shadow-none hover:!shadow-none active:!shadow-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 bg-primary text-white hover:bg-primary/90 h-10 px-3 text-sm min-h-[44px]\">{}</button></div></div></div>",
             self.preview_title,
             self.preview_description,
             self.title,
@@ -1171,13 +1171,13 @@ impl<'a> DropdownMenu<'a> {
             let inset = if item.inset { " pl-8" } else { "" };
             let shortcut = item.shortcut.map(|value| format!("<span class=\"ml-auto text-xs opacity-60\">{}</span>", value)).unwrap_or_default();
             let tabindex = if i == 0 { "0" } else { "-1" };
-            format!("<div role=\"menuitem\" tabindex=\"{}\" class=\"relative flex cursor-default select-none items-center rounded-md px-3 py-3 text-[14px] font-medium outline-none transition-colors hover:bg-surface-50 focus:bg-surface-100 focus:text-surface-900 cursor-pointer min-h-[44px]{}{}\">{}{}</div>", tabindex, inset, destructive, item.label, shortcut)
+            format!("<div role=\"menuitem\" tabindex=\"{}\" class=\"relative flex cursor-default select-none items-center rounded-[8px_8px_7px_7px] px-3 py-3 text-[14px] font-medium outline-none transition-colors hover:bg-surface-50 focus:bg-surface-100 focus:text-surface-900 cursor-pointer min-h-[44px]{}{}\">{}{}</div>", tabindex, inset, destructive, item.label, shortcut)
         }).collect::<Vec<_>>().join("");
         let keyboard_attrs = " data-keyboard-contract=\"dropdown-menu\" data-keyboard-arrow-navigates=\"true\" data-keyboard-enter-activates=\"true\" data-keyboard-escape-closes=\"true\"";
         // The separator belongs INSIDE the menu container (between the label
         // and the items) — rendering it after the closing </div> left it
         // stranded outside the menu, where keyboard/role semantics ignore it.
-        format!("<div class=\"z-50 min-w-[8rem] overflow-hidden rounded-lg border border-surface-200/60 bg-card/90 backdrop-blur-xl p-1.5 text-surface-900 data-[state=open]:animate-in\" role=\"menu\"{}>{}{}{}</div>", keyboard_attrs, label, separator, items)
+        format!("<div class=\"z-50 min-w-[8rem] overflow-hidden rounded-[16px_16px_9px_9px] border border-surface-200/60 bg-card/90 backdrop-blur-xl p-1.5 text-surface-900 data-[state=open]:animate-in\" role=\"menu\"{}>{}{}{}</div>", keyboard_attrs, label, separator, items)
     }
 }
 
@@ -1191,7 +1191,7 @@ pub struct Tooltip<'a> {
 
 impl<'a> Tooltip<'a> {
     pub fn render_html(&self) -> String {
-        format!("<div role=\"tooltip\" data-side=\"{}\" data-delay=\"{}\" class=\"z-50 overflow-hidden rounded-md border px-3 py-1.5 text-xs animate-in fade-in-0 zoom-in-95 {} {}\">{}</div>", self.side, self.delay_duration, tooltip_variant_class(self.variant), tooltip_side_class(self.side), self.content)
+        format!("<div role=\"tooltip\" data-side=\"{}\" data-delay=\"{}\" class=\"z-50 overflow-hidden rounded-[8px_8px_7px_7px] border px-3 py-1.5 text-xs animate-in fade-in-0 zoom-in-95 {} {}\">{}</div>", self.side, self.delay_duration, tooltip_variant_class(self.variant), tooltip_side_class(self.side), self.content)
     }
 
     /// Tooltip delay and positioning contract:matches Radix Tooltip behavior.
@@ -1549,8 +1549,8 @@ impl<'a> Toast<'a> {
             .description
             .map(|value| format!("<div class=\"text-sm opacity-90\">{}</div>", value))
             .unwrap_or_default();
-        let action = self.action_label.map(|value| format!("<button class=\"inline-flex h-8 shrink-0 items-center justify-center rounded-md border bg-transparent px-3 text-sm font-medium ring-offset-background transition-colors hover:bg-secondary\">{}</button>", value)).unwrap_or_default();
-        format!("<div class=\"group pointer-events-auto relative flex w-full items-center justify-between space-x-4 overflow-hidden rounded-lg border p-4 pr-8 transition-all {}\" role=\"status\"><div class=\"flex items-start gap-3\">{}<div class=\"grid gap-1\">{}{}</div></div>{}<button class=\"absolute right-2 top-2 rounded-md p-1 text-foreground/50\" aria-label=\"Close notification\">{}</button></div>", toast_variant_class(self.variant), toast_icon_markup(self.variant), title, description, action, primitive_icon("x", "h-4 w-4"))
+        let action = self.action_label.map(|value| format!("<button class=\"inline-flex h-8 shrink-0 items-center justify-center rounded-[8px_8px_7px_7px] border bg-transparent px-3 text-sm font-medium ring-offset-background transition-colors hover:bg-secondary\">{}</button>", value)).unwrap_or_default();
+        format!("<div class=\"group pointer-events-auto relative flex w-full items-center justify-between space-x-4 overflow-hidden rounded-[16px_16px_9px_9px] border p-4 pr-8 transition-all {}\" role=\"status\"><div class=\"flex items-start gap-3\">{}<div class=\"grid gap-1\">{}{}</div></div>{}<button class=\"absolute right-2 top-2 rounded-[8px_8px_7px_7px] p-1 text-foreground/50\" aria-label=\"Close notification\">{}</button></div>", toast_variant_class(self.variant), toast_icon_markup(self.variant), title, description, action, primitive_icon("x", "h-4 w-4"))
     }
 }
 
@@ -1679,7 +1679,7 @@ impl<'a> Card<'a> {
             ""
         };
         format!(
-            "<div class=\"apex-card rounded-lg border border-surface-200 bg-card text-surface-950 transition-premium {} {}{}\"><div class=\"flex flex-col space-y-2 min-w-0 mb-4\"><h3 class=\"text-sm font-bold tracking-tight leading-tight break-words text-surface-400\">{}</h3></div><div class=\"min-w-0\">{}</div></div>",
+            "<div class=\"apex-card rounded-[16px_16px_9px_9px] border border-surface-200 bg-card text-surface-950 transition-premium {} {}{}\"><div class=\"flex flex-col space-y-2 min-w-0 mb-4\"><h3 class=\"text-sm font-bold tracking-tight leading-tight break-words text-surface-400\">{}</h3></div><div class=\"min-w-0\">{}</div></div>",
             card_variant_class(self.variant),
             card_padding_class(self.padding),
             interactive,
@@ -1723,9 +1723,9 @@ fn input_variant_class(variant: &str) -> &'static str {
 
 fn input_size_class(size: &str) -> &'static str {
     match size {
-        "sm" => "h-10 px-3 text-[13px] rounded-md",
-        "lg" => "h-14 px-6 text-[16px] rounded-md",
-        _ => "h-12 px-4 text-[14px] rounded-md",
+        "sm" => "h-10 px-3 text-[13px] rounded-[8px_8px_7px_7px]",
+        "lg" => "h-14 px-6 text-[16px] rounded-[8px_8px_7px_7px]",
+        _ => "h-12 px-4 text-[14px] rounded-[8px_8px_7px_7px]",
     }
 }
 
@@ -1765,9 +1765,9 @@ fn select_variant_class(variant: &str) -> &'static str {
 
 fn select_size_class(size: &str) -> &'static str {
     match size {
-        "sm" => "h-10 px-3 text-[12px] tracking-tight rounded-md",
-        "lg" => "h-14 px-6 text-[15px] tracking-tight rounded-md",
-        _ => "h-12 px-4 text-[14px] tracking-tight rounded-md",
+        "sm" => "h-10 px-3 text-[12px] tracking-tight rounded-[8px_8px_7px_7px]",
+        "lg" => "h-14 px-6 text-[15px] tracking-tight rounded-[8px_8px_7px_7px]",
+        _ => "h-12 px-4 text-[14px] tracking-tight rounded-[8px_8px_7px_7px]",
     }
 }
 
@@ -2185,15 +2185,15 @@ fn tabs_list_variant_class(variant: &str) -> &'static str {
             "border-b border-border bg-transparent w-full justify-start gap-8 px-0 rounded-none"
         }
         "pills" => "gap-1 bg-transparent",
-        _ => "rounded-lg bg-muted/50 p-1 text-muted-foreground border border-border/50",
+        _ => "rounded-[16px_16px_9px_9px] bg-muted/50 p-1 text-muted-foreground border border-border/50",
     }
 }
 
 fn tabs_trigger_variant_class(variant: &str) -> &'static str {
     match variant {
         "underline" => "relative border-b-2 border-transparent pb-3 pt-2 px-1 text-surface-500 rounded-none data-[state=active]:border-primary data-[state=active]:text-primary hover:text-surface-950",
-        "pills" => "rounded-md px-4 bg-transparent text-surface-500 hover:bg-surface-50 data-[state=active]:bg-brand-50 data-[state=active]:text-primary",
-        _ => "rounded-md text-surface-500 hover:text-surface-950 data-[state=active]:bg-background data-[state=active]:text-foreground",
+        "pills" => "rounded-[8px_8px_7px_7px] px-4 bg-transparent text-surface-500 hover:bg-surface-50 data-[state=active]:bg-brand-50 data-[state=active]:text-primary",
+        _ => "rounded-[8px_8px_7px_7px] text-surface-500 hover:text-surface-950 data-[state=active]:bg-background data-[state=active]:text-foreground",
     }
 }
 
@@ -2892,7 +2892,7 @@ mod tests {
         }
         .render_html();
 
-        assert!(html.contains("h-10 px-3 text-[13px] rounded-md"));
+        assert!(html.contains("h-10 px-3 text-[13px] rounded-[8px_8px_7px_7px]"));
         assert!(html.contains("disabled aria-disabled=\"true\""));
         assert!(html.contains("border-surface-200"));
     }
@@ -3204,7 +3204,7 @@ mod tests {
 
         assert!(html.contains("data-open=\"true\""));
         assert!(html.contains("border-success"));
-        assert!(html.contains("h-14 px-6 text-[15px] tracking-tight rounded-md"));
+        assert!(html.contains("h-14 px-6 text-[15px] tracking-tight rounded-[8px_8px_7px_7px]"));
         assert!(html.contains("Enterprise"));
         assert!(html.contains("role=\"option\""));
     }
@@ -3438,7 +3438,7 @@ mod tests {
         .render_html();
 
         assert!(
-            html.contains("rounded-lg border border-border bg-popover p-4 text-popover-foreground")
+            html.contains("rounded-[16px_16px_9px_9px] border border-border bg-popover p-4 text-popover-foreground")
         );
         assert!(html.contains("Segment risk summary"));
         assert!(html.contains("Open report"));

@@ -397,7 +397,7 @@ mod tests {
         let html = inp.render_html();
         let classes = extract_classes(&html);
         assert!(!classes.is_empty());
-        assert!(classes[0].contains(&"rounded-md".to_string()));
+        assert!(classes[0].contains(&"rounded-[8px_8px_7px_7px]".to_string()));
         assert!(classes[0].contains(&"border".to_string()));
     }
 
@@ -764,7 +764,7 @@ mod tests {
         let required = [
             "min-h-screen",
             "rounded-xl",
-            "rounded-md",
+            "rounded-[8px_8px_7px_7px]",
             "border",
             "bg-white",
             "font-bold",
@@ -787,7 +787,7 @@ mod tests {
         let required = [
             "min-h-screen",
             "rounded-xl",
-            "rounded-md",
+            "rounded-[8px_8px_7px_7px]",
             "border",
             "text-2xl",
             "font-bold",

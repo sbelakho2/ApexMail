@@ -2922,10 +2922,6 @@ input:user-invalid:focus-visible,
   border-radius: 9999px;
 }
 
-.rounded-lg {
-  border-radius: var(--radius-lg);
-}
-
 .rounded-md {
   border-radius: var(--radius-md);
 }
@@ -6462,8 +6458,8 @@ input::placeholder,
     justify-content: space-between;
   }
 
-  .sm\:rounded-lg {
-    border-radius: var(--radius-lg);
+  .sm\:rounded-\[16px_16px_9px_9px\] {
+    border-radius: 16px 16px 9px 9px;
   }
 
   .sm\:px-6 {

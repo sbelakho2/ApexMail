@@ -180,7 +180,7 @@ impl<'a> ShellHeader<'a> {
                     {mobile_toggle}\
                     <form method=\"get\" action=\"/campaigns\" role=\"search\" class=\"relative hidden md:block\">\
                         <label class=\"sr-only\" for=\"global-search\">Search campaigns</label>\
-                        <div class=\"flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-surface-500 bg-surface-50 border border-surface-200/60 rounded-lg focus-within:border-primary min-w-[220px]\">\
+                        <div class=\"flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-surface-500 bg-surface-50 border border-surface-200/60 rounded-[16px_16px_9px_9px] focus-within:border-primary min-w-[220px]\">\
                             <svg xmlns=\"http://www.w3.org/2000/svg\" width=\"14\" height=\"14\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2.5\" stroke-linecap=\"round\" stroke-linejoin=\"round\" aria-hidden=\"true\"><circle cx=\"11\" cy=\"11\" r=\"8\"/><path d=\"m21 21-4.3-4.3\"/></svg>\
                             <input id=\"global-search\" type=\"search\" name=\"query\" placeholder=\"Search campaigns…\" class=\"bg-transparent outline-none text-surface-600 placeholder:text-muted-foreground w-full\" />\
                             <button type=\"submit\" class=\"text-[10px] font-bold uppercase tracking-widest text-surface-500 hover:text-surface-900 transition-colors\">Search</button>\
@@ -231,7 +231,7 @@ impl<'a> ImpersonationBanner<'a> {
         let safe_operator = html_escape(self.operator_name);
         let safe_time = html_escape(self.time_remaining);
         format!(
-            "<div class=\"fixed top-0 left-0 right-0 z-[100] bg-primary text-white border-b border-brand-700\" role=\"alert\" aria-live=\"polite\"><div class=\"max-w-7xl mx-auto px-6 py-2\"><div class=\"flex items-center justify-between\"><div class=\"flex items-center gap-6\"><div class=\"flex items-center gap-2 bg-white/10 px-2 py-0.5 rounded-full\"><span class=\"text-[10px] font-semibold uppercase tracking-[0.1em]\">Impersonation Active</span></div><div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Tenant:</span><span class=\"bg-white/10 px-1.5 py-0.5 rounded-md\">{}</span></div><div class=\"hidden md:flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Operator:</span><span>{}</span></div></div><div class=\"flex items-center gap-6\">{}<div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Expires:</span><span class=\"font-mono bg-white/20 px-1.5 py-0.5 rounded-md\">{}</span></div><form method=\"POST\" action=\"/web/auth/impersonate/end\" class=\"inline\"><button type=\"submit\" class=\"px-3 py-1 bg-white text-primary rounded-md text-[11px] font-semibold hover:bg-surface-50 transition-colors\">{}</button></form></div></div></div></div>",
+            "<div class=\"fixed top-0 left-0 right-0 z-[100] bg-primary text-white border-b border-brand-700\" role=\"alert\" aria-live=\"polite\"><div class=\"max-w-7xl mx-auto px-6 py-2\"><div class=\"flex items-center justify-between\"><div class=\"flex items-center gap-6\"><div class=\"flex items-center gap-2 bg-white/10 px-2 py-0.5 rounded-full\"><span class=\"text-[10px] font-semibold uppercase tracking-[0.1em]\">Impersonation Active</span></div><div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Tenant:</span><span class=\"bg-white/10 px-1.5 py-0.5 rounded-[8px_8px_7px_7px]\">{}</span></div><div class=\"hidden md:flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Operator:</span><span>{}</span></div></div><div class=\"flex items-center gap-6\">{}<div class=\"flex items-center gap-2 text-[11px] font-semibold tracking-tight\"><span class=\"opacity-70\">Expires:</span><span class=\"font-mono bg-white/20 px-1.5 py-0.5 rounded-[8px_8px_7px_7px]\">{}</span></div><form method=\"POST\" action=\"/web/auth/impersonate/end\" class=\"inline\"><button type=\"submit\" class=\"px-3 py-1 bg-white text-primary rounded-[8px_8px_7px_7px] text-[11px] font-semibold hover:bg-surface-50 transition-colors\">{}</button></form></div></div></div></div>",
             safe_tenant,
             safe_operator,
             error,
@@ -294,7 +294,7 @@ impl<'a> WebDashboardShell<'a> {
         let menu_icon = shell_icon("menu", "h-5 w-5");
         let mobile_sidebar = format!(
             "<details class=\"apex-mobile-nav md:hidden fixed inset-y-0 left-0 z-50\" id=\"mobile-sidebar\">\
-            <summary class=\"absolute left-4 top-3 z-10 inline-flex h-10 w-10 items-center justify-center rounded-lg bg-card text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors border border-surface-200\" aria-label=\"Toggle navigation menu\" aria-controls=\"mobile-sidebar-panel\">{menu_icon}<span class=\"sr-only\">Menu</span></summary>\
+            <summary class=\"absolute left-4 top-3 z-10 inline-flex h-10 w-10 items-center justify-center rounded-[16px_16px_9px_9px] bg-card text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors border border-surface-200\" aria-label=\"Toggle navigation menu\" aria-controls=\"mobile-sidebar-panel\">{menu_icon}<span class=\"sr-only\">Menu</span></summary>\
             <div id=\"mobile-sidebar-panel\" class=\"h-screen w-[min(20rem,calc(100vw-2rem))] bg-card border-r border-surface-200/60 overflow-y-auto pt-16\">{sidebar_content}</div>\
             </details>",
             menu_icon = menu_icon,
@@ -377,7 +377,7 @@ impl<'a> ControlPlaneShell<'a> {
         let menu_icon = shell_icon("menu", "h-5 w-5");
         let mobile_sidebar = format!(
             "<details class=\"apex-mobile-nav md:hidden fixed inset-y-0 left-0 z-50\" id=\"control-plane-mobile-sidebar\">\
-            <summary class=\"absolute left-4 top-3 z-10 inline-flex h-10 w-10 items-center justify-center rounded-lg bg-card text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors border border-surface-200\" aria-label=\"Toggle control plane navigation menu\" aria-controls=\"control-plane-mobile-panel\">{menu_icon}<span class=\"sr-only\">Menu</span></summary>\
+            <summary class=\"absolute left-4 top-3 z-10 inline-flex h-10 w-10 items-center justify-center rounded-[16px_16px_9px_9px] bg-card text-surface-500 hover:bg-surface-50 hover:text-surface-950 transition-colors border border-surface-200\" aria-label=\"Toggle control plane navigation menu\" aria-controls=\"control-plane-mobile-panel\">{menu_icon}<span class=\"sr-only\">Menu</span></summary>\
             <div id=\"control-plane-mobile-panel\" class=\"h-screen w-[min(20rem,calc(100vw-2rem))] bg-card border-r border-surface-200/60 overflow-y-auto pt-16\">{sidebar_content}</div>\
             </details>",
             menu_icon = menu_icon,
@@ -434,7 +434,7 @@ fn render_marketing_header() -> String {
          <nav class=\"max-w-7xl mx-auto px-4 sm:px-6 lg:px-8\">\
          <div class=\"flex items-center justify-between h-16 lg:h-20\">\
          <a href=\"/\" class=\"flex items-center gap-2 group\">\
-         <div class=\"w-8 h-8 rounded-md bg-surface-950 flex items-center justify-center border border-surface-800\">\
+         <div class=\"w-8 h-8 rounded-[8px_8px_7px_7px] bg-surface-950 flex items-center justify-center border border-surface-800\">\
          <svg xmlns=\"http://www.w3.org/2000/svg\" class=\"w-5 h-5 text-white\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><polygon points=\"13 2 3 14 12 14 11 22 21 10 12 10 13 2\"/></svg>\
          </div><span class=\"text-xl font-bold text-surface-950 tracking-tighter\">ApexMail</span></a>\
          <div class=\"hidden lg:flex items-center gap-6\">\
@@ -501,7 +501,7 @@ fn render_sidebar_content(
             let classes = if is_active {
                 "apex-nav-cell is-active flex items-center gap-3 px-3 py-2 text-sm font-semibold transition-all bg-primary text-white"
             } else {
-                "flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-md text-surface-600 hover:text-surface-950 hover:bg-surface-50"
+                "flex items-center gap-3 px-3 py-2 text-sm font-medium transition-all rounded-[8px_8px_7px_7px] text-surface-600 hover:text-surface-950 hover:bg-surface-50"
             };
 
             let icon_color = if is_active { "text-brand-700" } else { "text-surface-500" };
@@ -578,7 +578,7 @@ fn render_web_sidebar(current_path: &str, csrf_token: &str) -> String {
          <div class=\"p-6 mb-4\"><div class=\"flex items-center gap-2\">\
          <span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter transition-all hover:opacity-80\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span></div></div>\
          <nav class=\"flex-1 overflow-y-auto\" data-sidebar=\"primary\" aria-label=\"Primary sidebar navigation\">{content}</nav>\
-         <div class=\"p-4 border-t border-surface-100\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf_token}\" /><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 text-sm font-semibold rounded-md text-surface-500 hover:text-surface-950 hover:bg-surface-50 transition-colors\"><span>Sign Out</span></button></form></div></div>",
+         <div class=\"p-4 border-t border-surface-100\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf_token}\" /><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 text-sm font-semibold rounded-[8px_8px_7px_7px] text-surface-500 hover:text-surface-950 hover:bg-surface-50 transition-colors\"><span>Sign Out</span></button></form></div></div>",
         content = content,
         csrf_token = html_escape(csrf_token),
     )
@@ -632,7 +632,7 @@ fn render_cp_sidebar(current_path: &str, csrf_token: &str) -> String {
          <span class=\"apex-sidebar-brand text-xl font-bold tracking-tighter\"><span class=\"text-primary\">Apex</span><span class=\"text-surface-950\">Mail</span></span>\
          <span class=\"text-[11px] font-semibold uppercase tracking-[0.1em] text-surface-500\">Operations</span></div></div>\
          <nav class=\"flex-1 overflow-y-auto cp-sidebar-nav\" data-sidebar=\"primary\" aria-label=\"Control Plane navigation\">{}</nav>\
-         <div class=\"p-4 border-t border-surface-100\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf_token}\" /><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 text-sm font-semibold rounded-md text-surface-500 hover:text-surface-950 hover:bg-surface-50 transition-colors\"><span>Sign Out</span></button></form></div></div>",
+         <div class=\"p-4 border-t border-surface-100\"><form method=\"POST\" action=\"/web/auth/logout\"><input type=\"hidden\" name=\"_csrf\" value=\"{csrf_token}\" /><button type=\"submit\" class=\"flex w-full items-center gap-3 px-4 py-2 text-sm font-semibold rounded-[8px_8px_7px_7px] text-surface-500 hover:text-surface-950 hover:bg-surface-50 transition-colors\"><span>Sign Out</span></button></form></div></div>",
         content,
         csrf_token = html_escape(csrf_token),
     )

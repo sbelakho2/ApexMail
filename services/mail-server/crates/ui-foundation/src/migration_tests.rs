@@ -560,7 +560,7 @@ fn migration_web_and_cp_share_primitives() {
     let cp_login = leptos_views::control_plane_login_page("");
 
     // Both should use the same button class pattern
-    let btn_class = "py-3 rounded-md";
+    let btn_class = "py-3 rounded-[8px_8px_7px_7px]";
     assert!(
         web_login.contains(btn_class),
         "web login missing common button class"

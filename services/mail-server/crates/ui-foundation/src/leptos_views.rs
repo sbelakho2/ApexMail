@@ -387,7 +387,7 @@ fn domain_detail_section(data: &ListPageData) -> String {
         .map(|table| table.rows.as_slice())
         .unwrap_or(&[]);
     let verify_form = format!(
-        "<form method=\"post\" action=\"{base}/verify\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Verify DNS now</button><p class=\"mt-2 text-xs text-muted-foreground max-w-md\">Verification re-probes every record and (on the first run) provisions the DKIM keys that generate the full record set below.</p></form>",
+        "<form method=\"post\" action=\"{base}/verify\" class=\"inline\"><button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Verify DNS now</button><p class=\"mt-2 text-xs text-muted-foreground max-w-md\">Verification re-probes every record and (on the first run) provisions the DKIM keys that generate the full record set below.</p></form>",
         base = html_escape(&data.base_path),
     );
     if records.is_empty() {
@@ -494,7 +494,7 @@ fn campaign_detail_section(data: &ListPageData) -> String {
                 )
             } else {
                 format!(
-                    "<button type=\"button\" disabled aria-disabled=\"true\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-surface-500 cursor-not-allowed\" title=\"Not available in this campaign's current status\">{label}</button>",
+                    "<button type=\"button\" disabled aria-disabled=\"true\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-surface-500 cursor-not-allowed\" title=\"Not available in this campaign's current status\">{label}</button>",
                     label = html_escape(&label),
                 )
             };
@@ -540,7 +540,7 @@ fn domain_transfer_section(data: &ListPageData) -> String {
         <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"transfer-domain\">Domain</label><input id=\"transfer-domain\" name=\"domain\" type=\"text\" required value=\"{domain}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
         <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"transfer-target\">Target tenant id</label><input id=\"transfer-target\" name=\"to_tenant_id\" type=\"text\" required placeholder=\"tenant UUID\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
         <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"transfer-confirmation\">Confirmation</label><input id=\"transfer-confirmation\" name=\"confirmation\" type=\"text\" required pattern=\"{pattern}\" title=\"Type {expected} exactly.\" placeholder=\"{expected}\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /><p class=\"text-xs text-muted-foreground\">The exact string is checked again server-side after the POST.</p></div>\
-        <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Transfer domain</button>\
+        <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Transfer domain</button>\
         </form></section>",
         expected = html_escape(&expected),
         domain = html_escape(&domain),
@@ -938,7 +938,7 @@ pub fn data_list_page(data: &ListPageData, noun: &str) -> String {
                 if has_bulk {
                     let bulk = data.bulk_action.as_ref().expect("checked above");
                     format!(
-                    "<form method=\"post\" action=\"{action}\" data-bulk-form=\"{noun}\"><section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"{noun}\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">There is no select-all without scripts — tick each row you want. Bulk actions apply to every checked row and return to this exact page.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"{action}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></div></div></section><section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">{summary}</p>{pagination}</div></section></form>",
+                    "<form method=\"post\" action=\"{action}\" data-bulk-form=\"{noun}\"><section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"{noun}\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">There is no select-all without scripts — tick each row you want. Bulk actions apply to every checked row and return to this exact page.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"{action}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">{label}</button></div></div></section><section data-view-state=\"ready\" class=\"space-y-4\">{table}<div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><p class=\"text-sm text-muted-foreground\">{summary}</p>{pagination}</div></section></form>",
                     action = html_escape(&bulk.action),
                     noun = html_escape(noun),
                     label = html_escape(&bulk.button_label),
@@ -1035,7 +1035,7 @@ fn render_campaign_editor_page(
         audience_select = audience_select,
         content_label = Label { text: "HTML Content", variant: "default", size: "default", required: false, optional: false }.render_html(),
         content_input = content_input,
-        preview_button = "<button type=\"submit\" formaction=\"/web/campaigns/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Preview</button>",
+        preview_button = "<button type=\"submit\" formaction=\"/web/campaigns/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Preview</button>",
         save_button = save_button,
     )
 }
@@ -1604,10 +1604,10 @@ pub fn control_plane_audit_page() -> String {
 <div class=\"apex-page-heading flex flex-col gap-2\"><p class=\"apex-eyebrow\"><span>Control Plane Audit</span></p>\
 <h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">Audit Logs</h1></div>\
 <div class=\"flex items-center gap-3\">\
-<a href=\"/web/admin/audit/export\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300\">Export audit log (CSV)</a>\
+<a href=\"/web/admin/audit/export\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300\">Export audit log (CSV)</a>\
 </div>\
 <form method=\"get\" action=\"/audit\" role=\"search\" class=\"flex items-center gap-4\">\
-<div class=\"flex-1\"><label class=\"sr-only\" for=\"audit-search\">Search audit logs</label><input id=\"audit-search\" type=\"search\" name=\"query\" placeholder=\"Search audit logs...\" class=\"flex h-12 w-full rounded-md border border-surface-200 bg-background px-4 text-[14px] outline-none transition focus-visible:ring-2 focus-visible:ring-primary/20\" /></div><button type=\"submit\" class=\"rounded-sm border border-surface-200 bg-card px-4 py-2 text-sm font-bold text-surface-950\">Search</button>\
+<div class=\"flex-1\"><label class=\"sr-only\" for=\"audit-search\">Search audit logs</label><input id=\"audit-search\" type=\"search\" name=\"query\" placeholder=\"Search audit logs...\" class=\"flex h-12 w-full rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 text-[14px] outline-none transition focus-visible:ring-2 focus-visible:ring-primary/20\" /></div><button type=\"submit\" class=\"rounded-sm border border-surface-200 bg-card px-4 py-2 text-sm font-bold text-surface-950\">Search</button>\
 </form>\
 <section data-view-state=\"ready\">{table}</section>\
 \
@@ -1652,7 +1652,7 @@ pub fn control_plane_sales_page() -> String {
                     </div>
                 </div>
 
-                <section class="rounded-sm border border-white/10 bg-[#111b2e] p-5">
+                <section class="rounded-sm border border-white/10 bg-surface-950 p-5">
                     <div>
                         <p class="text-xs uppercase tracking-[0.24em] text-surface-500">Session</p>
                         <h2 class="mt-2 text-xl font-bold text-white">Same-origin operator session</h2>
@@ -1739,7 +1739,7 @@ pub fn control_plane_sales_page() -> String {
                     </div>
                 </section>
 
-                <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-[#0f1726] p-6">
+                <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-surface-950 p-6">
                     <div class="flex items-center justify-between">
                         <div>
                             <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Stage Flow</p>
@@ -1784,7 +1784,7 @@ pub fn control_plane_sales_page() -> String {
                     </div>
                 </section>
 
-                <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-[#11192a] p-6">
+                <section class="apex-cp-dark-panel rounded-sm border border-white/10 bg-surface-950 p-6">
                     <div>
                         <p class="text-xs uppercase tracking-[0.28em] text-surface-500">Discovery</p>
                         <h2 class="mt-2 text-2xl font-bold text-white tracking-tight">Source intake</h2>
@@ -1908,8 +1908,8 @@ fn web_auth_social_footer(agreement_prefix: &str) -> String {
 <div class=\"relative flex justify-center text-[10px] uppercase font-bold tracking-[0.2em]\"><span class=\"bg-white px-4 text-surface-500\">Or continue with</span></div>\
 </div>\
 <div class=\"flex flex-col gap-3\">\
-<a href=\"/v1/auth/sso/google\" aria-label=\"Continue with Google\" class=\"flex items-center justify-center gap-3 px-4 py-3 rounded-md border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]\">{google}<span class=\"text-sm font-semibold text-surface-950\">Google</span></a>\
-<a href=\"/v1/auth/sso/github\" aria-label=\"Continue with GitHub\" class=\"flex items-center justify-center gap-3 px-4 py-3 rounded-md border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]\">{github}<span class=\"text-sm font-semibold text-surface-950\">GitHub</span></a>\
+<a href=\"/v1/auth/sso/google\" aria-label=\"Continue with Google\" class=\"flex items-center justify-center gap-3 px-4 py-3 rounded-[8px_8px_7px_7px] border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]\">{google}<span class=\"text-sm font-semibold text-surface-950\">Google</span></a>\
+<a href=\"/v1/auth/sso/github\" aria-label=\"Continue with GitHub\" class=\"flex items-center justify-center gap-3 px-4 py-3 rounded-[8px_8px_7px_7px] border border-surface-200 bg-white hover:bg-surface-50 transition-all shadow-sm active:scale-[0.98]\">{github}<span class=\"text-sm font-semibold text-surface-950\">GitHub</span></a>\
 </div>\
 <p class=\"mt-6 text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">{agreement_prefix} <a href=\"/terms\" class=\"text-primary font-bold hover:underline\">Terms of Service</a> and <a href=\"/privacy\" class=\"text-primary font-bold hover:underline\">Privacy Policy</a>.</p></div>",
         google = web_auth_google_icon(),
@@ -2073,7 +2073,7 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
 {password_hint}\
 </div>\
 
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Create Account</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Create Account</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\">Already have an account? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Sign in</a></div>\
 </form>",
         csrf = csrf,
@@ -2103,7 +2103,7 @@ pub fn web_forgot_password_page(csrf_token: &str) -> String {
 <input id=\"reset-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
 </div>\
 
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Send Reset Link</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Send Reset Link</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\"><a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div>\
 </form>",
         csrf = csrf,
@@ -2179,7 +2179,7 @@ pub fn web_reset_password_page_with_state(
 </div>\
 </div>\
 
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2 disabled:opacity-50 disabled:cursor-not-allowed\"{submit_state}><span>Reset Password</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2 disabled:opacity-50 disabled:cursor-not-allowed\"{submit_state}><span>Reset Password</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\">Remembered your password? <a href=\"/login\" class=\"text-primary font-bold hover:underline\">Back to sign in</a></div>\
 </form>",
         csrf = csrf,
@@ -2221,7 +2221,7 @@ pub fn web_verify_email_page_with_state(
                 "Verification complete",
                 message.unwrap_or("Email verified successfully. You can now log in."),
             ),
-            "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Continue to sign in</span></a><a href=\"/pricing\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Explore plans</span></a></div>".to_string(),
+            "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Continue to sign in</span></a><a href=\"/pricing\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Explore plans</span></a></div>".to_string(),
             "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">Need help getting started? <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>".to_string(),
         ),
         Some("error") => (
@@ -2232,7 +2232,7 @@ pub fn web_verify_email_page_with_state(
                 "Verification failed",
                 message.unwrap_or("Use the latest verification email or create a new account to receive a fresh link."),
             ),
-            "<div class=\"space-y-4\"><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Create a new account</span></a><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Back to sign in</span></a></div>".to_string(),
+            "<div class=\"space-y-4\"><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Create a new account</span></a><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Back to sign in</span></a></div>".to_string(),
             "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">If you need a fresh verification link, <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">contact support</a>.</p></div>".to_string(),
         ),
         _ if token.is_some() => (
@@ -2264,7 +2264,7 @@ pub fn web_verify_email_page_with_state(
                 "Verify your email",
                 "Activate your account to start sending with ApexMail.",
                 web_auth_notice("info", "Verification pending", &description),
-                "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Back to sign in</span></a><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-md border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Create another account</span></a></div>".to_string(),
+                "<div class=\"space-y-4\"><a href=\"/login\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] bg-primary text-white text-sm font-semibold shadow-premium transition-all hover:bg-brand-700 active:scale-[0.99] group\"><span>Back to sign in</span></a><a href=\"/signup\" class=\"flex w-full items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] border border-surface-200 text-surface-700 text-sm font-semibold transition-all hover:bg-surface-50 active:scale-[0.99]\"><span>Create another account</span></a></div>".to_string(),
                 "<div class=\"px-8 pb-8\"><p class=\"text-center text-[11px] text-surface-500 font-medium leading-relaxed px-4\">If the email does not arrive, check spam or <a href=\"mailto:support@apexmail.ee\" class=\"text-primary font-bold hover:underline\">Contact support</a>.</p></div>".to_string(),
             )
         }
@@ -2441,7 +2441,7 @@ pub fn web_campaigns_page() -> String {
     };
     let bulk_bar = format!(
         "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"campaigns\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div class=\"flex items-start gap-3\"><div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">There is no select-all without scripts — tick each row you want. Bulk actions apply to every checked row and return to this exact page.</p></div></div><div class=\"flex flex-col gap-2 sm:flex-row\">{delete_button}</div></div></section>",
-        delete_button = "<button type=\"submit\" formaction=\"/web/campaigns/delete-bulk\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete selected</button>",
+        delete_button = "<button type=\"submit\" formaction=\"/web/campaigns/delete-bulk\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete selected</button>",
     );
     let pagination_key = pagination_storage_key("campaigns");
     let pagination = PaginationControls {
@@ -2603,7 +2603,7 @@ pub fn web_contacts_page() -> String {
             ],
         ],
     };
-    let bulk_bar = "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"contacts\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">There is no select-all without scripts — tick each contact you want. Checked contacts can be exported or deleted in one plain form post.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"/web/contacts/export.csv\" formmethod=\"get\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Export selected</button><button type=\"submit\" formaction=\"/web/contacts/delete-bulk\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete selected</button></div></div></section>";
+    let bulk_bar = "<section class=\"rounded-sm border border-surface-200 bg-card/80 p-6\" data-bulk-scope=\"contacts\"><div class=\"flex flex-col gap-3 md:flex-row md:items-center md:justify-between\"><div aria-live=\"polite\"><p class=\"text-sm font-bold text-foreground\">Select rows to act on them in bulk</p><p class=\"text-xs text-muted-foreground\">There is no select-all without scripts — tick each contact you want. Checked contacts can be exported or deleted in one plain form post.</p></div><div class=\"flex flex-col gap-2 sm:flex-row\"><button type=\"submit\" formaction=\"/web/contacts/export.csv\" formmethod=\"get\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-colors hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Export selected</button><button type=\"submit\" formaction=\"/web/contacts/delete-bulk\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-destructive px-4 py-2 text-sm font-semibold text-destructive-foreground transition-colors hover:bg-destructive/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Delete selected</button></div></div></section>";
     let pagination_key = pagination_storage_key("contacts");
     let pagination = PaginationControls {
         page: 3,
@@ -2660,7 +2660,7 @@ pub fn web_contacts_new_page() -> String {
 <input id=\"contacts-import-file\" name=\"file\" type=\"file\" accept=\".csv,text/csv\" class=\"flex w-full rounded-sm border border-input bg-background px-3 py-2 text-sm ring-offset-background transition-all file:border-0 file:bg-transparent file:text-sm file:font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" />\
 <p class=\"text-xs text-muted-foreground\">When both are provided the file wins. The import runs server-side — validation results arrive as a flash summary.</p>\
 </div>\
-<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Import contacts</button>\
+<button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Import contacts</button>\
 </form>\
 </section>\
 </div>",
@@ -2930,7 +2930,7 @@ pub fn web_template_edit_page(template_id: &str) -> String {
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"template-subject\">Default Subject</label><input id=\"template-subject\" name=\"subject\" type=\"text\" value=\"\" class=\"flex h-12 w-full rounded-sm border border-input bg-background px-3 text-[14px] ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\" /></div>\
 <div class=\"space-y-2\"><label class=\"text-sm font-medium leading-none\" for=\"template-content\">HTML Content</label><textarea id=\"template-content\" name=\"html_body\" rows=\"14\" class=\"flex min-h-[240px] w-full rounded-sm border border-input bg-background px-3 py-2 text-sm font-mono ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\"></textarea><p class=\"text-xs text-muted-foreground\">Leave the content empty to keep the stored body — Preview with an empty field renders the stored version.</p></div>\
 <div class=\"flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between\"><p class=\"text-xs text-muted-foreground\">Everything runs server-side: save and preview are plain form posts.</p><div class=\"flex flex-col gap-3 sm:flex-row\">\
-<button type=\"submit\" formaction=\"/web/templates/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Preview</button>\
+<button type=\"submit\" formaction=\"/web/templates/preview\" formtarget=\"_blank\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] border border-surface-200 bg-background px-4 py-2 text-sm font-semibold text-foreground transition-all duration-200 ease-premium active:scale-[0.98] hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Preview</button>\
 <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white transition-all duration-200 ease-premium active:scale-[0.98] hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2\">Save Changes</button>\
 </div></div>\
 </form></div>",
@@ -3147,7 +3147,7 @@ pub fn web_events_page() -> String {
         rows: vec![],
     };
     let search = format!(
-        "<form method=\"get\" action=\"/events\" role=\"search\" class=\"flex flex-col gap-2 sm:flex-row\"><label class=\"sr-only\" for=\"events-search\">Filter events</label><div class=\"relative flex-1\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{icon}</span><input id=\"events-search\" type=\"search\" name=\"query\" placeholder=\"Filter events...\" class=\"flex h-12 w-full rounded-md border border-surface-200 bg-background pl-10 pr-4 text-[14px] outline-none transition focus-visible:ring-2 focus-visible:ring-primary/20\" /></div><button type=\"submit\" class=\"rounded-sm border border-surface-200 bg-card px-4 py-2 text-sm font-bold text-surface-950 hover:border-surface-950\">Apply</button></form>",
+        "<form method=\"get\" action=\"/events\" role=\"search\" class=\"flex flex-col gap-2 sm:flex-row\"><label class=\"sr-only\" for=\"events-search\">Filter events</label><div class=\"relative flex-1\"><span class=\"pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground\">{icon}</span><input id=\"events-search\" type=\"search\" name=\"query\" placeholder=\"Filter events...\" class=\"flex h-12 w-full rounded-[8px_8px_7px_7px] border border-surface-200 bg-background pl-10 pr-4 text-[14px] outline-none transition focus-visible:ring-2 focus-visible:ring-primary/20\" /></div><button type=\"submit\" class=\"rounded-sm border border-surface-200 bg-card px-4 py-2 text-sm font-bold text-surface-950 hover:border-surface-950\">Apply</button></form>",
         icon = search_icon,
     );
     format!(
@@ -4315,7 +4315,7 @@ pub fn control_plane_security_page_with_setup(setup: Option<&MfaSetupView<'_>>) 
 <form method=\"post\" action=\"/web/auth/mfa/confirm\" class=\"flex flex-col gap-3 sm:flex-row sm:items-start\">\
 <div class=\"flex-1\">\
 <label for=\"mfa-code\" class=\"block text-xs font-bold uppercase tracking-widest text-surface-500 mb-2\">Enter the 6-digit code from your authenticator app</label>\
-<input id=\"mfa-code\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]{{6}}\" maxlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" class=\"w-full max-w-xs rounded-md border border-surface-300 bg-background px-3 py-2 text-sm font-mono tracking-widest focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary\" />\
+<input id=\"mfa-code\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]{{6}}\" maxlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" class=\"w-full max-w-xs rounded-[8px_8px_7px_7px] border border-surface-300 bg-background px-3 py-2 text-sm font-mono tracking-widest focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary\" />\
 </div>\
 <button type=\"submit\" class=\"rounded-[8px_8px_7px_7px] bg-primary px-4 py-2 text-sm font-semibold text-white hover:bg-brand-700 focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:opacity-50\">Verify &amp; Enable</button>\
 </form>\
@@ -4675,7 +4675,7 @@ pub fn web_login_page_with_state(message: Option<&str>, csrf_token: &str) -> Str
         .filter(|m| !m.is_empty())
         .map(|m| {
             format!(
-                "<div class=\"mb-6 rounded-md border border-error/30 bg-error/5 px-4 py-3\" role=\"alert\"><p class=\"text-sm font-medium text-error\">{}</p></div>",
+                "<div class=\"mb-6 rounded-[8px_8px_7px_7px] border border-error/30 bg-error/5 px-4 py-3\" role=\"alert\"><p class=\"text-sm font-medium text-error\">{}</p></div>",
                 crate::shell::html_escape(m),
             )
         })
@@ -4704,7 +4704,7 @@ pub fn web_login_page_with_state(message: Option<&str>, csrf_token: &str) -> Str
 <a href=\"/forgot-password\" class=\"text-xs font-bold text-primary hover:text-brand-700\">Forgot password?</a>\
 </div>\
 
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Sign In</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Sign In</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\">No account? <a href=\"/signup\" class=\"text-primary font-bold hover:underline\">Sign up</a></div>\
 </form>",
         csrf = csrf,
@@ -4758,7 +4758,7 @@ pub fn web_login_mfa_challenge_page(csrf_token: &str, email: &str, return_to: &s
 <input id=\"mfaCode\" name=\"code\" type=\"text\" inputmode=\"numeric\" pattern=\"[0-9]*\" maxlength=\"6\" minlength=\"6\" required autocomplete=\"one-time-code\" placeholder=\"000000\" aria-describedby=\"mfa-code-hint\" class=\"apex-input flex h-12 w-full border border-surface-200 bg-surface-50 px-4 py-2 text-sm font-mono text-center tracking-widest focus-visible:outline-none transition-all\" />\
 <p id=\"mfa-code-hint\" class=\"text-xs text-surface-500\">The code refreshes every 30 seconds in your app.</p>\
 </div>\
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Verify and sign in</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Verify and sign in</span>{arrow}</button>\
 <div class=\"text-center text-xs font-medium text-surface-500\"><a href=\"/login\" class=\"text-primary font-bold hover:underline\">Use a different account</a></div>\
 </form>",
         csrf = csrf,
@@ -4802,7 +4802,7 @@ pub fn control_plane_login_page(csrf_token: &str) -> String {
 <label for=\"rememberMe\" class=\"text-xs text-surface-500 font-medium cursor-pointer\">Maintain session security</label>\
 </div>\
 
-<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-md shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Authorize Access</span>{arrow}</button>\
+<button type=\"submit\" class=\"w-full bg-primary hover:bg-brand-700 text-white text-sm font-semibold flex items-center justify-center gap-3 py-3 rounded-[8px_8px_7px_7px] shadow-premium transition-all active:scale-[0.99] group mt-2\"><span>Authorize Access</span>{arrow}</button>\
 </form>",
         csrf = csrf,
         arrow = web_auth_arrow_icon(),

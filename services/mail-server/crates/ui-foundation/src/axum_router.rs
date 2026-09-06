@@ -1035,7 +1035,7 @@ fn render_flash_banners(mut html: String, flash: &[crate::flash::FlashMessage]) 
                 }
             };
             format!(
-                "<div role=\"status\" aria-label=\"{label}\" class=\"apex-flash mb-6 flex items-start gap-3 rounded-sm border {border} px-4 py-3\"><span aria-hidden=\"true\" class=\"mt-0.5 font-bold\">{icon}</span><p class=\"text-sm font-medium\">{}</p></div>",
+                "<div role=\"status\" aria-label=\"{label}\" class=\"apex-flash mb-6 flex items-start gap-3 rounded-[12px_12px_8px_8px] border {border} px-4 py-3\"><span aria-hidden=\"true\" class=\"mt-0.5 font-bold\">{icon}</span><p class=\"text-sm font-medium\">{}</p></div>",
                 crate::shell::html_escape(&message.text),
             )
         })
