@@ -89,15 +89,15 @@
       "gzip_bytes_zlib13": 1229
     },
     "widget_compat": {
-      "raw_bytes": 27078,
-      "brotli_bytes": 7367,
+      "raw_bytes": 26597,
+      "brotli_bytes": 7151,
       "raw_cap_bytes": 32768,
       "gzip_cap_bytes": 12000,
       "brotli_cap_bytes": 10000,
       "copies_identical": true,
       "note": "The compatibility-loader module (widget-compat.js), three byte-identical copies. Delivered inside the /api.js loader response (glue + driver core + risk module + compat module) and never fetched elsewhere; the compat markup issues the lazy widget-locales.js URL + SRI digest as container attributes. Compressed sizes use gzip -n -9 and brotli -q 11. Structured raw/gzip/brotli fields are authoritative (perf-budget.sh equality-gates them).",
-      "gzip_bytes_zlib12": 8573,
-      "gzip_bytes_zlib13": 8573
+      "gzip_bytes_zlib12": 8357,
+      "gzip_bytes_zlib13": 8357
     },
     "widget_locales": {
       "raw_bytes": 13395,
