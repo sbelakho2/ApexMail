@@ -276,3 +276,14 @@ The fix plan in section 6 was executed in nine parallel workstreams plus a first
 **Console**: quiet-meter plan-usage rows (sends / api / recipients hairlines) atop the dashboard. **Control plane**: the service-slot ribbon (platform services as flip-cells, all-nominal solid) under System Overview.
 
 **Deployed via pipeline `20260905T222742: OK`.** Live-verified: the login pages carry the Spiral Lock path with the slot strip, zero glow/shine bytes, all driver hooks and the nonce CSP intact; a live end-to-end solve passes the verifier (valid token → 401 credential stage; bogus → 400 captcha rejection) — the redesign changed skin only, not one byte of the security contract. Marketing serves the ribbon, hairline and receipt; health green. Gates: 6,083 workspace tests, clippy clean, zola clean.
+
+## 12. Spiral-Lock DNA — 100% implementation — 2026-09-06
+
+**Deployed via pipeline `20260906T001654: OK`.** The v2 language (approved from the full-page previews) applied to every element on every surface — nothing left on the old skin:
+
+- **Token layer** (`ui-foundation`): ARCH radii as CSS vars (cards 16/9 crown, buttons 8/7, inputs 9/7) consumed by `.btn-primary`, `.apex-card`, and the new `.apex-input`; CONCENTRIC focus (the spiral's two arms — inner ring + outer hairline) on all console/CP inputs; POINT meters (`.apex-meter` + terminal dot); `.apex-klabel` + `.apex-arc` mono labels; winding `.apex-receipt`; `.apex-dial`; `.apex-nav-cell` concentric selection; `.apex-chart-monoline` strokes. `globals.css` rebuilt (12 DNA hits live in the served bundle).
+- **Rust surfaces**: `arc_mark_svg`/`receipt_arc_svg` helpers, the monoline bar chart with peak points, and the 270° dial primitive in `charts.rs`; auth field labels carry the shackle arc in mono caps and every auth input uses the arch+concentric `.apex-input`; console KPI labels arc'd with point meters; CP ribbon label arc'd; sidebar active nav = solid + concentric ring. The migration test now pins the new input contract.
+- **Widget** (standalone commit + all mirrors, parity OK): card radius is the arch crown, retry focus concentric, chip arched.
+- **Marketing**: arch radii + concentric focus platform-wide via the DNA block in `input.css` (rebuilt into `styles.css`), hero meters carry terminal points, footer receipt winds.
+
+**Live-verified:** login serves the arched concentric inputs with arc labels under the Spiral Lock; the globals bundle carries every DNA class (radius-arch ×5, meter-point, nav-cell, dial, klabel, receipt ×5, monoline ×3); marketing serves point meters and arch styles; health green. Gates: 6,083 workspace tests exit 0, clippy clean, zola clean.
