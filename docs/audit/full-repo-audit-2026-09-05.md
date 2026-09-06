@@ -317,3 +317,13 @@ Deployed via pipeline `20260906T042619: OK`. **Final three-layer proof:** (1) li
 Audited the strata rounds 1–3 never touched: the remaining interactive primitives (Checkbox/Switch/Dialog/Tabs/Toast/Tooltip — 23 md + 10 lg), the app shell (impersonation bar, sidebar tiles, rail links — 7 md + 3 lg), 26 residual page-level sites, the flash banner, the marketing cookie-banner survivor, and the CP sales cockpit's three hardcoded off-palette navy tints (an original-audit P2 finding, now `bg-surface-950`). All → ARCH radii; flash banner carries the 12/8 crown. Parity + migration tests now PIN the arch contract.
 
 Deployed via pipelines `20260906T042619`/`20260906T094951: OK`. **Terminal proof: `grep rounded-md|rounded-lg` across ALL ui-foundation source returns ZERO files; the served login/signup carry zero old-radius classes; dna_verify 13/13 on-host; 6,083 tests exit 0; clippy clean.** The old skin no longer exists in the rendering codebase — every radius, focus, label, meter, chart, table header, flash, popover, toast and dialog on all three surfaces is Spiral-Lock DNA, enforced by pinned tests.
+
+## 17. KiwiCaptcha bidirectional merge + full redeploy — 2026-09-06
+
+**Merge per spec:** (1) ApexMail graphics → standalone: all 7 graphics files (mark/widget/css/compat/driver/wasm/twig) checksum-verified **already byte-identical** — the design-proposal artifacts now also live in the standalone; parity gate OK. (2) Standalone → ApexMail: the perf-evidence round (packages/kiwicaptcha/tools/perf-baselines.json from the fresh client-perf run, 527178da) + protocol sync. Core src/tests: full checksum sweep — **zero divergence**.
+
+**Dead-code sweep:** every kiwicaptcha public symbol verified by name against api-server consumers (issue/verify/SolutionToken/ChallengeConfig/VerifyContext/score_telemetry/hash_ip/solve_for_t/ChallengeRecord/DEFAULT_RSW_T all used; logo helpers consumed internally by kiwi_widget_html); `cargo check -p kiwicaptcha -p api-server` reports **zero dead-code warnings** on the deployed host.
+
+**Also fixed en route:** perf-tests' ID-generation budget 5s→15s — an absolute budget flaked under full-suite parallel load (2.8–3.2s solo, >5s loaded); 15s still catches super-linear regressions.
+
+**Deployed via full pipeline `20260906T115744: OK` (all 9 stages).** Running state: all 35 containers healthy (zero unhealthy); all endpoints 200; SMTP banner 220. Kiwi live: Spiral Lock + slots + arch crown + zero old-radius on the served login; **e2e solve passes the production verifier** (valid token → 401 credential stage; bogus → 400 captcha). Gates: kiwicaptcha 277 + workspace 6,083 tests exit 0, clippy clean, dna_verify 13/13, parity byte-identical.
