@@ -91,9 +91,13 @@
           </div>
         </details>
 
-        <a href="{{ lp }}/pricing/" {% if current_path_value == "/pricing" or current_path_value == "/pricing/" %}aria-current="page"{% endif %} class="px-3 py-2 text-xs font-bold tracking-widest uppercase text-surface-600 hover:text-surface-950 transition-colors rounded-sm hover:bg-surface-100">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["pricing"] %}{{ i18n_data[l]["header"]["pricing"] }}{% else %}Pricing{% endif %}</a>
-        <a href="{{ lp }}/compliance/" {% if current_path_value == "/compliance" or current_path_value == "/compliance/" %}aria-current="page"{% endif %} class="px-3 py-2 text-xs font-bold tracking-widest uppercase text-surface-600 hover:text-surface-950 transition-colors rounded-sm hover:bg-surface-100">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["compliance"] %}{{ i18n_data[l]["header"]["compliance"] }}{% else %}Compliance{% endif %}</a>
-        <a href="{{ lp }}/solutions/enterprise/" {% if current_path_value == "/solutions/enterprise" or current_path_value == "/solutions/enterprise/" %}aria-current="page"{% endif %} class="px-3 py-2 text-xs font-bold tracking-widest uppercase text-surface-600 hover:text-surface-950 transition-colors rounded-sm hover:bg-surface-100">{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["enterprise"] %}{{ i18n_data[l]["header"]["enterprise"] }}{% else %}Enterprise{% endif %}</a>
+        {# v2: the slot nav — links as flip-cells; the active page is the
+             solid needle (the winning nonce). #}
+        <span class="slot-nav">
+        <a href="{{ lp }}/pricing/" {% if current_path_value == "/pricing" or current_path_value == "/pricing/" %}aria-current="page"{% endif %}>{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["pricing"] %}{{ i18n_data[l]["header"]["pricing"] }}{% else %}Pricing{% endif %}</a>
+        <a href="{{ lp }}/compliance/" {% if current_path_value == "/compliance" or current_path_value == "/compliance/" %}aria-current="page"{% endif %}>{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["compliance"] %}{{ i18n_data[l]["header"]["compliance"] }}{% else %}Compliance{% endif %}</a>
+        <a href="{{ lp }}/solutions/enterprise/" {% if current_path_value == "/solutions/enterprise" or current_path_value == "/solutions/enterprise/" %}aria-current="page"{% endif %}>{% if i18n_data and i18n_data[l] and i18n_data[l]["header"] and i18n_data[l]["header"]["enterprise"] %}{{ i18n_data[l]["header"]["enterprise"] }}{% else %}Enterprise{% endif %}</a>
+        </span>
       </div>
 
       {# ── CTA Buttons ──────────────────────────────── #}

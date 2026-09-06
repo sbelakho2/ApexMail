@@ -20,7 +20,13 @@
   <div class="mb-8">
     <h3 class="{% if plan_is_enterprise %}text-white{% else %}text-surface-950{% endif %} text-xl font-bold mb-3 tracking-tight" id="plan-{{ plan_name | lower }}">{{ plan_name }}</h3>
     <div class="flex items-baseline gap-2">
-      <span class="{% if plan_is_enterprise %}text-white{% else %}text-surface-950{% endif %} text-4xl font-bold tabular-nums tracking-tighter">{{ plan_price }}</span>
+      {# v2 split-flap: digits as slot cells; the recommended plan's digits are
+     the solid needle (brand). The € sign and period ride as plain spans. #}
+<span class="flex items-baseline gap-0.5" aria-label="{{ plan_price }} per month">
+  {% set price_digits = plan_price | replace(from="€", to="") | replace(from=",", to="") %}
+  <span class="k-arc-label" style="font-size:12px">€</span>
+  {% for digit in price_digits %}{% if digit == "." %}<span class="px-0.5 text-surface-500 font-bold">.</span>{% else %}<span class="price-slot{% if plan_is_popular %} brand{% endif %}">{{ digit }}</span>{% endif %}{% endfor %}
+</span>
       <span class="{% if plan_is_enterprise %}text-surface-400{% else %}text-surface-500{% endif %} text-xs font-bold tracking-widest">{{ plan_period }}</span>
     </div>
     <p class="{% if plan_is_enterprise %}text-surface-400{% else %}text-surface-500{% endif %} text-sm mt-4 leading-relaxed font-bold tracking-tight">{{ plan_description }}</p>

@@ -1,107 +1,77 @@
+{# Hero — v2 unified design language (Spiral-Lock DNA), implemented from the
+   approved full-page preview (docs/design/full-page-previews.html). The
+   checksum ribbon (one solid slot among faint — the winning needle), the
+   proof headline, the terminal panel, and the stats band with point-meters. #}
+<section aria-label="Introduction" class="relative bg-surface-50 border-b border-surface-200/80">
+  <div class="relative w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 lg:py-24">
 
-{# Hero Section — rhythm per design audit item 13: the sticky header is in
-   flow, so the old pt-36/lg:pt-40 double-counted against min-h-[90vh];
-   the ratified section padding is py-20 lg:py-32. #}
-<section aria-label="Introduction" class="relative min-h-[90vh] flex items-center py-20 lg:py-32 overflow-hidden bg-surface-50">
-  <div class="relative w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-      {# Unified design language (2026-09-05): the checksum ribbon — seven
-         mono slots settling to APEXMAIL, the same flip-cell motif as the
-         security widget — plus hairline stat meters. One motif, three
-         surfaces (hero ribbon / CP service strip / console quota rows). #}
-      <div class="mb-10 flex flex-col sm:flex-row sm:items-center gap-6 sm:gap-10" aria-hidden="true">
-        <div class="flex items-center gap-1.5 font-mono text-[11px] font-bold tracking-[0.08em] select-none">
-          <span class="inline-grid place-items-center min-w-[22px] h-[26px] rounded bg-surface-200/70 text-surface-600">A</span><span class="inline-grid place-items-center min-w-[22px] h-[26px] rounded bg-surface-200/70 text-surface-600">P</span><span class="inline-grid place-items-center min-w-[22px] h-[26px] rounded bg-surface-200/70 text-surface-600">E</span><span class="inline-grid place-items-center min-w-[22px] h-[26px] rounded bg-surface-200/70 text-surface-600">X</span><span class="inline-grid place-items-center min-w-[22px] h-[26px] rounded bg-brand-500 text-white">M</span><span class="inline-grid place-items-center min-w-[22px] h-[26px] rounded bg-surface-200/70 text-surface-600">A</span><span class="inline-grid place-items-center min-w-[22px] h-[26px] rounded bg-surface-200/70 text-surface-600">I</span><span class="inline-grid place-items-center min-w-[22px] h-[26px] rounded bg-surface-200/70 text-surface-600">L</span>
-        </div>
-        <div class="flex-1 min-w-[180px] max-w-md">
-          <div class="flex justify-between text-[10px] font-mono uppercase tracking-[0.14em] text-surface-500 mb-1.5"><span>proof of delivery</span><span>every message</span></div>
-          <div class="k-meter"><i style="width:96%"></i><b style="left:96%"></b></div>
-        </div>
-        <div class="hidden md:block flex-1 min-w-[180px] max-w-md">
-          <div class="flex justify-between text-[10px] font-mono uppercase tracking-[0.14em] text-surface-500 mb-1.5"><span>EEA processing</span><span>fi · de</span></div>
-          <div class="k-meter k-ok"><i style="width:100%"></i><b style="left:100%"></b></div>
-        </div>
-      </div>
-    
-    <div class="grid min-w-0 lg:grid-cols-2 gap-12 lg:gap-20 items-center">
+    {# ── The checksum ribbon: APEXMAIL settling, M solid (the found nonce) ── #}
+    <div class="ribbon mb-8" aria-hidden="true">
+      <span>A</span><span>P</span><span>E</span><span>X</span><span class="m">M</span><span>A</span><span>I</span><span>L</span>
+    </div>
+
+    <div class="grid min-w-0 lg:grid-cols-2 gap-12 lg:gap-16 items-center">
       <div class="min-w-0">
-        {# Eyebrow badge on the calculator grammar (design audit item 11):
-           brand-50 surface + brand-700 text + the brand-500 dot. #}
-        <div class="inline-flex items-center gap-2 px-3 py-1 rounded-md bg-brand-50 text-brand-700 border border-brand-100/50 text-xs font-bold tracking-[0.05em] uppercase mb-10">
-          <div class="w-2 h-2 bg-brand-500" aria-hidden="true"></div>
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_badge"] %}{{ i18n_data[l]["home"]["hero_badge"] }}{% else %}Now with Private Cloud deployments{% endif %}
-        </div>
-        <h1 class="mb-8 text-surface-950 leading-[0.95] text-balance text-[40px] sm:text-[48px] lg:text-[80px]">
-          <span class="block">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_line1"] %}{{ i18n_data[l]["home"]["hero_line1"] }}{% else %}The Email API{% endif %}</span>
-          <span class="block">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_line2"] %}{{ i18n_data[l]["home"]["hero_line2"] }}{% else %}Built for{% endif %} <span class="block sm:inline text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_highlight"] %}{{ i18n_data[l]["home"]["hero_highlight"] }}{% else %}Stability.{% endif %}</span></span>
+        <h1 class="text-surface-950 leading-[1.02] text-balance text-[44px] sm:text-[52px] lg:text-[64px] font-bold tracking-[-0.03em]">
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_line1"] %}
+            {{ i18n_data[l]["home"]["hero_line1"] }}<br>
+            {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_line2"] %}{{ i18n_data[l]["home"]["hero_line2"] }}{% else %}Built for{% endif %}
+            <em class="not-italic text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_highlight"] %}{{ i18n_data[l]["home"]["hero_highlight"] }}{% else %}proof.{% endif %}</em>
+          {% else %}
+            The email API,<br>built for <em class="not-italic text-brand-500">proof.</em>
+          {% endif %}
         </h1>
-        {# A <div>, not a <p>: the build minifier omits optional end tags, and
-           a <p> directly followed by the benefits <ul> produced an invalid
-           nested <p><ul> shape in the served HTML. A div keeps the markup
-           unambiguous with identical styling. #}
-        <div class="text-surface-600 mb-10 max-w-xl text-lg leading-[1.5]">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_subtitle"] %}{{ i18n_data[l]["home"]["hero_subtitle"] }}{% else %}Reliable, compliance-ready email infrastructure for mission-critical applications.{% endif %}
-        </div>
-        <ul class="grid grid-cols-1 sm:grid-cols-2 gap-y-3 gap-x-8 mb-10">
-          <li class="flex items-center gap-3 text-surface-600 text-sm">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-brand-500 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_benefit_1"] %}{{ i18n_data[l]["home"]["hero_benefit_1"] }}{% else %}Deliverability tooling{% endif %}
-          </li>
-          <li class="flex items-center gap-3 text-surface-600 text-sm">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-brand-500 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_benefit_2"] %}{{ i18n_data[l]["home"]["hero_benefit_2"] }}{% else %}GDPR-oriented workflow support{% endif %}
-          </li>
-          <li class="flex items-center gap-3 text-surface-600 text-sm">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-brand-500 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_benefit_3"] %}{{ i18n_data[l]["home"]["hero_benefit_3"] }}{% else %}Delivery event tracking{% endif %}
-          </li>
-          <li class="flex items-center gap-3 text-surface-600 text-sm">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 text-brand-500 flex-shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-            {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_benefit_4"] %}{{ i18n_data[l]["home"]["hero_benefit_4"] }}{% else %}No credit card required{% endif %}
-          </li>
-        </ul>
-        <div class="flex flex-col sm:flex-row flex-wrap gap-4">
-          <a href="{{ config.extra.app_url }}/signup" class="btn-primary btn-primary--lg" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_primary"] %}{{ i18n_data[l]["home"]["hero_cta_primary"] }}{% else %}Start Free{% endif %}">
-            {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_primary"] %}{{ i18n_data[l]["home"]["hero_cta_primary"] }}{% else %}Start Free{% endif %}
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+        <p class="text-surface-600 text-base lg:text-lg max-w-[44ch] mt-5 mb-8">
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_subtitle"] %}{{ i18n_data[l]["home"]["hero_subtitle"] }}{% else %}Transactional email with signed proof of delivery on every message. EEA-hosted, GDPR-oriented, no puzzles.{% endif %}
+        </p>
+        <div class="flex flex-col sm:flex-row flex-wrap gap-3">
+          <a href="{{ config.extra.app_url }}/signup" class="btn-primary btn-primary--lg">
+            {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_primary"] %}{{ i18n_data[l]["home"]["hero_cta_primary"] }}{% else %}Start free{% endif %}
+            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </a>
-          <a href="/api-explorer/" class="btn-secondary btn-secondary--lg" aria-label="{% if i18n_data and i18n_data[l] and i18n_data[l]["api_console"] and i18n_data[l]["api_console"]["hero_cta"] %}{{ i18n_data[l]["api_console"]["hero_cta"] }}{% else %}Open the interactive API explorer{% endif %}">
-            <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
-            {% if i18n_data and i18n_data[l] and i18n_data[l]["api_console"] and i18n_data[l]["api_console"]["hero_cta"] %}{{ i18n_data[l]["api_console"]["hero_cta"] }}{% else %}Open API Explorer{% endif %}
+          <a href="/api-explorer/" class="btn-secondary btn-secondary--lg">
+            {% if i18n_data and i18n_data[l] and i18n_data[l]["api_console"] and i18n_data[l]["api_console"]["hero_cta"] %}{{ i18n_data[l]["api_console"]["hero_cta"] }}{% else %}Open API explorer{% endif %}
           </a>
         </div>
       </div>
-      <div class="relative min-w-0 lg:mt-0 mt-16">
-        <div class="bg-surface-950 text-surface-100 p-0 font-mono text-[13px] overflow-hidden border border-surface-800">
-          <div class="flex items-center gap-2 bg-surface-900 px-4 py-3 border-b border-surface-800">
-            <div class="flex gap-2">
-              <div class="w-2 h-2 bg-surface-700"></div>
-              <div class="w-2 h-2 bg-surface-700"></div>
-              <div class="w-2 h-2 bg-surface-700"></div>
-            </div>
-            <span class="ml-4 text-xs font-bold tracking-widest text-surface-500">api/request.ts</span>
+
+      {# ── The terminal: the product story as a proof trace ── #}
+      <div class="relative min-w-0 lg:mt-0 mt-10">
+        <div class="term">
+          <div class="term-bar">
+            <span class="term-dot"></span><span class="term-dot"></span><span class="term-dot"></span>
+            <b>POST /v1/messages</b>
           </div>
-          <div class="p-6 overflow-x-auto max-w-full">
-<pre class="whitespace-pre"><code><span class="code-comment">// Server-side send example</span>
-<span class="code-keyword">const</span> response = <span class="code-keyword">await</span> <span class="code-keyword">fetch</span>(<span class="code-string">'https://api.apexmail.ee/v1/messages'</span>, {
-  method: <span class="code-string">'POST'</span>,
-  headers: {
-    <span class="code-string">'X-API-Key'</span>: <span class="code-keyword">process</span>.env.<span class="code-keyword">APEXMAIL_API_KEY</span>,
-    <span class="code-string">'Content-Type'</span>: <span class="code-string">'application/json'</span>
-  },
-  body: <span class="code-keyword">JSON</span>.<span class="code-keyword">stringify</span>({
-    from: <span class="code-string">'hello@yourcompany.com'</span>,
-    to: <span class="code-string">'customer@example.com'</span>,
-    subject: <span class="code-string">'Welcome to Our Platform!'</span>,
-    html: <span class="code-string">'&lt;h1&gt;Hello World!&lt;/h1&gt;'</span>,
-    type: <span class="code-string">'transactional'</span>
-  })
+<pre class="term-pre"><span class="term-c">// signed proof on every send</span>
+<span class="term-k">await</span> apex.messages.create({
+  from: <span class="term-s">'hello@yourcompany.com'</span>,
+  to: <span class="term-s">'customer@example.com'</span>,
+  proof: <span class="term-k">true</span>
 });
-<span class="code-comment">// That's it. Email delivered with full tracking.</span>
-<span class="code-keyword">console</span>.<span class="code-keyword">log</span>(<span class="code-keyword">await</span> response.<span class="code-keyword">json</span>());
-<span class="code-comment">// { id: "msg_abc123", status: "queued" }</span></code></pre>
-        </div>
+<span class="term-c">&rarr; 202 accepted &middot; proof 0x41f2</span>
+<span class="term-c">&rarr; delivered &#10003; 1.8s &middot; eeu</span></pre>
         </div>
       </div>
     </div>
+
+    {# ── Stats band: mono values + point-meters (the found nonce rides each fill) ── #}
+    <div class="stats mt-14 lg:mt-20" aria-label="Platform statistics">
+      <div>
+        <span class="k-arc-label">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["stat_uptime_label"] %}{{ i18n_data[l]["home"]["stat_uptime_label"] }}{% else %}uptime · 12mo{% endif %}</span>
+        <div class="stats-v">99.9<span class="stats-v-dim">%</span></div>
+        <div class="k-meter k-ok"><i style="width:99%"></i><b style="left:99%"></b></div>
+      </div>
+      <div>
+        <span class="k-arc-label">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["stat_delivery_label"] %}{{ i18n_data[l]["home"]["stat_delivery_label"] }}{% else %}median delivery{% endif %}</span>
+        <div class="stats-v">1.8<span class="stats-v-dim">s</span></div>
+        <div class="k-meter"><i style="width:62%"></i><b style="left:62%"></b></div>
+      </div>
+      <div>
+        <span class="k-arc-label">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["stat_volume_label"] %}{{ i18n_data[l]["home"]["stat_volume_label"] }}{% else %}messages / month{% endif %}</span>
+        <div class="stats-v">5.2<span class="stats-v-dim">m</span></div>
+        <div class="k-meter"><i style="width:78%"></i><b style="left:78%"></b></div>
+      </div>
+    </div>
+
   </div>
 </section>
