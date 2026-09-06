@@ -426,7 +426,8 @@
       "email_grader_title": "E-Mail-Zustellbarkeits-Grader",
       "stat_uptime_label": "Betriebszeit · 12 Monate",
       "stat_delivery_label": "mediane Zustellung",
-      "stat_volume_label": "Nachrichten / Monat"
+      "stat_volume_label": "Nachrichten / Monat",
+      "pricing_teaser_heading": "Einfache Preise"
     },
     "home_features": {
       "eyebrow": "Funktionsumfang",
@@ -449,7 +450,8 @@
       "card_7_desc": "Bewerten Sie Ihre E-Mail-Zustellbarkeit mit deterministischen DNS-, Authentifizierungs-, Inhalts- und Reputationsprüfungen.",
       "card_8_title": "Inbox-Platzierung",
       "card_8_desc": "Testen Sie die Zustellbarkeit bei Gmail, Outlook, Yahoo, iCloud, AOL und Zoho. Erkennt automatisch die Platzierung im Posteingang, in Werbung und Spam.",
-      "heading": "Alles für den Versand"
+      "heading": "Alles für den Versand",
+      "see_all": "Alle Funktionen →"
     },
     "home_comparison": {
       "eyebrow": "Marktpositionierung",
@@ -1099,7 +1101,8 @@
       "email_grader_grade_label": "Note Déterministe",
       "stat_uptime_label": "disponibilité · 12 mois",
       "stat_delivery_label": "livraison médiane",
-      "stat_volume_label": "messages / mois"
+      "stat_volume_label": "messages / mois",
+      "pricing_teaser_heading": "Tarifs simples"
     },
     "a11y": {
       "back_to_top": "Retour en haut",
@@ -1147,7 +1150,8 @@
       "heading_1": "Tout ce qu'il vous faut pour l'envoi d'emails.",
       "heading_2": "De la technique pure, sans superflu.",
       "subtitle": "Des emails transactionnels simples à l'infrastructure de niveau entreprise.",
-      "heading": "Tout pour envoyer"
+      "heading": "Tout pour envoyer",
+      "see_all": "Toutes les fonctionnalités →"
     },
     "home_comparison": {
       "col_apexmail": "ApexMail",
@@ -1772,7 +1776,8 @@
       "email_grader_grade_label": "Calificación Determinista",
       "stat_uptime_label": "disponibilidad · 12 meses",
       "stat_delivery_label": "entrega mediana",
-      "stat_volume_label": "mensajes / mes"
+      "stat_volume_label": "mensajes / mes",
+      "pricing_teaser_heading": "Precios simples"
     },
     "a11y": {
       "back_to_top": "Volver arriba",
@@ -1820,7 +1825,8 @@
       "heading_1": "Todo lo que necesita para el envío de emails.",
       "heading_2": "Tecnología pura, sin adornos.",
       "subtitle": "Desde emails transaccionales simples hasta infraestructura de nivel empresarial.",
-      "heading": "Todo para enviar"
+      "heading": "Todo para enviar",
+      "see_all": "Todas las funciones →"
     },
     "home_comparison": {
       "col_apexmail": "ApexMail",
