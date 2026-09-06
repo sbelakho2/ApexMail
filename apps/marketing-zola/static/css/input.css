@@ -1641,3 +1641,44 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   background: rgb(var(--surface-200)); color: rgb(var(--surface-950));
 }
 .price-slot.brand { background: rgb(var(--brand-500)); color: #fff; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   MOBILE COMPACTION (2026-09-06) — the desktop-first layout stacked into an
+   endless 14k-px column on phones. Compacted: section rhythm, hero, stats,
+   terminal, cards — everything breathes at phone width without ballooning.
+   ═══════════════════════════════════════════════════════════════════════════ */
+@media (max-width: 640px) {
+  /* Section rhythm: py-20 (80px) is generous on a 640px-tall phone — halve it */
+  section[class*="py-20"] { padding-top: 2.5rem !important; padding-bottom: 2.5rem !important; }
+
+  /* Hero: compact */
+  .ribbon span { min-width: 20px; height: 23px; font-size: 10px; }
+  .term-pre { padding: 12px; font-size: 11px; line-height: 1.6; }
+  .term-pre code, .term-pre span { word-break: break-all; }
+
+  /* Stats: NOT three stacked bars — a tight 3-up row with smaller values */
+  .stats { grid-template-columns: repeat(3, 1fr) !important; }
+  .stats > div { padding: 12px 10px; }
+  .stats-v { font-size: 18px; margin: 4px 0 6px; }
+  .k-arc-label { font-size: 8.5px; letter-spacing: 0.1em; gap: 4px; }
+  .k-arc-label::before { width: 12px; height: 8px; }
+
+  /* Ledger cards: compact padding */
+  .ledger-feat .card-dna { padding: 12px; }
+  .ledger-feat .tag-slots span { min-width: 12px; height: 15px; font-size: 8px; }
+
+  /* Pricing slots: smaller digits */
+  .price-slot { min-width: 20px; height: 26px; font-size: 17px; }
+
+  /* Headers: h1/h2 clamp on phones */
+  h1 { font-size: clamp(34px, 9vw, 44px) !important; }
+  section h2 { font-size: clamp(28px, 8vw, 36px) !important; }
+
+  /* Cards: less desktop padding */
+  .apex-card { padding: 1.25rem !important; }
+  .apex-card[class*="p-10"] { padding: 1.25rem !important; }
+
+  /* Footer: tighten */
+  footer { padding-top: 2rem !important; padding-bottom: 2rem !important; }
+  .k-receipt { font-size: 10px; line-height: 1.8; }
+}
