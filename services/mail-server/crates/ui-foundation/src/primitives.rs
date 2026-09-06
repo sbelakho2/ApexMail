@@ -287,7 +287,7 @@ impl<'a> Button<'a> {
             String::new()
         };
         format!(
-            "<button type=\"{button_type}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-all duration-200 ease-premium active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 {} {}\" data-variant=\"{}\" data-size=\"{}\"{}>{}{}{}{}</button>",
+            "<button type=\"{button_type}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] ring-offset-background transition-all duration-200 ease-premium active:scale-[0.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50 {} {}\" data-variant=\"{}\" data-size=\"{}\"{}>{}{}{}{}</button>",
             button_variant_class(self.variant),
             button_size_class(self.size),
             self.variant,
@@ -347,7 +347,7 @@ impl<'a> Input<'a> {
             ""
         };
         let input_markup = format!(
-            "<input type=\"{}\"{} value=\"{}\" placeholder=\"{}\" class=\"flex w-full rounded-md border bg-background text-[14px] ring-offset-background transition-all duration-300 file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 {} {}{}{}{}\"{} data-variant=\"{}\" data-size=\"{}\" />",
+            "<input type=\"{}\"{} value=\"{}\" placeholder=\"{}\" class=\"flex w-full rounded-[9px_9px_7px_7px] border bg-background text-[14px] ring-offset-background transition-all duration-300 file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-primary focus-visible:shadow-[0_0_0_1px_rgb(var(--primary)),0_0_0_4px_rgb(var(--card)),0_0_0_5px_rgb(var(--border))] disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 {} {}{}{}{}\"{} data-variant=\"{}\" data-size=\"{}\" />",
             self.input_type,
             name_attr,
             self.value,
@@ -407,7 +407,7 @@ impl<'a> Textarea<'a> {
             .map(|value| format!(" name=\"{}\"", value))
             .unwrap_or_default();
         let textarea = format!(
-            "<textarea{} class=\"flex min-h-[80px] w-full rounded-md border bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/20 focus-visible:border-primary disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 transition-all duration-200 {} {}\" data-variant=\"{}\" data-resize=\"{}\" placeholder=\"{}\"{}>{}</textarea>",
+            "<textarea{} class=\"flex min-h-[80px] w-full rounded-[9px_9px_7px_7px] border bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:border-primary focus-visible:shadow-[0_0_0_1px_rgb(var(--primary)),0_0_0_4px_rgb(var(--card)),0_0_0_5px_rgb(var(--border))] disabled:cursor-not-allowed disabled:opacity-50 hover:border-border/80 transition-all duration-200 {} {}\" data-variant=\"{}\" data-resize=\"{}\" placeholder=\"{}\"{}>{}</textarea>",
             name_attr,
             input_variant_class(self.variant),
             textarea_resize_class(self.resize),
@@ -563,7 +563,7 @@ impl<'a> Select<'a> {
                 .collect::<Vec<_>>()
                 .join("");
             format!(
-                "<div id=\"{}\" class=\"relative z-50 max-h-106 min-w-[8rem] overflow-hidden rounded-lg border bg-popover text-popover-foreground border-border/60 data-[state=open]:animate-in\" role=\"listbox\"{}><div class=\"p-1\">{}</div></div>",
+                "<div id=\"{}\" class=\"relative z-50 max-h-106 min-w-[8rem] overflow-hidden rounded-[16px_16px_9px_9px] border bg-popover text-popover-foreground border-border/60 data-[state=open]:animate-in\" role=\"listbox\"{}><div class=\"p-1\">{}</div></div>",
                 listbox_id,
                 if self.open { "" } else { " hidden" },
                 items,
@@ -593,7 +593,7 @@ impl<'a> Select<'a> {
                 .collect::<Vec<_>>()
                 .join("");
             format!(
-                "<div id=\"{}\" class=\"relative z-50 max-h-106 min-w-[8rem] overflow-hidden rounded-lg border bg-popover text-popover-foreground border-border/60 data-[state=open]:animate-in\" role=\"listbox\" hidden><div class=\"p-1\">{}</div></div>",
+                "<div id=\"{}\" class=\"relative z-50 max-h-106 min-w-[8rem] overflow-hidden rounded-[16px_16px_9px_9px] border bg-popover text-popover-foreground border-border/60 data-[state=open]:animate-in\" role=\"listbox\" hidden><div class=\"p-1\">{}</div></div>",
                 listbox_id, items,
             )
         };
@@ -605,7 +605,7 @@ impl<'a> Select<'a> {
         };
 
         format!(
-            "<div data-open=\"{}\"{}{}><button type=\"button\" role=\"combobox\" aria-expanded=\"{}\" aria-controls=\"{}\" aria-haspopup=\"listbox\"{}{} class=\"flex w-full items-center justify-between rounded-md border border-surface-200 bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1 transition-all duration-200 {} {}\" data-variant=\"{}\" data-size=\"{}\"><span>{}</span><span class=\"h-4 w-4 opacity-50\">⌄</span></button>{}</div>",
+            "<div data-open=\"{}\"{}{}><button type=\"button\" role=\"combobox\" aria-expanded=\"{}\" aria-controls=\"{}\" aria-haspopup=\"listbox\"{}{} class=\"flex w-full items-center justify-between rounded-[9px_9px_7px_7px] border border-surface-200 bg-background px-3 py-2 text-[14px] ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-primary/20 focus:border-primary disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1 transition-all duration-200 {} {}\" data-variant=\"{}\" data-size=\"{}\"><span>{}</span><span class=\"h-4 w-4 opacity-50\">⌄</span></button>{}</div>",
             self.open,
             name_attrs,
             filter_attrs,
@@ -918,8 +918,8 @@ impl<'a> EmptyState<'a> {
         let icon = self.icon_markup.map(|icon| format!("<div class=\"mb-4 flex h-16 w-16 items-center justify-center rounded-lg bg-muted/50 border border-border/50\">{}</div>", icon)).unwrap_or_default();
         let description = self.description.map(|text| format!("<p class=\"mx-auto max-w-[320px] text-sm text-muted-foreground leading-relaxed\">{}</p>", text)).unwrap_or_default();
         let action = match (self.action_label, self.action_href) {
-            (Some(label), Some(href)) => format!("<a href=\"{}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 h-10 px-3 text-sm min-h-[44px] mt-6\">{}</a>", href, label),
-            (Some(label), None) => format!("<button type=\"button\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 h-10 px-3 text-sm min-h-[44px] mt-6\">{}</button>", label),
+            (Some(label), Some(href)) => format!("<a href=\"{}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 hover:bg-accent hover:text-accent-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 h-10 px-3 text-sm min-h-[44px] mt-6\">{}</a>", href, label),
+            (Some(label), None) => format!("<button type=\"button\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 h-10 px-3 text-sm min-h-[44px] mt-6\">{}</button>", label),
             _ => String::new(),
         };
         format!(
@@ -1503,7 +1503,7 @@ pub struct Table<'a> {
 impl<'a> Table<'a> {
     pub fn render_html(&self) -> String {
         let headers = self.columns.iter().map(|column| {
-            format!("<th scope=\"col\" class=\"h-12 px-4 align-middle font-semibold text-muted-foreground text-[11px] uppercase tracking-wide bg-muted/20 whitespace-nowrap {}\">{}</th>", table_align_class(column.align), column.label)
+            format!("<th scope=\"col\" class=\"h-12 px-4 align-middle font-semibold text-muted-foreground text-[10px] uppercase tracking-[0.14em] font-mono bg-muted/20 whitespace-nowrap {}\">{}</th>", table_align_class(column.align), column.label)
         }).collect::<Vec<_>>().join("");
         let rows = if self.rows.is_empty() {
             let colspan = self.columns.len().max(1);
@@ -1568,7 +1568,7 @@ impl PaginationControls {
             } else {
                 ""
             };
-            format!("<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 h-10 px-3 text-sm min-h-[44px]\"{}>{}</button>", disabled_attr, label)
+            format!("<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 h-10 px-3 text-sm min-h-[44px]\"{}>{}</button>", disabled_attr, label)
         };
         format!(
             "<div class=\"flex items-center gap-2\" role=\"navigation\" aria-label=\"Pagination controls\">{}{}<span class=\"px-2 text-sm text-muted-foreground\">Page {} of {}</span>{}{}</div>",
@@ -1601,13 +1601,13 @@ impl PaginationControls {
         let link = |label: &str, target_page: usize, disabled: bool| {
             if disabled {
                 return format!(
-                    "<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 h-10 px-3 text-sm min-h-[44px]\" disabled aria-disabled=\"true\">{}</button>",
+                    "<button class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 h-10 px-3 text-sm min-h-[44px]\" disabled aria-disabled=\"true\">{}</button>",
                     label,
                 );
             }
 
             format!(
-                "<a href=\"{}?page={}{}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-md text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 h-10 px-3 text-sm min-h-[44px]\">{}</a>",
+                "<a href=\"{}?page={}{}\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-[8px_8px_7px_7px] text-[14px] font-sans font-semibold tracking-[0.01em] border border-surface-200 bg-background text-foreground hover:border-surface-300 h-10 px-3 text-sm min-h-[44px]\">{}</a>",
                 base_path,
                 target_page,
                 preserved,
@@ -2508,7 +2508,7 @@ pub fn render_sortable_header(
         _ => ("⇅", "none"),
     };
     format!(
-        "<th scope=\"col\" class=\"h-12 px-4 align-middle font-semibold text-muted-foreground text-[11px] uppercase tracking-wide bg-muted/20 whitespace-nowrap cursor-pointer select-none hover:bg-muted/40 transition-colors\" aria-sort=\"{}\" data-sort-key=\"{}\"><div class=\"flex items-center gap-1\">{}<span class=\"text-muted-foreground/60\">{}</span></div></th>",
+        "<th scope=\"col\" class=\"h-12 px-4 align-middle font-semibold text-muted-foreground text-[10px] uppercase tracking-[0.14em] font-mono bg-muted/20 whitespace-nowrap cursor-pointer select-none hover:bg-muted/40 transition-colors\" aria-sort=\"{}\" data-sort-key=\"{}\"><div class=\"flex items-center gap-1\">{}<span class=\"text-muted-foreground/60\">{}</span></div></th>",
         aria_sort, sort_key, label, indicator,
     )
 }
@@ -2870,7 +2870,8 @@ mod tests {
         assert!(html.contains("border-primary"));
         assert!(html.contains("Required"));
         assert!(html.contains("placeholder=\"email\""));
-        assert!(html.contains("focus-visible:ring-2"));
+        // Spiral-Lock DNA: the concentric two-arms focus replaced the ring.
+        assert!(html.contains("focus-visible:shadow-[0_0_0_1px_rgb(var(--primary))"));
     }
 
     #[test]
