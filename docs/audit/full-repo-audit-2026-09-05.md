@@ -311,3 +311,9 @@ Rounds 1–2 fixed pages; round 3 audited the **component library** the first tw
 Deployed via pipeline `20260906T042619: OK`. **Final three-layer proof:** (1) live anonymous checks 3/3 (auth surface + both CSS bundle families incl. every arch radius and the concentric shadow); (2) on-host dna_verify 13/13 rendered-output checks; (3) on-host primitives tests green. 6,083 workspace tests, clippy clean, parity byte-identical.
 
 **Completeness now holds by construction at three layers:** token CSS (everything inherits), primitives (every data-backed page inherits), and page-level markup (auth/dashboards/CP/marketing explicit) — with `dna_verify` + the pinned tests as the permanent regression gate.
+
+## 16. Completeness verification round 4 — zero old-radius — 2026-09-06
+
+Audited the strata rounds 1–3 never touched: the remaining interactive primitives (Checkbox/Switch/Dialog/Tabs/Toast/Tooltip — 23 md + 10 lg), the app shell (impersonation bar, sidebar tiles, rail links — 7 md + 3 lg), 26 residual page-level sites, the flash banner, the marketing cookie-banner survivor, and the CP sales cockpit's three hardcoded off-palette navy tints (an original-audit P2 finding, now `bg-surface-950`). All → ARCH radii; flash banner carries the 12/8 crown. Parity + migration tests now PIN the arch contract.
+
+Deployed via pipelines `20260906T042619`/`20260906T094951: OK`. **Terminal proof: `grep rounded-md|rounded-lg` across ALL ui-foundation source returns ZERO files; the served login/signup carry zero old-radius classes; dna_verify 13/13 on-host; 6,083 tests exit 0; clippy clean.** The old skin no longer exists in the rendering codebase — every radius, focus, label, meter, chart, table header, flash, popover, toast and dialog on all three surfaces is Spiral-Lock DNA, enforced by pinned tests.
