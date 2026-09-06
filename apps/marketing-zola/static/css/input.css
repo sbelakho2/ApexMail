@@ -1486,7 +1486,7 @@ html.dark .z-variable {
    siblings. Scoped to header/footer nav links carrying aria-current. */
 nav a[aria-current="page"],
 header a[aria-current="page"] {
-  background: var(--brand-500, #dc2626);
+  background: rgb(var(--brand-500));
   color: #fff !important;
   border-radius: 4px;
   padding-left: 10px;
@@ -1505,9 +1505,9 @@ header a[aria-current="page"] {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 11px;
   line-height: 1.9;
-  color: var(--surface-500, #71717a);
+  color: rgb(var(--surface-500));
 }
-.k-receipt .ok { color: var(--brand-500, #dc2626); font-weight: 600; }
+.k-receipt .ok { color: rgb(var(--brand-500)); font-weight: 600; }
 
 
 /* ── Spiral-Lock DNA v2 (2026-09-06) — the mark's geometry, platform-wide ── */
@@ -1522,19 +1522,19 @@ header a[aria-current="page"] {
 /* CONCENTRIC: focus is the spiral's two arms. */
 .btn-primary:focus-visible, .btn-secondary:focus-visible, a:focus-visible, button:focus-visible,
 input:focus-visible, select:focus-visible, textarea:focus-visible {
-  outline: 2px solid var(--brand-500, #dc2626);
+  outline: 2px solid rgb(var(--brand-500));
   outline-offset: 2px;
   box-shadow: 0 0 0 5px var(--surface-50, #fafafa), 0 0 0 6px var(--surface-300, #d4d4d8);
 }
 /* POINT: meters terminate in the found nonce. */
-.k-meter { position: relative; height: 2px; background: var(--surface-200, #e4e4e7); border-radius: 2px; }
-.k-meter > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: var(--brand-500, #dc2626); }
-.k-meter.k-ok > i { background: var(--success-500, #059669); }
+.k-meter { position: relative; height: 2px; background: rgb(var(--surface-200)); border-radius: 2px; }
+.k-meter > i { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 2px; background: rgb(var(--brand-500)); }
+.k-meter.k-ok > i { background: rgb(var(--success-500, 5 150 105)); }
 .k-meter > b { position: absolute; top: 50%; width: 6px; height: 6px; border-radius: 50%;
-  background: var(--brand-500, #dc2626); border: 2px solid var(--surface-50, #fff); transform: translate(-50%, -50%); }
-.k-meter.k-ok > b { background: var(--success-500, #059669); }
+  background: rgb(var(--brand-500)); border: 2px solid rgb(var(--surface-50)); transform: translate(-50%, -50%); }
+.k-meter.k-ok > b { background: rgb(var(--success-500, 5 150 105)); }
 /* ARC labels: the shackle crown before every mono section label. */
-.k-arc { color: var(--brand-500, #dc2626); flex-shrink: 0; }
+.k-arc { color: rgb(var(--brand-500)); flex-shrink: 0; }
 /* WINDING receipts: arcs rotate stepwise down the rows. */
 .k-receipt div { display: flex; align-items: center; gap: 9px; }
 .k-receipt svg { flex-shrink: 0; }
@@ -1550,10 +1550,10 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .ribbon span {
   display: grid; place-items: center; min-width: 24px; height: 27px; padding: 0 4px;
   border-radius: 6px 6px 5px 5px; /* ARCH */
-  background: var(--surface-200, #e4e4e7); color: var(--surface-600, #52525b);
+  background: rgb(var(--surface-200)); color: rgb(var(--surface-600));
   font: 700 12px var(--font-mono, ui-monospace, Menlo, monospace);
 }
-.ribbon span.m { background: var(--brand-500, #dc2626); color: #fff; }
+.ribbon span.m { background: rgb(var(--brand-500)); color: #fff; }
 
 /* ── The terminal panel (hero right column) ── */
 .term {
@@ -1569,8 +1569,8 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 
 /* ── Stats band: mono display values over point-meters ── */
 .stats {
-  display: grid; grid-template-columns: repeat(3, 1fr); gap: 1px;
-  background: var(--surface-200, #e4e4e7); border: 1px solid var(--surface-200, #e4e4e7);
+  display: grid; grid-template-columns: 1fr; gap: 1px; /* mobile: stacked */
+  background: rgb(var(--surface-200)); border: 1px solid rgb(var(--surface-200));
   border-radius: 16px 16px 9px 9px; overflow: hidden; /* ARCH-lg */
 }
 .stats > div { background: #fff; padding: 20px 22px; }
@@ -1578,22 +1578,22 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   font: 700 26px var(--font-mono, ui-monospace, Menlo, monospace);
   letter-spacing: -0.02em; margin: 8px 0 10px;
 }
-.stats-v-dim { color: var(--surface-400, #a1a1aa); }
+.stats-v-dim { color: rgb(var(--surface-400)); }
 
 /* ── Arc labels: the shackle crown before every mono section label ── */
 .k-arc-label {
-  display: inline-flex; align-items: center; gap: 7px;
+  display: inline-flex; align-items: center; gap: 7px; flex-wrap: wrap;
   font: 600 10px var(--font-mono, ui-monospace, Menlo, monospace);
   letter-spacing: 0.16em; text-transform: uppercase;
-  color: var(--surface-500, #71717a);
+  color: rgb(var(--surface-500));
 }
 .k-arc-label::before {
   content: ""; width: 17px; height: 11px; flex-shrink: 0;
   background: currentColor; /* replaced below by mask for stroke look */
   -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 14' fill='none'%3E%3Cpath d='M4 12 A 9 9 0 0 1 20 12' stroke='black' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E") center/contain no-repeat;
   mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 14' fill='none'%3E%3Cpath d='M4 12 A 9 9 0 0 1 20 12' stroke='black' stroke-width='2.6' stroke-linecap='round'/%3E%3C/svg%3E") center/contain no-repeat;
-  color: var(--brand-500, #dc2626);
-  background-color: var(--brand-500, #dc2626);
+  color: rgb(var(--brand-500));
+  background-color: rgb(var(--brand-500));
 }
 
 /* ── Slot nav (header): links as flip-cells; the active page is solid ── */
@@ -1601,29 +1601,36 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .slot-nav a {
   font: 600 11px var(--font-mono, ui-monospace, Menlo, monospace);
   letter-spacing: 0.06em; text-transform: uppercase; text-decoration: none;
-  color: var(--surface-600, #52525b); padding: 7px 10px;
+  color: rgb(var(--surface-600)); padding: 7px 10px;
   border-radius: 6px 6px 5px 5px; /* ARCH */
   transition: background 0.15s ease, color 0.15s ease;
 }
-.slot-nav a:hover { color: var(--surface-950, #111113); background: var(--surface-100, #f4f4f5); }
+.slot-nav a:hover { color: rgb(var(--surface-950)); background: rgb(var(--surface-100)); }
 .slot-nav a.on, .slot-nav a[aria-current="page"] {
-  background: var(--brand-500, #dc2626); color: #fff;
+  background: rgb(var(--brand-500)); color: #fff;
 }
 
 /* ── Ledger feature cards: hex tag slots + the red index ── */
-.ledger-feat { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.ledger-feat { display: grid; grid-template-columns: 1fr; gap: 16px; }
+@media (min-width: 640px) {
+  .stats { grid-template-columns: repeat(3, 1fr); }
+  .ledger-feat { grid-template-columns: repeat(2, 1fr); }
+}
+@media (min-width: 1024px) {
+  .ledger-feat { grid-template-columns: repeat(3, 1fr); }
+}
 .ledger-feat .card-dna {
-  border: 1px solid var(--surface-200, #e4e4e7); border-radius: 16px 16px 9px 9px;
+  border: 1px solid rgb(var(--surface-200)); border-radius: 16px 16px 9px 9px;
   padding: 18px; background: #fff;
 }
 .ledger-feat .ix {
   font: 600 10px var(--font-mono, ui-monospace, Menlo, monospace);
-  letter-spacing: 0.16em; color: var(--brand-500, #dc2626);
+  letter-spacing: 0.16em; color: rgb(var(--brand-500));
 }
 .ledger-feat .tag-slots { display: flex; gap: 2px; }
 .ledger-feat .tag-slots span {
   display: grid; place-items: center; min-width: 14px; height: 17px; padding: 0 3px;
-  border-radius: 4px; background: var(--surface-200, #e4e4e7); color: var(--surface-600, #52525b);
+  border-radius: 4px; background: rgb(var(--surface-200)); color: rgb(var(--surface-600));
   font: 600 9px var(--font-mono, ui-monospace, Menlo, monospace);
 }
 
@@ -1631,6 +1638,6 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .price-slot {
   display: grid; place-items: center; min-width: 26px; height: 33px; border-radius: 6px 6px 5px 5px;
   font: 700 22px var(--font-mono, ui-monospace, Menlo, monospace);
-  background: var(--surface-200, #e4e4e7); color: var(--surface-950, #111113);
+  background: rgb(var(--surface-200)); color: rgb(var(--surface-950));
 }
-.price-slot.brand { background: var(--brand-500, #dc2626); color: #fff; }
+.price-slot.brand { background: rgb(var(--brand-500)); color: #fff; }

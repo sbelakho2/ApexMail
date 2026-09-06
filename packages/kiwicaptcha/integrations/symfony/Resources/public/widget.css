@@ -306,3 +306,12 @@
     .kiwi-widget { border: 1px solid CanvasText; }
     .kiwi-badge, .kiwi-slots i { border: 1px solid CanvasText; }
   }
+
+  /* ── Narrow-viewport relief (2026-09-06): the receipt/info line is
+     information, not decoration — at phone widths inside padded auth
+     cards the widget can be ~200px wide and the nowrap+ellipsis reduced
+     "Protected by KiwiCaptcha" to "Protected". Let it wrap. ── */
+  @media (max-width: 480px) {
+    .kiwi-info { white-space: normal; }
+    .kiwi-bottom { flex-wrap: wrap; }
+  }
