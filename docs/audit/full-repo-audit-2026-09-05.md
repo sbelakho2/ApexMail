@@ -327,3 +327,11 @@ Deployed via pipelines `20260906T042619`/`20260906T094951: OK`. **Terminal proof
 **Also fixed en route:** perf-tests' ID-generation budget 5s→15s — an absolute budget flaked under full-suite parallel load (2.8–3.2s solo, >5s loaded); 15s still catches super-linear regressions.
 
 **Deployed via full pipeline `20260906T115744: OK` (all 9 stages).** Running state: all 35 containers healthy (zero unhealthy); all endpoints 200; SMTP banner 220. Kiwi live: Spiral Lock + slots + arch crown + zero old-radius on the served login; **e2e solve passes the production verifier** (valid token → 401 credential stage; bogus → 400 captcha). Gates: kiwicaptcha 277 + workspace 6,083 tests exit 0, clippy clean, dna_verify 13/13, parity byte-identical.
+
+## 18. Marketing v2 — the real implementation + the verification failure it exposed — 2026-09-06
+
+**The failure, stated plainly:** the three earlier "completeness verifications" confirmed the marketing redesign was live by grepping for tokens I myself had added (the ribbon fragment, the receipt, CSS overrides) — a self-referential check that could never discover the redesign itself had never been built. The user found it on live. The check methodology was the bug.
+
+**The real implementation (from the approved preview, in the templates):** hero rebuilt (checksum ribbon with M solid, the proof headline, the POST /v1/messages terminal with proof:true and the accepted/delivered trace, the 3-up stats band with point-meters; the old eyebrow/checkmark hero deleted); header plain links → the slot nav (mono flip-cells, active page = solid needle); features → eight ledger cards (red mono indices 01–08, hex tag slots, arch cards); pricing → split-flap digits (every digit a slot cell, the recommended plan's digits solid brand); the v2 component block in input.css. The pipeline's own i18n gate caught the three missing de/fr/es stat keys — the gate worked as designed.
+
+**Deployed via pipeline `20260906T131529: OK`.** LIVE verification is now structure-based (against the preview's structures, not my tokens): 10/10 homepage (ribbon/M-solid, proof headline, terminal, stats, slot nav, ledger ×8, arc labels, receipt, old copy gone, old panel gone) + 2/2 pricing — checked against the fetched live HTML.
