@@ -241,7 +241,9 @@ html.dark #deploy-byoc:checked ~ .deploy-tabs [for="deploy-byoc"] {
   gap: 1.5rem;
 }
 .testimonials-track::-webkit-scrollbar { display: none; }
-.testimonials-track > .testimonial-card {
+.testimonials-track > .testimonial-card,
+.testimonials-track > .apex-card,
+.testimonials-track > .card-dna {
   scroll-snap-align: start;
   flex: 0 0 100%;
   min-width: 0;
