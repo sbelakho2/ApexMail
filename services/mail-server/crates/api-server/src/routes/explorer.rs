@@ -801,7 +801,9 @@ pub async fn grade_domain(
 fn grader_error_page(status: StatusCode, domain: &str, code: &str, message: &str) -> Response {
     (
         status,
-        Html(ui_foundation::explorer::grader_error_page(domain, code, message)),
+        Html(ui_foundation::explorer::grader_error_page(
+            domain, code, message,
+        )),
     )
         .into_response()
 }
@@ -937,7 +939,10 @@ mod tests {
             clean_domain_input("http://user@sub.yourcompany.com:8443/x?q=1"),
             "sub.yourcompany.com"
         );
-        assert_eq!(clean_domain_input("news@yourcompany.com"), "yourcompany.com");
+        assert_eq!(
+            clean_domain_input("news@yourcompany.com"),
+            "yourcompany.com"
+        );
         assert_eq!(clean_domain_input(".yourcompany.com."), "yourcompany.com");
         // Empty stays empty — the handler rejects it with INVALID_INPUT.
         assert_eq!(clean_domain_input("   "), "");

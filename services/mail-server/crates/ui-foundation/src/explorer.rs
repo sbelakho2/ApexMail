@@ -281,16 +281,13 @@ fn grader_findings_html(findings: Option<&Vec<serde_json::Value>>) -> String {
     }
     let mut html = String::new();
     for f in list.iter().take(shown) {
-        let severity = f
-            .get("severity")
-            .and_then(|v| v.as_str())
-            .unwrap_or("info");
+        let severity = f.get("severity").and_then(|v| v.as_str()).unwrap_or("info");
         let category = f.get("category").and_then(|v| v.as_str()).unwrap_or("");
         let message = f.get("message").and_then(|v| v.as_str()).unwrap_or("");
         let (color, mark) = match severity {
             "critical" | "error" => ("#f87171", "&#10007;"), // ✗
             "warning" => ("#fbbf24", "!"),
-            _ => ("#a1a1aa", "&#183;"),                        // ·
+            _ => ("#a1a1aa", "&#183;"), // ·
         };
         let cat_part = if category.is_empty() {
             String::new()
@@ -360,7 +357,9 @@ pub fn grader_response_page(result: &serde_json::Value) -> String {
     ];
     let mut rows = String::new();
     for (label, pointer) in dimensions {
-        let Some(d) = result.pointer(pointer) else { continue };
+        let Some(d) = result.pointer(pointer) else {
+            continue;
+        };
         let ds = d.get("score").and_then(|v| v.as_u64()).unwrap_or(0);
         let dm = d.get("max").and_then(|v| v.as_u64()).unwrap_or(0);
         rows.push_str(&format!(
@@ -377,10 +376,7 @@ pub fn grader_response_page(result: &serde_json::Value) -> String {
         )
     };
 
-    let findings = result
-        .get("findings")
-        .and_then(|v| v.as_array())
-        .cloned();
+    let findings = result.get("findings").and_then(|v| v.as_array()).cloned();
     let findings_html = grader_findings_html(findings.as_ref());
     let findings_section = if findings_html.is_empty() {
         String::new()
@@ -425,7 +421,12 @@ pub fn grader_response_page(result: &serde_json::Value) -> String {
         findings_section = findings_section,
         recs_section = recs_section,
     );
-    sandbox_shell("Deliverability grade", "/", "Back to the deliverability check", &body)
+    sandbox_shell(
+        "Deliverability grade",
+        "/",
+        "Back to the deliverability check",
+        &body,
+    )
 }
 
 /// Error response page for `POST /explorer/grade`.
@@ -448,7 +449,12 @@ pub fn grader_error_page(domain: &str, code: &str, message: &str) -> String {
         code = esc(code),
         message = esc(message),
     );
-    sandbox_shell("Grade error", "/", "Back to the deliverability check", &body)
+    sandbox_shell(
+        "Grade error",
+        "/",
+        "Back to the deliverability check",
+        &body,
+    )
 }
 
 #[cfg(test)]
@@ -589,6 +595,9 @@ mod tests {
         // 0/10 when max is 0 (no divide-by-zero, all hollow).
         assert_eq!(point_meter(0, 0).matches("background:#4ade80").count(), 0);
         // Clamped at 10 dots for overflow input.
-        assert_eq!(point_meter(150, 100).matches("background:#4ade80").count(), 10);
+        assert_eq!(
+            point_meter(150, 100).matches("background:#4ade80").count(),
+            10
+        );
     }
 }
