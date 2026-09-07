@@ -651,7 +651,16 @@
       "hero_subtitle": "Schätzen Sie Ihre monatlichen Kosten basierend auf dem E-Mail-Volumen.",
       "cta_title": "Bereit zu starten?",
       "cta_subtitle": "Senden Sie bis zu 30.000 E-Mails pro Monat kostenlos.",
-      "cta_button": "Kostenlos starten"
+      "cta_button": "Kostenlos starten",
+      "volume": "E-Mails / Monat",
+      "peak_daily": "Spitze / Tag",
+      "domains": "Sendedomänen",
+      "team_users": "Team-Mitglieder",
+      "dedicated_ips": "dedizierte IPs",
+      "billing": "Abrechnung",
+      "monthly": "Monatlich",
+      "annual": "Jährlich (10% Rabatt)",
+      "compute": "Preis berechnen"
     },
     "home_testimonials": {
       "heading_1": "Gemacht für",
@@ -1127,7 +1136,16 @@
       "cta_subtitle": "Calculateur de prix",
       "cta_title": "Calculateur",
       "hero_subtitle": "Estimez vos coûts mensuels en fonction de votre volume d'emails.",
-      "hero_title": "Calculateur de tarifs"
+      "hero_title": "Calculateur de tarifs",
+      "volume": "e-mails / mois",
+      "peak_daily": "pic / jour",
+      "domains": "domaines d’envoi",
+      "team_users": "utilisateurs",
+      "dedicated_ips": "IPs dédiées",
+      "billing": "facturation",
+      "monthly": "Mensuel",
+      "annual": "Annuel (10% de réduction)",
+      "compute": "Calculer mon prix"
     },
     "home_features": {
       "card_1_title": "API ultra-rapide",
@@ -1802,7 +1820,16 @@
       "cta_subtitle": "Calculadora de precios",
       "cta_title": "Calculadora",
       "hero_subtitle": "Estime sus costes mensuales según su volumen de emails.",
-      "hero_title": "Calculadora de precios"
+      "hero_title": "Calculadora de precios",
+      "volume": "correos / mes",
+      "peak_daily": "pico / día",
+      "domains": "dominios de envío",
+      "team_users": "usuarios del equipo",
+      "dedicated_ips": "IPs dedicadas",
+      "billing": "facturación",
+      "monthly": "Mensual",
+      "annual": "Anual (10% de descuento)",
+      "compute": "Calcular mi precio"
     },
     "home_features": {
       "card_1_title": "API ultrarrápida",
