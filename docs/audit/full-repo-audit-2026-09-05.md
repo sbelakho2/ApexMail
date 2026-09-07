@@ -372,3 +372,13 @@ The prior mobile passes fixed overflow and padding but the user's diagnosis stoo
 - **Features page — the worst offender at 16,705px** (38 cards at 1-up + 5 two-column detail sections). Fixed: cards now render **2-up compact** on phones (clamped 2-line descriptions, tightened padding/icons — verified live `feat-cols=2`); the detail sections trimmed **5 → 3** (API, compliance, insights kept; inbox-placement and enterprise link to their own existing pages). **Live: 8,860px — 47% reduction.**
 - **Console/CP dashboards:** verified from the render source that all KPI grids stack on mobile (`grid gap-4 sm:grid-cols-2 lg:grid-cols-4`), the sidebar is a mobile drawer (`md:` breakpoint), and the quiet-meter KPI row is `sm:grid-cols-3` (stacks to 1-up). No changes needed — the mobile shell was already correct; the prior widget/auth fixes covered the visible surfaces.
 - **Remaining subpage heights (live, 375px):** home 5,460 · compare 4,991 · compliance 8,782 · features 8,860 · security 9,855 · pricing 8,949 · private-cloud 11,769. All ≤ 12k and all `pageW == viewport` (zero horizontal break). Private-cloud is the longest remaining — a candidate for the same section-trim treatment if wanted, but it's a product deep-dive page, not a conversion page.
+
+## 24. Critical visual faults — text-on-text — root cause + fix — 2026-09-07
+
+**User-reported:** "lots of text on top of text, and elements out of screen and not appearing."
+
+**Root cause (found by programmatic overlap sweep):** the `<details>` element's closed-state hiding was defeated across the marketing site. The nav dropdown CSS had an explicit `details[data-dropdown] > [data-dropdown-menu] { display: block; }` that forced EVERY dropdown panel to render at full size regardless of open state — both Product and Developers dropdowns painted simultaneously over the nav and each other. The pricing FAQ had the same symptom (all answers rendering visible, overlapping the next question's summary) with no explicit forcing rule — the UA stylesheet's hiding simply wasn't applying.
+
+**Fix (pipelines `0b4533a2` + `1e7b727e`, run `20260907T014401: OK`):** (1) the dropdown rule scoped to the `[open]` state only; (2) an author-level enforcement rule restoring closed-state hiding for ALL details elements: `details:not([open]) > *:not(summary) { display: none !important; }`.
+
+**Live-verified:** desktop AND mobile, homepage AND pricing — every dropdown panel and every FAQ answer reports `height: 0` when closed. The overlap sweep that found the bugs (checking bounding-box intersections between visible text elements) is the pattern for future visual checks.
