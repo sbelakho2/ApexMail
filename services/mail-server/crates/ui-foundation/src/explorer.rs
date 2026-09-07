@@ -223,6 +223,234 @@ pub fn calculator_response_page(
     )
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Email Grader result page (`POST /explorer/grade`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Grade-letter colour on the zinc-dark sandbox triad (same palette as the
+/// status classes: green/amber/red).
+fn grade_color(grade: &str) -> &'static str {
+    match grade {
+        "A+" | "A" => "#4ade80",
+        "B" | "C" => "#fbbf24",
+        "D" | "F" => "#f87171",
+        _ => "#a1a1aa",
+    }
+}
+
+/// Ten-dot POINT meter (Spiral-Lock DNA: terminal dots carry the data).
+fn point_meter(score: u64, max: u64) -> String {
+    const DOTS: usize = 10;
+    let ratio = if max == 0 {
+        0.0
+    } else {
+        (score as f64 / max as f64).clamp(0.0, 1.0)
+    };
+    let filled = (ratio * DOTS as f64).round() as usize;
+    let color = if ratio >= 0.8 {
+        "#4ade80"
+    } else if ratio >= 0.6 {
+        "#fbbf24"
+    } else {
+        "#f87171"
+    };
+    let mut dots = String::with_capacity(DOTS * 96);
+    for i in 0..DOTS {
+        let (bg, border) = if i < filled {
+            (color, color)
+        } else {
+            ("transparent", "#3f3f46")
+        };
+        dots.push_str(&format!(
+            "<span style=\"display:inline-block;width:7px;height:7px;border-radius:9999px;background:{bg};border:1px solid {border};margin-right:3px;vertical-align:middle\"></span>"
+        ));
+    }
+    dots
+}
+
+/// Render the findings list (severity-tagged rows), capped with a remainder
+/// note so a pathological payload cannot balloon the page.
+fn grader_findings_html(findings: Option<&Vec<serde_json::Value>>) -> String {
+    let Some(list) = findings else {
+        return String::new();
+    };
+    const CAP: usize = 24;
+    let shown = list.len().min(CAP);
+    if shown == 0 {
+        return r#"<p style="margin:0;font-size:.85rem;color:#4ade80">No issues found — every check passed.</p>"#.to_string();
+    }
+    let mut html = String::new();
+    for f in list.iter().take(shown) {
+        let severity = f
+            .get("severity")
+            .and_then(|v| v.as_str())
+            .unwrap_or("info");
+        let category = f.get("category").and_then(|v| v.as_str()).unwrap_or("");
+        let message = f.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        let (color, mark) = match severity {
+            "critical" | "error" => ("#f87171", "&#10007;"), // ✗
+            "warning" => ("#fbbf24", "!"),
+            _ => ("#a1a1aa", "&#183;"),                        // ·
+        };
+        let cat_part = if category.is_empty() {
+            String::new()
+        } else {
+            format!("&nbsp;&middot;&nbsp;{}", esc(category))
+        };
+        html.push_str(&format!(
+            "<div style=\"display:flex;gap:.6rem;padding:.5rem 0;border-bottom:1px solid #18181b\"><span style=\"font-family:monospace;font-weight:700;color:{color};line-height:1.4\">{mark}</span><div style=\"min-width:0\"><p style=\"margin:0;font-family:monospace;font-size:.68rem;font-weight:700;letter-spacing:.08em;color:{color};text-transform:uppercase\">{sev}{cat_part}</p><p style=\"margin:.15rem 0 0;font-size:.85rem;color:#d4d4d8;line-height:1.55\">{msg}</p></div></div>",
+            sev = esc(severity),
+            msg = esc(message),
+        ));
+    }
+    if list.len() > CAP {
+        html.push_str(&format!(
+            "<p style=\"margin:.6rem 0 0;font-size:.7rem;color:#71717a\">+ {} more findings not shown</p>",
+            list.len() - CAP
+        ));
+    }
+    html
+}
+
+/// Render the numbered recommendations list (mono index, capped).
+fn grader_recommendations_html(recs: Option<&Vec<serde_json::Value>>) -> String {
+    let Some(list) = recs else {
+        return String::new();
+    };
+    const CAP: usize = 12;
+    let shown = list.len().min(CAP);
+    if shown == 0 {
+        return String::new();
+    }
+    let mut html = String::from("<ol style=\"margin:0;padding-left:1.4rem\">");
+    for (i, r) in list.iter().take(shown).enumerate() {
+        let text = r.as_str().unwrap_or("");
+        html.push_str(&format!(
+            "<li style=\"margin:.4rem 0;color:#d4d4d8;line-height:1.55\"><span style=\"font-family:monospace;font-weight:700;color:#dc2626\">{:02}</span>&nbsp;&nbsp;{text}</li>",
+            i + 1,
+            text = esc(text),
+        ));
+    }
+    html.push_str("</ol>");
+    if list.len() > CAP {
+        html.push_str(&format!(
+            "<p style=\"margin:.6rem 0 0;font-size:.7rem;color:#71717a\">+ {} more recommendations not shown</p>",
+            list.len() - CAP
+        ));
+    }
+    html
+}
+
+/// Full success response page for `POST /explorer/grade`. `result` is the
+/// engine's `GraderResponse` JSON (domain, score, grade, breakdown,
+/// findings, recommendations).
+pub fn grader_response_page(result: &serde_json::Value) -> String {
+    let domain = result.get("domain").and_then(|v| v.as_str()).unwrap_or("—");
+    let score = result.get("score").and_then(|v| v.as_u64()).unwrap_or(0);
+    let grade = result.get("grade").and_then(|v| v.as_str()).unwrap_or("?");
+    let color = grade_color(grade);
+
+    // Breakdown dimensions in display order (content_quality is optional).
+    let dimensions = [
+        ("DNS health", "/breakdown/dns_health"),
+        ("Authentication", "/breakdown/authentication"),
+        ("Spam likelihood", "/breakdown/spam_likelihood"),
+        ("Content quality", "/breakdown/content_quality"),
+        ("Reputation", "/breakdown/reputation"),
+    ];
+    let mut rows = String::new();
+    for (label, pointer) in dimensions {
+        let Some(d) = result.pointer(pointer) else { continue };
+        let ds = d.get("score").and_then(|v| v.as_u64()).unwrap_or(0);
+        let dm = d.get("max").and_then(|v| v.as_u64()).unwrap_or(0);
+        rows.push_str(&format!(
+            "<tr style=\"border-bottom:1px solid #27272a\"><td style=\"padding:.6rem .9rem;color:#a1a1aa;white-space:nowrap\">{label}</td><td style=\"padding:.6rem .9rem\">{meter}</td><td style=\"padding:.6rem .9rem;text-align:right;font-family:monospace;white-space:nowrap;color:#d4d4d8\">{ds}&hairsp;/&hairsp;{dm}</td></tr>",
+            label = esc(label),
+            meter = point_meter(ds, dm),
+        ));
+    }
+    let breakdown_section = if rows.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<p class=\"apx-label\">Score breakdown</p><table style=\"width:100%;border-collapse:collapse;font-size:.85rem\">{rows}</table>"
+        )
+    };
+
+    let findings = result
+        .get("findings")
+        .and_then(|v| v.as_array())
+        .cloned();
+    let findings_html = grader_findings_html(findings.as_ref());
+    let findings_section = if findings_html.is_empty() {
+        String::new()
+    } else {
+        format!("<p class=\"apx-label\">Findings</p>{findings_html}")
+    };
+
+    let recs = result
+        .get("recommendations")
+        .and_then(|v| v.as_array())
+        .cloned();
+    let recs_html = grader_recommendations_html(recs.as_ref());
+    let recs_section = if recs_html.is_empty() {
+        String::new()
+    } else {
+        format!("<p class=\"apx-label\">Recommendations</p>{recs_html}")
+    };
+
+    let body = format!(
+        r#"<div class="apx-sb">
+  <div class="apx-sb-bar"><span class="apx-chip">GRADE</span><span class="apx-path">{domain}</span><span class="apx-badge">DOMAIN CHECK</span><span class="apx-status apx-status--2" style="margin-left:auto">{score}/100</span></div>
+  <div style="padding:1.1rem 1.1rem 1.25rem">
+    <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;margin-bottom:.4rem">
+      <span style="display:inline-grid;place-items:center;min-width:3.6rem;height:3.6rem;padding:0 .5rem;border:1px solid #27272a;border-radius:2px;background:#18181b;color:{color};font-family:monospace;font-weight:700;font-size:1.5rem">{grade}</span>
+      <div style="min-width:0">
+        <p style="margin:0;font-size:.95rem;font-weight:700;color:#fafafa;word-break:break-all">{domain}</p>
+        <p style="margin:.45rem 0 0">{overall}</p>
+      </div>
+    </div>
+    {breakdown_section}
+    {findings_section}
+    {recs_section}
+    <p style="font-size:.7rem;color:#71717a;margin-top:1rem;line-height:1.5">Computed live by the ApexMail Email Grader with real DNS lookups — SPF, DKIM, DMARC, MX and blocklists. Domain-only readiness check; run the full email grader from the console for message-level analysis.</p>
+  </div>
+</div>"#,
+        domain = esc(domain),
+        score = score,
+        color = color,
+        grade = esc(grade),
+        overall = point_meter(score, 100),
+        breakdown_section = breakdown_section,
+        findings_section = findings_section,
+        recs_section = recs_section,
+    );
+    sandbox_shell("Deliverability grade", "/", "Back to the deliverability check", &body)
+}
+
+/// Error response page for `POST /explorer/grade`.
+pub fn grader_error_page(domain: &str, code: &str, message: &str) -> String {
+    let domain_part = if domain.is_empty() {
+        String::new()
+    } else {
+        esc(domain)
+    };
+    let body = format!(
+        r#"<div class="apx-sb">
+  <div class="apx-sb-bar"><span class="apx-chip">GRADE</span><span class="apx-path">{domain}</span><span class="apx-badge">DOMAIN CHECK</span></div>
+  <div style="padding:1.1rem 1.1rem 1.25rem">
+    <p style="margin:0;font-family:monospace;font-weight:700;color:#f87171">{code}</p>
+    <p style="margin:.5rem 0 0;font-size:.95rem;color:#d4d4d8;line-height:1.6">{message}</p>
+    <p style="font-size:.75rem;color:#71717a;margin-top:1rem">Enter a domain you send from — for example <span style="font-family:monospace">yourcompany.com</span>.</p>
+  </div>
+</div>"#,
+        domain = domain_part,
+        code = esc(code),
+        message = esc(message),
+    );
+    sandbox_shell("Grade error", "/", "Back to the deliverability check", &body)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -284,5 +512,83 @@ mod tests {
         assert!(page.contains("Monthly total"));
         assert!(page.contains("&lt;your&gt;"));
         assert!(page.contains("</html>"));
+    }
+
+    fn sample_grader_result() -> serde_json::Value {
+        serde_json::json!({
+            "domain": "example<b>.com",
+            "score": 75,
+            "grade": "B",
+            "breakdown": {
+                "dns_health": {"score": 20, "max": 25},
+                "authentication": {"score": 15, "max": 25},
+                "spam_likelihood": {"score": 20, "max": 20},
+                "reputation": {"score": 20, "max": 30}
+            },
+            "findings": [
+                {"severity": "warning", "category": "dmarc", "message": "DMARC policy is p=none; <enforce> alignment"}
+            ],
+            "recommendations": ["Publish a DMARC record at p=quarantine"]
+        })
+    }
+
+    #[test]
+    fn grader_page_renders_grade_meters_and_escapes() {
+        let page = grader_response_page(&sample_grader_result());
+        assert!(page.contains("<!DOCTYPE html>"));
+        assert!(page.contains("</html>"));
+        // Grade + score surface in the page.
+        assert!(page.contains("B</span>"));
+        assert!(page.contains("75/100"));
+        // Domain is escaped, never raw.
+        assert!(page.contains("&lt;b&gt;"));
+        assert!(!page.contains("example<b>"));
+        // Breakdown dimensions render.
+        assert!(page.contains("DNS health"));
+        assert!(page.contains("Authentication"));
+        assert!(page.contains("Reputation"));
+        // Findings + recommendations render with escaping.
+        assert!(page.contains("&lt;enforce&gt;"));
+        assert!(page.contains("p=quarantine"));
+        // Point meter dots exist (10 per meter).
+        assert!(page.matches("border-radius:9999px").count() >= 10);
+    }
+
+    #[test]
+    fn grader_page_handles_empty_findings_and_missing_sections() {
+        let mut v = sample_grader_result();
+        v["findings"] = serde_json::json!([]);
+        v["recommendations"] = serde_json::json!([]);
+        let page = grader_response_page(&v);
+        assert!(page.contains("No issues found"));
+        assert!(!page.contains("Recommendations</p><ol"));
+        // Optional content_quality dimension is skipped silently.
+        assert!(!page.contains("Content quality"));
+    }
+
+    #[test]
+    fn grader_page_tolerates_minimal_payload() {
+        let page = grader_response_page(&serde_json::json!({"domain": "x.com"}));
+        assert!(page.contains("</html>"));
+        assert!(page.contains("0/100"));
+    }
+
+    #[test]
+    fn grader_error_page_escapes_and_is_balanced() {
+        let page = grader_error_page("evil<b>.com", "INVALID_INPUT", "bad <domain>");
+        assert!(page.contains("&lt;b&gt;"));
+        assert!(page.contains("INVALID_INPUT"));
+        assert!(page.contains("</html>"));
+        assert!(page.contains("Back to the deliverability check"));
+    }
+
+    #[test]
+    fn point_meter_fill_counts_track_ratio() {
+        // 8/10 filled for 80%.
+        assert_eq!(point_meter(20, 25).matches("background:#4ade80").count(), 8);
+        // 0/10 when max is 0 (no divide-by-zero, all hollow).
+        assert_eq!(point_meter(0, 0).matches("background:#4ade80").count(), 0);
+        // Clamped at 10 dots for overflow input.
+        assert_eq!(point_meter(150, 100).matches("background:#4ade80").count(), 10);
     }
 }

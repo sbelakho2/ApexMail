@@ -686,6 +686,124 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/explorer/exec", axum::routing::post(exec))
         .route("/explorer/calculate", axum::routing::post(calculate))
+        .route("/explorer/grade", axum::routing::post(grade_domain))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Email Grader (zero-JS form wrapper)
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct GradeDomainForm {
+    #[serde(default)]
+    pub domain: String,
+}
+
+/// Strip the noise users paste into a "your domain" box: schemes, paths,
+/// ports, credentials, surrounding dots. Lowercased.
+fn clean_domain_input(raw: &str) -> String {
+    let mut d = raw.trim().to_ascii_lowercase();
+    for scheme in ["https://", "http://"] {
+        if let Some(rest) = d.strip_prefix(scheme) {
+            d = rest.to_string();
+            break;
+        }
+    }
+    // Pasted email / MAIL FROM shape: keep only the host.
+    if let Some((_, host)) = d.rsplit_once('@') {
+        d = host.to_string();
+    }
+    for sep in ['/', ':', '?', '#'] {
+        if let Some((host, _)) = d.split_once(sep) {
+            d = host.to_string();
+        }
+    }
+    d.trim_matches('.').trim().to_string()
+}
+
+pub async fn grade_domain(
+    State(state): State<AppState>,
+    connect_info: Option<axum::extract::ConnectInfo<std::net::SocketAddr>>,
+    headers: axum::http::HeaderMap,
+    Form(form): Form<GradeDomainForm>,
+) -> Response {
+    // Same trusted-proxy IP walk and Redis budget as the sandbox lanes.
+    let bucket_ip = match connect_info {
+        Some(axum::extract::ConnectInfo(addr)) => {
+            client_ip(&headers, addr.ip(), &state.config.trusted_proxies)
+        }
+        None => "unknown".to_string(),
+    };
+    if !rate_limit(&state, &bucket_ip).await {
+        return grader_error_page(
+            StatusCode::TOO_MANY_REQUESTS,
+            "",
+            "RATE_LIMITED",
+            "Too many checks — try again in a minute.",
+        );
+    }
+    let domain = clean_domain_input(&form.domain);
+    if domain.is_empty()
+        || domain.len() > 253
+        || !domain.contains('.')
+        || domain.chars().any(|c| c.is_whitespace())
+    {
+        return grader_error_page(
+            StatusCode::BAD_REQUEST,
+            &domain,
+            "INVALID_INPUT",
+            "Enter a real domain you send from, like yourcompany.com.",
+        );
+    }
+    let gs = match state.grader_state.clone() {
+        Some(s) => s,
+        None => {
+            return grader_error_page(
+                StatusCode::SERVICE_UNAVAILABLE,
+                &domain,
+                "GRADER_DISABLED",
+                "The Email Grader is temporarily unavailable.",
+            )
+        }
+    };
+    let client_ip_addr: std::net::IpAddr = bucket_ip
+        .parse()
+        .unwrap_or_else(|_| "0.0.0.0".parse().expect("static ip literal"));
+    // Delegate to the canonical transport-agnostic handler — enabled flag,
+    // per-IP engine rate limit, error mapping and scoring all stay in ONE
+    // place, identical to the /v1/grader/check JSON API.
+    let (status, axum::Json(value)) = email_grader::routes::check_domain(
+        gs,
+        client_ip_addr,
+        email_grader::DomainCheckRequest {
+            domain: domain.clone(),
+            selectors: Vec::new(),
+        },
+    )
+    .await;
+    if status == StatusCode::OK {
+        Html(ui_foundation::explorer::grader_response_page(&value)).into_response()
+    } else {
+        let code = value
+            .pointer("/error/code")
+            .and_then(|v| v.as_str())
+            .unwrap_or("GRADER_ERROR");
+        // Public endpoint: the engine's messages are already
+        // user-facing (map_grader_error), but never leak anything raw.
+        let message = value
+            .pointer("/error/message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("The check could not be completed.");
+        grader_error_page(status, &domain, code, message)
+    }
+}
+
+fn grader_error_page(status: StatusCode, domain: &str, code: &str, message: &str) -> Response {
+    (
+        status,
+        Html(ui_foundation::explorer::grader_error_page(domain, code, message)),
+    )
+        .into_response()
 }
 
 // A HeaderName import keeps clippy from flagging the unused-headers path.
@@ -806,5 +924,22 @@ mod tests {
         );
         let total = rows.iter().find(|r| r.0 == "Monthly total").expect("total");
         assert!(total.1.starts_with("€"));
+    }
+
+    #[test]
+    fn grade_form_strips_pasted_url_noise() {
+        assert_eq!(clean_domain_input("  YourCompany.COM "), "yourcompany.com");
+        assert_eq!(
+            clean_domain_input("https://yourcompany.com/pricing"),
+            "yourcompany.com"
+        );
+        assert_eq!(
+            clean_domain_input("http://user@sub.yourcompany.com:8443/x?q=1"),
+            "sub.yourcompany.com"
+        );
+        assert_eq!(clean_domain_input("news@yourcompany.com"), "yourcompany.com");
+        assert_eq!(clean_domain_input(".yourcompany.com."), "yourcompany.com");
+        // Empty stays empty — the handler rejects it with INVALID_INPUT.
+        assert_eq!(clean_domain_input("   "), "");
     }
 }

@@ -50,6 +50,22 @@
 });
 <span class="term-c">&rarr; 202 accepted &middot; proof 0x41f2</span>
 <span class="term-c">&rarr; delivered &#10003; 1.8s &middot; eeu</span></pre>
+          {# The trace above, made real: a plain form POST to the Rust
+             sandbox executor — the request really queues, the worker
+             really attempts delivery, the result page shows the live
+             status and latency. Zero JavaScript. #}
+          <form method="POST" action="https://api.apexmail.ee/explorer/exec" class="term-run">
+            <input type="hidden" name="lane" value="send">
+            <input type="hidden" name="body" value='{"to":"customer@example.com","subject":"Hello from ApexMail","html":"&lt;h1&gt;Signed proof of delivery.&lt;/h1&gt;","proof":true}'>
+            <button type="submit" class="btn-primary">
+              {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_run_cta"] %}{{ i18n_data[l]["home"]["hero_run_cta"] }}{% else %}Run this request{% endif %}
+              <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+            </button>
+            <span class="term-run-note">
+              <svg viewBox="0 0 24 14" width="12" height="8" fill="none" style="display:inline-block;vertical-align:middle;margin-right:4px" aria-hidden="true"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>
+              {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_run_note"] %}{{ i18n_data[l]["home"]["hero_run_note"] }}{% else %}executes on the live sandbox &middot; zero JavaScript{% endif %}
+            </span>
+          </form>
         </div>
       </div>
     </div>

@@ -427,7 +427,12 @@
       "stat_uptime_label": "Betriebszeit · 12 Monate",
       "stat_delivery_label": "mediane Zustellung",
       "stat_volume_label": "Nachrichten / Monat",
-      "pricing_teaser_heading": "Einfache Preise"
+      "pricing_teaser_heading": "Einfache Preise",
+      "hero_run_cta": "Anfrage ausführen",
+      "hero_run_note": "läuft in der Live-Sandbox · null JavaScript",
+      "email_grader_field": "Domain",
+      "email_grader_submit": "Domain bewerten",
+      "email_grader_note": "Live-DNS-Prüfungen · SPF / DKIM / DMARC / MX · null JavaScript"
     },
     "home_features": {
       "eyebrow": "Funktionsumfang",
@@ -1112,7 +1117,12 @@
       "stat_uptime_label": "disponibilité · 12 mois",
       "stat_delivery_label": "livraison médiane",
       "stat_volume_label": "messages / mois",
-      "pricing_teaser_heading": "Tarifs simples"
+      "pricing_teaser_heading": "Tarifs simples",
+      "hero_run_cta": "Exécuter cette requête",
+      "hero_run_note": "s'exécute sur le sandbox en direct · zéro JavaScript",
+      "email_grader_field": "Domaine",
+      "email_grader_submit": "Évaluer mon domaine",
+      "email_grader_note": "vérifications DNS en direct · SPF / DKIM / DMARC / MX · zéro JavaScript"
     },
     "a11y": {
       "back_to_top": "Retour en haut",
@@ -1797,7 +1807,12 @@
       "stat_uptime_label": "disponibilidad · 12 meses",
       "stat_delivery_label": "entrega mediana",
       "stat_volume_label": "mensajes / mes",
-      "pricing_teaser_heading": "Precios simples"
+      "pricing_teaser_heading": "Precios simples",
+      "hero_run_cta": "Ejecutar esta solicitud",
+      "hero_run_note": "se ejecuta en el sandbox en vivo · cero JavaScript",
+      "email_grader_field": "Dominio",
+      "email_grader_submit": "Evaluar mi dominio",
+      "email_grader_note": "comprobaciones DNS en vivo · SPF / DKIM / DMARC / MX · cero JavaScript"
     },
     "a11y": {
       "back_to_top": "Volver arriba",
