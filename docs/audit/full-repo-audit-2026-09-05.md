@@ -355,3 +355,11 @@ Also noted while diagnosing: the local `file://` preview of the built site loads
 ## 21. Mobile marketing — compaction pass — 2026-09-06
 
 The three prior fixes cleared overflow/clipping but the page remained a desktop-first layout stacked into an endless 14,497-px column (~18 screens). Reviewed all 10 viewport slices, then compacted (pipeline `20260906T182226: OK`): section rhythm halved (py-20→40px), h1 clamped to 9vw (34px at 375px), the stats band as a tight 3-up row (three 113px columns, 18px values — not three stacked full-width bars), hero ribbon/terminal tightened (11px font, word-break), ledger/pricing cards compacted, footer receipt tightened. **Live-verified:** page 13,396px (8% shorter from padding alone, with all content intact), pageW==375 (no break), stats 3-up, h1 34px, section padding 40px. Console/CP/pricing were already clean.
+
+## 22. Marketing homepage restructure — content, not CSS — 2026-09-07
+
+The prior mobile passes fixed overflow and padding but the user's diagnosis stood: **the homepage was trying to be the entire site** — 9 major blocks (8-card features, API explorer demo, comparison table, security deep-dive, grader section, pricing calculator, capabilities band, CTA) stacked into a 14,497-px column (~18 phone screens).
+
+**Restructured (pipeline `20260906T234100: OK`) to a tight conversion page** — 5 sections: Hero (ribbon + terminal + stats) → Features (4 cards + "All features →" link; the full 8 live on /features/) → Grader strip (one compact differentiator) → Pricing teaser (3 plans inline, recommended-plan needle, links to /pricing/) → CTA. The comparison table (/compare/), security deep-dive (/security/), API explorer demo, calculator, and capabilities band are cut from the homepage — each lives on (or moves to) its own page.
+
+**Live-verified:** page height **5,460px (was 14,497 — 62% reduction)**, 5 sections, pageW == viewport, all old heavy sections confirmed absent from the served HTML, ribbon/terminal/pricing-teaser/CTA confirmed present. The i18n gate caught the two new keys (de/fr/es) before deploy — fixed and included.
