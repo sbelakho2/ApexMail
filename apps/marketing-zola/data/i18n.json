@@ -672,7 +672,8 @@
     "home_pricing_island": {
       "pricing_island_heading_1": "Preise, die",
       "pricing_island_heading_2": "mit Ihnen skalieren",
-      "pricing_island_subtitle": "Transparente Preisberechnung mit 30.000 kostenlosen E-Mails pro Monat, veröffentlichten Überziehungsraten und Enterprise-Preisen für betreute Infrastruktur."
+      "pricing_island_subtitle": "Transparente Preisberechnung mit 30.000 kostenlosen E-Mails pro Monat, veröffentlichten Überziehungsraten und Enterprise-Preisen für betreute Infrastruktur.",
+      "pricing_island_eyebrow": "§ Rechner"
     },
     "not_found": {
       "heading": "Diese Seite ist weg, aber die Plattform ist noch da.",
@@ -1356,7 +1357,8 @@
     "home_pricing_island": {
       "pricing_island_heading_1": "Des prix qui",
       "pricing_island_heading_2": "évoluent avec vous",
-      "pricing_island_subtitle": "Tarification transparente avec 30 000 e-mails gratuits par mois, dépassements publiés et tarifs Enterprise réservés à une infrastructure gérée."
+      "pricing_island_subtitle": "Tarification transparente avec 30 000 e-mails gratuits par mois, dépassements publiés et tarifs Enterprise réservés à une infrastructure gérée.",
+      "pricing_island_eyebrow": "§ calculateur"
     },
     "not_found": {
       "heading": "Cette page a disparu, mais la plateforme est toujours là.",
@@ -2040,7 +2042,8 @@
     "home_pricing_island": {
       "pricing_island_heading_1": "Precios que",
       "pricing_island_heading_2": "escalan contigo",
-      "pricing_island_subtitle": "Precios transparentes con 30 000 correos gratuitos al mes, excedentes publicados y precios Enterprise reservados para infraestructura gestionada."
+      "pricing_island_subtitle": "Precios transparentes con 30 000 correos gratuitos al mes, excedentes publicados y precios Enterprise reservados para infraestructura gestionada.",
+      "pricing_island_eyebrow": "§ calculadora"
     },
     "not_found": {
       "heading": "Esta página ya no existe, pero la plataforma sigue aquí.",
