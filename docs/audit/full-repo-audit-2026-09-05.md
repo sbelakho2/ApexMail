@@ -382,3 +382,15 @@ The prior mobile passes fixed overflow and padding but the user's diagnosis stoo
 **Fix (pipelines `0b4533a2` + `1e7b727e`, run `20260907T014401: OK`):** (1) the dropdown rule scoped to the `[open]` state only; (2) an author-level enforcement rule restoring closed-state hiding for ALL details elements: `details:not([open]) > *:not(summary) { display: none !important; }`.
 
 **Live-verified:** desktop AND mobile, homepage AND pricing — every dropdown panel and every FAQ answer reports `height: 0` when closed. The overlap sweep that found the bugs (checking bounding-box intersections between visible text elements) is the pattern for future visual checks.
+
+## 25. Card DNA visibility + table breaks + interactive calculator — 2026-09-07
+
+Deployed via pipeline `20260907T195148: OK`.
+
+**Card DNA visibility pass** — the ledger cards and pricing cards carried the Spiral-Lock DNA classes but they were nearly invisible: hex tags were micro-text, the arch crowns had no visual distinction, the cards read as flat bordered boxes ("just lists on a bare page" — user). Now: arch crowns carry a brand-tinted inset halo, hex tag slots are proper bordered cells, the index numerals are brand-tinted badges, pricing slot digits are 26px with depth/border/shadow, cards have hover depth states, and the "All features" link card is a distinct dashed variant.
+
+**Table text** — `word-break: keep-all; white-space: nowrap` on all table cells prevents unnecessary mid-word breaks; comparison tables keep their 600px min-width with horizontal scroll instead of breaking text.
+
+**CTA section** — tightened from ~815px to ~4rem padding.
+
+**Interactive calculator (Rust-only)** — the static pricing table is now a real interactive form that POSTs to the Rust api-server's `/explorer/calculate` endpoint. The billing-service plan tables (the invoicing source of truth) compute the result server-side and render a full result page. **Zero JavaScript**: a plain HTML form + a Rust backend. E2E verified: POST 50k volume → Starter/€25/month with annual at €250/yr. The form carries arc-labeled inputs, the billing-cycle select, and the "computed by the Rust billing engine — zero JavaScript" proof line. All 10 calculator i18n keys translated (de/fr/es) — the gate caught them before deploy.
