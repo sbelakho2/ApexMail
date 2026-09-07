@@ -80,9 +80,12 @@ details[data-dropdown][open] > summary .dropdown-chevron {
 details[data-dropdown][open] > summary {
   color: rgb(var(--surface-950));
 }
-details[data-dropdown] > [data-dropdown-menu] {
+details[data-dropdown][open] > [data-dropdown-menu] {
   display: block;
 }
+/* When CLOSED the <details> user-agent stylesheet hides the panel.
+   The old unconditional `display: block` overrode that, rendering
+   EVERY dropdown panel simultaneously (overlapping text in the nav). */
 
 /* ── Mobile Menu (checkbox hack + grid-rows animation, item 17) ──
    Off-screen positioning instead of clip-based sr-only to maintain
