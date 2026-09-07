@@ -376,3 +376,11 @@ html.dark #deploy-byoc:checked ~ .deploy-tabs [for="deploy-byoc"] {
 @media (prefers-reduced-motion: reduce) {
   .latency-bar { animation: none; }
 }
+
+/* ── Details closed-state enforcement (2026-09-07) ──────────────────
+   Both the nav dropdowns and the FAQ accordions were rendering their
+   content ALWAYS visible — the <details> user-agent closed-state
+   hiding was defeated. This author-level rule restores it. */
+details:not([open]) > *:not(summary) {
+  display: none !important;
+}
