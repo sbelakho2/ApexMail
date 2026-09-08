@@ -133,10 +133,8 @@ validate_repo_gates() {
     #     deploy-image-name-guard job (canonical map from deploy/DEPLOYMENT.md).
     image_name_guard || return "$CI_EXIT_FAIL"
 
-    # (b) brand/product isolation + forbidden patterns (kiwi-leak-check.yml,
-    #     legal-identity.yml forbidden-patterns job).
+    # (b) brand/product isolation (kiwi-leak-check.yml).
     ci_check "kiwi marketing isolation" bash tools/check-kiwi-marketing-isolation.sh
-    ci_check "forbidden patterns" bash tools/check-forbidden-patterns.sh
 
     # (c) panic-path guardrails (rust-panic-paths.yml).
     if command -v python3 >/dev/null 2>&1; then
@@ -344,6 +342,11 @@ zola_gates() {
     (cd apps/marketing-zola && rm -rf public && zola build) >>"$CI_STAGE_LOG" 2>&1 \
         || { ci_err "zola build failed"; return "$CI_EXIT_FAIL"; }
     [ -f apps/marketing-zola/public/index.html ] || { ci_err "zola build produced no index.html"; return "$CI_EXIT_FAIL"; }
+
+    # Forbidden patterns (legal-identity.yml forbidden-patterns job): scans
+    # the BUILT output, so it must run AFTER the zola build — it previously
+    # ran earlier against whatever stale public/ was lying around.
+    ci_check "forbidden patterns" bash tools/check-forbidden-patterns.sh
 
     # template-leak gate over the committed/built output (deploy.yml pre-build)
     ci_check "template leaks (marketing public/)" \
