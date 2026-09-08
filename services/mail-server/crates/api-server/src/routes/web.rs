@@ -7782,7 +7782,7 @@ mod tests {
             // Repeated `events` keys (a checkbox group) all bind; the
             // secret rides in the structured field-map cookie.
             let body = format!(
-                "{}&url=https%3A%2F%2Fexample.com%2Fhook&events=message.sent&events=email.delivered&events=email.delivered",
+                "{}&url=https%3A%2F%2Fexample.com%2Fhook&events=message.accepted&events=message.delivered&events=message.delivered",
                 csrf_body(&state, &[]).replace('&', "%26").replace('=', "%3D")
             );
             // NOTE: the csrf pair must stay a normal pair — build it
@@ -7790,7 +7790,7 @@ mod tests {
             let _ = body;
             let token = ui_foundation::csrf::generate_csrf_token(&state.config.csrf_secret);
             let body = format!(
-                "_csrf={}&url=https%3A%2F%2Fexample.com%2Fhook&events=message.sent&events=email.delivered&events=email.delivered",
+                "_csrf={}&url=https%3A%2F%2Fexample.com%2Fhook&events=message.accepted&events=message.delivered&events=message.delivered",
                 urlencode(&token)
             );
             let response = app
