@@ -128,8 +128,18 @@ install_trivy() {
 # gates) and the test stage (ui-foundation include_str!s the built site when
 # apps/marketing-zola/public has not been synced yet).
 install_zola() {
-    have zola && { log "zola present: $(zola --version)"; return 0; }
+    # Version-pinned: the marketing Docker build uses 0.22.1, and older
+    # host zolas (0.20) do not clean orphan output files from public/ —
+    # deleted pages then linger and fail the forbidden-pattern gate with
+    # stale content. Replace a mismatched version instead of keeping it.
     _v=0.22.1
+    if have zola; then
+        if [ "$(zola --version 2>/dev/null | awk '{print $2}')" = "v$_v" ]; then
+            log "zola present: $(zola --version)"
+            return 0
+        fi
+        log "zola version mismatch ($(zola --version)) — replacing with v$_v"
+    fi
     _tmp=$(mktemp -d)
     log "installing zola v$_v"
     curl -sSL "https://github.com/getzola/zola/releases/download/v${_v}/zola-v${_v}-x86_64-unknown-linux-gnu.tar.gz" \

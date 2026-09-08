@@ -338,7 +338,10 @@ zola_gates() {
         return "$CI_EXIT_OK"
     fi
     ci_info "building marketing site (zola)"
-    (cd apps/marketing-zola && zola build) >>"$CI_STAGE_LOG" 2>&1 \
+    # rm -rf public first: zola only cleans orphan outputs on 0.22+; on
+    # older host zolas deleted pages linger in public/ and fail the
+    # forbidden-pattern gate with stale content.
+    (cd apps/marketing-zola && rm -rf public && zola build) >>"$CI_STAGE_LOG" 2>&1 \
         || { ci_err "zola build failed"; return "$CI_EXIT_FAIL"; }
     [ -f apps/marketing-zola/public/index.html ] || { ci_err "zola build produced no index.html"; return "$CI_EXIT_FAIL"; }
 
