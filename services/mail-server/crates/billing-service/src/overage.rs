@@ -167,7 +167,9 @@ async fn sweep_subscription_periods(
         result.periods_checked += 1;
 
         // Effective plan name for this period (tenant row or terminal
-        // subscription) — drives the per-plan overage rate below.
+        // subscription) — drives the per-plan overage rate below. Both
+        // branches below assign it before any read.
+        #[allow(unused_assignments)]
         let mut sweep_plan_name = String::new();
 
         // Plan limit for the period. Active subscriptions resolve the
