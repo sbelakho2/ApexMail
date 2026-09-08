@@ -92,7 +92,7 @@ pub struct ListWebhooksQuery {
 /// - `message.attempted`  — delivery attempt started
 /// - `message.deferred`   — recipient server deferred (4xx); retry scheduled
 /// - `message.delivered`  — recipient mail server returned a successful
-///                          SMTP acceptance response
+///   SMTP acceptance response
 /// - `message.bounced`    — permanent failure (5xx / hard bounce)
 /// - `message.complained` — feedback-loop spam complaint
 /// - `message.suppressed` — recipient added to the suppression list
