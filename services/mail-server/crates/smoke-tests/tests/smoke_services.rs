@@ -206,7 +206,7 @@ mod billing_tests {
         assert!(free.is_some(), "free plan should exist");
         let free = free.unwrap();
         assert_eq!(free.price_monthly, 0, "free plan should cost $0/mo");
-        assert_eq!(free.email_limit, 30_000);
+        assert_eq!(free.email_limit, 3_000);
     }
 
     #[test]

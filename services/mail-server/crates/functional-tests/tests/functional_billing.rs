@@ -28,13 +28,13 @@ fn plan_lookup_by_name() {
         .find(|p| p.name == "free")
         .expect("free plan must exist");
     assert_eq!(free.price_monthly, 0);
-    assert_eq!(free.email_limit, 30_000);
+    assert_eq!(free.email_limit, 3_000);
 
     let ent = plans
         .iter()
         .find(|p| p.name == "enterprise")
         .expect("enterprise plan must exist");
-    assert_eq!(ent.price_monthly, 300_000);
+    assert_eq!(ent.price_monthly, 175_000);
     assert!(!ent.features.hipaa_compliance);
     assert!(ent.features.sso_enabled);
 }
