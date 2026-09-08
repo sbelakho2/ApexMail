@@ -9,6 +9,40 @@ FORBIDDEN_PATTERNS=("16192499" "16942833")
 # public/ output. See marketing_audit.md v2 §6.
 FORBIDDEN_PATTERNS+=("kiwicaptcha" "kiwi-widget" "kiwi-container" "KIWI_WASM_B64" "kcaptcha")
 
+# Old-generation marketing vocabulary (external review 2026-09-08 §17):
+# phrases from the retired site generation — and the undocumented "signed
+# proof" contract (§1) and "static explorer" contradiction (§8) — that
+# must never reappear in built output while current claims say otherwise.
+FORBIDDEN_PATTERNS+=(
+  "Apex Style"
+  "System Integrity Verified"
+  "Infrastructure Operational"
+  "Initialize Deployment"
+  "deterministic deliverability"
+  "built-in regulatory compliance"
+  "HIPAA BAA"
+  "HIPAA Ready"
+  "proof 0x"
+  "Proof 0x"
+  "signed proof"
+  "Signed proof"
+  "static API explorer"
+  "live server requests"
+  "Endpoint Lanes"
+  "Operator Notes"
+  "Comparative Mappings"
+  "Execution Domain"
+  "HMAC-Signed Telemetry"
+  "high-fidelity telemetry"
+  "Compliance-as-Code"
+  "Economic Model"
+  "High-Precision Infrastructure"
+  "High-precision infrastructure"
+  "Deterministic Outcomes"
+  "Deterministic outcomes"
+  "Pure engineering, no fluff"
+)
+
 FOUND=0
 HTML_FILES=$(find apps/marketing-zola/public -name "*.html" 2>/dev/null || true)
 

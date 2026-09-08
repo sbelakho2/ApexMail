@@ -16,7 +16,7 @@ ApexMail proporciona flujos de trabajo de seguridad y privacidad en torno a la e
 <div class="grid grid-cols-1 md:grid-cols-3 gap-6 my-12">
   <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
     <h3 class="text-xl font-semibold mb-3">Auditoría y controles de acceso</h3>
-    <p>Scale y Enterprise incluyen funciones de identidad y auditoría en tiempo de ejecución. La titularidad de la configuración y de las operaciones sigue siendo responsabilidad del cliente.</p>
+    <p>Business y Enterprise incluyen funciones de identidad y auditoría en tiempo de ejecución. La titularidad de la configuración y de las operaciones sigue siendo responsabilidad del cliente.</p>
   </div>
   <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
     <h3 class="text-xl font-semibold mb-3">Posición de cumplimiento actual</h3>

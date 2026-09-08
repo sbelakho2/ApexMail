@@ -4,6 +4,7 @@ description = "Faktischer Vergleich der Funktionen für Transaktions-E-Mails: Ap
 template = "compare.html"
 
 [extra]
+noindex = true
 competitor = "Amazon SES"
 competitor_slug = "amazon-ses"
 competitor_name = "Amazon SES"
@@ -14,8 +15,6 @@ volume_assumption = "100.000 E-Mails/Monat"
 billing_period = "monthly"
 currency_note = "Preise werden in EUR angezeigt. Veröffentlicht ein Anbieter nur USD, wird der EUR-Betrag zum Kurs 1 USD = €0.92 (Referenzkurs, 2026-08-19) umgerechnet und der vom Anbieter veröffentlichte USD-Preis in Klammern angegeben. Angaben ohne anfallende Steuern."
 # Feature comparison counts — update when capabilities change.
-apexmail_wins = 2
-competitor_wins = 4
 verdict_title = "Wie sich ApexMail von Amazon SES unterscheidet"
 verdict_points = ["Verwaltete E-Mail-Infrastruktur mit API, Ereignissen und Support inklusive gegenüber Abrechnung roher Kapazität", "Diagnose-Dashboard für die Zustellung jeder Nachricht gegenüber selbst zusammengestelltem CloudWatch + SNS", "Idempotenzschlüssel in allen Tarifen gegenüber nicht nativ unterstützt", "EU/EWR-orientierte Bereitstellungskonfiguration mit pro Bereitstellung bestätigten aktiven Regionen", "Verwalteter Dienst mit dedizierter Tenancy gegenüber Selbstverwaltung auf AWS"]
 

@@ -80,7 +80,7 @@ In accordance with Article 16(m) of Directive 2011/83/EU, the right of withdrawa
 
 ## 9. SLA
 
-Scale and Enterprise plan customers are covered by our [Service Level Agreement](/sla/). Other plans are provided on a best-effort basis with no guaranteed uptime commitment unless otherwise agreed in writing.
+Business and Enterprise plan customers are covered by our [Service Level Agreement](/sla/). Other plans are provided on a best-effort basis with no guaranteed uptime commitment unless otherwise agreed in writing.
 
 ## 10. Limitation of Liability
 

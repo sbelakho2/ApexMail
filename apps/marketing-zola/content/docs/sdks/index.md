@@ -32,7 +32,7 @@ All SDKs are MIT-licensed and require TLS 1.2+ for API connections. API keys are
 
 Until the packages are published, you can vendor or build the SDK directly from the monorepo:
 
-The SDK source is distributed on request (support@apexmail.ee) until the
+SDK source is currently private and available to approved preview customers (support@apexmail.ee) until the
 first registry release; the drop you receive contains the same
 `packages/sdk-<language>` directory layout with per-language build
 instructions. Pin to the supplied commit if you vendor.

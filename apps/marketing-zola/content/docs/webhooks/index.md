@@ -24,7 +24,7 @@ Every webhook event shares a common top-level envelope:
 | Field | Type | Description |
 |-------|------|-------------|
 | `id` | string | Unique event identifier (e.g. `"evt_s1a2b3c4d5"`). Use for deduplication. |
-| `event` | string | Event type name (e.g. `"message.sent"`). |
+| `event` | string | Event type name (e.g. `"message.accepted"`). |
 | `timestamp` | string | ISO 8601 timestamp of when the event occurred. |
 | `data` | object | Type-specific payload (varies by event type). |
 
@@ -34,24 +34,33 @@ The following sections document each event type and the shape of its `data` payl
 
 | Event | Trigger | Dedup key in `data` |
 |-------|---------|---------------------|
-| `message.sent` | Message accepted for delivery | `data.messageId` |
-| `message.delivered` | Delivery confirmed by receiving MTA | `data.messageId` |
+| `message.accepted` | Message accepted for delivery (API `202`) | `data.messageId` |
+| `message.queued` | Message entered the outbound queue | `data.messageId` |
+| `message.attempted` | Delivery attempt started | `data.messageId` |
+| `message.deferred` | Recipient server deferred the message (SMTP `4xx`); a retry is scheduled | `data.messageId` |
+| `message.delivered` | Recipient mail server returned a successful SMTP acceptance response | `data.messageId` |
+| `message.bounced` | Delivery permanently rejected (hard bounce) | `data.messageId` |
+| `message.complained` | Recipient marks as spam (feedback loop) | `data.messageId` |
+| `message.suppressed` | Recipient added to the suppression list | `data.email` |
 | `message.opened` | Recipient opens the email | `data.messageId` |
 | `message.clicked` | Recipient clicks a link | `data.messageId` |
-| `message.bounced` | Delivery permanently or temporarily rejected | `data.messageId` |
-| `message.complained` | Recipient marks as spam | `data.messageId` |
+| `message.cancelled` | Scheduled send cancelled before dispatch | `data.messageId` |
 | `recipient.unsubscribed` | Recipient unsubscribes | `data.email` |
+
+`message.delivered` proves that the recipient mail server accepted the message. It does not prove that a human saw the message or that it reached the inbox rather than the spam folder.
+
+The legacy `email.*` event names and `message.sent` were retired on 2026-09-08; stored subscriptions were migrated to the canonical names above.
 
 ---
 
-### `message.sent`
+### `message.accepted`
 
 Triggered when a message is accepted for delivery.
 
 ```json
 {
   "id": "evt_s1a2b3c4d5",
-  "event": "message.sent",
+  "event": "message.accepted",
   "timestamp": "2024-01-15T10:30:00Z",
   "data": {
     "messageId": "msg_abc123",
@@ -363,7 +372,7 @@ The first-party SDKs (currently in development) will provide helper functions fo
 
 ## Retry Schedule
 
-ApexMail retries failed webhook deliveries with exponential backoff.
+ApexMail retries failed webhook deliveries on a fixed ladder sized to survive multi-hour endpoint outages. Delivery is at-least-once.
 
 **Retryable failure conditions:**
 
@@ -372,16 +381,22 @@ ApexMail retries failed webhook deliveries with exponential backoff.
 - HTTP `429` (Too Many Requests)
 - HTTP `5xx` (Server errors)
 
-**Default retry policy:**
+**Default retry policy — 10 total attempts:**
 
-| Setting | Default |
-|---------|---------|
-| Base delay | 30 seconds |
-| Backoff multiplier | Exponential (2× per attempt) |
-| Max retries | 3 |
-| Max individual delay | 1 hour |
+| Attempt | Delay before attempt |
+|---------|---------------------|
+| 1 | immediate |
+| 2 | 30 seconds |
+| 3 | 2 minutes |
+| 4 | 10 minutes |
+| 5 | 30 minutes |
+| 6 | 1 hour |
+| 7 | 3 hours |
+| 8 | 6 hours |
+| 9 | 12 hours |
+| 10 | 24 hours |
 
-When a receiving endpoint returns `429` or `503` with a `Retry-After` header, ApexMail honors that delay instead of the computed backoff.
+When a receiving endpoint returns `429` or `503` with a `Retry-After` header, ApexMail honors that delay instead of the scheduled wait.
 
 After the retry budget is exhausted, the failed delivery is recorded and removed from the pending queue. Failed events are retained for 7 days and can be manually replayed from the dashboard.
 
@@ -424,7 +439,7 @@ Use the `id` field as the deduplication key. Store processed event IDs for at le
 
 ## Ordering Guarantees
 
-Webhook events are **not guaranteed to be delivered in order**. Multiple events for the same message (e.g., `message.sent` followed by `message.delivered`) may arrive out of sequence. Always rely on the `timestamp` field in the event payload, not delivery order, to determine event chronology.
+Webhook events are **not guaranteed to be delivered in order**. Multiple events for the same message (e.g., `message.accepted` followed by `message.delivered`) may arrive out of sequence. Always rely on the `timestamp` field in the event payload, not delivery order, to determine event chronology.
 
 ---
 

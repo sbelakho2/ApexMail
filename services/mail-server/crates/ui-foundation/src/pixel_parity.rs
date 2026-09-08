@@ -719,7 +719,6 @@ mod tests {
                 "private_cloud",
                 leptos_views::marketing_private_cloud_page(),
             ),
-            ("case_studies", leptos_views::marketing_case_studies_page()),
             ("status", leptos_views::marketing_status_page()),
             (
                 "compare_postmark",

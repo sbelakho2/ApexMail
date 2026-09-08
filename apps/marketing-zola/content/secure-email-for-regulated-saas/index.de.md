@@ -16,7 +16,7 @@ ApexMail bietet Sicherheits- und Datenschutz-Workflows rund um die E-Mail-Zustel
 <div class="grid grid-cols-1 md:grid-cols-3 gap-6 my-12">
   <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
     <h3 class="text-xl font-semibold mb-3">Audit- und Zugriffskontrollen</h3>
-    <p>Scale und Enterprise enthalten Identity- und Audit-Funktionen zur Laufzeit. Konfiguration und operativer Betrieb bleiben in der Verantwortung des Kunden.</p>
+    <p>Business und Enterprise enthalten Identity- und Audit-Funktionen zur Laufzeit. Konfiguration und operativer Betrieb bleiben in der Verantwortung des Kunden.</p>
   </div>
   <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
     <h3 class="text-xl font-semibold mb-3">Aktuelle Compliance-Position</h3>

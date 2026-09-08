@@ -4,6 +4,7 @@ description = "Comparación objetiva de capacidades de email transaccional: Apex
 template = "compare.html"
 
 [extra]
+noindex = true
 competitor = "Mailgun"
 competitor_slug = "mailgun"
 competitor_name = "Mailgun"
@@ -14,10 +15,8 @@ volume_assumption = "100.000 emails/mes"
 billing_period = "monthly"
 currency_note = "Los precios se muestran en EUR. Cuando un proveedor solo publica precios en USD, la cifra en EUR se convierte a 1 USD = €0.92 (tipo de referencia, 2026-08-19) y se muestra entre paréntesis el precio en USD publicado por el proveedor. Impuestos no incluidos."
 # Feature comparison counts — update when capabilities change
-apexmail_wins = 4
-competitor_wins = 2
 verdict_title = "En qué se diferencia ApexMail de Mailgun"
-verdict_points = ["Configuración de despliegue orientada a la UE/EEE", "Catálogo público actual (Mailgun publica en USD; EUR mostrado al tipo de referencia)", "Controles de acceso en Scale y Enterprise", "Registros de auditoría en Growth y superiores", "Revisión de arquitectura y contractual para despliegues no estándar"]
+verdict_points = ["Configuración de despliegue orientada a la UE/EEE", "Catálogo público actual (Mailgun publica en USD; EUR mostrado al tipo de referencia)", "Controles de acceso en Business y Enterprise", "Registros de auditoría en Growth y superiores", "Revisión de arquitectura y contractual para despliegues no estándar"]
 
 # Comparison data (audit 3.3): rendered by partials/compare/table.html via a
 # single loop, so design changes to the row/winner markup happen in ONE place.
@@ -36,7 +35,7 @@ comparison_sections = [
     { feature = "Envío por lotes", apex = 'Disponible cuando esté habilitado para el plan contratado', comp = 'Sí — envío por lotes mediante <code>recipient-variables</code> con hasta 1.000 destinatarios<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
     { feature = "Claves de idempotencia", apex = 'Sí (todos los planes) — cabecera <code>Idempotency-Key</code>', comp = 'No admitido — las aplicaciones deben implementar su propia lógica de deduplicación<sup><a href="#src-mg3">3</a></sup>', winner = "apexmail" },
     { feature = "Envío programado", apex = 'Disponible cuando esté habilitado para el plan contratado', comp = 'Sí — parámetro <code>o:deliverytime</code> (formato RFC 2822, hasta 3 días)<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
-    { feature = "Email entrante", apex = 'Planes Scale y Enterprise', comp = 'Sí — rutas entrantes con acciones de reenvío, almacenamiento y webhooks<sup><a href="#src-mg4">4</a></sup>', winner = "none" }
+    { feature = "Email entrante", apex = 'Planes Business y Enterprise', comp = 'Sí — rutas entrantes con acciones de reenvío, almacenamiento y webhooks<sup><a href="#src-mg4">4</a></sup>', winner = "none" }
   ]},
   { title = "MODELOS DE DESPLIEGUE", rows = [
     { feature = "Nube compartida", apex = 'Sí (todos los planes) — multi-tenant, alojado en la UE', comp = 'Sí (todos los planes)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
@@ -45,7 +44,7 @@ comparison_sections = [
     { feature = "BYOC / despliegue privado", apex = 'Sujeto a revisión de arquitectura y contractual', comp = 'Consulte la documentación del proveedor<sup><a href="#src-mg5">5</a></sup>', winner = "none" }
   ]},
   { title = "CONTROLES ENTERPRISE", rows = [
-    { feature = "SAML SSO", apex = 'Planes Scale y Enterprise', comp = 'Foundation 100K y planes superiores<sup><a href="#src-mg6">6</a></sup>', winner = "none" },
+    { feature = "SAML SSO", apex = 'Planes Business y Enterprise', comp = 'Foundation 100K y planes superiores<sup><a href="#src-mg6">6</a></sup>', winner = "none" },
     { feature = "SCIM", apex = 'Plan Enterprise', comp = 'No documentado en la fecha de verificación — aprovisionamiento de usuarios mediante la API de Mailgun<sup><a href="#src-mg6">6</a></sup>', winner = "apexmail" },
     { feature = "Registros de auditoría", apex = 'Plan Growth y superiores — actividad de la cuenta, uso de claves de API y cambios de configuración; con búsqueda y exportación', comp = 'Registros de eventos accesibles mediante la Events API; la retención varía según el plan; sin pista de auditoría consolidada a nivel de cuenta<sup><a href="#src-mg7">7</a></sup>', winner = "apexmail" }
   ]},
@@ -56,7 +55,7 @@ comparison_sections = [
   ]},
   { title = "ÁREAS DONDE MAILGUN ES MÁS FUERTE", rows = [
     { feature = "Validación de email", apex = 'API Email Grader (DNS/SPF/DKIM/DMARC/contenido/reputación)', comp = 'API de validación de email dedicada con validación en tiempo real y masiva<sup><a href="#src-mg9">9</a></sup>', winner = "competitor" },
-    { feature = "Procesamiento de email entrante", apex = 'Email entrante en los planes Scale y Enterprise', comp = 'Enrutado entrante con acciones de reenvío, webhook HTTP y almacenamiento; incluido en todos los planes<sup><a href="#src-mg4">4</a></sup>', winner = "competitor" },
+    { feature = "Procesamiento de email entrante", apex = 'Email entrante en los planes Business y Enterprise', comp = 'Enrutado entrante con acciones de reenvío, webhook HTTP y almacenamiento; incluido en todos los planes<sup><a href="#src-mg4">4</a></sup>', winner = "competitor" },
     { feature = "Sandbox de pruebas de email", apex = 'Entorno sandbox con dominios sandbox y límites de velocidad', comp = 'Dominio sandbox para pruebas en todos los planes con credenciales de prueba independientes<sup><a href="#src-mg3">3</a></sup>', winner = "none" }
   ]}
 ]

@@ -26,12 +26,12 @@ At high volume, small deliverability changes have large revenue impact. A 1% del
 
 ## ApexMail Solution
 
-- **Dedicated IPs** — Approved add-on on Pro; 1 included on Growth, 3 on Scale, and 10 on Enterprise. Contract-scoped deployment options are reviewed separately.
+- **Dedicated IPs** — Approved add-on on Pro; 1 included on Growth, 3 on Business, and 10 on Enterprise. Contract-scoped deployment options are reviewed separately.
 - **Automated Warm-Up** — Gradual volume ramp following provider-specific schedules. Monitored for reputation signals. Manual override available.
 - **Queue Prioritization** — Transactional traffic is prioritized ahead of bulk under load. Time-to-inbox targets monitored.
 - **Batch API** (`POST /v1/messages/batch`) — Submit up to 100 messages per request. Lower per-message overhead than individual API calls.
 - **Rate Limits** — Limits are enforced per API key and plan; see the current API documentation for public limits.
-- **Contractual SLA** — Scale and Enterprise include plan-level SLA terms; non-standard deployments require a separate contract review.
+- **Contractual SLA** — Business and Enterprise include plan-level SLA terms; non-standard deployments require a separate contract review.
 
 ## Technical Implementation
 

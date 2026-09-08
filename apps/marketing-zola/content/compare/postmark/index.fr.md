@@ -4,6 +4,7 @@ description = "Découvrez comment ApexMail se positionne face à Postmark sur la
 template = "compare.html"
 
 [extra]
+noindex = true
 competitor = "Postmark"
 competitor_slug = "postmark"
 competitor_name = "Postmark"
@@ -11,8 +12,6 @@ competitor_description = "Postmark d’ActiveCampaign se concentre sur la livrai
 pricing_as_of = "2026-08-19"
 currency_note = "Les prix sont indiqués en EUR. Lorsqu’un fournisseur publie uniquement en USD, le montant en EUR est converti à 1 USD = €0.92 (taux de référence, 2026-08-19) et le prix USD publié par le fournisseur est affiché entre parenthèses. Hors taxes applicables."
 og_image = "/images/og-image.png"
-apexmail_wins = 0
-competitor_wins = 0
 
 # Comparison data (audit 3.3): rendered by partials/compare/table.html via a
 # single loop, so design changes to the row/winner markup happen in ONE place.
@@ -38,12 +37,12 @@ comparison_sections = [
   { title = "FONCTIONNALITÉS", rows = [
     { feature = "Email transactionnel", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
     { feature = "Email marketing", apex = '<span class="text-brand-600 font-semibold">Oui (API unifiée)</span>', comp = '<span class="text-surface-600">Produit distinct</span>', winner = "none" },
-    { feature = "Traitement entrant", apex = '<span class="text-brand-600 font-semibold">Forfaits Scale et Enterprise</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
+    { feature = "Traitement entrant", apex = '<span class="text-brand-600 font-semibold">Forfaits Business et Enterprise</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
     { feature = "Modèles", apex = '<span class="text-brand-600 font-semibold">Modèles stockés</span>', comp = '<span class="text-surface-600">Propriétaires</span>', winner = "none" },
     { feature = "Envoi programmé", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
   { title = "ENTERPRISE", rows = [
-    { feature = "SSO/SAML", apex = '<span class="text-brand-600 font-semibold">Scale et Enterprise</span>', comp = '<span class="text-surface-600">Disponible sur demande</span>', winner = "none" },
+    { feature = "SSO/SAML", apex = '<span class="text-brand-600 font-semibold">Business et Enterprise</span>', comp = '<span class="text-surface-600">Disponible sur demande</span>', winner = "none" },
     { feature = "Revue de déploiement personnalisé", apex = '<span class="text-brand-600 font-semibold">Revue Enterprise</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Options de déploiement dédié", apex = '<span class="text-brand-600 font-semibold">Revue personnalisée</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},

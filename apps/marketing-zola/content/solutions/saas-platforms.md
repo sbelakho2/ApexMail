@@ -54,7 +54,7 @@ Platforms that send email for customers inherit every customer's reputation risk
 
 ## Required Plan
 
-Subaccounts are available on Scale (up to 10) and Enterprise (up to 100). Any non-standard deployment arrangement requires a separate architecture and contract review.
+Subaccounts are available on Business (up to 10) and Enterprise (up to 100). Any non-standard deployment arrangement requires a separate architecture and contract review.
 
 ## Security Considerations
 

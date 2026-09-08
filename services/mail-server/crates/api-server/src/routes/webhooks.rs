@@ -82,35 +82,49 @@ pub struct ListWebhooksQuery {
 
 // ─── Validation ────────────────────────────────────────────────
 
-/// Event types a webhook may subscribe to (audit L-2).
+/// Event types a webhook may subscribe to (audit L-2; canonicalized
+/// 2026-09-08 per the external API review §7 — exactly ONE vocabulary).
 ///
-/// The set is the union of everything the platform's emitters actually
-/// enqueue (SES notifications: `email.*`; the MTA bounce/FBL/inbound
-/// pipelines; tracking-service unsubscribes; inbox-placement completions),
-/// the names documented in `docs/api/openapi.yaml` (`message.*`), and the
-/// `*` wildcard every consumer's selector honours
-/// (`events @> '"*"'::jsonb`). Unknown names previously validated as
-/// non-empty only — a typo like `delivred` registered silently and the
-/// webhook never fired.
+/// Every message-scoped event uses the `message.*` namespace:
+///
+/// - `message.accepted`   — message accepted for delivery (API 202)
+/// - `message.queued`     — message entered the outbound queue
+/// - `message.attempted`  — delivery attempt started
+/// - `message.deferred`   — recipient server deferred (4xx); retry scheduled
+/// - `message.delivered`  — recipient mail server returned a successful
+///                          SMTP acceptance response
+/// - `message.bounced`    — permanent failure (5xx / hard bounce)
+/// - `message.complained` — feedback-loop spam complaint
+/// - `message.suppressed` — recipient added to the suppression list
+/// - `message.opened`     — open tracked
+/// - `message.clicked`    — click tracked
+/// - `message.cancelled`  — scheduled send cancelled before dispatch
+///
+/// Non-message resources keep their own noun: `recipient.unsubscribed`,
+/// `placement_test.completed`, `inbound`. The legacy `email.*` names and
+/// `message.sent` are mapped in-place by migration 128 for stored
+/// subscriptions and are rejected at validation time. `*` is the
+/// wildcard every consumer's selector honours (`events @> '"*"'::jsonb`).
+/// Unknown names previously validated as non-empty only — a typo like
+/// `delivred` registered silently and the webhook never fired.
 pub(crate) const KNOWN_WEBHOOK_EVENTS: &[&str] = &[
-    // SES notification pipeline (ses_notifications.rs)
-    "email.delivered",
-    "email.bounced",
-    "email.complained",
-    // Documented API contract (docs/api/openapi.yaml)
-    "message.sent",
+    // Message lifecycle (canonical vocabulary)
+    "message.accepted",
+    "message.queued",
+    "message.attempted",
+    "message.deferred",
     "message.delivered",
     "message.bounced",
     "message.complained",
+    "message.suppressed",
     "message.opened",
     "message.clicked",
+    "message.cancelled",
     // tracking-service
     "recipient.unsubscribed",
     // inbox-placement
     "placement_test.completed",
-    // MTA pipelines (bounce/complaint/inbound payloads)
-    "bounce",
-    "complaint",
+    // inbound email pipeline
     "inbound",
     // Wildcard honoured by every webhook selector
     "*",
@@ -646,7 +660,7 @@ mod tests {
             "unexpected error: {error}"
         );
         // The message must list the valid names so the fix is obvious.
-        assert!(error.contains("email.delivered"));
+        assert!(error.contains("message.delivered"));
         assert!(error.contains("recipient.unsubscribed"));
     }
 
@@ -655,7 +669,14 @@ mod tests {
         // `delivered`/`bounced` (the bare names the old tests used) are NOT
         // emitted by anything — they must now be rejected with the valid
         // alternatives listed.
-        for bad in ["delivered", "delivred", "email.delivere", "message.bounce"] {
+        for bad in [
+            "delivered",
+            "delivred",
+            "email.delivere",
+            "email.delivered",
+            "email.bounced",
+            "message.sent",
+        ] {
             let error = validate_webhook_events(&events(&[bad])).unwrap_err();
             assert!(
                 error.contains(&format!("unknown event type(s): {bad}")),
@@ -666,7 +687,7 @@ mod tests {
         // Blank entries are invalid too.
         assert!(validate_webhook_events(&events(&["   "])).is_err());
         // A single bad name poisons the whole list, valid ones notwithstanding.
-        assert!(validate_webhook_events(&events(&["email.delivered", "nope"])).is_err());
+        assert!(validate_webhook_events(&events(&["message.delivered", "nope"])).is_err());
     }
 
     #[test]
@@ -680,19 +701,22 @@ mod tests {
         // Mixed valid lists and the wildcard pass; surrounding whitespace on
         // a valid name is tolerated (trimmed).
         assert!(validate_webhook_events(&events(&[
-            "email.delivered",
+            "message.delivered",
             "recipient.unsubscribed",
             "*"
         ]))
         .is_ok());
-        assert!(validate_webhook_events(&events(&["  email.bounced  "])).is_ok());
+        // The legacy email.* vocabulary is retired — it must be rejected
+        // with the canonical names listed (migration 128 remapped stored
+        // subscriptions, so nothing legitimate still sends them).
+        assert!(validate_webhook_events(&events(&["  email.bounced  "])).is_err());
     }
 
     #[test]
     fn known_webhook_events_match_the_documented_and_emitted_set() {
         // Documented API contract names must all be present.
         for documented in [
-            "message.sent",
+            "message.accepted",
             "message.delivered",
             "message.bounced",
             "message.complained",
@@ -705,16 +729,30 @@ mod tests {
         // Emitted names (ses_notifications, tracking, inbox-placement, mta)
         // and the selector wildcard must all be present.
         for emitted in [
-            "email.delivered",
-            "email.bounced",
-            "email.complained",
+            "message.delivered",
+            "message.bounced",
+            "message.complained",
+            "message.queued",
+            "message.attempted",
+            "message.deferred",
+            "message.suppressed",
+            "message.cancelled",
             "placement_test.completed",
-            "bounce",
-            "complaint",
             "inbound",
             "*",
         ] {
             assert!(KNOWN_WEBHOOK_EVENTS.contains(&emitted));
+        }
+        // The retired vocabulary must be absent from the known set.
+        for retired in [
+            "email.delivered",
+            "email.bounced",
+            "email.complained",
+            "message.sent",
+            "bounce",
+            "complaint",
+        ] {
+            assert!(!KNOWN_WEBHOOK_EVENTS.contains(&retired));
         }
     }
 

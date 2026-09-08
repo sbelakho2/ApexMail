@@ -4,6 +4,7 @@ description = "Sehen Sie, wie ApexMail im Vergleich zu Postmark bei Zustellbarke
 template = "compare.html"
 
 [extra]
+noindex = true
 competitor = "Postmark"
 competitor_slug = "postmark"
 competitor_name = "Postmark"
@@ -11,8 +12,6 @@ competitor_description = "Postmark von ActiveCampaign ist auf schnelle, zuverlä
 pricing_as_of = "2026-08-19"
 currency_note = "Preise werden in EUR angezeigt. Veröffentlicht ein Anbieter nur USD, wird der EUR-Betrag zum Kurs 1 USD = €0.92 (Referenzkurs, 2026-08-19) umgerechnet und der vom Anbieter veröffentlichte USD-Preis in Klammern angegeben. Angaben ohne anfallende Steuern."
 og_image = "/images/og-image.png"
-apexmail_wins = 0
-competitor_wins = 0
 
 # Comparison data (audit 3.3): rendered by partials/compare/table.html via a
 # single loop, so design changes to the row/winner markup happen in ONE place.
@@ -43,13 +42,13 @@ comparison_sections = [
     { feature = "Geplantes Senden", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
   { title = "ENTERPRISE", rows = [
-    { feature = "SSO/SAML", apex = '<span class="text-brand-600 font-semibold">Scale und Enterprise</span>', comp = '<span class="text-surface-600">Auf Anfrage verfügbar</span>', winner = "none" },
+    { feature = "SSO/SAML", apex = '<span class="text-brand-600 font-semibold">Business und Enterprise</span>', comp = '<span class="text-surface-600">Auf Anfrage verfügbar</span>', winner = "none" },
     { feature = "Prüfung individueller Bereitstellungen", apex = '<span class="text-brand-600 font-semibold">Enterprise-Review</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Dedizierte Bereitstellungsoptionen", apex = '<span class="text-brand-600 font-semibold">Individuelle Prüfung</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
   { title = "PREISE", rows = [
     { feature = "Kostenlose Stufe", apex = '<span class="text-brand-600 font-semibold">30.000/Monat</span>', comp = '<span class="text-surface-600">100/Monat</span>', winner = "none" },
-    { feature = "100K E-Mails/Monat", apex = '<span class="text-brand-600 font-semibold">€65 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€122.82 (US$133.50) — Pro: €15.18 (US$16.50)/Monat + 90K Überschreitung @ €1.20 (US$1.30)/1K</span>', winner = "none" },
+    { feature = "100K E-Mails/Monat", apex = '<span class="text-brand-600 font-semibold">€89 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€122.82 (US$133.50) — Pro: €15.18 (US$16.50)/Monat + 90K Überschreitung @ €1.20 (US$1.30)/1K</span>', winner = "none" },
     { feature = "Unbegrenzte Teammitglieder", apex = '<span class="text-brand-600 font-semibold">Enterprise-Tarif</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Individuelle Enterprise-Konditionen", apex = '<span class="text-brand-600 font-semibold">Jahresverträge</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]}

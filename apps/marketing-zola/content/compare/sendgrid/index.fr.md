@@ -4,6 +4,7 @@ description = "Découvrez comment ApexMail se positionne face à SendGrid sur la
 template = "compare.html"
 
 [extra]
+noindex = true
 competitor = "SendGrid"
 competitor_slug = "sendgrid"
 competitor_name = "SendGrid"
@@ -13,15 +14,13 @@ verification_date = "2026-08-19"
 currency_note = "Les prix sont indiqués en EUR. Lorsqu’un fournisseur publie uniquement en USD, le montant en EUR est converti à 1 USD = €0.92 (taux de référence, 2026-08-19) et le prix USD publié par le fournisseur est affiché entre parenthèses. Hors taxes applicables."
 og_image = "/images/og-image.png"
 # Feature comparison counts — update when capabilities change
-apexmail_wins = 5
-competitor_wins = 0
 verdict_title = "Pourquoi choisir ApexMail plutôt que SendGrid ?"
 verdict_points = [
   "Meilleure délivrabilité avec réchauffement IP automatique et protection de la réputation",
   "Workflows orientés RGPD, registres de consentement et journaux d’audit",
   "Analyses de délivrabilité sans décisions d’envoi automatiques en boîte noire",
   "Revues de déploiement personnalisées pour les programmes Enterprise réglementés",
-  "SSO sur Scale et Enterprise avec un packaging de forfaits à jour",
+  "SSO sur Business et Enterprise avec un packaging de forfaits à jour",
 ]
 
 # Comparison data (audit 3.3): rendered by partials/compare/table.html via a
@@ -54,7 +53,7 @@ comparison_sections = [
   { title = "TARIFS", rows = [
     { feature = "Offre gratuite", apex = '<span class="text-brand-600 font-semibold">30 000 emails/mois</span>', comp = '<span class="text-surface-600">100 emails/jour</span>', winner = "none" },
     { feature = "100K emails/mois", apex = '<span class="text-brand-600 font-semibold">€65 (Pro : 150K)</span>', comp = '<span class="text-surface-600">€82.75 (US$89.95) — Pro ; Essentials à partir de €18.35 (US$19.95)</span>', winner = "apexmail" },
-    { feature = "SSO inclus", apex = '<span class="text-brand-600 font-semibold">Forfaits Scale et Enterprise</span>', comp = '<span class="text-surface-600">Inclus sur Pro</span>', winner = "none" },
+    { feature = "SSO inclus", apex = '<span class="text-brand-600 font-semibold">Forfaits Business et Enterprise</span>', comp = '<span class="text-surface-600">Inclus sur Pro</span>', winner = "none" },
     { feature = "Revue de déploiement personnalisé", apex = '<span class="text-brand-600 font-semibold">Revue Enterprise</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
   { title = "ANALYSES ET INTELLIGENCE", rows = [

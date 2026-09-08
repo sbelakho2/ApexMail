@@ -49,7 +49,8 @@ const DEDUP_TTL_SECS: i64 = 40 * 86_400;
 const TENANT_PLAN_LIMITS_SQL: &str = r#"
         SELECT t.plan as plan_name,
                p.email_limit,
-               p.api_call_limit
+               p.api_call_limit,
+               t.created_at as tenant_created_at
         FROM tenants t
         LEFT JOIN plan_overrides po
           ON po.tenant_id = t.id
@@ -58,6 +59,30 @@ const TENANT_PLAN_LIMITS_SQL: &str = r#"
         LEFT JOIN plans p ON p.name = COALESCE(po.plan, t.plan)
         WHERE t.id = $1
         "#;
+
+/// Free-plan launch allowance (2026-09-08 pricing review): the standing
+/// Free ceiling is 3,000 emails/month; a tenant on the FREE plan within
+/// its first 30 days gets a one-time 30,000-email launch allowance
+/// instead. The usage counter is anchored to the tenant's billing cycle
+/// (cycle 1 == the tenant's first 30 days), so the allowance applies
+/// exactly once and never refreshes. Overrides that name another plan
+/// are never widened by the allowance.
+pub(crate) const FREE_PLAN_LAUNCH_ALLOWANCE: i64 = 30_000;
+pub(crate) const FREE_PLAN_LAUNCH_WINDOW_DAYS: i64 = 30;
+
+fn free_launch_allowance_applies(row: &TenantPlanLimitRow) -> bool {
+    if row.plan_name != "free" {
+        return false;
+    }
+    match row.tenant_created_at {
+        Some(created) => {
+            let window = chrono::Duration::days(FREE_PLAN_LAUNCH_WINDOW_DAYS);
+            chrono::Utc::now() - created < window
+        }
+        // Unknown creation date: do not widen the limit.
+        None => false,
+    }
+}
 
 /// Fix E — which plan limit (if any) gates a metering event type.
 /// Only email and API-call quotas exist in plans.rs; the remaining metered
@@ -920,6 +945,7 @@ struct TenantPlanLimitRow {
     plan_name: String,
     email_limit: Option<i64>,
     api_call_limit: Option<i64>,
+    tenant_created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 fn resolve_plan_limits(row: Option<TenantPlanLimitRow>) -> PlanLimitRow {
@@ -928,8 +954,15 @@ fn resolve_plan_limits(row: Option<TenantPlanLimitRow>) -> PlanLimitRow {
             let (fallback_email_limit, fallback_api_call_limit) =
                 builtin_quota_limits(Some(&row.plan_name));
 
+            let mut email_limit = row.email_limit.unwrap_or(fallback_email_limit);
+            // Launch allowance (see FREE_PLAN_LAUNCH_ALLOWANCE): only ever
+            // WIDENS the free ceiling, and only during the first 30 days —
+            // an override that already grants more keeps its value.
+            if free_launch_allowance_applies(&row) {
+                email_limit = email_limit.max(FREE_PLAN_LAUNCH_ALLOWANCE);
+            }
             PlanLimitRow {
-                email_limit: row.email_limit.unwrap_or(fallback_email_limit),
+                email_limit,
                 api_call_limit: row.api_call_limit.unwrap_or(fallback_api_call_limit),
             }
         }
@@ -1242,6 +1275,7 @@ mod tests {
             plan_name: "pro".to_string(),
             email_limit: Some(250_000),
             api_call_limit: Some(3_000_000),
+            tenant_created_at: Some(chrono::Utc::now() - chrono::Duration::days(3)),
         }));
 
         assert_eq!(limits.email_limit, 250_000);
@@ -1250,14 +1284,68 @@ mod tests {
 
     #[test]
     fn resolve_plan_limits_fall_back_to_builtin_plan_defaults() {
+        // Outside the 30-day launch window: the standing Free ceiling.
         let limits = resolve_plan_limits(Some(TenantPlanLimitRow {
             plan_name: "free".to_string(),
             email_limit: None,
             api_call_limit: None,
+            tenant_created_at: Some(chrono::Utc::now() - chrono::Duration::days(45)),
         }));
 
-        assert_eq!(limits.email_limit, 30_000);
-        assert_eq!(limits.api_call_limit, 300_000);
+        assert_eq!(limits.email_limit, 3_000);
+        assert_eq!(limits.api_call_limit, 30_000);
+    }
+
+    #[test]
+    fn free_launch_allowance_widens_only_the_first_30_days() {
+        // Inside the window: widened to the one-time 30k allowance.
+        let fresh = resolve_plan_limits(Some(TenantPlanLimitRow {
+            plan_name: "free".to_string(),
+            email_limit: Some(3_000),
+            api_call_limit: Some(30_000),
+            tenant_created_at: Some(chrono::Utc::now() - chrono::Duration::days(29)),
+        }));
+        assert_eq!(fresh.email_limit, FREE_PLAN_LAUNCH_ALLOWANCE);
+        assert_eq!(
+            fresh.api_call_limit, 30_000,
+            "allowance never touches API limit"
+        );
+
+        // Day 31: back to the standing ceiling.
+        let aged = resolve_plan_limits(Some(TenantPlanLimitRow {
+            plan_name: "free".to_string(),
+            email_limit: Some(3_000),
+            api_call_limit: Some(30_000),
+            tenant_created_at: Some(chrono::Utc::now() - chrono::Duration::days(31)),
+        }));
+        assert_eq!(aged.email_limit, 3_000);
+
+        // Unknown creation date: never widened.
+        let unknown = resolve_plan_limits(Some(TenantPlanLimitRow {
+            plan_name: "free".to_string(),
+            email_limit: Some(3_000),
+            api_call_limit: Some(30_000),
+            tenant_created_at: None,
+        }));
+        assert_eq!(unknown.email_limit, 3_000);
+
+        // A paid plan is never widened by the free allowance.
+        let pro = resolve_plan_limits(Some(TenantPlanLimitRow {
+            plan_name: "pro".to_string(),
+            email_limit: Some(150_000),
+            api_call_limit: Some(2_000_000),
+            tenant_created_at: Some(chrono::Utc::now()),
+        }));
+        assert_eq!(pro.email_limit, 150_000);
+
+        // An override granting more than the allowance keeps its value.
+        let boosted = resolve_plan_limits(Some(TenantPlanLimitRow {
+            plan_name: "free".to_string(),
+            email_limit: Some(50_000),
+            api_call_limit: Some(500_000),
+            tenant_created_at: Some(chrono::Utc::now() - chrono::Duration::days(1)),
+        }));
+        assert_eq!(boosted.email_limit, 50_000);
     }
 
     #[test]

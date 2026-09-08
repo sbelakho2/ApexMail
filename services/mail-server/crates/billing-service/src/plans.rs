@@ -40,19 +40,25 @@ pub struct PlanUpsertInput {
 
 /// All default plans shipped with ApexMail.
 ///
-/// The Free tier ships **30,000 emails / month**. Rust runtime margins
-/// (Hetzner + Rust per-core throughput) make a 10x competitive Free tier
-/// affordable. This is intentionally an order-of-magnitude above Resend's
-/// 3,000/mo and is the primary acquisition wedge.
+/// 2026-09-08 pricing review: the Free tier moved from 30,000/mo to
+/// 3,000/mo — 30k/month forever gave away a meaningful production
+/// workload (competitors: Resend 3k, Scaleway €80/100k). New free
+/// tenants instead get a ONE-TIME 30-day launch allowance of 30,000
+/// emails (enforced in usage.rs `resolve_plan_limits`: the effective
+/// ceiling is 30,000 for the tenant's first 30 days, then 3,000).
+/// Paid tiers were repositioned so Growth/Business are no longer
+/// suspiciously inexpensive for what they include (dedicated IPs,
+/// SSO, SLA): Developer €29, Pro €89, Growth €229, Business €699,
+/// Enterprise Cloud from €1,750.
 fn free_plan_seed() -> PlanSeed {
     PlanSeed {
         name: "free",
         display_name: "Free",
-        description: "Generous free tier — 30,000 emails/month forever",
+        description: "3,000 emails/month forever + a one-time 30,000-email launch allowance for your first 30 days",
         price_monthly: 0,
         price_yearly: 0,
-        email_limit: 30_000,
-        api_call_limit: 300_000,
+        email_limit: 3_000,
+        api_call_limit: 30_000,
         sort_order: 0,
         features: PlanFeatures {
             api_access: true,
@@ -71,10 +77,10 @@ pub fn default_plans() -> Vec<PlanSeed> {
         free_plan_seed(),
         PlanSeed {
             name: "starter",
-            display_name: "Starter",
-            description: "For growing businesses with moderate email needs",
-            price_monthly: 2_500,
-            price_yearly: 25_000,
+            display_name: "Developer",
+            description: "For developers wiring up production email",
+            price_monthly: 2_900,
+            price_yearly: 29_000,
             email_limit: 50_000,
             api_call_limit: 500_000,
             sort_order: 1,
@@ -95,8 +101,8 @@ pub fn default_plans() -> Vec<PlanSeed> {
             name: "pro",
             display_name: "Pro",
             description: "For scaling teams with custom tracking needs",
-            price_monthly: 6_500,
-            price_yearly: 65_000,
+            price_monthly: 8_900,
+            price_yearly: 89_000,
             email_limit: 150_000,
             api_call_limit: 2_000_000,
             sort_order: 2,
@@ -122,8 +128,8 @@ pub fn default_plans() -> Vec<PlanSeed> {
             name: "growth",
             display_name: "Growth",
             description: "For teams that need advanced deliverability features",
-            price_monthly: 15_000,
-            price_yearly: 150_000,
+            price_monthly: 22_900,
+            price_yearly: 229_000,
             email_limit: 500_000,
             api_call_limit: 5_000_000,
             sort_order: 3,
@@ -153,10 +159,10 @@ pub fn default_plans() -> Vec<PlanSeed> {
         },
         PlanSeed {
             name: "scale",
-            display_name: "Scale",
+            display_name: "Business",
             description: "For high-volume senders needing isolation",
-            price_monthly: 35_000,
-            price_yearly: 350_000,
+            price_monthly: 69_900,
+            price_yearly: 699_000,
             email_limit: 2_000_000,
             api_call_limit: 20_000_000,
             sort_order: 4,
@@ -194,10 +200,11 @@ pub fn default_plans() -> Vec<PlanSeed> {
         },
         PlanSeed {
             name: "enterprise",
-            display_name: "Enterprise",
-            description: "Annual-contract platform plan for large organizations",
-            price_monthly: 300_000,
-            price_yearly: 3_000_000,
+            display_name: "Enterprise Cloud",
+            description:
+                "From €1,750/month — annual-contract platform plan for large organizations",
+            price_monthly: 175_000,
+            price_yearly: 1_750_000,
             email_limit: 5_000_000,
             api_call_limit: -1,
             sort_order: 5,
@@ -735,7 +742,7 @@ mod tests {
     fn builtin_quota_limits_fall_back_to_free() {
         assert_eq!(
             builtin_quota_limits(Some("does-not-exist")),
-            (30_000, 300_000)
+            (3_000, 30_000)
         );
     }
 
@@ -746,7 +753,7 @@ mod tests {
 
     #[test]
     fn builtin_email_limit_resolves_known_plans_by_name() {
-        assert_eq!(builtin_email_limit_for_plan("free"), Some(30_000));
+        assert_eq!(builtin_email_limit_for_plan("free"), Some(3_000));
         assert_eq!(builtin_email_limit_for_plan("starter"), Some(50_000));
         assert_eq!(builtin_email_limit_for_plan("enterprise"), Some(5_000_000));
         // PAYG is unlimited.

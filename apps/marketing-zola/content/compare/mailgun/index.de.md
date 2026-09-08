@@ -4,6 +4,7 @@ description = "Faktischer Vergleich der Funktionen für Transaktions-E-Mails: Ap
 template = "compare.html"
 
 [extra]
+noindex = true
 competitor = "Mailgun"
 competitor_slug = "mailgun"
 competitor_name = "Mailgun"
@@ -14,10 +15,8 @@ volume_assumption = "100.000 E-Mails/Monat"
 billing_period = "monthly"
 currency_note = "Preise werden in EUR angezeigt. Veröffentlicht ein Anbieter nur USD, wird der EUR-Betrag zum Kurs 1 USD = €0.92 (Referenzkurs, 2026-08-19) umgerechnet und der vom Anbieter veröffentlichte USD-Preis in Klammern angegeben. Angaben ohne anfallende Steuern."
 # Feature comparison counts — update when capabilities change
-apexmail_wins = 4
-competitor_wins = 2
 verdict_title = "Wie sich ApexMail von Mailgun unterscheidet"
-verdict_points = ["EU/EWR-orientierte Bereitstellungskonfiguration", "Aktueller öffentlicher Katalog (Mailgun veröffentlicht USD; EUR zum Referenzkurs umgerechnet)", "Zugriffskontrollen in Scale und Enterprise", "Audit-Logs ab Growth", "Architektur- und Vertragsprüfung für nicht standardisierte Bereitstellungen"]
+verdict_points = ["EU/EWR-orientierte Bereitstellungskonfiguration", "Aktueller öffentlicher Katalog (Mailgun veröffentlicht USD; EUR zum Referenzkurs umgerechnet)", "Zugriffskontrollen in Business und Enterprise", "Audit-Logs ab Growth", "Architektur- und Vertragsprüfung für nicht standardisierte Bereitstellungen"]
 
 # Comparison data (audit 3.3): rendered by partials/compare/table.html via a
 # single loop, so design changes to the row/winner markup happen in ONE place.

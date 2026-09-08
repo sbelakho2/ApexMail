@@ -15,12 +15,12 @@ Stripe confirms the subscription through a verified webhook.
 
 | Plan ID | Plan | Monthly | Annual | Emails/month | API calls/month | Domains | Team members | Event retention | Dedicated IPs |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---|
-| `free` | Free | €0 | €0 | 30,000 | 300,000 | 1 | 1 | 7 days | — |
-| `starter` | Starter | €25 | €250/year | 50,000 | 500,000 | 5 | 5 | 30 days | — |
-| `pro` | Pro | €65 | €650/year | 150,000 | 2,000,000 | 25 | 10 | 60 days | Add-on eligible |
-| `growth` | Growth | €150 | €1,500/year | 500,000 | 5,000,000 | 100 | 25 | 90 days | 1 included |
-| `scale` | Scale | €350 | €3,500/year | 2,000,000 | 20,000,000 | Unlimited | 50 | 365 days | 3 included |
-| `enterprise` | Enterprise | €3,000 | €30,000/year | 5,000,000 | Unlimited | Unlimited | Unlimited | 730 days | 10 included |
+| `free` | Free | €0 | €0 | 3,000 | 30,000 | 1 | 1 | 7 days | — |
+| `starter` | Developer | €29 | €290/year | 50,000 | 500,000 | 5 | 5 | 30 days | — |
+| `pro` | Pro | €89 | €890/year | 150,000 | 2,000,000 | 25 | 10 | 60 days | Add-on eligible |
+| `growth` | Growth | €229 | €2,290/year | 500,000 | 5,000,000 | 100 | 25 | 90 days | 1 included |
+| `scale` | Business | €699 | €6,990/year | 2,000,000 | 20,000,000 | Unlimited | 50 | 365 days | 3 included |
+| `enterprise` | Enterprise Cloud | €1,750 | €17,500/year | 5,000,000 | Unlimited | Unlimited | Unlimited | 730 days | 10 included |
 
 Annual billing is 10 times the monthly price: two months free, or roughly a
 17% discount compared with twelve monthly payments.

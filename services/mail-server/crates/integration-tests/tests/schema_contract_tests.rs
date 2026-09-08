@@ -226,7 +226,7 @@ fn test_config() -> Config {
         ui_default_surface: Some("web".into()),
         webhook_signing_secret: "test-webhook-signing-secret-1234567890".into(),
         webhook_timeout_ms: 5_000,
-        webhook_max_retries: 3,
+        webhook_max_retries: 10,
         idempotency_ttl_seconds: 86_400,
         aws_region: "us-east-1".into(),
         ses_ip_pool_prefix: "apexmail".into(),

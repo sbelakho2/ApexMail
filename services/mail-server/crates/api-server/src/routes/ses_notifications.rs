@@ -753,7 +753,7 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
                 // Queue webhook event for the tenant
                 if let Some(ref tid) = tenant_id {
                     let payload = serde_json::json!({
-                        "event": "email.bounced",
+                        "event": "message.bounced",
                         "type": bounce.bounce_type,
                         "subType": bounce_sub_type,
                         "recipient": email,
@@ -762,7 +762,7 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
                         "diagnosticCode": recipient.diagnostic_code,
                         "timestamp": bounce.timestamp,
                     });
-                    queue_webhook_event(state, tid, "email.bounced", &payload).await;
+                    queue_webhook_event(state, tid, "message.bounced", &payload).await;
                 }
             }
         }
@@ -860,14 +860,14 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
                 // Queue webhook
                 if let Some(ref tid) = tenant_id {
                     let payload = serde_json::json!({
-                        "event": "email.complained",
+                        "event": "message.complained",
                         "feedbackType": feedback_type,
                         "recipient": email,
                         "messageId": apexmail_message_id,
                         "sesMessageId": ses_message_id,
                         "timestamp": complaint.timestamp,
                     });
-                    queue_webhook_event(state, tid, "email.complained", &payload).await;
+                    queue_webhook_event(state, tid, "message.complained", &payload).await;
                 }
             }
         }
@@ -925,14 +925,14 @@ async fn process_delivery(state: &AppState, event: &SesEvent) -> Result<(), ApiE
     // Queue webhook
     if let Some(ref tid) = tenant_id {
         let payload = serde_json::json!({
-            "event": "email.delivered",
+            "event": "message.delivered",
             "recipients": delivery.recipients,
             "messageId": apexmail_message_id,
             "processingTimeMs": delivery.processing_time_millis,
             "smtpResponse": delivery.smtp_response,
             "timestamp": delivery.timestamp,
         });
-        queue_webhook_event(state, tid, "email.delivered", &payload).await;
+        queue_webhook_event(state, tid, "message.delivered", &payload).await;
     }
 
     Ok(())
@@ -1003,12 +1003,12 @@ async fn process_open(state: &AppState, event: &SesEvent) -> Result<(), ApiError
     // Queue webhook
     if let Some(ref tid) = tenant_id {
         let payload = serde_json::json!({
-            "event": "email.opened",
+            "event": "message.opened",
             "messageId": apexmail_message_id,
             "userAgent": open.user_agent,
             "timestamp": open.timestamp,
         });
-        queue_webhook_event(state, tid, "email.opened", &payload).await;
+        queue_webhook_event(state, tid, "message.opened", &payload).await;
     }
 
     Ok(())
@@ -1065,13 +1065,13 @@ async fn process_click(state: &AppState, event: &SesEvent) -> Result<(), ApiErro
     // Queue webhook
     if let Some(ref tid) = tenant_id {
         let payload = serde_json::json!({
-            "event": "email.clicked",
+            "event": "message.clicked",
             "messageId": apexmail_message_id,
             "link": click.link,
             "userAgent": click.user_agent,
             "timestamp": click.timestamp,
         });
-        queue_webhook_event(state, tid, "email.clicked", &payload).await;
+        queue_webhook_event(state, tid, "message.clicked", &payload).await;
     }
 
     Ok(())

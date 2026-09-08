@@ -148,7 +148,7 @@ pub struct WebhookTestRequest {
 }
 
 fn default_event_type() -> String {
-    "email.delivered".into()
+    "message.delivered".into()
 }
 
 /// POST /webhooks/test — fire a test webhook.

@@ -537,7 +537,7 @@ The following webhook events are emitted for message lifecycle:
 | Event | Description |
 |-------|-------------|
 | `message.queued` | Message accepted and queued for sending |
-| `message.sent` | Message dispatched to receiving MTA |
+| `message.accepted` | Message dispatched to receiving MTA |
 | `message.delivered` | Delivery confirmed by remote MTA |
 | `message.bounced` | Hard or soft bounce received |
 | `message.opened` | Recipient opened the message |

@@ -1,6 +1,6 @@
 +++
 title = "ApexMail Enterprise | Kaufmännische Konditionen und Beschaffung"
-description = "Enterprise-Transaktions-E-Mails: Jahresvertrag über €30.000 mit 5 Millionen enthaltenen E-Mails pro Monat, dediziertem Support und vertraglicher Bereitstellungsplanung."
+description = "Enterprise-Cloud-E-Mail: ab €1.750/Monat auf Jahresvertrag mit 5 Millionen enthaltenen E-Mails, dediziertem Support und vertraglicher Deployment-Planung."
 template = "prose.html"
 
 [extra]
@@ -15,7 +15,7 @@ Enterprise ist ein vertragliches E-Mail-Versandangebot für Organisationen, die 
 
 | Position | Enterprise |
 |---|---|
-| Preis | €30.000/Jahr unter einem Jahresvertrag |
+| Preis | ab €1.750/Monat unter einem Jahresvertrag |
 | Enthaltenes E-Mail-Volumen | 5.000.000 E-Mails/Monat |
 | API-Aufrufe | Unbegrenzt |
 | Domains und Teammitglieder | Unbegrenzt |
@@ -25,7 +25,7 @@ Enterprise ist ein vertragliches E-Mail-Versandangebot für Organisationen, die 
 | Support-Level | Dediziert |
 | Private Cloud / BYOIP | Vorbehaltlich Vertrags- und Technikprüfung |
 
-Der jährliche Katalogpreis beträgt €30.000 — das Zehnfache des monatlichen Referenzpreises von €3.000. Individuelle Volumen-, Bereitstellungs- und Professional-Services-Kosten werden verhandelt und ausschließlich in einem schriftlichen Angebot oder Auftrag formuliert.
+Der Katalogpreis beträgt ab €1.750/Monat (€17.500/Jahr bei 10 von 12 Monaten). Individuelle Volumen-, Bereitstellungs- und Professional-Services-Kosten werden verhandelt und ausschließlich in einem schriftlichen Angebot oder Auftrag formuliert.
 
 ## Beschaffungsprüfung
 

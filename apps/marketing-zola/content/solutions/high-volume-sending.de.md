@@ -31,7 +31,7 @@ Bei hohen Volumina haben kleine Zustellbarkeitsänderungen große Umsatzauswirku
 - **Warteschlangen-Priorisierung** — Transaktionaler Verkehr wird bei Last vor Massensendungen priorisiert. Time-to-Inbox-Ziele werden überwacht.
 - **Batch-API** (`POST /v1/messages/batch`) — Reichen Sie bis zu 100 Nachrichten pro Anfrage ein. Geringerer Aufwand pro Nachricht als bei einzelnen API-Aufrufen.
 - **Ratenbegrenzungen** — Limits werden je API-Key und Tarif durchgesetzt; siehe die aktuelle API-Dokumentation für die öffentlichen Limits.
-- **Vertragliche SLA** — Scale und Enterprise enthalten Tarif-SLA-Bedingungen; nicht standardisierte Bereitstellungen erfordern eine separate Vertragsprüfung.
+- **Vertragliche SLA** — Business und Enterprise enthalten Tarif-SLA-Bedingungen; nicht standardisierte Bereitstellungen erfordern eine separate Vertragsprüfung.
 
 ## Technische Umsetzung
 

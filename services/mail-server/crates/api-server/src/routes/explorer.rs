@@ -609,18 +609,20 @@ fn compute_calculator(f: &CalculatorForm) -> Vec<(String, String, bool)> {
             ));
         }
         let total = base + overage;
-        // Dedicated IP add-on: €30/mo per IP (Pro and above), per the catalog.
+        // Dedicated IP add-on (2026-09-08 pricing): first managed IP
+        // €49/mo, each additional €69/mo — on Pro and above.
         let ip_fee = if f.dedicated_ips > 0 && plan.name != "free" && plan.name != "starter" {
-            f.dedicated_ips * 3_000
+            4_900 + (f.dedicated_ips.saturating_sub(1)) * 6_900
         } else {
             0
         };
         if ip_fee > 0 {
-            rows.push((
-                format!("Dedicated IPs ({}× €30)", f.dedicated_ips),
-                format!("€{:.2}", ip_fee as f64 / 100.0),
-                false,
-            ));
+            let ip_label = if f.dedicated_ips == 1 {
+                "Dedicated IP (1× €49)".to_string()
+            } else {
+                format!("Dedicated IPs (1× €49 + {}× €69)", f.dedicated_ips - 1)
+            };
+            rows.push((ip_label, format!("€{:.2}", ip_fee as f64 / 100.0), false));
         } else if f.dedicated_ips > 0 {
             rows.push((
                 "Dedicated IPs".to_string(),

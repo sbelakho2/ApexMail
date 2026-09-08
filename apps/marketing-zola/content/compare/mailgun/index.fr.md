@@ -4,6 +4,7 @@ description = "Comparaison factuelle des capacités d'email transactionnel : Ape
 template = "compare.html"
 
 [extra]
+noindex = true
 competitor = "Mailgun"
 competitor_slug = "mailgun"
 competitor_name = "Mailgun"
@@ -14,10 +15,8 @@ volume_assumption = "100 000 emails/mois"
 billing_period = "mensuelle"
 currency_note = "Les prix sont indiqués en EUR. Lorsqu’un fournisseur publie uniquement en USD, le montant en EUR est converti à 1 USD = €0.92 (taux de référence, 2026-08-19) et le prix USD publié par le fournisseur est affiché entre parenthèses. Hors taxes applicables."
 # Feature comparison counts — update when capabilities change
-apexmail_wins = 4
-competitor_wins = 2
 verdict_title = "Ce qui distingue ApexMail de Mailgun"
-verdict_points = ["Configuration de déploiement orientée UE/EEE", "Catalogue public actuel (Mailgun publie en USD ; EUR affiché au taux de référence)", "Contrôles d’accès Scale et Enterprise", "Journaux d’audit dès le forfait Growth", "Revue d’architecture et de contrat pour les déploiements non standards"]
+verdict_points = ["Configuration de déploiement orientée UE/EEE", "Catalogue public actuel (Mailgun publie en USD ; EUR affiché au taux de référence)", "Contrôles d’accès Business et Enterprise", "Journaux d’audit dès le forfait Growth", "Revue d’architecture et de contrat pour les déploiements non standards"]
 
 # Comparison data (audit 3.3): rendered by partials/compare/table.html via a
 # single loop, so design changes to the row/winner markup happen in ONE place.
@@ -36,7 +35,7 @@ comparison_sections = [
     { feature = "Envoi par lots", apex = 'Disponible lorsque cette option est activée pour le forfait souscrit', comp = 'Oui — envoi par lots via <code>recipient-variables</code> avec jusqu’à 1 000 destinataires<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
     { feature = "Clés d’idempotence", apex = 'Oui (tous les forfaits) — en-tête <code>Idempotency-Key</code>', comp = 'Non pris en charge — les applications doivent implémenter leur propre logique de déduplication<sup><a href="#src-mg3">3</a></sup>', winner = "apexmail" },
     { feature = "Envoi programmé", apex = 'Disponible lorsque cette option est activée pour le forfait souscrit', comp = 'Oui — paramètre <code>o:deliverytime</code> (format RFC 2822, jusqu’à 3 jours)<sup><a href="#src-mg3">3</a></sup>', winner = "none" },
-    { feature = "Email entrant", apex = 'Forfaits Scale et Enterprise', comp = 'Oui — routes entrantes avec transfert, stockage et actions webhook<sup><a href="#src-mg4">4</a></sup>', winner = "none" }
+    { feature = "Email entrant", apex = 'Forfaits Business et Enterprise', comp = 'Oui — routes entrantes avec transfert, stockage et actions webhook<sup><a href="#src-mg4">4</a></sup>', winner = "none" }
   ]},
   { title = "MODÈLES DE DÉPLOIEMENT", rows = [
     { feature = "Cloud mutualisé", apex = 'Oui (tous les forfaits) — multi-tenant, hébergé dans l’UE', comp = 'Oui (tous les forfaits)<sup><a href="#src-mg5">5</a></sup>', winner = "none" },
@@ -45,7 +44,7 @@ comparison_sections = [
     { feature = "BYOC / déploiement privé", apex = 'Soumis à revue d’architecture et de contrat', comp = 'Voir la documentation du fournisseur<sup><a href="#src-mg5">5</a></sup>', winner = "none" }
   ]},
   { title = "CONTRÔLES ENTERPRISE", rows = [
-    { feature = "SAML SSO", apex = 'Forfaits Scale et Enterprise', comp = 'Forfaits Foundation 100K et supérieurs<sup><a href="#src-mg6">6</a></sup>', winner = "none" },
+    { feature = "SAML SSO", apex = 'Forfaits Business et Enterprise', comp = 'Forfaits Foundation 100K et supérieurs<sup><a href="#src-mg6">6</a></sup>', winner = "none" },
     { feature = "SCIM", apex = 'Forfait Enterprise', comp = 'Non documenté à la date de vérification — provisioning des utilisateurs via l’API Mailgun<sup><a href="#src-mg6">6</a></sup>', winner = "apexmail" },
     { feature = "Journaux d’audit", apex = 'Forfait Growth et supérieurs — activité du compte, usage des clés API, changements de configuration ; consultables, exportables', comp = 'Journaux d’événements accessibles via l’API Events ; rétention variable selon le forfait ; pas de piste d’audit consolidée au niveau du compte<sup><a href="#src-mg7">7</a></sup>', winner = "apexmail" }
   ]},
@@ -56,7 +55,7 @@ comparison_sections = [
   ]},
   { title = "DOMAINES OÙ MAILGUN EST PLUS FORT", rows = [
     { feature = "Validation d’emails", apex = 'API Email Grader (DNS/SPF/DKIM/DMARC/contenu/réputation)', comp = 'API de validation d’emails dédiée avec validation en temps réel et en masse<sup><a href="#src-mg9">9</a></sup>', winner = "competitor" },
-    { feature = "Traitement des emails entrants", apex = 'Emails entrants sur les forfaits Scale et Enterprise', comp = 'Routage entrant avec actions de transfert, webhook HTTP et stockage ; inclus sur tous les forfaits<sup><a href="#src-mg4">4</a></sup>', winner = "competitor" },
+    { feature = "Traitement des emails entrants", apex = 'Emails entrants sur les forfaits Business et Enterprise', comp = 'Routage entrant avec actions de transfert, webhook HTTP et stockage ; inclus sur tous les forfaits<sup><a href="#src-mg4">4</a></sup>', winner = "competitor" },
     { feature = "Sandbox de test d’emails", apex = 'Environnement sandbox avec domaines sandbox et limites de débit', comp = 'Domaine sandbox de test sur tous les forfaits avec identifiants de test distincts<sup><a href="#src-mg3">3</a></sup>', winner = "none" }
   ]}
 ]

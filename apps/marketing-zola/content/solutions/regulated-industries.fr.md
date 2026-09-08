@@ -14,8 +14,8 @@ L'email transactionnel peut s'inscrire dans un workflow réglementé. ApexMail f
 |---|---|
 | Accord de traitement des données (DPA) | Disponible pour revue et signature |
 | Résidence des données UE/EEE | Disponible pour le service hébergé standard, sous réserve des conditions de service applicables |
-| Journaux d'audit | Inclus dès Growth ; des contrôles opérationnels étendus sont disponibles sur Scale et Enterprise |
-| SAML SSO | Inclus sur Scale et Enterprise |
+| Journaux d'audit | Inclus dès Growth ; des contrôles opérationnels étendus sont disponibles sur Business et Enterprise |
+| SAML SSO | Inclus sur Business et Enterprise |
 | Cloud Privé / BYOIP | Revue contractuelle et technique Enterprise |
 | HIPAA / BAA | **Non proposé actuellement** |
 | Certification SOC 2 | **Non proposée actuellement** ; prévue, mais ne constitue pas un droit |

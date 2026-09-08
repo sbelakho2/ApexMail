@@ -4,6 +4,7 @@ description = "See how ApexMail compares to Postmark on deliverability, complian
 template = "compare.html"
 
 [extra]
+noindex = true
 competitor = "Postmark"
 competitor_slug = "postmark"
 competitor_name = "Postmark"
@@ -11,8 +12,6 @@ competitor_description = "Postmark by ActiveCampaign focuses on fast, reliable t
 pricing_as_of = "2026-08-19"
 currency_note = "Prices are shown in EUR. Where a provider publishes only USD, the EUR figure is converted at 1 USD = €0.92 (reference rate, 2026-08-19) and the provider's published USD price is shown in parentheses. Exclude applicable taxes."
 og_image = "/images/og-image.png"
-apexmail_wins = 0
-competitor_wins = 0
 
 # Comparison data (audit 3.3): rendered by partials/compare/table.html via a
 # single loop, so design changes to the row/winner markup happen in ONE place.
@@ -23,7 +22,7 @@ comparison_sections = [
   { title = "DELIVERABILITY", rows = [
     { feature = "Delivery Rate", apex = '<span class="text-brand-600 font-semibold">High</span>', comp = '<span class="text-surface-600">High</span>', winner = "none" },
     { feature = "P95 acceptance to first attempt", apex = '<span class="text-brand-600 font-semibold">&le;30s (P95) &mdash; internal engineering target, not an independently verified figure</span>', comp = '<span class="text-surface-600">Not publicly documented</span>', winner = "none" },
-    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth, 3 on Scale</span>', comp = '<span class="text-surface-600">See provider pricing</span>', winner = "none" },
+    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth, 3 on Business</span>', comp = '<span class="text-surface-600">See provider pricing</span>', winner = "none" },
     { feature = "Automatic IP Warming", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-600">Automatic (Postmark-managed)</span>', winner = "none" },
     { feature = "BIMI Support", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "MTA-STS Support", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" }
@@ -38,18 +37,18 @@ comparison_sections = [
   { title = "FEATURES", rows = [
     { feature = "Transactional Email", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
     { feature = "Marketing Email", apex = '<span class="text-brand-600 font-semibold">Yes (unified API)</span>', comp = '<span class="text-surface-600">Separate product</span>', winner = "none" },
-    { feature = "Inbound Processing", apex = '<span class="text-brand-600 font-semibold">Scale and Enterprise plans</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
+    { feature = "Inbound Processing", apex = '<span class="text-brand-600 font-semibold">Business and Enterprise plans</span>', comp = '<span class="text-brand-600">✓</span>', winner = "none" },
     { feature = "Templates", apex = '<span class="text-brand-600 font-semibold">Stored templates</span>', comp = '<span class="text-surface-600">Proprietary</span>', winner = "none" },
     { feature = "Scheduled Sending", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
   { title = "ENTERPRISE", rows = [
-    { feature = "SSO/SAML", apex = '<span class="text-brand-600 font-semibold">Scale and Enterprise</span>', comp = '<span class="text-surface-600">Available on request</span>', winner = "none" },
+    { feature = "SSO/SAML", apex = '<span class="text-brand-600 font-semibold">Business and Enterprise</span>', comp = '<span class="text-surface-600">Available on request</span>', winner = "none" },
     { feature = "Custom Deployment Review", apex = '<span class="text-brand-600 font-semibold">Enterprise review</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Dedicated Deployment Options", apex = '<span class="text-brand-600 font-semibold">Custom review</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
   { title = "PRICING", rows = [
     { feature = "Free Tier", apex = '<span class="text-brand-600 font-semibold">30,000/mo</span>', comp = '<span class="text-surface-600">100/mo</span>', winner = "none" },
-    { feature = "100K emails/mo", apex = '<span class="text-brand-600 font-semibold">€65 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€122.82 (US$133.50) — Pro: €15.18 (US$16.50)/mo + 90K overage @ €1.20 (US$1.30)/1K</span>', winner = "none" },
+    { feature = "100K emails/mo", apex = '<span class="text-brand-600 font-semibold">€89 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€122.82 (US$133.50) — Pro: €15.18 (US$16.50)/mo + 90K overage @ €1.20 (US$1.30)/1K</span>', winner = "none" },
     { feature = "Unlimited team members", apex = '<span class="text-brand-600 font-semibold">Enterprise plan</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" },
     { feature = "Custom enterprise terms", apex = '<span class="text-brand-600 font-semibold">Annual contracts</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]}

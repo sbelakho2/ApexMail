@@ -1,6 +1,6 @@
 +++
 title = "API Explorer | Interactive API Reference & Examples"
-description = "Explore the ApexMail API interactively. Browse endpoints, see request/response examples, and understand the API structure — demo environment, no account required."
+description = "Run real ApexMail API requests in an isolated sandbox: send messages, add domains, watch the queue. Live handlers, real responses, no account required."
 template = "api-explorer.html"
 
 [extra]

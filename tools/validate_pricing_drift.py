@@ -70,11 +70,11 @@ class PlanExpectation:
 
 EXPECTED_CATALOG: dict[str, PlanExpectation] = {
     "free": PlanExpectation(
-        "Free", 0, 0, 30_000, 300_000, 1, 1, 7, 0, "Community",
+        "Free", 0, 0, 3_000, 30_000, 1, 1, 7, 0, "Community",
         {"api_access": True, "webhooks_enabled": False, "dedicated_ip": False},
     ),
     "starter": PlanExpectation(
-        "Starter", 2_500, 25_000, 50_000, 500_000, 5, 5, 30, 0, "Email",
+        "Developer", 2_900, 29_000, 50_000, 500_000, 5, 5, 30, 0, "Email",
         {
             "api_access": True,
             "webhooks_enabled": True,
@@ -84,7 +84,7 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
         },
     ),
     "pro": PlanExpectation(
-        "Pro", 6_500, 65_000, 150_000, 2_000_000, 25, 10, 60, 0, "Email",
+        "Pro", 8_900, 89_000, 150_000, 2_000_000, 25, 10, 60, 0, "Email",
         {
             "dedicated_ip": True,
             "custom_tracking_domain": True,
@@ -93,7 +93,7 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
         },
     ),
     "growth": PlanExpectation(
-        "Growth", 15_000, 150_000, 500_000, 5_000_000, 100, 25, 90, 1, "Email",
+        "Growth", 22_900, 229_000, 500_000, 5_000_000, 100, 25, 90, 1, "Email",
         {
             "dedicated_ip": True,
             "audit_logs": True,
@@ -103,7 +103,7 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
         },
     ),
     "scale": PlanExpectation(
-        "Scale", 35_000, 350_000, 2_000_000, 20_000_000, -1, 50, 365, 3, "Priority",
+        "Business", 69_900, 699_000, 2_000_000, 20_000_000, -1, 50, 365, 3, "Priority",
         {
             "dedicated_ip": True,
             "sso_enabled": True,
@@ -113,7 +113,7 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
         },
     ),
     "enterprise": PlanExpectation(
-        "Enterprise", 300_000, 3_000_000, 5_000_000, -1, -1, -1, 730, 10, "Dedicated",
+        "Enterprise Cloud", 175_000, 1_750_000, 5_000_000, -1, -1, -1, 730, 10, "Dedicated",
         {
             "dedicated_ip": True,
             "sso_enabled": True,
@@ -380,7 +380,8 @@ def validate_pricing_reference(catalog: dict[str, ParsedPlan], errors: list[str]
             f"docs/pricing.md catalog row drift for {plan_id}: missing {expected_row!r}",
             errors,
         )
-    for stale in ("Developer", "Business", "10% on every self-serve"):
+    # 2026-09-08: Developer/Business are canonical ladder names now.
+    for stale in ("10% on every self-serve",):
         check(stale not in text, f"docs/pricing.md contains stale pricing token {stale!r}", errors)
 
 
@@ -455,6 +456,15 @@ def validate_marketing_source(catalog: dict[str, ParsedPlan], errors: list[str])
         if runtime is None:
             continue
         price = display_money(runtime.monthly_cents)
+        if plan_id == "enterprise":
+            # 2026-09-08 review SS6: Enterprise renders as its own
+            # full-width section (from-price + display name), not a card.
+            check(
+                f"from {price}" in cards and runtime.display_name in cards,
+                f"pricing page does not contain the runtime {runtime.display_name} section price",
+                errors,
+            )
+            continue
         check(
             f'plan_name = "{runtime.display_name}"' in cards and f'plan_price = "{price}"' in cards,
             f"pricing card does not contain the runtime {runtime.display_name} price",
@@ -464,24 +474,26 @@ def validate_marketing_source(catalog: dict[str, ParsedPlan], errors: list[str])
             query = "/signup" if plan_id == "free" else f"/signup?plan={plan_id}"
             check(query in cards, f"pricing card for {plan_id} has no vetted signup URL", errors)
 
-    for stale in ("Developer", "Business", "plan=developer", "plan=business"):
+    # 2026-09-08: Developer/Business are the canonical display names now;
+    # the plan identity KEYS remain starter/scale, so key-form links are stale.
+    for stale in ("plan=developer", "plan=business"):
         check(stale not in cards, f"pricing cards contain stale token {stale!r}", errors)
     check("Pay-as-you-go usage pricing is available" in cards, "pricing cards omit PAYG managed-flow disclosure", errors)
     check("HIPAA availability is not currently offered" in cards, "pricing cards omit current HIPAA availability status", errors)
 
     for needle in (
-        "Starter (50K/mo)",
-        "Scale (2M/mo)",
+        "Developer (50K/mo)",
+        "Business (2M/mo)",
         "Annual subscriptions are billed at 10&times; the monthly price",
-        "Dedicated IPs are available as an add-on from {{ pricing_data.currency_symbol }}30/month on Pro and above",
+        "Dedicated IPs are an add-on from \u20ac49/month (first) and \u20ac69/month (each additional) on Pro and above",
     ):
         check(needle in calculator, f"calculator source is missing {needle!r}", errors)
-    for stale in ("Developer", "Business", "Private Cloud (dedicated tenant)", "BYOC from", "&minus;10%"):
+    for stale in ("Private Cloud (dedicated tenant)", "BYOC from", "&minus;10%"):
         check(stale not in calculator, f"calculator source contains stale token {stale!r}", errors)
 
-    for needle in ("€25", "€65", "€150", "€350", "€3,000", "€30,000/yr", "€0.40 per additional 1,000 emails"):
+    for needle in ("€29", "€89", "€229", "€699", "€1,750", "€17,500/yr", "€0.40 per additional 1,000 emails"):
         check(needle in island, f"generated pricing island source is missing {needle!r}", errors)
-    for stale in ("Developer", "Business", "SendGrid", "Mailchimp", "You Save"):
+    for stale in ("SendGrid", "Mailchimp", "You Save"):
         check(stale not in island, f"generated pricing island contains stale token {stale!r}", errors)
 
     for needle in (
@@ -634,9 +646,11 @@ def validate_built_output(errors: list[str]) -> None:
         errors.append("no generated home/pricing HTML found; run zola build before pricing validation")
         return
     output = "\n".join(read(path) for path in pages)
-    for needle in ("Starter", "Scale", "€25", "€350", "€30,000", "€0.40 per 1,000 emails"):
+    for needle in ("Developer", "Business", "€29", "€89", "€229", "€699", "€1,750", "€0.40 per 1,000 emails"):
         check(needle in output, f"generated marketing output is missing {needle!r}", errors)
-    for stale in ("Start Developer", "Start Business", "€29", "€699", "plan=developer", "plan=business"):
+    # 2026-09-08: the retired generation's names and prices (the ladder was
+    # Free 30k / Starter EUR25 / Pro 65 / Growth 150 / Scale 350 / Ent 3000).
+    for stale in ("Starter", "Scale", "€25", "€65", "€150", "€350", "plan=developer", "plan=business"):
         check(stale not in output, f"generated marketing output contains stale token {stale!r}", errors)
 
 

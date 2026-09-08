@@ -14,8 +14,8 @@ Transactional email can be part of a regulated workflow. ApexMail provides EU/EE
 |---|---|
 | Data Processing Agreement | Available for review and execution |
 | EU/EEA data residency | Available for the standard hosted service, subject to the applicable service terms |
-| Audit logs | Included from Growth; expanded operational controls are available on Scale and Enterprise |
-| SAML SSO | Included on Scale and Enterprise |
+| Audit logs | Included from Growth; expanded operational controls are available on Business and Enterprise |
+| SAML SSO | Included on Business and Enterprise |
 | Private Cloud / BYOIP | Enterprise contractual and technical review |
 | HIPAA / BAA | **Not currently offered** |
 | SOC 2 certification | **Not currently offered**; planned, not an entitlement |

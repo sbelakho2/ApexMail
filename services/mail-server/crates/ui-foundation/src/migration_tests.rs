@@ -514,7 +514,6 @@ fn migration_marketing_pages_have_content() {
         ("/features", "Features"),
         ("/compliance", "Compliance"),
         ("/private-cloud", "Private Cloud"),
-        ("/case-studies", "Use Cases"),
         ("/status", "System Status"),
     ];
 

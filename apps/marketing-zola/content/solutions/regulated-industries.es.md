@@ -14,8 +14,8 @@ El email transaccional puede formar parte de un flujo de trabajo regulado. ApexM
 |---|---|
 | Acuerdo de procesamiento de datos | Disponible para revisión y firma |
 | Residencia de datos en la UE/EEE | Disponible para el servicio alojado estándar, sujeto a las condiciones de servicio aplicables |
-| Registros de auditoría | Incluidos a partir de Growth; controles operativos ampliados disponibles en Scale y Enterprise |
-| SAML SSO | Incluido en Scale y Enterprise |
+| Registros de auditoría | Incluidos a partir de Growth; controles operativos ampliados disponibles en Business y Enterprise |
+| SAML SSO | Incluido en Business y Enterprise |
 | Private Cloud / BYOIP | Revisión contractual y técnica Enterprise |
 | HIPAA / BAA | **No disponible actualmente** |
 | Certificación SOC 2 | **No disponible actualmente**; planificada, no constituye un derecho |

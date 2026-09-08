@@ -4,6 +4,7 @@ description = "Vea cómo se compara ApexMail con SendGrid en entregabilidad, cum
 template = "compare.html"
 
 [extra]
+noindex = true
 competitor = "SendGrid"
 competitor_slug = "sendgrid"
 competitor_name = "SendGrid"
@@ -13,15 +14,13 @@ verification_date = "2026-08-19"
 currency_note = "Los precios se muestran en EUR. Cuando un proveedor solo publica precios en USD, la cifra en EUR se convierte a 1 USD = €0.92 (tipo de referencia, 2026-08-19) y se muestra entre paréntesis el precio en USD publicado por el proveedor. Impuestos no incluidos."
 og_image = "/images/og-image.png"
 # Feature comparison counts — update when capabilities change
-apexmail_wins = 5
-competitor_wins = 0
 verdict_title = "¿Por qué elegir ApexMail en lugar de SendGrid?"
 verdict_points = [
   "Mejor entregabilidad con calentamiento automático de IP y protección de la reputación",
   "Flujos de trabajo orientados al RGPD, registros de consentimiento y registros de auditoría",
   "Perspectivas de entregabilidad sin decisiones de envío automáticas de caja negra",
   "Revisiones de despliegue personalizadas para programas empresariales regulados",
-  "SSO en Scale y Enterprise con el empaquetado de planes actual",
+  "SSO en Business y Enterprise con el empaquetado de planes actual",
 ]
 
 # Comparison data (audit 3.3): rendered by partials/compare/table.html via a
@@ -53,8 +52,8 @@ comparison_sections = [
   ]},
   { title = "PRECIOS", rows = [
     { feature = "Nivel gratuito", apex = '<span class="text-brand-600 font-semibold">30.000 emails/mes</span>', comp = '<span class="text-surface-600">100 emails/día</span>', winner = "none" },
-    { feature = "100K emails/mes", apex = '<span class="text-brand-600 font-semibold">€65 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€82.75 (US$89.95) — Pro; Essentials desde €18.35 (US$19.95)</span>', winner = "apexmail" },
-    { feature = "SSO incluido", apex = '<span class="text-brand-600 font-semibold">Planes Scale y Enterprise</span>', comp = '<span class="text-surface-600">Incluido en Pro</span>', winner = "none" },
+    { feature = "100K emails/mes", apex = '<span class="text-brand-600 font-semibold">€89 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€82.75 (US$89.95) — Pro; Essentials desde €18.35 (US$19.95)</span>', winner = "apexmail" },
+    { feature = "SSO incluido", apex = '<span class="text-brand-600 font-semibold">Planes Business y Enterprise</span>', comp = '<span class="text-surface-600">Incluido en Pro</span>', winner = "none" },
     { feature = "Revisión de despliegue personalizado", apex = '<span class="text-brand-600 font-semibold">Revisión Enterprise</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},
   { title = "INFORMACIÓN E INTELIGENCIA", rows = [

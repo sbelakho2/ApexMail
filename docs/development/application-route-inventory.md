@@ -237,7 +237,7 @@ All routes are public:
 - /compliance
 - /private-cloud
 - /api-explorer (301 from /api-console)
-- /case-studies
+- /solutions (301 from /case-studies)
 - /forensic
 - /status
 - /compare/postmark
@@ -260,7 +260,7 @@ All routes are public:
 - /compliance
 - /private-cloud
 - /api-explorer (301 from /api-console)
-- /case-studies
+- /solutions (301 from /case-studies)
 - /forensic
 - /status
 - /compare

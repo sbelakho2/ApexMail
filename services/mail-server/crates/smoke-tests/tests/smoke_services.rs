@@ -273,7 +273,7 @@ mod devex_tests {
             devex_service::webhook_tester::WebhookTester::new(vec!["whsec_test123".into()])
                 .expect("valid webhook secret");
         let payload =
-            devex_service::webhook_tester::WebhookTester::build_test_payload("email.delivered");
+            devex_service::webhook_tester::WebhookTester::build_test_payload("message.delivered");
         let body = serde_json::to_vec(&payload).unwrap();
 
         let sig = tester.sign_payload(&body);

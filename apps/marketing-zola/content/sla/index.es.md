@@ -1,6 +1,6 @@
 +++
 title = "Acuerdo de Nivel de Servicio (SLA)"
-description = "SLA de ApexMail — compromis contractuales de disponibilidad para clientes de los planes Scale y Enterprise."
+description = "SLA de ApexMail — compromis contractuales de disponibilidad para clientes de los planes Business y Enterprise."
 template = "prose.html"
 
 [extra]

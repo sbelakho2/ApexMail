@@ -4,6 +4,7 @@ description = "Comparaison factuelle des capacités d'email transactionnel : Ape
 template = "compare.html"
 
 [extra]
+noindex = true
 competitor = "Amazon SES"
 competitor_slug = "amazon-ses"
 competitor_name = "Amazon SES"
@@ -14,8 +15,6 @@ volume_assumption = "100 000 emails/mois"
 billing_period = "mensuelle"
 currency_note = "Les prix sont indiqués en EUR. Lorsqu’un fournisseur publie uniquement en USD, le montant en EUR est converti à 1 USD = €0.92 (taux de référence, 2026-08-19) et le prix USD publié par le fournisseur est affiché entre parenthèses. Hors taxes applicables."
 # Feature comparison counts — update when capabilities change.
-apexmail_wins = 2
-competitor_wins = 4
 verdict_title = "Ce qui distingue ApexMail d’Amazon SES"
 verdict_points = ["Infrastructure email gérée avec API, événements et support inclus, contre une facturation de capacité brute", "Tableau de bord de diagnostic de livraison par message, contre un assemblage CloudWatch + SNS à votre charge", "Clés d’idempotence sur tous les forfaits, contre absence de prise en charge native", "Configuration de déploiement orientée UE/EEE avec régions actives confirmées par déploiement", "Tenance dédiée en service géré, contre une gestion autonome sur AWS"]
 
@@ -36,7 +35,7 @@ comparison_sections = [
     { feature = "Relais SMTP", apex = 'Oui — smtp.apexmail.ee:587 (STARTTLS)', comp = 'Oui — email-smtp.{region}.amazonaws.com:587 (STARTTLS)<sup><a href="#src-ses3">3</a></sup>', winner = "none" },
     { feature = "Clés d’idempotence", apex = 'Oui (tous les forfaits) — en-tête <code>Idempotency-Key</code>', comp = 'Non pris en charge nativement — AWS recommande une déduplication des messages au niveau applicatif<sup><a href="#src-ses3">3</a></sup>', winner = "apexmail" },
     { feature = "Suivi des événements de message", apex = 'Tableau de bord de diagnostic de livraison par message avec chronologie en 7 étapes', comp = 'Métriques CloudWatch (envoi, rebond, plainte, livraison) + notifications SNS pour les événements — assemblage à votre charge<sup><a href="#src-ses4">4</a></sup>', winner = "apexmail" },
-    { feature = "Email entrant", apex = 'Forfaits Scale et Enterprise', comp = 'Oui — règles de réception SES avec actions S3, Lambda, SNS, SQS<sup><a href="#src-ses5">5</a></sup>', winner = "none" }
+    { feature = "Email entrant", apex = 'Forfaits Business et Enterprise', comp = 'Oui — règles de réception SES avec actions S3, Lambda, SNS, SQS<sup><a href="#src-ses5">5</a></sup>', winner = "none" }
   ]},
   { title = "MODÈLES DE DÉPLOIEMENT", rows = [
     { feature = "Cloud mutualisé", apex = 'Oui (tous les forfaits) — multi-tenant géré, hébergé dans l’UE', comp = 'Oui (tous les comptes) — pool d’IP partagé par défaut<sup><a href="#src-ses6">6</a></sup>', winner = "none" },
@@ -45,7 +44,7 @@ comparison_sections = [
     { feature = "BYOC / déploiement privé", apex = 'Soumis à revue d’architecture et de contrat', comp = 'Inhérent — le client opère sur son propre compte AWS ; SES est un service AWS<sup><a href="#src-ses6">6</a></sup>', winner = "none" }
   ]},
   { title = "CONTRÔLES ENTERPRISE", rows = [
-    { feature = "SAML SSO", apex = 'Forfaits Scale et Enterprise', comp = 'Via AWS IAM Identity Center — nécessite la mise en place d’une AWS Organization et la configuration IAM<sup><a href="#src-ses7">7</a></sup>', winner = "none" },
+    { feature = "SAML SSO", apex = 'Forfaits Business et Enterprise', comp = 'Via AWS IAM Identity Center — nécessite la mise en place d’une AWS Organization et la configuration IAM<sup><a href="#src-ses7">7</a></sup>', winner = "none" },
     { feature = "Sous-comptes / isolation", apex = 'Scale (10) et Enterprise (100) — gérés, hiérarchiques', comp = 'Via AWS Organizations avec un compte séparé par environnement — gestion autonome<sup><a href="#src-ses7">7</a></sup>', winner = "none" },
     { feature = "Support géré", apex = "Conditions de support propres à chaque forfait", comp = 'Plans AWS Support (Developer, Business, Enterprise) — achat distinct de l’usage SES<sup><a href="#src-ses8">8</a></sup>', winner = "none" },
     { feature = "Disponibilité HIPAA", apex = 'Non proposée actuellement', comp = 'Oui — BAA AWS disponible ; SES est un service éligible HIPAA<sup><a href="#src-ses9">9</a></sup>', winner = "competitor" }

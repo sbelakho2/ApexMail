@@ -688,22 +688,19 @@ fn mfa_challenge_key(token: &str) -> String {
 }
 
 fn validate_password_strength(password: &str) -> Result<(), ApiError> {
-    // Use char count for minimum length (Unicode-aware) and byte length for max (DB storage limit)
+    // NIST SP 800-63B-4 policy (external review 2026-09-08 §21): length
+    // and breached-password screening, NOT composition rules. The old
+    // uppercase/lowercase/digit/punctuation mandate pushed users toward
+    // predictable transformations (Password1!) without adding entropy.
+    // Unicode (including spaces) is allowed; paste and password managers
+    // are supported by the clients.
+    //
+    // Use char count for minimum length (Unicode-aware) and byte length
+    // for max (DB storage limit).
     let char_count = password.chars().count();
-    if char_count < 12 || password.len() > 128 {
+    if char_count < 15 || password.len() > 128 {
         return Err(ApiError::Validation(vec![
-            "password must be 12-128 characters".into(),
-        ]));
-    }
-
-    let has_lower = password.chars().any(|c| c.is_ascii_lowercase());
-    let has_upper = password.chars().any(|c| c.is_ascii_uppercase());
-    let has_digit = password.chars().any(|c| c.is_ascii_digit());
-    let has_special = password.chars().any(|c| c.is_ascii_punctuation());
-    if !has_lower || !has_upper || !has_digit || !has_special {
-        return Err(ApiError::Validation(vec![
-            "password must include uppercase, lowercase, number, and an ASCII punctuation mark"
-                .into(),
+            "password must be 15-128 characters; longer is stronger — no uppercase/digit/symbol mix is required".into(),
         ]));
     }
 
@@ -3740,12 +3737,36 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_password_strength_requires_ascii_special_character() {
-        assert!(validate_password_strength("StrongPassword1!").is_ok());
-        assert!(validate_password_strength("ValidPass9?Z").is_ok());
-        assert!(validate_password_strength("ValidPass9~Z").is_ok());
+    fn test_validate_password_strength_follows_nist_length_policy() {
+        // NIST SP 800-63B-4 (review 2026-09-08 §21): length + blocklist,
+        // no composition mandates. A long lowercase passphrase is valid…
+        assert!(validate_password_strength("correct horse battery staple").is_ok());
+        // …Unicode and spaces are allowed…
+        assert!(validate_password_strength("grüße großes passwort").is_ok());
+        // …composition rules are GONE: letters-only is fine if long enough.
+        assert!(validate_password_strength("LetterOnlyLongPassphrase").is_ok());
+        // Too short under the 15-char minimum…
         assert!(matches!(
-            validate_password_strength("Password123é"),
+            validate_password_strength("Strong1!a"),
+            Err(ApiError::Validation(_))
+        ));
+        // …and the old composition-mandate error is retired with it: a
+        // 15+ char letters-only password must NOT be rejected.
+        assert!(!matches!(
+            validate_password_strength("PlainButLongEnough"),
+            Err(ApiError::Validation(m)) if m.iter().any(|e| e.contains("uppercase"))
+        ));
+        // Weak-password blocklist and repeat/sequence rules still apply.
+        assert!(matches!(
+            validate_password_strength("123456789012345678"),
+            Err(ApiError::Validation(_))
+        ));
+        assert!(matches!(
+            validate_password_strength("aaaabbbbccccdddde"),
+            Err(ApiError::Validation(_))
+        ));
+        assert!(matches!(
+            validate_password_strength("abcdabcdabcdabcd"),
             Err(ApiError::Validation(_))
         ));
     }

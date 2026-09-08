@@ -34,13 +34,13 @@ Webhooks allow you to receive HTTP POST requests when events happen in ApexMail,
 
 ## Event Types
 
-### `message.sent`
+### `message.accepted`
 
 Triggered when a message is accepted for delivery.
 
 ```json
 {
-  "event": "message.sent",
+  "event": "message.accepted",
   "timestamp": "2024-01-15T10:30:00Z",
   "data": {
     "messageId": "msg_abc123",

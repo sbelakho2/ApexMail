@@ -14,7 +14,7 @@ last_updated = "2026-07-29"
 - TLS 1.2+ requerido para todas las conexiones API y SMTP.
 - TLS 1.3 preferido cuando sea compatible con el MTA receptor.
 - Política MTA-STS con `mode: enforce` para SMTP entrante.
-- DANE (registros TLSA) para entrega SMTP saliente.
+- Validación DANE (registros TLSA) para dominios destinatarios compatibles en la entrega SMTP saliente.
 - WireGuard o red privada para comunicación entre servicios.
 
 ### Datos en reposo
@@ -29,7 +29,7 @@ last_updated = "2026-07-29"
 
 - Claves API con ámbito por entorno (live/test) con permisos configurables.
 - Firmas HMAC de webhooks (SHA-256) para integridad de carga útil de eventos.
-- SAML SSO en los planes Scale y Enterprise; los compromisos de aprovisionamiento se confirman en el contrato aplicable.
+- SAML SSO en los planes Business y Enterprise; los compromisos de aprovisionamiento se confirman en el contrato aplicable.
 - Control de acceso basado en roles (RBAC) con roles personalizados en plan Enterprise.
 - Autenticación multifactor (TOTP) para acceso al panel.
 - Gestión de sesiones con tiempo de espera configurable y vinculación IP.
@@ -116,7 +116,7 @@ La integridad del sistema se verifica mediante controles automatizados y recurre
 - ApexMail no cuenta actualmente con certificación SOC 2. El mapeo interno de controles y el trabajo de preparación no crean una certificación, un derecho de producto ni un compromiso de fecha de certificación.
 - Resumen de prueba de penetración: planificado para publicación después de completar la primera prueba de penetración externa de la aplicación y remediar los hallazgos altos/críticos. Actualmente no disponible.
 - Las solicitudes de cuestionarios de seguridad se evalúan caso por caso usando los materiales de revisión actuales; los paquetes SIG, CAIQ o HECVAT estandarizados no son un derecho de producto.
-- Los registros de auditoría están disponibles en Growth, Scale y Enterprise; la retención depende del plan contratado.
+- Los registros de auditoría están disponibles en Growth, Business y Enterprise; la retención depende del plan contratado.
 - La facilitación de auditorías de clientes está sujeta a revisión contractual Enterprise.
 
 ## Seguridad operativa

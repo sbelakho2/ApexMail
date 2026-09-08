@@ -4,24 +4,20 @@ description = "See how ApexMail compares to Resend on deliverability, compliance
 template = "compare.html"
 
 [extra]
+noindex = true
 competitor = "Resend"
 competitor_slug = "resend"
 competitor_name = "Resend"
 competitor_description = "Resend is a modern email API for developers with component-based email authoring."
 pricing_as_of = "2026-09-05"
 og_image = "/images/og-image.png"
-# Feature comparison counts — update when capabilities change
-apexmail_wins = 6
-competitor_wins = 0
+# Feature comparison counts are not displayed (review 2026-09-08 §19)
 verdict_title = "Why Choose ApexMail Over Resend?"
 verdict_points = [
-  "Full enterprise features: SSO, white-label, sub-accounts",
-  "Current compliance documentation and audit-capable plan controls",
-  "Custom deployment reviews for dedicated infrastructure needs",
-  "Advanced analytics, content diagnostics, and send-time recommendations",
-  "Built-in consent management, audit logs, and GDPR automation",
-  "Idempotency keys, ARC signing, BIMI, and reputation circuit breaker",
-  "First-party SDKs for Python, Go, PHP, Ruby, and Java are in active development (source in the monorepo, not yet published to registries; no Node.js SDK today — use the HTTP API); Resend offers SDKs for Node.js, PHP, Python, Ruby, Go, Java, Rust, .NET, and Laravel",
+  "Core email data (content, delivery events, sender and recipient data) stored in the EEA by default — not just sent from an EU region",
+  "Private deployment paths (Dedicated Tenant, BYOC) alongside the shared cloud",
+  "Delivery forensics: per-attempt timelines, deferral diagnostics, and the Email Deliverability Grader",
+  "Honest capability disclosure: SDK availability, certification status, and data locations documented as they are, not as aspirational",
 ]
 
 # Comparison data (audit 3.3): rendered by partials/compare/table.html via a
@@ -31,7 +27,7 @@ verdict_points = [
 comparison_sections = [
   { title = "DELIVERABILITY", rows = [
     { feature = "Delivery Rate", apex = '<span class="text-brand-600 font-semibold">High</span>', comp = '<span class="text-surface-600">High</span>', winner = "tie" },
-    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth, 3 on Scale</span>', comp = '<span class="text-surface-600">See provider pricing</span>', winner = "none" },
+    { feature = "Dedicated IP", apex = '<span class="text-brand-600 font-semibold">Approved add-on on Pro; 1 included on Growth, 3 on Business</span>', comp = '<span class="text-surface-600">See provider pricing</span>', winner = "none" },
     { feature = "IP Warming", apex = '<span class="text-brand-600 font-semibold">Automatic geometric</span>', comp = '<span class="text-surface-600">Automatic (managed)</span>', winner = "tie" },
     { feature = "BIMI Support", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" },
     { feature = "ARC Signing", apex = '<span class="text-brand-600">✓</span>', comp = '<span class="text-surface-400">✗</span>', winner = "apexmail" },

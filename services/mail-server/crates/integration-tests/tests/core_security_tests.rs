@@ -342,8 +342,8 @@ mod webhook_security {
 
     #[test]
     fn payload_structure_is_valid() {
-        let payload = WebhookTester::build_test_payload("email.bounced");
-        assert_eq!(payload["type"], "email.bounced");
+        let payload = WebhookTester::build_test_payload("message.bounced");
+        assert_eq!(payload["type"], "message.bounced");
         assert!(payload["test"].as_bool().unwrap());
         assert!(
             payload["id"].as_str().unwrap().starts_with("evt_"),

@@ -21,7 +21,7 @@
           <div class="w-6 h-6 rounded-sm bg-surface-100 flex items-center justify-center flex-shrink-0 text-surface-600">
             <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
           </div>
-          <span class="text-surface-600 text-[14px] font-bold tracking-wide">{% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["feature_free"] %}{{ i18n_data[l]["cta"]["feature_free"] }}{% else %}30,000 free emails every month, forever{% endif %}</span>
+          <span class="text-surface-600 text-[14px] font-bold tracking-wide">{% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["feature_free"] %}{{ i18n_data[l]["cta"]["feature_free"] }}{% else %}3,000 free emails every month + 30,000-launch allowance{% endif %}</span>
         </div>
         <div class="animate-in flex items-center gap-3 text-left">
           <div class="w-6 h-6 rounded-sm bg-surface-100 flex items-center justify-center flex-shrink-0 text-surface-600">
@@ -48,7 +48,7 @@
       <div class="animate-in delay-500 flex flex-wrap items-center justify-center gap-6 text-[14px] font-bold tracking-widest text-surface-600">
         <span class="flex items-center gap-2">
           <span class="w-1.5 h-1.5 rounded-sm bg-success-500"></span>
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["trust_uptime"] %}{{ i18n_data[l]["cta"]["trust_uptime"] }}{% else %}99.9% Uptime SLA (Scale and Enterprise){% endif %}
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["trust_uptime"] %}{{ i18n_data[l]["cta"]["trust_uptime"] }}{% else %}99.9% Uptime SLA (Business and Enterprise){% endif %}
         </span>
         <span class="flex items-center gap-2">
           <span class="w-1.5 h-1.5 rounded-sm bg-brand-500"></span>
@@ -60,7 +60,7 @@
         </span>
         <span class="flex items-center gap-2">
           <span class="w-1.5 h-1.5 rounded-sm bg-surface-400"></span>
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["trust_support"] %}{{ i18n_data[l]["cta"]["trust_support"] }}{% else %}Priority Support (Scale; Dedicated on Enterprise){% endif %}
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["trust_support"] %}{{ i18n_data[l]["cta"]["trust_support"] }}{% else %}Priority Support (Business; Dedicated on Enterprise Cloud){% endif %}
         </span>
       </div>
     </div>

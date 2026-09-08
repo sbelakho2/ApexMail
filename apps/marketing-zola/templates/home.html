@@ -46,7 +46,7 @@
         </form>
         <p class="text-[11px] font-mono text-surface-400 mt-2">
           <svg viewBox="0 0 24 14" width="12" height="8" fill="none" style="display:inline-block;vertical-align:middle;margin-right:4px" aria-hidden="true"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["email_grader_note"] %}{{ i18n_data[l]["home"]["email_grader_note"] }}{% else %}live DNS checks&nbsp;&middot;&nbsp;SPF / DKIM / DMARC / MX&nbsp;&middot;&nbsp;zero JavaScript{% endif %}
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["email_grader_note"] %}{{ i18n_data[l]["home"]["email_grader_note"] }}{% else %}live DNS checks&nbsp;&middot;&nbsp;SPF / DKIM / DMARC / MX{% endif %}
         </p>
       </div>
     </div>
@@ -67,20 +67,20 @@
       <div class="card-dna p-6">
         <span class="k-arc-label">free</span>
         <div class="flex items-baseline gap-1 mt-3 mb-1"><span class="text-2xl font-bold font-mono text-surface-950">€0</span><span class="text-sm text-surface-500">/mo</span></div>
-        <p class="text-[13px] text-surface-500">30,000 emails · 7-day retention</p>
+        <p class="text-[13px] text-surface-500">3,000 emails/mo + 30,000 launch allowance</p>
         <a href="{{ config.extra.app_url }}/signup" class="btn-secondary w-full mt-4">Start free</a>
       </div>
       <div class="card-dna p-6 relative" style="outline:2px solid rgb(var(--brand-500));outline-offset:-1px">
         <span class="k-arc-label" style="color:rgb(var(--brand-500))">pro · most verified</span>
-        <div class="flex items-baseline gap-1 mt-3 mb-1"><span class="text-2xl font-bold font-mono" style="color:rgb(var(--brand-500))">€65</span><span class="text-sm text-surface-500">/mo</span></div>
+        <div class="flex items-baseline gap-1 mt-3 mb-1"><span class="text-2xl font-bold font-mono" style="color:rgb(var(--brand-500))">€89</span><span class="text-sm text-surface-500">/mo</span></div>
         <p class="text-[13px] text-surface-500">150,000 emails · 60-day retention</p>
         <a href="{{ config.extra.app_url }}/signup?plan=pro" class="btn-primary w-full mt-4">Choose Pro</a>
       </div>
       <div class="card-dna p-6">
-        <span class="k-arc-label">scale</span>
-        <div class="flex items-baseline gap-1 mt-3 mb-1"><span class="text-2xl font-bold font-mono text-surface-950">€350</span><span class="text-sm text-surface-500">/mo</span></div>
+        <span class="k-arc-label">business</span>
+        <div class="flex items-baseline gap-1 mt-3 mb-1"><span class="text-2xl font-bold font-mono text-surface-950">€699</span><span class="text-sm text-surface-500">/mo</span></div>
         <p class="text-[13px] text-surface-500">2M emails · 365-day retention</p>
-        <a href="{{ config.extra.app_url }}/signup?plan=scale" class="btn-secondary w-full mt-4">Choose Scale</a>
+        <a href="{{ config.extra.app_url }}/signup?plan=scale" class="btn-secondary w-full mt-4">Choose Business</a>
       </div>
     </div>
   </div>

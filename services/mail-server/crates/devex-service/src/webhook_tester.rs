@@ -352,8 +352,8 @@ mod tests {
 
     #[test]
     fn test_build_test_payload_structure() {
-        let payload = WebhookTester::build_test_payload("email.delivered");
-        assert_eq!(payload["type"], "email.delivered");
+        let payload = WebhookTester::build_test_payload("message.delivered");
+        assert_eq!(payload["type"], "message.delivered");
         assert_eq!(payload["test"], true);
         assert!(payload["id"].as_str().unwrap().starts_with("evt_"));
         assert!(payload["data"]["email_id"]
@@ -504,7 +504,7 @@ mod tests {
             "http://[::1]:8080/hook",
         ] {
             let err = tester
-                .send_test_webhook(url, "email.delivered")
+                .send_test_webhook(url, "message.delivered")
                 .await
                 .expect_err("private target must be rejected before sending");
             assert!(

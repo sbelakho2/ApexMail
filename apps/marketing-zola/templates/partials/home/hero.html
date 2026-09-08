@@ -1,7 +1,11 @@
 {# Hero — v2 unified design language (Spiral-Lock DNA), implemented from the
    approved full-page preview (docs/design/full-page-previews.html). The
    checksum ribbon (one solid slot among faint — the winning needle), the
-   proof headline, the terminal panel, and the stats band with point-meters. #}
+   headline, the terminal panel, and the stats band with point-meters.
+   2026-09-08: the undocumented "signed proof" contract came out of the
+   headline, terminal and CTA — the API has no proof field. The headline
+   now leads with the claim that IS true and defensible: EEA data
+   residency (storage, not just sending) — see /data-locations/. #}
 <section aria-label="Introduction" class="relative bg-surface-50 border-b border-surface-200/80">
   <div class="relative w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 lg:py-24">
 
@@ -16,13 +20,13 @@
           {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_line1"] %}
             {{ i18n_data[l]["home"]["hero_line1"] }}<br>
             {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_line2"] %}{{ i18n_data[l]["home"]["hero_line2"] }}{% else %}Built for{% endif %}
-            <em class="not-italic text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_highlight"] %}{{ i18n_data[l]["home"]["hero_highlight"] }}{% else %}proof.{% endif %}</em>
+            <em class="not-italic text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_highlight"] %}{{ i18n_data[l]["home"]["hero_highlight"] }}{% else %}Europe.{% endif %}</em>
           {% else %}
-            The email API,<br>built for <em class="not-italic text-brand-500">proof.</em>
+            The email API,<br>built for <em class="not-italic text-brand-500">Europe.</em>
           {% endif %}
         </h1>
         <p class="text-surface-600 text-base lg:text-lg max-w-[44ch] mt-5 mb-8">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_subtitle"] %}{{ i18n_data[l]["home"]["hero_subtitle"] }}{% else %}Transactional email with signed proof of delivery on every message. EEA-hosted, GDPR-oriented, no puzzles.{% endif %}
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_subtitle"] %}{{ i18n_data[l]["home"]["hero_subtitle"] }}{% else %}Message content, delivery events and sender data are stored in the EEA by default — not just sent from it. <a href="/data-locations/" class="text-brand-500 font-semibold hover:underline">See where&nbsp;→</a>{% endif %}
         </p>
         <div class="flex flex-col sm:flex-row flex-wrap gap-3">
           <a href="{{ config.extra.app_url }}/signup" class="btn-primary btn-primary--lg">
@@ -42,48 +46,49 @@
             <span class="term-dot"></span><span class="term-dot"></span><span class="term-dot"></span>
             <b>POST /v1/messages</b>
           </div>
-<pre class="term-pre"><span class="term-c">// signed proof on every send</span>
+<pre class="term-pre"><span class="term-c">// delivery events on every send</span>
 <span class="term-k">await</span> apex.messages.create({
   from: <span class="term-s">'hello@yourcompany.com'</span>,
-  to: <span class="term-s">'customer@example.com'</span>,
-  proof: <span class="term-k">true</span>
+  to: <span class="term-s">'customer@example.com'</span>
 });
-<span class="term-c">&rarr; 202 accepted &middot; proof 0x41f2</span>
+<span class="term-c">&rarr; 202 accepted &middot; id msg_2f9a</span>
 <span class="term-c">&rarr; delivered &#10003; 1.8s &middot; eeu</span></pre>
           {# The trace above, made real: a plain form POST to the Rust
              sandbox executor — the request really queues, the worker
              really attempts delivery, the result page shows the live
-             status and latency. Zero JavaScript. #}
+             status and latency. #}
           <form method="POST" action="https://api.apexmail.ee/explorer/exec" class="term-run">
             <input type="hidden" name="lane" value="send">
-            <input type="hidden" name="body" value='{"to":"customer@example.com","subject":"Hello from ApexMail","html":"&lt;h1&gt;Signed proof of delivery.&lt;/h1&gt;","proof":true}'>
+            <input type="hidden" name="body" value='{"to":"customer@example.com","subject":"Hello from ApexMail","html":"&lt;h1&gt;Sent from the EEA.&lt;/h1&gt;"}'>
             <button type="submit" class="btn-primary">
               {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_run_cta"] %}{{ i18n_data[l]["home"]["hero_run_cta"] }}{% else %}Run this request{% endif %}
               <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
             </button>
             <span class="term-run-note">
               <svg viewBox="0 0 24 14" width="12" height="8" fill="none" style="display:inline-block;vertical-align:middle;margin-right:4px" aria-hidden="true"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>
-              {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_run_note"] %}{{ i18n_data[l]["home"]["hero_run_note"] }}{% else %}executes on the live sandbox &middot; zero JavaScript{% endif %}
+              {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_run_note"] %}{{ i18n_data[l]["home"]["hero_run_note"] }}{% else %}executes on the live sandbox{% endif %}
             </span>
           </form>
         </div>
       </div>
     </div>
 
-    {# ── Stats band: mono values + point-meters (the found nonce rides each fill) ── #}
+    {# ── Stats band: mono values + point-meters. Every metric links to its
+       methodology (/performance-methodology/) or live history (status
+       host) — an unexplained number is a trust risk, not proof. ── #}
     <div class="stats mt-14 lg:mt-20" aria-label="Platform statistics">
       <div>
-        <span class="k-arc-label">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["stat_uptime_label"] %}{{ i18n_data[l]["home"]["stat_uptime_label"] }}{% else %}uptime · 12mo{% endif %}</span>
+        <span class="k-arc-label"><a href="https://status.apexmail.ee" class="hover:underline" style="color:inherit">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["stat_uptime_label"] %}{{ i18n_data[l]["home"]["stat_uptime_label"] }}{% else %}uptime · 12mo{% endif %}</a></span>
         <div class="stats-v">99.9<span class="stats-v-dim">%</span></div>
         <div class="k-meter k-ok"><i style="width:99%"></i><b style="left:99%"></b></div>
       </div>
       <div>
-        <span class="k-arc-label">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["stat_delivery_label"] %}{{ i18n_data[l]["home"]["stat_delivery_label"] }}{% else %}median delivery{% endif %}</span>
+        <span class="k-arc-label"><a href="/performance-methodology/" class="hover:underline" style="color:inherit">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["stat_delivery_label"] %}{{ i18n_data[l]["home"]["stat_delivery_label"] }}{% else %}recipient-MX acceptance{% endif %}</a></span>
         <div class="stats-v">1.8<span class="stats-v-dim">s</span></div>
         <div class="k-meter"><i style="width:62%"></i><b style="left:62%"></b></div>
       </div>
       <div>
-        <span class="k-arc-label">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["stat_volume_label"] %}{{ i18n_data[l]["home"]["stat_volume_label"] }}{% else %}messages / month{% endif %}</span>
+        <span class="k-arc-label"><a href="/performance-methodology/" class="hover:underline" style="color:inherit">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["stat_volume_label"] %}{{ i18n_data[l]["home"]["stat_volume_label"] }}{% else %}deliveries · Aug 2026{% endif %}</a></span>
         <div class="stats-v">5.2<span class="stats-v-dim">m</span></div>
         <div class="k-meter"><i style="width:78%"></i><b style="left:78%"></b></div>
       </div>

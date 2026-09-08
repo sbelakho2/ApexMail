@@ -20,7 +20,7 @@ Multi-tenant infrastructure with an EU/EEA-oriented default deployment configura
 **Key characteristics:**
 - No infrastructure management required.
 - Shared IP pools with automatic reputation management.
-- 99.9% uptime SLA (Scale and Enterprise, subject to the applicable service terms).
+- 99.9% uptime SLA (Business and Enterprise, subject to the applicable service terms).
 - Pay-as-you-go or committed monthly plans.
 - EU/EEA-oriented storage configuration; confirm active regions and transfer safeguards for the deployment.
 - Provisioned in minutes.

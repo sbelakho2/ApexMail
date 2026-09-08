@@ -64,7 +64,7 @@ Transactional email is mission-critical infrastructure. Delayed password resets 
 
 | Plan | Monthly Volume | Support |
 |---|---|---|
-| Free | 30,000 emails | Community |
+| Free | 3,000 emails | Community |
 | Starter | 50,000 emails | Email support |
 | Pro | 150,000 emails | Email support |
 | Growth | 500,000 emails | Email support |

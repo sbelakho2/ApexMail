@@ -80,7 +80,7 @@ De conformidad con el Artículo 16(m) de la Directiva 2011/83/UE, el derecho de 
 
 ## 9. SLA
 
-Los clientes de los planes Scale y Enterprise están cubiertos por nuestro [Acuerdo de nivel de servicio](/es/sla/). Los demás planes se proporcionan sobre la base del mejor esfuerzo, sin compromiso de disponibilidad garantizada, salvo acuerdo escrito en contrario.
+Los clientes de los planes Business y Enterprise están cubiertos por nuestro [Acuerdo de nivel de servicio](/es/sla/). Los demás planes se proporcionan sobre la base del mejor esfuerzo, sin compromiso de disponibilidad garantizada, salvo acuerdo escrito en contrario.
 
 ## 10. Limitación de responsabilidad
 

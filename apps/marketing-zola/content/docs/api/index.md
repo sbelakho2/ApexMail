@@ -207,11 +207,11 @@ Webhook payloads are signed with HMAC-SHA256. Verify signatures using `X-ApexMai
 ```
 t=1690000000,v1=hmac_sha256_value
 ```
-Payload: `{timestamp}.{raw_body}` signed with your webhook secret. Events include: `email.sent`, `email.delivered`, `email.opened`, `email.clicked`, `email.bounced`, `email.complained`.
+Payload: `{timestamp}.{raw_body}` signed with your webhook secret. Events include: `email.sent`, `message.delivered`, `message.opened`, `message.clicked`, `message.bounced`, `message.complained`.
 
 ## SDKs
 
-ApexMail ships first-party SDKs for Python, Go, PHP, Ruby, and Java. **These SDKs are under active development and are not yet published to public package registries** (PyPI, pkg.go.dev, Packagist, RubyGems, Maven Central). SDK source is distributed on request (support@apexmail.ee) until the first registry release; see the [SDKs page](/docs/sdks/) for the per-language status and planned install commands. There is no Node.js SDK — Node developers should call the HTTP API directly with `fetch`.
+ApexMail ships first-party SDKs for Python, Go, PHP, Ruby, and Java. **These SDKs are under active development and are not yet published to public package registries** (PyPI, pkg.go.dev, Packagist, RubyGems, Maven Central). SDK source is currently private and available to approved preview customers (support@apexmail.ee) until the first registry release; see the [SDKs page](/docs/sdks/) for the per-language status and planned install commands. There is no Node.js SDK — Node developers should call the HTTP API directly with `fetch`.
 
 | Language   | Module / package            | Minimum runtime | Status          |
 |------------|-----------------------------|-----------------|-----------------|

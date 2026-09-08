@@ -438,7 +438,7 @@ async fn concurrent_webhook_creation_uniqueness() {
     let tenant_id = id::generate_id("ten", 21);
     let webhook_url = format!("https://example.com/hook-{}", Uuid::new_v4());
     let webhook_secret = "whsec_test_secret_12345";
-    let events_json = serde_json::json!(["email.sent", "email.opened"]);
+    let events_json = serde_json::json!(["message.accepted", "message.opened"]);
     let events_json2 = events_json.clone();
 
     seed_minimal_webhook_tables(&pool, &tenant_id).await;

@@ -9,7 +9,7 @@ last_updated = "2026-05-07"
 
 ## 1. Scope
 
-This Service Level Agreement ("SLA") applies to Scale and Enterprise plan customers and defines our uptime and performance commitments.
+This Service Level Agreement ("SLA") applies to Business and Enterprise plan customers and defines our uptime and performance commitments.
 
 ## 2. Uptime Commitment
 
@@ -37,12 +37,23 @@ Uptime is measured by our external monitoring system (Blackbox exporter + Promet
 
 ## 5. Service Credits
 
-| Plan | Availability commitment | Monthly credit cap |
-|---|---:|---:|
-| Scale | 99.9% | 10% |
-| Enterprise | 99.9% | 25% |
+Eligible plans carry a 99.9% monthly availability commitment. When measured
+monthly uptime falls below it, a service credit applies per the tiered bands
+below — the credit percentage is the tenant's monthly recurring charge for the
+affected month.
 
-Credits are calculated from measured monthly uptime below the commitment and capped by the customer's plan.
+| Measured monthly availability | Service credit |
+|---|---:|
+| ≥ 99.9% | 0% (commitment met) |
+| 99.0% – 99.899% | 10% |
+| 95.0% – 98.999% | 25% |
+| < 95.0% | 50% |
+
+**Plan caps:** Business 10% of monthly charge; Enterprise Cloud and contracted
+deployments 25% (or the contracted figure where an order form specifies one).
+
+Credits are calculated from measured monthly uptime below the commitment and
+capped by the customer's plan.
 
 ## 6. Exclusions
 

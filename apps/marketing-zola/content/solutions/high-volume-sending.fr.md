@@ -31,7 +31,7 @@ Grandes plateformes SaaS envoyant plus d'1M d'emails/mois. Plateformes e-commerc
 - **Priorisation des files** — Le trafic transactionnel est traité en priorité devant les envois massifs en période de charge. Objectifs de temps jusqu'à la boîte de réception supervisés.
 - **API par lots** (`POST /v1/messages/batch`) — Soumettez jusqu'à 100 messages par requête. Surcoût par message inférieur aux appels API individuels.
 - **Limites de débit** — Les limites sont appliquées par clé API et par forfait ; consultez la documentation API actuelle pour les limites publiques.
-- **SLA contractuel** — Scale et Enterprise incluent des engagements SLA au niveau du forfait ; les déploiements non standards requièrent une revue contractuelle distincte.
+- **SLA contractuel** — Business et Enterprise incluent des engagements SLA au niveau du forfait ; les déploiements non standards requièrent une revue contractuelle distincte.
 
 ## Implémentation technique
 

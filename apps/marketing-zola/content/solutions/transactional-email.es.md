@@ -64,7 +64,7 @@ El email transaccional es infraestructura de misión crítica. Los restablecimie
 
 | Plan | Volumen mensual | Soporte |
 |---|---|---|
-| Free | 30.000 emails | Comunidad |
+| Free | 3.000 emails | Comunidad |
 | Starter | 50.000 emails | Soporte por email |
 | Pro | 150.000 emails | Soporte por email |
 | Growth | 500.000 emails | Soporte por email |

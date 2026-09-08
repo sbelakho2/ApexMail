@@ -71,7 +71,11 @@
   {% if xdefault_url %}
   <link rel="alternate" hreflang="x-default" href="{{ xdefault_url }}" />
   {% endif %}
+  {% if page.extra.noindex %}
+  <meta name="robots" content="noindex, follow" />
+  {% else %}
   <meta name="robots" content="index, follow, max-video-preview:-1, max-image-preview:large, max-snippet:-1" />
+  {% endif %}
   <meta name="googlebot" content="index, follow, max-video-preview:-1, max-image-preview:large, max-snippet:-1" />
   <meta name="keywords" content="email API, transactional email, email infrastructure, GDPR-oriented email, email deliverability, enterprise email, developer email API" />
   <meta name="author" content="{{ config.extra.author }}" />

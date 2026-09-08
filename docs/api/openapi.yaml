@@ -5257,7 +5257,7 @@ paths:
         Register a webhook endpoint to receive real-time event notifications.
         
         Available events:
-        - `message.sent` - Message accepted for delivery
+        - `message.accepted` - Message accepted for delivery
         - `message.delivered` - Message delivered to recipient
         - `message.bounced` - Message bounced
         - `message.complained` - Recipient marked as spam
@@ -10299,7 +10299,7 @@ components:
           items:
             type: string
             enum:
-              - message.sent
+              - message.accepted
               - message.delivered
               - message.bounced
               - message.complained
@@ -10319,7 +10319,7 @@ components:
           items:
             type: string
             enum:
-              - message.sent
+              - message.accepted
               - message.delivered
               - message.bounced
               - message.complained

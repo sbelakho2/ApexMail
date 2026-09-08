@@ -64,7 +64,7 @@ Transaktions-E-Mails sind geschäftskritische Infrastruktur. Verzögerte Passwor
 
 | Tarif | Monatliches Volumen | Support |
 |---|---|---|
-| Free | 30.000 E-Mails | Community |
+| Free | 3.000 E-Mails | Community |
 | Starter | 50.000 E-Mails | E-Mail-Support |
 | Pro | 150.000 E-Mails | E-Mail-Support |
 | Growth | 500.000 E-Mails | E-Mail-Support |

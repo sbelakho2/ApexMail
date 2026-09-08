@@ -262,8 +262,8 @@ fn devex_webhook_signing_verification() {
     let tester = WebhookTester::new(vec![secret.to_string()]).expect("webhook tester");
 
     // Build a test payload
-    let payload = WebhookTester::build_test_payload("email.delivered");
-    assert_eq!(payload["type"], "email.delivered");
+    let payload = WebhookTester::build_test_payload("message.delivered");
+    assert_eq!(payload["type"], "message.delivered");
     assert!(payload["test"].as_bool().unwrap());
     assert!(payload["data"]["email_id"].is_string());
 

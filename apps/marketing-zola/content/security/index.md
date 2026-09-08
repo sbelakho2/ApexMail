@@ -14,7 +14,7 @@ last_updated = "2026-07-29"
 - TLS 1.2+ required for all API and SMTP connections.
 - TLS 1.3 preferred where supported by the receiving MTA.
 - MTA-STS policy with `mode: enforce` for inbound SMTP.
-- DANE (TLSA records) for outbound SMTP delivery.
+- DANE (TLSA record) validation for supported recipient domains on outbound SMTP delivery.
 - WireGuard or private networking for inter-service communication.
 
 ### Data at Rest
@@ -29,7 +29,7 @@ last_updated = "2026-07-29"
 
 - API keys scoped per environment (live/test) with configurable permissions.
 - Webhook HMAC signatures (SHA-256) for event payload integrity.
-- SAML SSO on Scale and Enterprise plans; any provisioning commitment is confirmed in the applicable contract.
+- SAML SSO on Business and Enterprise plans; any provisioning commitment is confirmed in the applicable contract.
 - Role-based access control (RBAC) with custom roles on Enterprise plan.
 - Multi-factor authentication (TOTP) for dashboard access.
 - Session management with configurable timeout and IP binding.

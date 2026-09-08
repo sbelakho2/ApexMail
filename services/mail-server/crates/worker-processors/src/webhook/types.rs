@@ -129,15 +129,36 @@ impl WebhookJob {
             .unwrap_or_default()
     }
 
-    /// Calculate next retry delay with exponential backoff.
+    /// Next retry delay on the FIXED retry ladder (review 2026-09-08 §7).
+    ///
+    /// Infrastructure webhooks must survive multi-hour customer outages:
+    /// the old exponential curve (1s·2^n, capped at 1h) exhausted three
+    /// retries within minutes, turning a brief outage into permanent
+    /// event loss. The published schedule is now:
+    ///
+    ///   attempt 1 delivers immediately; on failure retry after
+    ///   30s, 2m, 10m, 30m, 1h, 3h, 6h, 12h, 24h
+    ///
+    /// (10 total attempts, at-least-once semantics unchanged). The
+    /// stored `retry_delay`/`backoff_multiplier` fields are kept for
+    /// schema compatibility but no longer shape the curve.
     pub fn next_retry_delay_ms(&self) -> i64 {
-        let multiplier = if self.backoff_multiplier.is_finite() && self.backoff_multiplier > 0.0 {
-            self.backoff_multiplier
-        } else {
-            2.0 // Default exponential backoff
-        };
-        let delay = self.retry_delay as f64 * multiplier.powi((self.attempt - 1).max(0));
-        (delay as i64).min(3_600_000) // Cap at 1 hour
+        const RETRY_LADDER_MS: [i64; 9] = [
+            30_000,     // 30s
+            120_000,    // 2m
+            600_000,    // 10m
+            1_800_000,  // 30m
+            3_600_000,  // 1h
+            10_800_000, // 3h
+            21_600_000, // 6h
+            43_200_000, // 12h
+            86_400_000, // 24h
+        ];
+        // `attempt` is 1-based and counts the attempt that just failed:
+        // after attempt 1 wait RETRY_LADDER_MS[0], after attempt 9 wait
+        // the last rung; attempt 10+ is exhaustion, not scheduling.
+        let idx = (self.attempt.max(1) as usize).clamp(1, RETRY_LADDER_MS.len()) - 1;
+        RETRY_LADDER_MS[idx]
     }
 }
 

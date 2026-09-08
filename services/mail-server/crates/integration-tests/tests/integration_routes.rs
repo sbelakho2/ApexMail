@@ -65,7 +65,7 @@ mod devex {
     async fn webhook_test_endpoint_accepts_post() {
         let body = serde_json::json!({
             "url": "https://httpbin.org/post",
-            "event_type": "email.delivered"
+            "event_type": "message.delivered"
         });
         let resp = app()
             .oneshot(

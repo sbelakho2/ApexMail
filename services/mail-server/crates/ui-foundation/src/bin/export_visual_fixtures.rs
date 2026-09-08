@@ -32,11 +32,10 @@ const AUTH_FIXTURES: [(&str, &str, &str); 3] = [
     ("web-forgot-password", "web", "/forgot-password"),
 ];
 
-const MARKETING_FIXTURES: [(&str, &str); 20] = [
+const MARKETING_FIXTURES: [(&str, &str); 19] = [
     ("marketing", "/"),
     ("marketing", "/acceptable-use"),
     ("marketing", "/api-console"),
-    ("marketing", "/case-studies"),
     ("marketing-zola", "/compare"),
     ("marketing", "/compare/postmark"),
     ("marketing", "/compare/resend"),

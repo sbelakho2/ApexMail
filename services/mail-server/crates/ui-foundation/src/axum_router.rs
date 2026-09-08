@@ -211,10 +211,6 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/architecture/index.html"
         ),)),
-        "/case-studies" => Some(include_str!(concat!(
-            env!("APX_MARKETING_PUBLIC_DIR"),
-            "/case-studies/index.html"
-        ),)),
         "/compare" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/compare/index.html"
@@ -1873,7 +1869,6 @@ fn render_marketing(surface: &str, path: &str) -> Option<String> {
         "/features" => leptos_views::marketing_features_page(),
         "/compliance" => leptos_views::marketing_compliance_page(),
         "/private-cloud" => leptos_views::marketing_private_cloud_page(),
-        "/case-studies" => leptos_views::marketing_case_studies_page(),
         "/forensic" => leptos_views::marketing_forensic_page(),
         "/status" => leptos_views::marketing_status_page(),
         "/compare" => {
@@ -2867,8 +2862,8 @@ mod tests {
     fn form_field_map_repopulates_values_and_renders_errors() {
         let mut map = crate::view_data::FormFieldData::new("webhook-create");
         map.set("url", "https://example.com/hook");
-        map.set("events", "message.sent");
-        map.set("events", "email.delivered");
+        map.set("events", "message.accepted");
+        map.set("events", "message.delivered");
         map.error("url", "Enter an https URL.");
         map.secret("Webhook signing secret", "whsec_abc123");
         let html = render_route_with_form_fields(

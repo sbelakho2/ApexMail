@@ -4,6 +4,7 @@ description = "Sehen Sie, wie ApexMail im Vergleich zu SendGrid bei Zustellbarke
 template = "compare.html"
 
 [extra]
+noindex = true
 competitor = "SendGrid"
 competitor_slug = "sendgrid"
 competitor_name = "SendGrid"
@@ -13,15 +14,13 @@ verification_date = "2026-08-19"
 currency_note = "Preise werden in EUR angezeigt. Veröffentlicht ein Anbieter nur USD, wird der EUR-Betrag zum Kurs 1 USD = €0.92 (Referenzkurs, 2026-08-19) umgerechnet und der vom Anbieter veröffentlichte USD-Preis in Klammern angegeben. Angaben ohne anfallende Steuern."
 og_image = "/images/og-image.png"
 # Feature comparison counts — update when capabilities change
-apexmail_wins = 5
-competitor_wins = 0
 verdict_title = "Warum ApexMail statt SendGrid?"
 verdict_points = [
   "Bessere Zustellbarkeit durch automatisches IP-Warm-up und Reputationsschutz",
   "DSGVO-orientierte Workflows, Einwilligungsnachweise und Audit-Logs",
   "Zustellbarkeits-Einblicke ohne automatische Black-Box-Entscheidungen beim Versand",
   "Individuelle Bereitstellungsprüfungen für regulierte Enterprise-Programme",
-  "SSO in Scale und Enterprise mit aktueller Tarif-Bündelung",
+  "SSO in Business und Enterprise mit aktueller Tarif-Bündelung",
 ]
 
 # Comparison data (audit 3.3): rendered by partials/compare/table.html via a
@@ -53,7 +52,7 @@ comparison_sections = [
   ]},
   { title = "PREISE", rows = [
     { feature = "Kostenlose Stufe", apex = '<span class="text-brand-600 font-semibold">30.000 E-Mails/Monat</span>', comp = '<span class="text-surface-600">100 E-Mails/Tag</span>', winner = "none" },
-    { feature = "100K E-Mails/Monat", apex = '<span class="text-brand-600 font-semibold">€65 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€82.75 (US$89.95) — Pro; Essentials ab €18.35 (US$19.95)</span>', winner = "apexmail" },
+    { feature = "100K E-Mails/Monat", apex = '<span class="text-brand-600 font-semibold">€89 (Pro: 150K)</span>', comp = '<span class="text-surface-600">€82.75 (US$89.95) — Pro; Essentials ab €18.35 (US$19.95)</span>', winner = "apexmail" },
     { feature = "SSO inklusive", apex = '<span class="text-brand-600 font-semibold">Scale- und Enterprise-Tarife</span>', comp = '<span class="text-surface-600">Ab Pro enthalten</span>', winner = "none" },
     { feature = "Prüfung individueller Bereitstellungen", apex = '<span class="text-brand-600 font-semibold">Enterprise-Review</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},

@@ -14,7 +14,7 @@ last_updated = "2026-07-29"
 - TLS 1.2+ für alle API- und SMTP-Verbindungen erforderlich.
 - TLS 1.3 bevorzugt, wo vom empfangenden MTA unterstützt.
 - MTA-STS-Richtlinie mit `mode: enforce` für eingehende SMTP.
-- DANE (TLSA-Einträge) für ausgehende SMTP-Zustellung.
+- DANE-Validierung (TLSA-Einträge) für unterstützte Empfängerdomänen bei der ausgehenden SMTP-Zustellung.
 - WireGuard oder private Vernetzung für die dienstübergreifende Kommunikation.
 
 ### Daten im Ruhezustand
@@ -116,7 +116,7 @@ Die Systemintegrität wird durch automatisierte, wiederkehrende Prüfungen im ge
 - ApexMail ist derzeit nicht SOC-2-zertifiziert. Interne Kontrollkartierung und Bereitschaftsarbeit begründen weder eine Zertifizierung noch ein Produktmerkmal oder eine Zusage für ein Zertifizierungsdatum.
 - Zusammenfassung des Penetrationstests: geplant zur Veröffentlichung nach Abschluss des ersten externen Anwendungs-Penetrationstests und Behebung hoher/kritischer Ergebnisse. Derzeit nicht verfügbar.
 - Sicherheitsfragebögen werden anhand aktueller Prüfdokumentation im Einzelfall bewertet; standardisierte SIG-, CAIQ- oder HECVAT-Pakete sind kein Produktmerkmal.
-- Audit-Protokolle sind für Growth, Scale und Enterprise verfügbar; die Aufbewahrung richtet sich nach dem abonnierten Tarif.
+- Audit-Protokolle sind für Growth, Business und Enterprise verfügbar; die Aufbewahrung richtet sich nach dem abonnierten Tarif.
 - Unterstützung bei Kundenaudits unterliegt einer Enterprise-Vertragsprüfung.
 
 ## Betriebliche Sicherheit

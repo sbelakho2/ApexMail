@@ -4,6 +4,7 @@ description = "Vea cómo se compara ApexMail con Resend en entregabilidad, cumpl
 template = "compare.html"
 
 [extra]
+noindex = true
 competitor = "Resend"
 competitor_slug = "resend"
 competitor_name = "Resend"
@@ -11,8 +12,6 @@ competitor_description = "Resend es una API de email moderna para desarrolladore
 pricing_as_of = "2026-05-09"
 og_image = "/images/og-image.png"
 # Feature comparison counts — update when capabilities change
-apexmail_wins = 6
-competitor_wins = 0
 verdict_title = "¿Por qué elegir ApexMail en lugar de Resend?"
 verdict_points = [
   "Funciones empresariales completas: SSO, marca blanca y subcuentas",

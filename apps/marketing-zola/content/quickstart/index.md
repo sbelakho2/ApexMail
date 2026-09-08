@@ -29,7 +29,7 @@ Navigate to [app.apexmail.ee/signup](https://app.apexmail.ee/signup).
 
 **Error cases:**
 - **`Email already registered`**: Use the password reset flow at [app.apexmail.ee/reset-password](https://app.apexmail.ee/reset-password).
-- **`Password too weak`**: Use 12+ characters with at least one number and one symbol.
+- **`Password too weak`**: Use 15+ characters (longer passphrases are fine — no symbol or digit mix is required). Avoid common passwords and simple repeat/sequence patterns.
 
 ---
 
@@ -171,7 +171,7 @@ Choose your integration method:
 
 > **Not yet on public registries.** The ApexMail SDKs are **not yet published to PyPI, pkg.go.dev, Packagist, RubyGems, or Maven Central** — `pip install apexmail`, `go get github.com/apexmail/apexmail-go`, and `composer require apexmail/apexmail-php` will fail until the first stable release. Until then, install from the monorepo source and pin to a specific commit, and **verify the source you vendor** before shipping it. See [SDKs](/docs/sdks/) for the per-language status.
 
-The SDK source is distributed on request while the packages are being
+SDK source is currently private and available to approved preview customers while the packages are being
 prepared for their first public registry release — email
 [support@apexmail.ee](mailto:support@apexmail.ee) (or your account manager)
 and you will receive the pinned source drop for your language, with a
@@ -384,4 +384,4 @@ Before moving to production:
 - [Webhooks](/docs/webhooks/) — full event catalog, security, and delivery documentation
 - [SDKs](/docs/sdks/) — SDK installation, authentication, and usage examples
 - [Analytics](/docs/analytics/) — delivery metrics, bounce classification, and reporting
-- [API Explorer](/api-explorer/) — static API explorer for browsing example payloads
+- [API Explorer](/api-explorer/) — run real requests against the isolated live sandbox

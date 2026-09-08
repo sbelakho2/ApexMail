@@ -6997,12 +6997,15 @@ mod tests {
     #[test]
     fn urlencoded_parser_keeps_repeated_keys_and_decodes_escapes() {
         let pairs = parse_urlencoded(
-            "events=message.sent&events=email.bounced&url=https%3A%2F%2Fex.io%2Fhook&q=a+b",
+            "events=message.accepted&events=message.bounced&url=https%3A%2F%2Fex.io%2Fhook&q=a+b",
         );
         let form = ParsedForm::from_pairs(pairs);
         assert_eq!(
             form.get_all("events"),
-            vec!["message.sent".to_string(), "email.bounced".to_string()]
+            vec![
+                "message.accepted".to_string(),
+                "message.bounced".to_string()
+            ]
         );
         assert_eq!(form.field("url"), "https://ex.io/hook");
         assert_eq!(form.field("q"), "a b");
@@ -7088,20 +7091,23 @@ mod tests {
     fn webhook_event_selection_validates_against_the_known_set() {
         assert_eq!(
             normalize_webhook_events(vec![
-                "message.sent".into(),
-                " message.sent ".into(),
+                "message.accepted".into(),
+                " message.accepted ".into(),
                 "".into(),
-                "email.bounced".into(),
+                "message.bounced".into(),
             ]),
-            vec!["message.sent".to_string(), "email.bounced".to_string()]
+            vec![
+                "message.accepted".to_string(),
+                "message.bounced".to_string()
+            ]
         );
         assert!(validate_webhook_events(&[]).is_some());
-        let error = validate_webhook_events(&["message.sent".into(), "delivred".into()]);
+        let error = validate_webhook_events(&["message.accepted".into(), "delivred".into()]);
         let error = error.expect("typo rejected");
         assert!(error.contains("delivred"));
-        assert!(error.contains("message.sent"));
+        assert!(error.contains("message.accepted"));
         assert!(
-            validate_webhook_events(&["*".into(), "email.delivered".into()]).is_none(),
+            validate_webhook_events(&["*".into(), "message.delivered".into()]).is_none(),
             "wildcard and known names pass"
         );
     }
@@ -7802,7 +7808,7 @@ mod tests {
             .unwrap();
             assert_eq!(
                 events,
-                serde_json::json!(["message.sent", "email.delivered"]),
+                serde_json::json!(["message.accepted", "message.delivered"]),
                 "the chosen checkbox set is stored, deduplicated"
             );
             // Item N: the signing secret is in the structured field-map.
@@ -7839,7 +7845,7 @@ mod tests {
                 flash_text(&flash).contains("delivred"),
                 "flash was: {flash:?}"
             );
-            assert!(flash_text(&flash).contains("message.sent"));
+            assert!(flash_text(&flash).contains("message.accepted"));
             let rows: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM webhooks WHERE tenant_id = $1")
                     .bind(&tenant)
@@ -7875,7 +7881,7 @@ mod tests {
                 "http://127.0.0.1:8080/hook",
                 "ftp://example.com/hook",
             ] {
-                let body = csrf_body(&state, &[("url", url), ("events", "message.sent")]);
+                let body = csrf_body(&state, &[("url", url), ("events", "message.accepted")]);
                 let response = app
                     .clone()
                     .oneshot(post_form("/web/webhooks", &body))
@@ -7934,7 +7940,7 @@ mod tests {
                 &state,
                 &[
                     ("url", "https://example.com/hook-26"),
-                    ("events", "message.sent"),
+                    ("events", "message.accepted"),
                 ],
             );
             let response = app

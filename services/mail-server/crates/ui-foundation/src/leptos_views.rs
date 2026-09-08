@@ -1956,11 +1956,14 @@ fn web_auth_shell(title: &str, subtitle: &str, form_html: &str, footer_html: &st
 }
 
 fn password_pattern() -> &'static str {
-    r"(?=.*\d)(?=.*[a-z])(?=.*[A-Z])(?=.*[\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E]).{12,128}"
+    // NIST SP 800-63B-4 (review 2026-09-08 §21): length-only pattern —
+    // no composition mandates. `.` does not match newlines; passwords
+    // must not contain them (multi-line paste accidents).
+    r".{15,128}"
 }
 
 fn password_requirements_text() -> &'static str {
-    "Use 12-128 characters with uppercase, lowercase, a number, and ASCII punctuation such as ! @ # $ % ^ & * ? - _ ."
+    "Use 15-128 characters — longer is stronger. Any characters welcome (no symbol or digit mix required); avoid common passwords and simple repeat/sequence patterns."
 }
 
 fn password_requirements_hint() -> String {
@@ -2027,10 +2030,10 @@ pub fn web_signup_page(csrf_token: &str) -> String {
 /// subscription.
 pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) -> String {
     let (plan_id, plan_display_name) = match selected_plan {
-        Some("starter") => ("starter", Some("Starter")),
+        Some("starter") => ("starter", Some("Developer")),
         Some("pro") => ("pro", Some("Pro")),
         Some("growth") => ("growth", Some("Growth")),
-        Some("scale") => ("scale", Some("Scale")),
+        Some("scale") => ("scale", Some("Business")),
         Some("free") | None => ("free", None),
         // This helper can be reused outside the HTTP router, so repeat the
         // allow-list check here instead of trusting a caller's query parsing.
@@ -2068,7 +2071,7 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
 <label class=\"apex-klabel\" for=\"signup-password\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Password</label>\
 </div>\
 <div class=\"relative\">\
-<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 12 characters\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
+<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"15\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 15 characters\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 {password_hint}\
 </div>\
@@ -2168,14 +2171,14 @@ pub fn web_reset_password_page_with_state(
 <div class=\"space-y-2\">\
 <label class=\"apex-klabel\" for=\"new-password\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>New password</label>\
 <div class=\"relative\">\
-<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
+<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"15\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 {password_hint}\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"apex-klabel\" for=\"confirm-password\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Confirm password</label>\
 <div class=\"relative\">\
-<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"12\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
+<input id=\"confirm-password\" name=\"confirmPassword\" type=\"password\" required autocomplete=\"new-password\" minlength=\"15\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Confirm your new password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 </div>\
 
@@ -2321,7 +2324,7 @@ pub fn web_dashboard_page() -> String {
 <div class=\"grid grid-cols-1 sm:grid-cols-3 gap-6\" aria-label=\"Plan usage\">\
 <div class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 px-6 py-5 shadow-sm\">\
 <p class=\"apex-klabel mb-2\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>sends · month</p>\
-<p class=\"text-lg font-bold text-surface-950 tracking-tight mb-3\">0 <span class=\"text-sm font-medium text-surface-500\">/ 30,000</span></p>\
+<p class=\"text-lg font-bold text-surface-950 tracking-tight mb-3\">0 <span class=\"text-sm font-medium text-surface-500\">/ 3,000</span></p>\
 <div class=\"apex-meter\"><div class=\"apex-meter-fill\" style=\"width:2%\"></div><span class=\"apex-meter-point\" style=\"left:2%\"></span></div>\
 </div>\
 <div class=\"bg-white rounded-[16px_16px_9px_9px] border border-surface-200/60 px-6 py-5 shadow-sm\">\
@@ -3328,7 +3331,7 @@ pub fn web_settings_billing_page() -> String {
 <p class=\"text-3xl font-bold mt-4\">$0<span class=\"text-sm font-normal text-muted-foreground\">/month</span></p>\
 <form class=\"mt-4\" method=\"post\" action=\"/web/billing/checkout\">\
 <label class=\"apex-klabel mb-2\" for=\"upgrade-plan\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Plan</label>\
-<select id=\"upgrade-plan\" name=\"plan\" class=\"w-full max-w-xs px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\"><option value=\"starter\">Starter — €25/mo</option><option value=\"pro\">Pro — €65/mo</option><option value=\"growth\">Growth — €150/mo</option><option value=\"scale\">Scale — €350/mo</option></select>\
+<select id=\"upgrade-plan\" name=\"plan\" class=\"w-full max-w-xs px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\"><option value=\"starter\">Developer — €29/mo</option><option value=\"pro\">Pro — €89/mo</option><option value=\"growth\">Growth — €229/mo</option><option value=\"scale\">Business — €699/mo</option></select>\
 <button type=\"submit\" class=\"mt-3 inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Upgrade Plan</button>\
 </form>\
 </div>\
@@ -4378,34 +4381,34 @@ pub fn marketing_pricing_page() -> String {
     // Previously this fallback showed 3 invented USD plans that contradicted
     // the marketing site.
     let plans: &[(&str, &str, &str, &str)] = &[
-        ("Free", "€0", "30,000 emails/month", ""),
+        ("Free", "€0", "3,000 emails/month", ""),
         (
-            "Starter",
-            "€25",
+            "Developer",
+            "€29",
             "50,000 emails/month · €0.40 per extra 1,000",
             "",
         ),
         (
             "Pro",
-            "€65",
+            "€89",
             "150,000 emails/month · €0.40 per extra 1,000",
             "border-2 border-primary",
         ),
         (
             "Growth",
-            "€150",
+            "€229",
             "500,000 emails/month · €0.40 per extra 1,000",
             "",
         ),
         (
-            "Scale",
-            "€350",
+            "Business",
+            "€699",
             "2,000,000 emails/month · priority support",
             "",
         ),
         (
-            "Enterprise",
-            "€3,000",
+            "Enterprise Cloud",
+            "from €1,750",
             "5,000,000 emails/month on annual contracts",
             "",
         ),
@@ -4441,7 +4444,7 @@ pub fn marketing_pricing_calculator_page() -> String {
 <div class=\"rounded-sm border bg-card p-8 space-y-6\">\
 <div><label class=\"text-sm font-medium\">Monthly emails</label>\
 <input type=\"range\" min=\"0\" max=\"1000000\" value=\"30000\" class=\"w-full mt-2\" />\
-<p class=\"text-sm text-surface-500 mt-1\">30,000 emails/month</p></div>\
+<p class=\"text-sm text-surface-500 mt-1\">3,000 emails/month</p></div>\
 <div class=\"border-t pt-6\"><p class=\"text-sm text-surface-500\">Estimated cost</p>\
 <p class=\"text-4xl font-bold text-surface-900\">$0/mo</p></div>\
 </div></div></section>"
@@ -4480,15 +4483,6 @@ pub fn marketing_private_cloud_page() -> String {
 <div class=\"grid md:grid-cols-2 gap-8\">\
 <div class=\"rounded-sm border p-6\"><h3 class=\"text-lg font-bold\">Dedicated Infrastructure</h3><p class=\"text-sm text-surface-500 mt-2\">Your own isolated environment with dedicated resources.</p></div>\
 <div class=\"rounded-sm border p-6\"><h3 class=\"text-lg font-bold\">BYOIP and Domains</h3><p class=\"text-sm text-surface-500 mt-2\">Dedicated IP lifecycle, BYOIP verification, and custom domain planning.</p></div>\
-</div></div></section>".to_string()
-}
-
-pub fn marketing_case_studies_page() -> String {
-    "<section class=\"py-20 px-4\"><div class=\"max-w-4xl mx-auto\">\
-<h1 class=\"text-4xl font-bold text-surface-900 mb-4\">Use Cases</h1>\
-<p class=\"text-lg text-surface-600 mb-8\">Implementation-backed patterns for regulated email infrastructure.</p>\
-<div class=\"space-y-8\">\
-<div class=\"rounded-sm border p-6\"><h3 class=\"text-lg font-bold\">Regulated SaaS Security Review</h3><p class=\"text-sm text-surface-500 mt-2\">SOC 2 evidence workflows, HIPAA BAA lifecycle, GDPR workflows, and questionnaire automation support Enterprise review.</p></div>\
 </div></div></section>".to_string()
 }
 
@@ -4881,15 +4875,15 @@ mod tests {
     #[test]
     fn fallback_pricing_matches_marketing_catalog() {
         let html = marketing_pricing_page();
-        for expected in ["€0", "€25", "€65", "€150", "€350", "€3,000"] {
+        for expected in ["€0", "€29", "€89", "€229", "€699", "€1,750"] {
             assert!(html.contains(expected), "missing EUR price {expected}");
         }
         assert!(!html.contains("$0"), "no USD prices");
         assert!(!html.contains("$65"));
-        assert!(html.contains("Starter"));
+        assert!(html.contains("Developer"));
         assert!(html.contains("Growth"));
-        assert!(html.contains("Scale"));
-        assert!(html.contains("Enterprise"));
+        assert!(html.contains("Business"));
+        assert!(html.contains("Enterprise Cloud"));
     }
 
     /// Backslash return_to values are open redirects: WHATWG URL parsing
@@ -5253,8 +5247,9 @@ mod tests {
         // Dead JS-era markup purge: the pr-12 gutter reserved for the
         // deleted password-toggle button is gone.
         assert!(!html.contains("pr-12"));
-        assert!(html.contains(r"\x21-\x2F\x3A-\x40\x5B-\x60\x7B-\x7E"));
-        assert!(html.contains("ASCII punctuation"));
+        // NIST 800-63B-4: length-only pattern, no composition mandates.
+        assert!(html.contains("minlength=\"15\""));
+        assert!(html.contains("15-128 characters"));
         assert!(html.contains("action=\"/web/auth/signup\""));
         assert!(html.contains("name=\"plan\" value=\"free\""));
         assert!(html.contains("Create Account"));
@@ -5266,7 +5261,7 @@ mod tests {
         let selected = web_signup_page_with_plan("", Some("scale"));
         assert!(selected.contains("name=\"plan\" value=\"scale\""));
         assert!(selected.contains("data-signup-plan-intent=\"scale\""));
-        assert!(selected.contains("activate Scale after email verification"));
+        assert!(selected.contains("activate Business after email verification"));
 
         let invalid = web_signup_page_with_plan("", Some("enterprise"));
         assert!(invalid.contains("name=\"plan\" value=\"free\""));
@@ -5955,7 +5950,6 @@ mod tests {
             marketing_page(&marketing_features_page()),
             marketing_page(&marketing_compliance_page()),
             marketing_page(&marketing_private_cloud_page()),
-            marketing_page(&marketing_case_studies_page()),
             marketing_page(&marketing_forensic_page()),
             marketing_page(&marketing_status_page()),
             marketing_page(&marketing_compare_page("postmark")),
@@ -6048,7 +6042,6 @@ mod tests {
             ("mkt_features", marketing_features_page()),
             ("mkt_compliance", marketing_compliance_page()),
             ("mkt_private_cloud", marketing_private_cloud_page()),
-            ("mkt_case_studies", marketing_case_studies_page()),
             ("mkt_forensic", marketing_forensic_page()),
             ("mkt_status", marketing_status_page()),
             ("mkt_compare", marketing_compare_page("postmark")),

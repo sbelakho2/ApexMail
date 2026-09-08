@@ -64,7 +64,7 @@ L'email transactionnel est une infrastructure critique. Des réinitialisations d
 
 | Forfait | Volume mensuel | Support |
 |---|---|---|
-| Free | 30 000 emails | Communauté |
+| Free | 3 000 emails | Communauté |
 | Starter | 50 000 emails | Support par email |
 | Pro | 150 000 emails | Support par email |
 | Growth | 500 000 emails | Support par email |

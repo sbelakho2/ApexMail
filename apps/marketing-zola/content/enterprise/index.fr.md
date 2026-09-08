@@ -1,6 +1,6 @@
 +++
 title = "ApexMail Enterprise | Conditions commerciales et achats"
-description = "Email transactionnel Enterprise : un contrat annuel de €30,000 avec 5 millions d'emails inclus, un support dédié et une planification contractuelle du déploiement."
+description = "Email transactionnel Enterprise Cloud : à partir de €1,750/mois en contrat annuel avec 5 millions d'e-mails inclus, support dédié et planification contractuelle du déploiement."
 template = "prose.html"
 
 [extra]
@@ -15,7 +15,7 @@ Enterprise est une offre contractuelle de livraison d'emails pour les organisati
 
 | Élément | Enterprise |
 |---|---|
-| Prix | €30,000/an dans le cadre d'un contrat annuel |
+| Prix | à partir de €1,750/mois dans le cadre d'un contrat annuel |
 | Volume d'emails inclus | 5,000,000 emails/mois |
 | Appels API | Illimités |
 | Domaines et membres d'équipe | Illimités |
@@ -25,7 +25,7 @@ Enterprise est une offre contractuelle de livraison d'emails pour les organisati
 | Niveau de support | Dédié |
 | Cloud Privé / BYOIP | Soumis à revue contractuelle et technique |
 
-Le prix annuel du catalogue est de €30,000, soit 10 fois le prix mensuel de référence de €3,000. Les coûts personnalisés de volume, de déploiement et de services professionnels sont négociés et indiqués uniquement dans une proposition écrite ou un bon de commande.
+Le prix catalogue est de à partir de €1,750/mois (€17,500/an). Les coûts personnalisés de volume, de déploiement et de services professionnels sont négociés et indiqués uniquement dans une proposition écrite ou un bon de commande.
 
 ## Revue d'achat
 

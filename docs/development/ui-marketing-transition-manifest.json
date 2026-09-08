@@ -7,7 +7,6 @@
     "/",
     "/acceptable-use",
     "/api-console",
-    "/case-studies",
     "/compare/postmark",
     "/compare/resend",
     "/compare/sendgrid",
@@ -46,43 +45,186 @@
   ],
   "transitionalOnlyRoutes": [],
   "routeOwners": [
-    { "path": "/", "owner": "dual-maintained", "status": "shared" },
-    { "path": "/acceptable-use", "owner": "dual-maintained", "status": "shared" },
-    { "path": "/api-console", "owner": "dual-maintained", "status": "shared" },
-    { "path": "/case-studies", "owner": "dual-maintained", "status": "shared" },
-    { "path": "/compare", "owner": "apps/marketing-zola", "status": "canonical-only" },
-    { "path": "/contact", "owner": "apps/marketing-zola", "status": "canonical-only" },
-    { "path": "/contact/sales", "owner": "apps/marketing-zola", "status": "canonical-only" },
-    { "path": "/de", "owner": "apps/marketing-zola", "status": "canonical-only" },
-    { "path": "/de/cookies", "owner": "apps/marketing-zola", "status": "canonical-only" },
-    { "path": "/docs", "owner": "apps/marketing-zola", "status": "canonical-only" },
-    { "path": "/docs/alerts", "owner": "apps/marketing-zola", "status": "canonical-only" },
-    { "path": "/docs/analytics", "owner": "apps/marketing-zola", "status": "canonical-only" },
-    { "path": "/docs/api", "owner": "apps/marketing-zola", "status": "canonical-only" },
-    { "path": "/docs/api/grader", "owner": "apps/marketing-zola", "status": "canonical-only" },
-    { "path": "/docs/sdks", "owner": "apps/marketing-zola", "status": "canonical-only" },
-    { "path": "/docs/webhooks", "owner": "apps/marketing-zola", "status": "canonical-only" },
-    { "path": "/es", "owner": "apps/marketing-zola", "status": "canonical-only" },
-    { "path": "/es/cookies", "owner": "apps/marketing-zola", "status": "canonical-only" },
-    { "path": "/fr", "owner": "apps/marketing-zola", "status": "canonical-only" },
-    { "path": "/fr/cookies", "owner": "apps/marketing-zola", "status": "canonical-only" },
-    { "path": "/inbox-placement", "owner": "apps/marketing-zola", "status": "canonical-only" },
-    { "path": "/secure-email-for-regulated-saas", "owner": "apps/marketing-zola", "status": "canonical-only" },
-    { "path": "/compare/postmark", "owner": "dual-maintained", "status": "shared" },
-    { "path": "/compare/resend", "owner": "dual-maintained", "status": "shared" },
-    { "path": "/compare/sendgrid", "owner": "dual-maintained", "status": "shared" },
-    { "path": "/compliance", "owner": "dual-maintained", "status": "shared" },
-    { "path": "/cookies", "owner": "dual-maintained", "status": "shared" },
-    { "path": "/dpa", "owner": "dual-maintained", "status": "shared" },
-    { "path": "/features", "owner": "dual-maintained", "status": "shared" },
-    { "path": "/forensic", "owner": "dual-maintained", "status": "shared" },
-    { "path": "/pricing", "owner": "dual-maintained", "status": "shared" },
-    { "path": "/pricing/calculator", "owner": "dual-maintained", "status": "shared" },
-    { "path": "/privacy", "owner": "dual-maintained", "status": "shared" },
-    { "path": "/private-cloud", "owner": "dual-maintained", "status": "shared" },
-    { "path": "/sla", "owner": "dual-maintained", "status": "shared" },
-    { "path": "/status", "owner": "dual-maintained", "status": "shared" },
-    { "path": "/terms", "owner": "dual-maintained", "status": "shared" }
+    {
+      "path": "/",
+      "owner": "dual-maintained",
+      "status": "shared"
+    },
+    {
+      "path": "/acceptable-use",
+      "owner": "dual-maintained",
+      "status": "shared"
+    },
+    {
+      "path": "/api-console",
+      "owner": "dual-maintained",
+      "status": "shared"
+    },
+    {
+      "path": "/compare",
+      "owner": "apps/marketing-zola",
+      "status": "canonical-only"
+    },
+    {
+      "path": "/contact",
+      "owner": "apps/marketing-zola",
+      "status": "canonical-only"
+    },
+    {
+      "path": "/contact/sales",
+      "owner": "apps/marketing-zola",
+      "status": "canonical-only"
+    },
+    {
+      "path": "/de",
+      "owner": "apps/marketing-zola",
+      "status": "canonical-only"
+    },
+    {
+      "path": "/de/cookies",
+      "owner": "apps/marketing-zola",
+      "status": "canonical-only"
+    },
+    {
+      "path": "/docs",
+      "owner": "apps/marketing-zola",
+      "status": "canonical-only"
+    },
+    {
+      "path": "/docs/alerts",
+      "owner": "apps/marketing-zola",
+      "status": "canonical-only"
+    },
+    {
+      "path": "/docs/analytics",
+      "owner": "apps/marketing-zola",
+      "status": "canonical-only"
+    },
+    {
+      "path": "/docs/api",
+      "owner": "apps/marketing-zola",
+      "status": "canonical-only"
+    },
+    {
+      "path": "/docs/api/grader",
+      "owner": "apps/marketing-zola",
+      "status": "canonical-only"
+    },
+    {
+      "path": "/docs/sdks",
+      "owner": "apps/marketing-zola",
+      "status": "canonical-only"
+    },
+    {
+      "path": "/docs/webhooks",
+      "owner": "apps/marketing-zola",
+      "status": "canonical-only"
+    },
+    {
+      "path": "/es",
+      "owner": "apps/marketing-zola",
+      "status": "canonical-only"
+    },
+    {
+      "path": "/es/cookies",
+      "owner": "apps/marketing-zola",
+      "status": "canonical-only"
+    },
+    {
+      "path": "/fr",
+      "owner": "apps/marketing-zola",
+      "status": "canonical-only"
+    },
+    {
+      "path": "/fr/cookies",
+      "owner": "apps/marketing-zola",
+      "status": "canonical-only"
+    },
+    {
+      "path": "/inbox-placement",
+      "owner": "apps/marketing-zola",
+      "status": "canonical-only"
+    },
+    {
+      "path": "/secure-email-for-regulated-saas",
+      "owner": "apps/marketing-zola",
+      "status": "canonical-only"
+    },
+    {
+      "path": "/compare/postmark",
+      "owner": "dual-maintained",
+      "status": "shared"
+    },
+    {
+      "path": "/compare/resend",
+      "owner": "dual-maintained",
+      "status": "shared"
+    },
+    {
+      "path": "/compare/sendgrid",
+      "owner": "dual-maintained",
+      "status": "shared"
+    },
+    {
+      "path": "/compliance",
+      "owner": "dual-maintained",
+      "status": "shared"
+    },
+    {
+      "path": "/cookies",
+      "owner": "dual-maintained",
+      "status": "shared"
+    },
+    {
+      "path": "/dpa",
+      "owner": "dual-maintained",
+      "status": "shared"
+    },
+    {
+      "path": "/features",
+      "owner": "dual-maintained",
+      "status": "shared"
+    },
+    {
+      "path": "/forensic",
+      "owner": "dual-maintained",
+      "status": "shared"
+    },
+    {
+      "path": "/pricing",
+      "owner": "dual-maintained",
+      "status": "shared"
+    },
+    {
+      "path": "/pricing/calculator",
+      "owner": "dual-maintained",
+      "status": "shared"
+    },
+    {
+      "path": "/privacy",
+      "owner": "dual-maintained",
+      "status": "shared"
+    },
+    {
+      "path": "/private-cloud",
+      "owner": "dual-maintained",
+      "status": "shared"
+    },
+    {
+      "path": "/sla",
+      "owner": "dual-maintained",
+      "status": "shared"
+    },
+    {
+      "path": "/status",
+      "owner": "dual-maintained",
+      "status": "shared"
+    },
+    {
+      "path": "/terms",
+      "owner": "dual-maintained",
+      "status": "shared"
+    }
   ],
   "shutdownCriteria": [
     "full route parity",

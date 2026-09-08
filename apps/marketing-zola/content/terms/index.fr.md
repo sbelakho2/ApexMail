@@ -80,7 +80,7 @@ Conformément à l'Article 16(m) de la Directive 2011/83/UE, le droit de rétrac
 
 ## 9. SLA
 
-Les clients des forfaits Scale et Enterprise sont couverts par notre [Service Level Agreement](/fr/sla/). Les autres forfaits sont fournis sur la base des meilleurs efforts, sans engagement de disponibilité garanti, sauf accord écrit contraire.
+Les clients des forfaits Business et Enterprise sont couverts par notre [Service Level Agreement](/fr/sla/). Les autres forfaits sont fournis sur la base des meilleurs efforts, sans engagement de disponibilité garanti, sauf accord écrit contraire.
 
 ## 10. Limitation de responsabilité
 

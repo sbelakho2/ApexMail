@@ -15,7 +15,7 @@
         <span class="text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_pricing_island"] and i18n_data[l]["home_pricing_island"]["pricing_island_heading_2"] %}{{ i18n_data[l]["home_pricing_island"]["pricing_island_heading_2"] }}{% else %}scales with you{% endif %}</span>
       </h2>
       <p class="text-surface-600 text-base max-w-xl mx-auto">
-        {% if i18n_data and i18n_data[l] and i18n_data[l]["home_pricing_island"] and i18n_data[l]["home_pricing_island"]["pricing_island_subtitle"] %}{{ i18n_data[l]["home_pricing_island"]["pricing_island_subtitle"] }}{% else %}Enter your volumes — the Rust billing engine (the same code that invoices you) computes your exact plan and overage.{% endif %}
+        {% if i18n_data and i18n_data[l] and i18n_data[l]["home_pricing_island"] and i18n_data[l]["home_pricing_island"]["pricing_island_subtitle"] %}{{ i18n_data[l]["home_pricing_island"]["pricing_island_subtitle"] }}{% else %}Enter your volumes — the calculator uses the same pricing rules used for billing, so the estimate matches your invoice.{% endif %}
       </p>
     </div>
 
@@ -89,7 +89,7 @@
           </button>
           <p class="text-[11px] font-mono text-surface-400">
             <svg viewBox="0 0 24 14" width="12" height="8" fill="none" style="display:inline-block;vertical-align:middle;margin-right:4px" aria-hidden="true"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"/></svg>
-            computed by the Rust billing engine — zero JavaScript
+            Calculated using the same pricing rules used for billing
           </p>
         </div>
       </form>
