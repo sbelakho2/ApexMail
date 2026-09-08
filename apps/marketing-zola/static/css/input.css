@@ -1745,6 +1745,26 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
    proper contrast, monospace data in slot cells, and proper card depth.
    ═══════════════════════════════════════════════════════════════════════════ */
 
+/* ── Numeric tokens (review 2026-09-08 §6/§57): ALL financial and
+      operational numerals are plain tabular lining figures with ZERO
+      tracking — the spaced APEXMAIL wordmark treatment must never leak
+      onto prices, percentages, counts, latencies or timestamps. ── */
+.price-value,
+.stats-v,
+.stats-v-dim,
+.metric,
+.usage-number,
+.tabular-nums {
+  letter-spacing: 0 !important;
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings: "tnum" 1, "lnum" 1;
+}
+.price-value {
+  font: 700 30px var(--font-mono, ui-monospace, Menlo, monospace);
+  color: rgb(var(--surface-950));
+}
+.price-value--brand { color: rgb(var(--brand-500)); }
+
 /* ── Ledger cards: visible arch crown + depth + hex tags that read ── */
 .ledger-feat .card-dna {
   border: 1px solid rgb(var(--surface-200));

@@ -509,7 +509,7 @@ fn migration_control_plane_pages_have_titles() {
 #[test]
 fn migration_marketing_pages_have_content() {
     let pages: Vec<(&str, &str)> = vec![
-        ("/", "Enterprise Email"),
+        ("/", "The email API"),
         ("/pricing", "pricing"),
         ("/features", "Features"),
         ("/compliance", "Compliance"),

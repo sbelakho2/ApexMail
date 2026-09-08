@@ -3,9 +3,9 @@
   <div class="relative max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
     <div class="animate-in text-center">
       <h2 class="mb-6">
-        <span class="text-surface-950">{% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["heading_1"] %}{{ i18n_data[l]["cta"]["heading_1"] }}{% else %}Ready to Ship{% endif %}</span>
+        <span class="text-surface-950">{% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["heading_1"] %}{{ i18n_data[l]["cta"]["heading_1"] }}{% else %}Ready to{% endif %}</span>
         <br />
-        <span class="text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["heading_2"] %}{{ i18n_data[l]["cta"]["heading_2"] }}{% else %}Better Email?{% endif %}</span>
+        <span class="text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["heading_2"] %}{{ i18n_data[l]["cta"]["heading_2"] }}{% else %}send?{% endif %}</span>
       </h2>
       <p class="text-xl text-surface-600 max-w-2xl mx-auto mb-10 leading-relaxed font-medium">
         {% if i18n_data and i18n_data[l] and i18n_data[l]["cta"] and i18n_data[l]["cta"]["subtitle"] %}{{ i18n_data[l]["cta"]["subtitle"] }}{% else %}Start on the free tier and grow into the same API — no migration, no renegotiation, no surprise overage rates.{% endif %}

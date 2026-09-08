@@ -401,8 +401,8 @@
       "hero_badge": "Jetzt mit Private-Cloud-Bereitstellungen",
       "hero_line1": "Die E-Mail-API",
       "hero_line2": "Gebaut für",
-      "hero_highlight": "Europa.",
-      "hero_subtitle": "Nachrichteninhalte, Zustellereignisse und Absenderdaten werden standardmäßig im EWR gespeichert — nicht nur von dort versendet. <a href=\"/data-locations/\" class=\"text-brand-500 font-semibold hover:underline\">Mehr erfahren&nbsp;→</a>",
+      "hero_highlight": "Kontrolle.",
+      "hero_subtitle": "Senden Sie transaktionale und Lifecycle-E-Mails über eine schnelle API oder einen SMTP-Relay, prüfen Sie jeden Zustellversuch und verwalten Sie Zustellbarkeit auf einer operativen Plattform.",
       "hero_benefit_1": "Zustellbarkeits-Tooling",
       "hero_benefit_2": "DSGVO- und Audit-Workflow-Unterstützung",
       "hero_benefit_3": "Zustellereignis-Tracking",
@@ -411,7 +411,7 @@
       "hero_performance_metric_desc": "Produktions-API P95 (Gateway)",
       "hero_performance_note": "P95 von POST /v1/messages, 30-Tage-Fenster, 1-Min-Buckets, exkl. Sandbox/Health-Probes.",
       "hero_cta_primary": "Kostenlos starten",
-      "hero_cta_secondary": "API erkunden",
+      "hero_cta_secondary": "Live-API-Anfrage ausführen",
       "email_grader_eyebrow": "Systemfunktion",
       "email_grader_heading": "E-Mail-Zustellbarkeits-Grader",
       "email_grader_desc": "Erhalten Sie eine deterministische Buchstabennote mit Zustellbarkeitsprüfungen Ihrer DNS, Authentifizierung, Inhalte und Reputation. Kostenlos für alle ApexMail-Kunden.",
@@ -432,7 +432,9 @@
       "hero_run_note": "läuft in der Live-Sandbox",
       "email_grader_field": "Domain",
       "email_grader_submit": "Domain bewerten",
-      "email_grader_note": "Live-DNS-Prüfungen · SPF / DKIM / DMARC / MX"
+      "email_grader_note": "Live-DNS-Prüfungen · SPF / DKIM / DMARC / MX",
+      "hero_eyebrow": "Transaktionale E-Mail-Infrastruktur",
+      "hero_proof_line": "Keine Kreditkarte &middot; 3.000 E-Mails/Monat &middot; 30.000-Nachrichten-Startguthaben &middot; <a href=\"/data-locations/\" class=\"text-brand-500 font-semibold hover:underline\">Standardmäßig im EWR gespeichert</a>"
     },
     "home_features": {
       "eyebrow": "Funktionsumfang",
@@ -1080,10 +1082,10 @@
     },
     "home": {
       "hero_badge": "Maintenant avec déploiements Cloud Privé",
-      "hero_line1": "L'API Email",
+      "hero_line1": "L'API email pensée pour",
       "hero_line2": "Conçu pour",
-      "hero_highlight": "l'Europe.",
-      "hero_subtitle": "Le contenu des messages, les événements de livraison et les données d'expédition sont stockés dans l'EEE par défaut — pas seulement envoyés depuis l'EEE. <a href=\"/data-locations/\" class=\"text-brand-500 font-semibold hover:underline\">Voir où&nbsp;→</a>",
+      "hero_highlight": "le contrôle.",
+      "hero_subtitle": "Envoyez des emails transactionnels et lifecycle via une API rapide ou un relais SMTP, inspectez chaque tentative de livraison et pilotez la délivrabilité depuis une plateforme opérationnelle.",
       "hero_benefit_1": "Outils de délivrabilité",
       "hero_benefit_2": "Support des workflows RGPD et d'audit",
       "hero_benefit_3": "Suivi des événements de livraison",
@@ -1092,7 +1094,7 @@
       "hero_performance_metric_desc": "API de production P95 (passerelle)",
       "hero_performance_note": "P95 de POST /v1/messages, fenêtre de 30 jours, buckets de 1 min, hors sandbox/sondes de santé.",
       "hero_cta_primary": "Commencer gratuitement",
-      "hero_cta_secondary": "Explorer l'API",
+      "hero_cta_secondary": "Exécuter une requête API réelle",
       "email_grader_eyebrow": "Fonctionnalité système",
       "email_grader_heading": "Évaluateur de délivrabilité d'email",
       "email_grader_desc": "Obtenez une note déterministe avec des vérifications de délivrabilité de vos DNS, authentification, contenu et réputation. Gratuit pour tous les clients ApexMail.",
@@ -1113,7 +1115,9 @@
       "hero_run_note": "s'exécute sur le sandbox en direct",
       "email_grader_field": "Domaine",
       "email_grader_submit": "Évaluer mon domaine",
-      "email_grader_note": "vérifications DNS en direct · SPF / DKIM / DMARC / MX"
+      "email_grader_note": "vérifications DNS en direct · SPF / DKIM / DMARC / MX",
+      "hero_eyebrow": "Infrastructure email transactionnelle",
+      "hero_proof_line": "Sans carte bancaire &middot; 3 000 emails/mois &middot; allocation de lancement de 30 000 messages &middot; <a href=\"/data-locations/\" class=\"text-brand-500 font-semibold hover:underline\">stocké dans l’EEE par défaut</a>"
     },
     "a11y": {
       "back_to_top": "Retour en haut",
@@ -1761,10 +1765,10 @@
     },
     "home": {
       "hero_badge": "Ahora con implementaciones de Nube Privada",
-      "hero_line1": "La API de Email",
+      "hero_line1": "La API de email hecha para",
       "hero_line2": "Construido para",
-      "hero_highlight": "Europa.",
-      "hero_subtitle": "El contenido de los mensajes, los eventos de entrega y los datos del remitente se almacenan en el EEE por defecto — no solo se envían desde él. <a href=\"/data-locations/\" class=\"text-brand-500 font-semibold hover:underline\">Ver dónde&nbsp;→</a>",
+      "hero_highlight": "el control.",
+      "hero_subtitle": "Envía email transaccional y de ciclo de vida por API o SMTP, inspecciona cada intento de entrega y gestiona la entregabilidad desde una plataforma operativa.",
       "hero_benefit_1": "Herramientas de entregabilidad",
       "hero_benefit_2": "Soporte de flujos de trabajo RGPD y de auditoría",
       "hero_benefit_3": "Seguimiento de eventos de entrega",
@@ -1773,7 +1777,7 @@
       "hero_performance_metric_desc": "API de producción P95 (gateway)",
       "hero_performance_note": "P95 de POST /v1/messages, ventana de 30 días, cubos de 1 min, excluyendo sandbox/sondas de salud.",
       "hero_cta_primary": "Empezar gratis",
-      "hero_cta_secondary": "Explorar API",
+      "hero_cta_secondary": "Ejecutar una solicitud API real",
       "email_grader_eyebrow": "Funcionalidad del sistema",
       "email_grader_heading": "Evaluador de entregabilidad de email",
       "email_grader_desc": "Obtenga una calificación determinista con verificaciones de entregabilidad de su DNS, autenticación, contenido y reputación. Gratis para todos los clientes de ApexMail.",
@@ -1794,7 +1798,9 @@
       "hero_run_note": "se ejecuta en el sandbox en vivo",
       "email_grader_field": "Dominio",
       "email_grader_submit": "Evaluar mi dominio",
-      "email_grader_note": "comprobaciones DNS en vivo · SPF / DKIM / DMARC / MX"
+      "email_grader_note": "comprobaciones DNS en vivo · SPF / DKIM / DMARC / MX",
+      "hero_eyebrow": "Infraestructura de email transaccional",
+      "hero_proof_line": "Sin tarjeta &middot; 3.000 emails/mes &middot; asignación de lanzamiento de 30.000 mensajes &middot; <a href=\"/data-locations/\" class=\"text-brand-500 font-semibold hover:underline\">almacenado en el EEE por defecto</a>"
     },
     "a11y": {
       "back_to_top": "Volver arriba",

@@ -22,11 +22,12 @@
       </div>
     </div>
 
-    {# ── Self-serve ladder (review 2026-09-08 §6): Free → Developer → Pro →
-       Growth → Business. Enterprise renders as its own full-width section
-       below, Dedicated Tenant / BYOC below that. Prices are plain
-       tabular numerals — scannable, not decorative. ── #}
-    <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+    {# ── Self-serve ladder (review 2026-09-08 §7): Row 1 = Free →
+       Developer → Pro → Growth; Row 2 = one larger Business card.
+       Enterprise Infrastructure is a visually separated 3-card section
+       below. Prices are plain tabular numerals — scannable, not
+       decorative. ── #}
+    <div class="grid md:grid-cols-2 lg:grid-cols-4 gap-6">
       {% set plan_name = "Free" %}{% set plan_price = "€0" %}{% set plan_period = "/month" %}{% set plan_description = "Development, testing, and learning." %}{% set plan_features = ["3,000 emails/month", "One-time 30,000-email launch allowance (first 30 days)", "1 sending domain", "1 team member", "REST API + SMTP relay", "7-day event retention", "Community support"] %}{% set plan_cta_label = "Start Free" %}{% set plan_cta_url = config.extra.app_url ~ "/signup" %}{% set plan_cta_aria_label = "Start Free - Free plan at €0/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
       {% include "partials/pricing/card.html" %}
 
@@ -39,44 +40,48 @@
       {% set plan_name = "Growth" %}{% set plan_price = "€229" %}{% set plan_period = "/month" %}{% set plan_description = "For teams that need advanced deliverability features." %}{% set plan_features = ["500,000 emails/month", "100 sending domains", "25 team members", "1 dedicated IP included", "A/B testing and audit logs", "Custom retention and data export", "90-day event retention", "Email support"] %}{% set plan_cta_label = "Start Growth" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=growth" %}{% set plan_cta_aria_label = "Start Growth - Growth plan at €229/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
       {% include "partials/pricing/card.html" %}
 
-      {% set plan_name = "Business" %}{% set plan_price = "€699" %}{% set plan_period = "/month" %}{% set plan_description = "For high-volume senders needing isolation." %}{% set plan_features = ["2,000,000 emails/month", "Unlimited sending domains", "50 team members", "3 dedicated IPs included", "SAML SSO and inbound email", "10 subaccounts", "99.9% SLA with tiered service credits", "Priority support"] %}{% set plan_cta_label = "Start Business" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=scale" %}{% set plan_cta_aria_label = "Start Business - Business plan at €699/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
+    </div>
+
+    {# ── Row 2: the larger Business card (2M volume, isolation) ── #}
+    <div class="mt-6 max-w-3xl mx-auto">
+      {% set plan_name = "Business" %}{% set plan_price = "€699" %}{% set plan_period = "/month" %}{% set plan_description = "For high-volume senders needing isolation." %}{% set plan_features = ["2,000,000 emails/month", "Unlimited sending domains", "50 team members", "1 dedicated IP included; second assigned where useful", "SAML SSO and inbound email", "10 subaccounts", "99.9% SLA with tiered service credits", "Priority support"] %}{% set plan_cta_label = "Start Business" %}{% set plan_cta_url = config.extra.app_url ~ "/signup?plan=scale" %}{% set plan_cta_aria_label = "Start Business - Business plan at €699/month" %}{% set plan_is_popular = false %}{% set plan_is_enterprise = false %}{% set plan_button_primary = false %}
       {% include "partials/pricing/card.html" %}
     </div>
 
-    {# ── Enterprise Cloud: its own full-width section ── #}
-    <div class="mt-10 card-dna p-8 lg:p-10" style="border-radius:16px 16px 9px 9px">
-      <div class="flex flex-col lg:flex-row lg:items-center gap-8">
-        <div class="lg:flex-1">
+    {# ── Enterprise Infrastructure (review §7): three EQUAL cards —
+       Enterprise Cloud, Dedicated Tenant, BYOC. Contractual features,
+       isolated tenancy, customer-controlled environment. ── #}
+    <div class="mt-16 pt-10 border-t border-surface-200">
+      <h2 class="text-2xl font-bold text-surface-950 tracking-tight mb-2">Enterprise infrastructure</h2>
+      <p class="text-sm text-surface-500 mb-8">Deployment models beyond the shared cloud — scoped to your operational and compliance requirements.</p>
+      <div class="grid md:grid-cols-3 gap-6">
+        <div class="card-dna p-6 flex flex-col">
           <span class="k-arc-label">enterprise cloud</span>
           <div class="flex items-baseline gap-2 mt-3 mb-1">
-            <span class="text-3xl font-bold text-surface-950" style="font-variant-numeric: tabular-nums">from €1,750</span>
-            <span class="text-sm text-surface-500">/month, annual contract</span>
+            <span class="price-value" style="font-size:24px">from €1,750</span>
+            <span class="text-sm text-surface-500">/mo, annual contract</span>
           </div>
-          <p class="text-sm text-surface-600 max-w-2xl">For large organizations: 5,000,000 emails/month, unlimited domains and team members, 10 dedicated IPs included, SAML SSO and audit logs, white-label, private cloud and BYOIP, 100 subaccounts, 730-day event retention, dedicated CSM and 99.9% SLA with tiered service credits.</p>
+          <p class="text-sm text-surface-600 mt-2 flex-1">Contractual features on shared-adjacent infrastructure: 5M emails/month, SSO, audit logs, white-label, 730-day event retention, CSM, 99.9% SLA with tiered credits.</p>
+          <a href="{{ lp }}/contact/sales/" class="btn-secondary mt-4">Contact sales</a>
         </div>
-        <div class="shrink-0">
-          <a href="{{ lp }}/contact/sales/" class="btn-primary">Contact sales</a>
+        <div class="card-dna p-6 flex flex-col">
+          <span class="k-arc-label">dedicated tenant</span>
+          <div class="flex items-baseline gap-2 mt-3 mb-1">
+            <span class="price-value" style="font-size:24px">from €4,000</span>
+            <span class="text-sm text-surface-500">/mo + setup</span>
+          </div>
+          <p class="text-sm text-surface-600 mt-2 flex-1">Isolated single-tenant ApexMail in our EEA infrastructure: separate queues, storage boundary and monitoring, scoped to your workload — <a href="{{ lp }}/private-cloud/" class="text-brand-500 font-semibold hover:underline">how it works</a>.</p>
+          <a href="{{ lp }}/contact/sales/" class="btn-secondary mt-4">Architecture review</a>
         </div>
-      </div>
-    </div>
-
-    {# ── Private deployment models: commercially separate from Enterprise Cloud ── #}
-    <div class="mt-6 grid md:grid-cols-2 gap-6">
-      <div class="card-dna p-6">
-        <span class="k-arc-label">dedicated tenant</span>
-        <div class="flex items-baseline gap-2 mt-3 mb-1">
-          <span class="text-2xl font-bold text-surface-950" style="font-variant-numeric: tabular-nums">from €4,000</span>
-          <span class="text-sm text-surface-500">/month + setup</span>
+        <div class="card-dna p-6 flex flex-col">
+          <span class="k-arc-label">byoc</span>
+          <div class="flex items-baseline gap-2 mt-3 mb-1">
+            <span class="price-value" style="font-size:24px">from €6,500</span>
+            <span class="text-sm text-surface-500">/mo + setup</span>
+          </div>
+          <p class="text-sm text-surface-600 mt-2 flex-1">Customer-controlled environment: ApexMail running in your cloud account, your keys, your boundaries — <a href="{{ lp }}/private-cloud/" class="text-brand-500 font-semibold hover:underline">BYOC details</a>.</p>
+          <a href="{{ lp }}/contact/sales/" class="btn-secondary mt-4">Architecture review</a>
         </div>
-        <p class="text-sm text-surface-600 mt-2">Single-tenant ApexMail in our EEA infrastructure, scoped to your workload. Priced by tenancy, not by the Enterprise Cloud contract — <a href="{{ lp }}/private-cloud/" class="text-brand-500 font-semibold hover:underline">how it works</a>.</p>
-      </div>
-      <div class="card-dna p-6">
-        <span class="k-arc-label">byoc</span>
-        <div class="flex items-baseline gap-2 mt-3 mb-1">
-          <span class="text-2xl font-bold text-surface-950" style="font-variant-numeric: tabular-nums">from €6,500</span>
-          <span class="text-sm text-surface-500">/month + setup</span>
-        </div>
-        <p class="text-sm text-surface-600 mt-2">ApexMail running in your cloud account, your keys, your boundaries. A separate commercial track from shared and dedicated tenancy — <a href="{{ lp }}/private-cloud/" class="text-brand-500 font-semibold hover:underline">BYOC details</a>.</p>
       </div>
     </div>
 

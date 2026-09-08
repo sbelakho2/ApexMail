@@ -103,7 +103,7 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
         },
     ),
     "scale": PlanExpectation(
-        "Business", 69_900, 699_000, 2_000_000, 20_000_000, -1, 50, 365, 3, "Priority",
+        "Business", 69_900, 699_000, 2_000_000, 20_000_000, -1, 50, 365, 1, "Priority",
         {
             "dedicated_ip": True,
             "sso_enabled": True,
@@ -113,7 +113,7 @@ EXPECTED_CATALOG: dict[str, PlanExpectation] = {
         },
     ),
     "enterprise": PlanExpectation(
-        "Enterprise Cloud", 175_000, 1_750_000, 5_000_000, -1, -1, -1, 730, 10, "Dedicated",
+        "Enterprise Cloud", 175_000, 1_750_000, 5_000_000, -1, -1, -1, 730, 3, "Dedicated",
         {
             "dedicated_ip": True,
             "sso_enabled": True,
@@ -491,20 +491,21 @@ def validate_marketing_source(catalog: dict[str, ParsedPlan], errors: list[str])
     for stale in ("Private Cloud (dedicated tenant)", "BYOC from", "&minus;10%"):
         check(stale not in calculator, f"calculator source contains stale token {stale!r}", errors)
 
-    for needle in ("€29", "€89", "€229", "€699", "€1,750", "€17,500/yr", "€0.40 per additional 1,000 emails"):
+    for needle in ("€29", "€89", "€229", "€699", "€1,750", "€17,500/yr", "€0.80, Pro €0.60, Growth/Business €0.35 per 1,000"):
         check(needle in island, f"generated pricing island source is missing {needle!r}", errors)
     for stale in ("SendGrid", "Mailchimp", "You Save"):
         check(stale not in island, f"generated pricing island contains stale token {stale!r}", errors)
 
     for needle in (
-        "€0.40 per 1,000 emails",
+        "€0.80, Pro €0.60, Growth/Business €0.35",
         "roughly a 17% discount",
         "HIPAA availability is not currently offered",
         "Stripe billing portal",
         "verified Stripe webhook",
     ):
         check(needle in faq, f"pricing FAQ is missing {needle!r}", errors)
-    for stale in ("€0.35", "€0.80", "saves 10%", "upgraded or downgraded from the dashboard"):
+    # 2026-09-08 §9: 0.80/0.60/0.35 are the CANONICAL per-plan rates now.
+    for stale in ("saves 10%", "upgraded or downgraded from the dashboard"):
         check(stale not in faq, f"pricing FAQ contains stale token {stale!r}", errors)
 
 
@@ -646,7 +647,7 @@ def validate_built_output(errors: list[str]) -> None:
         errors.append("no generated home/pricing HTML found; run zola build before pricing validation")
         return
     output = "\n".join(read(path) for path in pages)
-    for needle in ("Developer", "Business", "€29", "€89", "€229", "€699", "€1,750", "€0.40 per 1,000 emails"):
+    for needle in ("Developer", "Business", "€29", "€89", "€229", "€699", "€1,750", "€0.80, Pro €0.60, Growth/Business €0.35"):
         check(needle in output, f"generated marketing output is missing {needle!r}", errors)
     # 2026-09-08: the retired generation's names and prices (the ladder was
     # Free 30k / Starter EUR25 / Pro 65 / Growth 150 / Scale 350 / Ent 3000).

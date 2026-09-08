@@ -60,7 +60,9 @@ overage allowance (default: +100% of the plan limit — a 50K plan may send up
 to 100K; tunable via `OVERAGE_ALLOWANCE_PERCENT`, 0 = hard stop), after which
 sends are rejected with `403 email quota exceeded`. The overage accrued in a
 billing cycle is invoiced automatically when the cycle ends: the daily
-maintenance sweep creates an `Overage:` invoice line at €0.40 per 1,000
+maintenance sweep creates an `Overage:` invoice line at the per-plan
+rate (Developer €0.80, Pro €0.60, Growth/Business €0.35, Enterprise
+€0.22–€0.35 contractual) per 1,000
 emails (rounded up), once per tenant per period. Free plans are hard-capped
 at the plan limit. `POST /v1/billing/overage/estimate` previews the charge.
 No separate subscription-plan API-call overage price is defined by the

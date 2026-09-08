@@ -15,7 +15,7 @@
           {% include "partials/brand-lockup.html" %}
         </div>
         <p class="text-surface-500 text-sm mb-6 max-w-xs leading-relaxed">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["tagline"] %}{{ i18n_data[l]["footer"]["tagline"] }}{% else %}Enterprise-grade email infrastructure, operated from the EU.{% endif %}
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["tagline"] %}{{ i18n_data[l]["footer"]["tagline"] }}{% else %}Transactional email infrastructure for developers and enterprises.{% endif %}
         </p>
         <div class="flex items-center gap-3">
           {% if config.extra.github_url %}
@@ -41,7 +41,7 @@
           <li><a href="{{ lp }}/pricing/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["pricing"] %}{{ i18n_data[l]["footer"]["pricing"] }}{% else %}Pricing{% endif %}</a></li>
           <li><a href="{{ lp }}/security/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["security"] %}{{ i18n_data[l]["footer"]["security"] }}{% else %}Security{% endif %}</a></li>
           <li><a href="{{ lp }}/solutions/enterprise/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["enterprise"] %}{{ i18n_data[l]["footer"]["enterprise"] }}{% else %}Enterprise{% endif %}</a></li>
-          <li><a href="{{ lp }}/forensic/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["forensic_tools"] %}{{ i18n_data[l]["footer"]["forensic_tools"] }}{% else %}Forensic Tools{% endif %}</a></li>
+          <li><a href="{{ lp }}/email-logs/" class="text-[13px] font-medium text-surface-600 hover:text-brand-500 transition-colors">{% if i18n_data and i18n_data[l] and i18n_data[l]["footer"] and i18n_data[l]["footer"]["forensic_tools"] %}{{ i18n_data[l]["footer"]["forensic_tools"] }}{% else %}Delivery Diagnostics{% endif %}</a></li>
         </ul>
       </div>
       <div>
@@ -96,11 +96,10 @@
     </div>
   </div>
 
-  {# Unified language: the footer receipt — the same challenge·work·done
-     grammar as the security widget's done state. #}
+  {# 2026-09-08 review §47: the footer should be boring and stable — the
+     pseudo-console receipt (challenge issued / work done · eeu) came out.
+     One quiet capability line remains. #}
   <div class="k-receipt" aria-hidden="true">
-    <div><svg viewBox="0 0 24 14" width="14" height="9" fill="none" style="transform:rotate(-24deg)"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="var(--brand-500, #dc2626)" stroke-width="2.6" stroke-linecap="round"/></svg><span class="ok">✓</span> challenge&nbsp;&nbsp;issued</div>
-    <div><svg viewBox="0 0 24 14" width="14" height="9" fill="none" style="transform:rotate(0deg)"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="var(--brand-500, #dc2626)" stroke-width="2.6" stroke-linecap="round"/></svg><span class="ok">✓</span> work&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;done · eeu</div>
-    <div><svg viewBox="0 0 24 14" width="14" height="9" fill="none" style="transform:rotate(24deg)"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="var(--brand-500, #dc2626)" stroke-width="2.6" stroke-linecap="round"/></svg><span class="ok">✓</span> events&nbsp;&nbsp;every message</div>
+    <div><svg viewBox="0 0 24 14" width="14" height="9" fill="none" aria-hidden="true"><path d="M4 12 A 9 9 0 0 1 20 12" stroke="var(--brand-500, #dc2626)" stroke-width="2.6" stroke-linecap="round"/></svg><span class="ok">✓</span> Full message event history</div>
   </div>
 </footer>

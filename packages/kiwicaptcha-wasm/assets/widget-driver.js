@@ -403,9 +403,9 @@
   // the English fallback and re-paints when the module registers.
   var kiwiLocalePacks = {
     en: { dir: "ltr",
-      label: "Security Check", badgeIdle: "Idle", badgeWait: "Wait",
-      badgeWorking: "Working", badgeSuccess: "Success", badgeFailed: "Failed",
-      badgeVersionError: "Version Error", badgeUnavailable: "Unavailable",
+      label: "Security verification", badgeIdle: "", badgeWait: "Checking\u2026",
+      badgeWorking: "Checking\u2026", badgeSuccess: "Verified.", badgeFailed: "Try again.",
+      badgeVersionError: "Version error", badgeUnavailable: "Unavailable",
       statusConnecting: "Connecting\u2026", statusVerifying: "Verifying\u2026",
       statusVerified: "Verification complete", statusFailed: "Verification failed",
       statusExpired: "Verification expired", statusWorkerUnavailable: "Worker unavailable",
@@ -672,7 +672,7 @@
       var v = view;
       if (!v || !v.statusKey) return;
       if (labelEl) labelEl.textContent = kiwiT(v.statusKey);
-      if (pillEl) pillEl.textContent = kiwiT(v.badgeKey);
+      if (pillEl) { var badgeText = kiwiT(v.badgeKey); pillEl.textContent = badgeText; pillEl.style.display = badgeText ? "" : "none"; }
       if (stateEl) stateEl.setAttribute("data-state", v.domState);
       if (v.hintKey && hintEl) hintEl.textContent = kiwiExpandView(kiwiT(v.hintKey), v.replacements);
       if (retryEl) retryEl.textContent = kiwiWidgetPack.retryButton;

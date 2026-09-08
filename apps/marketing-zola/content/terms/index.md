@@ -41,7 +41,7 @@ Use of the Service is subject to our [Acceptable Use Policy](/acceptable-use/). 
 
 ## 6. Data Processing
 
-We process data in accordance with our [Privacy Policy](/privacy/) and [Data Processing Agreement](/dpa/), compliant with GDPR and applicable Estonian and EU data protection law.
+We process data in accordance with our [Privacy Policy](/privacy/), [Data Processing Agreement](/dpa/) and applicable data-protection law.
 
 ## 7. Payment Terms
 

@@ -3,8 +3,8 @@
 # ──────────────────────────────────────────────────────────────
 
 base_url = "https://apexmail.ee"
-title = "ApexMail - Enterprise Email API for Developers"
-description = "Enterprise email API with compliance workflow support, delivery tracking, and developer-first APIs. EU/EEA-oriented deployment configurations and contract-reviewed Enterprise options."
+title = "Transactional Email API & SMTP Infrastructure | ApexMail"
+description = "Send transactional and lifecycle email with REST or SMTP, detailed delivery diagnostics, signed webhooks, reputation controls and enterprise deployment options."
 default_language = "en"
 # theme = ""  # No external theme; templates are in ./templates/
 

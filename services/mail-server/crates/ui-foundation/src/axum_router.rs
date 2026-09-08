@@ -471,9 +471,9 @@ fn marketing_static_document(surface: &str, path: &str) -> Option<&'static str> 
             env!("APX_MARKETING_PUBLIC_DIR"),
             "/features/index.html"
         ),)),
-        "/forensic" => Some(include_str!(concat!(
+        "/email-logs" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
-            "/forensic/index.html"
+            "/email-logs/index.html"
         ),)),
         "/fr" => Some(include_str!(concat!(
             env!("APX_MARKETING_PUBLIC_DIR"),
@@ -1869,7 +1869,7 @@ fn render_marketing(surface: &str, path: &str) -> Option<String> {
         "/features" => leptos_views::marketing_features_page(),
         "/compliance" => leptos_views::marketing_compliance_page(),
         "/private-cloud" => leptos_views::marketing_private_cloud_page(),
-        "/forensic" => leptos_views::marketing_forensic_page(),
+        "/email-logs" => leptos_views::marketing_forensic_page(),
         "/status" => leptos_views::marketing_status_page(),
         "/compare" => {
             if surface == "marketing-zola" {

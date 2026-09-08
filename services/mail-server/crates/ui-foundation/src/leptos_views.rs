@@ -1858,7 +1858,7 @@ pub fn marketing_page(child_html: &str) -> String {
         "<!DOCTYPE html>\
 <html lang=\"en\">\
 <head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">\
-<title>ApexMail - Enterprise Email Infrastructure</title>\
+<title>Transactional Email API &amp; SMTP Infrastructure | ApexMail</title>\
 <link rel=\"stylesheet\" href=\"/assets/marketing.css\"></head>\
 <body class=\"font-apex antialiased\">{header}<main class=\"flex-1\">{child}</main>\
 <footer data-marketing-shell=\"footer\"></footer></body></html>",
@@ -2052,15 +2052,7 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
 {csrf}\
 {plan_input}\
 {plan_notice}\
-<div class=\"grid grid-cols-1 sm:grid-cols-2 gap-4\">\
-<div class=\"space-y-2\">\
-<label class=\"apex-klabel\" for=\"signup-name\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Full name</label>\
-<input id=\"signup-name\" name=\"name\" type=\"text\" required autocomplete=\"name\" placeholder=\"Jane Doe\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
-</div>\
-<div class=\"space-y-2\">\
-<label class=\"apex-klabel\" for=\"signup-company\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Company</label>\
-<input id=\"signup-company\" name=\"company_name\" type=\"text\" required autocomplete=\"organization\" placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
-</div>\
+        // 2026-09-08 review: first screen is email + password only; name/company are collected post-verification (backend defaults them from the email local-part).\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"apex-klabel\" for=\"signup-email\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
@@ -4367,7 +4359,7 @@ pub fn marketing_home_page() -> String {
     "<section class=\"relative overflow-hidden py-20 sm:py-32\">\
 <div class=\"max-w-7xl mx-auto px-4 sm:px-6 lg:px-8\">\
 <div class=\"text-center max-w-3xl mx-auto\">\
-<h1 class=\"text-5xl sm:text-6xl font-bold tracking-tight text-surface-900\">Enterprise Email<br/>Infrastructure</h1>\
+<h1 class=\"text-5xl sm:text-6xl font-bold tracking-tight text-surface-900\">The email API<br/>built for control.</h1>\
 <p class=\"mt-6 text-xl text-surface-600 leading-relaxed\">The most secure, compliant, and developer-friendly email platform. Built for teams that demand reliability.</p>\
 <div class=\"mt-10 flex flex-col sm:flex-row gap-4 justify-center\">\
 <a href=\"https://app.apexmail.ee/signup\" class=\"btn-primary text-lg px-8 py-3\">Get Started Free</a>\
@@ -5227,7 +5219,9 @@ mod tests {
     #[test]
     fn marketing_page_wrapper_includes_shell() {
         let html = marketing_page("<p>test</p>");
-        assert!(html.contains("<title>ApexMail - Enterprise Email Infrastructure</title>"));
+        assert!(html.contains(
+            "<title>Transactional Email API &amp; SMTP Infrastructure | ApexMail</title>"
+        ));
         assert!(html.contains("ApexMail"));
         assert!(html.contains("<p>test</p>"));
         assert!(html.contains("data-marketing-shell=\"footer\""));
@@ -5241,7 +5235,6 @@ mod tests {
     fn web_signup_page_renders_form() {
         let html = web_signup_page("");
         assert!(html.contains("Create your account"));
-        assert!(html.contains("id=\"signup-name\""));
         assert!(html.contains("id=\"signup-email\""));
         assert!(html.contains("id=\"signup-password\""));
         // Dead JS-era markup purge: the pr-12 gutter reserved for the
@@ -5819,7 +5812,7 @@ mod tests {
     #[test]
     fn marketing_home_renders_hero() {
         let html = marketing_home_page();
-        assert!(html.contains("Enterprise Email"));
+        assert!(html.contains("The email API"));
         assert!(html.contains("Get Started Free"));
         assert!(html.contains("View Pricing"));
     }

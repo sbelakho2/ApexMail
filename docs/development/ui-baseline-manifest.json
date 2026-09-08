@@ -441,8 +441,8 @@
           "authRequired": false
         },
         {
-          "path": "/forensic",
-          "name": "Forensic Analysis",
+          "path": "/email-logs",
+          "name": "Delivery Diagnostics",
           "category": "marketing",
           "authRequired": false
         },
@@ -555,8 +555,8 @@
           "authRequired": false
         },
         {
-          "path": "/forensic",
-          "name": "Forensic Analysis",
+          "path": "/email-logs",
+          "name": "Delivery Diagnostics",
           "category": "marketing",
           "authRequired": false
         },

@@ -1,0 +1,14 @@
+{# Delivery Diagnostics — the flagship timeline page (review 2026-09-08 §28).
+   One screen answers "what exactly happened to this message": request
+   acceptance through DKIM signing, pool selection, every SMTP attempt,
+   deferrals and retries, MX acceptance, event emission and webhook
+   delivery. The timeline below mirrors the console's message-detail view. #}
+{% extends "base.html" %}
+
+{% block title %}Delivery Diagnostics — see exactly what happened to every message | {{ config.extra.site_name }}{% endblock title %}
+
+{% block content %}
+{% include "partials/email-logs/hero.html" %}
+{% include "partials/email-logs/timeline.html" %}
+{% include "partials/email-logs/cta.html" %}
+{% endblock content %}

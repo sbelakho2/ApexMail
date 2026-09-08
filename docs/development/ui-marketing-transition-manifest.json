@@ -14,7 +14,7 @@
     "/cookies",
     "/dpa",
     "/features",
-    "/forensic",
+    "/email-logs",
     "/pricing",
     "/pricing/calculator",
     "/privacy",
@@ -186,7 +186,7 @@
       "status": "shared"
     },
     {
-      "path": "/forensic",
+      "path": "/email-logs",
       "owner": "dual-maintained",
       "status": "shared"
     },

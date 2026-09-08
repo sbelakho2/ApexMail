@@ -44,7 +44,7 @@ const MARKETING_FIXTURES: [(&str, &str); 19] = [
     ("marketing", "/cookies"),
     ("marketing", "/dpa"),
     ("marketing", "/features"),
-    ("marketing", "/forensic"),
+    ("marketing", "/email-logs"),
     ("marketing", "/pricing"),
     ("marketing", "/pricing/calculator"),
     ("marketing", "/privacy"),

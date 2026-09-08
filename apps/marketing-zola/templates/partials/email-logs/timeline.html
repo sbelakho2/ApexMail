@@ -1,0 +1,68 @@
+{# The flagship timeline (review §28): a real-shaped message trace with the
+   right-side context panel and action bar. Timestamps, providers, SMTP
+   codes, TLS state, pool names — real technical detail, no decorative
+   technicality. Numeric columns are tabular with zero tracking (§6).
+   The rows are static markup: the data never varies per render. #}
+<section class="bg-surface-100 border-b border-surface-200" aria-label="Message timeline example">
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-14 lg:py-20">
+    <div class="flex flex-wrap items-baseline justify-between gap-3 mb-6">
+      <h2 class="text-2xl font-bold text-surface-950 tracking-tight">One message, end to end</h2>
+      <p class="text-[13px] font-mono text-surface-500">msg_2f9a &middot; transactional &middot; yourcompany.com &rarr; customer@example.com</p>
+    </div>
+
+    <div class="grid lg:grid-cols-[1fr_320px] gap-6 items-start">
+      <div class="bg-white border border-surface-200 rounded-[16px_16px_9px_9px] overflow-hidden">
+        <ol class="divide-y divide-surface-100" role="list">
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="text-[12px] font-mono tabular-nums text-surface-500 pt-0.5 shrink-0" style="letter-spacing:0">14:32:01.042</span><div class="min-w-0"><p class="text-[14px] font-bold text-surface-950">request accepted</p><p class="text-[12.5px] text-surface-600 font-mono mt-0.5 break-words">req_84fb&hellip; &middot; idempotency hit: no</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="text-[12px] font-mono tabular-nums text-surface-500 pt-0.5 shrink-0" style="letter-spacing:0">14:32:01.048</span><div class="min-w-0"><p class="text-[14px] font-bold text-surface-950">sender validated</p><p class="text-[12.5px] text-surface-600 font-mono mt-0.5 break-words">yourcompany.com &middot; DKIM selector apx1</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="text-[12px] font-mono tabular-nums text-surface-500 pt-0.5 shrink-0" style="letter-spacing:0">14:32:01.053</span><div class="min-w-0"><p class="text-[14px] font-bold text-surface-950">message classified</p><p class="text-[12.5px] text-surface-600 font-mono mt-0.5 break-words">transactional &middot; priority high</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="text-[12px] font-mono tabular-nums text-surface-500 pt-0.5 shrink-0" style="letter-spacing:0">14:32:01.060</span><div class="min-w-0"><p class="text-[14px] font-bold text-surface-950">queued</p><p class="text-[12.5px] text-surface-600 font-mono mt-0.5 break-words">pool tx-shared-04</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="text-[12px] font-mono tabular-nums text-surface-500 pt-0.5 shrink-0" style="letter-spacing:0">14:32:01.191</span><div class="min-w-0"><p class="text-[14px] font-bold text-surface-950">DKIM signed</p><p class="text-[12.5px] text-surface-600 font-mono mt-0.5 break-words">rsa2048 &middot; selector apx1</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="text-[12px] font-mono tabular-nums text-surface-500 pt-0.5 shrink-0" style="letter-spacing:0">14:32:01.228</span><div class="min-w-0"><p class="text-[14px] font-bold text-surface-950">attempt 1</p><p class="text-[12.5px] text-surface-600 font-mono mt-0.5 break-words">gmail-smtp-in.l.google.com &middot; TLS 1.3</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5 bg-brand-50/40"><span class="text-[12px] font-mono tabular-nums text-surface-500 pt-0.5 shrink-0" style="letter-spacing:0">14:32:02.011</span><div class="min-w-0"><p class="text-[14px] font-bold text-brand-600">deferred</p><p class="text-[12.5px] text-surface-600 font-mono mt-0.5 break-words">421 4.7.0 temporary rate limit</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="text-[12px] font-mono tabular-nums text-surface-500 pt-0.5 shrink-0" style="letter-spacing:0">14:37:02.011</span><div class="min-w-0"><p class="text-[14px] font-bold text-surface-950">retry scheduled</p><p class="text-[12.5px] text-surface-600 font-mono mt-0.5 break-words">backoff ladder step 2</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="text-[12px] font-mono tabular-nums text-surface-500 pt-0.5 shrink-0" style="letter-spacing:0">14:37:02.704</span><div class="min-w-0"><p class="text-[14px] font-bold text-surface-950">attempt 2</p><p class="text-[12.5px] text-surface-600 font-mono mt-0.5 break-words">gmail-smtp-in.l.google.com</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="text-[12px] font-mono tabular-nums text-surface-500 pt-0.5 shrink-0" style="letter-spacing:0">14:37:03.019</span><div class="min-w-0"><p class="text-[14px] font-bold text-surface-950">recipient MX accepted</p><p class="text-[12.5px] text-surface-600 font-mono mt-0.5 break-words">250 2.0.0</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="text-[12px] font-mono tabular-nums text-surface-500 pt-0.5 shrink-0" style="letter-spacing:0">14:37:03.045</span><div class="min-w-0"><p class="text-[14px] font-bold text-surface-950">event emitted</p><p class="text-[12.5px] text-surface-600 font-mono mt-0.5 break-words">message.delivered</p></div></li>
+          <li class="flex items-start gap-4 px-5 py-3.5"><span class="text-[12px] font-mono tabular-nums text-surface-500 pt-0.5 shrink-0" style="letter-spacing:0">14:37:03.184</span><div class="min-w-0"><p class="text-[14px] font-bold text-surface-950">webhook delivered</p><p class="text-[12.5px] text-surface-600 font-mono mt-0.5 break-words">200 &middot; 139 ms</p></div></li>
+        </ol>
+        <div class="border-t border-surface-200 bg-surface-50 px-5 py-3 flex flex-wrap gap-x-5 gap-y-2">
+          <span class="text-[12px] font-bold text-surface-600">Replay webhook</span>
+          <span class="text-[12px] font-bold text-surface-600">Export raw events</span>
+          <span class="text-[12px] font-bold text-surface-600">Open domain diagnostics</span>
+          <span class="text-[12px] font-bold text-surface-600">Copy message ID</span>
+          <span class="text-[12px] font-bold text-surface-600">Suppress recipient</span>
+          <span class="text-[12px] font-bold text-surface-600">View IP reputation</span>
+          <span class="text-[12px] font-bold text-surface-600">Generate support report</span>
+        </div>
+      </div>
+
+      <aside class="bg-white border border-surface-200 rounded-[16px_16px_9px_9px] p-5">
+        <p class="k-arc-label mb-4">message context</p>
+        <dl class="space-y-2.5 text-[13px]">
+          <div class="flex items-baseline justify-between gap-3"><dt class="text-surface-500">Message ID</dt><dd class="font-mono text-surface-950 text-right tabular-nums" style="letter-spacing:0">msg_2f9a</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt class="text-surface-500">Request ID</dt><dd class="font-mono text-surface-950 text-right tabular-nums" style="letter-spacing:0">req_84fb&hellip;</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt class="text-surface-500">Stream</dt><dd class="font-mono text-surface-950 text-right">transactional</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt class="text-surface-500">Sending domain</dt><dd class="font-mono text-surface-950 text-right">yourcompany.com</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt class="text-surface-500">Recipient provider</dt><dd class="font-mono text-surface-950 text-right">gmail.com</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt class="text-surface-500">Sending IP</dt><dd class="font-mono text-surface-950 text-right tabular-nums" style="letter-spacing:0">95.216.226.51</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt class="text-surface-500">Pool</dt><dd class="font-mono text-surface-950 text-right">tx-shared-04</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt class="text-surface-500">DKIM selector</dt><dd class="font-mono text-surface-950 text-right">apx1</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt class="text-surface-500">SPF</dt><dd class="font-mono text-surface-950 text-right">pass</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt class="text-surface-500">DKIM</dt><dd class="font-mono text-surface-950 text-right">pass</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt class="text-surface-500">DMARC</dt><dd class="font-mono text-surface-950 text-right">pass</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt class="text-surface-500">TLS</dt><dd class="font-mono text-surface-950 text-right tabular-nums" style="letter-spacing:0">1.3</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt class="text-surface-500">Total attempts</dt><dd class="font-mono text-surface-950 text-right tabular-nums" style="letter-spacing:0">2</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt class="text-surface-500">Queue duration</dt><dd class="font-mono text-surface-950 text-right tabular-nums" style="letter-spacing:0">372 ms</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt class="text-surface-500">Time to MX acceptance</dt><dd class="font-mono text-surface-950 text-right tabular-nums" style="letter-spacing:0">1.98 s</dd></div>
+          <div class="flex items-baseline justify-between gap-3"><dt class="text-surface-500">Webhook state</dt><dd class="font-mono text-surface-950 text-right">delivered &middot; 200</dd></div>
+        </dl>
+      </aside>
+    </div>
+
+    <p class="text-[12px] text-surface-500 mt-4 max-w-3xl">
+      Every row is backed by a stored event: SMTP transcripts, TLS state, pool and selector are recorded per attempt.
+      Diagnostics prove that the recipient mail server accepted the message — they do not claim inbox placement.
+    </p>
+  </div>
+</section>

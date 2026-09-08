@@ -166,6 +166,10 @@ async fn sweep_subscription_periods(
     for period in periods {
         result.periods_checked += 1;
 
+        // Effective plan name for this period (tenant row or terminal
+        // subscription) — drives the per-plan overage rate below.
+        let mut sweep_plan_name = String::new();
+
         // Plan limit for the period. Active subscriptions resolve the
         // TENANT-level (override-aware) limit — the same source the
         // enforcement gate used, so the invoice bills exactly the volume
@@ -202,16 +206,17 @@ async fn sweep_subscription_periods(
             // builtin plan's limit BY NAME; unknown names are skipped
             // loudly below — never `unwrap_or(0)`, which billed the
             // tenant's entire volume as overage (audit 1.3).
+            sweep_plan_name = plan_name;
             resolve_plan_limit_or_warn(
                 &state.db,
-                &plan_name,
+                &sweep_plan_name,
                 email_limit,
                 &period.tenant_id,
                 &mut result.skipped_unknown_plan,
             )
             .await?
         } else {
-            let Some(plan_name) = period.subscription_plan.as_deref() else {
+            let Some(plan_name) = period.subscription_plan.clone() else {
                 warn!(
                     tenant_id = %period.tenant_id,
                     subscription_status = %period.status,
@@ -220,9 +225,10 @@ async fn sweep_subscription_periods(
                 result.skipped_unknown_plan += 1;
                 continue;
             };
+            sweep_plan_name = plan_name;
             resolve_plan_limit_or_warn(
                 &state.db,
-                plan_name,
+                &sweep_plan_name,
                 None,
                 &period.tenant_id,
                 &mut result.skipped_unknown_plan,
@@ -277,9 +283,22 @@ async fn sweep_subscription_periods(
             continue;
         }
 
-        // Fix I10/audit 1.3: the sweep prices with the CONFIGURED rate, not
-        // a private constant — the invoice text below quotes the same rate.
-        let rate_millicents = state.config.overage_rate_per_email_millicents;
+        // Review 2026-09-08 §9: the DIFFERENTIATED per-plan ladder prices
+        // overage (Developer 80 / Pro 60 / Growth+Business+Enterprise 35
+        // millicents per email). Free/PAYG/unknown plans have no automatic
+        // overage — skip. The invoice text below quotes the same rate.
+        let rate_millicents = match plans::plan_overage_rate_millicents(&sweep_plan_name) {
+            Some(rate) => rate,
+            None => {
+                warn!(
+                    tenant_id = %period.tenant_id,
+                    plan = %sweep_plan_name,
+                    "overage sweep: plan has no automatic overage; skipping period"
+                );
+                result.skipped_no_overage += 1;
+                continue;
+            }
+        };
         let amount_cents =
             plans::calculate_overage_cost_with_rate(sent, plan_limit, rate_millicents);
         if amount_cents <= 0 {

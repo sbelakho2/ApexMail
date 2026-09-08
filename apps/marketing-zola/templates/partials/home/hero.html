@@ -1,11 +1,12 @@
-{# Hero — v2 unified design language (Spiral-Lock DNA), implemented from the
-   approved full-page preview (docs/design/full-page-previews.html). The
-   checksum ribbon (one solid slot among faint — the winning needle), the
-   headline, the terminal panel, and the stats band with point-meters.
-   2026-09-08: the undocumented "signed proof" contract came out of the
-   headline, terminal and CTA — the API has no proof field. The headline
-   now leads with the claim that IS true and defensible: EEA data
-   residency (storage, not just sending) — see /data-locations/. #}
+{# Hero — 2026-09-08 positioning round: "built for control" (review §1/§3).
+   Geography (EEA storage) stays as a SUPPORTING pillar, not the headline —
+   the product proposition (send, inspect, control delivery and
+   infrastructure) applies worldwide. The terminal shows the REAL public
+   HTTP contract (curl against /v1/messages); the fictional
+   @apexmail/node import stays out until the SDK actually ships. The
+   "Run live API request" button POSTs the shown payload to the Rust
+   sandbox executor — the request really queues and delivery is really
+   attempted. #}
 <section aria-label="Introduction" class="relative bg-surface-50 border-b border-surface-200/80">
   <div class="relative w-full max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16 lg:py-24">
 
@@ -16,50 +17,54 @@
 
     <div class="grid min-w-0 lg:grid-cols-2 gap-12 lg:gap-16 items-center">
       <div class="min-w-0">
+        <p class="k-arc-label mb-4">
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_eyebrow"] %}{{ i18n_data[l]["home"]["hero_eyebrow"] }}{% else %}Transactional email infrastructure{% endif %}
+        </p>
         <h1 class="text-surface-950 leading-[1.02] text-balance text-[44px] sm:text-[52px] lg:text-[64px] font-bold tracking-[-0.03em]">
           {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_line1"] %}
-            {{ i18n_data[l]["home"]["hero_line1"] }}<br>
-            {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_line2"] %}{{ i18n_data[l]["home"]["hero_line2"] }}{% else %}Built for{% endif %}
-            <em class="not-italic text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_highlight"] %}{{ i18n_data[l]["home"]["hero_highlight"] }}{% else %}Europe.{% endif %}</em>
+            {{ i18n_data[l]["home"]["hero_line1"] }}
+            <em class="not-italic text-brand-500">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_highlight"] %}{{ i18n_data[l]["home"]["hero_highlight"] }}{% else %}control.{% endif %}</em>
           {% else %}
-            The email API,<br>built for <em class="not-italic text-brand-500">Europe.</em>
+            The email API built for <em class="not-italic text-brand-500">control.</em>
           {% endif %}
         </h1>
-        <p class="text-surface-600 text-base lg:text-lg max-w-[44ch] mt-5 mb-8">
-          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_subtitle"] %}{{ i18n_data[l]["home"]["hero_subtitle"] }}{% else %}Message content, delivery events and sender data are stored in the EEA by default — not just sent from it. <a href="/data-locations/" class="text-brand-500 font-semibold hover:underline">See where&nbsp;→</a>{% endif %}
+        <p class="text-surface-600 text-base lg:text-lg max-w-[48ch] mt-5 mb-6">
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_subtitle"] %}{{ i18n_data[l]["home"]["hero_subtitle"] }}{% else %}Send transactional and lifecycle email through a fast API or SMTP relay, inspect every delivery attempt, and manage deliverability from one operational platform.{% endif %}
         </p>
-        <div class="flex flex-col sm:flex-row flex-wrap gap-3">
+        <div class="flex flex-col sm:flex-row flex-wrap gap-3 mb-5">
           <a href="{{ config.extra.app_url }}/signup" class="btn-primary btn-primary--lg">
             {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_primary"] %}{{ i18n_data[l]["home"]["hero_cta_primary"] }}{% else %}Start free{% endif %}
             <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
           </a>
           <a href="/api-explorer/" class="btn-secondary btn-secondary--lg">
-            {% if i18n_data and i18n_data[l] and i18n_data[l]["api_console"] and i18n_data[l]["api_console"]["hero_cta"] %}{{ i18n_data[l]["api_console"]["hero_cta"] }}{% else %}Open API explorer{% endif %}
+            {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_cta_secondary"] %}{{ i18n_data[l]["home"]["hero_cta_secondary"] }}{% else %}Run live API request{% endif %}
           </a>
         </div>
+        <p class="text-[13px] text-surface-500">
+          {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_proof_line"] %}{{ i18n_data[l]["home"]["hero_proof_line"] }}{% else %}No credit card &middot; 3,000 emails/month &middot; 30,000-message launch allowance &middot; <a href="/data-locations/" class="text-brand-500 font-semibold hover:underline">EEA-stored by default</a>{% endif %}
+        </p>
       </div>
 
-      {# ── The terminal: the product story as a proof trace ── #}
+      {# ── The terminal: the real public HTTP contract, executable ── #}
       <div class="relative min-w-0 lg:mt-0 mt-10">
         <div class="term">
           <div class="term-bar">
             <span class="term-dot"></span><span class="term-dot"></span><span class="term-dot"></span>
             <b>POST /v1/messages</b>
           </div>
-<pre class="term-pre"><span class="term-c">// delivery events on every send</span>
-<span class="term-k">await</span> apex.messages.create({
-  from: <span class="term-s">'hello@yourcompany.com'</span>,
-  to: <span class="term-s">'customer@example.com'</span>
-});
+<pre class="term-pre"><span class="term-k">curl</span> -X POST https://api.apexmail.ee/v1/messages \
+  -H <span class="term-s">"Authorization: Bearer $APEXMAIL_API_KEY"</span> \
+  -d <span class="term-s">'{"from":"hello@yourcompany.com",
+       "to":"customer@example.com"}'</span>
 <span class="term-c">&rarr; 202 accepted &middot; id msg_2f9a</span>
-<span class="term-c">&rarr; delivered &#10003; 1.8s &middot; eeu</span></pre>
+<span class="term-c">&rarr; accepted by recipient MX &middot; 1.8s</span></pre>
           {# The trace above, made real: a plain form POST to the Rust
              sandbox executor — the request really queues, the worker
              really attempts delivery, the result page shows the live
              status and latency. #}
           <form method="POST" action="https://api.apexmail.ee/explorer/exec" class="term-run">
             <input type="hidden" name="lane" value="send">
-            <input type="hidden" name="body" value='{"to":"customer@example.com","subject":"Hello from ApexMail","html":"&lt;h1&gt;Sent from the EEA.&lt;/h1&gt;"}'>
+            <input type="hidden" name="body" value='{"to":"customer@example.com","subject":"Hello from ApexMail","html":"&lt;h1&gt;Sent with control.&lt;/h1&gt;"}'>
             <button type="submit" class="btn-primary">
               {% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["hero_run_cta"] %}{{ i18n_data[l]["home"]["hero_run_cta"] }}{% else %}Run this request{% endif %}
               <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 ml-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
@@ -75,7 +80,8 @@
 
     {# ── Stats band: mono values + point-meters. Every metric links to its
        methodology (/performance-methodology/) or live history (status
-       host) — an unexplained number is a trust risk, not proof. ── #}
+       host) — an unexplained number is a trust risk, not proof. Numeric
+       values set tabular numerals with zero tracking (review §6). ── #}
     <div class="stats mt-14 lg:mt-20" aria-label="Platform statistics">
       <div>
         <span class="k-arc-label"><a href="https://status.apexmail.ee" class="hover:underline" style="color:inherit">{% if i18n_data and i18n_data[l] and i18n_data[l]["home"] and i18n_data[l]["home"]["stat_uptime_label"] %}{{ i18n_data[l]["home"]["stat_uptime_label"] }}{% else %}uptime · 12mo{% endif %}</a></span>

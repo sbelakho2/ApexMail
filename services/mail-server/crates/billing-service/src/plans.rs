@@ -168,7 +168,9 @@ pub fn default_plans() -> Vec<PlanSeed> {
             sort_order: 4,
             features: PlanFeatures {
                 dedicated_ip: true,
-                dedicated_ip_count: 3,
+                // 2026-09-08 review §10: 1 included; a second is assigned
+                // where traffic justifies it (eligibility scoring), not 3 by default.
+                dedicated_ip_count: 1,
                 max_sending_domains: -1,
                 sso_enabled: true,
                 audit_logs: true,
@@ -210,7 +212,8 @@ pub fn default_plans() -> Vec<PlanSeed> {
             sort_order: 5,
             features: PlanFeatures {
                 dedicated_ip: true,
-                dedicated_ip_count: 10,
+                // Up to 3 included based on architecture; more pools contractual.
+                dedicated_ip_count: 3,
                 max_sending_domains: -1,
                 sso_enabled: true,
                 audit_logs: true,
@@ -269,6 +272,33 @@ pub fn default_plans() -> Vec<PlanSeed> {
             },
         },
     ]
+}
+
+/// Per-plan overage rate in millicents per email (review 2026-09-08 §9).
+///
+/// A single universal rate made Developer economically preferable to Pro
+/// across a substantial range. The differentiated ladder keeps upgrade
+/// points economically sensible while remaining attractive against
+/// competitors (Resend paid tiers: $0.90/1k):
+///
+/// - Free: NO automatic overage (the quota gate blocks at the ceiling).
+/// - Developer: 80 millicents/email (EUR 0.80 per 1,000)
+/// - Pro: 60 (EUR 0.60/1k)
+/// - Growth: 35 (EUR 0.35/1k)
+/// - Business: 35 (EUR 0.35/1k)
+/// - Enterprise Cloud: 35 default; 22-35 by contract (the contract rate
+///   is applied via the existing per-tenant overage-rate override).
+///
+/// Returns None when the plan has no automatic overage (Free, PAYG,
+/// unknown names) — the caller must skip invoicing for those.
+pub fn plan_overage_rate_millicents(plan_name: &str) -> Option<i64> {
+    match plan_name {
+        "starter" => Some(80),
+        "pro" => Some(60),
+        "growth" | "scale" | "enterprise" => Some(35),
+        // Free has no overage by design; PAYG is usage-priced already.
+        _ => None,
+    }
 }
 
 pub fn builtin_plan_seed(plan_name: Option<&str>) -> PlanSeed {
@@ -698,10 +728,13 @@ mod tests {
             .expect("enterprise plan must exist");
 
         assert!(pro_plan.features.dedicated_ip);
+        // 2026-09-08 review §10: Pro add-on only; Growth 1 after
+        // qualification; Business 1 (second assigned where useful);
+        // Enterprise Cloud up to 3 based on architecture.
         assert_eq!(pro_plan.features.dedicated_ip_count, 0);
         assert_eq!(growth_plan.features.dedicated_ip_count, 1);
-        assert_eq!(scale_plan.features.dedicated_ip_count, 3);
-        assert_eq!(enterprise_plan.features.dedicated_ip_count, 10);
+        assert_eq!(scale_plan.features.dedicated_ip_count, 1);
+        assert_eq!(enterprise_plan.features.dedicated_ip_count, 3);
     }
 
     #[test]

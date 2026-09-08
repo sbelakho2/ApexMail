@@ -20,13 +20,11 @@
   <div class="mb-8">
     <h3 class="{% if plan_is_enterprise %}text-white{% else %}text-surface-950{% endif %} text-xl font-bold mb-3 tracking-tight" id="plan-{{ plan_name | lower }}">{{ plan_name }}</h3>
     <div class="flex items-baseline gap-2">
-      {# v2 split-flap: digits as slot cells; the recommended plan's digits are
-     the solid needle (brand). The € sign and period ride as plain spans. #}
-<span class="flex items-baseline gap-0.5" aria-label="{{ plan_price }} per month">
-  {% set price_digits = plan_price | replace(from="€", to="") | replace(from=",", to="") %}
-  <span class="k-arc-label" style="font-size:12px">€</span>
-  {% for digit in price_digits %}{% if digit == "." %}<span class="px-0.5 text-surface-500 font-bold">.</span>{% else %}<span class="price-slot{% if plan_is_popular %} brand{% endif %}">{{ digit }}</span>{% endif %}{% endfor %}
-</span>
+      {# 2026-09-08 review §6/§57: prices are PLAIN tabular numerals — the
+     per-digit slot cells rendered "€ 2 9" and read as broken. The spaced
+     APEXMAIL wordmark treatment never applies to numbers, prices,
+     percentages or metrics. #}
+<span class="price-value{% if plan_is_popular %} price-value--brand{% endif %}" aria-label="{{ plan_price }} per month">{{ plan_price }}</span>
       <span class="{% if plan_is_enterprise %}text-surface-400{% else %}text-surface-500{% endif %} text-xs font-bold tracking-widest">{{ plan_period }}</span>
     </div>
     <p class="{% if plan_is_enterprise %}text-surface-400{% else %}text-surface-500{% endif %} text-sm mt-4 leading-relaxed font-bold tracking-tight">{{ plan_description }}</p>

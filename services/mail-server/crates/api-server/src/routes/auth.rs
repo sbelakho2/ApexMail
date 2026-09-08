@@ -2639,9 +2639,15 @@ struct UserRow {
 #[serde(deny_unknown_fields)]
 #[allow(non_snake_case)]
 pub struct RegisterRequest {
-    pub company_name: String,
+    /// Optional since the 2026-09-08 signup simplification: the first
+    /// screen collects email + password only; name/company are gathered
+    /// during post-verification onboarding. Defaults keep the tenant
+    /// record valid (slug, display name) until the user fills them in.
+    #[serde(default)]
+    pub company_name: Option<String>,
     pub email: String,
-    pub name: String,
+    #[serde(default)]
+    pub name: Option<String>,
     pub password: String,
     #[serde(default = "default_plan")]
     pub plan: String,
@@ -2727,8 +2733,30 @@ async fn register(
     )
     .await?;
 
-    // Validate input
-    if body.company_name.is_empty() || body.company_name.len() > 100 {
+    // Validate input. company_name/name are optional (signup §37): when
+    // absent they default from the email local-part so the tenant record
+    // and billing slug stay well-formed.
+    let email_local = body
+        .email
+        .split('@')
+        .next()
+        .unwrap_or("workspace")
+        .to_string();
+    let company_name = body
+        .company_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(&email_local)
+        .to_string();
+    let display_name = body
+        .name
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(&email_local)
+        .to_string();
+    if company_name.len() > 100 {
         return Err(ApiError::Validation(vec![
             "company_name must be 1-100 characters".into(),
         ]));
@@ -2736,7 +2764,7 @@ async fn register(
     if body.email.is_empty() || body.email.len() > 254 {
         return Err(ApiError::Validation(vec!["invalid email address".into()]));
     }
-    if body.name.is_empty() || body.name.len() > 100 {
+    if display_name.len() > 100 {
         return Err(ApiError::Validation(vec![
             "name must be 1-100 characters".into()
         ]));
@@ -2803,7 +2831,7 @@ async fn register(
     // user id (same convention as create_api_key / the reset-password fix).
     let tenant_id = apexmail_lib::id::generate_id("", 26);
     let user_id = Uuid::new_v4();
-    let slug = generate_slug(&body.company_name);
+    let slug = generate_slug(&company_name);
     let now = Utc::now();
 
     // Hash password
@@ -2835,7 +2863,7 @@ async fn register(
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
     )
     .bind(&tenant_id)
-    .bind(&body.company_name)
+    .bind(&company_name)
     .bind(&slug)
     .bind("free")
     .bind("pending")
@@ -2859,7 +2887,7 @@ async fn register(
     .bind(user_id)
     .bind(&tenant_id)
     .bind(&email_lower)
-    .bind(&body.name)
+    .bind(&display_name)
     .bind(&password_hash)
     .bind("owner")
     .bind("active")
