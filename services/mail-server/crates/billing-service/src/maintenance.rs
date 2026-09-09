@@ -320,15 +320,26 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                 }
             }
 
-            match cleanup_stuck_subscription_sagas(grace_state.as_ref()).await {
-                Ok(cleaned) if cleaned > 0 => {
-                    info!(cleaned, "cleaned stuck subscription sagas");
+            // Audit F33 — resume stranded usage-invoice collection
+            // operations (invoice created, collection interrupted): the
+            // idempotent ladder re-runs wallet application, Stripe item and
+            // the dunning transition until the outbox row is done.
+            match crate::overage::resume_pending_collections(grace_state.as_ref()).await {
+                Ok(resumed) if resumed > 0 => {
+                    info!(resumed, "resumed stranded usage invoice collections");
                 }
                 Ok(_) => {}
                 Err(error_message) => {
-                    error!(error = %error_message, "failed to clean stuck subscription sagas");
+                    error!(error = %error_message, "failed to resume usage invoice collections");
                 }
             }
+
+            // Audit F66 — the hourly subscription_change_saga cleanup job was
+            // removed: no migration or writer ever created that table (every
+            // run failed with 42P01). Subscription-change persistence and
+            // recovery are the canonical stripe_webhook_events store
+            // (migrations 127/128) plus the deadletter retry ladder — there
+            // is no separate saga to clean up.
         }
     });
 
@@ -3206,6 +3217,12 @@ fn release_reserved_cents_clamp(reserved: i64, released_total: i64) -> i64 {
 /// the invoice id) so the settled invoice's history is complete either
 /// way. `None` restores the legacy unscoped blanket reset (used when no
 /// invoice context is available).
+///
+/// Audit F09 — billing and abuse holds stay DISTINCT: this clears only the
+/// BILLING hold. Tenant reactivation and the queued-message release happen
+/// only when no open/investigating/confirmed abuse report remains (the
+/// abuse lifecycle's constrained statuses, migration 133); an abuse hold
+/// survives payment recovery untouched.
 pub(crate) async fn mark_payment_recovered(
     state: &AppState,
     tenant_id: &str,
@@ -3286,12 +3303,22 @@ pub(crate) async fn mark_payment_recovered(
         return Ok(());
     }
 
+    // Audit F09 — releasing sending is gated on EVERY applicable hold: the
+    // dunning hold cleared above AND the abuse hold (which payment recovery
+    // must never clear).
     let released_count: i64 = sqlx::query_scalar(
         r#"
         WITH updated AS (
             UPDATE messages
             SET status = 'queued', updated_at = NOW()
-            WHERE tenant_id = $1 AND status = 'dunning_queued'
+            WHERE tenant_id = $1
+              AND status = 'dunning_queued'
+              AND NOT EXISTS (
+                SELECT 1
+                FROM abuse_reports ar
+                WHERE ar.tenant_id = $1
+                  AND ar.status IN ('open', 'investigating', 'confirmed')
+              )
             RETURNING id
         )
         SELECT COUNT(*)::bigint FROM updated
@@ -3317,30 +3344,96 @@ pub(crate) async fn mark_payment_recovered(
     Ok(())
 }
 
-async fn cleanup_stuck_subscription_sagas(state: &AppState) -> Result<i64, String> {
-    let timeout_minutes = std::env::var("SAGA_TIMEOUT_MINUTES")
-        .ok()
-        .and_then(|value| value.parse::<i64>().ok())
-        .filter(|value| *value > 0)
-        .unwrap_or(60);
+// Abuse-report lifecycle writers (audit F09). `abuse_reports.status` is a
+// constrained lifecycle (migration 133: open -> investigating ->
+// confirmed | dismissed | resolved). These are the canonical writers —
+// payment recovery (`mark_payment_recovered`) and the admin dunning reset
+// keep their billing holds DISTINCT from the abuse hold: clearing a
+// billing hold releases sending only when no open/investigating/confirmed
+// abuse report remains.
 
-    sqlx::query_scalar::<_, i64>(&format!(
+/// Record a new abuse report in the `open` state (the cautious default:
+/// holds reactivation until reviewed).
+pub async fn record_abuse_report(
+    state: &AppState,
+    tenant_id: &str,
+    report_type: &str,
+    source: Option<&str>,
+    details: serde_json::Value,
+) -> Result<Uuid, String> {
+    let id: Uuid = sqlx::query_scalar(
         r#"
-            WITH updated AS (
-                UPDATE subscription_change_saga
-                SET status = 'failed',
-                    error = COALESCE(error, 'Timed out waiting for completion'),
-                    updated_at = NOW()
-                WHERE status IN ('pending', 'stripe_completed')
-                  AND updated_at < NOW() - INTERVAL '{timeout_minutes} minutes'
-                RETURNING id
-            )
-            SELECT COUNT(*)::bigint AS cleaned FROM updated
-            "#
-    ))
+        INSERT INTO abuse_reports (tenant_id, report_type, source, details, status)
+        VALUES ($1, $2, $3, $4::jsonb, 'open')
+        RETURNING id
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(report_type)
+    .bind(source)
+    .bind(details.to_string())
     .fetch_one(&state.db)
     .await
-    .map_err(|error| format!("Failed to clean stuck subscription sagas: {error}"))
+    .map_err(|error| format!("Failed to record abuse report: {error}"))?;
+    info!(tenant_id = tenant_id, report_id = %id, report_type, "abuse report recorded (open)");
+    Ok(id)
+}
+
+/// Whether an OPEN abuse hold exists for the tenant — the state that must
+/// block sending-release and reactivation regardless of billing health.
+pub async fn tenant_has_open_abuse_hold(state: &AppState, tenant_id: &str) -> Result<bool, String> {
+    let open: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM abuse_reports
+            WHERE tenant_id = $1
+              AND status IN ('open', 'investigating', 'confirmed')
+        )
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|error| format!("Failed to check abuse hold: {error}"))?;
+    Ok(open)
+}
+
+/// Review an abuse report: move it along the lifecycle. Allowed moves are
+/// constrained by the schema CHECK (migration 133); invalid moves are
+/// rejected SQL-side.
+pub async fn review_abuse_report(
+    state: &AppState,
+    report_id: Uuid,
+    new_status: &str,
+    reviewed_by: Option<&str>,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE abuse_reports
+        SET status = $2,
+            reviewed_at = NOW(),
+            reviewed_by = $3,
+            resolved_at = CASE WHEN $2 IN ('dismissed', 'resolved') THEN NOW() ELSE resolved_at END
+        WHERE id = $1
+        "#,
+    )
+    .bind(report_id)
+    .bind(new_status)
+    .bind(reviewed_by)
+    .execute(&state.db)
+    .await
+    .map_err(|error| format!("Failed to review abuse report {report_id}: {error}"))?;
+    Ok(())
+}
+
+/// Resolve an abuse report (terminal) — releases the abuse hold once no
+/// other open/investigating/confirmed report remains.
+pub async fn resolve_abuse_report(
+    state: &AppState,
+    report_id: Uuid,
+    reviewed_by: Option<&str>,
+) -> Result<(), String> {
+    review_abuse_report(state, report_id, "resolved", reviewed_by).await
 }
 
 fn stripe_api_base_url() -> String {

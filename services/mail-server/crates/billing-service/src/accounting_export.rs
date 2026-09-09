@@ -53,6 +53,108 @@ struct AccountingExportRow {
     status: String,
 }
 
+/// Raw fetched row: the join fields above PLUS the invoice's immutable
+/// billing-address snapshot (audit F08). Issued invoices are legal
+/// documents — the export must show the address captured AT ISSUE TIME;
+/// the live `billing_addresses` join remains the fallback for legacy rows
+/// that predate snapshotting.
+#[derive(Debug, sqlx::FromRow)]
+struct FetchedAccountingRow {
+    invoice_number: String,
+    issued_at: DateTime<Utc>,
+    due_at: Option<DateTime<Utc>>,
+    tenant_name: Option<String>,
+    company_name: Option<String>,
+    address_line1: Option<String>,
+    address_line2: Option<String>,
+    city: Option<String>,
+    state: Option<String>,
+    postal_code: Option<String>,
+    country: Option<String>,
+    vat_number: Option<String>,
+    billing_address_snapshot: Option<String>,
+    subtotal: i64,
+    vat_total: i64,
+    total: i64,
+    currency: String,
+    status: String,
+}
+
+impl FetchedAccountingRow {
+    /// Snapshot-first resolution of one address field: the value frozen on
+    /// the invoice wins (snake_case key from the billing-service writer or
+    /// camelCase from the api-server admin writer); the live address join
+    /// fills legacy gaps.
+    fn resolve(
+        snapshot: &serde_json::Value,
+        snake_key: &str,
+        camel_key: &str,
+        live: Option<&String>,
+    ) -> Option<String> {
+        snapshot
+            .get(snake_key)
+            .or_else(|| snapshot.get(camel_key))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
+            .filter(|value| !value.is_empty())
+            .or_else(|| live.cloned().filter(|value| !value.is_empty()))
+    }
+
+    fn into_export_row(self) -> AccountingExportRow {
+        let snapshot: serde_json::Value = self
+            .billing_address_snapshot
+            .as_deref()
+            .and_then(|raw| serde_json::from_str(raw).ok())
+            .unwrap_or(serde_json::Value::Null);
+
+        AccountingExportRow {
+            invoice_number: self.invoice_number,
+            issued_at: self.issued_at,
+            due_at: self.due_at,
+            tenant_name: self.tenant_name,
+            company_name: Self::resolve(
+                &snapshot,
+                "company_name",
+                "companyName",
+                self.company_name.as_ref(),
+            ),
+            registry_code: None,
+            address_line1: Self::resolve(
+                &snapshot,
+                "address_line1",
+                "addressLine1",
+                self.address_line1.as_ref(),
+            ),
+            address_line2: Self::resolve(
+                &snapshot,
+                "address_line2",
+                "addressLine2",
+                self.address_line2.as_ref(),
+            ),
+            city: Self::resolve(&snapshot, "city", "city", self.city.as_ref()),
+            state: Self::resolve(&snapshot, "state", "state", self.state.as_ref()),
+            postal_code: Self::resolve(
+                &snapshot,
+                "postal_code",
+                "postalCode",
+                self.postal_code.as_ref(),
+            ),
+            country: Self::resolve(&snapshot, "country", "country", self.country.as_ref()),
+            vat_number: Self::resolve(
+                &snapshot,
+                "vat_number",
+                "vatNumber",
+                self.vat_number.as_ref(),
+            ),
+            subtotal: self.subtotal,
+            vat_total: self.vat_total,
+            total: self.total,
+            currency: self.currency,
+            status: self.status,
+        }
+    }
+}
+
 /// Export accounting data as a CSV string for the given date range.
 ///
 /// Returns a UTF-8 CSV string with BOM for Excel compatibility.
@@ -66,12 +168,17 @@ pub async fn export_accounting_csv(
 }
 
 /// Fetch invoice data joined with tenant info and billing addresses.
+///
+/// Audit F08: the invoice's immutable `billing_address` snapshot (captured
+/// at issue time) is the PRIMARY address source; the live-address LATERAL
+/// join is only the fallback for legacy invoices issued before
+/// snapshotting. `billing_addresses.state` exists since migration 132.
 async fn fetch_accounting_rows(
     pool: &PgPool,
     start_date: DateTime<Utc>,
     end_date: DateTime<Utc>,
 ) -> Result<Vec<AccountingExportRow>, String> {
-    let rows: Vec<AccountingExportRow> = sqlx::query_as(
+    let rows: Vec<FetchedAccountingRow> = sqlx::query_as(
         r#"
         SELECT
             i.invoice_number,
@@ -79,7 +186,6 @@ async fn fetch_accounting_rows(
             i.due_at,
             t.name AS tenant_name,
             ba.company_name,
-            NULL::text AS registry_code,
             ba.address_line1,
             ba.address_line2,
             ba.city,
@@ -87,6 +193,7 @@ async fn fetch_accounting_rows(
             ba.postal_code,
             ba.country,
             ba.vat_number,
+            i.billing_address AS billing_address_snapshot,
             i.subtotal,
             i.vat_total,
             i.total,
@@ -118,6 +225,10 @@ async fn fetch_accounting_rows(
     .await
     .map_err(|e| format!("Failed to query accounting data: {e}"))?;
 
+    let rows: Vec<AccountingExportRow> = rows
+        .into_iter()
+        .map(FetchedAccountingRow::into_export_row)
+        .collect();
     info!(rows = rows.len(), "Accounting export query returned rows");
 
     Ok(rows)
@@ -313,6 +424,58 @@ mod tests {
         };
         let addr = build_address_string(&row);
         assert_eq!(addr, "");
+    }
+
+    // ------------------------------------------------------------------
+    // Audit F08 — the immutable invoice snapshot wins over the live
+    // billing address; legacy rows fall back to the join.
+    // ------------------------------------------------------------------
+
+    fn fetched_row(snapshot: Option<&str>, live_city: Option<&str>) -> FetchedAccountingRow {
+        FetchedAccountingRow {
+            invoice_number: "INV-SNAP".into(),
+            issued_at: Utc::now(),
+            due_at: None,
+            tenant_name: Some("Test".into()),
+            company_name: Some("Live Company OÜ".into()),
+            address_line1: Some("Live Street 1".into()),
+            address_line2: None,
+            city: live_city.map(str::to_string),
+            state: None,
+            postal_code: None,
+            country: Some("EE".into()),
+            vat_number: None,
+            billing_address_snapshot: snapshot.map(str::to_string),
+            subtotal: 1000,
+            vat_total: 240,
+            total: 1240,
+            currency: "EUR".into(),
+            status: "paid".into(),
+        }
+    }
+
+    #[test]
+    fn snapshot_address_wins_over_the_live_address() {
+        let snapshot = r#"{"company_name":"Snapshot OÜ","city":"Tartu","state":"Tartumaa"}"#;
+        let row = fetched_row(Some(snapshot), Some("Tallinn")).into_export_row();
+        assert_eq!(row.company_name.as_deref(), Some("Snapshot OÜ"));
+        assert_eq!(row.city.as_deref(), Some("Tartu"));
+        assert_eq!(row.state.as_deref(), Some("Tartumaa"));
+        // Fields absent from the snapshot fall back to the live join.
+        assert_eq!(row.address_line1.as_deref(), Some("Live Street 1"));
+    }
+
+    #[test]
+    fn legacy_rows_without_snapshot_use_the_live_address() {
+        let row = fetched_row(None, Some("Tallinn")).into_export_row();
+        assert_eq!(row.company_name.as_deref(), Some("Live Company OÜ"));
+        assert_eq!(row.city.as_deref(), Some("Tallinn"));
+    }
+
+    #[test]
+    fn malformed_snapshot_degrades_to_the_live_address() {
+        let row = fetched_row(Some("{not json"), Some("Tallinn")).into_export_row();
+        assert_eq!(row.city.as_deref(), Some("Tallinn"));
     }
 
     #[test]

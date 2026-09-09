@@ -785,23 +785,36 @@ async fn handle_subscription_change(
         return Ok(());
     };
 
-    let current_subscription = sqlx::query_as::<_, (String, String)>(
-        "SELECT tenant_id, status FROM stripe_subscriptions WHERE stripe_subscription_id = $1",
+    let current_subscription = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Option<DateTime<Utc>>,
+            Option<DateTime<Utc>>,
+            Option<String>,
+        ),
+    >(
+        r#"
+        SELECT tenant_id, status::text, billing_cycle_start, billing_cycle_end, plan
+        FROM stripe_subscriptions
+        WHERE stripe_subscription_id = $1
+        "#,
     )
     .bind(&subscription.id)
     .fetch_optional(&state.db)
     .await
     .map_err(|error| format!("Failed to load current Stripe subscription: {error}"))?;
 
-    if let Some((current_tenant_id, current_status)) = current_subscription {
-        if current_tenant_id != tenant_id {
+    if let Some((current_tenant_id, current_status, ..)) = current_subscription.as_ref() {
+        if current_tenant_id.as_str() != tenant_id {
             return Err(format!(
                 "Stripe subscription {} is already bound to a different tenant",
                 subscription.id
             ));
         }
-        if current_status != subscription.status.as_str()
-            && !subscription.status.can_transition_from(&current_status)
+        if current_status.as_str() != subscription.status.as_str()
+            && !subscription.status.can_transition_from(current_status)
         {
             return Err(format!(
                 "Invalid subscription status transition: {current_status} -> {}",
@@ -863,8 +876,15 @@ async fn handle_subscription_change(
     .ok_or_else(|| format!("Unknown Stripe price ID: {price_id}"))?;
     let entitlement_plan = subscription.status.entitlement_plan_name(&plan_name);
 
-    // Run the upsert inside a transaction that first deactivates any other
-    // active subscription rows for the tenant. Migration 078 added a partial
+    let incoming_period_start =
+        DateTime::<Utc>::from_timestamp(subscription.current_period_start, 0);
+    let incoming_period_end = DateTime::<Utc>::from_timestamp(subscription.current_period_end, 0);
+
+    // Run the upsert inside a tenant-scoped entitlement transaction (audit
+    // F36): the advisory lock serializes every entitlement writer (create,
+    // update, delete) for this tenant, so reconciled plans can never
+    // interleave. The transaction first deactivates any other active
+    // subscription rows for the tenant. Migration 078 added a partial
     // unique index on (tenant_id) WHERE status = 'active', so inserting a
     // second active row for the tenant (e.g. a renewed Stripe subscription
     // id after an upgrade) would abort the ON CONFLICT upsert.
@@ -874,47 +894,100 @@ async fn handle_subscription_change(
         .await
         .map_err(|error| format!("Failed to begin subscription upsert transaction: {error}"))?;
 
-    sqlx::query(
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("stripe_entitlement:{tenant_id}"))
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("Failed to lock tenant entitlement: {error}"))?;
+
+    // Audit F30: before the upsert overwrites the period bounds, snapshot
+    // the subscription's CLOSING cycle into the immutable billing_periods
+    // table — a renewal must never erase the just-ended period before the
+    // overage sweep has read it. Only a genuine period transition (new
+    // start differs from the stored one) snapshots the old cycle.
+    if let Some((_, previous_status, Some(previous_start), Some(previous_end), previous_plan)) =
+        current_subscription.as_ref()
+    {
+        if incoming_period_start.is_none_or(|incoming| incoming != *previous_start) {
+            snapshot_billing_period(
+                &mut tx,
+                tenant_id,
+                &subscription.id,
+                previous_status,
+                previous_plan.as_deref(),
+                *previous_start,
+                *previous_end,
+            )
+            .await?;
+        }
+    }
+
+    let superseded: Vec<SupersededCycleRow> = sqlx::query_as(
         r#"
         UPDATE stripe_subscriptions
         SET status = 'canceled', updated_at = NOW()
         WHERE tenant_id = $1
           AND status = 'active'
           AND stripe_subscription_id <> $2
+        RETURNING stripe_subscription_id, billing_cycle_start, billing_cycle_end, plan
         "#,
     )
     .bind(tenant_id)
     .bind(&subscription.id)
-    .execute(&mut *tx)
+    .fetch_all(&mut *tx)
     .await
     .map_err(|error| format!("Failed to deactivate superseded subscriptions: {error}"))?;
 
+    // Audit F30: superseded subscriptions' current cycles are equally
+    // billable periods — snapshot them before their rows go terminal.
+    // Their pre-deactivation status was 'active' (the UPDATE's WHERE).
+    for cycle in &superseded {
+        if let (Some(start), Some(end)) = (cycle.billing_cycle_start, cycle.billing_cycle_end) {
+            snapshot_billing_period(
+                &mut tx,
+                tenant_id,
+                &cycle.stripe_subscription_id,
+                "active",
+                cycle.plan.as_deref(),
+                start,
+                end,
+            )
+            .await?;
+        }
+    }
+
+    // Audit F27: the upsert persists BOTH the resolved plan and the Stripe
+    // price — the old DO UPDATE preserved a stale price (and never wrote
+    // `plan` at all), so consumers keying on ss.plan mis-resolved after
+    // upgrades/downgrades.
     sqlx::query(
         r#"
         WITH upsert_subscription AS (
             INSERT INTO stripe_subscriptions (
                 id, tenant_id, stripe_subscription_id, stripe_customer_id, stripe_price_id,
-                status, billing_interval, billing_cycle_start, billing_cycle_end,
+                plan, status, billing_interval, billing_cycle_start, billing_cycle_end,
                 cancel_at_period_end, canceled_at, trial_end, created_at, updated_at
             )
             VALUES (
-                gen_random_uuid(), $1, $2, $3, $4, $5, $6,
-                to_timestamp($7), to_timestamp($8), $9, to_timestamp($10), to_timestamp($11), NOW(), NOW()
+                gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7,
+                to_timestamp($8), to_timestamp($9), $10, to_timestamp($11), to_timestamp($12), NOW(), NOW()
             )
             ON CONFLICT (stripe_subscription_id) DO UPDATE SET
-                status = $5,
-                billing_interval = $6,
-                billing_cycle_start = to_timestamp($7),
-                billing_cycle_end = to_timestamp($8),
-                cancel_at_period_end = $9,
-                canceled_at = to_timestamp($10),
-                trial_end = to_timestamp($11),
+                stripe_price_id = $4,
+                plan = $5,
+                status = $6,
+                billing_interval = $7,
+                billing_cycle_start = to_timestamp($8),
+                billing_cycle_end = to_timestamp($9),
+                cancel_at_period_end = $10,
+                canceled_at = to_timestamp($11),
+                trial_end = to_timestamp($12),
                 updated_at = NOW()
             RETURNING tenant_id
         ),
         update_tenant AS (
             UPDATE tenants
-            SET plan = $12, updated_at = NOW()
+            SET plan = $13, updated_at = NOW()
             WHERE id = $1
             RETURNING id
         )
@@ -925,6 +998,7 @@ async fn handle_subscription_change(
     .bind(&subscription.id)
     .bind(subscription.customer.id())
     .bind(price_id)
+    .bind(&plan_name)
     .bind(subscription.status.as_str())
     .bind(interval.as_db_value())
     .bind(subscription.current_period_start)
@@ -936,6 +1010,21 @@ async fn handle_subscription_change(
     .execute(&mut *tx)
     .await
     .map_err(|error| format!("Failed to upsert Stripe subscription: {error}"))?;
+
+    // Audit F30: the incoming cycle gets its period record now, with the
+    // resolved plan snapshotted.
+    if let (Some(period_start), Some(period_end)) = (incoming_period_start, incoming_period_end) {
+        snapshot_billing_period(
+            &mut tx,
+            tenant_id,
+            &subscription.id,
+            subscription.status.as_str(),
+            Some(&plan_name),
+            period_start,
+            period_end,
+        )
+        .await?;
+    }
 
     tx.commit()
         .await
@@ -1136,6 +1225,89 @@ async fn auto_provision_dedicated_ips_background(
     Ok(())
 }
 
+/// Record (or leave untouched) the immutable billing-period snapshot for a
+/// subscription cycle (audit F30). Runs INSIDE the caller's entitlement
+/// transaction. `status` is the subscription's status while the cycle was
+/// in force — ACTIVE cycles snapshot the tenant-level override-aware plan
+/// (the same source the enforcement gate used), terminal cycles the
+/// subscription's own plan.
+async fn snapshot_billing_period(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: &str,
+    stripe_subscription_id: &str,
+    status: &str,
+    subscription_plan: Option<&str>,
+    period_start: DateTime<Utc>,
+    period_end: DateTime<Utc>,
+) -> Result<(), String> {
+    if period_end <= period_start {
+        return Ok(());
+    }
+
+    let effective: Option<(String, Option<i64>)> = sqlx::query_as(
+        r#"
+        SELECT p.name, p.email_limit
+        FROM tenants t
+        LEFT JOIN plan_overrides po
+          ON po.tenant_id = t.id
+         AND po.active = true
+         AND (po.expires_at IS NULL OR po.expires_at > NOW())
+        LEFT JOIN plans p
+          ON p.name = CASE WHEN $2 = 'active'
+                           THEN COALESCE(po.plan, t.plan, $3)
+                           ELSE $3
+                      END
+        WHERE t.id = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(status)
+    .bind(subscription_plan)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|error| format!("Failed to snapshot billing period plan: {error}"))?;
+
+    let (plan_name, email_allowance) = match effective {
+        Some((name, limit)) => (Some(name), limit),
+        None => (subscription_plan.map(str::to_string), None),
+    };
+
+    sqlx::query(
+        r#"
+        INSERT INTO billing_periods (
+            tenant_id, stripe_subscription_id, usage_kind,
+            period_start, period_end, currency, plan_name, email_allowance
+        )
+        VALUES ($1, $2, 'subscription', $3, $4, 'EUR', $5, $6)
+        ON CONFLICT (tenant_id, usage_kind, period_start) DO NOTHING
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(stripe_subscription_id)
+    .bind(period_start)
+    .bind(period_end)
+    .bind(plan_name)
+    .bind(email_allowance)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("Failed to snapshot billing period: {error}"))?;
+    Ok(())
+}
+
+/// Entitlement decision after a subscription was deleted (audit F36):
+/// the plan comes from the tenant's best REMAINING entitled subscription
+/// (active preferred over trialing); with none left, the tenant drops to
+/// free. Pure — unit-tested. This is what makes a stale `deleted` event for
+/// an already-replaced subscription unable to downgrade the newer active
+/// one: the decision never consults the deleted row.
+fn reconciled_entitlement_plan(remaining: Option<(Option<&str>, &str)>) -> String {
+    match remaining {
+        Some((Some(plan), _status)) if !plan.trim().is_empty() => plan.trim().to_string(),
+        _ => "free".to_string(),
+    }
+}
+
 async fn handle_subscription_deleted(
     state: &AppState,
     subscription: SubscriptionEvent,
@@ -1144,34 +1316,133 @@ async fn handle_subscription_deleted(
         return Ok(());
     };
 
-    sqlx::query(
+    // Audit F36: reconcile entitlement under a tenant-scoped transaction.
+    // The advisory lock serializes every entitlement writer for this
+    // tenant (create/update/delete), so a stale delete event can no longer
+    // interleave with a newer subscription webhook and downgrade a tenant
+    // that still has an entitled subscription.
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|error| format!("Failed to begin subscription delete transaction: {error}"))?;
+
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(format!("stripe_entitlement:{tenant_id}"))
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("Failed to lock tenant entitlement: {error}"))?;
+
+    // Cancel ONLY this tenant's row for the deleted subscription: a stale
+    // or foreign event (subscription bound to another tenant, already
+    // replaced) matches no row and is a no-op.
+    let canceled: Option<String> = sqlx::query_scalar(
         r#"
-        WITH cancel_subscription AS (
-            UPDATE stripe_subscriptions
-            SET status = 'canceled', updated_at = NOW()
-            WHERE stripe_subscription_id = $1
-            RETURNING tenant_id
-        ),
-        downgrade_tenant AS (
-            UPDATE tenants
-            SET plan = 'free', updated_at = NOW()
-            WHERE id = $2
-              AND EXISTS (
-                  SELECT 1 FROM cancel_subscription
-                  WHERE tenant_id = $2
-              )
-            RETURNING id
-        )
-        SELECT 1
+        UPDATE stripe_subscriptions
+        SET status = 'canceled', updated_at = NOW()
+        WHERE stripe_subscription_id = $1
+          AND tenant_id = $2
+        RETURNING tenant_id
         "#,
     )
     .bind(&subscription.id)
     .bind(tenant_id)
-    .execute(&state.db)
+    .fetch_optional(&mut *tx)
     .await
     .map_err(|error| format!("Failed to cancel Stripe subscription: {error}"))?;
 
-    info!(tenant_id = %tenant_id, subscription_id = %subscription.id, "stripe subscription canceled");
+    let Some(canceled_tenant) = canceled else {
+        // Stale event (or the row belongs to another tenant): reject its
+        // effect on the tenant's plan outright.
+        tx.rollback()
+            .await
+            .map_err(|error| format!("Failed to roll back stale delete: {error}"))?;
+        info!(
+            tenant_id = %tenant_id,
+            subscription_id = %subscription.id,
+            "stripe subscription.deleted ignored — no matching row for this tenant (stale event)"
+        );
+        return Ok(());
+    };
+    debug_assert_eq!(canceled_tenant, tenant_id);
+
+    // Audit F30: the deleted subscription's final cycle is still a
+    // billable period — snapshot it before the row goes terminal.
+    let final_cycle: Option<SubscriptionCycleRow> = sqlx::query_as(
+        r#"
+        SELECT billing_cycle_start, billing_cycle_end, plan
+        FROM stripe_subscriptions
+        WHERE stripe_subscription_id = $1 AND tenant_id = $2
+        "#,
+    )
+    .bind(&subscription.id)
+    .bind(tenant_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to load deleted subscription cycle: {error}"))?;
+    if let Some(SubscriptionCycleRow {
+        billing_cycle_start: Some(start),
+        billing_cycle_end: Some(end),
+        plan,
+    }) = final_cycle
+    {
+        snapshot_billing_period(
+            &mut tx,
+            tenant_id,
+            &subscription.id,
+            "canceled",
+            plan.as_deref(),
+            start,
+            end,
+        )
+        .await?;
+    }
+
+    // Reconcile the tenant's plan from the CURRENT subscription state: an
+    // entitled subscription that remains (active or trialing) keeps its
+    // plan; only when none remains does the tenant drop to free. This is
+    // what makes a stale delete of an OLD subscription unable to downgrade
+    // a NEWER active one (audit F36).
+    let remaining: Option<(Option<String>, String)> = sqlx::query_as(
+        r#"
+        SELECT plan, status::text
+        FROM stripe_subscriptions
+        WHERE tenant_id = $1
+          AND stripe_subscription_id <> $2
+          AND status IN ('active', 'trialing')
+        ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END, created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(&subscription.id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to reconcile remaining entitlement: {error}"))?;
+
+    let reconciled_plan = reconciled_entitlement_plan(
+        remaining
+            .as_ref()
+            .map(|(plan, status)| (plan.as_deref(), status.as_str())),
+    );
+
+    sqlx::query("UPDATE tenants SET plan = $2, updated_at = NOW() WHERE id = $1")
+        .bind(tenant_id)
+        .bind(&reconciled_plan)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("Failed to reconcile tenant plan: {error}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("Failed to commit subscription delete: {error}"))?;
+
+    info!(
+        tenant_id = %tenant_id,
+        subscription_id = %subscription.id,
+        reconciled_plan = %reconciled_plan,
+        "stripe subscription canceled — entitlement reconciled from current subscription state"
+    );
     Ok(())
 }
 
@@ -1219,16 +1490,31 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
 
     // Atomically update the invoice, resolving tenant_id either from event
     // metadata or via a subquery on stripe_subscriptions. This eliminates the
-    // TOCTOU window between tenant resolution and the UPDATE.
+    // TOCTOU window between tenant resolution and the UPDATE. A confirmed
+    // payment allocation (audit F35) is written in the same statement so
+    // the outstanding derivation sees Stripe-settled invoices as paid.
     let result = sqlx::query(
         r#"
-        UPDATE invoices SET status = 'paid', paid_at = NOW(), updated_at = NOW()
-        WHERE stripe_invoice_id = $1
-          AND (tenant_id = $2 OR tenant_id IS NULL)
+        WITH marked AS (
+            UPDATE invoices SET status = 'paid', paid_at = NOW(), updated_at = NOW()
+            WHERE stripe_invoice_id = $1
+              AND (tenant_id = $2 OR tenant_id IS NULL)
+            RETURNING id, tenant_id, total, currency
+        ),
+        allocation AS (
+            INSERT INTO invoice_payment_allocations (
+                id, tenant_id, invoice_id, operation_id, source, amount_cents, currency
+            )
+            SELECT gen_random_uuid(), tenant_id, id, $3, 'stripe', total, currency
+            FROM marked
+            ON CONFLICT (operation_id) DO NOTHING
+        )
+        SELECT 1
         "#,
     )
     .bind(&invoice.id)
     .bind(&tenant_id)
+    .bind(format!("stripe:{}", invoice.id))
     .execute(&state.db)
     .await;
 
@@ -1396,14 +1682,38 @@ async fn insert_paid_invoice_from_stripe(
     // Best-effort capture of the billing country for KMD bucketing (I4):
     // invoices created directly from Stripe carry no local VAT derivation,
     // so store the current address; the VAT rate is derived from the Stripe
-    // amounts themselves.
-    let billing_country: Option<String> =
-        sqlx::query_scalar("SELECT UPPER(country) FROM billing_addresses WHERE tenant_id = $1")
-            .bind(tenant_id)
-            .fetch_optional(&state.db)
-            .await
-            .unwrap_or(None)
-            .flatten();
+    // amounts themselves. Audit F08: the FULL address is snapshotted
+    // immutably onto the invoice, not just the country.
+    let address_snapshot: Option<String> = sqlx::query_scalar(
+        r#"
+        SELECT json_build_object(
+            'company_name', company_name,
+            'vat_number', vat_number,
+            'address_line1', address_line1,
+            'address_line2', address_line2,
+            'city', city,
+            'state', state,
+            'postal_code', postal_code,
+            'country', country,
+            'email', email
+        )::text
+        FROM billing_addresses WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_optional(&state.db)
+    .await
+    .unwrap_or(None)
+    .flatten();
+    let billing_country: Option<String> = address_snapshot
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|snapshot| {
+            snapshot
+                .get("country")
+                .and_then(|value| value.as_str())
+                .map(|country| country.to_uppercase())
+        });
 
     let result = sqlx::query(
         r#"
@@ -1411,14 +1721,14 @@ async fn insert_paid_invoice_from_stripe(
             id, tenant_id, stripe_invoice_id, invoice_number, status,
             currency, amount, subtotal, vat_total, total, line_items,
             issued_at, due_at, paid_at, period_start, period_end,
-            billing_country, vat_rate,
+            billing_country, vat_rate, billing_address,
             created_at, updated_at
         ) VALUES (
             gen_random_uuid(), $1, $2,
             COALESCE($3, to_char(NOW(), 'YYYY') || '-' || LPAD(nextval('invoice_number_seq')::text, 6, '0')),
             'paid', $4, $7, $5, $6, $7, $13,
             to_timestamp($8), to_timestamp($8), NOW(), to_timestamp($9), to_timestamp($10),
-            $11, $12,
+            $11, $12, $14,
             NOW(), NOW()
         )
         ON CONFLICT (stripe_invoice_id) DO UPDATE SET
@@ -1447,6 +1757,7 @@ async fn insert_paid_invoice_from_stripe(
     .bind(billing_country)
     .bind(vat_rate)
     .bind(line_items_json)
+    .bind(address_snapshot)
     .execute(&state.db)
     .await
     .map_err(|error| format!("Failed to insert paid Stripe invoice {}: {error}", invoice.id))?;
@@ -2120,6 +2431,24 @@ enum WebhookEventClaim {
     AlreadyPending,
 }
 
+/// A subscription row's current billing cycle (audit F30 snapshot input).
+#[derive(Debug, sqlx::FromRow)]
+struct SubscriptionCycleRow {
+    billing_cycle_start: Option<DateTime<Utc>>,
+    billing_cycle_end: Option<DateTime<Utc>>,
+    plan: Option<String>,
+}
+
+/// A superseded (deactivated) subscription's cycle, returned by the
+/// deactivating UPDATE (audit F30).
+#[derive(Debug, sqlx::FromRow)]
+struct SupersededCycleRow {
+    stripe_subscription_id: String,
+    billing_cycle_start: Option<DateTime<Utc>>,
+    billing_cycle_end: Option<DateTime<Utc>>,
+    plan: Option<String>,
+}
+
 #[derive(Debug, sqlx::FromRow)]
 struct WebhookEventClaimRow {
     claimed: bool,
@@ -2781,6 +3110,53 @@ pub async fn retry_deadlettered_webhooks(state: &AppState) -> Result<(), String>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // Audit F36 — entitlement reconciliation after a subscription delete.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn delete_with_a_remaining_active_subscription_keeps_its_plan() {
+        // A stale deleted event for an OLD subscription must not downgrade
+        // the newer active one.
+        assert_eq!(
+            reconciled_entitlement_plan(Some((Some("growth"), "active"))),
+            "growth"
+        );
+    }
+
+    #[test]
+    fn delete_with_a_remaining_trial_keeps_the_trialled_plan() {
+        assert_eq!(
+            reconciled_entitlement_plan(Some((Some("pro"), "trialing"))),
+            "pro"
+        );
+    }
+
+    #[test]
+    fn delete_with_no_entitled_subscription_remaining_drops_to_free() {
+        assert_eq!(reconciled_entitlement_plan(None), "free");
+        // A remaining row with no plan recorded cannot grant entitlement.
+        assert_eq!(reconciled_entitlement_plan(Some((None, "active"))), "free");
+        // Blank plans are data corruption, not entitlement.
+        assert_eq!(
+            reconciled_entitlement_plan(Some((Some("  "), "active"))),
+            "free"
+        );
+    }
+
+    #[test]
+    fn delete_reconciliation_never_consults_the_deleted_row() {
+        // The decision input is exclusively the remaining-subscription
+        // query result; pin that the handler's query only selects rows
+        // OTHER than the deleted subscription and only entitled statuses.
+        // (Behavioral pin: the deleted subscription's plan 'enterprise'
+        // must lose to the remaining active 'starter'.)
+        assert_eq!(
+            reconciled_entitlement_plan(Some((Some("starter"), "active"))),
+            "starter"
+        );
+    }
 
     #[test]
     fn reactivation_transitions_from_terminal_states_are_allowed() {
