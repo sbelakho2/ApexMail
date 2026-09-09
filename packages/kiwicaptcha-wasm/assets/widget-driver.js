@@ -674,7 +674,11 @@
       var v = view;
       if (!v || !v.statusKey) return;
       if (labelEl) labelEl.textContent = kiwiT(v.statusKey);
-      if (pillEl) { var badgeText = kiwiT(v.badgeKey); pillEl.textContent = badgeText; pillEl.style.display = badgeText ? "" : "none"; }
+      // The static template ships the badge with the `hidden` attribute
+      // (empty idle text must not paint before the driver runs); the
+      // repaint owns BOTH mechanisms — the attribute and the inline
+      // display — so a badge with text is always visible in any state.
+      if (pillEl) { var badgeText = kiwiT(v.badgeKey); pillEl.textContent = badgeText; pillEl.hidden = !badgeText; pillEl.style.display = badgeText ? "" : "none"; }
       if (stateEl) stateEl.setAttribute("data-state", v.domState);
       if (v.hintKey && hintEl) hintEl.textContent = kiwiExpandView(kiwiT(v.hintKey), v.replacements);
       if (retryEl) retryEl.textContent = kiwiWidgetPack.retryButton;
