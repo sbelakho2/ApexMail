@@ -403,19 +403,21 @@
   // the English fallback and re-paints when the module registers.
   var kiwiLocalePacks = {
     en: { dir: "ltr",
-      label: "Security Check", badgeIdle: "Idle", badgeWait: "Wait",
-      badgeWorking: "Working", badgeSuccess: "Success", badgeFailed: "Failed",
-      badgeVersionError: "Version Error", badgeUnavailable: "Unavailable",
+      label: "Security verification", badgeIdle: "", badgeWait: "Checking\u2026",
+      badgeWorking: "Checking\u2026", badgeSuccess: "Verified.", badgeFailed: "Try again.",
+      badgeExpired: "Expired",
+      badgeVersionError: "Version error", badgeUnavailable: "Unavailable",
       statusConnecting: "Connecting\u2026", statusVerifying: "Verifying\u2026",
       statusVerified: "Verification complete", statusFailed: "Verification failed",
       statusExpired: "Verification expired", statusWorkerUnavailable: "Worker unavailable",
       statusSolverMismatch: "Solver version mismatch",
-      hintProtected: "Protected", hintRetrying: "Challenge failed ({msg}) \u2014 retrying\u2026",
+      hintProtected: "Protected by KiwiCaptcha", hintRetrying: "Challenge failed ({msg}) \u2014 retrying\u2026",
       hintClickRetry: "Challenge failed ({msg}) \u2014 press the Retry button to try again.",
-      hintVerified: "Proof-of-work verified locally.",
+      hintVerified: "Verification complete.",
+      hintExpired: "Verification expired \u2014 press Retry to verify again.",
       hintWorker: "Worker unavailable \u2014 Argon2id needs a Web Worker that this page's CSP blocks; retry, or configure data-kiwi-worker-src.",
       hintSolver: "The solver worker is out of date \u2014 reload the page to load the current version.",
-      expired: "expired", retryButton: "Retry", checking: "Checking\u2026" },
+      retryButton: "Retry", checking: "Checking\u2026" },
     // The lazy widget-locales.js module fills these placeholders with
     // the same language codes it ships.
     de: null, fr: null, es: null, it: null, nl: null, pl: null, pt: null, ar: null
@@ -672,7 +674,7 @@
       var v = view;
       if (!v || !v.statusKey) return;
       if (labelEl) labelEl.textContent = kiwiT(v.statusKey);
-      if (pillEl) pillEl.textContent = kiwiT(v.badgeKey);
+      if (pillEl) { var badgeText = kiwiT(v.badgeKey); pillEl.textContent = badgeText; pillEl.style.display = badgeText ? "" : "none"; }
       if (stateEl) stateEl.setAttribute("data-state", v.domState);
       if (v.hintKey && hintEl) hintEl.textContent = kiwiExpandView(kiwiT(v.hintKey), v.replacements);
       if (retryEl) retryEl.textContent = kiwiWidgetPack.retryButton;
@@ -755,13 +757,14 @@
       if (tokenEl) tokenEl.value = "";
       setBinding("");
       writeResponseAlias("");
-      // The expired view keeps the solved-state strings (the label, the
-      // Success badge and the verified hint stay on the widget exactly
-      // like the legacy expiry path left them) and only flips the DOM
-      // state to "expired", so a later language settlement repaints the
-      // same expired presentation in the settled pack.
-      kiwiSetView({ statusKey: "label", badgeKey: "badgeSuccess", domState: "expired", hintKey: "hintVerified" });
-      if (countdownEl) countdownEl.textContent = kiwiT("expired");
+      // The expired presentation is its OWN coherent view (review
+      // 2026-09-09): the legacy path kept the solved-state badge and
+      // hint next to an "expired" countdown, which read contradictory —
+      // "Verified." and "expired" on screen at once. The badge, hint and
+      // countdown repaint as one expired state, and a later language
+      // settlement repaints the same view in the settled pack.
+      kiwiSetView({ statusKey: "label", badgeKey: "badgeExpired", domState: "expired", hintKey: "hintExpired" });
+      if (countdownEl) countdownEl.textContent = "";
       // The credential is gone — the widget is not started anymore, so
       // the (now visible) Retry button can reacquire.
       delete W.dataset.kiwiStarted;
@@ -778,7 +781,7 @@
     }
     function startCountdown(ttlSecs) {
       var remaining = ttlSecs;
-      var tick = function() { if (countdownEl) countdownEl.textContent = remaining > 0 ? remaining + "s" : kiwiT("expired"); };
+      var tick = function() { if (countdownEl) countdownEl.textContent = remaining > 0 ? remaining + "s" : ""; };
       tick(); clearInterval(countdownTimer);
       countdownTimer = setInterval(function() { remaining--; tick(); if (remaining <= 0) clearInterval(countdownTimer); }, 1000);
       var rc = kiwiWidgets[widgetId];

@@ -82,8 +82,8 @@ ROUTE_CHECKS = (
         path="/login",
         expected_fragments=(
             "Welcome back",
-            "Enter your credentials to access the console",
-            "Security Check Active",
+            "Sign in to your ApexMail account",
+            "Security verification",
         ),
     ),
     RouteCheck(

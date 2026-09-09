@@ -2052,7 +2052,6 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
 {csrf}\
 {plan_input}\
 {plan_notice}\
-</div>\
 <div class=\"space-y-2\">\
 <label class=\"apex-klabel\" for=\"signup-email\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
 <input id=\"signup-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
@@ -5275,6 +5274,68 @@ mod tests {
             assert!(!page.contains("<script"));
             assert!(!page.contains("data-password-toggle"));
             assert!(!page.contains("kiwi"));
+        }
+    }
+
+    #[test]
+    fn auth_page_markup_is_structurally_sound() {
+        // Regression (2026-09-09): deleting the signup name/company grid
+        // left a stray `</div>` inside the HTML format string, which
+        // closed the form early in the browser — the fields rendered
+        // OUTSIDE the <form> and the submit button was orphaned, so the
+        // page looked broken and could not submit. These structural
+        // invariants catch that class of slip (unbalanced containers,
+        // controls outside the form, missing submit) on every auth page
+        // built from Rust string literals.
+        let pages: Vec<(&str, String)> = vec![
+            ("login", web_login_page("t")),
+            (
+                "login+error",
+                web_login_page_with_state(Some("Invalid credentials"), "t"),
+            ),
+            ("signup", web_signup_page("t")),
+            ("signup+plan", web_signup_page_with_plan("t", Some("scale"))),
+            (
+                "mfa",
+                web_login_mfa_challenge_page("t", "ada@example.com", "/dashboard"),
+            ),
+            ("forgot", web_forgot_password_page("t")),
+            (
+                "reset",
+                web_reset_password_page_with_state(Some("tok"), Some("ada@example.com"), None, "t"),
+            ),
+            ("cp-login", control_plane_login_page("t")),
+        ];
+        for (name, html) in pages {
+            let opens = html.matches("<div").count();
+            let closes = html.matches("</div>").count();
+            assert_eq!(
+                opens, closes,
+                "{name}: <div> imbalance ({opens} opens vs {closes} closes)"
+            );
+
+            let form_start = html
+                .find("<form")
+                .unwrap_or_else(|| panic!("{name}: no <form>"));
+            let form_end = html
+                .find("</form>")
+                .unwrap_or_else(|| panic!("{name}: no </form>"));
+            assert!(form_end > form_start, "{name}: empty form range");
+            assert!(
+                html[form_start..form_end].contains("<button type=\"submit\""),
+                "{name}: submit button not inside the form"
+            );
+            for tag in ["<input", "<button", "<label"] {
+                let mut from = 0;
+                while let Some(offset) = html[from..].find(tag) {
+                    let pos = from + offset;
+                    assert!(
+                        pos > form_start && pos < form_end,
+                        "{name}: {tag} element rendered outside the form"
+                    );
+                    from = pos + tag.len();
+                }
+            }
         }
     }
 
