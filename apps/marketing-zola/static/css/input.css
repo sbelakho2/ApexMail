@@ -1572,11 +1572,14 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
       Used by the features grid and pricing teaser. Previously ONLY the
       .ledger-feat-scoped variant carried styling; the v3 homepage
       restructure dropped that wrapper and every bare card-dna went
-      unstyled (no background, no border, no crown). */
+      unstyled (no background, no border, no crown). Padding lives here
+      so a bare card-dna can never ship with content hugging its border;
+      utility overrides (p-6 on pricing) still win. */
 .card-dna {
   border: 1px solid rgb(var(--surface-200));
   border-radius: 16px 16px 9px 9px;
   background: rgb(var(--card));
+  padding: 20px;
   box-shadow: inset 0 3px 0 0 rgb(var(--brand-500) / 0.05),
               0 1px 3px rgb(9 9 11 / 0.03);
 }
@@ -1585,6 +1588,17 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   box-shadow: inset 0 3px 0 0 rgb(var(--brand-500) / 0.08),
               0 4px 12px rgb(9 9 11 / 0.05);
 }
+/* ── The ledger index (01/02/…) — base rule so the numeral renders as
+      the small brand-mono index everywhere, never as body text. ── */
+.ix {
+  font: 600 10px var(--font-mono, ui-monospace, Menlo, monospace);
+  letter-spacing: 0.16em; color: rgb(var(--brand-500));
+}
+/* The centered "All features →" exit under the features grid: the arc
+   label in the brand color (the eyebrow variant stays muted). Compound
+   selector beats the base .k-arc-label color regardless of order. */
+.k-arc-label.features-see-all { color: rgb(var(--brand-500)); }
+.k-arc-label.features-see-all:hover { color: rgb(var(--brand-600)); }
 
 /* ── The terminal panel (hero right column) ── */
 .term {

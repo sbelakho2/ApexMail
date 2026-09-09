@@ -27,8 +27,9 @@
         <h3 class="text-base font-bold text-surface-950 mb-4 tracking-tight">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_4_title"] %}{{ i18n_data[l]["home_features"]["card_4_title"] }}{% else %}Delivery Analytics{% endif %}</h3>
         <p class="text-surface-600 text-[13px] leading-[1.6]">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["card_4_desc"] %}{{ i18n_data[l]["home_features"]["card_4_desc"] }}{% else %}Opens, clicks, bounces, and complaints feed analytics and webhooks, with Enterprise webhook delivery targets measured at P95.{% endif %}</p>
       </div>
-      <div class="card-dna flex items-center justify-center" style="min-height:140px">
-          <a href="{{ lp }}/features/" class="k-arc-label" style="color:rgb(var(--brand-500))">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["see_all"] %}{{ i18n_data[l]["home_features"]["see_all"] }}{% else %}All features →{% endif %}</a>
-        </div>
-      </div>
+    </div>
+    <div class="mt-14 text-center">
+      <a href="{{ lp }}/features/" class="k-arc-label features-see-all">{% if i18n_data and i18n_data[l] and i18n_data[l]["home_features"] and i18n_data[l]["home_features"]["see_all"] %}{{ i18n_data[l]["home_features"]["see_all"] }}{% else %}All features →{% endif %}</a>
+    </div>
+  </div>
 </section>
