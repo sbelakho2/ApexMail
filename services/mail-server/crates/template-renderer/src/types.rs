@@ -1,6 +1,5 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 // ─── Error Codes ───────────────────────────────────────────────
 
@@ -99,14 +98,20 @@ impl TemplateError {
 
 // ─── Template Types ────────────────────────────────────────────
 
+/// A stored template from the canonical repository (F62): the same
+/// `templates` table the api-server templates routes read — VARCHAR(26)
+/// text ids, TEXT tenant scope, `subject`/`html_body`/`text_body` columns
+/// and an integer `version` that the api-server writer bumps on every save.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Template {
-    pub id: Uuid,
-    pub tenant_id: Uuid,
+    pub id: String,
+    pub tenant_id: String,
     pub name: String,
-    pub source: String,
+    pub subject: String,
+    pub html_body: String,
+    pub text_body: Option<String>,
     pub version: i32,
-    pub compiled: Option<String>,
+    pub status: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

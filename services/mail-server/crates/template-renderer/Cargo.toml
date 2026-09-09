@@ -37,7 +37,6 @@ metrics = { workspace = true }
 
 # Utils
 chrono = { workspace = true }
-uuid = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 
