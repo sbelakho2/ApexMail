@@ -605,6 +605,70 @@ pub(crate) fn role_requires_mfa(role: &str) -> bool {
     matches!(role, "admin" | "owner")
 }
 
+// ─── API key scope registry (F17) ──────────────────────────────
+
+/// The scope vocabulary an API key may carry (F17): the union of every
+/// role's grants plus the administrative wildcard. Both key-creating
+/// surfaces (the JSON endpoint and the console form) validate requested
+/// scopes against THIS shared registry, so a typo'd or not-yet-granted
+/// scope string is rejected instead of being stored as inert authority.
+pub(crate) fn registered_api_key_scopes() -> &'static [String] {
+    static REGISTERED: OnceLock<Vec<String>> = OnceLock::new();
+    REGISTERED.get_or_init(|| {
+        let mut scopes: Vec<String> = vec!["*".into()];
+        for role in ["admin", "developer", "viewer", "member"] {
+            for scope in scopes_for_role(role) {
+                if !scopes.contains(&scope) {
+                    scopes.push(scope);
+                }
+            }
+        }
+        scopes
+    })
+}
+
+/// Whether `scope` is part of the shared API key scope registry.
+pub(crate) fn is_registered_api_key_scope(scope: &str) -> bool {
+    registered_api_key_scopes()
+        .iter()
+        .any(|known| known == scope)
+}
+
+/// Per-scope issuance authorization for API key creation (F17):
+///
+/// * a caller holding the wildcard `*` may mint ANY registered scope — the
+///   previous exact-match check locked administrators out of ordinary
+///   scoped keys, forcing them to mint full-power `*` keys instead;
+/// * a restricted caller may mint exactly the scopes they already hold;
+/// * `*` itself may only be minted by a caller who already holds it, so a
+///   restricted caller can never escalate through a minted key.
+pub(crate) fn authorize_scope_issuance(
+    caller_scopes: &[String],
+    requested: &str,
+) -> Result<(), ApiError> {
+    let caller_holds_wildcard = caller_scopes.iter().any(|scope| scope == "*");
+    if requested == "*" {
+        if caller_holds_wildcard {
+            return Ok(());
+        }
+        return Err(ApiError::Forbidden(
+            "scope '*' exceeds your own permissions".into(),
+        ));
+    }
+    if !is_registered_api_key_scope(requested) {
+        return Err(ApiError::Validation(vec![format!(
+            "unknown scope '{requested}': must be one of {}",
+            registered_api_key_scopes().join(", ")
+        )]));
+    }
+    if caller_holds_wildcard || caller_scopes.iter().any(|scope| scope == requested) {
+        return Ok(());
+    }
+    Err(ApiError::Forbidden(format!(
+        "scope '{requested}' exceeds your own permissions"
+    )))
+}
+
 /// Bind the MFA secret ciphertext to the owning user_id so a row swap
 /// (database-level relocation) cannot make a stolen ciphertext usable
 /// against another account.
@@ -2975,11 +3039,65 @@ async fn verify_email(
 
 /// Path-parameter form of email verification (F5/CWE-598): the token
 /// travels in the path, never in the query string.
+///
+/// F65: verification emails link HERE, so the primary consumer is a
+/// browser navigation. After a SUCCESSFUL exchange the response for
+/// HTML-preferring clients is a 303 to the token-free page URL, taking the
+/// token out of the address bar, history, and any onward Referer header.
+/// Non-browser clients (no `Accept: text/html`) keep the JSON contract.
 async fn verify_email_by_path(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Path(token): Path<String>,
-) -> Result<Json<VerifyEmailResponse>, ApiError> {
-    Ok(Json(verify_email_token(&state, &token).await?))
+) -> Result<Response, ApiError> {
+    let result = verify_email_token(&state, &token).await;
+
+    if let Ok(verification) = &result {
+        if client_prefers_html(&headers) {
+            let location = format!(
+                "/verify-email?status=success&message={}",
+                urlencode_component(&verification.message)
+            );
+            let mut response = (
+                StatusCode::SEE_OTHER,
+                [(axum::http::header::LOCATION, location)],
+            )
+                .into_response();
+            // Strict referrer policy for the token-bearing exchange: the
+            // page (and anything it links to) must never re-disclose the
+            // URL the token arrived on.
+            response.headers_mut().insert(
+                axum::http::header::REFERRER_POLICY,
+                HeaderValue::from_static("no-referrer"),
+            );
+            return Ok(response);
+        }
+    }
+
+    Ok(result.map(Json).into_response())
+}
+
+/// Whether the client's `Accept` header prefers an HTML response — i.e.
+/// this is a browser navigation rather than an API call.
+fn client_prefers_html(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|accept| accept.contains("text/html"))
+}
+
+/// Percent-encode a query component for a `Location` header value.
+fn urlencode_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(byte as char)
+            }
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
 }
 
 pub(crate) async fn verify_email_token(
@@ -2994,56 +3112,105 @@ pub(crate) async fn verify_email_token(
 
     let token_hash = hash_token(token);
 
-    // Find user with matching verification token
-    let user: Option<(String, String, serde_json::Value)> = sqlx::query_as(
-        "SELECT id::text, tenant_id, metadata FROM users
-            WHERE metadata->>'verification_token_hash' = $1
-         AND email_verified = false
-         LIMIT 1",
+    // Lookup, consumption, and activation share ONE transaction (F16): the
+    // row lock taken below serializes concurrent presentations of the same
+    // token, and the conditional UPDATE consumes it only while THIS token
+    // hash is still stored on the still-unverified row.
+    let mut tx = state.db.begin().await?;
+
+    // Find user with matching verification token. `users.id` is UUID
+    // (migrations 052/056), so the id is returned and re-bound as
+    // `uuid::Uuid` — the previous text round-trip bound a TEXT value
+    // against the UUID column and failed with 42883
+    // `operator does not exist: uuid = text` (F15). `tenant_id` is
+    // VARCHAR(26) (migration 064) and stays a String.
+    let user: Option<(Uuid, String, Option<String>)> = sqlx::query_as(
+        "SELECT id, tenant_id, metadata->>'verification_expires' AS verification_expires
+         FROM users
+         WHERE metadata->>'verification_token_hash' = $1
+           AND email_verified = false
+         LIMIT 1
+         FOR UPDATE",
     )
     .bind(&token_hash)
-    .fetch_optional(&state.db)
+    .fetch_optional(&mut *tx)
     .await?;
 
-    let (user_id, tenant_id, metadata) = match user {
+    let (user_id, tenant_id, expires_raw) = match user {
         Some(u) => u,
         None => {
+            let _ = tx.rollback().await;
             return Err(ApiError::BadRequest(
                 "invalid or expired verification token".into(),
             ));
         }
     };
 
-    // Check expiry
-    if let Some(expires_str) = metadata
-        .get("verification_expires")
-        .and_then(|v| v.as_str())
+    // Expiry is mandatory and typed (F16): the RFC 3339 metadata string is
+    // parsed into a `DateTime<Utc>` and must lie in the future. A missing
+    // or malformed value fails CLOSED — the old code silently skipped the
+    // expiry check whenever parsing failed, and a missing value was never
+    // checked at all.
+    let expires: chrono::DateTime<chrono::Utc> = match expires_raw
+        .as_deref()
+        .and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok())
+        .map(|parsed| parsed.with_timezone(&Utc))
     {
-        if let Ok(expires) = chrono::DateTime::parse_from_rfc3339(expires_str) {
-            if Utc::now() > expires {
-                return Err(ApiError::BadRequest(
-                    "verification token has expired".into(),
-                ));
-            }
+        Some(expires) => expires,
+        None => {
+            let _ = tx.rollback().await;
+            tracing::warn!(
+                user_id = %user_id,
+                tenant_id = %tenant_id,
+                "verification token has missing or malformed expiry — refusing"
+            );
+            return Err(ApiError::BadRequest(
+                "invalid or expired verification token".into(),
+            ));
         }
+    };
+    if Utc::now() > expires {
+        let _ = tx.rollback().await;
+        return Err(ApiError::BadRequest(
+            "verification token has expired".into(),
+        ));
     }
 
-    // Mark email as verified
-    sqlx::query(
+    // Consume the token atomically (F16): the UPDATE matches only while the
+    // exact token hash is still present on the still-unverified row, so a
+    // replay — including one that raced the SELECT — affects zero rows.
+    let consumed = sqlx::query(
         "UPDATE users SET email_verified = true,
             metadata = metadata - 'verification_token_hash' - 'verification_token' - 'verification_expires',
          updated_at = NOW()
-         WHERE id = $1"
+         WHERE id = $1
+           AND email_verified = false
+           AND metadata->>'verification_token_hash' = $2",
     )
-    .bind(&user_id)
-    .execute(&state.db)
+    .bind(user_id)
+    .bind(&token_hash)
+    .execute(&mut *tx)
+    .await?;
+    if consumed.rows_affected() == 0 {
+        let _ = tx.rollback().await;
+        return Err(ApiError::BadRequest(
+            "invalid or expired verification token".into(),
+        ));
+    }
+
+    // Activate the tenant ONLY from the initial pending-verification state
+    // (F16): an administrative, abuse, or billing hold written between
+    // sign-up and this click survives verification instead of being
+    // clobbered to 'active'.
+    sqlx::query(
+        "UPDATE tenants SET status = 'active', updated_at = NOW()
+         WHERE id = $1 AND status = 'pending'",
+    )
+    .bind(&tenant_id)
+    .execute(&mut *tx)
     .await?;
 
-    // Activate tenant
-    sqlx::query("UPDATE tenants SET status = 'active', updated_at = NOW() WHERE id = $1")
-        .bind(&tenant_id)
-        .execute(&state.db)
-        .await?;
+    tx.commit().await?;
 
     tracing::info!(user_id = %user_id, tenant_id = %tenant_id, "Email verified");
 
@@ -3053,56 +3220,63 @@ pub(crate) async fn verify_email_token(
     })
 }
 
-async fn create_api_key(
-    State(state): State<AppState>,
-    auth: AuthUser,
-    Json(body): Json<CreateApiKeyRequest>,
-) -> Result<(StatusCode, Json<CreateApiKeyResponse>), ApiError> {
+/// A newly minted API key: the one-time raw secret plus the persisted
+/// metadata. Returned by [`mint_api_key`].
+pub(crate) struct MintedApiKey {
+    pub id: String,
+    pub raw_key: String,
+    pub key_prefix: String,
+    pub name: String,
+    pub scopes: Vec<String>,
+    pub created_at: chrono::DateTime<Utc>,
+    pub expires_at: chrono::DateTime<Utc>,
+}
+
+/// Shared API key creation (F46): the JSON endpoint (`POST /v1/api-keys`)
+/// and the console form (`POST /web/api-keys`) BOTH go through this
+/// function, so scope authorization (F17), the expiry default/bounds, the
+/// keyed HMAC hash, and the per-tenant key ceiling are enforced
+/// identically on both surfaces. The console-created keys previously
+/// bypassed the JSON endpoint's expiry policy entirely (no `expires_at`).
+pub(crate) async fn mint_api_key(
+    state: &AppState,
+    caller: &AuthUser,
+    name: &str,
+    scopes: &[String],
+    expires_in_days: Option<i64>,
+) -> Result<MintedApiKey, ApiError> {
     // Scope gate (F2): minting keys is a write-capability on credential
     // material, not an implicit side effect of being logged in. Admin/owner
     // sessions hold the "*" wildcard, so they pass transparently.
-    require_scopes(&auth, &["api-keys:write"])?;
+    require_scopes(caller, &["api-keys:write"])?;
 
-    if body.name.is_empty() {
+    let name = name.trim();
+    if name.is_empty() {
         return Err(ApiError::Validation(vec!["name is required".into()]));
     }
-    if body.name.len() > 100 {
+    if name.len() > 100 {
         return Err(ApiError::Validation(vec![
             "name must be at most 100 characters".into(),
         ]));
     }
-    if body.scopes.len() > 50 {
+    if scopes.len() > 50 {
         return Err(ApiError::Validation(vec![
             "at most 50 scopes are allowed".into()
         ]));
     }
 
-    // Privilege-escalation guard: a key can never carry more authority than
-    // its creator. Every requested scope must already be held by the caller
-    // (the wildcard "*" is only mintable by a caller who already holds it,
-    // and unknown scope strings are rejected outright).
-    for scope in &body.scopes {
-        if !auth.scopes.iter().any(|s| s == scope) {
-            return Err(ApiError::Forbidden(format!(
-                "scope '{scope}' exceeds your own permissions"
-            )));
-        }
+    // Privilege-escalation guard (F17): every requested scope must be
+    // registered AND held by the caller — the wildcard authorizes any
+    // registered scope, restricted callers authorize their own scopes
+    // only, and "*" is mintable solely by a wildcard holder.
+    for scope in scopes {
+        authorize_scope_issuance(&caller.scopes, scope)?;
     }
 
-    // Per-tenant key ceiling, counted before insert (F2). Mirrors the
-    // webhooks cap; without it a churn loop (mint → never revoke) grows
-    // api_keys unboundedly.
-    let existing_keys: (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1")
-            .bind(&auth.tenant_id)
-            .fetch_one(&state.db)
-            .await?;
-
-    if existing_keys.0 >= MAX_API_KEYS_PER_TENANT {
-        return Err(ApiError::Forbidden(format!(
-            "API key limit reached: maximum {MAX_API_KEYS_PER_TENANT} keys per tenant"
-        )));
-    }
+    // Same expiry policy for every surface (F46): absent = the 90-day
+    // default, values bounded to 1..=365 days.
+    let now = Utc::now();
+    let expires_at = resolve_api_key_expiry(expires_in_days, now)?;
 
     let raw_key = apexmail_lib::id::generate_api_key(false);
     let key_hash =
@@ -3118,34 +3292,103 @@ async fn create_api_key(
     let key_prefix = raw_key[..prefix_len].to_string();
 
     let id = Uuid::new_v4();
-    let now = Utc::now();
-    let expires_at = Some(resolve_api_key_expiry(body.expires_in_days, now)?);
+
+    // One transaction with the tenant row LOCKED (F46/F18): the per-tenant
+    // key count is enforced atomically — concurrent mints serialize on the
+    // row lock instead of racing a COUNT-then-INSERT past the ceiling — and
+    // the tenant policy is decided at mint time through the SAME helper
+    // the auth middleware uses, so a suspended tenant mints nothing.
+    let mut tx = state.db.begin().await?;
+    let tenant_status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1 FOR UPDATE")
+            .bind(&caller.tenant_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    match tenant_status.as_deref() {
+        Some(status) if crate::middleware::auth::tenant_status_permits_auth(status) => {}
+        Some(status) => {
+            let _ = tx.rollback().await;
+            tracing::warn!(
+                tenant_id = %caller.tenant_id,
+                tenant_status = %status,
+                "API key mint refused for restricted tenant"
+            );
+            return Err(ApiError::Forbidden(format!(
+                "workspace is {status} — API keys cannot be created until it is active"
+            )));
+        }
+        None => {
+            let _ = tx.rollback().await;
+            return Err(ApiError::Forbidden("workspace not found".into()));
+        }
+    }
+
+    let existing_keys: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1")
+            .bind(&caller.tenant_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if existing_keys.0 >= MAX_API_KEYS_PER_TENANT {
+        let _ = tx.rollback().await;
+        return Err(ApiError::Forbidden(format!(
+            "API key limit reached: maximum {MAX_API_KEYS_PER_TENANT} keys per tenant"
+        )));
+    }
 
     sqlx::query(
         "INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, scopes, expires_at, created_at, updated_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)",
     )
     .bind(id)
-    .bind(auth.tenant_id)
-    .bind(&body.name)
+    .bind(&caller.tenant_id)
+    .bind(name)
     .bind(&key_prefix)
     .bind(&key_hash)
-    .bind(serde_json::json!(body.scopes))
+    .bind(serde_json::json!(scopes))
     .bind(expires_at)
     .bind(now)
-    .execute(&state.db)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+
+    Ok(MintedApiKey {
+        id: id.to_string(),
+        raw_key,
+        key_prefix,
+        name: name.to_string(),
+        scopes: scopes.to_vec(),
+        created_at: now,
+        expires_at,
+    })
+}
+
+async fn create_api_key(
+    State(state): State<AppState>,
+    auth: AuthUser,
+    Json(body): Json<CreateApiKeyRequest>,
+) -> Result<(StatusCode, Json<CreateApiKeyResponse>), ApiError> {
+    // F46: shared creation path with the console form — scope
+    // authorization, expiry policy, hashing, ceiling, and persistence all
+    // live in `mint_api_key`.
+    let minted = mint_api_key(
+        &state,
+        &auth,
+        &body.name,
+        &body.scopes,
+        body.expires_in_days,
+    )
     .await?;
 
     Ok((
         StatusCode::CREATED,
         Json(CreateApiKeyResponse {
-            id: id.to_string(),
-            key: raw_key,
-            key_prefix,
-            name: body.name,
-            scopes: body.scopes,
-            created_at: now.to_rfc3339(),
-            expires_at: expires_at.map(|value| value.to_rfc3339()),
+            id: minted.id,
+            key: minted.raw_key,
+            key_prefix: minted.key_prefix,
+            name: minted.name,
+            scopes: minted.scopes,
+            created_at: minted.created_at.to_rfc3339(),
+            expires_at: Some(minted.expires_at.to_rfc3339()),
         }),
     ))
 }
@@ -3980,6 +4223,435 @@ mod tests {
             key,
             "apexmail:session_revoked_after:ten_test_001:usr_test_001"
         );
+    }
+
+    // ── F17: wildcard + restricted scope issuance ─────────────────────
+
+    #[test]
+    fn registered_api_key_scopes_covers_role_grants_and_wildcard() {
+        let registry = registered_api_key_scopes();
+        assert!(
+            registry.contains(&"*".to_string()),
+            "wildcard is registered"
+        );
+        for scope in scopes_for_role("developer") {
+            assert!(
+                registry.contains(&scope),
+                "developer scope {scope} must be registered"
+            );
+        }
+        for scope in scopes_for_role("viewer") {
+            assert!(
+                registry.contains(&scope),
+                "viewer scope {scope} must be registered"
+            );
+        }
+        // The key-minting scopes are NOT role-granted (only wildcard holders
+        // pass the api-keys:write gate), so they are deliberately absent:
+        // a minted key must not be able to mint further keys.
+        assert!(!registry.contains(&"api-keys:write".to_string()));
+        assert!(!registry.contains(&"api-keys:read".to_string()));
+    }
+
+    #[test]
+    fn wildcard_caller_mints_any_registered_scope() {
+        let caller = vec!["*".to_string()];
+        // THE F17 REGRESSION: a wildcard administrator previously could NOT
+        // mint an ordinary scoped key (exact-match check), forcing them to
+        // mint full-power "*" keys instead.
+        assert!(authorize_scope_issuance(&caller, "messages:send").is_ok());
+        assert!(authorize_scope_issuance(&caller, "webhooks:write").is_ok());
+        assert!(authorize_scope_issuance(&caller, "suppressions:read").is_ok());
+        assert!(authorize_scope_issuance(&caller, "*").is_ok());
+    }
+
+    #[test]
+    fn restricted_caller_mints_only_own_scopes_and_never_the_wildcard() {
+        let caller = vec!["messages:read".to_string(), "domains:read".to_string()];
+        assert!(authorize_scope_issuance(&caller, "messages:read").is_ok());
+        // Escalation attempts must fail with Forbidden.
+        assert!(matches!(
+            authorize_scope_issuance(&caller, "messages:send"),
+            Err(ApiError::Forbidden(message)) if message.contains("exceeds")
+        ));
+        assert!(matches!(
+            authorize_scope_issuance(&caller, "*"),
+            Err(ApiError::Forbidden(message)) if message.contains("exceeds")
+        ));
+        // Unregistered scope strings are rejected as validation errors.
+        assert!(matches!(
+            authorize_scope_issuance(&caller, "not-a-scope"),
+            Err(ApiError::Validation(_))
+        ));
+        assert!(matches!(
+            authorize_scope_issuance(&["*".to_string()], "not-a-scope"),
+            Err(ApiError::Validation(_))
+        ));
+    }
+
+    // ── F65: browser-negotiated redirect helpers ──────────────────────
+
+    #[test]
+    fn client_prefers_html_detects_browser_navigation() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::ACCEPT,
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                .parse()
+                .unwrap(),
+        );
+        assert!(client_prefers_html(&headers));
+
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::ACCEPT,
+            "application/json".parse().unwrap(),
+        );
+        assert!(!client_prefers_html(&headers));
+
+        let headers = HeaderMap::new();
+        assert!(!client_prefers_html(&headers));
+    }
+
+    #[test]
+    fn urlencode_component_percent_encodes_reserved_characters() {
+        assert_eq!(urlencode_component("Email verified"), "Email%20verified");
+        assert_eq!(
+            urlencode_component("a&b=c?d#e"),
+            "a%26b%3Dc%3Fd%23e",
+            "redirect targets must never smuggle extra query params or fragments"
+        );
+        assert_eq!(urlencode_component("ok.-_~"), "ok.-_~");
+    }
+
+    // ── F15/F16: email verification against canonical UUID user ids ───
+
+    /// Fixture: a pending tenant plus an unverified owner carrying the
+    /// given verification metadata. Mirrors the `register` INSERT.
+    async fn seed_unverified_user(
+        pool: &sqlx::PgPool,
+        tenant_status: &str,
+        expires: Option<chrono::DateTime<Utc>>,
+        extra_metadata: serde_json::Value,
+    ) -> (String, String, String) {
+        let tenant_id = format!("tver{}", &Uuid::new_v4().simple().to_string()[..18]);
+        let user_id = Uuid::new_v4();
+        let token = format!("vtok_{}", Uuid::new_v4().simple());
+        let mut metadata = serde_json::json!({
+            "verification_token_hash": hash_token(&token),
+        });
+        if let Some(expires) = expires {
+            metadata["verification_expires"] = serde_json::json!(expires.to_rfc3339());
+        }
+        if let serde_json::Value::Object(extra) = extra_metadata {
+            for (key, value) in extra {
+                metadata[key] = value;
+            }
+        }
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Verify Co', $2, 'free', $3, NOW(), NOW())",
+        )
+        .bind(&tenant_id)
+        .bind(format!("slug-{tenant_id}"))
+        .bind(tenant_status)
+        .execute(pool)
+        .await
+        .expect("seed tenant");
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
+                               email_verified, mfa_enabled, metadata, created_at, updated_at)
+             VALUES ($1, $2, $3, 'Verify Owner', 'x', 'owner', 'active', false, false, $4, NOW(), NOW())",
+        )
+        .bind(user_id)
+        .bind(&tenant_id)
+        .bind(format!("verify-{}@example.com", user_id.simple()))
+        .bind(&metadata)
+        .execute(pool)
+        .await
+        .expect("seed user");
+        (tenant_id, user_id.to_string(), token)
+    }
+
+    async fn user_verification_state(
+        pool: &sqlx::PgPool,
+        user_id: &str,
+    ) -> (bool, serde_json::Value) {
+        sqlx::query_as("SELECT email_verified, metadata FROM users WHERE id = $1::uuid")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await
+            .expect("load user")
+    }
+
+    #[tokio::test]
+    async fn verify_email_token_succeeds_consumes_token_and_activates_pending_tenant() {
+        let Some(pool) = crate::test_db::canonical_pool("verify_email_success").await else {
+            eprintln!("skipping verify_email_token_succeeds: no TEST_DATABASE_URL");
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant_id, user_id, token) = seed_unverified_user(
+            &pool,
+            "pending",
+            Some(Utc::now() + ChronoDuration::hours(24)),
+            serde_json::json!({}),
+        )
+        .await;
+
+        // F15 regression: this call performs the UUID round-trip that used
+        // to fail with 42883 (`operator does not exist: uuid = text`).
+        let result = verify_email_token(&state, &token)
+            .await
+            .expect("verification must succeed");
+        assert!(result.success);
+
+        let (verified, metadata) = user_verification_state(&pool, &user_id).await;
+        assert!(verified, "user must be email_verified");
+        assert!(
+            metadata.get("verification_token_hash").is_none()
+                && metadata.get("verification_expires").is_none(),
+            "token material must be consumed, got {metadata}"
+        );
+        let tenant_status: String = sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+            .bind(&tenant_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load tenant");
+        assert_eq!(tenant_status, "active", "pending tenant must activate");
+
+        // Sequential replay: the consumed token no longer matches.
+        assert!(verify_email_token(&state, &token).await.is_err());
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn verify_email_token_rejects_expired_missing_and_malformed_expiry() {
+        let Some(pool) = crate::test_db::canonical_pool("verify_email_expiry").await else {
+            eprintln!("skipping verify_email_token_rejects_expired: no TEST_DATABASE_URL");
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+
+        // Expired.
+        let (_, user_id, token) = seed_unverified_user(
+            &pool,
+            "pending",
+            Some(Utc::now() - ChronoDuration::hours(1)),
+            serde_json::json!({}),
+        )
+        .await;
+        assert!(matches!(
+            verify_email_token(&state, &token).await,
+            Err(ApiError::BadRequest(message)) if message.contains("expired")
+        ));
+        let (verified, _) = user_verification_state(&pool, &user_id).await;
+        assert!(!verified, "expired token must not verify the user");
+
+        // Missing expiry (F16: fails CLOSED, previously unchecked).
+        let (_, user_id, token) =
+            seed_unverified_user(&pool, "pending", None, serde_json::json!({})).await;
+        assert!(verify_email_token(&state, &token).await.is_err());
+        let (verified, _) = user_verification_state(&pool, &user_id).await;
+        assert!(!verified, "token without expiry must not verify the user");
+
+        // Malformed expiry (F16: parse failure previously skipped the check).
+        let (_, user_id, token) = seed_unverified_user(
+            &pool,
+            "pending",
+            Some(Utc::now() + ChronoDuration::hours(24)),
+            serde_json::json!({ "verification_expires": "not-a-timestamp" }),
+        )
+        .await;
+        assert!(verify_email_token(&state, &token).await.is_err());
+        let (verified, _) = user_verification_state(&pool, &user_id).await;
+        assert!(!verified, "malformed expiry must not verify the user");
+
+        // Unknown token.
+        assert!(verify_email_token(&state, "vtok_does_not_exist")
+            .await
+            .is_err());
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn verify_email_token_concurrent_double_use_consumes_exactly_once() {
+        let Some(pool) = crate::test_db::canonical_pool("verify_email_double_use").await else {
+            eprintln!("skipping verify_email_token_concurrent_double_use: no TEST_DATABASE_URL");
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let (tenant_id, user_id, token) = seed_unverified_user(
+            &pool,
+            "pending",
+            Some(Utc::now() + ChronoDuration::hours(24)),
+            serde_json::json!({}),
+        )
+        .await;
+
+        // Two racing presentations of the SAME token: the row lock plus the
+        // conditional consumption means exactly one exchange commits (F16).
+        let (first, second) = tokio::join!(
+            verify_email_token(&state, &token),
+            verify_email_token(&state, &token),
+        );
+        let successes = [&first, &second].iter().filter(|r| r.is_ok()).count();
+        assert_eq!(
+            successes, 1,
+            "exactly one concurrent presentation may succeed, got {first:?} / {second:?}"
+        );
+        let (verified, _) = user_verification_state(&pool, &user_id).await;
+        assert!(verified);
+
+        let tenant_status: String = sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+            .bind(&tenant_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load tenant");
+        assert_eq!(tenant_status, "active");
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn verify_email_token_preserves_administrative_and_billing_holds() {
+        let Some(pool) = crate::test_db::canonical_pool("verify_email_holds").await else {
+            eprintln!("skipping verify_email_token_preserves_holds: no TEST_DATABASE_URL");
+            return;
+        };
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+
+        // A tenant an operator (or dunning) suspended between sign-up and
+        // the verification click keeps its hold (F16).
+        let (tenant_id, user_id, token) = seed_unverified_user(
+            &pool,
+            "suspended",
+            Some(Utc::now() + ChronoDuration::hours(24)),
+            serde_json::json!({}),
+        )
+        .await;
+        verify_email_token(&state, &token)
+            .await
+            .expect("the user's email still verifies");
+        let (verified, _) = user_verification_state(&pool, &user_id).await;
+        assert!(verified, "the user is verified even though the hold stands");
+        let tenant_status: String = sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+            .bind(&tenant_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load tenant");
+        assert_eq!(
+            tenant_status, "suspended",
+            "verification must NOT lift an administrative/abuse/billing hold"
+        );
+
+        pool.close().await;
+    }
+
+    // ── F18/F46: key minting honours the tenant policy and shared path ──
+
+    #[tokio::test]
+    async fn mint_api_key_enforces_tenant_policy_expiry_and_scopes() {
+        let Some(pool) = crate::test_db::canonical_pool("mint_api_key_policy").await else {
+            eprintln!("skipping mint_api_key_enforces_policy: no TEST_DATABASE_URL");
+            return;
+        };
+        // The canonical fixture lineage ships no api_keys table (only the
+        // auth-critical shapes); create the same fixture the API-key cache
+        // test uses.
+        sqlx::raw_sql(
+            "CREATE TABLE IF NOT EXISTS api_keys (
+                id UUID PRIMARY KEY,
+                tenant_id VARCHAR(26) NOT NULL,
+                name TEXT NOT NULL,
+                key_prefix VARCHAR(32) NOT NULL,
+                key_hash TEXT NOT NULL UNIQUE,
+                scopes JSONB NOT NULL,
+                expires_at TIMESTAMPTZ,
+                last_used_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("api_keys fixture DDL must apply");
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let tenant_id = format!("tmint{}", &Uuid::new_v4().simple().to_string()[..16]);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Mint Co', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant_id)
+        .bind(format!("slug-{tenant_id}"))
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+
+        let wildcard = AuthUser {
+            tenant_id: tenant_id.clone(),
+            user_id: Some(Uuid::new_v4().to_string()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+
+        // F17 through the shared path: a wildcard caller mints ordinary
+        // scoped keys (previously rejected outright).
+        let minted = mint_api_key(&state, &wildcard, "scoped", &["messages:read".into()], None)
+            .await
+            .expect("wildcard caller must mint scoped keys");
+        assert_eq!(minted.scopes, vec!["messages:read".to_string()]);
+        assert!(
+            minted.expires_at > Utc::now() + ChronoDuration::days(89),
+            "absent expiry must resolve to the shared 90-day default"
+        );
+
+        let row: Option<(String, chrono::DateTime<Utc>)> =
+            sqlx::query_as("SELECT key_hash, expires_at FROM api_keys WHERE id::text = $1")
+                .bind(&minted.id)
+                .fetch_optional(&pool)
+                .await
+                .expect("load key row");
+        let (stored_hash, stored_expiry) = row.expect("key persisted");
+        assert_eq!(
+            stored_hash,
+            apexmail_lib::hash_api_key_with_secret(
+                &minted.raw_key,
+                &state.config.api_key_hash_secret
+            ),
+            "shared keyed HMAC hashing on every surface"
+        );
+        assert_eq!(stored_expiry, minted.expires_at, "expiry persisted (F46)");
+
+        // Escalation through the shared path still fails.
+        let restricted = AuthUser {
+            tenant_id: tenant_id.clone(),
+            user_id: Some(Uuid::new_v4().to_string()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["messages:read".into()],
+        };
+        assert!(matches!(
+            mint_api_key(&state, &restricted, "escalate", &["*".into()], None).await,
+            Err(ApiError::Forbidden(_))
+        ));
+
+        // F18: a suspended tenant mints nothing.
+        sqlx::query("UPDATE tenants SET status = 'suspended' WHERE id = $1")
+            .bind(&tenant_id)
+            .execute(&pool)
+            .await
+            .expect("suspend tenant");
+        crate::middleware::auth::invalidate_tenant_status_cache(&tenant_id, &state).await;
+        assert!(matches!(
+            mint_api_key(&state, &wildcard, "nope", &["messages:read".into()], None).await,
+            Err(ApiError::Forbidden(message)) if message.contains("suspended")
+        ));
+
+        pool.close().await;
     }
 
     #[tokio::test]

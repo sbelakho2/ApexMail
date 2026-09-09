@@ -344,6 +344,10 @@ async fn authenticate_api_key(
     // Check Redis cache (try HMAC first, then legacy SHA-256)
     if let Ok(cached) = lookup_cached_api_key(&hmac_hash, state).await {
         enforce_api_key_tenant_binding(&cached, request_path)?;
+        // Tenant policy (F18): the cached identity does not carry the
+        // tenant's CURRENT status, so the centralized gate runs on every
+        // hit too.
+        enforce_tenant_not_restricted(state, &cached.tenant_id).await?;
         if let Some(api_key_id) = cached.api_key_id.as_deref() {
             touch_api_key_last_used(api_key_id, &hmac_hash, state).await?;
         }
@@ -353,6 +357,7 @@ async fn authenticate_api_key(
     if legacy_hash != hmac_hash {
         if let Ok(cached) = lookup_cached_api_key(&legacy_hash, state).await {
             enforce_api_key_tenant_binding(&cached, request_path)?;
+            enforce_tenant_not_restricted(state, &cached.tenant_id).await?;
             if let Some(api_key_id) = cached.api_key_id.as_deref() {
                 touch_api_key_last_used(api_key_id, &legacy_hash, state).await?;
             }
@@ -430,6 +435,11 @@ async fn authenticate_api_key(
     };
 
     enforce_api_key_tenant_binding(&auth_user, request_path)?;
+
+    // Tenant policy (F18): an API key belonging to a suspended (or
+    // otherwise restricted) tenant must stop authenticating, on the DB
+    // path just like on the cache-hit path above.
+    enforce_tenant_not_restricted(state, &auth_user.tenant_id).await?;
 
     // Re-hash legacy SHA-256 key on successful authentication (upgrade to Argon2id)
     if used_legacy_hash {
@@ -553,6 +563,8 @@ async fn authenticate_api_key_argon2_fallback(
         };
 
         enforce_api_key_tenant_binding(&auth_user, request_path)?;
+        // Tenant policy (F18) on the legacy-hash fallback path too.
+        enforce_tenant_not_restricted(state, &auth_user.tenant_id).await?;
 
         // Upgrade: re-hash to HMAC-SHA256 for fast future lookups
         let new_hash =
@@ -922,6 +934,105 @@ pub(crate) async fn invalidate_tenant_user_status_cache(tenant_id: &str, state: 
     }
 }
 
+// ─── Tenant status policy (audit F18) ──────────────────────────
+
+const TENANT_STATUS_CACHE_PREFIX: &str = "apexmail:tenant_status:";
+const TENANT_STATUS_CACHE_TTL: u64 = 15; // seconds
+const TENANT_STATUS_CACHE_MISSING: &str = "__missing__";
+
+fn tenant_status_cache_key(tenant_id: &str) -> String {
+    format!("{TENANT_STATUS_CACHE_PREFIX}{tenant_id}")
+}
+
+/// THE tenant-policy decision (audit F18): which `tenants.status` values
+/// permit authenticated traffic. Only `active` does — a `pending` tenant
+/// has not completed verification, and a `suspended` tenant is under an
+/// administrative, abuse, or billing hold. Every enforcement point (API
+/// key auth, JWT auth, and API key minting in `routes::auth`) consults
+/// this ONE function so the surfaces cannot drift apart again.
+pub(crate) fn tenant_status_permits_auth(status: &str) -> bool {
+    status == "active"
+}
+
+async fn cache_tenant_status(tenant_id: &str, status: Option<&str>, state: &AppState) {
+    let cache_key = tenant_status_cache_key(tenant_id);
+    let value = status.unwrap_or(TENANT_STATUS_CACHE_MISSING).to_string();
+    if let Ok(mut conn) = state.redis.get().await {
+        let _: Result<(), _> = conn
+            .set_ex(&cache_key, value, TENANT_STATUS_CACHE_TTL)
+            .await;
+    }
+}
+
+/// Drop the cached tenant-status decision so a control-plane status write
+/// takes effect immediately instead of after the short TTL. Called by the
+/// tenant lifecycle handlers (`routes::admin::tenants`, web console
+/// suspend/resume) on every status change.
+pub(crate) async fn invalidate_tenant_status_cache(tenant_id: &str, state: &AppState) {
+    let cache_key = tenant_status_cache_key(tenant_id);
+    if let Ok(mut conn) = state.redis.get().await {
+        let _: Result<(), _> = redis::AsyncCommands::del(&mut *conn, &cache_key).await;
+    }
+}
+
+/// Enforce the tenant-status policy for an authenticated identity (audit
+/// F18). The decision is cached in Redis for 15 s (mirroring the
+/// user-status cache) and invalidated by every control-plane status
+/// write; an unreachable Redis degrades to the authoritative DB row.
+/// Unknown tenants and DB errors fail CLOSED.
+pub(crate) async fn enforce_tenant_not_restricted(
+    state: &AppState,
+    tenant_id: &str,
+) -> Result<(), ApiError> {
+    // The static control-plane key carries the "system" sentinel tenant id,
+    // which has no tenants row and is governed by its own gates.
+    if tenant_id == "system" {
+        return Ok(());
+    }
+
+    let status = tenant_status_for_auth(state, tenant_id).await?;
+    if tenant_status_permits_auth(&status) {
+        return Ok(());
+    }
+
+    tracing::warn!(tenant_id = %tenant_id, tenant_status = %status, "authentication refused for restricted tenant");
+    Err(ApiError::Unauthorized(format!(
+        "workspace is {status} — access is restricted"
+    )))
+}
+
+async fn tenant_status_for_auth(state: &AppState, tenant_id: &str) -> Result<String, ApiError> {
+    if let Ok(mut conn) = state.redis.get().await {
+        let cache_key = tenant_status_cache_key(tenant_id);
+        if let Ok(cached) = conn.get::<_, Option<String>>(&cache_key).await {
+            match cached {
+                Some(value) if value == TENANT_STATUS_CACHE_MISSING => {
+                    return Err(ApiError::Unauthorized("workspace no longer exists".into()));
+                }
+                Some(status) => return Ok(status),
+                None => {} // cache miss — fall through to the DB row
+            }
+        }
+    }
+
+    let status: Option<String> = sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+        .bind(tenant_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|error| {
+            tracing::error!(error = %error, tenant_id, "tenant status lookup failed");
+            ApiError::Internal("authentication error".into())
+        })?;
+
+    let Some(status) = status else {
+        cache_tenant_status(tenant_id, None, state).await;
+        return Err(ApiError::Unauthorized("workspace no longer exists".into()));
+    };
+
+    cache_tenant_status(tenant_id, Some(&status), state).await;
+    Ok(status)
+}
+
 // ─── JWT authentication ────────────────────────────────────────
 
 /// Token-type discrimination shared by EVERY consumer of `am_session`-style
@@ -1014,6 +1125,12 @@ pub(crate) async fn authenticate_jwt(token: &str, state: &AppState) -> Result<Au
             "user account is {user_status}"
         )));
     }
+
+    // Tenant policy (F18): the USER being active is not enough — a session
+    // under a suspended (or otherwise restricted) tenant must stop
+    // authenticating across the API and SSR surfaces alike. This is the
+    // same centralized gate the API key path enforces.
+    enforce_tenant_not_restricted(state, &tenant_id).await?;
 
     // Live scope narrowing: the token's scopes are the user's scopes AT
     // LOGIN; the role may have changed since. Recompute the effective set
@@ -2043,6 +2160,18 @@ mod tests {
 
             let tenant = apexmail_lib::id::generate_id("scopes", 18);
             let user_id = uuid::Uuid::new_v4();
+            // F18: authenticate_jwt enforces the tenant policy, so the
+            // fixture tenant must exist (and be active) for the session to
+            // authenticate at all.
+            sqlx::query(
+                "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+                 VALUES ($1, 'Scope Co', $2, 'free', 'active', NOW(), NOW())",
+            )
+            .bind(&tenant)
+            .bind(format!("slug-{tenant}"))
+            .execute(&pool)
+            .await
+            .expect("seed tenant");
             sqlx::query(
                 "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified)
                  VALUES ($1, $2, $3, 'Scope Tester', 'x', 'admin', 'active', true)",
@@ -2104,6 +2233,213 @@ mod tests {
 
             pool.close().await;
         }
+    }
+
+    // ── Tenant-status policy (audit F18) ──────────────────────────────
+
+    #[test]
+    fn tenant_status_policy_permits_only_active() {
+        assert!(tenant_status_permits_auth("active"));
+        assert!(!tenant_status_permits_auth("pending"));
+        assert!(!tenant_status_permits_auth("suspended"));
+        assert!(!tenant_status_permits_auth(""));
+        assert!(!tenant_status_permits_auth("ACTIVE"));
+    }
+
+    #[test]
+    fn tenant_status_cache_key_is_prefixed_and_tenant_scoped() {
+        assert_eq!(
+            tenant_status_cache_key("ten_test_001"),
+            "apexmail:tenant_status:ten_test_001"
+        );
+    }
+
+    /// Shared fixture for the F18 outcome tests: a tenant + active owner,
+    /// and a state whose config carries a fresh RSA signing pair.
+    async fn suspended_tenant_fixture(
+        test_name: &str,
+    ) -> Option<(sqlx::PgPool, AppState, String, String)> {
+        let pool = crate::test_db::canonical_pool(test_name).await?;
+        use rsa::pkcs8::{DecodePrivateKey, EncodePublicKey, LineEnding};
+        let key_pair = apexmail_lib::dkim::generate_dkim_keypair().expect("test RSA keypair");
+        let private_key =
+            rsa::RsaPrivateKey::from_pkcs8_pem(key_pair.private_key_pem.as_str()).unwrap();
+        let mut config = crate::app::test_support::test_config();
+        config.jwt_private_key_pem = key_pair.private_key_pem.to_string();
+        config.jwt_public_key_pem = private_key
+            .to_public_key()
+            .to_public_key_pem(LineEnding::LF)
+            .unwrap()
+            .to_string();
+        let state =
+            crate::app::test_support::test_state_over_with_config(pool.clone(), config).await;
+
+        let tenant_id = apexmail_lib::id::generate_id("f18", 18);
+        let user_id = uuid::Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'F18 Co', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant_id)
+        .bind(format!("slug-{tenant_id}"))
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+        sqlx::query(
+            "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status, email_verified)
+             VALUES ($1, $2, $3, 'F18 Owner', 'x', 'owner', 'active', true)",
+        )
+        .bind(user_id)
+        .bind(&tenant_id)
+        .bind(format!("f18-{}@example.com", user_id.simple()))
+        .execute(&pool)
+        .await
+        .expect("seed user");
+        Some((pool, state, tenant_id, user_id.to_string()))
+    }
+
+    async fn sign_session(state: &AppState, tenant_id: &str, user_id: &str) -> String {
+        let now = Utc::now().timestamp();
+        let claims = JwtClaims {
+            sub: user_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+            scopes: vec!["*".into()],
+            exp: now + 3600,
+            iat: now,
+            jti: uuid::Uuid::new_v4().to_string(),
+            typ: Some("session".into()),
+        };
+        jsonwebtoken::encode(
+            &jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256),
+            &claims,
+            &jsonwebtoken::EncodingKey::from_rsa_pem(state.config.jwt_private_key_pem.as_bytes())
+                .expect("encoding key"),
+        )
+        .expect("sign session jwt")
+    }
+
+    /// F18: a session under a suspended tenant stops authenticating, and a
+    /// control-plane suspension takes effect immediately (the cached
+    /// decision is dropped, so no TTL window remains).
+    #[tokio::test]
+    async fn suspended_tenant_session_is_refused_and_suspend_is_immediate() {
+        let Some((pool, state, tenant_id, user_id)) =
+            suspended_tenant_fixture("f18_jwt_gate").await
+        else {
+            eprintln!("skipping suspended_tenant_session_is_refused: no TEST_DATABASE_URL");
+            return;
+        };
+        let token = sign_session(&state, &tenant_id, &user_id).await;
+
+        authenticate_jwt(&token, &state)
+            .await
+            .expect("active tenant authenticates");
+
+        sqlx::query("UPDATE tenants SET status = 'suspended' WHERE id = $1")
+            .bind(&tenant_id)
+            .execute(&pool)
+            .await
+            .expect("suspend tenant");
+        invalidate_tenant_status_cache(&tenant_id, &state).await;
+
+        match authenticate_jwt(&token, &state).await {
+            Err(ApiError::Unauthorized(message)) => assert!(
+                message.contains("suspended"),
+                "expected a suspension-specific denial, got {message}"
+            ),
+            other => panic!("suspended tenant session must be refused, got {other:?}"),
+        }
+
+        // Recovery: resuming the tenant restores the session immediately.
+        sqlx::query("UPDATE tenants SET status = 'active' WHERE id = $1")
+            .bind(&tenant_id)
+            .execute(&pool)
+            .await
+            .expect("resume tenant");
+        invalidate_tenant_status_cache(&tenant_id, &state).await;
+        authenticate_jwt(&token, &state)
+            .await
+            .expect("resumed tenant authenticates again");
+
+        pool.close().await;
+    }
+
+    /// F18: an API key belonging to a suspended tenant stops
+    /// authenticating on the database path (the Redis cache is bypassed in
+    /// this fixture, exercising the authoritative row).
+    #[tokio::test]
+    async fn suspended_tenant_api_key_is_refused() {
+        let Some((pool, state, tenant_id, _user_id)) =
+            suspended_tenant_fixture("f18_apikey_gate").await
+        else {
+            eprintln!("skipping suspended_tenant_api_key_is_refused: no TEST_DATABASE_URL");
+            return;
+        };
+        sqlx::raw_sql(
+            "CREATE TABLE IF NOT EXISTS api_keys (
+                id UUID PRIMARY KEY,
+                tenant_id VARCHAR(26) NOT NULL,
+                name TEXT NOT NULL,
+                key_prefix VARCHAR(32) NOT NULL,
+                key_hash TEXT NOT NULL UNIQUE,
+                scopes JSONB NOT NULL,
+                expires_at TIMESTAMPTZ,
+                last_used_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("api_keys fixture DDL must apply");
+        let raw_key = format!("am_live_{}", uuid::Uuid::new_v4().simple());
+        let key_hash =
+            apexmail_lib::hash_api_key_with_secret(&raw_key, &state.config.api_key_hash_secret);
+        sqlx::query(
+            "INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, scopes, created_at, updated_at)
+             VALUES ($1, $2, 'f18 key', 'am_live_', $3, $4::jsonb, NOW(), NOW())",
+        )
+        .bind(uuid::Uuid::new_v4())
+        .bind(&tenant_id)
+        .bind(&key_hash)
+        .bind(serde_json::json!(["*"]).to_string())
+        .execute(&pool)
+        .await
+        .expect("seed api key");
+
+        let mut parts = axum::http::Request::get("/")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        parts.headers.insert("x-api-key", raw_key.parse().unwrap());
+        let auth = AuthUser::from_request_parts(&mut parts, &state)
+            .await
+            .expect("active tenant api key authenticates");
+        assert_eq!(auth.tenant_id, tenant_id);
+
+        sqlx::query("UPDATE tenants SET status = 'suspended' WHERE id = $1")
+            .bind(&tenant_id)
+            .execute(&pool)
+            .await
+            .expect("suspend tenant");
+        invalidate_tenant_status_cache(&tenant_id, &state).await;
+
+        let mut parts = axum::http::Request::get("/")
+            .body(())
+            .unwrap()
+            .into_parts()
+            .0;
+        parts.headers.insert("x-api-key", raw_key.parse().unwrap());
+        match AuthUser::from_request_parts(&mut parts, &state).await {
+            Err(ApiError::Unauthorized(message)) => assert!(
+                message.contains("suspended"),
+                "expected a suspension-specific denial, got {message}"
+            ),
+            other => panic!("suspended tenant api key must be refused, got {other:?}"),
+        }
+
+        pool.close().await;
     }
 
     /// An expired API key must stay rejected even when a cache entry from

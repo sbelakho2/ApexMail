@@ -3097,101 +3097,89 @@ async fn form_api_key_create(
     State(state): State<AppState>,
     axum::Extension(user): axum::Extension<AuthUser>,
     headers: HeaderMap,
-    Form(form): Form<HashMap<String, String>>,
+    body: axum::body::Bytes,
 ) -> Response {
-    if let Err(message) = check_csrf(&form, &headers, &state.config) {
+    // Lossless form parse (repeated `scopes=` checkbox keys survive, the
+    // way the webhook form's `events=` group does).
+    let form = match parse_form_body(&headers, body).await {
+        Ok(form) => form,
+        Err(message) => {
+            return redirect_error(message, "/settings/api-keys", &state.config);
+        }
+    };
+    if let Err(message) = form.check_csrf(&headers, &state.config) {
         return redirect_error(message, "/settings/api-keys", &state.config);
     }
-    // Scope gate (F2, parity with the JSON `POST /v1/api-keys` route):
-    // minting credential material requires an api-keys:write-capable
-    // session. Console session scopes come from the caller's role
-    // (`scopes_for_role`), so admin/owner ("*") pass transparently and
-    // every lesser role is turned away with a flash, not a JSON error.
-    if crate::middleware::auth::require_scopes(&user, &["api-keys:write"]).is_err() {
-        return redirect_error(
-            "You do not have permission to create API keys.",
-            "/settings/api-keys",
-            &state.config,
-        );
-    }
-    let name = field_truncated(&form, "name", 100);
+    let form_map: HashMap<String, String> = form.pairs.iter().cloned().collect();
+    let name = field_truncated(&form_map, "name", 100);
     if name.is_empty() {
         return redirect_error("Give the key a name.", "/settings/api-keys", &state.config);
     }
-    // Same per-tenant key ceiling as the JSON surface (F2), counted before
-    // insert. The count query failing fails CLOSED (generic error flash) —
-    // never insert past the limit.
-    let existing_keys: Result<(i64,), _> =
-        sqlx::query_as("SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1")
-            .bind(user.tenant_id.as_str())
-            .fetch_one(&state.db)
-            .await;
-    match existing_keys {
-        Ok((count,)) if count >= crate::routes::auth::MAX_API_KEYS_PER_TENANT => {
-            return redirect_error(
-                &format!(
-                    "API key limit reached: maximum {} keys per workspace.",
-                    crate::routes::auth::MAX_API_KEYS_PER_TENANT
-                ),
-                "/settings/api-keys",
-                &state.config,
-            );
+    // Supported expiry choice (F46): the form may post `expires_in_days`;
+    // absent means the shared JSON default (90 days) — console-created keys
+    // previously bypassed the expiry policy entirely and never expired.
+    // Out-of-range values surface the shared path's validation error as a
+    // flash; a non-numeric value is rejected up front.
+    let expires_raw = form.field("expires_in_days").trim().to_string();
+    let expires_in_days: Option<i64> = if expires_raw.is_empty() {
+        None
+    } else {
+        match expires_raw.parse::<i64>() {
+            Ok(days) => Some(days),
+            Err(_) => {
+                return redirect_error(
+                    "Expiry must be a number of days (1-365).",
+                    "/settings/api-keys",
+                    &state.config,
+                );
+            }
         }
-        Err(error) => {
-            tracing::error!(error = %error, "web api-key count check failed");
-            return redirect_error(
-                "Could not create the key. Try again.",
-                "/settings/api-keys",
-                &state.config,
-            );
-        }
-        _ => {}
+    };
+    // Supported scope choices (F46): the form may post a `scopes` checkbox
+    // group; every value is validated + authorized by the SHARED creation
+    // path below (F17). Absent keeps the console's historical default.
+    let mut scopes: Vec<String> = form
+        .get_all("scopes")
+        .into_iter()
+        .map(|scope| scope.trim().to_string())
+        .filter(|scope| !scope.is_empty())
+        .collect();
+    scopes.dedup();
+    if scopes.is_empty() {
+        scopes = vec!["messages:send".into(), "messages:read".into()];
     }
-    // Mirror the JSON path (routes/auth.rs create_api_key) exactly:
-    // - api_keys.id is UUID (052/056 schema)
-    // - the table has NO user_id column
-    // - key_prefix fits VARCHAR(8)
-    // - the secret is stored as keyed HMAC-SHA256 (apexmail_lib), NOT plain
-    //   SHA-256 — unsalted digests permanently parked keys in the legacy
-    //   bucket of authenticate_api_key, costing an extra DB round-trip and
-    //   a background rehash on every use.
-    let id = Uuid::new_v4();
-    let secret = apexmail_lib::id::generate_api_key(false);
-    let prefix_len = secret.len().min(8);
-    let prefix = secret[..prefix_len].to_string();
-    let key_hash =
-        apexmail_lib::hash_api_key_with_secret(&secret, &state.config.api_key_hash_secret);
-    let result = sqlx::query(
-        "INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, scopes, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())",
-    )
-    .bind(id)
-    .bind(user.tenant_id.as_str())
-    .bind(&name)
-    .bind(&prefix)
-    .bind(&key_hash)
-    .bind(json!(["messages:send", "messages:read"]))
-    .execute(&state.db)
-    .await;
-    match result {
-        Ok(_) => {
+
+    // F46: the console form and the JSON endpoint share ONE creation path —
+    // scope authorization, expiry defaults/bounds, keyed hashing, the
+    // atomic key-count ceiling, and persistence all behave identically.
+    // Flash-mapped (never a raw JSON error) for the no-JS surface.
+    match crate::routes::auth::mint_api_key(&state, &user, &name, &scopes, expires_in_days).await {
+        Ok(minted) => {
             // Item N: the reveal-once secret travels as STRUCTURED data in
             // the signed field-map cookie (mono-renderable by the view),
             // with the prose flash kept for no-JS banner parity.
             let mut fields = FormFieldMap::new("api-key-create");
-            fields.set("name", &name);
-            fields.secret("API key secret (shown once)", &secret);
+            fields.set("name", &minted.name);
+            fields.secret("API key secret (shown once)", &minted.raw_key);
             redirect_with_secret(
                 &fields,
                 &format!(
-                    "API key created. Copy the secret now — it will not be shown again: {secret}"
+                    "API key created. It expires {} — copy the secret now, it will not be shown again: {}",
+                    minted.expires_at.to_rfc3339(),
+                    minted.raw_key
                 ),
                 "/settings/api-keys",
                 &state.config,
             )
         }
+        Err(crate::error::ApiError::Validation(details)) => {
+            redirect_error(&details.join(" "), "/settings/api-keys", &state.config)
+        }
+        Err(crate::error::ApiError::Forbidden(message)) => {
+            redirect_error(&message, "/settings/api-keys", &state.config)
+        }
         Err(error) => {
-            tracing::error!(error = %error, "web api-key create failed");
+            tracing::error!(error = ?error, "web api-key create failed");
             redirect_error(
                 "Could not create the key. Try again.",
                 "/settings/api-keys",
@@ -4982,14 +4970,19 @@ async fn form_confirm_destructive(
             if !is_system_tenant(&state, &tenant).await {
                 return redirect_error("Operator access required.", "/tenants", &state.config);
             }
-            sqlx::query(
+            let suspended = sqlx::query(
                 "UPDATE tenants SET status = 'suspended', updated_at = NOW()
                  WHERE id = $1 AND status IN ('pending', 'active')",
             )
             .bind(&id)
             .execute(&state.db)
             .await
-            .map(|r| r.rows_affected())
+            .map(|r| r.rows_affected());
+            // F18: the restriction must reach authenticated traffic
+            // immediately (drop the middleware's cached tenant-status
+            // decision), not after its short TTL.
+            crate::middleware::auth::invalidate_tenant_status_cache(&id, &state).await;
+            suspended
         }
         "delete-tenant" => {
             if !is_system_tenant(&state, &tenant).await {
@@ -5688,6 +5681,11 @@ async fn form_admin_tenant_resume(
     .bind(&id)
     .execute(&state.db)
     .await;
+    if matches!(&result, Ok(update) if update.rows_affected() == 1) {
+        // F18: the recovery takes effect immediately for the tenant's
+        // sessions and API keys.
+        crate::middleware::auth::invalidate_tenant_status_cache(&id, &state).await;
+    }
     match result {
         Ok(result) if result.rows_affected() == 1 => redirect_success(
             "Tenant resumed — status is now active.",
@@ -6336,6 +6334,242 @@ mod tests {
         assert_eq!(normalize_consent_choice(Some("garbage")), None);
         assert_eq!(normalize_consent_choice(Some("")), None);
         assert_eq!(normalize_consent_choice(None), None);
+    }
+
+    // ── F46: SSR/JSON key-creation parity ──────────────────────────────
+
+    /// Drive the console form handler exactly like a browser POST: a
+    /// double-submit CSRF pair, a urlencoded body, and the caller's
+    /// session identity. Returns the decoded reveal-once field map (for
+    /// the raw secret) so the test can assert against the PERSISTED row.
+    async fn post_console_api_key_form(
+        state: &AppState,
+        user: &AuthUser,
+        body: &str,
+    ) -> (Response, Option<FormFieldMap>) {
+        let config = &state.config;
+        let csrf = form_csrf_for_render(&HeaderMap::new(), config);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            format!("csrf_token={}", csrf.token).parse().unwrap(),
+        );
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded".parse().unwrap(),
+        );
+        let body_with_csrf = format!("{body}&_csrf={}", csrf.token);
+        let response = form_api_key_create(
+            State(state.clone()),
+            axum::Extension(user.clone()),
+            headers,
+            axum::body::Bytes::from(body_with_csrf),
+        )
+        .await;
+
+        let field_map = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .find_map(|value| {
+                let cookie = value.to_str().ok()?;
+                let (name, rest) = cookie.split_once('=')?;
+                (name == FORM_FIELDS_COOKIE_NAME).then(|| {
+                    FormFieldMap::decode(
+                        rest.split(';').next().unwrap_or_default(),
+                        &config.csrf_secret,
+                    )
+                })?
+            });
+        (response, field_map)
+    }
+
+    #[tokio::test]
+    async fn console_api_key_form_shares_the_json_policy() {
+        let Some(pool) = crate::test_db::canonical_pool("web_key_parity").await else {
+            eprintln!("skipping console_api_key_form_shares_the_json_policy: no TEST_DATABASE_URL");
+            return;
+        };
+        sqlx::raw_sql(
+            "CREATE TABLE IF NOT EXISTS api_keys (
+                id UUID PRIMARY KEY,
+                tenant_id VARCHAR(26) NOT NULL,
+                name TEXT NOT NULL,
+                key_prefix VARCHAR(32) NOT NULL,
+                key_hash TEXT NOT NULL UNIQUE,
+                scopes JSONB NOT NULL,
+                expires_at TIMESTAMPTZ,
+                last_used_at TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("api_keys fixture DDL must apply");
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let tenant_id = format!("tpar{}", &uuid::Uuid::new_v4().simple().to_string()[..16]);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+             VALUES ($1, 'Parity Co', $2, 'free', 'active', NOW(), NOW())",
+        )
+        .bind(&tenant_id)
+        .bind(format!("slug-{tenant_id}"))
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+        let admin = AuthUser {
+            tenant_id: tenant_id.clone(),
+            user_id: Some(uuid::Uuid::new_v4().to_string()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".to_string()],
+        };
+
+        // 1. Bare form (name only): the console default scopes plus the
+        //    SHARED 90-day expiry default — the SSR path used to insert
+        //    NULL expires_at, i.e. a never-expiring credential (F46).
+        let (response, field_map) =
+            post_console_api_key_form(&state, &admin, "name=Console Default").await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let map = field_map.expect("reveal-once field map cookie must be set");
+        let (label, raw_secret) = map
+            .secrets()
+            .first()
+            .expect("the one-time secret rides the signed cookie");
+        assert!(label.contains("shown once"));
+
+        let row: (
+            String,
+            serde_json::Value,
+            chrono::DateTime<Utc>,
+            Option<chrono::DateTime<Utc>>,
+        ) = sqlx::query_as(
+            "SELECT key_hash, scopes, created_at, expires_at FROM api_keys
+                 WHERE tenant_id = $1 AND name = 'Console Default'",
+        )
+        .bind(&tenant_id)
+        .fetch_one(&pool)
+        .await
+        .expect("console key persisted");
+        assert_eq!(
+            row.0,
+            apexmail_lib::hash_api_key_with_secret(raw_secret, &state.config.api_key_hash_secret),
+            "SSR must use the SAME keyed HMAC hash as the JSON endpoint"
+        );
+        assert_eq!(
+            row.1,
+            serde_json::json!(["messages:send", "messages:read"]),
+            "absent scope choices keep the console default"
+        );
+        let expires_at = row
+            .3
+            .expect("console-created keys must now carry an expiry (F46)");
+        assert!(
+            expires_at > Utc::now() + chrono::Duration::days(89)
+                && expires_at < Utc::now() + chrono::Duration::days(91),
+            "default expiry must be the shared 90-day policy, got {expires_at}"
+        );
+
+        // 2. Explicit choices: posted scopes (multi-value) and a bounded
+        //    expiry ride the SHARED validation/authorization.
+        let (response, _) = post_console_api_key_form(
+            &state,
+            &admin,
+            "name=Console Scoped&scopes=domains:read&scopes=messages:read&expires_in_days=7",
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let row: (serde_json::Value, chrono::DateTime<Utc>) = sqlx::query_as(
+            "SELECT scopes, expires_at FROM api_keys
+             WHERE tenant_id = $1 AND name = 'Console Scoped'",
+        )
+        .bind(&tenant_id)
+        .fetch_one(&pool)
+        .await
+        .expect("scoped console key persisted");
+        assert_eq!(
+            row.0,
+            serde_json::json!(["domains:read", "messages:read"]),
+            "posted checkbox-group scopes are stored exactly"
+        );
+        assert!(
+            row.1 > Utc::now() + chrono::Duration::days(6)
+                && row.1 < Utc::now() + chrono::Duration::days(8),
+            "explicit 7-day expiry honoured, got {}",
+            row.1
+        );
+
+        // 3. Shared authorization: a restricted console session cannot
+        //    mint a scope it lacks — the SSR surface used to skip scope
+        //    checks entirely.
+        let viewer = AuthUser {
+            tenant_id: tenant_id.clone(),
+            user_id: Some(uuid::Uuid::new_v4().to_string()),
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["messages:read".to_string()],
+        };
+        let (response, _) =
+            post_console_api_key_form(&state, &viewer, "name=Escalation&scopes=messages:send")
+                .await;
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "still a flash PRG"
+        );
+        let escalation_flash = flash_messages(&response, &state.config);
+        assert!(
+            escalation_flash
+                .iter()
+                .any(|message| message.kind == ui_foundation::flash::FlashKind::Error),
+            "escalation attempt must flash an error, got {escalation_flash:?}"
+        );
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM api_keys WHERE tenant_id = $1 AND name = 'Escalation'",
+        )
+        .bind(&tenant_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 0, "no key may be minted for the escalation attempt");
+
+        // 4. Missing CSRF is refused outright.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/x-www-form-urlencoded".parse().unwrap(),
+        );
+        let response = form_api_key_create(
+            State(state.clone()),
+            axum::Extension(admin.clone()),
+            headers,
+            axum::body::Bytes::from_static(b"name=No Csrf"),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let csrf_flash = flash_messages(&response, &state.config);
+        assert!(
+            csrf_flash
+                .iter()
+                .any(|message| message.kind == ui_foundation::flash::FlashKind::Error),
+            "missing CSRF must flash an error, got {csrf_flash:?}"
+        );
+
+        pool.close().await;
+    }
+
+    /// Decode the flash cookie a PRG response set (test-only view into the
+    /// signed payload).
+    fn flash_messages(response: &Response, config: &Config) -> Vec<FlashMessage> {
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .filter(|cookie| cookie.starts_with("apexmail_flash="))
+            .flat_map(|cookie| decode_flash_from_cookie_header(cookie, &config.csrf_secret))
+            .collect()
     }
 
     #[test]
