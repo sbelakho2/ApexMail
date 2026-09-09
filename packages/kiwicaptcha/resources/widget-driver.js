@@ -414,7 +414,7 @@
       hintProtected: "Protected by KiwiCaptcha", hintRetrying: "Challenge failed ({msg}) \u2014 retrying\u2026",
       hintClickRetry: "Challenge failed ({msg}) \u2014 press the Retry button to try again.",
       hintVerified: "Verification complete.",
-      hintExpired: "Verification expired \u2014 press Retry to verify again.",
+      hintExpired: "Verification expired \u2014 press Retry.",
       hintWorker: "Worker unavailable \u2014 Argon2id needs a Web Worker that this page's CSP blocks; retry, or configure data-kiwi-worker-src.",
       hintSolver: "The solver worker is out of date \u2014 reload the page to load the current version.",
       retryButton: "Retry", checking: "Checking\u2026" },
