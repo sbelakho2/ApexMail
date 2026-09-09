@@ -219,14 +219,46 @@ run_contrast_gate() {
 # tools/contrast-audit/tag-balance.py strict-closure-checks every built page
 # so an unclosed tag can never again swallow the rest of the document.
 # Both self-provision their inputs exactly like the contrast gate.
+# F52: both gates here are REQUIRED, and their prerequisites differ. The
+# tag-balance gate needs only python3 (no browser toolchain), so it runs
+# FIRST and unconditionally — the old node/playwright early-returns let BOTH
+# gates pass silently on a runner without the browser stack, tag-balance
+# included. For the layout-spill gate a missing browser toolchain is missing
+# infrastructure for a required gate: a stage FAILURE with the provisioning
+# hint, never a silent skip (matching layout-gate.sh's own loud-failure
+# contract). The only intentional opt-out is explicit:
+# CI_LAYOUT_GATE_CHECK=advisory. (The WCAG contrast gate above loud-skips by
+# design on browser-less runners and is unaffected.)
 run_layout_gates() {
-    command -v node >/dev/null 2>&1 || { ci_warn "node missing — layout gates skipped"; return "$CI_EXIT_OK"; }
-    [ -d "$REPO_ROOT/tools/contrast-audit/node_modules/playwright" ] || { ci_warn "tools/contrast-audit/node_modules missing — layout gates skipped"; return "$CI_EXIT_OK"; }
-    (cd "$REPO_ROOT" && ci_check "layout-spill gate (tools/contrast-audit/layout-gate.sh)" \
-        sh tools/contrast-audit/layout-gate.sh) || { ci_err "layout gate FAILED — see tools/contrast-audit/reports/layout/violations.json"; return "$CI_EXIT_FAIL"; }
-    command -v python3 >/dev/null 2>&1 || { ci_warn "python3 missing — tag-balance gate skipped"; return "$CI_EXIT_OK"; }
-    (cd "$REPO_ROOT" && ci_check "tag-balance gate (tag-balance.py)" \
-        python3 tools/contrast-audit/tag-balance.py) || { ci_err "tag-balance gate FAILED — see per-page output above"; return "$CI_EXIT_FAIL"; }
+    # tag-balance first: pure python3 over the built fixtures/marketing pages,
+    # so no browser-toolchain prerequisite can ever skip it (and a
+    # layout-spill failure cannot mask it).
+    if command -v python3 >/dev/null 2>&1; then
+        (cd "$REPO_ROOT" && ci_check "tag-balance gate (tag-balance.py)" \
+            python3 tools/contrast-audit/tag-balance.py) || { ci_err "tag-balance gate FAILED — see per-page output above"; return "$CI_EXIT_FAIL"; }
+    elif [ "${CI_LAYOUT_GATE_CHECK:-required}" = required ]; then
+        ci_err "python3 missing — tag-balance gate REQUIRED \
+(install python3, or set CI_LAYOUT_GATE_CHECK=advisory to disable this gate explicitly)"
+        return "$CI_EXIT_FAIL"
+    else
+        ci_warn "ADVISORY: python3 missing — tag-balance gate skipped (CI_LAYOUT_GATE_CHECK=advisory)"
+    fi
+    # layout-spill gate: node + playwright required — absent toolchain fails.
+    _lg_missing=''
+    command -v node >/dev/null 2>&1 || _lg_missing='node missing'
+    if [ -z "$_lg_missing" ] && [ ! -d "$REPO_ROOT/tools/contrast-audit/node_modules/playwright" ]; then
+        _lg_missing="tools/contrast-audit/node_modules (playwright) missing — run '(cd tools/contrast-audit && npm install)'"
+    fi
+    if [ -z "$_lg_missing" ]; then
+        (cd "$REPO_ROOT" && ci_check "layout-spill gate (tools/contrast-audit/layout-gate.sh)" \
+            sh tools/contrast-audit/layout-gate.sh) || { ci_err "layout gate FAILED — see tools/contrast-audit/reports/layout/violations.json"; return "$CI_EXIT_FAIL"; }
+    elif [ "${CI_LAYOUT_GATE_CHECK:-required}" = required ]; then
+        ci_err "$_lg_missing — layout-spill gate REQUIRED \
+(provision the browser toolchain, or set CI_LAYOUT_GATE_CHECK=advisory to disable this gate explicitly)"
+        return "$CI_EXIT_FAIL"
+    else
+        ci_warn "ADVISORY: $_lg_missing — layout-spill gate skipped (CI_LAYOUT_GATE_CHECK=advisory)"
+    fi
 }
 
 # --- 8c. i18n completeness gate ----------------------------------------------------------
