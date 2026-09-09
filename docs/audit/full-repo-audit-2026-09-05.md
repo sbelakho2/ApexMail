@@ -458,3 +458,27 @@ Deployed via pipeline `20260908T221028: OK` (commits `f1703727`+`26f60993`; no n
 **Live-verified:** hero/eyebrow/proof line/MX line; new title; footer tagline + quiet receipt; /email-logs/ 200 with timeline + /forensic/ 301; pricing headline + Enterprise-infrastructure section + 9 plain price-values + zero price-slots + overage ladder; signup without name/company at minlength 15; widget badge "Security verification"; de/fr control positioning; grader endpoint 200; zero banned microcopy.
 
 **Remaining roadmap (product engineering, sequenced per review §64):** @apexmail/node SDK then the other registries, transactional/broadcast streams, ARC/BIMI depth, adaptive reputation circuit breaker, dedicated-IP workflow UI, Inbox Placement as first-class product, Grader expansion, send-time/content optimization, SSO/OIDC/SCIM depth, white-label, subaccount hard isolation, BYOIP workflow, Dedicated-Tenant/BYOC automation, on-prem model, docs shell with ⌘K search, Stripe-style API reference, status SSR rebuild, viewport screenshot regression fleet, app-shell nav reorder around Messages/Domains, neutral comparison rebuild, measured private-deployment benchmarks.
+
+## 29. Review round 3 (2026-09-09) — the 20 confirmed bugs — 2026-09-09
+
+Deployed via pipeline `20260909T022056: OK` (commits `da335d77`+`4a513919`; no new migrations; verify: services healthy, endpoints + SMTP answering). 1,465 tests green across touched crates; all gates green.
+
+**The first-integration contract (§1/§4 — highest priority).** The homepage curl showed `Authorization: Bearer` while the real middleware authenticates `X-API-Key`, and a scalar `"to"` while the API types `to` as `Vec<String>`. Both fixed — the first example a developer copies now compiles against the real contract.
+
+**The empty /solutions/ route (§7/§46).** Root cause: `content/solutions/index.md` made the hub a Zola PAGE rendered through a SECTION template — `section.content`/`section.pages` were both undefined, so `<main>` shipped empty (nav+footer only). Renamed to `_index.md` (+locale variants): the hub now renders its body and child-page list (~2.9k chars of main text). This was the same class of bug as the stale-output gate issues — structure, not copy.
+
+**Status SSR (§9/§10/§42/§52).** The status page was client-side-only ("Loading…" in first paint and crawls). The probe set was extracted into a shared `probe_services()` helper and the page now server-renders real health: component cards, the percentage, overall state and "Last checked <ts>"; the client script only refreshes and keeps the SSR state visible if its fetch fails. Verified live: "All systems operational" + "Last checked" present with zero "Loading".
+
+**Contract drift (§3/§5/§6/§8-events/§16/§32/§66/§67).** API Reference rate table → Developer/Business/Enterprise Cloud and the canonical `message.*` vocabulary; the pricing calculator's IP entitlements now match cards and seeds (Growth 1, Business 1 + second where useful, Enterprise Cloud up to 3); "Scale SLA available" → "SLA available on eligible plans"; solutions/enterprise "10 IPs" → up to 3.
+
+**Neutral comparisons (§47).** Winner column and badges removed (3-column capability table), "Comparative Verdict" → a balanced "Which should you choose?" decision guide (choose-ApexMail / choose-alternative columns), CTA standardized to "Start free".
+
+**SDK page (§11/§6).** Consistently PRIVATE PREVIEW — the "source is available in the monorepo" claims that contradicted the private-source statement were replaced with "Request SDK preview access" wording.
+
+**Small but visible:** calculator title/description now about ApexMail estimation (§49); decorative hex tag slots removed from homepage cards, indexes kept (§36); the KiwiCaptcha SERVER-RENDERED markup no longer carries "Security Check"/"Idle" before JS init (§55); SLA Business graduated schedule 10/20/30% with the seed ceiling raised to 30, document re-dated 2026-09-09 (§68/§69).
+
+**Stale-crawl items verified already fixed live:** signup (no name/company, NIST 15+ no-composition), login badge behavior, explorer footer tagline + Delivery Diagnostics naming, /email-logs/ route stability (GET/HEAD, slash/no-slash → canonical 200).
+
+**Live-verified:** X-API-Key + to-array on the homepage; /solutions/ 2,941-char main; status SSR; compare decision guide with zero Winner columns; calculator title + entitlement copy; login SSR badge; API Reference plan/event vocabulary.
+
+**Roadmap unchanged** (per review §89/§90): Node SDK first, then canonical event/API schema generation, streams, suppressions, circuit breaker, IP operations, Inbox Placement, Grader expansion, diagnostics actions, query API, SSO/SCIM, subaccounts, white-label, BYOIP, deployment automation, docs shell, three-pane reference, viewport regression CI.
