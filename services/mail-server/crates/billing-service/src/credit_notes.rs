@@ -39,6 +39,9 @@ pub struct CreditNote {
     pub invoice_id: Uuid,
     pub tenant_id: String,
     pub amount: i64,
+    /// ISO-4217 code of the credited invoice's currency — a credit must
+    /// reconcile in the currency it was issued in (audit F60).
+    pub currency: String,
     pub reason: String,
     pub idempotency_key: String,
     pub created_at: DateTime<Utc>,
@@ -65,6 +68,10 @@ pub enum CreditNoteError {
         invoice_currency: String,
         wallet_currency: String,
     },
+    #[error(
+        "idempotency key {idempotency_key} was already used for a different credit note payload"
+    )]
+    IdempotencyKeyReused { idempotency_key: String },
     #[error("audit log failure: {0}")]
     Audit(String),
 }
@@ -95,18 +102,32 @@ fn validate_credit_amount(
     Ok(())
 }
 
+/// Replay comparison (audit F60): a retried request with the same
+/// (tenant, idempotency key) is a REPLAY only when the payload matches the
+/// stored credit note — same invoice, same amount. A key reused for a
+/// different payload is an error, never a silent return of someone else's
+/// credit. Pure — unit-tested.
+fn replay_matches(existing: &CreditNoteRow, input: &CreateCreditNoteInput) -> bool {
+    existing.invoice_id == input.invoice_id && existing.amount == input.amount
+}
+
 /// Create a credit note **idempotently**.
 ///
-/// If a credit note with the same `idempotency_key` already exists, the
-/// existing record is returned and no changes are made to the wallet or
-/// invoice.  This guarantees exactly-once semantics under retries.
+/// If a credit note with the same `(tenant_id, idempotency_key)` already
+/// exists AND the payload matches, the existing record is returned and no
+/// changes are made to the wallet or invoice — exactly-once semantics
+/// under retries. A key reused for a DIFFERENT payload is rejected with
+/// [`CreditNoteError::IdempotencyKeyReused`].
 ///
-/// ## Idempotency guarantees
+/// ## Idempotency guarantees (audit F60)
 ///
-/// 1. `ON CONFLICT (idempotency_key) DO NOTHING` prevents duplicate rows.
-/// 2. Wallet credit is applied inside the same transaction via
-///    `wallet_transactions`.
-/// 3. An audit log entry is written for every *first* creation.
+/// 1. The replay lookup + payload compare happen BEFORE any credit is
+///    reserved — a mismatched retry never touches the wallet.
+/// 2. `ON CONFLICT (tenant_id, idempotency_key) DO NOTHING` prevents
+///    duplicate rows; idempotency is scoped to the TENANT so one tenant's
+///    key can never adopt another tenant's credit.
+/// 3. Invoice lock, credit-note row, wallet credit and audit log commit in
+///    ONE transaction.
 /// 4. Fix F — the invoice row is locked with `SELECT ... FOR UPDATE` for the
 ///    whole transaction, so two concurrent credit notes (different keys)
 ///    cannot both read the same `already_credited` and over-credit the
@@ -116,7 +137,7 @@ fn validate_credit_amount(
 ///
 /// - The referred invoice must exist and be in a creditable state
 ///   (`Paid`, `Pending`, or `Uncollectible` — not `Void` or `Draft`).
-/// - The credit amount must not exceed the invoice total.
+/// - The credit amount must be positive and not exceed the invoice total.
 pub async fn create_credit_note(
     pool: &PgPool,
     input: CreateCreditNoteInput,
@@ -143,11 +164,61 @@ pub async fn create_credit_note(
         other => {
             tracing::warn!(
                 invoice_id = %input.invoice_id,
-                status = %other,
+                status = other,
                 "attempted to credit non-creditable invoice"
             );
             return Err(CreditNoteError::InvoiceNotCreditable(input.invoice_id));
         }
+    }
+
+    // ── 2. Replay compare BEFORE reserving any credit (audit F60) ───────
+    // A retry with the same (tenant, key) returns the stored record only
+    // when the payload matches; a reused key with a different payload is
+    // an error. Nothing below this point runs for a replay.
+    let replayed: Option<CreditNoteRow> = sqlx::query_as(
+        r#"
+        SELECT id, invoice_id, tenant_id, amount, currency, reason, idempotency_key, created_at
+        FROM credit_notes
+        WHERE tenant_id = $1 AND idempotency_key = $2
+        "#,
+    )
+    .bind(&input.tenant_id)
+    .bind(&input.idempotency_key)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(CreditNoteError::Db)?;
+
+    if let Some(existing) = replayed {
+        if !replay_matches(&existing, &input) {
+            tracing::error!(
+                tenant_id = %input.tenant_id,
+                idempotency_key = %input.idempotency_key,
+                stored_invoice_id = %existing.invoice_id,
+                stored_amount = existing.amount,
+                requested_invoice_id = %input.invoice_id,
+                requested_amount = input.amount,
+                "credit-note idempotency key reused for a different payload — rejected"
+            );
+            return Err(CreditNoteError::IdempotencyKeyReused {
+                idempotency_key: input.idempotency_key,
+            });
+        }
+        tracing::info!(
+            idempotency_key = %input.idempotency_key,
+            credit_note_id = %existing.id,
+            "reusing existing credit note (idempotent replay)"
+        );
+        let credit_note = existing;
+        return Ok(CreditNote {
+            id: credit_note.id,
+            invoice_id: credit_note.invoice_id,
+            tenant_id: credit_note.tenant_id,
+            amount: credit_note.amount,
+            currency: credit_note.currency,
+            reason: credit_note.reason,
+            idempotency_key: credit_note.idempotency_key,
+            created_at: credit_note.created_at,
+        });
     }
 
     // The credit amount must not exceed the *remaining* creditable balance
@@ -174,15 +245,16 @@ pub async fn create_credit_note(
 
     let row: Option<CreditNoteRow> = sqlx::query_as(
         r#"
-        INSERT INTO credit_notes (invoice_id, tenant_id, amount, reason, idempotency_key, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6)
-        ON CONFLICT (idempotency_key) DO NOTHING
-        RETURNING id, invoice_id, tenant_id, amount, reason, idempotency_key, created_at
+        INSERT INTO credit_notes (invoice_id, tenant_id, amount, currency, reason, idempotency_key, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+        RETURNING id, invoice_id, tenant_id, amount, currency, reason, idempotency_key, created_at
         "#,
     )
     .bind(input.invoice_id)
     .bind(&input.tenant_id)
     .bind(input.amount)
+    .bind(&invoice_currency)
     .bind(&input.reason)
     .bind(&input.idempotency_key)
     .bind(now)
@@ -273,6 +345,7 @@ pub async fn create_credit_note(
                 serde_json::json!({
                     "invoiceId": input.invoice_id,
                     "amount": input.amount,
+                    "currency": invoice_currency,
                     "reason": input.reason,
                     "idempotencyKey": input.idempotency_key,
                 }),
@@ -284,24 +357,32 @@ pub async fn create_credit_note(
             row
         }
         None => {
-            // Idempotency key collision — fetch the existing record.
-            // This path is taken when the caller retries with the same key.
+            // Lost a concurrent insert race on (tenant, key): the winner's
+            // record IS this request's replay — compare and return it, or
+            // reject a divergent payload (audit F60).
             let existing: CreditNoteRow = sqlx::query_as(
                 r#"
-                SELECT id, invoice_id, tenant_id, amount, reason, idempotency_key, created_at
+                SELECT id, invoice_id, tenant_id, amount, currency, reason, idempotency_key, created_at
                 FROM credit_notes
-                WHERE idempotency_key = $1
+                WHERE tenant_id = $1 AND idempotency_key = $2
                 "#,
             )
+            .bind(&input.tenant_id)
             .bind(&input.idempotency_key)
             .fetch_one(&mut *tx)
             .await
             .map_err(CreditNoteError::Db)?;
 
+            if !replay_matches(&existing, &input) {
+                return Err(CreditNoteError::IdempotencyKeyReused {
+                    idempotency_key: input.idempotency_key,
+                });
+            }
+
             tracing::info!(
                 idempotency_key = %input.idempotency_key,
                 credit_note_id = %existing.id,
-                "reusing existing credit note (idempotent retry)"
+                "reusing existing credit note (idempotent retry after insert race)"
             );
 
             existing
@@ -315,6 +396,7 @@ pub async fn create_credit_note(
         invoice_id: credit_note.invoice_id,
         tenant_id: credit_note.tenant_id,
         amount: credit_note.amount,
+        currency: credit_note.currency,
         reason: credit_note.reason,
         idempotency_key: credit_note.idempotency_key,
         created_at: credit_note.created_at,
@@ -331,6 +413,7 @@ struct CreditNoteRow {
     invoice_id: Uuid,
     tenant_id: String,
     amount: i64,
+    currency: String,
     reason: String,
     idempotency_key: String,
     created_at: DateTime<Utc>,
@@ -369,6 +452,7 @@ mod tests {
             invoice_id: Uuid::new_v4(),
             tenant_id: "tenant-1".into(),
             amount: 5000,
+            currency: "EUR".into(),
             reason: "SLA breach credit".into(),
             idempotency_key: Uuid::new_v4().to_string(),
             created_at: Utc::now(),
@@ -377,7 +461,61 @@ mod tests {
         let deserialized: CreditNote = serde_json::from_value(json).unwrap();
         assert_eq!(note.id, deserialized.id);
         assert_eq!(note.amount, deserialized.amount);
+        assert_eq!(note.currency, deserialized.currency);
         assert_eq!(note.idempotency_key, deserialized.idempotency_key);
+    }
+
+    // ------------------------------------------------------------------
+    // Audit F60 — replay comparison gates every idempotent retry.
+    // ------------------------------------------------------------------
+
+    fn sample_row(invoice_id: Uuid, amount: i64) -> CreditNoteRow {
+        CreditNoteRow {
+            id: Uuid::new_v4(),
+            invoice_id,
+            tenant_id: "tenant-1".into(),
+            amount,
+            currency: "EUR".into(),
+            reason: "goodwill".into(),
+            idempotency_key: "idem-001".into(),
+            created_at: Utc::now(),
+        }
+    }
+
+    fn sample_input(invoice_id: Uuid, amount: i64) -> CreateCreditNoteInput {
+        CreateCreditNoteInput {
+            invoice_id,
+            amount,
+            reason: "goodwill".into(),
+            tenant_id: "tenant-1".into(),
+            idempotency_key: "idem-001".into(),
+        }
+    }
+
+    #[test]
+    fn replay_with_identical_payload_matches() {
+        let invoice = Uuid::new_v4();
+        assert!(replay_matches(
+            &sample_row(invoice, 1_000),
+            &sample_input(invoice, 1_000)
+        ));
+    }
+
+    #[test]
+    fn replay_with_different_amount_is_not_a_replay() {
+        let invoice = Uuid::new_v4();
+        assert!(!replay_matches(
+            &sample_row(invoice, 1_000),
+            &sample_input(invoice, 2_000)
+        ));
+    }
+
+    #[test]
+    fn replay_for_a_different_invoice_is_not_a_replay() {
+        assert!(!replay_matches(
+            &sample_row(Uuid::new_v4(), 1_000),
+            &sample_input(Uuid::new_v4(), 1_000)
+        ));
     }
 
     // ------------------------------------------------------------------

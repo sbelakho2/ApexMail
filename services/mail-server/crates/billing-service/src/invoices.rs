@@ -72,7 +72,46 @@ pub async fn generate_invoice_number(pool: &PgPool) -> Result<String, InvoiceErr
     Ok(format!("{year}-{:06}", row.0))
 }
 
-/// Input for creating an invoice.
+/// Same as [`generate_invoice_number`], on a caller-owned transaction so
+/// the sequence bump participates in the caller's atomicity unit.
+async fn generate_invoice_number_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+) -> Result<String, InvoiceError> {
+    let year = Utc::now().year();
+
+    let row: (i64,) = sqlx::query_as("SELECT nextval('invoice_number_seq')::bigint")
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(InvoiceError::Db)?;
+
+    Ok(format!("{year}-{:06}", row.0))
+}
+
+pub struct CreateInvoiceInput {
+    pub tenant_id: String,
+    pub stripe_invoice_id: Option<String>,
+    pub line_items: Vec<NewLineItem>,
+    pub period_start: DateTime<Utc>,
+    pub period_end: DateTime<Utc>,
+    pub due_at: Option<DateTime<Utc>>,
+    pub currency: Option<String>,
+    /// Idempotency marker for the usage sweeps (migration 126): the
+    /// billing-cycle start (overage) or calendar-month start (PAYG) this
+    /// invoice settles. `invoices.overage_period` is written in the SAME
+    /// INSERT as the invoice row, so the check-then-insert idempotency in
+    /// the overage sweep can never observe a marker-less invoice. `None`
+    /// for non-sweep writers (Stripe webhook invoice persistence, the
+    /// admin invoice writer).
+    pub overage_period: Option<DateTime<Utc>>,
+}
+
+pub struct NewLineItem {
+    pub description: String,
+    pub quantity: i64,
+    /// Unit price in cents.
+    pub unit_price: i64,
+}
+
 /// Escape HTML-special characters in a user-supplied string to prevent
 /// XSS injection into the PDF invoice template (BS-005).
 ///
@@ -124,31 +163,6 @@ fn escape_html(s: &str) -> String {
     out
 }
 
-pub struct CreateInvoiceInput {
-    pub tenant_id: String,
-    pub stripe_invoice_id: Option<String>,
-    pub line_items: Vec<NewLineItem>,
-    pub period_start: DateTime<Utc>,
-    pub period_end: DateTime<Utc>,
-    pub due_at: Option<DateTime<Utc>>,
-    pub currency: Option<String>,
-    /// Idempotency marker for the usage sweeps (migration 126): the
-    /// billing-cycle start (overage) or calendar-month start (PAYG) this
-    /// invoice settles. `invoices.overage_period` is written in the SAME
-    /// INSERT as the invoice row, so the check-then-insert idempotency in
-    /// `overage::claim_period_slot` can never observe a marker-less
-    /// invoice. `None` for non-sweep writers (Stripe webhook invoice
-    /// persistence, the admin invoice writer).
-    pub overage_period: Option<DateTime<Utc>>,
-}
-
-pub struct NewLineItem {
-    pub description: String,
-    pub quantity: i64,
-    /// Unit price in cents.
-    pub unit_price: i64,
-}
-
 /// Round-half-up VAT for a single base amount (integer cents, fractional
 /// percent rates supported via billing_common).
 pub fn round_vat(amount: i64, rate: f64) -> i64 {
@@ -187,32 +201,85 @@ pub fn allocate_vat_across_lines(amounts: &[i64], rate: f64) -> Vec<i64> {
     allocated
 }
 
-/// Create an invoice.
+/// Full billing-address row snapshotted onto the invoice at issue time.
+/// An issued invoice is a legal document: it must show the address that was
+/// in force WHEN it was issued, not the tenant's current (mutable) address
+/// (audit F08).
+#[derive(sqlx::FromRow)]
+struct BillingAddrSnapshotRow {
+    company_name: Option<String>,
+    vat_number: Option<String>,
+    address_line1: Option<String>,
+    address_line2: Option<String>,
+    city: Option<String>,
+    state: Option<String>,
+    postal_code: Option<String>,
+    country: Option<String>,
+    email: Option<String>,
+}
+
+/// Create an invoice on the pool (own transaction).
 pub async fn create_invoice(
     pool: &PgPool,
     input: CreateInvoiceInput,
 ) -> Result<Invoice, InvoiceError> {
-    // Fetch billing address country + VAT number for VAT calculation.
-    let addr: BillingAddrRow =
-        sqlx::query_as("SELECT country, vat_number FROM billing_addresses WHERE tenant_id = $1")
-            .bind(&input.tenant_id)
-            .fetch_optional(pool)
-            .await
-            .map_err(InvoiceError::Db)?
-            .ok_or(InvoiceError::NoBillingAddress)?;
+    let mut tx = pool.begin().await.map_err(InvoiceError::Db)?;
+    let invoice = create_invoice_in_tx(&mut tx, input).await?;
+    tx.commit().await.map_err(InvoiceError::Db)?;
+    Ok(invoice)
+}
 
-    let invoice_number = generate_invoice_number(pool).await?;
+/// Create an invoice INSIDE a caller-owned transaction.
+///
+/// The usage sweeps must claim the billing period and insert its invoice
+/// atomically (audit F29 — the old claim-then-insert-on-another-connection
+/// sequence let two sweeps double-invoice a period). Everything this
+/// function does (address read, invoice numbering, INSERT) executes on the
+/// caller's transaction, so a unique violation on `overage_period`
+/// (migration 136) aborts the whole claim together with the insert.
+pub async fn create_invoice_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: CreateInvoiceInput,
+) -> Result<Invoice, InvoiceError> {
+    // Fetch the FULL billing address: country + VAT number drive VAT
+    // calculation, and the whole row is snapshotted immutably onto the
+    // invoice (audit F08).
+    let addr: BillingAddrSnapshotRow = sqlx::query_as(
+        r#"
+        SELECT company_name, vat_number, address_line1, address_line2,
+               city, state, postal_code, country, email
+        FROM billing_addresses WHERE tenant_id = $1
+        "#,
+    )
+    .bind(&input.tenant_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(InvoiceError::Db)?
+    .ok_or(InvoiceError::NoBillingAddress)?;
+
+    let country = addr
+        .country
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or(InvoiceError::NoBillingAddress)?;
+
+    let invoice_number = generate_invoice_number_tx(tx).await?;
 
     // All lines on one invoice share the billing address, hence the same VAT
     // rate; compute it once from the full subtotal so per-line allocations
     // reconcile with the headline total (Fix I3).
-    let line_amounts: Vec<i64> = input
-        .line_items
-        .iter()
-        .map(|item| item.quantity * item.unit_price)
-        .collect();
+    let mut line_amounts: Vec<i64> = Vec::with_capacity(input.line_items.len());
+    for item in &input.line_items {
+        let amount = item.quantity.checked_mul(item.unit_price).ok_or_else(|| {
+            InvoiceError::PdfGeneration(format!(
+                "line amount overflow: {} x {}",
+                item.quantity, item.unit_price
+            ))
+        })?;
+        line_amounts.push(amount);
+    }
     let subtotal: i64 = line_amounts.iter().sum();
-    let (vat_rate, _) = calculate_vat(subtotal, &addr.country, addr.vat_number.as_deref());
+    let (vat_rate, _) = calculate_vat(subtotal, &country, addr.vat_number.as_deref());
     let vat_allocations = allocate_vat_across_lines(&line_amounts, vat_rate);
 
     let mut line_items = Vec::with_capacity(input.line_items.len());
@@ -239,6 +306,21 @@ pub async fn create_invoice(
     let currency = input.currency.unwrap_or_else(|| "eur".into());
     let id = Uuid::new_v4();
     let items_json = encode_invoice_line_items(&line_items)?;
+    // Immutable billing-address snapshot (audit F08). Stored as TEXT
+    // (the column's type since migration 076) — same JSON shape the
+    // api-server admin writer snapshots.
+    let address_snapshot = serde_json::json!({
+        "company_name": addr.company_name,
+        "vat_number": addr.vat_number,
+        "address_line1": addr.address_line1,
+        "address_line2": addr.address_line2,
+        "city": addr.city,
+        "state": addr.state,
+        "postal_code": addr.postal_code,
+        "country": addr.country,
+        "email": addr.email,
+    })
+    .to_string();
 
     sqlx::query(
         r#"
@@ -246,13 +328,13 @@ pub async fn create_invoice(
             id, tenant_id, stripe_invoice_id, invoice_number, status,
             currency, amount, subtotal, vat_total, total, line_items,
             issued_at, due_at, period_start, period_end,
-            billing_country, vat_rate, overage_period,
+            billing_country, vat_rate, overage_period, billing_address,
             created_at, updated_at
         ) VALUES (
             $1, $2, $3, $4, 'draft',
             $5, $8, $6, $7, $8, $9,
             $10, $11, $12, $13,
-            $14, $15, $16,
+            $14, $15, $16, $17,
             $10, $10
         )
         "#,
@@ -270,10 +352,11 @@ pub async fn create_invoice(
     .bind(due_at)
     .bind(input.period_start)
     .bind(input.period_end)
-    .bind(addr.country.to_uppercase())
+    .bind(country.to_uppercase())
     .bind(vat_rate)
     .bind(input.overage_period)
-    .execute(pool)
+    .bind(address_snapshot)
+    .execute(&mut **tx)
     .await
     .map_err(InvoiceError::Db)?;
 
@@ -296,6 +379,56 @@ pub async fn create_invoice(
         created_at: now,
         updated_at: now,
     })
+}
+
+/// Pure outstanding-balance derivation (audit F35):
+/// `total − confirmed payments − valid credits`, saturating at zero —
+/// refunds/over-credits can never push the balance below zero, and the
+/// subtraction is checked so hostile inputs cannot wrap.
+pub fn compute_outstanding(
+    total_cents: i64,
+    confirmed_payments_cents: i64,
+    credits_cents: i64,
+) -> i64 {
+    total_cents
+        .saturating_sub(confirmed_payments_cents.max(0))
+        .saturating_sub(credits_cents.max(0))
+        .max(0)
+}
+
+/// Durable outstanding balance for an invoice: total minus confirmed
+/// payment allocations (migration 140) minus credit notes (migration 134).
+/// This is the single derivation UI, dunning and refunds must use
+/// (audit F35).
+pub async fn invoice_outstanding_cents(
+    pool: &PgPool,
+    invoice_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    let outstanding: i64 = sqlx::query_scalar(
+        r#"
+        SELECT i.total
+             - COALESCE(p.payments, 0)
+             - COALESCE(c.credits, 0)
+        FROM invoices i
+        LEFT JOIN (
+            SELECT invoice_id, SUM(amount_cents)::bigint AS payments
+            FROM invoice_payment_allocations
+            WHERE invoice_id = $1
+            GROUP BY invoice_id
+        ) p ON p.invoice_id = i.id
+        LEFT JOIN (
+            SELECT invoice_id, SUM(amount)::bigint AS credits
+            FROM credit_notes
+            WHERE invoice_id = $1
+            GROUP BY invoice_id
+        ) c ON c.invoice_id = i.id
+        WHERE i.id = $1
+        "#,
+    )
+    .bind(invoice_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(outstanding.max(0))
 }
 
 /// Generate a PDF for an invoice by calling the pdf-renderer service, upload
@@ -539,12 +672,6 @@ pub async fn get_invoice_by_id(
 // ---------------------------------------------------------------------------
 // Internal row mapping
 // ---------------------------------------------------------------------------
-
-#[derive(sqlx::FromRow)]
-struct BillingAddrRow {
-    country: String,
-    vat_number: Option<String>,
-}
 
 #[derive(sqlx::FromRow)]
 struct InvoiceRow {

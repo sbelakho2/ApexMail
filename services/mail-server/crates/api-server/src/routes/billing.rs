@@ -856,7 +856,11 @@ struct LegacyInvoiceRow {
     vat_total: i64,
     total: i64,
     line_items: String,
-    billing_address: String,
+    /// Nullable on the table (rows written by the Stripe invoice.paid
+    /// persistence predate address snapshotting) — decoded as an empty
+    /// address so a NULL snapshot can never fail the whole list/detail
+    /// query (audit F05).
+    billing_address: Option<String>,
     issued_at: chrono::DateTime<Utc>,
     due_at: chrono::DateTime<Utc>,
     paid_at: Option<chrono::DateTime<Utc>>,
@@ -1889,7 +1893,7 @@ fn render_invoice_html(invoice: &LegacyInvoiceDto, style_nonce: &str) -> String 
     )
 }
 
-fn render_invoice_xml(invoice: &LegacyInvoiceDto) -> String {
+fn render_invoice_xml(invoice: &LegacyInvoiceDto, outstanding_cents: Option<i64>) -> String {
     let reference_number = invoice
         .purchase_order_number
         .as_ref()
@@ -1992,18 +1996,25 @@ fn render_invoice_xml(invoice: &LegacyInvoiceDto) -> String {
         block
     };
 
-    // <PaidAmount> must reflect the invoice's settlement state: a paid
-    // invoice carries its full total as paid (and nothing payable), an
-    // open one shows 0.00 paid. The hardcoded 0.00 told every recipient's
-    // accounting package that settled invoices were still outstanding.
+    // <PaidAmount>/<PayableAmount> must reflect the invoice's settlement
+    // state: a paid invoice carries its full total as paid (and nothing
+    // payable); an open one shows the DURABLY settled amount — confirmed
+    // payment allocations plus credit notes (audit F35), falling back to
+    // the binary 0/total view when no allocation data exists (legacy
+    // invoices). The hardcoded 0.00 told every recipient's accounting
+    // package that settled invoices were still outstanding.
     let is_paid = invoice.paid_at.is_some() || invoice.status.eq_ignore_ascii_case("paid");
     let paid_amount = if is_paid {
         cents_to_decimal_string(invoice.total)
+    } else if let Some(outstanding) = outstanding_cents {
+        cents_to_decimal_string(invoice.total.saturating_sub(outstanding))
     } else {
         cents_to_decimal_string(0)
     };
     let payable_amount = if is_paid {
         cents_to_decimal_string(0)
+    } else if let Some(outstanding) = outstanding_cents {
+        cents_to_decimal_string(outstanding)
     } else {
         cents_to_decimal_string(invoice.total)
     };
@@ -2068,7 +2079,10 @@ fn map_invoice_row(row: LegacyInvoiceRow) -> LegacyInvoiceDto {
         vat_total: row.vat_total,
         total: row.total,
         line_items: parse_json_or_default(&row.line_items, Vec::new()),
-        billing_address: parse_json_or_default(&row.billing_address, empty_billing_address()),
+        billing_address: parse_json_or_default(
+            row.billing_address.as_deref().unwrap_or("{}"),
+            empty_billing_address(),
+        ),
         issued_at: row.issued_at,
         due_at: row.due_at,
         paid_at: row.paid_at,
@@ -2080,6 +2094,40 @@ fn map_invoice_row(row: LegacyInvoiceRow) -> LegacyInvoiceDto {
         xml_url: row.xml_url,
         created_at: row.created_at,
         updated_at: row.updated_at,
+    }
+}
+
+/// Optional invoice metadata columns added after the base chain (093/098/
+/// 130). Only a 42703 naming one of THESE licenses the legacy fallback —
+/// the fallback NULL-adapts exactly this set and keeps the canonical
+/// totals/due_at (audit F05: an arbitrary missing-column error must never
+/// be treated as permission to run an incompatible fallback query).
+const INVOICE_FALLBACK_OPTIONAL_COLUMNS: [&str; 4] =
+    ["xml_url", "purchase_order_number", "notes", "pdf_url"];
+
+/// Extract the missing column name from a Postgres 42703 error
+/// (`column "x" does not exist`).
+fn missing_column_name(error: &sqlx::Error) -> Option<String> {
+    let db_error = match error {
+        sqlx::Error::Database(db_error) => db_error,
+        _ => return None,
+    };
+    if db_error.code().as_deref() != Some("42703") {
+        return None;
+    }
+    let message = db_error.message();
+    let start = message.find('"')? + 1;
+    let end = start + message[start..].find('"')?;
+    Some(message[start..end].to_string())
+}
+
+/// Whether the error is a missing-column error naming one of `columns` —
+/// the ONLY condition under which the invoice schema-adapter fallback may
+/// run (audit F05).
+fn is_missing_column_error_for(error: &sqlx::Error, columns: &[&str]) -> bool {
+    match missing_column_name(error) {
+        Some(missing) => columns.contains(&missing.as_str()),
+        None => false,
     }
 }
 
@@ -2127,7 +2175,13 @@ async fn query_invoice_list_rows_with_legacy_fallback(
     .await
     {
         Ok(rows) => Ok(rows),
-        Err(error) if is_expected_schema_fallback_error(&error, &["42703", "42P01"]) => {
+        Err(error) if is_missing_column_error_for(&error, &INVOICE_FALLBACK_OPTIONAL_COLUMNS) => {
+            // Legacy adapter: the canonical totals (subtotal/vat_total/
+            // total) and due_at stay AS-IS — migrations 076/093 guarantee
+            // them on every completed chain — and only the optional
+            // metadata columns are NULL-adapted. The pre-fix fallback
+            // selected `amount_cents`/`due_date`, columns the canonical
+            // chain no longer has, so BOTH paths failed (audit F05).
             sqlx::query_as::<_, LegacyInvoiceRow>(
                 r#"
                 SELECT
@@ -2137,13 +2191,13 @@ async fn query_invoice_list_rows_with_legacy_fallback(
                     invoice_number,
                     status::text AS status,
                     currency,
-                    amount_cents AS subtotal,
-                    0::bigint AS vat_total,
-                    amount_cents AS total,
+                    subtotal,
+                    vat_total,
+                    total,
                     line_items::text AS line_items,
-                    '{}'::text AS billing_address,
-                    created_at AS issued_at,
-                    due_date AS due_at,
+                    billing_address::text AS billing_address,
+                    issued_at,
+                    due_at,
                     paid_at,
                     period_start,
                     period_end,
@@ -2155,7 +2209,7 @@ async fn query_invoice_list_rows_with_legacy_fallback(
                     updated_at
                 FROM invoices
                 WHERE tenant_id = $1
-                ORDER BY created_at DESC
+                ORDER BY issued_at DESC
                 LIMIT $2 OFFSET $3
                 "#,
             )
@@ -2210,7 +2264,7 @@ async fn query_invoice_detail_rows_with_legacy_fallback(
     .await
     {
         Ok(rows) => Ok(rows),
-        Err(error) if is_expected_schema_fallback_error(&error, &["42703", "42P01"]) => {
+        Err(error) if is_missing_column_error_for(&error, &INVOICE_FALLBACK_OPTIONAL_COLUMNS) => {
             sqlx::query_as::<_, LegacyInvoiceRow>(
                 r#"
                 SELECT
@@ -2220,13 +2274,13 @@ async fn query_invoice_detail_rows_with_legacy_fallback(
                     invoice_number,
                     status::text AS status,
                     currency,
-                    amount_cents AS subtotal,
-                    0::bigint AS vat_total,
-                    amount_cents AS total,
+                    subtotal,
+                    vat_total,
+                    total,
                     line_items::text AS line_items,
-                    '{}'::text AS billing_address,
-                    created_at AS issued_at,
-                    due_date AS due_at,
+                    billing_address::text AS billing_address,
+                    issued_at,
+                    due_at,
                     paid_at,
                     period_start,
                     period_end,
@@ -2762,8 +2816,9 @@ async fn get_payg_usage(
 
 async fn estimate_overage_cost(
     State(state): State<AppState>,
+    auth: AuthUser,
     Json(body): Json<OverageEstimateBody>,
-) -> Result<Json<ApiResponse<serde_json::Value>>, ApiError> {
+) -> Result<Response, ApiError> {
     let emails_sent = validate_non_negative(body.emails_sent, "emailsSent")? as i64;
     if body.email_limit < 0 {
         return Err(ApiError::Validation(vec![
@@ -2772,20 +2827,30 @@ async fn estimate_overage_cost(
     }
 
     // Fix I13 mirror (billing-service routes.rs) — recompute the limit
-    // server-side when a tenant is named: a client-supplied limit is only a
-    // display default, never the billing truth. The resolved limit honours
-    // active admin plan overrides via plans::get_plan_for_tenant.
-    let email_limit = match body.tenant_id.as_deref() {
-        Some(tenant_id) => {
-            plans::get_plan_for_tenant(&state.db, tenant_id)
-                .await?
-                .map(|plan| plan.email_limit)
-                // Unknown tenant: fall back to the validated client value
-                // (legacy callers) — the estimate is advisory.
-                .unwrap_or(body.email_limit)
+    // server-side: a client-supplied limit is only a display default,
+    // never the billing truth. The resolved limit honours active admin
+    // plan overrides via plans::get_plan_for_tenant.
+    //
+    // Audit F64 — the estimate uses the AUTHENTICATED tenant. Naming a
+    // DIFFERENT tenant is an explicit admin action and requires admin
+    // access to that tenant; the old handler resolved ANY tenant's billing
+    // data from an unauthenticated body field.
+    let estimate_tenant = match body.tenant_id.as_deref() {
+        Some(requested_tenant) if requested_tenant != auth.tenant_id => {
+            if let Err(response) = require_admin_tenant_access(&auth, requested_tenant) {
+                return Ok(response);
+            }
+            requested_tenant.to_string()
         }
-        None => body.email_limit,
+        _ => auth.tenant_id.clone(),
     };
+
+    let email_limit = plans::get_plan_for_tenant(&state.db, &estimate_tenant)
+        .await?
+        .map(|plan| plan.email_limit)
+        // Unknown tenant: fall back to the validated client value (legacy
+        // callers) — the estimate is advisory.
+        .unwrap_or(body.email_limit);
 
     // The deployed overage rate (env-configurable), not a hardcoded 40 —
     // must quote the same rate the overage sweep invoices with.
@@ -2795,7 +2860,7 @@ async fn estimate_overage_cost(
         billing_service::config::configured_overage_rate_millicents(),
     );
 
-    Ok(billing_success(serde_json::json!({
+    Ok(billing_success_response(serde_json::json!({
         "usage": {
             "emailsSent": emails_sent,
             "emailLimit": email_limit,
@@ -3298,7 +3363,17 @@ async fn get_invoice_xml(
 ) -> Result<Response, ApiError> {
     match load_legacy_invoice_detail(&state.db, &id, &auth.tenant_id).await? {
         Some(invoice) => {
-            let mut response = render_invoice_xml(&invoice).into_response();
+            // Audit F35 — the e-invoice's paid/payable split derives from
+            // the durable outstanding balance (total − confirmed payment
+            // allocations − credit notes), not the binary status flag.
+            let outstanding_cents = match uuid::Uuid::parse_str(&invoice.id) {
+                Ok(invoice_id) => Some(
+                    billing_service::invoices::invoice_outstanding_cents(&state.db, invoice_id)
+                        .await?,
+                ),
+                Err(_) => None,
+            };
+            let mut response = render_invoice_xml(&invoice, outstanding_cents).into_response();
             response.headers_mut().insert(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("application/xml"),
@@ -3723,19 +3798,45 @@ async fn admin_apply_plan_override(
             .into_response());
     }
     let admin_id = admin_actor_id(&auth);
-    let expires_at = body.expires_at.as_deref().and_then(parse_query_date);
+    // Audit F06 — a malformed expiry must be REJECTED, not silently turned
+    // into "no expiry" (the old and_then(parse_query_date) mapped a typo to
+    // an unlimited override). Only an absent/empty field means no expiry.
+    let expires_at = match body.expires_at.as_deref().map(str::trim) {
+        None | Some("") => None,
+        Some(raw) => match parse_query_date(raw) {
+            Some(parsed) => Some(parsed),
+            None => {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "Invalid expiresAt — must be an RFC 3339 timestamp or YYYY-MM-DD date"
+                    })),
+                )
+                    .into_response());
+            }
+        },
+    };
+
+    let actor_id: Option<uuid::Uuid> = uuid::Uuid::parse_str(&admin_id).ok();
+
+    // Audit F06 — the override and its audit record commit together: a
+    // crash between two separate statements must never leave an unaudited
+    // override (or an audit record for a override that never landed).
+    let mut tx = state.db.begin().await?;
 
     sqlx::query(
         r#"
         INSERT INTO plan_overrides (
-            tenant_id, plan, plan_id, reason, admin_id, expires_at, created_at
-        ) VALUES ($1, $2, $2, $3, $4, $5, NOW())
+            tenant_id, plan, plan_id, reason, admin_id, expires_at,
+            active, created_at, updated_at
+        ) VALUES ($1, $2, $2, $3, $4, $5, true, NOW(), NOW())
         ON CONFLICT (tenant_id) DO UPDATE SET
             plan = $2,
             plan_id = $2,
             reason = $3,
             admin_id = $4,
             expires_at = $5,
+            active = true,
             updated_at = NOW()
         "#,
     )
@@ -3744,10 +3845,9 @@ async fn admin_apply_plan_override(
     .bind(reason)
     .bind(&admin_id)
     .bind(expires_at)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
 
-    let actor_id: Option<uuid::Uuid> = uuid::Uuid::parse_str(&admin_id).ok();
     sqlx::query(
         r#"
         INSERT INTO billing_audit_log (
@@ -3764,8 +3864,15 @@ async fn admin_apply_plan_override(
         "reason": reason,
         "expiresAt": body.expires_at,
     }))
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
+
+    // Audit F06 — the override may move the tenant between priced and
+    // unpriced plans; drop the cached paid-subscription gate so quota
+    // enforcement picks up the new effective plan immediately.
+    billing_service::overage::invalidate_subscription_cache(&tenant_id);
 
     Ok(billing_success_response(serde_json::json!({
         "success": true,
@@ -5049,7 +5156,7 @@ mod tests {
     fn billing_routes_invoice_xml_renderer_escapes_values_and_includes_payment_fields() {
         initialize_billing_test_env();
 
-        let xml = render_invoice_xml(&sample_invoice());
+        let xml = render_invoice_xml(&sample_invoice(), None);
 
         assert!(xml.contains("<?xml version=\"1.0\" encoding=\"UTF-8\"?>"));
         assert!(xml.contains("<Name>Bel Consulting OÜ</Name>"));
@@ -5058,6 +5165,102 @@ mod tests {
         assert!(xml.contains("PO-&lt;123&gt;"));
         assert!(xml.contains("<PayToAccount>EE381010220123456789</PayToAccount>"));
         assert!(xml.contains("<PhoneNumber>+3721234567</PhoneNumber>"));
+    }
+
+    // ------------------------------------------------------------------
+    // Audit F05 — the invoice fallback may only run for a NAMED optional
+    // column, and it must keep the canonical totals/due_at.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn billing_routes_missing_column_name_parses_the_postgres_error() {
+        struct FakeDbError(&'static str);
+        impl std::fmt::Debug for FakeDbError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "FakeDbError")
+            }
+        }
+        impl std::fmt::Display for FakeDbError {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "FakeDbError")
+            }
+        }
+        impl std::error::Error for FakeDbError {}
+        impl sqlx::error::DatabaseError for FakeDbError {
+            fn message(&self) -> &str {
+                self.0
+            }
+            fn code(&self) -> Option<std::borrow::Cow<'_, str>> {
+                Some("42703".into())
+            }
+            fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+                self
+            }
+            fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+                self
+            }
+            fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+                self
+            }
+            fn is_transient_in_connect_phase(&self) -> bool {
+                false
+            }
+            fn kind(&self) -> sqlx::error::ErrorKind {
+                sqlx::error::ErrorKind::Other
+            }
+        }
+
+        let error =
+            sqlx::Error::Database(Box::new(FakeDbError(r#"column "xml_url" does not exist"#)));
+        assert_eq!(
+            missing_column_name(&error).as_deref(),
+            Some("xml_url"),
+            "the missing column name must be extracted from the 42703 message"
+        );
+
+        // An optional-column miss licenses the fallback…
+        assert!(is_missing_column_error_for(
+            &error,
+            &INVOICE_FALLBACK_OPTIONAL_COLUMNS
+        ));
+        // …a CORE column miss (e.g. the totals) must NOT — the fallback
+        // keeps canonical totals, so falling back for them would be wrong.
+        let totals_error =
+            sqlx::Error::Database(Box::new(FakeDbError(r#"column "subtotal" does not exist"#)));
+        assert!(!is_missing_column_error_for(
+            &totals_error,
+            &INVOICE_FALLBACK_OPTIONAL_COLUMNS
+        ));
+    }
+
+    // ------------------------------------------------------------------
+    // Audit F35 — the XML paid/payable split honors the durable
+    // outstanding balance for open invoices.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn billing_routes_invoice_xml_partial_payment_uses_outstanding() {
+        initialize_billing_test_env();
+
+        let mut invoice = sample_invoice();
+        invoice.status = "pending".to_string();
+        invoice.paid_at = None;
+        invoice.total = 10_000;
+
+        // Partially settled: 4 000 confirmed -> 6 000 outstanding.
+        let xml = render_invoice_xml(&invoice, Some(6_000));
+        assert!(xml.contains("<PaidAmount>40.00</PaidAmount>"));
+        assert!(xml.contains("<PayableAmount>60.00</PayableAmount>"));
+
+        // No allocation data (legacy invoice): binary 0 / total.
+        let xml = render_invoice_xml(&invoice, None);
+        assert!(xml.contains("<PaidAmount>0.00</PaidAmount>"));
+        assert!(xml.contains("<PayableAmount>100.00</PayableAmount>"));
+
+        // Fully settled but not yet flipped to paid: 0 outstanding.
+        let xml = render_invoice_xml(&invoice, Some(0));
+        assert!(xml.contains("<PaidAmount>100.00</PaidAmount>"));
+        assert!(xml.contains("<PayableAmount>0.00</PayableAmount>"));
     }
 
     #[test]
