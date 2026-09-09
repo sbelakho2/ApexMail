@@ -84,3 +84,6 @@ live-db = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+# DB-backed tests bootstrap through the REAL production migrator (audit F01):
+# the same embedded canonical migration set the deploy gate applies.
+migrator = { path = "../migrator" }

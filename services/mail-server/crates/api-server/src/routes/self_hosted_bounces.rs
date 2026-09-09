@@ -1076,7 +1076,8 @@ mod tests {
     // ── M-3 + M-12 end-to-end (DB-gated) ─────────────────────────
 
     /// Minimal schema for the handler's queries, in a dedicated per-test
-    /// database (avoids the tools/migrations shape divergence in `<db>_api`).
+    /// database (isolated bounce/suppression rows per test; `<db>_api`
+    /// itself carries the full canonical chain since audit F01).
     async fn bounce_test_pool(db_suffix: &str) -> Option<sqlx::PgPool> {
         use sqlx::postgres::PgPoolOptions;
         use std::time::Duration;

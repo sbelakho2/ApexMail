@@ -441,9 +441,8 @@ pub struct TemplateContent {
     pub text_body: Option<String>,
 }
 
-/// Fetch a template by id or slug for a tenant. Column set restricted to
-/// columns present on BOTH schema lineages (tools/migrations and
-/// services/mail-server/migrations).
+/// Fetch a template by id or slug for a tenant (canonical templates shape:
+/// VARCHAR(26) ids, versioned subject/html_body/text_body).
 pub async fn fetch_template(
     db: &PgPool,
     tenant_id: &str,

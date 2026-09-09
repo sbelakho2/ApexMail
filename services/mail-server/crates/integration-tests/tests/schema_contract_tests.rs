@@ -4,10 +4,14 @@
 //! actually exists in the database schema. They are designed to FAIL first —
 //! detecting migration drift before it reaches production.
 //!
+//! The validated schema is the CANONICAL production lineage: the full
+//! `services/mail-server/migrations` chain applied through the REAL
+//! production migrator (`migrator::test_support` — audit F01), never the
+//! archived `tools/migrations` tree whose identifier/column shapes diverged
+//! from what every deploy installs.
+//!
 //! Run with:cargo test --test schema_contract_tests -- --nocapture
 //! Requires:PostgreSQL + Redis running with all migrations applied.
-
-use std::{fs, path::PathBuf};
 
 use serial_test::serial;
 
@@ -20,94 +24,36 @@ use api_server::{
 };
 use axum::Router;
 use deadpool_redis::Config as RedisConfig;
-use sqlx::{migrate::Migrator, postgres::PgPoolOptions, PgPool};
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::time::Duration;
 use uuid::Uuid;
 
-fn tool_migrations_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../tools/migrations")
-}
-
-/// Apply tool/utility migrations against the test database.
+/// Apply the canonical production migrations against the test database via
+/// the production migrator (`migrator::MIGRATIONS` — the same embedded set
+/// the deploy gate applies; audit F01).
 ///
 /// # Security note
 /// This function receives an existing `PgPool` connected to a test-only database.
 /// Do **not** reuse this function against a production database.
-async fn apply_tool_migrations(pool: &PgPool) {
-    // Serialize concurrent migration application across parallel tests using a
-    // transaction-scoped Postgres advisory lock. Without this, multiple tests
-    // racing through `Migrator::run` collide on `pg_class`/`pg_type` catalog
-    // unique indexes during `CREATE TABLE` / `CREATE INDEX`.
-    //
-    // We hold a dedicated connection for the duration of the migration apply
-    // and use a session-scoped advisory lock that auto-releases when the
-    // connection is dropped at function exit.
-    let mut lock_conn = pool
-        .acquire()
+async fn apply_canonical_migrations(pool: &PgPool) {
+    // Every schema-contract test owns a PRIVATE database (see
+    // `optional_pg_pool`), so no advisory lock is needed to serialize the
+    // apply — the migrator itself is idempotent.
+    migrator::test_support::apply_canonical_migrations(pool)
         .await
-        .expect("failed to acquire lock connection for advisory lock");
-    sqlx::query("SELECT pg_advisory_lock(7723691501421983236)")
-        .execute(&mut *lock_conn)
-        .await
-        .expect("failed to take advisory lock for migrations");
-
-    let source_dir = tool_migrations_dir();
-    let temp_dir =
-        std::env::temp_dir().join(format!("apexmail-sqlx-up-migrations-{}", Uuid::new_v4()));
-
-    fs::create_dir_all(&temp_dir).expect("failed to create temp sqlx migration directory");
-
-    let mut entries: Vec<PathBuf> = fs::read_dir(&source_dir)
-        .expect("failed to read tools/migrations")
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .map(|name| !name.ends_with("_down.sql") && !name.contains("performance_indexes"))
-                .unwrap_or(false)
-        })
-        .collect();
-    entries.sort();
-
-    for path in entries {
-        let file_name = path.file_name().expect("migration path missing filename");
-        let raw = fs::read_to_string(&path)
-            .unwrap_or_else(|error| panic!("failed to read migration {:?}: {error}", path));
-        let normalized = raw
-            .replace("CREATE UNIQUE INDEX CONCURRENTLY", "CREATE UNIQUE INDEX")
-            .replace("CREATE INDEX CONCURRENTLY", "CREATE INDEX");
-        fs::write(temp_dir.join(file_name), normalized)
-            .unwrap_or_else(|error| panic!("failed to write copied migration {:?}: {error}", path));
-    }
-
-    let migrator = Migrator::new(temp_dir.clone())
-        .await
-        .expect("failed to load copied up migrations");
-    migrator
-        .run(pool)
-        .await
-        .expect("failed to apply copied up migrations");
-
-    // Release the advisory lock before dropping the lock connection so the
-    // next test can proceed even if connection drop is delayed.
-    let _ = sqlx::query("SELECT pg_advisory_unlock(7723691501421983236)")
-        .execute(&mut *lock_conn)
-        .await;
-    drop(lock_conn);
-
-    let _ = fs::remove_dir_all(&temp_dir);
+        .expect("failed to apply canonical migrations");
 }
 
-/// Schema-contract tests use a dedicated database (`<base>_schema`) so that
-/// runtime code in OTHER test binaries (e.g. `integration_routes` calling
-/// `crm_pg::initialize` which creates `sales_leads` with a `UUID` primary key)
-/// cannot pollute the schema we are validating against the migration files
-/// (where `sales_leads.id` is `VARCHAR(64)`).
+/// Schema-contract tests each get a PRIVATE database (`<base>_schema_<test>`)
+/// carrying the canonical production chain: `cargo test` runs tests in
+/// parallel threads of one process and `cargo nextest` runs every test in
+/// its own process — a per-test name gives both a freshly migrated,
+/// uncontended database (no cross-test seeding interference, and no
+/// DROP-during-use races). The per-test isolation also keeps runtime code
+/// in OTHER test binaries (e.g. `integration_routes` calling
+/// `crm_pg::initialize`, which creates `sales_leads` at runtime) from
+/// polluting this suite's catalog and `_sqlx_migrations` lineage ledger.
 async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
-    use tokio::sync::OnceCell;
-    static INIT_DB: OnceCell<()> = OnceCell::const_new();
-
     let database_url = match std::env::var("TEST_DATABASE_URL") {
         Ok(value) if !value.trim().is_empty() => value,
         _ => {
@@ -116,7 +62,10 @@ async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
         }
     };
 
-    // Derive an isolated database URL by appending `_schema` to the dbname.
+    // Derive an isolated database URL by appending `_schema_<test>` to the
+    // dbname. Postgres truncates identifiers beyond 63 bytes, which would
+    // silently CREATE a differently-named database — bound the suffix so the
+    // full name always fits.
     let (server_part, db_part) = match database_url.rsplit_once('/') {
         Some((s, d)) => (s, d),
         None => {
@@ -125,54 +74,60 @@ async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
         }
     };
     let db_only = db_part.split('?').next().unwrap_or(db_part);
-    // Unique per test: nextest executes every test in its own PROCESS, so a
-    // fixed `_schema` name had each process DROP the database out from under
-    // the others. The OnceCell below still guards within one process.
-    let isolated_db = format!(
-        "{db_only}_schema_{}",
-        test_name.replace(|c: char| !c.is_ascii_alphanumeric() && c != '_', "_")
-    );
+    const PREFIX: &str = "_schema_";
+    let max_suffix = 63_usize.saturating_sub(db_only.len() + PREFIX.len());
+    let sanitized: String = test_name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let suffix = &sanitized[..sanitized.len().min(max_suffix)];
+    let isolated_db = format!("{db_only}{PREFIX}{suffix}");
     let isolated_url = format!("{server_part}/{isolated_db}");
     let admin_url = format!("{server_part}/postgres");
 
-    INIT_DB
-        .get_or_init(|| async {
-            let admin = match PgPoolOptions::new()
-                .max_connections(1)
-                .acquire_timeout(Duration::from_secs(3))
-                .connect(&admin_url)
-                .await
-            {
-                Ok(p) => p,
-                Err(error) => {
-                    eprintln!("schema-contract DB bootstrap: cannot connect to admin URL: {error}");
-                    return;
-                }
-            };
-            let _ = sqlx::query(&format!(
-                "DROP DATABASE IF EXISTS \"{isolated_db}\" WITH (FORCE)"
-            ))
+    let admin = PgPoolOptions::new()
+        .max_connections(1)
+        .acquire_timeout(Duration::from_secs(30))
+        .connect(&admin_url)
+        .await
+        .unwrap_or_else(|error| {
+            panic!("schema-contract DB bootstrap: cannot connect to admin URL: {error}")
+        });
+    let create = async {
+        sqlx::query(&format!(
+            "DROP DATABASE IF EXISTS \"{isolated_db}\" WITH (FORCE)"
+        ))
+        .execute(&admin)
+        .await?;
+        sqlx::query(&format!(r#"CREATE DATABASE "{isolated_db}""#))
             .execute(&admin)
-            .await;
-            let _ = sqlx::query(&format!("CREATE DATABASE \"{isolated_db}\""))
-                .execute(&admin)
-                .await;
-        })
-        .await;
-
-    Some(
-        PgPoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(Duration::from_secs(5))
-            .connect(&isolated_url)
             .await
-            .unwrap_or_else(|error| {
-                panic!(
-                    "schema-contract isolated DB ({isolated_url}) could not connect for \
-                     {test_name}: {error}"
-                )
-            }),
-    )
+    }
+    .await;
+    admin.close().await;
+    create.unwrap_or_else(|error| {
+        panic!("schema-contract DB bootstrap: cannot create {isolated_db}: {error}")
+    });
+
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .acquire_timeout(Duration::from_secs(5))
+        .connect(&isolated_url)
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "schema-contract isolated DB ({isolated_url}) could not connect for \
+                 {test_name}: {error}"
+            )
+        });
+    apply_canonical_migrations(&pool).await;
+    Some(pool)
 }
 
 fn bounded_id(prefix: &str) -> String {
@@ -375,43 +330,13 @@ async fn registration_test_app(pool: PgPool) -> Router {
         None => raw_database_url,
     };
     // The register flow is production code bound to the CANONICAL migration
-    // chain (users.id is UUID there); the tools/initdb lineage still carries
-    // VARCHAR(26) ids for users, so validating this flow against it fails on
-    // `value too long for character varying(26)` — a lineage divergence, not
-    // a code bug. Apply the canonical chain to a dedicated database.
+    // chain; provision it through the REAL production migrator (audit F01)
+    // on a dedicated database and seed the dkim-ready system sender.
     let (server_part, db_only) = database_url.rsplit_once('/').unwrap();
     let canonical_db = format!("{db_only}_register");
+    if let Some(canon_pool) =
+        migrator::test_support::fresh_canonical_db(&database_url, &canonical_db).await
     {
-        let admin_url = format!("{server_part}/postgres");
-        let admin = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&admin_url)
-            .await
-            .expect("admin connect");
-        let _ = sqlx::query(&format!(
-            r#"DROP DATABASE IF EXISTS "{canonical_db}" WITH (FORCE)"#
-        ))
-        .execute(&admin)
-        .await;
-        let _ = sqlx::query(&format!(r#"CREATE DATABASE "{canonical_db}""#))
-            .execute(&admin)
-            .await;
-        admin.close().await;
-        let canon_url = format!("{server_part}/{canonical_db}");
-        let canon_pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&canon_url)
-            .await
-            .expect("canonical db connect");
-        let migrations_dir =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
-        let migrator = sqlx::migrate::Migrator::new(migrations_dir)
-            .await
-            .expect("load canonical migrations");
-        migrator
-            .run(&canon_pool)
-            .await
-            .expect("apply canonical chain");
         seed_system_sender_domain(&canon_pool).await;
         canon_pool.close().await;
     }
@@ -473,14 +398,18 @@ async fn insert_test_tenant(pool: &PgPool, suffix: &str) -> String {
 }
 
 /// Helper:create a test user and return its ID.
-async fn insert_test_user(pool: &PgPool, tenant_id: &str, email: &str) -> String {
-    let id = bounded_id("usr");
+///
+/// Canonical contract (migration 052): users.id is UUID and users.email is
+/// globally UNIQUE — the register flow relies on exactly-one-row-per-email
+/// across tenants.
+async fn insert_test_user(pool: &PgPool, tenant_id: &str, email: &str) -> Uuid {
+    let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO users (id, tenant_id, email, password_hash, role, status)
          VALUES ($1, $2, $3, '$argon2id$v=19$m=19456,t=2,p=1$fakehash', 'owner', 'active')
-         ON CONFLICT (tenant_id, email) DO UPDATE SET status = EXCLUDED.status",
+         ON CONFLICT (email) DO UPDATE SET status = EXCLUDED.status",
     )
-    .bind(&id)
+    .bind(id)
     .bind(tenant_id)
     .bind(email)
     .execute(pool)
@@ -529,7 +458,7 @@ async fn messages_table_has_to_emails_column() {
     let Some(pool) = optional_pg_pool("messages_table_has_to_emails_column").await else {
         return;
     };
-    apply_tool_migrations(&pool).await;
+    apply_canonical_migrations(&pool).await;
 
     // The messages.rs send_message handler INSERTs into (to_emails, cc_emails, bcc_emails).
     // If these columns don't exist, this will fail at runtime.
@@ -566,7 +495,7 @@ async fn messages_table_has_html_body_and_text_body_columns() {
     else {
         return;
     };
-    apply_tool_migrations(&pool).await;
+    apply_canonical_migrations(&pool).await;
 
     // messages.rs uses html_body/text_body but initial schema has html_body/text_body
     // and the send handler also writes html/text. Verify both exist.
@@ -602,14 +531,14 @@ async fn sessions_table_exists_for_password_reset() {
     let Some(pool) = optional_pg_pool("sessions_table_exists_for_password_reset").await else {
         return;
     };
-    apply_tool_migrations(&pool).await;
+    apply_canonical_migrations(&pool).await;
 
     let tenant_id = insert_test_tenant(&pool, "sessions").await;
     let user_id = insert_test_user(&pool, &tenant_id, "sessions@test.com").await;
 
-    // auth.rs:693 does DELETE FROM sessions WHERE user_id = $1
+    // auth.rs does DELETE FROM sessions WHERE user_id = $1 (bound as text)
     let result = sqlx::query("DELETE FROM sessions WHERE user_id = $1")
-        .bind(&user_id)
+        .bind(user_id.to_string())
         .execute(&pool)
         .await;
 
@@ -626,18 +555,21 @@ async fn sessions_table_accepts_insert() {
     let Some(pool) = optional_pg_pool("sessions_table_accepts_insert").await else {
         return;
     };
-    apply_tool_migrations(&pool).await;
+    apply_canonical_migrations(&pool).await;
 
     let tenant_id = insert_test_tenant(&pool, "sessinsert").await;
-    let user_id = insert_test_user(&pool, &tenant_id, "sessinsert@test.com").await;
+    let _user_id = insert_test_user(&pool, &tenant_id, "sessinsert@test.com").await;
 
+    // Canonical sessions shape (compliance suite's writer shape): VARCHAR(64)
+    // id, VARCHAR(26) user/tenant ids, expires_at NOT NULL. The tools-lineage
+    // token_hash column does not exist on the canonical table.
     let result = sqlx::query(
-        "INSERT INTO sessions (id, user_id, token_hash, created_at, expires_at)
-         VALUES ($1, $2, $3, NOW(), NOW() + INTERVAL '7 days')",
+        "INSERT INTO sessions (id, user_id, tenant_id, expires_at)
+         VALUES ($1, $2, $3, NOW() + INTERVAL '7 days')",
     )
     .bind(bounded_id("sess"))
-    .bind(&user_id)
-    .bind("abc123hash")
+    .bind(bounded_id("usr"))
+    .bind(&tenant_id)
     .execute(&pool)
     .await;
 
@@ -658,16 +590,23 @@ async fn metering_events_table_exists() {
     let Some(pool) = optional_pg_pool("metering_events_table_exists").await else {
         return;
     };
-    apply_tool_migrations(&pool).await;
+    apply_canonical_migrations(&pool).await;
 
     let tenant_id = insert_test_tenant(&pool, "metering").await;
     let event_id = Uuid::new_v4();
 
-    // usage.rs:50-65 INSERTs into metering_events
+    // usage.rs INSERTs into metering_events. Canonical contract (migration
+    // 050): the table is RANGE-partitioned by "timestamp" with PRIMARY KEY
+    // (id, timestamp) — on a partitioned table the ON CONFLICT arbiter must
+    // include the partition key, so the arbiter is (id, "timestamp").
+    // NOTE: billing-service/src/usage.rs still specifies ON CONFLICT (id),
+    // which PostgreSQL rejects with 42P10 against this canonical shape — a
+    // production-code divergence surfaced by the F01 centralization that
+    // needs its own remediation.
     let result = sqlx::query(
         "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
          VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (id) DO NOTHING",
+         ON CONFLICT (id, \"timestamp\") DO NOTHING",
     )
     .bind(event_id)
     .bind(&tenant_id)
@@ -691,7 +630,7 @@ async fn metering_events_aggregation_works() {
     let Some(pool) = optional_pg_pool("metering_events_aggregation_works").await else {
         return;
     };
-    apply_tool_migrations(&pool).await;
+    apply_canonical_migrations(&pool).await;
 
     // usage.rs:88-103 aggregates from metering_events
     let result = sqlx::query(
@@ -720,7 +659,7 @@ async fn plans_table_has_email_limit_column() {
     let Some(pool) = optional_pg_pool("plans_table_has_email_limit_column").await else {
         return;
     };
-    apply_tool_migrations(&pool).await;
+    apply_canonical_migrations(&pool).await;
 
     // usage.rs:120-132 queries p.email_limit and p.api_call_limit
     let result = sqlx::query(
@@ -746,7 +685,7 @@ async fn plans_table_accepts_limits() {
     let Some(pool) = optional_pg_pool("plans_table_accepts_limits").await else {
         return;
     };
-    apply_tool_migrations(&pool).await;
+    apply_canonical_migrations(&pool).await;
 
     let plan_name = apexmail_lib::id::generate_id("plan", 16);
 
@@ -789,23 +728,23 @@ async fn domains_table_uses_correct_column_names() {
     let Some(pool) = optional_pg_pool("domains_table_uses_correct_column_names").await else {
         return;
     };
-    apply_tool_migrations(&pool).await;
+    apply_canonical_migrations(&pool).await;
 
     let tenant_id = insert_test_tenant(&pool, "domcols").await;
 
-    // messages.rs:485-495 queries:WHERE tenant_id = $1 AND name = $2 AND verified = true
-    // After migration 003, the column is 'domain' not 'name', and 'is_verified' not 'verified'
-    let result = sqlx::query(
-        "SELECT 1 FROM domains WHERE tenant_id = $1 AND name = $2 AND is_verified = true",
-    )
-    .bind(&tenant_id)
-    .bind("example.com")
-    .fetch_optional(&pool)
-    .await;
+    // messages.rs queries WHERE tenant_id = $1 AND name = $2 AND verified = true.
+    // Canonical contract: `name` + `verified` (is_verified was the archived
+    // tools-lineage shape the canonical chain never installs).
+    let result =
+        sqlx::query("SELECT 1 FROM domains WHERE tenant_id = $1 AND name = $2 AND verified = true")
+            .bind(&tenant_id)
+            .bind("example.com")
+            .fetch_optional(&pool)
+            .await;
 
     assert!(
         result.is_ok(),
-        "SELECT from domains with 'domain' and 'is_verified' columns failed: {:?}. \
+        "SELECT from domains with 'name' and 'verified' columns failed: {:?}. \
         The column names may not match what the code expects.",
         result.err()
     );
@@ -817,17 +756,18 @@ async fn domains_table_allows_insert_with_domain_column() {
     else {
         return;
     };
-    apply_tool_migrations(&pool).await;
+    apply_canonical_migrations(&pool).await;
 
     let tenant_id = insert_test_tenant(&pool, "dominsert").await;
-    let domain_id = bounded_id("dom");
 
+    // Canonical contract: UUID id + `verified` flag (the tools lineage used a
+    // VARCHAR id and is_verified).
     let result = sqlx::query(
-        "INSERT INTO domains (id, tenant_id, name, is_verified)
+        "INSERT INTO domains (id, tenant_id, name, verified)
          VALUES ($1, $2, $3, true)
          ON CONFLICT DO NOTHING",
     )
-    .bind(&domain_id)
+    .bind(Uuid::new_v4())
     .bind(&tenant_id)
     .bind("verified.example.com")
     .execute(&pool)
@@ -835,8 +775,8 @@ async fn domains_table_allows_insert_with_domain_column() {
 
     assert!(
         result.is_ok(),
-        "INSERT INTO domains with 'name' column failed: {:?}. \
-        The canonical column is `name` per tools migration 003.",
+        "INSERT INTO domains with 'name'/'verified' columns failed: {:?}. \
+        The canonical columns are `name` and `verified` (UUID id).",
         result.err()
     );
 }
@@ -846,23 +786,26 @@ async fn domains_table_allows_insert_with_domain_column() {
 // ═══════════════════════════════════════════════════════════════════════════
 
 #[tokio::test]
-async fn api_keys_table_uses_prefix_not_key_prefix() {
-    let Some(pool) = optional_pg_pool("api_keys_table_uses_prefix_not_key_prefix").await else {
+async fn api_keys_table_uses_canonical_key_prefix_column() {
+    let Some(pool) = optional_pg_pool("api_keys_table_uses_canonical_key_prefix_column").await
+    else {
         return;
     };
-    apply_tool_migrations(&pool).await;
+    apply_canonical_migrations(&pool).await;
 
-    // After migration 003, the column is 'prefix' not 'key_prefix'
+    // Canonical contract (and what auth.rs reads/writes): `key_prefix`
+    // VARCHAR(8). `prefix` was the archived tools-lineage rename the
+    // canonical chain never installs.
     let result = sqlx::query(
-        "SELECT id, name, prefix, scopes FROM api_keys WHERE tenant_id = 'nonexistent'",
+        "SELECT id, name, key_prefix, scopes FROM api_keys WHERE tenant_id = 'nonexistent'",
     )
     .fetch_all(&pool)
     .await;
 
     assert!(
         result.is_ok(),
-        "SELECT prefix FROM api_keys failed: {:?}. \
-        The column may still be 'key_prefix' — migration 003 rename not applied.",
+        "SELECT key_prefix FROM api_keys failed: {:?}. \
+        The column must be 'key_prefix' — the canonical + production shape.",
         result.err()
     );
 }
@@ -872,26 +815,25 @@ async fn api_keys_insert_with_prefix_column() {
     let Some(pool) = optional_pg_pool("api_keys_insert_with_prefix_column").await else {
         return;
     };
-    apply_tool_migrations(&pool).await;
+    apply_canonical_migrations(&pool).await;
 
     let tenant_id = insert_test_tenant(&pool, "apikeys").await;
-    let user_id = insert_test_user(&pool, &tenant_id, "apikeys@test.com").await;
-    let key_id = bounded_id("key");
 
+    // Canonical writer shape (auth.rs mint): UUID id, key_prefix VARCHAR(8),
+    // no user_id column on the canonical table.
     let result = sqlx::query(
-        "INSERT INTO api_keys (id, tenant_id, user_id, name, prefix, key_hash, scopes)
-         VALUES ($1, $2, $3, 'Test Key', 'ak_test', 'hash123', '[\"*\"]')",
+        "INSERT INTO api_keys (id, tenant_id, name, key_prefix, key_hash, scopes)
+         VALUES ($1, $2, 'Test Key', 'ak_test', 'hash123', '[\"*\"]')",
     )
-    .bind(&key_id)
+    .bind(Uuid::new_v4())
     .bind(&tenant_id)
-    .bind(&user_id)
     .execute(&pool)
     .await;
 
     assert!(
         result.is_ok(),
-        "INSERT INTO api_keys with 'prefix' column failed: {:?}. \
-        Code uses 'key_prefix' but schema has 'prefix'.",
+        "INSERT INTO api_keys with 'key_prefix' column failed: {:?}. \
+        The canonical column is `key_prefix` (UUID id).",
         result.err()
     );
 }
@@ -905,10 +847,14 @@ async fn invoices_table_exists() {
     let Some(pool) = optional_pg_pool("invoices_table_exists").await else {
         return;
     };
-    apply_tool_migrations(&pool).await;
+    apply_canonical_migrations(&pool).await;
 
     let result = sqlx::query(
-        "SELECT id, tenant_id, amount_cents, status, created_at FROM invoices WHERE tenant_id = 'nonexistent'",
+        // Canonical invoice amounts: `amount` with optional `total` (billing
+        // maintenance reads COALESCE(total, amount); amount_cents was the
+        // tools-lineage shape).
+        "SELECT id, tenant_id, COALESCE(total, amount), status, created_at
+         FROM invoices WHERE tenant_id = 'nonexistent'",
     )
     .fetch_all(&pool)
     .await;
@@ -930,7 +876,7 @@ async fn subscriptions_tenant_id_is_varchar_compatible() {
     let Some(pool) = optional_pg_pool("subscriptions_tenant_id_is_varchar_compatible").await else {
         return;
     };
-    apply_tool_migrations(&pool).await;
+    apply_canonical_migrations(&pool).await;
 
     // subscriptions.tenant_id is UUID but tenants.id is VARCHAR(26)
     // This test verifies the JOIN works
@@ -957,17 +903,18 @@ async fn users_table_has_all_user_row_columns() {
     let Some(pool) = optional_pg_pool("users_table_has_all_user_row_columns").await else {
         return;
     };
-    apply_tool_migrations(&pool).await;
+    apply_canonical_migrations(&pool).await;
 
     let tenant_id = insert_test_tenant(&pool, "usercols").await;
     let user_id = insert_test_user(&pool, &tenant_id, "usercols@test.com").await;
 
     // auth.rs change_password selects:id, tenant_id, email, name, password_hash, role, status
-    // But UserRow also needs:mfa_enabled, mfa_secret
+    // But UserRow also needs:mfa_enabled, mfa_secret.
+    // Canonical contract: users.id is UUID (migration 052).
     let result = sqlx::query_as::<
         _,
         (
-            String,
+            Uuid,
             String,
             String,
             Option<String>,
@@ -981,7 +928,7 @@ async fn users_table_has_all_user_row_columns() {
         "SELECT id, tenant_id, email, name, password_hash, role, status, mfa_enabled, mfa_secret
          FROM users WHERE id = $1",
     )
-    .bind(&user_id)
+    .bind(user_id)
     .fetch_optional(&pool)
     .await;
 
@@ -1023,36 +970,16 @@ async fn concurrent_registration_same_email_no_orphaned_tenant() {
         "{db_only}_reg_{}",
         &uuid::Uuid::new_v4().simple().to_string()[..10]
     );
-    {
-        let admin_url = format!("{server_part}/postgres");
-        let admin = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&admin_url)
-            .await
-            .expect("admin connect");
-        sqlx::query(&format!(r#"CREATE DATABASE "{register_db}""#))
-            .execute(&admin)
-            .await
-            .expect("create register db");
-        admin.close().await;
-        let url = format!("{server_part}/{register_db}");
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-            .expect("connect register db");
-        let migrations_dir =
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../migrations");
-        let migrator = sqlx::migrate::Migrator::new(migrations_dir)
-            .await
-            .expect("load canonical migrations");
-        migrator.run(&pool).await.expect("apply canonical chain");
+    // Provision through the REAL production migrator (audit F01) — the same
+    // embedded canonical chain the deploy gate applies.
+    if let Some(pool) = migrator::test_support::fresh_canonical_db(&raw, &register_db).await {
         pool.close().await;
+    } else {
+        panic!("failed to provision canonical register database {register_db}");
     }
 
-    // Reuse the canonical-chain database registration_test_app builds
-    // (freshly migrated each run). The concurrent INSERTs below race on the
-    // users unique constraint exactly as two racing register requests do.
+    // The concurrent INSERTs below race on the users unique constraint
+    // exactly as two racing register requests do.
     let url = format!("{server_part}/{register_db}");
     let db = sqlx::postgres::PgPoolOptions::new()
         .max_connections(4)
@@ -1145,80 +1072,13 @@ async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables() {
     else {
         return;
     };
-    apply_tool_migrations(&pool).await;
+    apply_canonical_migrations(&pool).await;
 
-    // The purge helper now writes its (non-optional) deletion audit entry
-    // through the hash-chained audit writer. The TOOLS migration set this
-    // suite applies carries a LEGACY audit_logs shape (resource_type/
-    // metadata/prev_hash — no session_id/resource/outcome/signature/
-    // created_at/details), and its CREATE TABLE wins because it runs
-    // first. Bring whichever shape exists up to the writer's column
-    // contract: CREATE IF NOT EXISTS covers a bare database, the ALTERs
-    // reconcile the tools shape in place.
-    sqlx::raw_sql(
-        "CREATE TABLE IF NOT EXISTS audit_logs (
-            id TEXT PRIMARY KEY,
-            tenant_id TEXT,
-            user_id TEXT,
-            session_id TEXT,
-            action TEXT NOT NULL,
-            resource TEXT NOT NULL,
-            resource_id TEXT,
-            details JSONB NOT NULL DEFAULT '{}'::jsonb,
-            ip_address TEXT,
-            user_agent TEXT,
-            outcome TEXT NOT NULL,
-            error_message TEXT,
-            timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            hash TEXT NOT NULL,
-            previous_hash TEXT,
-            signature TEXT NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("audit_logs fixture DDL must apply");
-    sqlx::raw_sql(
-        "ALTER TABLE audit_logs
-            ADD COLUMN IF NOT EXISTS session_id TEXT,
-            ADD COLUMN IF NOT EXISTS resource TEXT,
-            ADD COLUMN IF NOT EXISTS details JSONB NOT NULL DEFAULT '{}'::jsonb,
-            ADD COLUMN IF NOT EXISTS outcome TEXT,
-            ADD COLUMN IF NOT EXISTS error_message TEXT,
-            ADD COLUMN IF NOT EXISTS previous_hash TEXT,
-            ADD COLUMN IF NOT EXISTS signature TEXT,
-            ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()",
-    )
-    .execute(&pool)
-    .await
-    .expect("audit_logs fixture reconciliation must apply");
-    // The chained writer's ids are UUID strings (36 chars) and its
-    // tenant/resource ids are canonical VARCHAR(26)+ values — the tools
-    // shape's narrow columns would truncate-fail the INSERT.
-    sqlx::raw_sql(
-        "ALTER TABLE audit_logs
-            ALTER COLUMN id TYPE TEXT,
-            ALTER COLUMN tenant_id TYPE TEXT,
-            ALTER COLUMN resource_id TYPE TEXT,
-            ALTER COLUMN action TYPE TEXT,
-            ALTER COLUMN ip_address TYPE TEXT",
-    )
-    .execute(&pool)
-    .await
-    .expect("audit_logs fixture column widening must apply");
-    sqlx::raw_sql(
-        "CREATE TABLE IF NOT EXISTS audit_chain_head (
-            chain_id    TEXT        PRIMARY KEY,
-            head_hash   TEXT        NOT NULL,
-            prev_hash   TEXT,
-            head_seq    BIGINT      NOT NULL DEFAULT 1,
-            updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        )",
-    )
-    .execute(&pool)
-    .await
-    .expect("audit_chain_head fixture DDL must apply");
+    // The purge helper writes its (non-optional) deletion audit entry through
+    // the hash-chained audit writer. The canonical chain installs the exact
+    // audit_logs/audit_chain_head shape that writer targets (migrations
+    // 038/055) — the legacy tools-lineage reconciliation DDL this test used
+    // to carry is gone (audit F01).
 
     let tenant_id = insert_test_tenant(&pool, "delete-coverage").await;
     let feature_flag_key = format!("delete-coverage-{}", Uuid::new_v4().simple());
@@ -1243,10 +1103,13 @@ async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables() {
     .await
     .expect("failed to seed support_tickets row");
 
+    // Canonical feature_flags shape (features.rs writer): UUID id, `name` is
+    // the flag key — the tools lineage's `key` column does not exist.
     sqlx::query(
-        "INSERT INTO feature_flags (key, name, description)
-         VALUES ($1, 'Delete Coverage Flag', 'schema contract coverage')",
+        "INSERT INTO feature_flags (id, name, description, enabled)
+         VALUES ($1, $2, 'schema contract coverage', true)",
     )
+    .bind(Uuid::new_v4())
     .bind(&feature_flag_key)
     .execute(&pool)
     .await
@@ -1254,7 +1117,7 @@ async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables() {
 
     sqlx::query(
         "INSERT INTO feature_flag_overrides (tenant_id, tenant_name, flag_key, value)
-         VALUES ($1, 'Delete Coverage', $2, true)",
+         VALUES ($1, 'Delete Coverage', $2, 'true'::jsonb)",
     )
     .bind(&tenant_id)
     .bind(&feature_flag_key)
@@ -1262,19 +1125,25 @@ async fn tenant_deletion_removes_seeded_rows_across_tenant_scoped_tables() {
     .await
     .expect("failed to seed feature_flag_overrides row");
 
+    // Canonical idempotency ledger (migration 153, F10): idempotency_records
+    // with the messages.rs writer's column set — the tools lineage's
+    // idempotency_keys table does not exist on the canonical chain.
     sqlx::query(
-        "INSERT INTO idempotency_keys (
-            id, tenant_id, idempotency_key, request_hash, response_status, response_body, expires_at
-         ) VALUES ($1, $2, 'delete-coverage-key', 'delete-coverage-hash', 200, '{}'::jsonb, NOW() + INTERVAL '1 day')",
+        "INSERT INTO idempotency_records (
+            tenant_id, idempotency_key, request_method, request_route, payload_hash,
+            principal_id, owner_token, status, response_status, response_body
+         ) VALUES ($1, 'delete-coverage-key', 'POST', '/test', 'delete-coverage-hash',
+                   'delete-coverage-principal', 'delete-coverage-owner', 'completed', 200, '{}'::jsonb)",
     )
-    .bind(bounded_id("idem"))
     .bind(&tenant_id)
     .execute(&pool)
     .await
-    .expect("failed to seed idempotency_keys row");
+    .expect("failed to seed idempotency_records row");
 
+    // Canonical autopilot_inbox_messages shape: summary TEXT (the tools
+    // lineage's text_body column does not exist).
     sqlx::query(
-        "INSERT INTO autopilot_inbox_messages (tenant_id, from_address, subject, text_body)
+        "INSERT INTO autopilot_inbox_messages (tenant_id, from_address, subject, summary)
          VALUES ($1, 'sender@example.com', 'Delete Coverage', 'orphan coverage')",
     )
     .bind(&tenant_id)

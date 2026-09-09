@@ -671,9 +671,11 @@ mod tests {
         .expect("audit_logs fixture DDL must apply");
         for n in 0..3 {
             sqlx::query(
-                "INSERT INTO audit_logs (id, tenant_id, action, resource, details, timestamp, fts_vector)
+                "INSERT INTO audit_logs (id, tenant_id, action, resource, details, timestamp, fts_vector,
+                                         outcome, hash, signature)
                  VALUES ($1, 'tenant-a', 'user.login', 'session', '{\"who\":\"admin\"}'::jsonb, NOW() - make_interval(mins => $2),
-                         to_tsvector('english', 'user.login session admin'))",
+                         to_tsvector('english', 'user.login session admin'),
+                         'success', 'seed-hash', 'seed-signature')",
             )
             .bind(format!("row-{n}"))
             .bind(n)

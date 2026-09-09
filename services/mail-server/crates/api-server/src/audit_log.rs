@@ -514,9 +514,11 @@ CREATE TABLE IF NOT EXISTS audit_chain_head (
 "#;
 
     /// Dedicated per-test database (the compliance crate's 50-way test
-    /// pattern): the shared `<db>_api` database carries the tools/migrations
-    /// legacy audit_logs shape, which is incompatible with the canonical
-    /// writer. Skips unless TEST_DATABASE_URL is set (workspace convention).
+    /// pattern): these tests assert the hash-chain writer against its own
+    /// fresh DDL (isolated chain per test, no interference with the rows
+    /// other suites seed into the shared `<db>_api` database — which, since
+    /// audit F01, carries the full canonical migration chain). Skips unless
+    /// TEST_DATABASE_URL is set (workspace convention).
     async fn audit_chain_test_pool(db_suffix: &str) -> Option<PgPool> {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .ok()

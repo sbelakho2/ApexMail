@@ -627,61 +627,7 @@ async fn update_ticket(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, path::PathBuf};
-
-    use sqlx::{migrate::Migrator, PgPool};
     use uuid::Uuid;
-
-    fn tool_migrations_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../tools/migrations")
-    }
-
-    async fn apply_tool_migrations(pool: &PgPool) {
-        let source_dir = tool_migrations_dir();
-        let temp_dir = std::env::temp_dir().join(format!(
-            "apexmail-api-support-up-migrations-{}",
-            Uuid::new_v4()
-        ));
-
-        fs::create_dir_all(&temp_dir).expect("failed to create temp sqlx migration directory");
-
-        let mut entries: Vec<PathBuf> = fs::read_dir(&source_dir)
-            .expect("failed to read tools/migrations")
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| {
-                        !name.ends_with("_down.sql") && !name.contains("performance_indexes")
-                    })
-                    .unwrap_or(false)
-            })
-            .collect();
-        entries.sort();
-
-        for path in entries {
-            let file_name = path.file_name().expect("migration path missing filename");
-            let raw = fs::read_to_string(&path)
-                .unwrap_or_else(|error| panic!("failed to read migration {:?}: {error}", path));
-            let normalized = raw
-                .replace("CREATE UNIQUE INDEX CONCURRENTLY", "CREATE UNIQUE INDEX")
-                .replace("CREATE INDEX CONCURRENTLY", "CREATE INDEX");
-            fs::write(temp_dir.join(file_name), normalized).unwrap_or_else(|error| {
-                panic!("failed to write copied migration {:?}: {error}", path)
-            });
-        }
-
-        let migrator = Migrator::new(temp_dir.clone())
-            .await
-            .expect("failed to load copied up migrations");
-        migrator
-            .run(pool)
-            .await
-            .expect("failed to apply copied up migrations");
-
-        let _ = fs::remove_dir_all(&temp_dir);
-    }
 
     #[test]
     fn support_post_request_deserializes_create_shape() {
@@ -715,7 +661,6 @@ mod tests {
         else {
             return;
         };
-        apply_tool_migrations(&pool).await;
 
         let ticket = insert_support_ticket(
             &pool,
@@ -764,7 +709,6 @@ mod tests {
         else {
             return;
         };
-        apply_tool_migrations(&pool).await;
 
         let ticket = insert_support_ticket(
             &pool,
@@ -796,7 +740,7 @@ mod tests {
         .expect("support reply insertion should succeed");
 
         let row: (String, String, String) = sqlx::query_as(
-            "SELECT content, author, author_type FROM support_ticket_messages WHERE id = $1",
+            "SELECT content, author, author_type FROM support_ticket_messages WHERE id = $1::uuid",
         )
         .bind(&reply.id)
         .fetch_one(&pool)
@@ -806,9 +750,12 @@ mod tests {
         assert_eq!(row.0, "We are investigating now");
         assert_eq!(row.1, "System");
         assert_eq!(row.2, "agent");
+        // Canonical support_ticket_messages ids are database-generated UUIDs
+        // (migration 093); the tools lineage's VARCHAR(26) bound is gone.
         assert!(
-            reply.id.len() <= 26,
-            "database-generated ids should fit the support schema"
+            Uuid::parse_str(&reply.id).is_ok(),
+            "database-generated reply id must be a UUID, got {}",
+            reply.id
         );
     }
 }
