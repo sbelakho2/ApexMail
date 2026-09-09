@@ -78,6 +78,38 @@ fn decode_keyset_cursor(encoded: &str) -> Result<(DateTime<Utc>, String), ApiErr
 
 // ─── Types ─────────────────────────────────────────────────────
 
+/// Maximum number of tags stored on a contact. Matches the
+/// `contacts_tags_shape_check` constraint added by migration 150.
+const MAX_CONTACT_TAGS: usize = 50;
+
+/// Maximum length of a single tag in characters. Matches the
+/// `contacts_tags_shape_check` constraint added by migration 150.
+const MAX_CONTACT_TAG_LEN: usize = 64;
+
+/// Validate a tag list against the canonical `contacts.tags` shape
+/// (migration 150): at most [`MAX_CONTACT_TAGS`] strings, each 1..
+/// [`MAX_CONTACT_TAG_LEN`] characters. Shared by every write path
+/// (create/update/bulk import/bulk tag) so an oversized payload is
+/// rejected with 422 instead of tripping the database CHECK as a 500.
+fn validate_tags(tags: &[String]) -> Result<(), ApiError> {
+    if tags.len() > MAX_CONTACT_TAGS {
+        return Err(ApiError::Validation(vec![format!(
+            "a contact can have at most {MAX_CONTACT_TAGS} tags"
+        )]));
+    }
+    for tag in tags {
+        // chars(), not bytes: the database CHECK uses char_length, so a
+        // multi-byte tag of 64 characters must be accepted.
+        let len = tag.chars().count();
+        if len == 0 || len > MAX_CONTACT_TAG_LEN {
+            return Err(ApiError::Validation(vec![format!(
+                "each tag must be between 1 and {MAX_CONTACT_TAG_LEN} characters"
+            )]));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CreateContactRequest {
@@ -108,7 +140,10 @@ pub struct ContactResponse {
     pub id: String,
     pub email: String,
     pub name: Option<String>,
-    pub tags: Option<serde_json::Value>,
+    /// Tags in their ONE canonical representation (migration 150): a JSON
+    /// array of bounded strings. Never null — reads coalesce a missing or
+    /// unmigrated value to `[]`.
+    pub tags: serde_json::Value,
     pub metadata: Option<serde_json::Value>,
     pub status: String,
     pub created_at: String,
@@ -162,7 +197,13 @@ async fn create_contact(
     let email = body.email.to_lowercase();
     let id = Uuid::new_v4();
     let now = Utc::now();
-    let tags = body.tags.as_ref().map(|t| serde_json::json!(t));
+    if let Some(tags) = &body.tags {
+        validate_tags(tags)?;
+    }
+    // One representation: an absent tag list is stored as the empty array
+    // (contacts.tags is NOT NULL DEFAULT '[]' since migration 150), never
+    // as SQL NULL.
+    let tags = serde_json::json!(body.tags.as_deref().unwrap_or_default());
 
     let insert_result = sqlx::query(
         "INSERT INTO contacts (id, tenant_id, email, name, tags, metadata, status, created_at, updated_at)
@@ -227,7 +268,7 @@ async fn list_contacts(
 
     let rows = if let Some((ref cursor_ts, ref cursor_id)) = cursor_value {
         sqlx::query_as::<_, ContactRow>(
-            "SELECT id, email, name, tags, metadata, status, created_at, updated_at
+            "SELECT id, email, name, COALESCE(tags, '[]'::jsonb) AS tags, metadata, status, created_at, updated_at
              FROM contacts WHERE tenant_id = $1
                AND (created_at < $2::timestamp OR (created_at = $2::timestamp AND id < $3))
              ORDER BY created_at DESC, id DESC LIMIT $4",
@@ -242,7 +283,7 @@ async fn list_contacts(
         // Fallback to offset-based pagination for backward compatibility
         let offset = params.offset.clamp(0, 100_000);
         sqlx::query_as::<_, ContactRow>(
-            "SELECT id, email, name, tags, metadata, status, created_at, updated_at
+            "SELECT id, email, name, COALESCE(tags, '[]'::jsonb) AS tags, metadata, status, created_at, updated_at
              FROM contacts WHERE tenant_id = $1 ORDER BY created_at DESC, id DESC LIMIT $2 OFFSET $3",
         )
         .bind(&auth.tenant_id)
@@ -312,7 +353,15 @@ async fn update_contact(
     let existing = fetch_contact(&state, &auth.tenant_id, id.clone()).await?;
 
     let name = body.name.or(existing.name);
-    let tags = body.tags.map(|t| serde_json::json!(t)).or(existing.tags);
+    // A provided tag list fully replaces the stored one (validated against
+    // the canonical shape); an absent one keeps the existing array.
+    let tags = match body.tags {
+        Some(tags) => {
+            validate_tags(&tags)?;
+            serde_json::json!(tags)
+        }
+        None => existing.tags.clone(),
+    };
     let metadata = body.metadata.or(existing.metadata);
     let status = body.status.unwrap_or(existing.status);
 
@@ -415,6 +464,11 @@ async fn bulk_import(
             failed += 1;
             continue;
         }
+        // Tag shape is structural: one malformed list rejects the batch
+        // before any database work rather than failing mid-upsert.
+        if let Some(tags) = &contact.tags {
+            validate_tags(tags)?;
+        }
         if !seen.insert(contact.email.to_lowercase()) {
             updated += 1;
             continue;
@@ -469,7 +523,12 @@ async fn bulk_import(
                     .bind(&auth.tenant_id)
                     .bind(contact.email.to_lowercase())
                     .bind(&contact.name)
-                    .bind(contact.tags.as_ref().map(|t| serde_json::json!(t)))
+                    // Not NULL: an absent tag list inserts the canonical
+                    // empty array (contacts.tags is NOT NULL, migration 150).
+                    .bind(serde_json::json!(contact
+                        .tags
+                        .as_deref()
+                        .unwrap_or_default()))
                     .bind(&contact.metadata);
             }
 
@@ -514,7 +573,9 @@ struct ContactRow {
     id: String,
     email: String,
     name: Option<String>,
-    tags: Option<serde_json::Value>,
+    /// Always a JSON array — every SELECT for this row type coalesces a
+    /// missing/NULL tags value to '[]' (canonical shape, migration 150).
+    tags: serde_json::Value,
     metadata: Option<serde_json::Value>,
     status: String,
     created_at: DateTime<Utc>,
@@ -542,7 +603,7 @@ async fn fetch_contact(
     id: String,
 ) -> Result<ContactRow, ApiError> {
     sqlx::query_as::<_, ContactRow>(
-        "SELECT id, email, name, tags, metadata, status, created_at, updated_at
+        "SELECT id, email, name, COALESCE(tags, '[]'::jsonb) AS tags, metadata, status, created_at, updated_at
          FROM contacts WHERE id = $1 AND tenant_id = $2",
     )
     .bind(id)
@@ -672,7 +733,40 @@ async fn bulk_restore(
 pub struct BulkTagRequest {
     pub ids: Vec<Uuid>,
     pub tags: Vec<String>,
+    /// `"add"` (default) unions the tags into each contact's set —
+    /// duplicates collapse; `"remove"` subtracts them instead.
+    #[serde(default)]
+    pub action: Option<String>,
 }
+
+/// Bulk tag add: set-union semantics. `tags || $3::jsonb` concatenates the
+/// arrays and the aggregation deduplicates and sorts the result, so adding
+/// a tag a contact already has is a no-op instead of a duplicate entry.
+/// A tenant predicate keeps the update inside the caller's tenant.
+const BULK_TAG_ADD_SQL: &str = r#"
+    UPDATE contacts SET
+        tags = COALESCE((
+            SELECT jsonb_agg(DISTINCT tag ORDER BY tag)
+            FROM jsonb_array_elements(tags || $3::jsonb) AS tag
+        ), '[]'::jsonb),
+        updated_at = NOW()
+    WHERE tenant_id = $1 AND id = ANY($2)"#;
+
+/// Bulk tag remove: set-difference semantics. Keeps exactly the existing
+/// tags that are not members of the removal list.
+const BULK_TAG_REMOVE_SQL: &str = r#"
+    UPDATE contacts SET
+        tags = COALESCE((
+            SELECT jsonb_agg(tag ORDER BY tag)
+            FROM jsonb_array_elements(tags) AS tag
+            WHERE NOT ($3::jsonb) ? (tag #>> '{}')
+        ), '[]'::jsonb),
+        updated_at = NOW()
+    WHERE tenant_id = $1 AND id = ANY($2)"#;
+
+/// Name of the shape constraint added by migration 150 — used to map a
+/// check violation (SQLSTATE 23514) to a 422 instead of a 500.
+const CONTACTS_TAGS_SHAPE_CHECK: &str = "contacts_tags_shape_check";
 
 async fn bulk_tag(
     State(state): State<AppState>,
@@ -681,20 +775,47 @@ async fn bulk_tag(
 ) -> Result<Json<BulkActionResult>, ApiError> {
     require_scopes(&auth, &["contacts:write"])?;
 
+    let remove = match body.action.as_deref().unwrap_or("add") {
+        "add" => false,
+        "remove" => true,
+        other => {
+            return Err(ApiError::Validation(vec![format!(
+                "invalid action '{other}'; expected 'add' or 'remove'"
+            )]));
+        }
+    };
+    // Same bounds the column enforces (migration 150): validated here so a
+    // bad payload is a 422, not a database CHECK violation surfaced as 500.
+    validate_tags(&body.tags)?;
+
     let tags_json = serde_json::to_value(&body.tags)
         .map_err(|e| ApiError::Internal(format!("tags serialization error: {e}")))?;
-    let affected = sqlx::query(
-        r#"UPDATE contacts SET
-            tags = COALESCE(tags, '[]'::jsonb) || $3::jsonb,
-            updated_at = NOW()
-         WHERE tenant_id = $1 AND id = ANY($2)"#,
-    )
-    .bind(auth.tenant_id.to_string())
-    .bind(&body.ids[..])
-    .bind(tags_json)
-    .execute(&state.db)
-    .await?
-    .rows_affected() as i64;
+    let sql = if remove {
+        BULK_TAG_REMOVE_SQL
+    } else {
+        BULK_TAG_ADD_SQL
+    };
+
+    let result = sqlx::query(sql)
+        .bind(auth.tenant_id.to_string())
+        .bind(&body.ids[..])
+        .bind(&tags_json)
+        .execute(&state.db)
+        .await;
+
+    let affected = match result {
+        Ok(result) => result.rows_affected() as i64,
+        // Adding tags to an already-full contact trips the shape CHECK.
+        // Surface that as a client error instead of an internal one.
+        Err(sqlx::Error::Database(db_err))
+            if db_err.constraint() == Some(CONTACTS_TAGS_SHAPE_CHECK) =>
+        {
+            return Err(ApiError::Validation(vec![format!(
+                "tagging would exceed the per-contact limit of {MAX_CONTACT_TAGS} tags"
+            )]));
+        }
+        Err(e) => return Err(e.into()),
+    };
 
     Ok(Json(BulkActionResult { affected }))
 }
@@ -939,7 +1060,7 @@ mod tests_extra {
             id: String::new(),
             email: "a@b.com".into(),
             name: Some("A".into()),
-            tags: Some(serde_json::json!(["vip"])),
+            tags: serde_json::json!(["vip"]),
             metadata: None,
             status: "active".into(),
             created_at: "2026-01-01T00:00:00Z".into(),
@@ -947,5 +1068,384 @@ mod tests_extra {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["status"], "active");
+        // Canonical representation: an array, never null.
+        assert_eq!(json["tags"], serde_json::json!(["vip"]));
+    }
+
+    #[test]
+    fn test_validate_tags_bounds() {
+        assert!(validate_tags(&[]).is_ok());
+        assert!(validate_tags(&["vip".into(), "beta".into()]).is_ok());
+
+        // More than MAX_CONTACT_TAGS entries.
+        let too_many: Vec<String> = (0..=MAX_CONTACT_TAGS).map(|i| i.to_string()).collect();
+        assert!(validate_tags(&too_many).is_err());
+
+        // Empty and over-long individual tags.
+        assert!(validate_tags(&["".into()]).is_err());
+        let over_long = "x".repeat(MAX_CONTACT_TAG_LEN + 1);
+        assert!(validate_tags(&[over_long]).is_err());
+
+        // char_length semantics: 64 multi-byte characters are in bounds.
+        let multi_byte = "ä".repeat(MAX_CONTACT_TAG_LEN);
+        assert_eq!(multi_byte.len(), MAX_CONTACT_TAG_LEN * 2); // bytes > 64
+        assert!(validate_tags(&[multi_byte]).is_ok());
+    }
+
+    #[test]
+    fn test_bulk_tag_action_parsing() {
+        let req: BulkTagRequest = serde_json::from_str(
+            r#"{"ids":["00000000-0000-0000-0000-000000000001"],"tags":["vip"]}"#,
+        )
+        .unwrap();
+        assert_eq!(req.action.as_deref(), None); // defaults to "add"
+
+        let req: BulkTagRequest = serde_json::from_str(
+            r#"{"ids":["00000000-0000-0000-0000-000000000001"],"tags":["vip"],"action":"remove"}"#,
+        )
+        .unwrap();
+        assert_eq!(req.action.as_deref(), Some("remove"));
+    }
+}
+
+// ─── F07 database tests ────────────────────────────────────────
+//
+// Exercise migration 150 (as shipped) and the bulk-tag SQL constants
+// against a real PostgreSQL, following the audit_log.rs isolated-per-test
+// database convention. Skipped unless TEST_DATABASE_URL is set.
+
+#[cfg(test)]
+mod tags_db_tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+    use std::time::Duration;
+
+    /// Migration 150 verbatim — these tests validate the real file, not a
+    /// restatement of it.
+    const MIGRATION_150: &str =
+        include_str!("../../../../migrations/150_contacts_tags_canonical.sql");
+
+    /// Dedicated per-test database (audit_log.rs pattern): skips unless
+    /// TEST_DATABASE_URL is set (workspace convention).
+    async fn isolated_pool(db_suffix: &str) -> Option<sqlx::PgPool> {
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())?;
+        let (server_part, db_part) = database_url.rsplit_once('/')?;
+        let db_only = db_part.split('?').next().unwrap_or(db_part);
+        let isolated_db = format!("{db_only}_api_contacts_f07_{db_suffix}");
+        let isolated_url = format!("{server_part}/{isolated_db}");
+        let admin_url = format!("{server_part}/postgres");
+
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(3))
+            .connect(&admin_url)
+            .await
+            .ok()?;
+        let _ = sqlx::query(&format!(
+            r#"DROP DATABASE IF EXISTS "{isolated_db}" WITH (FORCE)"#
+        ))
+        .execute(&admin)
+        .await;
+        let created = sqlx::query(&format!(r#"CREATE DATABASE "{isolated_db}""#))
+            .execute(&admin)
+            .await;
+        admin.close().await;
+        created.ok()?;
+
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(&isolated_url)
+            .await
+            .ok()?;
+        Some(pool)
+    }
+
+    async fn fetch_tags(pool: &sqlx::PgPool, tenant_id: &str, id: Uuid) -> serde_json::Value {
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT COALESCE(tags, '[]'::jsonb) FROM contacts WHERE tenant_id = $1 AND id = $2",
+        )
+        .bind(tenant_id)
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .expect("contact row must exist")
+    }
+
+    async fn run_bulk_tag(
+        pool: &sqlx::PgPool,
+        sql: &str,
+        tenant_id: &str,
+        ids: &[Uuid],
+        tags: &[String],
+    ) -> Result<u64, sqlx::Error> {
+        let tags_json = serde_json::to_value(tags).expect("tags serialize");
+        sqlx::query(sql)
+            .bind(tenant_id.to_string())
+            .bind(ids)
+            .bind(tags_json)
+            .execute(pool)
+            .await
+            .map(|r| r.rows_affected())
+    }
+
+    /// The 068 shape has NO tags column at all — the shape that made every
+    /// `UPDATE contacts SET tags` fail with "column does not exist".
+    /// Migration 150 must add the canonical column and enforce its bounds.
+    #[tokio::test]
+    async fn migration_150_establishes_tags_on_a_tags_less_shape() {
+        let Some(pool) = isolated_pool("shape").await else {
+            eprintln!("skipping migration_150_establishes_tags_on_a_tags_less_shape: TEST_DATABASE_URL not set");
+            return;
+        };
+
+        sqlx::raw_sql(
+            "CREATE TABLE contacts (
+                id         UUID PRIMARY KEY,
+                tenant_id  VARCHAR(26) NOT NULL,
+                email      VARCHAR(320) NOT NULL,
+                name       VARCHAR(512),
+                status     VARCHAR(20) NOT NULL DEFAULT 'subscribed',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("068-shape contacts table");
+
+        // raw_sql: the migration file is a multi-statement script (the
+        // prepared-statement protocol cannot carry it).
+        sqlx::raw_sql(MIGRATION_150)
+            .execute(&pool)
+            .await
+            .expect("migration 150 applies to the tags-less shape");
+
+        let tenant = "test-f07-shape-tenant";
+        let id = Uuid::new_v4();
+        // Insert without tags -> canonical default '[]'.
+        sqlx::query("INSERT INTO contacts (id, tenant_id, email) VALUES ($1, $2, 'a@x.ee')")
+            .bind(id)
+            .bind(tenant)
+            .execute(&pool)
+            .await
+            .expect("insert without tags uses the '[]' default");
+        assert_eq!(fetch_tags(&pool, tenant, id).await, serde_json::json!([]));
+
+        // Explicit NULL is rejected (NOT NULL).
+        let null_insert = sqlx::query(
+            "INSERT INTO contacts (id, tenant_id, email, tags) VALUES ($1, $2, 'b@x.ee', NULL)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant)
+        .execute(&pool)
+        .await;
+        assert!(null_insert.is_err(), "tags must be NOT NULL");
+
+        // Non-array values are rejected by the CHECK.
+        let bad_shapes = [
+            serde_json::json!({"vip": true}),
+            serde_json::json!("vip"),
+            serde_json::json!(null),
+        ];
+        for bad in bad_shapes {
+            let result = sqlx::query(
+                "INSERT INTO contacts (id, tenant_id, email, tags) VALUES ($1, $2, 'c@x.ee', $3)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(tenant)
+            .bind(bad)
+            .execute(&pool)
+            .await;
+            assert!(result.is_err(), "non-array tags must violate the CHECK");
+        }
+
+        // >50 tags is rejected.
+        let fifty_one: Vec<String> = (0..=50).map(|i| format!("t{i}")).collect();
+        let result = sqlx::query(
+            "INSERT INTO contacts (id, tenant_id, email, tags) VALUES ($1, $2, 'd@x.ee', $3)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant)
+        .bind(serde_json::json!(fifty_one))
+        .execute(&pool)
+        .await;
+        assert!(result.is_err(), "more than 50 tags must violate the CHECK");
+
+        // A 65-character tag is rejected; a 64-character one is accepted.
+        for (len, expect_ok) in [(65usize, false), (64, true)] {
+            let tag = "x".repeat(len);
+            let result = sqlx::query(
+                "INSERT INTO contacts (id, tenant_id, email, tags) VALUES ($1, $2, 'e@x.ee', $3)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(tenant)
+            .bind(serde_json::json!([tag]))
+            .execute(&pool)
+            .await;
+            assert_eq!(result.is_ok(), expect_ok, "tag of {len} chars");
+        }
+
+        // A JSON null element is rejected too.
+        let result = sqlx::query(
+            "INSERT INTO contacts (id, tenant_id, email, tags) VALUES ($1, $2, 'f@x.ee', $3)",
+        )
+        .bind(Uuid::new_v4())
+        .bind(tenant)
+        .bind(serde_json::json!([null, "vip"]))
+        .execute(&pool)
+        .await;
+        assert!(result.is_err(), "null tag elements must violate the CHECK");
+
+        pool.close().await;
+    }
+
+    /// Bulk tag add/remove against the canonical apexmail-db SCHEMA shape
+    /// (nullable tags) with migration 150 applied on top: union dedupe,
+    /// removal, round-trip through the coalescing read, tenant isolation,
+    /// and the 50-tag ceiling.
+    #[tokio::test]
+    async fn bulk_tag_add_remove_round_trip_and_tenant_isolation() {
+        let Some(pool) = isolated_pool("roundtrip").await else {
+            eprintln!("skipping bulk_tag_add_remove_round_trip_and_tenant_isolation: TEST_DATABASE_URL not set");
+            return;
+        };
+
+        // The 075/SCHEMA shape: contacts.tags exists but is nullable with
+        // no shape constraint — migration 150 must normalise it. (The full
+        // apexmail-db SCHEMA cannot be applied to a fresh database — its
+        // campaigns/templates FK is uuid-to-varchar — so the subset is
+        // spelled out here.)
+        sqlx::raw_sql(
+            "CREATE TABLE contacts (
+                id         UUID PRIMARY KEY,
+                tenant_id  VARCHAR(26) NOT NULL,
+                email      TEXT NOT NULL,
+                name       TEXT,
+                tags       JSONB,
+                metadata   JSONB,
+                status     TEXT NOT NULL DEFAULT 'active',
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );",
+        )
+        .execute(&pool)
+        .await
+        .expect("075-shape contacts table");
+        sqlx::raw_sql(MIGRATION_150)
+            .execute(&pool)
+            .await
+            .expect("migration 150 applies on the SCHEMA shape");
+
+        let tenant_a = "test-f07-round-a";
+        let tenant_b = "test-f07-round-b";
+
+        let contact_a = Uuid::new_v4();
+        let contact_b = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO contacts (id, tenant_id, email, tags) VALUES ($1, $2, 'a@x.ee', $3)",
+        )
+        .bind(contact_a)
+        .bind(tenant_a)
+        .bind(serde_json::json!(["beta", "vip"]))
+        .execute(&pool)
+        .await
+        .expect("contact A");
+        sqlx::query(
+            "INSERT INTO contacts (id, tenant_id, email, tags) VALUES ($1, $2, 'b@x.ee', $3)",
+        )
+        .bind(contact_b)
+        .bind(tenant_b)
+        .bind(serde_json::json!(["vip"]))
+        .execute(&pool)
+        .await
+        .expect("contact B");
+
+        // Add with an overlap: union dedupes and sorts.
+        let affected = run_bulk_tag(
+            &pool,
+            BULK_TAG_ADD_SQL,
+            tenant_a,
+            &[contact_a],
+            &["vip".into(), "new".into()],
+        )
+        .await
+        .expect("bulk tag add");
+        assert_eq!(affected, 1);
+        assert_eq!(
+            fetch_tags(&pool, tenant_a, contact_a).await,
+            serde_json::json!(["beta", "new", "vip"])
+        );
+
+        // Re-adding the same tag is an idempotent no-op.
+        run_bulk_tag(
+            &pool,
+            BULK_TAG_ADD_SQL,
+            tenant_a,
+            &[contact_a],
+            &["vip".into()],
+        )
+        .await
+        .expect("idempotent re-add");
+        assert_eq!(
+            fetch_tags(&pool, tenant_a, contact_a).await,
+            serde_json::json!(["beta", "new", "vip"])
+        );
+
+        // Remove: absent tags in the removal list are harmless.
+        let affected = run_bulk_tag(
+            &pool,
+            BULK_TAG_REMOVE_SQL,
+            tenant_a,
+            &[contact_a],
+            &["vip".into(), "missing".into()],
+        )
+        .await
+        .expect("bulk tag remove");
+        assert_eq!(affected, 1);
+        assert_eq!(
+            fetch_tags(&pool, tenant_a, contact_a).await,
+            serde_json::json!(["beta", "new"])
+        );
+
+        // Tenant isolation: tenant A cannot tag tenant B's contact.
+        let affected = run_bulk_tag(
+            &pool,
+            BULK_TAG_ADD_SQL,
+            tenant_a,
+            &[contact_b],
+            &["x".into()],
+        )
+        .await
+        .expect("cross-tenant add is a query, not an error");
+        assert_eq!(affected, 0, "cross-tenant bulk tag must affect nothing");
+        assert_eq!(
+            fetch_tags(&pool, tenant_b, contact_b).await,
+            serde_json::json!(["vip"]),
+            "tenant B's tags must be untouched"
+        );
+
+        // The union overflow trips the migration-150 CHECK instead of
+        // silently truncating: 2 existing + 49 new = 51 > 50.
+        let overflow: Vec<String> = (0..49).map(|i| format!("x{i}")).collect();
+        let err = run_bulk_tag(&pool, BULK_TAG_ADD_SQL, tenant_a, &[contact_a], &overflow)
+            .await
+            .expect_err("union beyond 50 tags must violate the CHECK");
+        match &err {
+            sqlx::Error::Database(db_err) => {
+                assert_eq!(db_err.code().as_deref(), Some("23514"));
+                assert_eq!(db_err.constraint(), Some(CONTACTS_TAGS_SHAPE_CHECK));
+            }
+            other => panic!("expected a database check violation, got {other:?}"),
+        }
+        // The failed update left the contact's tags unchanged.
+        assert_eq!(
+            fetch_tags(&pool, tenant_a, contact_a).await,
+            serde_json::json!(["beta", "new"])
+        );
+
+        pool.close().await;
     }
 }
