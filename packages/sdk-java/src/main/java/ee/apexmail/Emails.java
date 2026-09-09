@@ -24,12 +24,14 @@ public final class Emails {
         String html,
         String text,
         String templateId,
+        Object templateData,
         Object cc,
         Object bcc,
         Object replyTo,
         Object attachments,
         Object tags,
         String priority,
+        Map<String, String> headers,
         Map<String, Object> metadata,
         String scheduledAt,
         String idempotencyKey
@@ -47,21 +49,21 @@ public final class Emails {
             String scheduledAt,
             String idempotencyKey
         ) {
-            this(from, to, subject, html, text, templateId, cc, bcc, replyTo, null, null, null, null, scheduledAt, idempotencyKey);
+            this(from, to, subject, html, text, templateId, null, cc, bcc, replyTo, null, null, null, null, null, scheduledAt, idempotencyKey);
         }
 
         /**
-         * Serializes the exact server SendMessageRequest wire shape
-         * (messages.rs, deny_unknown_fields): from/to/cc/bcc as BARE
-         * address strings (map inputs {email, name} contribute only the
-         * address — the API has no display-name field), tags as a string
-         * list, scheduled_at snake_case. Inputs the API rejects (replyTo,
-         * templateId, attachments, priority) are validated as inputs but
-         * never transmitted.
+         * Serializes the send payload with every accepted option on the wire
+         * (F48): from/to/cc/bcc/reply_to as address strings with display
+         * names preserved as RFC 5322 {@code "Name <addr>"} forms, tags as
+         * a string list, scheduled_at snake_case, and reply_to,
+         * template_id/template_data, attachments, priority and headers
+         * under their documented snake_case field names. Nothing the SDK
+         * accepts is dropped silently.
          */
         Map<String, Object> toMap() {
             Map<String, Object> body = new HashMap<>();
-            body.put("from", Emails.extractEmail(from));
+            body.put("from", Emails.formatAddress(from));
             body.put("to", Emails.coerceAddressList(to));
             body.put("subject", subject);
             if (html != null) {
@@ -78,8 +80,27 @@ public final class Emails {
             if (bccList != null) {
                 body.put("bcc", bccList);
             }
+            String replyToFormatted = Emails.formatAddress(replyTo);
+            if (replyToFormatted != null) {
+                body.put("reply_to", replyToFormatted);
+            }
+            if (templateId != null && !templateId.isBlank()) {
+                body.put("template_id", templateId);
+            }
+            if (templateData != null) {
+                body.put("template_data", templateData);
+            }
+            if (attachments != null) {
+                body.put("attachments", attachments);
+            }
             if (tags != null) {
                 body.put("tags", Emails.coerceTagList(tags));
+            }
+            if (priority != null && !priority.isBlank()) {
+                body.put("priority", priority);
+            }
+            if (headers != null) {
+                body.put("headers", headers);
             }
             if (metadata != null) {
                 body.put("metadata", metadata);
@@ -103,11 +124,52 @@ public final class Emails {
             }
             return email == null ? null : String.valueOf(email);
         }
+        return bareAddress(String.valueOf(value));
+    }
+
+    /**
+     * Strips an RFC 5322 display-name form to its bare address
+     * ("Name &lt;a@b.c&gt;" → "a@b.c") so validation sees the addr-spec.
+     */
+    static String bareAddress(String value) {
+        int open = value.lastIndexOf('<');
+        int close = value.lastIndexOf('>');
+        if (open >= 0 && close > open) {
+            return value.substring(open + 1, close).trim();
+        }
+        return value;
+    }
+
+    /**
+     * Serializes one address input, preserving the display name (F48):
+     * {email, name} maps become {@code "Name <addr>"}; bare strings pass
+     * through unchanged.
+     */
+    static String formatAddress(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Map<?, ?> map) {
+            Object email = map.get("email");
+            if (email == null) {
+                email = map.get("address");
+            }
+            if (email == null) {
+                return null;
+            }
+            Object name = map.get("name");
+            if (name != null && !String.valueOf(name).isBlank()) {
+                return name + " <" + email + ">";
+            }
+            return String.valueOf(email);
+        }
         return String.valueOf(value);
     }
 
-    /** Coerces "addr" | ["addr", ...] | [{email, name}] to a List of bare
-     *  address strings (the API's SendMessageRequest takes Vec<String>). */
+    /**
+     * Coerces "addr" | ["addr", ...] | [{email, name}] to a List of address
+     * strings, preserving display names as "Name <addr>" forms (F48).
+     */
     static List<String> coerceAddressList(Object value) {
         if (value == null) {
             return null;
@@ -117,7 +179,7 @@ public final class Emails {
             : List.of(value);
         List<String> out = new java.util.ArrayList<>();
         for (Object item : raw) {
-            String email = extractEmail(item);
+            String email = formatAddress(item);
             if (email != null && !email.isBlank()) {
                 out.add(email);
             }
@@ -146,15 +208,15 @@ public final class Emails {
      * Send a single email.
      *
      * <p>Required keys: {@code from}, {@code to}, {@code subject} plus at
-     * least one of {@code html} or {@code text} (the API's
-     * SendMessageRequest has no templateId field).
+     * least one of {@code html} or {@code text}.
      *
-     * <p>The serialized body matches the server's SendMessageRequest
-     * exactly: from/to/cc/bcc go out as BARE address strings ({email, name}
-     * map inputs contribute only the address — the API has no display-name
-     * field), tags as a string list, scheduled_at snake_case. Inputs the
-     * API rejects (replyTo, templateId, attachments, priority) are
-     * validated as inputs but never transmitted.
+     * <p>Every accepted option is serialized (F48): from/to/cc/bcc/reply_to
+     * go out as address strings with display names preserved as RFC 5322
+     * {@code "Name <addr>"} forms ({email, name} map inputs keep their
+     * name), tags as a string list, scheduled_at snake_case, and reply_to,
+     * template_id/template_data, attachments, priority and headers under
+     * their documented snake_case field names. Nothing the SDK accepts is
+     * dropped silently.
      *
      * <p>When no {@code idempotencyKey} is supplied, a random UUID v4 is generated
      * per logical send and replayed across transport retries of that send, so
@@ -186,17 +248,29 @@ public final class Emails {
             (String) params.get("subject"),
             (String) params.get("html"),
             (String) params.get("text"),
-            (String) params.get("templateId"),
+            str(params, "templateId", "template_id"),
+            params.containsKey("templateData") ? params.get("templateData") : params.get("template_data"),
             params.get("cc"),
             params.get("bcc"),
-            params.get("replyTo"),
+            params.containsKey("replyTo") ? params.get("replyTo") : params.get("reply_to"),
             params.get("attachments"),
             params.get("tags"),
-            (String) params.get("priority"),
+            str(params, "priority"),
+            castStringMap(params.get("headers")),
             castStringObjectMap(params.get("metadata")),
-            (String) params.get("scheduledAt"),
-            (String) params.get("idempotencyKey")
+            str(params, "scheduledAt", "scheduled_at"),
+            str(params, "idempotencyKey", "idempotency_key")
         ));
+    }
+
+    private static String str(Map<String, Object> params, String... keys) {
+        for (String key : keys) {
+            Object value = params.get(key);
+            if (value instanceof String s && !s.isBlank()) {
+                return s;
+            }
+        }
+        return null;
     }
 
     /**
@@ -225,10 +299,9 @@ public final class Emails {
             throw new IllegalArgumentException("subject is required");
         }
         if (!params.containsKey("html") && !params.containsKey("text")) {
-            // The API's SendMessageRequest has no templateId field.
-            if (params.containsKey("templateId")) {
+            if (params.containsKey("template_id")) {
                 throw new IllegalArgumentException(
-                    "html or text body is required (templateId is not supported by the send API)");
+                    "html or text body is required (template_id alone cannot provide the body)");
             }
             throw new IllegalArgumentException("html or text is required");
         }
@@ -241,18 +314,20 @@ public final class Emails {
         if (params.containsKey("bcc")) {
             validateRecipients(params.get("bcc"), "bcc");
         }
-        if (params.containsKey("replyTo")) {
-            validateRecipients(params.get("replyTo"), "replyTo");
+        if (params.containsKey("reply_to")) {
+            validateRecipients(params.get("reply_to"), "reply_to");
         }
     }
 
     /**
-     * Normalize one batch message map to the exact SendMessageRequest wire
-     * shape (same coercion as a single send).
+     * Normalize one batch message map with the same serialization as a
+     * single send: display names preserved, every accepted option
+     * (reply_to, template id/data, attachments, priority, headers) on the
+     * wire (F48).
      */
     private static Map<String, Object> normalizeBatchMessage(Map<String, Object> message) {
         Map<String, Object> body = new HashMap<>();
-        body.put("from", extractEmail(message.get("from")));
+        body.put("from", formatAddress(message.get("from")));
         body.put("to", coerceAddressList(message.get("to")));
         Object subject = message.get("subject");
         if (subject != null) {
@@ -272,8 +347,31 @@ public final class Emails {
         if (bccList != null) {
             body.put("bcc", bccList);
         }
+        String replyTo = formatAddress(first(message, "reply_to", "replyTo"));
+        if (replyTo != null) {
+            body.put("reply_to", replyTo);
+        }
+        String templateId = firstString(message, "template_id", "templateId");
+        if (templateId != null && !templateId.isBlank()) {
+            body.put("template_id", templateId);
+        }
+        Object templateData = first(message, "template_data", "templateData");
+        if (templateData != null) {
+            body.put("template_data", templateData);
+        }
+        if (message.get("attachments") != null) {
+            body.put("attachments", message.get("attachments"));
+        }
         if (message.get("tags") != null) {
             body.put("tags", coerceTagList(message.get("tags")));
+        }
+        String priority = firstString(message, "priority");
+        if (priority != null && !priority.isBlank()) {
+            body.put("priority", priority);
+        }
+        Object headers = first(message, "headers");
+        if (headers != null) {
+            body.put("headers", headers);
         }
         if (message.get("metadata") != null) {
             body.put("metadata", message.get("metadata"));
@@ -288,14 +386,28 @@ public final class Emails {
         return body;
     }
 
+    private static Object first(Map<String, Object> map, String... keys) {
+        for (String key : keys) {
+            if (map.containsKey(key)) {
+                return map.get(key);
+            }
+        }
+        return null;
+    }
+
+    private static String firstString(Map<String, Object> map, String... keys) {
+        Object value = first(map, keys);
+        return value == null ? null : String.valueOf(value);
+    }
+
     /**
      * Send up to 1,000 emails in one API call.
      *
      * <p>An idempotency key is generated automatically and replayed across
      * transport retries of the batch call (SDK-B); supply {@code idempotencyKey}
      * via the overload to control it. Each message map is serialized with
-     * the same coercion as {@link #send} (bare-string recipients, snake_case
-     * scheduled_at, no API-unknown keys).
+     * the same serialization as {@link #send} (display names preserved,
+     * snake_case scheduled_at, every accepted option forwarded — F48).
      *
      * @param messages  List of parameter maps (same shape as {@link #send})
      */
@@ -332,9 +444,9 @@ public final class Emails {
                 throw new IllegalArgumentException("message at index " + i + " missing subject");
             }
             if (!message.containsKey("html") && !message.containsKey("text")) {
-                if (message.containsKey("templateId")) {
+                if (message.containsKey("templateId") || message.containsKey("template_id")) {
                     throw new IllegalArgumentException("message at index " + i
-                        + " missing html or text (templateId is not supported by the send API)");
+                        + " missing html or text (template_id alone cannot provide the body)");
                 }
                 throw new IllegalArgumentException("message at index " + i + " missing html or text");
             }
@@ -404,6 +516,24 @@ public final class Emails {
             return result;
         }
         throw new IllegalArgumentException("metadata must be a map");
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, String> castStringMap(Object value) {
+        if (value == null) {
+            return null;
+        }
+        if (value instanceof Map<?, ?> map) {
+            Map<String, String> result = new HashMap<>();
+            map.forEach((key, mapValue) -> {
+                if (key == null || mapValue == null) {
+                    throw new IllegalArgumentException("headers must be a map of non-null strings");
+                }
+                result.put(String.valueOf(key), String.valueOf(mapValue));
+            });
+            return result;
+        }
+        throw new IllegalArgumentException("headers must be a map");
     }
 
     @SuppressWarnings("unchecked")

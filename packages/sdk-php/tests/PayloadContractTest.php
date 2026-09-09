@@ -46,12 +46,13 @@ final class PayloadContractTest extends TestCase
             'tags'          => ['welcome', ['name' => 'campaign', 'value' => 'spring']],
             'scheduled_at'  => '2026-09-01T09:00:00Z',
             'metadata'      => ['source' => 'php-sdk-test'],
-            // Inputs the API rejects — must NOT appear on the wire:
-            'reply_to'      => 'reply@example.com',
+            // F48: every accepted option must reach the wire.
+            'reply_to'      => ['email' => 'reply@example.com', 'name' => 'Replies'],
             'template_id'   => 'tpl_1',
             'template_data' => ['a' => 1],
             'attachments'   => [['filename' => 'a.txt', 'content' => 'eHg=']],
             'priority'      => 'high',
+            'headers'       => ['X-Custom' => 'yes'],
         ]);
 
         $request = $client->requests[0];
@@ -60,23 +61,29 @@ final class PayloadContractTest extends TestCase
 
         $expected = [
             'from'         => 'hello@example.com',
-            'to'           => ['user@example.com', 'second@example.com'],
+            'to'           => ['user@example.com', 'Second <second@example.com>'],
             'cc'           => ['cc@example.com'],
             'bcc'          => ['bcc@example.com'],
+            'reply_to'     => 'Replies <reply@example.com>',
             'subject'      => 'Hello!',
             'html'         => '<h1>Hello World</h1>',
+            'attachments'  => [['filename' => 'a.txt', 'content' => 'eHg=']],
+            'headers'      => ['X-Custom' => 'yes'],
+            'priority'     => 'high',
+            'template_id'  => 'tpl_1',
+            'template_data' => ['a' => 1],
             'tags'         => ['welcome', 'campaign=spring'],
             'scheduled_at' => '2026-09-01T09:00:00Z',
             'metadata'     => ['source' => 'php-sdk-test'],
         ];
-        $this->assertSame($expected, $request['body']);
+        $this->assertEqualsCanonicalizing($expected, $request['body']);
 
-        foreach (['replyTo', 'templateId', 'templateData', 'attachments', 'priority', 'scheduledAt'] as $rejected) {
+        foreach (['replyTo', 'templateId', 'templateData', 'scheduledAt', 'name'] as $rejected) {
             $this->assertArrayNotHasKey($rejected, $request['body'], "{$rejected} must not be serialized");
         }
     }
 
-    public function testSendFromNameObjectIsFlattenedToBareAddress(): void
+    public function testSendFromNameObjectKeepsDisplayName(): void
     {
         $client = $this->recordingClient();
 
@@ -88,7 +95,8 @@ final class PayloadContractTest extends TestCase
         ]);
 
         $body = $client->requests[0]['body'];
-        $this->assertSame('named@example.com', $body['from']);
+        // F48: display names survive as "Name <addr>" forms.
+        $this->assertSame('Named Sender <named@example.com>', $body['from']);
         $this->assertSame(['user@example.com'], $body['to']);
         $this->assertArrayNotHasKey('name', $body);
     }
@@ -105,6 +113,7 @@ final class PayloadContractTest extends TestCase
                 'text'    => 'Hello',
                 'tags'    => ['batch'],
                 'priority' => 'high',
+                'reply_to' => 'reply@example.com',
             ],
         ]);
 
@@ -113,11 +122,13 @@ final class PayloadContractTest extends TestCase
         $this->assertSame([
             'messages' => [
                 [
-                    'from'    => 'hello@example.com',
-                    'to'      => ['user@example.com'],
-                    'subject' => 'Hi',
-                    'text'    => 'Hello',
-                    'tags'    => ['batch'],
+                    'from'     => 'hello@example.com',
+                    'to'       => ['user@example.com'],
+                    'reply_to' => 'reply@example.com',
+                    'subject'  => 'Hi',
+                    'text'     => 'Hello',
+                    'priority' => 'high',
+                    'tags'     => ['batch'],
                 ],
             ],
         ], $request['body']);

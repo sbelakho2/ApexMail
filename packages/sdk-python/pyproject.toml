@@ -36,7 +36,10 @@ classifiers = [
 requires-python = ">=3.9"
 dependencies = [
     "httpx>=0.25.0",
-    "pydantic>=2.0.0",
+    # F47: models.py uses pydantic.EmailStr, which requires the email-validator
+    # extra at validation time — a bare `pydantic` install raises ImportError
+    # the moment an EmailAddress/SendEmailRequest model is instantiated.
+    "pydantic[email]>=2.0.0",
 ]
 
 [project.optional-dependencies]

@@ -16,26 +16,28 @@ import (
 	"time"
 )
 
-// ── F1: send wire shape vs messages.rs SendMessageRequest ──────────────────
+// ── F1/F48: send wire shape — every accepted option is serialized ──────────
 
 func TestSendEmailRequestMarshalsExactServerShape(t *testing.T) {
 	t.Parallel()
 
 	req := &SendEmailRequest{
-		From:    EmailAddress{Email: "hello@example.com", Name: "Ignored Name"},
-		To:      []EmailAddress{{Email: "user@example.com"}, {Email: "second@example.com", Name: "Dropped"}},
+		From:    EmailAddress{Email: "hello@example.com", Name: "Hello"},
+		To:      []EmailAddress{{Email: "user@example.com"}, {Email: "second@example.com", Name: "Second"}},
 		CC:      []EmailAddress{{Email: "cc@example.com"}},
 		BCC:     []EmailAddress{{Email: "bcc@example.com"}},
 		Subject: "Hello!",
 		HTML:    "<h1>Hello World</h1>",
-		Tags:    []string{"welcome"},
-		// Inputs the API rejects — must NOT be serialized:
-		ReplyTo:     &EmailAddress{Email: "reply@example.com"},
-		TemplateID:  "tpl_1",
-		Priority:    "high",
-		Attachments: []Attachment{{Filename: "a.txt", Content: "eHg="}},
-		Metadata:    map[string]interface{}{"source": "go-sdk-test"},
-		ScheduledAt: "2026-09-01T09:00:00Z",
+		// F48: every accepted option must reach the wire.
+		ReplyTo:      &EmailAddress{Email: "reply@example.com", Name: "Replies"},
+		TemplateID:   "tpl_1",
+		TemplateData: map[string]string{"name": "Ada"},
+		Priority:     "high",
+		Attachments:  []Attachment{{Filename: "a.txt", Content: "eHg="}},
+		Headers:      map[string]string{"X-Custom": "yes"},
+		Tags:         []string{"welcome"},
+		Metadata:     map[string]interface{}{"source": "go-sdk-test"},
+		ScheduledAt:  "2026-09-01T09:00:00Z",
 	}
 
 	body, err := json.Marshal(req)
@@ -48,20 +50,44 @@ func TestSendEmailRequestMarshalsExactServerShape(t *testing.T) {
 		t.Fatalf("unmarshal: %v", err)
 	}
 
-	if payload["from"] != "hello@example.com" {
-		t.Fatalf("from must be a bare string, got %#v", payload["from"])
+	// Display names survive as RFC 5322 "Name <addr>" forms (F48).
+	if payload["from"] != "Hello <hello@example.com>" {
+		t.Fatalf("from must keep the display name, got %#v", payload["from"])
 	}
 	to, _ := payload["to"].([]any)
-	if len(to) != 2 || to[0] != "user@example.com" || to[1] != "second@example.com" {
-		t.Fatalf("to must be bare strings, got %#v", payload["to"])
+	if len(to) != 2 || to[0] != "user@example.com" || to[1] != "Second <second@example.com>" {
+		t.Fatalf("to must serialize display names, got %#v", payload["to"])
 	}
 	if payload["scheduled_at"] != "2026-09-01T09:00:00Z" {
 		t.Fatalf("scheduled_at must be snake_case, got %#v", payload["scheduled_at"])
 	}
 
-	for _, forbidden := range []string{"replyTo", "templateId", "templateData", "attachments", "priority", "scheduledAt", "name"} {
+	// Every accepted option reaches the wire under its documented
+	// snake_case field name (F48).
+	for _, required := range []string{"reply_to", "template_id", "template_data", "attachments", "priority", "headers"} {
+		if _, present := payload[required]; !present {
+			t.Fatalf("field %q must be serialized (F48: no silently dropped options)", required)
+		}
+	}
+	if payload["reply_to"] != "Replies <reply@example.com>" {
+		t.Fatalf("reply_to must keep the display name, got %#v", payload["reply_to"])
+	}
+	if payload["template_id"] != "tpl_1" || payload["priority"] != "high" {
+		t.Fatalf("template_id/priority must be serialized, got %#v", payload)
+	}
+	attachments, _ := payload["attachments"].([]any)
+	if len(attachments) != 1 {
+		t.Fatalf("attachments must be serialized, got %#v", payload["attachments"])
+	}
+	attachment, _ := attachments[0].(map[string]any)
+	if attachment["filename"] != "a.txt" || attachment["content"] != "eHg=" {
+		t.Fatalf("attachment shape mismatch: %#v", attachment)
+	}
+
+	// camelCase spellings must never appear.
+	for _, forbidden := range []string{"replyTo", "templateId", "templateData", "scheduledAt", "name"} {
 		if _, present := payload[forbidden]; present {
-			t.Fatalf("field %q must not be serialized (deny_unknown_fields → 422)", forbidden)
+			t.Fatalf("camelCase field %q must not be serialized", forbidden)
 		}
 	}
 }
@@ -83,23 +109,31 @@ func TestSendOverTheWireUsesExactPayload(t *testing.T) {
 		t.Fatalf("create client: %v", err)
 	}
 	if _, err := client.Emails.Send(context.Background(), &SendEmailRequest{
-		From:       EmailAddress{Email: "hello@example.com"},
-		To:         []EmailAddress{{Email: "user@example.com"}},
-		Subject:    "Hi",
-		Text:       "Hello",
-		Priority:   "high",
-		TemplateID: "tpl_1",
+		From:         EmailAddress{Email: "hello@example.com"},
+		To:           []EmailAddress{{Email: "user@example.com"}},
+		Subject:      "Hi",
+		Text:         "Hello",
+		Priority:     "high",
+		TemplateID:   "tpl_1",
+		TemplateData: map[string]string{"name": "Ada"},
+		ReplyTo:      &EmailAddress{Email: "reply@example.com"},
 	}); err != nil {
 		t.Fatalf("send: %v", err)
 	}
 
-	for _, forbidden := range []string{"priority", "templateId", "replyTo", "scheduledAt", "attachments"} {
-		if _, present := gotBody[forbidden]; present {
-			t.Fatalf("field %q reached the wire", forbidden)
+	// F48: accepted options reach the wire (snake_case), display names survive.
+	for _, required := range []string{"priority", "template_id", "template_data", "reply_to"} {
+		if _, present := gotBody[required]; !present {
+			t.Fatalf("field %q did not reach the wire", required)
 		}
 	}
 	if gotBody["from"] != "hello@example.com" {
-		t.Fatalf("from must be a bare string, got %#v", gotBody["from"])
+		t.Fatalf("from must be an address string, got %#v", gotBody["from"])
+	}
+	for _, forbidden := range []string{"replyTo", "templateId", "templateData", "scheduledAt"} {
+		if _, present := gotBody[forbidden]; present {
+			t.Fatalf("camelCase field %q reached the wire", forbidden)
+		}
 	}
 }
 

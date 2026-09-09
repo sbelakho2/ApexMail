@@ -75,10 +75,10 @@ response = client.emails.send(
     scheduled_at="2026-01-15T09:00:00Z",  # Optional
 )
 
-# Note: the API accepts bare address strings only (no {email, name}
-# objects) and has no reply_to/attachments/headers/priority fields —
-# those inputs are accepted by the SDK for compatibility but are not
-# transmitted.
+# Note: {email, name} address inputs are serialized as RFC 5322
+# "Name <addr>" strings, and every accepted option (reply_to,
+# attachments, headers) is transmitted under its documented
+# snake_case field name.
 
 # Batch send
 responses = client.emails.batch([

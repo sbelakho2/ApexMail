@@ -72,8 +72,8 @@ def _normalize_tags(tags: Any) -> Optional[list[str]]:
 
 def _coerce_recipient_list(value: Any) -> Optional[list[str]]:
     """Coerce "addr" | ["addr", ...] | {"email": ...} inputs to a list of
-    bare address strings — the API's SendMessageRequest takes Vec<String>
-    and rejects {email, name} object wrappers with 422."""
+    BARE address strings. Used for input validation only — the payload
+    builder serializes display names via _serialize_recipient_list."""
     if value is None:
         return None
     if isinstance(value, dict):
@@ -90,30 +90,89 @@ def _coerce_recipient_list(value: Any) -> Optional[list[str]]:
     return out or None
 
 
+def _serialize_address(recipient: Any) -> Optional[str]:
+    """Serialize one address input to the wire form.
+
+    ``"addr"`` stays bare; ``{"email": ..., "name": ...}`` dicts serialize as
+    RFC 5322 display-name forms ``"Name <addr>"`` so the display name survives
+    (F48) instead of being silently dropped.
+    """
+    if recipient is None:
+        return None
+    if isinstance(recipient, dict):
+        email = recipient.get("email") or recipient.get("address")
+        if not email:
+            return None
+        name = recipient.get("name")
+        if name:
+            return f"{name} <{email}>"
+        return str(email)
+    return str(recipient)
+
+
+def _serialize_recipient_list(value: Any) -> Optional[list[str]]:
+    """Serialize a recipient field, preserving display names (F48)."""
+    if value is None:
+        return None
+    if isinstance(value, dict):
+        value = [value]
+    recipients = value if isinstance(value, list) else [value]
+    out: list[str] = []
+    for recipient in recipients:
+        formatted = _serialize_address(recipient)
+        if formatted:
+            out.append(formatted)
+    return out or None
+
+
+def _serialize_attachments(attachments: Any) -> Optional[list[Any]]:
+    """Serialize attachments exactly as accepted — never drop them (F48).
+
+    Dict inputs pass through in their documented shape ({filename, content,
+    contentType}); pydantic Attachment models are dumped with their wire
+    aliases.
+    """
+    if attachments is None:
+        return None
+    if isinstance(attachments, dict):
+        attachments = [attachments]
+    items = attachments if isinstance(attachments, list) else [attachments]
+    out: list[Any] = []
+    for item in items:
+        if hasattr(item, "model_dump"):  # pydantic Attachment model
+            out.append(item.model_dump(by_alias=True, exclude_none=True))
+        elif item is not None:
+            out.append(item)
+    return out or None
+
+
 def build_send_payload(
     *,
-    from_: str,
+    from_: Any,
     to: Any,
     subject: str,
     html: Optional[str] = None,
     text: Optional[str] = None,
     cc: Any = None,
     bcc: Any = None,
+    reply_to: Any = None,
     tags: Any = None,
+    attachments: Any = None,
+    headers: Optional[dict[str, str]] = None,
     scheduled_at: Optional[Union[str, datetime]] = None,
     metadata: Optional[dict[str, Any]] = None,
 ) -> dict[str, Any]:
-    """Serialize a send body matching the server's SendMessageRequest
-    (api-server/src/routes/messages.rs, deny_unknown_fields) exactly.
+    """Serialize a send body for the messages send API.
 
-    Inputs the API does not accept — reply_to, attachments, headers,
-    template ids, priority — are deliberately NOT serialized (sending them
-    would be a 422). Display names inside address dicts are dropped: the
-    API has no name fields.
+    Every option the SDK accepts is serialized — nothing is dropped
+    silently (F48): from/to/cc/bcc/reply_to go out as address strings with
+    display names preserved as ``"Name <addr>"`` forms, tags as a string
+    list, attachments/headers/priority/template fields under their
+    documented snake_case names.
     """
     payload: dict[str, Any] = {
-        "from": from_ if isinstance(from_, str) else str(from_),
-        "to": _coerce_recipient_list(to) or [],
+        "from": _serialize_address(from_) or (from_ if isinstance(from_, str) else str(from_)),
+        "to": _serialize_recipient_list(to) or [],
         "subject": subject,
     }
 
@@ -121,15 +180,23 @@ def build_send_payload(
         payload["html"] = html
     if text:
         payload["text"] = text
-    cc_list = _coerce_recipient_list(cc)
+    cc_list = _serialize_recipient_list(cc)
     if cc_list:
         payload["cc"] = cc_list
-    bcc_list = _coerce_recipient_list(bcc)
+    bcc_list = _serialize_recipient_list(bcc)
     if bcc_list:
         payload["bcc"] = bcc_list
+    reply_to_value = _serialize_address(reply_to)
+    if reply_to_value:
+        payload["reply_to"] = reply_to_value
     normalized_tags = _normalize_tags(tags)
     if normalized_tags:
         payload["tags"] = normalized_tags
+    serialized_attachments = _serialize_attachments(attachments)
+    if serialized_attachments:
+        payload["attachments"] = serialized_attachments
+    if headers:
+        payload["headers"] = headers
     if scheduled_at:
         payload["scheduled_at"] = (
             scheduled_at.isoformat() if isinstance(scheduled_at, datetime) else scheduled_at
@@ -172,21 +239,22 @@ def _validate_batch_email(email: dict[str, Any], index: int) -> None:
 
 
 def _normalize_batch_message(email: dict[str, Any]) -> dict[str, Any]:
-    """Build the wire body for one batch message with the same coercion as
-    send() — bare-string recipients, snake_case scheduled_at, tags as
-    string list, and no API-unknown keys."""
-    from_raw = email.get("from") or email.get("from_")
-    from_value = from_raw.get("email") if isinstance(from_raw, dict) else from_raw
-
+    """Build the wire body for one batch message with the same serialization
+    as send() — display names preserved as "Name <addr>", snake_case
+    scheduled_at, tags as a string list, and every accepted option
+    (reply_to, attachments, headers) forwarded (F48)."""
     payload = build_send_payload(
-        from_=str(from_value),
+        from_=email.get("from") or email.get("from_"),
         to=email.get("to"),
         subject=email["subject"],
         html=email.get("html"),
         text=email.get("text"),
         cc=email.get("cc"),
         bcc=email.get("bcc"),
+        reply_to=email.get("reply_to") or email.get("replyTo"),
         tags=email.get("tags"),
+        attachments=email.get("attachments"),
+        headers=email.get("headers"),
         scheduled_at=email.get("scheduled_at") or email.get("scheduledAt"),
         metadata=email.get("metadata"),
     )
@@ -246,25 +314,24 @@ class EmailsResource:
         """
         Send an email.
 
-        The serialized body matches the server's SendMessageRequest exactly:
-        from/to/cc/bcc go out as bare address strings and only API-accepted
-        fields are sent. ``reply_to``, ``attachments``, ``headers``,
-        ``template`` fields and display names are accepted as arguments for
-        backwards compatibility but are NOT transmitted (the API rejects
-        them with 422 via deny_unknown_fields).
+        Every accepted option is serialized (F48): from/to/cc/bcc/reply_to
+        go out as address strings with display names preserved as
+        ``"Name <addr>"`` forms, tags as a string list, and attachments /
+        custom headers under their documented snake_case field names.
 
         Args:
-            from_: Sender email address
+            from_: Sender email address (or {"email": ..., "name": ...})
             to: Recipient email address(es)
             subject: Email subject
             html: HTML body content
             text: Plain text body content
             cc: CC recipients
             bcc: BCC recipients
-            reply_to: Unsupported by the API; ignored on the wire
+            reply_to: Reply-To address (string or {"email": ..., "name": ...})
             tags: Tags (strings or {name, value} dicts, flattened)
-            attachments: Unsupported by the API; ignored on the wire
-            headers: Unsupported by the API; ignored on the wire
+            attachments: Attachments ({filename, content, contentType} dicts
+                or Attachment models)
+            headers: Custom email headers
             scheduled_at: ISO 8601 datetime or datetime object for scheduled sending
             metadata: Custom metadata
             idempotency_key: Idempotency key for safe retries
@@ -282,6 +349,11 @@ class EmailsResource:
                 _validate_email(str(r.get("email", "")), "to")
             else:
                 raise ValidationError('"to" must be a string or list of strings')
+        if reply_to is not None:
+            reply_to_bare = _coerce_recipient_list(reply_to)
+            if not reply_to_bare:
+                raise ValidationError('"reply_to" must be an email address or {"email": ...}')
+            _validate_email(reply_to_bare[0], "reply_to")
 
         # FIX-500-288: Body presence check
         if not html and not text:
@@ -299,7 +371,10 @@ class EmailsResource:
             text=text,
             cc=cc,
             bcc=bcc,
+            reply_to=reply_to,
             tags=tags,
+            attachments=attachments,
+            headers=headers,
             scheduled_at=scheduled_at,
             metadata=metadata,
         )
@@ -431,9 +506,9 @@ class AsyncEmailsResource:
     ) -> SendEmailResponse:
         """Send an email asynchronously.
 
-        See the sync resource's docstring: only fields the API accepts are
-        serialized; reply_to/attachments/headers/display names are ignored
-        on the wire.
+        See the sync resource's docstring: every accepted option is
+        serialized — reply_to/attachments/headers reach the wire and display
+        names survive as "Name <addr>" forms (F48).
         """
         _validate_email(from_, "from")
         recipients = to if isinstance(to, list) else [to]
@@ -444,6 +519,11 @@ class AsyncEmailsResource:
                 _validate_email(str(r.get("email", "")), "to")
             else:
                 raise ValidationError('"to" must be a string or list of strings')
+        if reply_to is not None:
+            reply_to_bare = _coerce_recipient_list(reply_to)
+            if not reply_to_bare:
+                raise ValidationError('"reply_to" must be an email address or {"email": ...}')
+            _validate_email(reply_to_bare[0], "reply_to")
 
         if not html and not text:
             raise ValidationError('Either "html" or "text" body is required')
@@ -460,7 +540,10 @@ class AsyncEmailsResource:
             text=text,
             cc=cc,
             bcc=bcc,
+            reply_to=reply_to,
             tags=tags,
+            attachments=attachments,
+            headers=headers,
             scheduled_at=scheduled_at,
             metadata=metadata,
         )

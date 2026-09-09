@@ -37,25 +37,27 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 class PayloadContractTest {
 
-    // ── F1: send wire shape vs messages.rs SendMessageRequest ─────────────
+    // ── F1/F48: send wire shape — every accepted option is serialized ──────
 
     @Test
     void typedSendSerializesExactServerShape() throws Exception {
         RecordingHttpClient http = new RecordingHttpClient(flatSendResponse());
         try (ApexMailClient client = client(http)) {
             Emails.SendResponse response = client.emails().send(new Emails.SendRequest(
-                "hello@example.com",
-                List.of("user@example.com", Map.of("email", "second@example.com", "name", "Dropped")),
+                Map.of("email", "hello@example.com", "name", "Hello"),
+                List.of("user@example.com", Map.of("email", "second@example.com", "name", "Second")),
                 "Hello!",
                 "<h1>Hello World</h1>",
                 null,
-                "tpl_legacy",               // must NOT be sent
+                "tpl_1",                                   // template_id — serialized (F48)
+                Map.of("name", "Ada"),                     // template_data — serialized (F48)
                 List.of("cc@example.com"),
                 List.of("bcc@example.com"),
-                "reply@example.com",         // must NOT be sent
-                null,
+                Map.of("email", "reply@example.com", "name", "Replies"), // reply_to (F48)
+                List.of(Map.of("filename", "a.txt", "content", "eHg=")), // attachments (F48)
                 List.of("welcome"),
-                "high",                      // must NOT be sent
+                "high",                                    // priority — serialized (F48)
+                Map.of("X-Custom", "yes"),                 // headers — serialized (F48)
                 Map.of("source", "java-sdk-test"),
                 "2026-09-01T09:00:00Z",
                 null
@@ -64,22 +66,33 @@ class PayloadContractTest {
             assertEquals("msg_1", response.id());
             Map<String, Object> body = http.lastRequestBodyJson();
 
-            assertEquals("hello@example.com", body.get("from"));
-            assertEquals(List.of("user@example.com", "second@example.com"), body.get("to"));
+            // Display names survive as RFC 5322 "Name <addr>" forms (F48).
+            assertEquals("Hello <hello@example.com>", body.get("from"));
+            assertEquals(List.of("user@example.com", "Second <second@example.com>"), body.get("to"));
             assertEquals(List.of("cc@example.com"), body.get("cc"));
             assertEquals(List.of("bcc@example.com"), body.get("bcc"));
             assertEquals(List.of("welcome"), body.get("tags"));
             assertEquals("2026-09-01T09:00:00Z", body.get("scheduled_at"));
 
+            // Every accepted option reaches the wire under its documented
+            // snake_case field name (F48).
+            assertEquals("Replies <reply@example.com>", body.get("reply_to"));
+            assertEquals("tpl_1", body.get("template_id"));
+            assertEquals(Map.of("name", "Ada"), body.get("template_data"));
+            assertEquals(List.of(Map.of("filename", "a.txt", "content", "eHg=")), body.get("attachments"));
+            assertEquals("high", body.get("priority"));
+            assertEquals(Map.of("X-Custom", "yes"), body.get("headers"));
+
+            // camelCase spellings must never appear.
             for (String forbidden : new String[]{
-                "replyTo", "templateId", "templateData", "attachments", "priority", "scheduledAt", "name"}) {
+                "replyTo", "templateId", "templateData", "scheduledAt", "name"}) {
                 assertFalse(body.containsKey(forbidden), forbidden + " must not be serialized");
             }
         }
     }
 
     @Test
-    void mapSendCoercesBareStringToAndDropsUnknownFields() throws Exception {
+    void mapSendSerializesEveryAcceptedOption() throws Exception {
         RecordingHttpClient http = new RecordingHttpClient(flatSendResponse());
         try (ApexMailClient client = client(http)) {
             Map<String, Object> params = new HashMap<>();
@@ -87,16 +100,16 @@ class PayloadContractTest {
             params.put("to", "user@example.com"); // bare string — coerced to a list
             params.put("subject", "Hi");
             params.put("text", "Hello");
-            params.put("replyTo", "r@example.com");
+            params.put("replyTo", Map.of("email", "r@example.com", "name", "R"));
             params.put("priority", "high");
 
             client.emails().send(params);
 
             Map<String, Object> body = http.lastRequestBodyJson();
-            assertEquals("named@example.com", body.get("from"));
+            assertEquals("Named <named@example.com>", body.get("from"));
             assertEquals(List.of("user@example.com"), body.get("to"));
-            assertFalse(body.containsKey("replyTo"));
-            assertFalse(body.containsKey("priority"));
+            assertEquals("R <r@example.com>", body.get("reply_to"));
+            assertEquals("high", body.get("priority"));
         }
     }
 
