@@ -1,6 +1,6 @@
 +++
 title = "SDKs"
-description = "Client libraries for ApexMail. Source is available in the monorepo; the SDKs are not yet published to public package registries."
+description = "ApexMail client libraries are in private preview: not yet published to public package registries. Request preview access to evaluate them before release."
 template = "prose.html"
 weight = 3
 
@@ -10,13 +10,13 @@ last_updated = "2026-07-30"
 
 ## Status: In Development
 
-ApexMail ships first-party client libraries for five server-side languages. **The SDKs are under active development and are not yet published to public package registries** (npm, PyPI, pkg.go.dev, Packagist, RubyGems, Maven Central). Until the first stable release, integrate against the [HTTP API](/docs/api/) directly or build from source in the monorepo.
+ApexMail ships first-party client libraries for five server-side languages. **The SDKs are under active development and are not yet published to public package registries** (npm, PyPI, pkg.go.dev, Packagist, RubyGems, Maven Central). Until the first stable release, integrate against the [HTTP API](/docs/api/) directly.
 
-> Sign up to be notified when each SDK is published, or track progress in the [ApexMail monorepo](packages).
+> [Request SDK preview access](mailto:support@apexmail.ee) to evaluate a library before release, or watch this page for registry announcements.
 
 ## Language Coverage
 
-Each SDK lives in the `packages/` directory of the [ApexMail monorepo](packages). Source links below point to the current development location, not a published package.
+Each SDK is developed inside ApexMail's monorepo; **source is currently private** and available to approved preview customers. Cards below state language status and the intended registry.
 
 | Language   | Module / package name        | Source                                                                                | Min runtime   | Planned install (once published)                              |
 |------------|------------------------------|---------------------------------------------------------------------------------------|---------------|---------------------------------------------------------------|
@@ -30,7 +30,7 @@ All SDKs are MIT-licensed and require TLS 1.2+ for API connections. API keys are
 
 ## Building from Source
 
-Until the packages are published, you can vendor or build the SDK directly from the monorepo:
+Until the packages are published, approved preview customers receive source access on request:
 
 SDK source is currently private and available to approved preview customers (support@apexmail.ee) until the
 first registry release; the drop you receive contains the same

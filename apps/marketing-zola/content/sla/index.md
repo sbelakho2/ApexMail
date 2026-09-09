@@ -4,7 +4,7 @@ description = "ApexMail SLA — our uptime and performance commitments."
 template = "prose.html"
 
 [extra]
-last_updated = "2026-05-07"
+last_updated = "2026-09-09"
 +++
 
 ## 1. Scope
@@ -49,8 +49,12 @@ affected month.
 | 95.0% – 98.999% | 25% |
 | < 95.0% | 50% |
 
-**Plan caps:** Business 10% of monthly charge; Enterprise Cloud and contracted
-deployments 25% (or the contracted figure where an order form specifies one).
+**Plan schedules:**
+
+- **Business** — graduated, no flat cap below the tiers:
+  99.0–99.899% → 10% · 95.0–98.999% → 20% · <95% → 30% of the monthly charge.
+- **Enterprise Cloud and contracted deployments** — the tiers above up to 25%
+  (or the contracted figure where an order form specifies one).
 
 Credits are calculated from measured monthly uptime below the commitment and
 capped by the customer's plan.

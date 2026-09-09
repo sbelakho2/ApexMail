@@ -53,9 +53,9 @@
             <b>POST /v1/messages</b>
           </div>
 <pre class="term-pre"><span class="term-k">curl</span> -X POST https://api.apexmail.ee/v1/messages \
-  -H <span class="term-s">"Authorization: Bearer $APEXMAIL_API_KEY"</span> \
+  -H <span class="term-s">"X-API-Key: $APEXMAIL_API_KEY"</span> \
   -d <span class="term-s">'{"from":"hello@yourcompany.com",
-       "to":"customer@example.com"}'</span>
+       "to":["customer@example.com"]}'</span>
 <span class="term-c">&rarr; 202 accepted &middot; id msg_2f9a</span>
 <span class="term-c">&rarr; accepted by recipient MX &middot; 1.8s</span></pre>
           {# The trace above, made real: a plain form POST to the Rust

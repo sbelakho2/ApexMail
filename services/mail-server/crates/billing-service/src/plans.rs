@@ -193,7 +193,7 @@ pub fn default_plans() -> Vec<PlanSeed> {
                 dedicated_csm: true,
                 priority_onboarding: true,
                 sla_guarantee: true,
-                sla_credit_percentage: 10,
+                sla_credit_percentage: 30,
                 // Scale = priority email + shared Slack hub (no per-customer
                 // Discord, no 24/7 phone). Live calls are scheduled, capped.
                 support_level: SupportLevel::Priority,

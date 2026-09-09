@@ -159,10 +159,10 @@ Rate limits apply per API key per second. The server returns `429 Too Many Reque
 | Plan | Requests/s | Batch size |
 |------|-----------|------------|
 | Free | 10 | 100 |
-| Starter | 100 | 500 |
+| Developer | 100 | 500 |
 | Pro | 100 | 500 |
 | Growth | 500 | 1,000 |
-| Scale | 500 | 1,000 |
+| Business | 500 | 1,000 |
 | Enterprise | Custom | Custom |
 
 Rate-limit headers returned on every response:
@@ -207,7 +207,7 @@ Webhook payloads are signed with HMAC-SHA256. Verify signatures using `X-ApexMai
 ```
 t=1690000000,v1=hmac_sha256_value
 ```
-Payload: `{timestamp}.{raw_body}` signed with your webhook secret. Events include: `email.sent`, `message.delivered`, `message.opened`, `message.clicked`, `message.bounced`, `message.complained`.
+Payload: `{timestamp}.{raw_body}` signed with your webhook secret. Events use the canonical `message.*` vocabulary: `message.accepted`, `message.delivered`, `message.opened`, `message.clicked`, `message.bounced`, `message.complained` (full list in the [webhook guide](/docs/webhooks/)).
 
 ## SDKs
 

@@ -300,18 +300,65 @@ async fn tcp_connect_ok(host: &str, port: u16, timeout: std::time::Duration) -> 
 
 // ─── Status page ───────────────────────────────────────────
 
-async fn status_page() -> impl IntoResponse {
-    let html = r##"<!DOCTYPE html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>ApexMail Status</title>
-<style>:root{--brand:#ef4444;--bg:#f8f9fa;--card:#fff;--border:#e9ecef;--text:#0f1117;--muted:#6b7280;--success:#059669;--warning:#d97706;--error:#dc2626}*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text);max-width:900px;margin:0 auto;padding:40px 20px}h1{font-size:22px;font-weight:700;margin-bottom:4px}h1 span{color:var(--brand)}h1+p{color:var(--muted);font-size:14px;margin-bottom:32px}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}.card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px}.card h3{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:8px}.card .status{font-size:14px;font-weight:600;margin-bottom:4px}.card .meta{font-size:12px;color:var(--muted)}.ok{color:var(--success)}.warn{color:var(--warning)}.err{color:var(--error)}.overall{text-align:center;margin-bottom:24px;padding:20px;background:var(--card);border:1px solid var(--border);border-radius:10px}.overall .big{font-size:36px;font-weight:700}.bar{height:4px;background:var(--border);border-radius:2px;margin-top:12px;overflow:hidden}.bar-fill{height:100%;border-radius:2px;transition:width .3s}footer{text-align:center;margin-top:40px;font-size:12px;color:var(--muted)}</style></head><body>
-<h1><span>Apex</span>Mail Status</h1><p>Live service health — probes run every 60 seconds. <span id=updated style=color:var(--muted)></span></p>
-<div class=overall id=overall><div class=big id=big>—</div><div id=msg style=font-size:14px;color:var(--muted)>Loading…</div></div>
-<div class=grid id=grid></div>
-<div class=bar><div class=bar-fill id=bar style=width:0></div></div>
+async fn status_page(State(state): State<AppState>) -> impl IntoResponse {
+    // SSR the REAL probe state (review SS42/SS52): the crawler/first paint
+    // sees actual health and a last-checked timestamp — never "Loading…".
+    // The inline script only refreshes periodically; if its fetch fails the
+    // server-rendered state remains visible with the original timestamp.
+    let (services, all_operational) = probe_services(&state).await;
+    let updated = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
+
+    let esc = |v: &str| -> String {
+        v.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
+    let mut cards = String::new();
+    let mut operational = 0usize;
+    for svc in &services {
+        let name = svc["name"].as_str().unwrap_or("service");
+        let status = svc["status"].as_str().unwrap_or("unknown");
+        let cls = match status {
+            "operational" | "connected" => {
+                operational += 1;
+                "ok"
+            }
+            "degraded" => "warn",
+            _ => "err",
+        };
+        cards.push_str(&format!(
+            "<div class=card><h3>{}</h3><div class=\"status {}\">{}</div><div class=meta>checked {}</div></div>",
+            esc(name), cls, esc(status), updated
+        ));
+    }
+    let total = services.len().max(1);
+    let pct = (operational * 100 / total) as i64;
+    let (overall_msg, overall_cls) = if pct == 100 {
+        ("All systems operational", "ok")
+    } else if pct >= 80 {
+        ("Minor degradation", "warn")
+    } else {
+        ("Service disruption", "err")
+    };
+
+    let html = format!(
+        r##"<!DOCTYPE html><html lang=en><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>ApexMail Status</title>
+<style>:root{{--brand:#ef4444;--bg:#f8f9fa;--card:#fff;--border:#e9ecef;--text:#0f1117;--muted:#6b7280;--success:#059669;--warning:#d97706;--error:#dc2626}}*,*::before,*::after{{box-sizing:border-box;margin:0;padding:0}}body{{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text);max-width:900px;margin:0 auto;padding:40px 20px}}h1{{font-size:22px;font-weight:700;margin-bottom:4px}}h1 span{{color:var(--brand)}}h1+p{{color:var(--muted);font-size:14px;margin-bottom:32px}}.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:16px}}.card{{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px}}.card h3{{font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin-bottom:8px}}.card .status{{font-size:14px;font-weight:600;margin-bottom:4px}}.card .meta{{font-size:12px;color:var(--muted)}}.ok{{color:var(--success)}}.warn{{color:var(--warning)}}.err{{color:var(--error)}}.overall{{text-align:center;margin-bottom:24px;padding:20px;background:var(--card);border:1px solid var(--border);border-radius:10px}}.overall .big{{font-size:36px;font-weight:700}}.bar{{height:4px;background:var(--border);border-radius:2px;margin-top:12px;overflow:hidden}}.bar-fill{{height:100%;border-radius:2px;transition:width .3s}}footer{{text-align:center;margin-top:40px;font-size:12px;color:var(--muted)}}</style></head><body>
+<h1><span>Apex</span>Mail Status</h1><p>Live service health — probes run every 60 seconds. <span id=updated style=color:var(--muted)>Last checked {updated}</span></p>
+<div class=overall id=overall><div class="big {overall_cls}" id=big>{pct}%</div><div id=msg style=font-size:14px;color:var(--muted)>{overall_msg}</div></div>
+<div class=grid id=grid>{cards}</div>
+<div class=bar><div class=bar-fill id=bar style=width:{pct}%></div></div>
 <footer>ApexMail — Bel Consulting OÜ, Registry 16588745</footer>
 <script>
-async function check(){try{var r=await fetch("/status/api"),d=await r.json();var ok=0,g=document.getElementById("grid"),h="";d.services.forEach(function(s){var cls=s.status==="operational"||s.status==="connected"?"ok":s.status==="degraded"?"warn":"err";if(cls==="ok"||cls==="warn")ok++;h+="<div class=card><h3>"+s.name+"</h3><div class=\"status "+cls+"\">"+s.status+"</div><div class=meta>"+d.updated+"</div></div>"});g.innerHTML=h;var pct=(ok/d.services.length*100).toFixed(0);document.getElementById("big").textContent=pct+"%";document.getElementById("bar").style.width=pct+"%";document.getElementById("big").className="big "+(pct==100?"ok":pct>=80?"warn":"err");document.getElementById("msg").textContent=pct==100?"All systems operational":pct>=80?"Minor degradation":"Service disruption";document.getElementById("updated").textContent="Updated: "+d.updated}catch(ex){document.getElementById("msg").textContent="Status data unavailable";document.getElementById("big").className="big err"}}
+async function check(){{try{{var r=await fetch("/status/api"),d=await r.json();var ok=0,g=document.getElementById("grid"),h="";d.services.forEach(function(s){{var cls=s.status==="operational"||s.status==="connected"?"ok":s.status==="degraded"?"warn":"err";if(cls==="ok"||cls==="warn")ok++;h+="<div class=card><h3>"+s.name+"</h3><div class=\"status "+cls+"\">"+s.status+"</div><div class=meta>checked "+d.updated+"</div></div>"}});g.innerHTML=h;var pct=(ok/d.services.length*100).toFixed(0);document.getElementById("big").textContent=pct+"%";document.getElementById("bar").style.width=pct+"%";document.getElementById("big").className="big "+(pct==100?"ok":pct>=80?"warn":"err");document.getElementById("msg").textContent=pct==100?"All systems operational":pct>=80?"Minor degradation":"Service disruption";document.getElementById("updated").textContent="Last checked "+d.updated}}catch(ex){{/* keep the server-rendered state visible */}}}}
 check();setInterval(check,60000)
-</script></body></html>"##;
+</script></body></html>"##,
+        updated = updated,
+        overall_cls = overall_cls,
+        overall_msg = overall_msg,
+        pct = pct,
+        cards = cards,
+    );
     (
         StatusCode::OK,
         [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
@@ -346,6 +393,22 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 async fn status_api(State(state): State<AppState>) -> impl IntoResponse {
+    let (services, all_operational) = probe_services(&state).await;
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "status": if all_operational { "operational" } else { "degraded" },
+            "services": services,
+            "updated": chrono::Utc::now().to_rfc3339()
+        })),
+    )
+        .into_response()
+}
+
+/// The shared probe set (review 2026-09-09 SS42/SS52): consumed by BOTH the
+/// JSON API and the server-rendered status page so the SSR output is real
+/// health, never a Loading placeholder.
+async fn probe_services(state: &AppState) -> (Vec<serde_json::Value>, bool) {
     let mut services = Vec::new();
     let mut all_operational = true;
 
@@ -439,15 +502,7 @@ async fn status_api(State(state): State<AppState>) -> impl IntoResponse {
         all_operational = false;
     }
 
-    (
-        StatusCode::OK,
-        Json(serde_json::json!({
-            "status": if all_operational { "operational" } else { "degraded" },
-            "services": services,
-            "updated": chrono::Utc::now().to_rfc3339()
-        })),
-    )
-        .into_response()
+    (services, all_operational)
 }
 
 async fn status_history() -> impl IntoResponse {

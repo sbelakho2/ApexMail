@@ -17,7 +17,7 @@ ApexMail Enterprise is the contractual option for organizations that need high-v
 | API calls | Unlimited |
 | Sending domains and team members | Unlimited |
 | Event retention | 730 days |
-| Included dedicated IPs | 10 |
+| Included dedicated IPs | up to 3 (architecture-based) |
 | Identity and audit controls | SAML SSO and audit logs |
 | Deployment options | Private Cloud and BYOIP subject to contract and technical review |
 | Support | Dedicated |
