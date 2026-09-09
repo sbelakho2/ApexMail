@@ -8,6 +8,12 @@
 //! v2 – version u8 + per-field u16-BE length prefix
 //! v3 – v2 + additional originalUrl field
 //!
+//! Unsubscribe/preferences token payload format (inside the GCM envelope):
+//! v1 (legacy) – text `"tenantId:recipient:unix_ms"` (also accepted in the
+//!               legacy HMAC-signed wire format, full or 16-byte-truncated)
+//! v2 – binary `AXU2` magic + u16-BE length-prefixed tenantId, recipient,
+//!      messageId + ASCII decimal unix_ms (F13:message-attributed tokens)
+//!
 //! Token wire format://! base64url(IV[12] || AuthTag[16] || ciphertext)
 //!
 //! Key derivation://! encryption_key = HMAC-SHA256(master_secret, "encryption")[0..16]
@@ -44,6 +50,11 @@ pub struct UnsubscribeData {
     pub recipient: String,
     /// Decoded for token-expiry validation in the unsubscribe flow.
     pub timestamp_ms: u64,
+    /// F13:originating message id, present only in v2 unsubscribe tokens.
+    /// `None` for legacy (`tenant:recipient:ts`) tokens — the caller must
+    /// then resolve attribution against the canonical recipient arrays (or
+    /// record `"unknown"`) and NEVER invent a message id.
+    pub message_id: Option<String>,
 }
 
 /// Detailed tracking token decode errors for auditing and diagnostics.
@@ -159,7 +170,11 @@ impl TrackingCodec {
     // ── Unsubscribe token ─────────────────────────────────────────────
 
     /// Generate an AES-128-GCM encrypted unsubscribe token.
-    /// Payload:`{tenantId}:{recipient}:{unix_ms}` (UTF-8).
+    /// Payload:`{tenantId}:{recipient}:{unix_ms}` (UTF-8) — the LEGACY v1
+    /// format (no message attribution). Prefer
+    /// [`TrackingCodec::generate_unsubscribe_token_with_message`] for new
+    /// mail so the tracking service can attribute the unsubscribe to the
+    /// originating message without a database lookup (F13).
     pub fn generate_unsubscribe_token(&self, tenant_id: &str, recipient: &str) -> Result<String> {
         let ts_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -168,6 +183,49 @@ impl TrackingCodec {
 
         let payload_str = format!("{}:{}:{}", tenant_id, recipient, ts_ms);
         let (iv, tag, ciphertext) = self.aes128gcm_encrypt(payload_str.as_bytes())?;
+
+        let mut combined = Vec::with_capacity(IV_LEN + AUTH_TAG_LEN + ciphertext.len());
+        combined.extend_from_slice(&iv);
+        combined.extend_from_slice(&tag);
+        combined.extend_from_slice(&ciphertext);
+
+        Ok(URL_SAFE_NO_PAD.encode(&combined))
+    }
+
+    /// F13:generate a v2 unsubscribe token that carries the ORIGINATING
+    /// message id inside the authenticated (AES-128-GCM) envelope, so
+    /// attribution never depends on a `messages` lookup that can silently
+    /// fail and get substituted with an invented id.
+    ///
+    /// v2 payload layout (binary, length-prefixed — unambiguous even when
+    /// tenant/recipient/message ids contain `:`):
+    ///
+    /// ```text
+    /// b"AXU2"                       4-byte magic
+    /// u16-be  tenant_id length
+    ///         tenant_id bytes
+    /// u16-be  recipient length
+    ///         recipient bytes
+    /// u16-be  message_id length
+    ///         message_id bytes
+    ///         ASCII decimal unix-ms timestamp
+    /// ```
+    ///
+    /// The magic is uppercase; platform tenant ids are 26-char [0-9a-z]
+    /// nanoids, so a legacy v1 text payload can never collide with it.
+    pub fn generate_unsubscribe_token_with_message(
+        &self,
+        tenant_id: &str,
+        recipient: &str,
+        message_id: &str,
+    ) -> Result<String> {
+        let ts_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+
+        let payload = serialize_unsub_payload_v2(tenant_id, recipient, message_id, ts_ms);
+        let (iv, tag, ciphertext) = self.aes128gcm_encrypt(&payload)?;
 
         let mut combined = Vec::with_capacity(IV_LEN + AUTH_TAG_LEN + ciphertext.len());
         combined.extend_from_slice(&iv);
@@ -206,12 +264,30 @@ impl TrackingCodec {
         }
 
         // ── Try AES-128-GCM first ─────────────────────────────────────
-        let payload_str = self.try_gcm_decrypt_to_string(&combined).or_else(|| {
-            // ── Fallback:legacy HMAC-signed format ───────────────────
+        let payload_bytes = self.try_gcm_decrypt(&combined).or_else(|| {
             self.try_legacy_hmac_verify(&combined)
+                .map(String::into_bytes)
         })?;
 
-        parse_unsubscribe_payload(&payload_str, max_age_days)
+        // F13:v2 payloads carry the originating message id; legacy text
+        // payloads (`tenant:recipient:ts`) do not and fall back to the
+        // caller's database resolution.
+        if payload_bytes.starts_with(UNSUB_PAYLOAD_V2_MAGIC) {
+            let (tenant_id, recipient, message_id, timestamp_ms) =
+                parse_unsub_payload_v2(&payload_bytes)?;
+            if !unsubscribe_token_age_ok(timestamp_ms, max_age_days) {
+                return None; // Token too old
+            }
+            Some(UnsubscribeData {
+                tenant_id,
+                recipient,
+                timestamp_ms,
+                message_id: Some(message_id),
+            })
+        } else {
+            let payload_str = String::from_utf8(payload_bytes).ok()?;
+            parse_unsubscribe_payload(&payload_str, max_age_days)
+        }
     }
 
     /// Public alias used by preferences routes (configurable max age).
@@ -278,13 +354,10 @@ impl TrackingCodec {
             .map_err(|e| anyhow!("AES-128-GCM decrypt failed: {}", e))
     }
 
-    fn try_gcm_decrypt_to_string(&self, combined: &[u8]) -> Option<String> {
+    fn try_gcm_decrypt(&self, combined: &[u8]) -> Option<Vec<u8>> {
         let (iv_bytes, rest) = combined.split_at(IV_LEN);
         let (tag_bytes, ciphertext) = rest.split_at(AUTH_TAG_LEN);
-        let plain = self
-            .aes128gcm_decrypt(ciphertext, iv_bytes, tag_bytes)
-            .ok()?;
-        String::from_utf8(plain).ok()
+        self.aes128gcm_decrypt(ciphertext, iv_bytes, tag_bytes).ok()
     }
 
     fn try_legacy_hmac_verify(&self, combined: &[u8]) -> Option<String> {
@@ -362,6 +435,86 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
 
 // ── Unsubscribe payload parser ────────────────────────────────────────────────
 
+/// F13:v2 unsubscribe payload magic. Uppercase on purpose — platform tenant
+/// ids are 26-char [0-9a-z] nanoids, so a legacy v1 text payload
+/// (`"tenant:recipient:ts"`) can never start with it and the two formats
+/// stay unambiguously distinguishable after decryption.
+const UNSUB_PAYLOAD_V2_MAGIC: &[u8; 4] = b"AXU2";
+
+/// Serialize a v2 (message-attributed) unsubscribe payload.
+fn serialize_unsub_payload_v2(
+    tenant_id: &str,
+    recipient: &str,
+    message_id: &str,
+    ts_ms: u64,
+) -> Vec<u8> {
+    let tid = tenant_id.as_bytes();
+    let rec = recipient.as_bytes();
+    let mid = message_id.as_bytes();
+    let ts = ts_ms.to_string();
+
+    let mut buf = Vec::with_capacity(4 + 6 + tid.len() + rec.len() + mid.len() + ts.len());
+    buf.extend_from_slice(UNSUB_PAYLOAD_V2_MAGIC);
+    write_u16be(&mut buf, tid.len() as u16);
+    buf.extend_from_slice(tid);
+    write_u16be(&mut buf, rec.len() as u16);
+    buf.extend_from_slice(rec);
+    write_u16be(&mut buf, mid.len() as u16);
+    buf.extend_from_slice(mid);
+    buf.extend_from_slice(ts.as_bytes());
+    buf
+}
+
+/// Parse a decrypted v2 unsubscribe payload. `None` on any structural
+/// defect (bad lengths, non-UTF-8 fields, non-decimal timestamp).
+fn parse_unsub_payload_v2(buf: &[u8]) -> Option<(String, String, String, u64)> {
+    let rest = buf.strip_prefix(UNSUB_PAYLOAD_V2_MAGIC)?;
+
+    let mut pos = 0usize;
+    let read_field = |pos: &mut usize| -> Option<String> {
+        if *pos + 2 > rest.len() {
+            return None;
+        }
+        let len = ((rest[*pos] as usize) << 8) | rest[*pos + 1] as usize;
+        *pos += 2;
+        if *pos + len > rest.len() {
+            return None;
+        }
+        let s = std::str::from_utf8(&rest[*pos..*pos + len])
+            .ok()?
+            .to_owned();
+        *pos += len;
+        Some(s)
+    };
+
+    let tenant_id = read_field(&mut pos)?;
+    let recipient = read_field(&mut pos)?;
+    let message_id = read_field(&mut pos)?;
+
+    let ts_str = std::str::from_utf8(&rest[pos..]).ok()?;
+    if ts_str.is_empty() || !ts_str.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let timestamp_ms: u64 = ts_str.parse().ok()?;
+
+    if tenant_id.is_empty() || recipient.is_empty() || message_id.is_empty() {
+        return None;
+    }
+
+    Some((tenant_id, recipient, message_id, timestamp_ms))
+}
+
+/// Shared age gate for unsubscribe/preference tokens (v1 and v2 payloads):
+/// rejected once older than `max_age_days` (default 90).
+fn unsubscribe_token_age_ok(timestamp_ms: u64, max_age_days: Option<u64>) -> bool {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let max_ms = max_age_days.unwrap_or(90) * 24 * 60 * 60 * 1000;
+    now_ms.saturating_sub(timestamp_ms) <= max_ms
+}
+
 fn parse_unsubscribe_payload(payload: &str, max_age_days: Option<u64>) -> Option<UnsubscribeData> {
     // Format:"tenantId:recipient:timestamp_ms"
     // #195:Both tenant_id and recipient may contain colons.
@@ -387,15 +540,7 @@ fn parse_unsubscribe_payload(payload: &str, max_age_days: Option<u64>) -> Option
 
     let timestamp_ms: u64 = ts_str.parse().ok()?;
 
-    // Age check
-    let now_ms = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64;
-
-    let max_ms = max_age_days.unwrap_or(90) * 24 * 60 * 60 * 1000;
-
-    if now_ms.saturating_sub(timestamp_ms) > max_ms {
+    if !unsubscribe_token_age_ok(timestamp_ms, max_age_days) {
         return None; // Token too old
     }
 
@@ -403,6 +548,7 @@ fn parse_unsubscribe_payload(payload: &str, max_age_days: Option<u64>) -> Option
         tenant_id,
         recipient,
         timestamp_ms,
+        message_id: None,
     })
 }
 
@@ -633,6 +779,114 @@ mod tests {
             .expect("verify");
         assert_eq!(data.tenant_id, "tenant_1");
         assert_eq!(data.recipient, "user@domain.com");
+        // Legacy (v1) tokens carry NO message attribution (F13).
+        assert!(data.message_id.is_none());
+    }
+
+    // ── F13:v2 unsubscribe tokens carry the originating message id ──────
+
+    #[test]
+    fn v2_unsubscribe_token_roundtrip_carries_message_id() {
+        let codec = make_codec();
+        let token = codec
+            .generate_unsubscribe_token_with_message(
+                "tenant_1",
+                "user@domain.com",
+                "0b6e1a20-9c2d-4f3e-8a7b-111122223333",
+            )
+            .expect("generate");
+        let data = codec
+            .verify_unsubscribe_token(&token, Some(90))
+            .expect("verify");
+        assert_eq!(data.tenant_id, "tenant_1");
+        assert_eq!(data.recipient, "user@domain.com");
+        assert_eq!(
+            data.message_id.as_deref(),
+            Some("0b6e1a20-9c2d-4f3e-8a7b-111122223333")
+        );
+    }
+
+    /// The v2 payload is length-prefixed, so colons in any field survive.
+    #[test]
+    fn v2_unsubscribe_token_survives_colons_in_fields() {
+        let codec = make_codec();
+        let token = codec
+            .generate_unsubscribe_token_with_message("ten:ant", "weird:user@host", "msg:42")
+            .expect("generate");
+        let data = codec
+            .verify_unsubscribe_token(&token, Some(90))
+            .expect("verify");
+        assert_eq!(data.tenant_id, "ten:ant");
+        assert_eq!(data.recipient, "weird:user@host");
+        assert_eq!(data.message_id.as_deref(), Some("msg:42"));
+    }
+
+    /// A different codec (wrong key) must not verify a v2 token.
+    #[test]
+    fn v2_unsubscribe_token_rejects_wrong_key() {
+        let codec = TrackingCodec::new("secret-one-aaaaaaaaaaaaaaaaaaaaaaaa");
+        let token = codec
+            .generate_unsubscribe_token_with_message("t", "u@x.com", "m1")
+            .expect("generate");
+        let other = TrackingCodec::new("secret-two-aaaaaaaaaaaaaaaaaaaaaaaa");
+        assert!(other.verify_unsubscribe_token(&token, None).is_none());
+    }
+
+    /// A tampered v2 token must fail the GCM tag check (never decode garbage).
+    #[test]
+    fn v2_unsubscribe_token_tampering_fails() {
+        let codec = make_codec();
+        let token = codec
+            .generate_unsubscribe_token_with_message("t", "u@x.com", "m1")
+            .expect("generate");
+        let mut raw = URL_SAFE_NO_PAD.decode(&token).expect("decode");
+        let mid = raw.len() / 2;
+        raw[mid] ^= 0x01;
+        let tampered = URL_SAFE_NO_PAD.encode(&raw);
+        assert!(codec.verify_unsubscribe_token(&tampered, None).is_none());
+    }
+
+    /// Structural corruption of a v2 payload (declared length overruns the
+    /// buffer) must be REJECTED, never decoded as garbage.
+    #[test]
+    fn v2_unsubscribe_payload_rejects_structural_corruption() {
+        // Valid frame, then truncate each field region.
+        let mut buf = serialize_unsub_payload_v2("tenant", "u@x.com", "msg", 1_700_000_000_000);
+        let full = buf.clone();
+        let full_ts = "1700000000000";
+        for cut in 1..full.len() {
+            buf.truncate(full.len() - cut);
+            if buf.starts_with(UNSUB_PAYLOAD_V2_MAGIC) {
+                // A truncated frame may still parse only if the cut lands in
+                // the trailing timestamp (leaving a valid decimal prefix);
+                // anything else must be None. Whatever parses must carry the
+                // exact original string fields.
+                if let Some((t, r, m, ts)) = parse_unsub_payload_v2(&buf) {
+                    assert_eq!(t, "tenant");
+                    assert_eq!(r, "u@x.com");
+                    assert_eq!(m, "msg");
+                    assert!(
+                        full_ts.starts_with(&ts.to_string()),
+                        "timestamp must be a prefix of the original, got {ts}"
+                    );
+                }
+            }
+        }
+
+        // Declared tenant length overruns the buffer → rejected.
+        let mut bad = UNSUB_PAYLOAD_V2_MAGIC.to_vec();
+        bad.extend_from_slice(&[0xFF, 0xFF]);
+        bad.extend_from_slice(b"short");
+        assert!(parse_unsub_payload_v2(&bad).is_none());
+
+        // Non-decimal timestamp → rejected.
+        let mut bad_ts = UNSUB_PAYLOAD_V2_MAGIC.to_vec();
+        for field in ["t", "u@x.com", "m"] {
+            bad_ts.extend_from_slice(&(field.len() as u16).to_be_bytes());
+            bad_ts.extend_from_slice(field.as_bytes());
+        }
+        bad_ts.extend_from_slice(b"12ab");
+        assert!(parse_unsub_payload_v2(&bad_ts).is_none());
     }
 
     #[test]

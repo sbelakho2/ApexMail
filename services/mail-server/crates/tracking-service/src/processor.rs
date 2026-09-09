@@ -24,6 +24,14 @@
 //! `apexmail:suppressions:pending` (drained by the flush loop with the
 //! same retry budget as events) AND the caller gets an error — never a
 //! silent success without the suppression row.
+//! • F54:suppression/preference row ids are generated with the platform's
+//! canonical 26-char entity-ID generator (`apexmail_lib::id::generate_id`)
+//! — `suppressions.id` / `subscription_preferences.id` are VARCHAR(26) and
+//! the legacy 36-char `sup_` UUID ids overflowed the column (22001).
+//! • F55:every consent transition fans out on the `suppression:added` /
+//! `suppression:removed` / `suppression:changed` Redis channels — including
+//! suppressions that land via the retry queue and preference-center
+//! changes — so sending caches can invalidate.
 //! • GDPR:client IPs are masked at every persistence boundary (Postgres
 //! events, ClickHouse ingest — IPv4 → /24, IPv6 → /48 via
 //! `analytics::ip_mask`); full IPs remain only in transient paths.
@@ -917,36 +925,89 @@ impl EventProcessor {
         email: &str,
         category: Option<&str>,
     ) -> Result<()> {
-        let sup_id = new_id("sup");
+        // F54:suppressions.id / subscription_preferences.id are VARCHAR(26);
+        // the canonical platform generator for 26-char entity ids is
+        // `apexmail_lib::id::generate_id(prefix, 22)` (same one the
+        // api-server uses). The old "sup_" + 32-hex UUID (36 chars) overflowed
+        // the column (SQLSTATE 22001) and failed every insert.
+        let sup_id = suppression_entity_id();
         let email_lc = email.to_lowercase();
 
         self.insert_suppression_row(&sup_id, tenant_id, email, category)
             .await?;
 
-        // Fire-and-forget Redis publish (F-217)
+        self.publish_suppression_added(tenant_id, &email_lc, category);
+
+        Ok(())
+    }
+
+    // ── Suppression / consent fan-out (F55, tracking side) ─────────────
+
+    /// Fire-and-forget publish helpers (F-217 / F55). Subscribers (e.g. the
+    /// worker's suppression cache) need the recipient identity
+    /// (`tenantId` + `email`) plus what changed. Failures are logged and
+    /// never propagate — the Postgres row remains the source of truth and
+    /// the Redis `suppression:*` channels are cache invalidations, not the
+    /// record itself.
+    pub fn publish_suppression_added(&self, tenant_id: &str, email: &str, category: Option<&str>) {
         let payload = serde_json::json!({
             "tenantId": tenant_id,
-            "email": email_lc,
+            "email": email,
             "reason": "unsubscribe",
             "category": category,
             "timestamp": Utc::now().to_rfc3339(),
         });
+        self.publish_suppression_event("suppression:added", payload);
+    }
+
+    /// F38/F55:a resubscription REMOVES the suppression — publishing
+    /// `suppression:removed` lets sending caches invalidate the stale
+    /// "suppressed" entry instead of holding it for their TTL.
+    pub fn publish_suppression_removed(&self, tenant_id: &str, email: &str) {
+        let payload = serde_json::json!({
+            "tenantId": tenant_id,
+            "email": email,
+            "timestamp": Utc::now().to_rfc3339(),
+        });
+        self.publish_suppression_event("suppression:removed", payload);
+    }
+
+    /// F55:per-category preference changes alter send eligibility too —
+    /// publish `suppression:changed` with the category and new consent
+    /// state so subscribers can key their invalidation on it.
+    pub fn publish_preference_changed(
+        &self,
+        tenant_id: &str,
+        email: &str,
+        category: &str,
+        subscribed: bool,
+    ) {
+        let payload = serde_json::json!({
+            "tenantId": tenant_id,
+            "email": email,
+            "category": category,
+            "subscribed": subscribed,
+            "timestamp": Utc::now().to_rfc3339(),
+        });
+        self.publish_suppression_event("suppression:changed", payload);
+    }
+
+    fn publish_suppression_event(&self, channel: &str, payload: serde_json::Value) {
         let redis = self.redis.clone();
         let payload_str = payload.to_string();
+        let channel = channel.to_string();
         tokio::spawn(async move {
             if let Ok(mut conn) = redis.get().await {
                 if let Err(error) = redis::cmd("PUBLISH")
-                    .arg("suppression:added")
+                    .arg(&channel)
                     .arg(payload_str)
                     .query_async::<()>(&mut *conn)
                     .await
                 {
-                    warn!(error = %error, "Failed to publish suppression update");
+                    warn!(channel = %channel, error = %error, "Failed to publish suppression update");
                 }
             }
         });
-
-        Ok(())
     }
 
     // ── Suppression retry queue (F2) ──────────────────────────────────
@@ -1017,9 +1078,12 @@ impl EventProcessor {
                 );
                 continue;
             };
+            // F54:26-char entity id on the retry path too — the pending
+            // record eventually lands in the same VARCHAR(26) column.
+            let sup_id = suppression_entity_id();
             match self
                 .insert_suppression_row(
-                    &new_id("sup"),
+                    &sup_id,
                     &retry.tenant_id,
                     &retry.email,
                     retry.category.as_deref(),
@@ -1031,6 +1095,15 @@ impl EventProcessor {
                         tenant_id = %retry.tenant_id,
                         attempt = retry.retries + 1,
                         "Pending suppression retry succeeded"
+                    );
+                    // F55:a suppression that landed via the retry queue must
+                    // fan out exactly like the immediate path — subscribers
+                    // would otherwise hold a stale "not suppressed" cache
+                    // entry until their TTL expires.
+                    self.publish_suppression_added(
+                        &retry.tenant_id,
+                        &retry.email.to_lowercase(),
+                        retry.category.as_deref(),
                     );
                 }
                 Err(e) => match bump_suppression_retry(entry) {
@@ -1215,9 +1288,29 @@ fn sha256_hex8(s: &str) -> String {
 }
 
 /// Generate a prefixed ULID-style ID (e.g. "evt_01HXYZ...").
-/// Uses UUID v4 for simplicity.
+/// Uses UUID v4 for simplicity. ONLY for columns that can hold it —
+/// `events.id` / `webhook_queue.id` are VARCHAR(64), so the 36-char
+/// `"evt_" + 32-hex` output fits. It does NOT fit VARCHAR(26) columns; use
+/// [`entity_id_26`] for those (F54).
 fn new_id(prefix: &str) -> String {
     format!("{prefix}_{}", Uuid::new_v4().simple())
+}
+
+/// F54:generate a 26-char entity id for VARCHAR(26) PRIMARY KEY columns
+/// (`suppressions.id`, `subscription_preferences.id`). This is the
+/// platform's canonical generator — `apexmail_lib::id::generate_id` — the
+/// same one the api-server uses for suppression rows
+/// (`generate_id("sup", 22)`): `"{prefix}_"` (4 chars) + 22 chars of
+/// [0-9a-z] nanoid = exactly 26.
+fn entity_id_26(prefix: &str) -> String {
+    apexmail_lib::id::generate_id(prefix, 22)
+}
+
+/// F54:suppression row id (`suppressions.id` / `subscription_preferences.id`,
+/// both VARCHAR(26)). Per-category preference rows are minted in
+/// `routes/unsubscribe.rs` (`new_preference_id`) with the same generator.
+fn suppression_entity_id() -> String {
+    entity_id_26("sup")
 }
 
 /// Derive a dedup cache key from event type and identifying fields.
@@ -1333,6 +1426,40 @@ mod tests {
     #[test]
     fn sha256_hex8_len() {
         assert_eq!(sha256_hex8("hello").len(), 8);
+    }
+
+    // ── F54:26-char entity ids for VARCHAR(26) columns ────────────────
+
+    /// suppressions.id / subscription_preferences.id are VARCHAR(26); the
+    /// old `new_id("sup")` minted 36-char ids that overflowed the column
+    /// (SQLSTATE 22001). The canonical generator must produce exactly 26
+    /// chars, prefixed, lowercase-alnum only — on EVERY call.
+    #[test]
+    fn entity_ids_for_varchar26_columns_are_exactly_26_chars() {
+        for _ in 0..100 {
+            let sup = suppression_entity_id();
+            assert_eq!(sup.len(), 26, "suppression id: {sup}");
+            assert!(sup.starts_with("sup_"), "prefix: {sup}");
+            assert!(
+                sup.chars()
+                    .all(|c| c.is_ascii_digit() || c.is_ascii_lowercase() || c == '_'),
+                "charset: {sup}"
+            );
+
+            let prf = entity_id_26("prf");
+            assert_eq!(prf.len(), 26, "preference id: {prf}");
+            assert!(prf.starts_with("prf_"), "prefix: {prf}");
+        }
+    }
+
+    /// The UUID-based generator stays legal ONLY for the wide VARCHAR(64)
+    /// columns (events, webhook_queue) — pin its shape so a future reuse on
+    /// a VARCHAR(26) table is caught by this test failing review.
+    #[test]
+    fn uuid_based_new_id_is_36_chars_and_only_used_for_wide_columns() {
+        let id = new_id("evt");
+        assert_eq!(id.len(), 36);
+        assert!(id.starts_with("evt_"));
     }
 
     #[test]

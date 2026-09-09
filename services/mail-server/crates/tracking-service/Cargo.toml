@@ -14,6 +14,11 @@ path = "src/main.rs"
 mail-common = { path = "../mail-common", features = ["sqlx"] }
 # D: recipient privacy-encoding for the ClickHouse analytics ingest path.
 analytics = { path = "../analytics" }
+# F54: canonical 26-char entity-ID generator (same one the api-server uses
+# for suppressions.id — `generate_id("sup", 22)`); suppressions.id and
+# subscription_preferences.id are VARCHAR(26) and must not receive the
+# 36-char UUID-based IDs the tracking crate used to mint locally.
+apexmail-lib = { path = "../apexmail-lib" }
 
 # Async runtime
 tokio.workspace = true

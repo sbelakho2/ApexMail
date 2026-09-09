@@ -83,7 +83,7 @@ pub fn render_success_page(email: &str) -> String {
 pub fn render_confirmation_page(token: &str, email: &str, unsub_path: &str) -> String {
     let email_safe = escape_html(email);
     let token_safe = escape_html(token);
-    // #196:Escape unsub_path for safe use in HTML href attributes
+    // #196:Escape unsub_path for safe use in HTML form action attributes
     let unsub_path = escape_html(unsub_path);
     format!(
         r#"<!DOCTYPE html>
@@ -103,7 +103,7 @@ pub fn render_confirmation_page(token: &str, email: &str, unsub_path: &str) -> S
     .email {{ color: #000000; font-weight: 700; display: block; margin-top: 8px; }}
     .btn {{ display: inline-block; background: #dc2626; color: #fff; padding: 12px 24px;
       border-radius: 0px; text-decoration: none; font-weight: 700; transition: all 0.2s;
-      text-transform: uppercase; letter-spacing: 0.05em; font-size: 14px; }}
+      text-transform: uppercase; letter-spacing: 0.05em; font-size: 14px; border: none; cursor: pointer; }}
   </style>
 </head>
 <body>
@@ -112,7 +112,13 @@ pub fn render_confirmation_page(token: &str, email: &str, unsub_path: &str) -> S
     <p>Are you sure you want to unsubscribe?
       <span class="email">{email_safe}</span>
     </p>
-    <a href="{unsub_path}/{token_safe}?confirm=1" class="btn">Yes, Unsubscribe Me</a>
+    <!-- F39:confirmation is a plain HTML form POST (accessible, no JS).
+         The old GET ?confirm=1 link mutated consent on a plain fetch —
+         prefetchers and link scanners could unsubscribe users. -->
+    <form method="POST" action="{unsub_path}/{token_safe}/confirm">
+      <input type="hidden" name="confirm" value="true">
+      <button type="submit" class="btn">Yes, Unsubscribe Me</button>
+    </form>
   </div>
 </body>
 </html>"#
@@ -240,4 +246,39 @@ pub fn render_preferences_page(
 </body>
 </html>"#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── F39:confirmation is a POST form, not a GET mutation link ──────
+
+    #[test]
+    fn confirmation_page_renders_post_form_not_get_link() {
+        let token = "qLR6jSz1GePJxneHSEllfRrJbLjpeqSiDD6NaB6nFF6_3Jv3ciCb2g7ZEVUic7np62bt2Dgnd9-mt5USUxH4wJCdfP4";
+        let html = render_confirmation_page(token, "user@example.com", "/u");
+
+        // Plain HTML form POST (accessible, no JS) to the confirm endpoint.
+        assert!(html.contains(&format!(
+            r#"<form method="POST" action="/u/{token}/confirm">"#
+        )));
+        assert!(html.contains(r#"<input type="hidden" name="confirm" value="true">"#));
+        assert!(html.contains(r#"<button type="submit" class="btn">Yes, Unsubscribe Me</button>"#));
+
+        // The legacy GET ?confirm=1 mutation link must be gone.
+        assert!(!html.contains("?confirm=1\""));
+        // No script required for the flow.
+        assert!(!html.contains("<script"));
+    }
+
+    #[test]
+    fn confirmation_page_escapes_token_and_email() {
+        let html = render_confirmation_page("abcDEF123_-xyz", "user+tag@example.com", "/u");
+        assert!(html.contains("user+tag@example.com"));
+
+        let hostile = render_confirmation_page("abcDEF123_-", "<script>alert(1)</script>", "/u");
+        assert!(!hostile.contains("<script>alert"));
+        assert!(hostile.contains("&lt;script&gt;"));
+    }
 }
