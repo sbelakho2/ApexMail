@@ -2196,6 +2196,13 @@
     0 0 0 5px rgb(var(--border));
 }
 
+/* Password requirements paint only while the field is focused (zero-JS
+   :focus-within reveal) — an always-on paragraph between the auth form
+   elements read as clutter. The same text stays reachable to assistive
+   tech via the input's title + aria-describedby. */
+.apex-pwd-hint { display: none; }
+.apex-pwd-wrap:focus-within + .apex-pwd-hint { display: block; }
+
 /* DIAL (mark-native radial KPI): the SVG carries track + arc + terminal;
    this positions and typesets the value over it. */
 .apex-dial { position: relative; display: inline-grid; place-items: center; }

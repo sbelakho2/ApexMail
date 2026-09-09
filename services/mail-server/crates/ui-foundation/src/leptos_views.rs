@@ -1963,12 +1963,21 @@ fn password_pattern() -> &'static str {
 }
 
 fn password_requirements_text() -> &'static str {
-    "Use 15-128 characters — longer is stronger. Any characters welcome (no symbol or digit mix required); avoid common passwords and simple repeat/sequence patterns."
+    // NIST SP 800-63B-4 (review 2026-09-08 §21): length-only policy —
+    // no composition mandates. Kept to one compact sentence: it renders
+    // as a focus-revealed hint and as the input's title tooltip.
+    "15-128 characters — longer is stronger. Any characters welcome; avoid common passwords and simple repeated patterns."
 }
 
-fn password_requirements_hint() -> String {
+/// Password requirements as a focus-revealed hint: the paragraph paints
+/// only while its field is focused (`.apex-pwd-wrap:focus-within` in
+/// globals.css — zero JavaScript), and the same text stays reachable to
+/// assistive technology through the input's `title` and
+/// `aria-describedby`. An always-on paragraph between the form elements
+/// read as clutter (user review 2026-09-09).
+fn password_requirements_hint(id: &str) -> String {
     format!(
-        "<p class=\"text-xs text-muted-foreground leading-relaxed\">{}</p>",
+        "<p id=\"{id}\" class=\"apex-pwd-hint text-xs text-muted-foreground leading-relaxed\">{}</p>",
         password_requirements_text()
     )
 }
@@ -2046,12 +2055,22 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
             "<p class=\"text-xs leading-relaxed text-surface-500\" data-signup-plan-intent=\"{plan_id}\">You selected {display_name}. Your workspace starts on Free; activate {display_name} after email verification through secure billing setup.</p>"
         )
     });
-    let password_hint = password_requirements_hint();
+    let password_hint = password_requirements_hint("signup-password-hint");
     let form_html = format!(
         "<form class=\"p-8 space-y-6\" action=\"/web/auth/signup\" method=\"POST\">\
 {csrf}\
 {plan_input}\
 {plan_notice}\
+<div class=\"grid grid-cols-1 sm:grid-cols-2 gap-4\">\
+<div class=\"space-y-2\">\
+<label class=\"apex-klabel\" for=\"signup-name\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Full name</label>\
+<input id=\"signup-name\" name=\"name\" type=\"text\" required autocomplete=\"name\" placeholder=\"Jane Doe\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+</div>\
+<div class=\"space-y-2\">\
+<label class=\"apex-klabel\" for=\"signup-company\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Company</label>\
+<input id=\"signup-company\" name=\"company_name\" type=\"text\" required autocomplete=\"organization\" placeholder=\"Acme Inc.\" maxlength=\"100\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
+</div>\
+</div>\
 <div class=\"space-y-2\">\
 <label class=\"apex-klabel\" for=\"signup-email\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
 <input id=\"signup-email\" name=\"email\" type=\"email\" required autocomplete=\"email\" placeholder=\"you@example.com\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all placeholder:text-muted-foreground bg-surface-50 text-sm font-medium text-surface-950\" />\
@@ -2060,8 +2079,8 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
 <div class=\"flex items-center justify-between\">\
 <label class=\"apex-klabel\" for=\"signup-password\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Password</label>\
 </div>\
-<div class=\"relative\">\
-<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"15\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"At least 15 characters\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
+<div class=\"relative apex-pwd-wrap\">\
+<input id=\"signup-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"15\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" aria-describedby=\"signup-password-hint\" placeholder=\"At least 15 characters\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 {password_hint}\
 </div>\
@@ -2152,7 +2171,7 @@ pub fn web_reset_password_page_with_state(
     };
 
     let csrf = csrf_hidden_input(csrf_token);
-    let password_hint = password_requirements_hint();
+    let password_hint = password_requirements_hint("new-password-hint");
     let form_html = format!(
         "<form class=\"p-8 space-y-5\" action=\"/web/auth/reset-password\" method=\"POST\" autocomplete=\"off\">\
 {csrf}\
@@ -2160,8 +2179,8 @@ pub fn web_reset_password_page_with_state(
 {header_notice}\
 <div class=\"space-y-2\">\
 <label class=\"apex-klabel\" for=\"new-password\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>New password</label>\
-<div class=\"relative\">\
-<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"15\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" placeholder=\"Choose a strong password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
+<div class=\"relative apex-pwd-wrap\">\
+<input id=\"new-password\" name=\"password\" type=\"password\" required autocomplete=\"new-password\" minlength=\"15\" maxlength=\"128\" pattern=\"{password_pattern}\" title=\"{password_title}\" aria-describedby=\"new-password-hint\" placeholder=\"Choose a strong password\" class=\"apex-input w-full px-4 py-3 border border-surface-200 focus-visible:outline-none transition-all bg-surface-50 text-surface-950\" />\
 </div>\
 {password_hint}\
 </div>\
@@ -5233,6 +5252,8 @@ mod tests {
     fn web_signup_page_renders_form() {
         let html = web_signup_page("");
         assert!(html.contains("Create your account"));
+        assert!(html.contains("id=\"signup-name\""));
+        assert!(html.contains("id=\"signup-company\""));
         assert!(html.contains("id=\"signup-email\""));
         assert!(html.contains("id=\"signup-password\""));
         // Dead JS-era markup purge: the pr-12 gutter reserved for the
@@ -5241,6 +5262,12 @@ mod tests {
         // NIST 800-63B-4: length-only pattern, no composition mandates.
         assert!(html.contains("minlength=\"15\""));
         assert!(html.contains("15-128 characters"));
+        // The requirements are a focus-revealed hint, not an always-on
+        // paragraph: hidden by default via .apex-pwd-hint and tied to the
+        // field through aria-describedby.
+        assert!(html.contains("class=\"apex-pwd-hint"));
+        assert!(html.contains("aria-describedby=\"signup-password-hint\""));
+        assert!(html.contains("id=\"signup-password-hint\""));
         assert!(html.contains("action=\"/web/auth/signup\""));
         assert!(html.contains("name=\"plan\" value=\"free\""));
         assert!(html.contains("Create Account"));

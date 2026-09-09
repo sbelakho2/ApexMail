@@ -2922,10 +2922,6 @@ input:user-invalid:focus-visible,
   border-radius: 9999px;
 }
 
-.rounded-md {
-  border-radius: var(--radius-md);
-}
-
 .rounded-none {
   border-radius: 0px;
 }
@@ -5603,6 +5599,19 @@ input::placeholder,
     0 0 0 1px rgb(var(--primary)),
     0 0 0 4px rgb(var(--card)),
     0 0 0 5px rgb(var(--border));
+}
+
+/* Password requirements paint only while the field is focused (zero-JS
+   :focus-within reveal) — an always-on paragraph between the auth form
+   elements read as clutter. The same text stays reachable to assistive
+   tech via the input's title + aria-describedby. */
+
+.apex-pwd-hint {
+  display: none;
+}
+
+.apex-pwd-wrap:focus-within + .apex-pwd-hint {
+  display: block;
 }
 
 /* DIAL (mark-native radial KPI): the SVG carries track + arc + terminal;
