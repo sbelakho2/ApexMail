@@ -294,6 +294,16 @@ fn validate_generic_tenant_update(body: &UpdateTenantRequest) -> Result<(), ApiE
     Ok(())
 }
 
+/// Drop every cached authentication decision that depends on this
+/// tenant's status (audit F18): the tenant-status gate in the auth
+/// middleware (15 s TTL) and the per-user status cache for the tenant's
+/// users. Without this, a suspension keeps authenticating until the caches
+/// lapse.
+async fn invalidate_tenant_auth_caches(state: &AppState, tenant_id: &str) {
+    crate::middleware::auth::invalidate_tenant_status_cache(tenant_id, state).await;
+    crate::middleware::auth::invalidate_tenant_user_status_cache(tenant_id, state).await;
+}
+
 // ─── Handlers ──────────────────────────────────────────────────
 
 async fn list_tenants(
@@ -333,9 +343,24 @@ async fn update_tenant(
 
     // Handle suspend/unsuspend action
     if let Some(action) = &body.action {
-        let new_status = match action.as_str() {
-            "suspend" => "suspended",
-            "unsuspend" => "active",
+        // F18: lifecycle actions are TRANSITIONS, not blind writes. Suspend
+        // only applies to tenants that are currently operating
+        // (pending/active — mirroring the web console's guard), and the
+        // recovery action ("unsuspend") only lifts a 'suspended' tenant:
+        // administrative, abuse, and billing holds that use other states
+        // must be released through their own flows, never by this generic
+        // editor.
+        let (new_status, from_statuses, wrong_state_message) = match action.as_str() {
+            "suspend" => (
+                "suspended",
+                vec!["pending", "active"],
+                "only pending or active tenants can be suspended",
+            ),
+            "unsuspend" => (
+                "active",
+                vec!["suspended"],
+                "only suspended tenants can be resumed",
+            ),
             _ => {
                 return Err(ApiError::Validation(vec![format!(
                     "unknown action: {action}"
@@ -343,17 +368,33 @@ async fn update_tenant(
             }
         };
 
-        // rows_affected distinguishes a no-op edit from a missing tenant:
-        // silently 200-ing on an unknown id hides typos from the operator.
-        let result =
-            sqlx::query("UPDATE tenants SET status = $1, updated_at = NOW() WHERE id = $2")
-                .bind(new_status)
-                .bind(&id)
-                .execute(&state.db)
-                .await?;
+        // rows_affected distinguishes a wrong-state transition from a
+        // missing tenant: silently 200-ing on either hides the problem
+        // from the operator.
+        let result = sqlx::query(
+            "UPDATE tenants SET status = $1, updated_at = NOW()
+             WHERE id = $2 AND status = ANY($3)",
+        )
+        .bind(new_status)
+        .bind(&id)
+        .bind(&from_statuses)
+        .execute(&state.db)
+        .await?;
         if result.rows_affected() == 0 {
-            return Err(ApiError::NotFound("tenant not found".into()));
+            let current: Option<String> =
+                sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+                    .bind(&id)
+                    .fetch_optional(&state.db)
+                    .await?;
+            return match current {
+                Some(_) => Err(ApiError::Conflict(wrong_state_message.into())),
+                None => Err(ApiError::NotFound("tenant not found".into())),
+            };
         }
+
+        // F18: the status change must reach authenticated traffic
+        // immediately, not after the middleware caches lapse.
+        invalidate_tenant_auth_caches(&state, &id).await;
 
         // Audit log
         log_tenant_audit(&state, &auth, action, Some(&id)).await;
@@ -395,6 +436,11 @@ async fn update_tenant(
     tx.commit().await?;
 
     if changed {
+        // F18: a direct status edit is also a policy change — drop the
+        // cached auth decisions so it takes effect immediately.
+        if body.status.is_some() {
+            invalidate_tenant_auth_caches(&state, &id).await;
+        }
         log_tenant_audit(&state, &auth, "tenant_edited", Some(&id)).await;
     }
 
@@ -585,6 +631,123 @@ mod tests {
             validate_generic_tenant_update(&request)
                 .unwrap_or_else(|error| panic!("status {allowed:?} should be accepted: {error:?}"));
         }
+    }
+
+    /// F18: lifecycle actions are guarded transitions. The recovery action
+    /// only lifts a 'suspended' tenant (billing/abuse holds using other
+    /// states survive), and suspension only applies to operating tenants.
+    #[tokio::test]
+    async fn tenant_lifecycle_actions_are_guarded_transitions() {
+        let Some(pool) = crate::test_db::canonical_pool("admin_tenants_f18").await else {
+            eprintln!(
+                "skipping tenant_lifecycle_actions_are_guarded_transitions: no TEST_DATABASE_URL"
+            );
+            return;
+        };
+        let tenant_id = format!("tf18{}", &uuid::Uuid::new_v4().simple().to_string()[..12]);
+        sqlx::query(
+            "INSERT INTO tenants (id, name, slug, plan, status) VALUES ($1, 'F18 Co', $2, 'free', 'pending')",
+        )
+        .bind(&tenant_id)
+        .bind(format!("slug-{tenant_id}"))
+        .execute(&pool)
+        .await
+        .expect("seed tenant");
+        let state = crate::app::test_support::test_state_over(pool.clone()).await;
+        let operator = AuthUser {
+            tenant_id: "system".into(),
+            user_id: None,
+            api_key_id: None,
+            session_id: None,
+            scopes: vec!["*".into()],
+        };
+
+        // A pending tenant is not yet operating — resuming it is refused.
+        match update_tenant(
+            State(state.clone()),
+            operator.clone(),
+            Json(UpdateTenantRequest {
+                id: tenant_id.clone(),
+                action: Some("unsuspend".into()),
+                name: None,
+                plan: None,
+                status: None,
+            }),
+        )
+        .await
+        {
+            Err(ApiError::Conflict(message)) => assert!(
+                message.contains("suspended"),
+                "wrong-state message should name the allowed origin, got {message}"
+            ),
+            other => panic!("pending tenant must not be resumable, got {other:?}"),
+        }
+        let status: String = sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+            .bind(&tenant_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "pending", "refused transition must not write");
+
+        // pending → suspended → active is the sanctioned lifecycle.
+        update_tenant(
+            State(state.clone()),
+            operator.clone(),
+            Json(UpdateTenantRequest {
+                id: tenant_id.clone(),
+                action: Some("suspend".into()),
+                name: None,
+                plan: None,
+                status: None,
+            }),
+        )
+        .await
+        .expect("suspending a pending tenant must succeed");
+        update_tenant(
+            State(state.clone()),
+            operator,
+            Json(UpdateTenantRequest {
+                id: tenant_id.clone(),
+                action: Some("unsuspend".into()),
+                name: None,
+                plan: None,
+                status: None,
+            }),
+        )
+        .await
+        .expect("resuming a suspended tenant must succeed");
+        let status: String = sqlx::query_scalar("SELECT status FROM tenants WHERE id = $1")
+            .bind(&tenant_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(status, "active");
+
+        // A double-resume is a wrong-state transition, not a silent no-op.
+        match update_tenant(
+            State(state),
+            AuthUser {
+                tenant_id: "system".into(),
+                user_id: None,
+                api_key_id: None,
+                session_id: None,
+                scopes: vec!["*".into()],
+            },
+            Json(UpdateTenantRequest {
+                id: tenant_id.clone(),
+                action: Some("unsuspend".into()),
+                name: None,
+                plan: None,
+                status: None,
+            }),
+        )
+        .await
+        {
+            Err(ApiError::Conflict(_)) => {}
+            other => panic!("active tenant must not be resumable again, got {other:?}"),
+        }
+
+        pool.close().await;
     }
 
     /// Handler-level regression: direct name/status edits must (a) stay

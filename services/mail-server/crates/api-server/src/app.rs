@@ -737,6 +737,10 @@ static HDR_CONTENT_TYPE_OPTIONS: HeaderValue = HeaderValue::from_static("nosniff
 static HDR_XSS_PROTECTION: HeaderValue = HeaderValue::from_static("0");
 static HDR_REFERRER_POLICY: HeaderValue =
     HeaderValue::from_static("strict-origin-when-cross-origin");
+/// F65: `no-referrer` for surfaces whose URL embeds a one-time secret (the
+/// email-verification exchange) — the strictest policy; nothing about the
+/// request URL may leak onward.
+static NO_REFERRER: HeaderValue = HeaderValue::from_static("no-referrer");
 static HDR_CACHE_CONTROL: HeaderValue =
     HeaderValue::from_static("no-store, no-cache, must-revalidate");
 static HDR_CSP: HeaderValue =
@@ -760,7 +764,13 @@ async fn security_headers(
     }
     headers.insert("X-Content-Type-Options", HDR_CONTENT_TYPE_OPTIONS.clone());
     headers.insert("X-XSS-Protection", HDR_XSS_PROTECTION.clone());
-    headers.insert("Referrer-Policy", HDR_REFERRER_POLICY.clone());
+    // F65: a handler may pin a STRICTER per-surface Referrer-Policy (e.g.
+    // `no-referrer` on the token-bearing verification exchange) — respect
+    // a pre-set value instead of overwriting it, exactly like
+    // X-Frame-Options/CSP above.
+    if !headers.contains_key("Referrer-Policy") {
+        headers.insert("Referrer-Policy", HDR_REFERRER_POLICY.clone());
+    }
     headers.insert("Cache-Control", static_asset_cache_control(&path));
     if !headers.contains_key("Content-Security-Policy") {
         headers.insert("Content-Security-Policy", HDR_CSP.clone());
@@ -1088,6 +1098,14 @@ async fn null_byte_check(
 struct BrowserVerifyEmailQuery {
     token: Option<String>,
     email: Option<String>,
+    /// Display-only params produced by the F65 redirect target (and the
+    /// page render): the outcome of an already-consumed token exchange.
+    /// The extractor must accept them even though only the renderer reads
+    /// them (via `render_route_with_query`).
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 fn auth_page_error_message(error: &crate::error::ApiError) -> String {
@@ -1118,7 +1136,15 @@ async fn browser_verify_email_page(
     headers: HeaderMap,
     Query(params): Query<BrowserVerifyEmailQuery>,
 ) -> Response {
-    render_browser_verify_email(&state, &headers, params.token, params.email).await
+    render_browser_verify_email(
+        &state,
+        &headers,
+        params.token,
+        params.email,
+        params.status,
+        params.message,
+    )
+    .await
 }
 
 /// `GET /verify-email/{token}` — path-param variant of the branded
@@ -1131,7 +1157,15 @@ async fn browser_verify_email_page_by_path(
     Query(params): Query<BrowserVerifyEmailQuery>,
 ) -> Response {
     // The path token wins; a stray `?token=` from an old link is ignored.
-    render_browser_verify_email(&state, &headers, Some(token), params.email).await
+    render_browser_verify_email(
+        &state,
+        &headers,
+        Some(token),
+        params.email,
+        params.status,
+        params.message,
+    )
+    .await
 }
 
 async fn render_browser_verify_email(
@@ -1139,6 +1173,8 @@ async fn render_browser_verify_email(
     headers: &HeaderMap,
     token: Option<String>,
     email: Option<String>,
+    status: Option<String>,
+    message: Option<String>,
 ) -> Response {
     let host = headers.get(HOST).and_then(|value| value.to_str().ok());
     if !state.config.is_explicit_web_host(host) {
@@ -1151,7 +1187,13 @@ async fn render_browser_verify_email(
         query_params.push(("email", email.to_owned()));
     }
 
+    // F65: once a token has been EXCHANGED on this URL, the response is a
+    // 303 to the token-free page — the verification secret must not linger
+    // in the browser's address bar, history, or onward Referer headers.
+    // The redirect target renders the outcome via status/message params.
+    let mut token_consumed = false;
     if let Some(token) = token.as_deref() {
+        token_consumed = true;
         match routes::auth::verify_email_token(state, token).await {
             Ok(result) => {
                 query_params.push(("status", "success".into()));
@@ -1162,6 +1204,20 @@ async fn render_browser_verify_email(
                 query_params.push(("message", auth_page_error_message(&error)));
             }
         }
+    } else if let Some(status) = status.as_deref() {
+        // Token-free request carrying a forwarded outcome (the redirect
+        // target): pass the display state through to the renderer. The
+        // status is allowlisted and the message length-capped; the view
+        // layer HTML-escapes both.
+        if matches!(status, "success" | "error") {
+            query_params.push(("status", status.to_owned()));
+            if let Some(message) = message.as_deref() {
+                let message = message.trim().chars().take(300).collect::<String>();
+                if !message.is_empty() {
+                    query_params.push(("message", message));
+                }
+            }
+        }
     }
 
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
@@ -1169,6 +1225,19 @@ async fn render_browser_verify_email(
         serializer.append_pair(key, &value);
     }
     let query = serializer.finish();
+
+    if token_consumed && !query.is_empty() {
+        let mut redirect = (
+            StatusCode::SEE_OTHER,
+            [(header::LOCATION, format!("/verify-email?{query}"))],
+        )
+            .into_response();
+        redirect
+            .headers_mut()
+            .insert(header::REFERRER_POLICY, NO_REFERRER.clone());
+        return redirect;
+    }
+
     let html = ui_router::render_route_with_query(
         surface,
         "/verify-email",
@@ -1181,7 +1250,15 @@ async fn render_browser_verify_email(
     );
 
     match html {
-        Some(html) => browser_html_response(html),
+        Some(html) => {
+            let mut response = browser_html_response(html);
+            // F65: strict referrer policy on the verification surface —
+            // the page URL (pre-redirect) must never be re-disclosed.
+            response
+                .headers_mut()
+                .insert(header::REFERRER_POLICY, NO_REFERRER.clone());
+            response
+        }
         None => not_found_response(),
     }
 }
@@ -2258,6 +2335,103 @@ mod tests {
         assert!(!body.contains("<script"));
     }
 
+    /// F65: once a verification token has been exchanged on
+    /// `/verify-email/{token}`, the browser is redirected to a CLEAN URL —
+    /// the token must not linger in the address bar/history — and the
+    /// exchange response carries the strictest referrer policy. (The
+    /// fixture state has no reachable DB, so the exchange itself errors;
+    /// the redirect contract is identical for the error outcome.)
+    #[tokio::test]
+    async fn verify_email_page_redirects_off_the_token_url() {
+        let app = test_app().await;
+        let token = "vtok_f65_redirection_check";
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/verify-email/{token}"))
+                    .header(HOST, "app.apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::SEE_OTHER,
+            "a consumed token must yield a redirect, not an in-place render"
+        );
+        let location = response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("redirect carries a Location");
+        assert!(
+            !location.contains(token),
+            "the redirect target must be token-free, got {location}"
+        );
+        assert!(
+            location.starts_with("/verify-email?"),
+            "unexpected redirect target {location}"
+        );
+        assert!(
+            location.contains("status="),
+            "outcome rides the query: {location}"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::REFERRER_POLICY)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-referrer"),
+            "the token-bearing exchange must pin the strictest referrer policy"
+        );
+    }
+
+    /// F65: the security-headers middleware must RESPECT a handler-pinned
+    /// Referrer-Policy instead of overwriting it with the global default.
+    #[tokio::test]
+    async fn security_headers_respect_pinned_referrer_policy() {
+        let app = test_app().await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/verify-email")
+                    .header(HOST, "app.apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get(header::REFERRER_POLICY)
+                .and_then(|value| value.to_str().ok()),
+            Some("no-referrer"),
+            "the verification surface pins no-referrer through the middleware"
+        );
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/login")
+                    .header(HOST, "app.apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get(header::REFERRER_POLICY)
+                .and_then(|value| value.to_str().ok()),
+            Some("strict-origin-when-cross-origin"),
+            "other surfaces keep the global default"
+        );
+    }
+
     #[tokio::test]
     async fn web_form_login_rejects_bad_csrf_with_flash_redirect() {
         let app = test_app().await;
@@ -3064,9 +3238,11 @@ mod tests {
         // Path-param twin (F5/CWE-598): the token rides the path, not the
         // query string. An over-length token is rejected by
         // `verify_email_token` BEFORE any database access, so asserting its
-        // rendered message proves the path token reaches the verifier —
-        // without needing an external database — and the branded page still
-        // renders. An unknown host stays a branded 404.
+        // outcome proves the path token reaches the verifier — without
+        // needing an external database. F65: after the exchange (success OR
+        // error) the browser is redirected OFF the token-bearing URL; the
+        // outcome page renders from the clean target's query params. An
+        // unknown host stays a branded 404.
         let oversized_token = "t".repeat(129);
         let verify_path_response = app
             .clone()
@@ -3078,8 +3254,34 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(verify_path_response.status(), StatusCode::OK);
-        let verify_path_body = response_body_string(verify_path_response).await;
+        assert_eq!(
+            verify_path_response.status(),
+            StatusCode::SEE_OTHER,
+            "a token exchange redirects off the token URL (F65)"
+        );
+        let verify_path_location = verify_path_response
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .expect("redirect target")
+            .to_string();
+        assert!(
+            !verify_path_location.contains(&oversized_token),
+            "redirect target must be token-free, got {verify_path_location}"
+        );
+        assert!(verify_path_location.starts_with("/verify-email?status="));
+        let verify_target_response = app
+            .clone()
+            .oneshot(
+                Request::get(verify_path_location)
+                    .header(HOST, "app.apexmail.ee")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(verify_target_response.status(), StatusCode::OK);
+        let verify_path_body = response_body_string(verify_target_response).await;
         assert!(verify_path_body.contains("invalid verification token"));
 
         let verify_path_unknown_host = app
