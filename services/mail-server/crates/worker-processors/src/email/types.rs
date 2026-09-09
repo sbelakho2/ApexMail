@@ -63,7 +63,14 @@ pub struct Suppression {
 #[derive(Debug, Clone)]
 pub struct PreparedEmail {
     pub from: String,
+    /// Envelope destination: exactly ONE recipient (the send unit).
     pub to: String,
+    /// F26: the ORIGINAL MIME `To` header value (the full visible recipient
+    /// list). `None` falls back to `to` (legacy single-recipient rows).
+    pub mime_to: Option<String>,
+    /// F26: the ORIGINAL MIME `Cc` header value. Bcc intentionally has no
+    /// representation here — it lives only in the delivery data.
+    pub mime_cc: Option<String>,
     pub subject: String,
     pub html: Option<String>,
     pub text: Option<String>,
