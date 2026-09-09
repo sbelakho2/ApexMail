@@ -1061,16 +1061,20 @@ impl SubmissionServer {
 
         // NOTE: `users` has no `username` column (only smtp_credentials does),
         // so the lookup is by email only — identical to the api-server login
-        // path.
-        let user = sqlx::query_as::<_, (String, Uuid, String, String)>(
-            "SELECT email, id, password_hash, status FROM users WHERE LOWER(email) = LOWER($1)",
+        // path. The tenant join enforces tenants.status here too (F18): a
+        // suspended tenant's SMTP credentials must stop accepting
+        // submission, same as the API/SSR gates in api-server.
+        let user = sqlx::query_as::<_, (String, Uuid, String, String, String)>(
+            "SELECT u.email, u.id, u.password_hash, u.status, t.status \
+             FROM users u JOIN tenants t ON t.id = u.tenant_id \
+             WHERE LOWER(u.email) = LOWER($1)",
         )
         .bind(email)
         .fetch_optional(&self.pool)
         .await
         .map_err(|_| AuthError::Failed)?;
 
-        let (user_email, user_id, password_hash, status) = match user {
+        let (user_email, user_id, password_hash, status, tenant_status) = match user {
             Some(u) => u,
             None => {
                 // FIX-3: unknown-account attempts count toward the
@@ -1085,7 +1089,9 @@ impl SubmissionServer {
             }
         };
 
-        if status != "active" {
+        // The failure shape stays identical for user- and tenant-level
+        // refusals so the SMTP dialogue cannot distinguish them.
+        if status != "active" || tenant_status != "active" {
             self.auth_fail_tracker.record_failure(ip, email).await;
             let _ = verify_against_dummy(password);
             metrics::counter!("mta.auth.failure").increment(1);

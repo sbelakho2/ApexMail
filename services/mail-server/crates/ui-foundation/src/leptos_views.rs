@@ -3279,13 +3279,57 @@ pub fn web_settings_api_keys_page() -> String {
     format!(
         "<div class=\"space-y-6\">\
 <div class=\"flex items-center justify-between\"><h1 class=\"text-2xl font-bold text-surface-950 tracking-tight\">API Keys</h1></div>\
-<form class=\"flex flex-col gap-3 sm:flex-row sm:items-end\" method=\"post\" action=\"/web/api-keys\">\
-<div class=\"flex-1 space-y-2\"><label class=\"apex-klabel\" for=\"api-key-name\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Key name</label>\
+<form class=\"space-y-4\" method=\"post\" action=\"/web/api-keys\">\
+<div class=\"space-y-2\"><label class=\"apex-klabel\" for=\"api-key-name\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Key name</label>\
 <input id=\"api-key-name\" name=\"name\" type=\"text\" required maxlength=\"100\" class=\"w-full px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\" placeholder=\"Production sender\" /></div>\
+<div class=\"space-y-2\">\
+<span class=\"apex-klabel\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Scopes</span>\
+<fieldset class=\"flex flex-wrap gap-x-5 gap-y-2 border-0 p-0\">\
+{scope_checkboxes}\
+</fieldset>\
+<p class=\"text-xs text-surface-500\">Only scopes your account already holds can be issued; the request is refused otherwise.</p>\
+</div>\
+<div class=\"space-y-2\"><label class=\"apex-klabel\" for=\"api-key-expiry\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Expires in</label>\
+<select id=\"api-key-expiry\" name=\"expires_in_days\" class=\"w-full sm:w-56 px-4 py-3 rounded-sm border border-surface-200 focus:border-primary outline-none transition-all bg-background text-sm font-medium text-surface-950\">\
+<option value=\"90\" selected>90 days (default)</option>\
+<option value=\"30\">30 days</option>\
+<option value=\"180\">180 days</option>\
+<option value=\"365\">365 days</option>\
+</select></div>\
 <button type=\"submit\" class=\"inline-flex items-center justify-center whitespace-nowrap rounded-sm text-sm font-bold transition-all bg-primary text-white hover:bg-brand-700 h-12 px-6 py-3\">Create API Key</button>\
 </form>\
 {table}</div>",
         table = table.render_html(),
+        // The same registry the JSON endpoint validates against
+        // (routes::auth::registered_api_key_scopes): the developer-role
+        // grant set is the generally issueable surface; the handler still
+        // authorizes each requested scope against the caller.
+        scope_checkboxes = [
+            "messages:send",
+            "messages:read",
+            "domains:read",
+            "templates:read",
+            "templates:write",
+            "events:read",
+            "analytics:read",
+            "contacts:read",
+            "contacts:write",
+            "logs:read",
+            "webhooks:read",
+            "webhooks:write",
+            "campaigns:read",
+            "campaigns:write",
+            "suppressions:read",
+            "suppressions:write",
+        ]
+        .iter()
+        .map(|scope| {
+            format!(
+                "<label class=\"flex items-center gap-2 text-sm text-surface-700 font-medium\"><input type=\"checkbox\" name=\"scopes\" value=\"{scope}\" class=\"h-4 w-4 rounded border-surface-300 text-primary\" />{scope}</label>"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(""),
     )
 }
 
