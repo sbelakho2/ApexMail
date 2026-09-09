@@ -482,3 +482,13 @@ Deployed via pipeline `20260909T022056: OK` (commits `da335d77`+`4a513919`; no n
 **Live-verified:** X-API-Key + to-array on the homepage; /solutions/ 2,941-char main; status SSR; compare decision guide with zero Winner columns; calculator title + entitlement copy; login SSR badge; API Reference plan/event vocabulary.
 
 **Roadmap unchanged** (per review §89/§90): Node SDK first, then canonical event/API schema generation, streams, suppressions, circuit breaker, IP operations, Inbox Placement, Grader expansion, diagnostics actions, query API, SSO/SCIM, subaccounts, white-label, BYOIP, deployment automation, docs shell, three-pane reference, viewport regression CI.
+
+## 30. Visible metacommentary purge + complete SOC 2 removal — 2026-09-09
+
+Deployed via pipeline `20260909T095835: OK` (commit `311b13c9`; verify: services healthy). 665 tests green; all gates green.
+
+**Visible metacommentary** — a Rust line comment written inside the signup page's HTML string literal rendered as user-visible text ("// 2026-09-08 review: first screen is email + password only…"). Removed, and every rendered surface swept programmatically: 12 key pages at desktop width + 8 at mobile show zero leaked review/audit/date-comment strings and zero horizontal overflow. Screenshot-verified: pricing hierarchy (compact numerals, clean grid), the email-logs timeline/context panel, homepage.
+
+**SOC 2 removed everywhere public** (user instruction) — 53 files changed: the "SOC 2 Certification Not Currently Offered" CTA badge and the features "SOC 2 Status" card deleted; disclaimer bullets, table rows, checkbox/select options and description clauses dropped across compliance/security/enterprise/DPA/regulated-industries/solutions/contact pages in EN/DE/FR/ES; the compare/postmark SOC 2 row removed; console CP claim ("Compile SOC2, HIPAA BAA…" — also a banned-phrase leak), "SOC 2 Evidence" card and plan-table row removed with their tests; canonical.json + compliance legal_entity.rs claims reworded in lockstep (pen-test honesty retained); i18n keys and translated clauses purged; pricing/legal gate needles updated. HIPAA availability honesty statements were retained (they are distinct claims). The soc2_compliance=false PLAN FEATURE FLAG stays — it is the guard that keeps the entitlement OFF, not a public mention.
+
+**Live-verified:** signup renders no comment; site-wide SOC 2 scan across 10 EN pages + 5 locale pages + contact forms + console: zero hits.
