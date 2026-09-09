@@ -51,9 +51,7 @@ fn iso_workspaces_has_exactly_one_definition() {
     let count = all
         .match_indices("CREATE TABLE IF NOT EXISTS iso_workspaces")
         .count()
-        + all
-            .match_indices("CREATE TABLE iso_workspaces")
-            .count();
+        + all.match_indices("CREATE TABLE iso_workspaces").count();
     assert_eq!(count, 1, "iso_workspaces must be defined exactly once");
 }
 
@@ -77,7 +75,8 @@ fn migrations_match_column_types_bound_by_code() {
     // conditions, actions, effect); isolation configs are keyed by
     // workspace_id and updated with current_level/migration_status.
     assert!(MIGRATION_166.contains("conditions  JSONB  NOT NULL"));
-    assert!(MIGRATION_166.contains("workspace_id       TEXT        PRIMARY KEY REFERENCES iso_workspaces(id)"));
+    assert!(MIGRATION_166
+        .contains("workspace_id       TEXT        PRIMARY KEY REFERENCES iso_workspaces(id)"));
 
     // encryption.rs binds key_material as bytes and expires_at on every
     // insert; rotation keeps one active key per organization.
