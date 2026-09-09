@@ -1,5 +1,7 @@
 //! Risk scoring engine — assesses tenant risk profiles using 10 weighted
-//! factors computed from parallel DB queries and external blocklist checks.
+//! factors computed from parallel DB queries over canonical sources (the
+//! `events` table for complaint/unsubscribe/engagement signals, billing
+//! dunning for payment failures, scan_results for phishing/violations).
 //!
 //! Risk levels:Low (<25), Medium (25–49), High (50–74), Critical (≥75).
 //! Sending limits are scaled by a per-level multiplier (1.0 / 0.75 / 0.5 / 0.1).
@@ -9,7 +11,7 @@ use chrono::{Duration, Utc};
 use serde_json::json;
 use sqlx::PgPool;
 use std::collections::HashMap;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::config::ComplianceConfig;
 use crate::types::*;
@@ -21,7 +23,7 @@ struct TenantMetrics {
     account_age_days: i64,
     /// Number of verified (DKIM/SPF-confirmed) domains.
     verified_domains: i64,
-    /// Number of failed payments in the last 90 days.
+    /// Failed payments recorded by billing dunning (recent failures).
     payment_failures: i64,
     /// Total messages sent (lifetime).
     total_messages: i64,
@@ -37,18 +39,22 @@ struct TenantMetrics {
     spam_rate: f64,
     /// Unsubscribe rate (%).
     unsub_rate: f64,
-    /// Open rate from campaign stats (%).
+    /// Open rate from canonical events (%).
     open_rate: f64,
-    /// Click rate from campaign stats (%).
+    /// Click rate from canonical events (%).
     click_rate: f64,
     /// Abuse report count (all time).
     abuse_reports: i64,
-    /// Content violations (all time).
+    /// Content violations — scans the content scanner blocked (all time).
     content_violations: i64,
     /// Phishing detections (all time).
     phishing_detections: i64,
     /// Whether the tenant appears on any active blocklist.
     blocklisted: bool,
+    /// F57: whether a tenant-scoped blocklist source is available. When no
+    /// canonical source exists the blocklist factor is explicitly skipped
+    /// (nonfatal, logged) instead of being read from a phantom table.
+    blocklist_available: bool,
 }
 
 pub struct RiskScoringEngine {
@@ -235,13 +241,13 @@ impl RiskScoringEngine {
         .bind(tenant_id)
         .fetch_one(&self.db);
 
-        let payments_fut = sqlx::query_as::<_, (i64,)>(
-            "SELECT COUNT(*) FROM payment_events
-             WHERE tenant_id = $1 AND event_type = 'failed'
-               AND created_at > NOW() - INTERVAL '90 days'",
-        )
-        .bind(tenant_id)
-        .fetch_one(&self.db);
+        // F57: payment failures read the billing dunning record (one per
+        // tenant; migrations 093/118) — `failed_payment_count` is the
+        // canonical failure counter maintained by billing-service. The
+        // 90-day recency guard mirrors the original payment-history window.
+        let payments_fut = sqlx::query_as::<_, (Option<i64>,)>(PAYMENT_FAILURES_SQL)
+            .bind(tenant_id)
+            .fetch_optional(&self.db);
 
         let messages_fut = sqlx::query_as::<_, (i64, i64, i64)>(
             "SELECT COUNT(*),
@@ -258,34 +264,23 @@ impl RiskScoringEngine {
         .bind(tenant_id)
         .fetch_one(&self.db);
 
-        let spam_fut = sqlx::query_as::<_, (i64,)>(
-            "SELECT COUNT(*) FROM spam_complaints WHERE tenant_id = $1",
-        )
-        .bind(tenant_id)
-        .fetch_one(&self.db);
-
-        let unsub_fut =
-            sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM unsubscribes WHERE tenant_id = $1")
-                .bind(tenant_id)
-                .fetch_one(&self.db);
-
-        let engagement_fut = sqlx::query_as::<_, (Option<f64>, Option<f64>)>(
-            "SELECT AVG(open_rate), AVG(click_rate)
-             FROM campaign_stats WHERE tenant_id = $1",
-        )
-        .bind(tenant_id)
-        .fetch_optional(&self.db);
+        // F57: complaints, unsubscribes and engagement rates come from ONE
+        // tenant-scoped adapter over the canonical `events` table instead of
+        // the nonexistent spam_complaints / unsubscribes / campaign_stats
+        // tables (a missing table aborts the whole try_join!).
+        let events_fut = canonical_event_counts(&self.db, tenant_id);
 
         let abuse_fut =
             sqlx::query_as::<_, (i64,)>("SELECT COUNT(*) FROM abuse_reports WHERE tenant_id = $1")
                 .bind(tenant_id)
                 .fetch_one(&self.db);
 
-        let violations_fut = sqlx::query_as::<_, (i64,)>(
-            "SELECT COUNT(*) FROM content_violations WHERE tenant_id = $1",
-        )
-        .bind(tenant_id)
-        .fetch_one(&self.db);
+        // F57: content violations are the scans this crate's own content
+        // scanner blocked (scan_results, migration 038) — the nonexistent
+        // content_violations table had no producer.
+        let violations_fut = sqlx::query_as::<_, (i64,)>(CONTENT_VIOLATIONS_SQL)
+            .bind(tenant_id)
+            .fetch_one(&self.db);
 
         let phishing_fut = sqlx::query_as::<_, (i64,)>(
             "SELECT COUNT(*) FROM scan_results
@@ -294,46 +289,35 @@ impl RiskScoringEngine {
         .bind(tenant_id)
         .fetch_one(&self.db);
 
-        let blocklist_fut = sqlx::query_as::<_, (i64,)>(
-            "SELECT COUNT(*) FROM tenant_ips ti
-             JOIN blocklist_entries be ON be.ip = ti.ip AND be.active = true
-             WHERE ti.tenant_id = $1",
-        )
-        .bind(tenant_id)
-        .fetch_one(&self.db);
+        let (age_row, dom_row, pay_row, msg_row, bounce_row, events, abuse_row, cv_row, phish_row) =
+            tokio::try_join!(
+                age_fut,
+                domains_fut,
+                payments_fut,
+                messages_fut,
+                bounce_fut,
+                events_fut,
+                abuse_fut,
+                violations_fut,
+                phishing_fut,
+            )
+            .map_err(|e| format!("DB error: {e}"))?;
 
-        let (
-            age_row,
-            dom_row,
-            pay_row,
-            msg_row,
-            bounce_row,
-            spam_row,
-            unsub_row,
-            eng_row,
-            abuse_row,
-            cv_row,
-            phish_row,
-            bl_row,
-        ) = tokio::try_join!(
-            age_fut,
-            domains_fut,
-            payments_fut,
-            messages_fut,
-            bounce_fut,
-            spam_fut,
-            unsub_fut,
-            engagement_fut,
-            abuse_fut,
-            violations_fut,
-            phishing_fut,
-            blocklist_fut,
-        )
-        .map_err(|e| format!("DB error: {e}"))?;
+        // F57: no tenant-scoped blocklist source exists today (the only
+        // producer of postmaster_reputation_events writes tenant_id NULL,
+        // and tenant_ips/blocklist_entries were never created). The factor
+        // is explicitly unavailable-but-nonfatal: skip it with a logged
+        // warning rather than reading a phantom table. Required sources
+        // above still fail loudly through try_join!.
+        m.blocklist_available = false;
+        warn!(
+            tenant_id,
+            "risk factor `blocklist_listing` unavailable: no tenant-scoped blocklist source; skipping factor (nonfatal)"
+        );
 
         m.account_age_days = age_row.and_then(|r| r.0).unwrap_or(0);
         m.verified_domains = dom_row.0;
-        m.payment_failures = pay_row.0;
+        m.payment_failures = pay_row.and_then(|r| r.0).unwrap_or(0);
         m.total_messages = msg_row.0;
         m.messages_24h = msg_row.1;
         m.messages_7d = msg_row.2;
@@ -345,19 +329,13 @@ impl RiskScoringEngine {
 
         if m.total_messages > 0 {
             m.bounce_rate = (bounce_row.0 as f64 / m.total_messages as f64) * 100.0;
-            m.spam_rate = (spam_row.0 as f64 / m.total_messages as f64) * 100.0;
-            m.unsub_rate = (unsub_row.0 as f64 / m.total_messages as f64) * 100.0;
         }
 
-        if let Some((open_rate, click_rate)) = eng_row {
-            m.open_rate = open_rate.unwrap_or(0.0);
-            m.click_rate = click_rate.unwrap_or(0.0);
-        }
+        apply_event_metrics(&mut m, &events);
 
         m.abuse_reports = abuse_row.0;
         m.content_violations = cv_row.0;
         m.phishing_detections = phish_row.0;
-        m.blocklisted = bl_row.0 > 0;
 
         Ok(m)
     }
@@ -427,7 +405,9 @@ impl RiskScoringEngine {
             ),
         ];
 
-        if m.blocklisted {
+        // F57: only emitted when a tenant-scoped blocklist source is
+        // available (see collect_metrics).
+        if m.blocklist_available && m.blocklisted {
             factors.push(factor(
                 RiskFactorType::BlocklistListing,
                 80.0,
@@ -551,6 +531,120 @@ impl RiskScoringEngine {
         Ok(())
     }
 }
+
+// ─── Canonical event metrics adapter (F57) ──────────────────────
+//
+// Complaint, unsubscribe and engagement signals all live in the canonical
+// `events` table (migration 075). Producers:
+//   - worker-processors (email/processor.rs)  — per-message lifecycle events
+//   - tracking-service (processor.rs)         — opened / clicked / unsubscribed
+//   - api-server ses_notifications.rs         — complained (one row per FBL hit)
+// Webhook subscriptions use the `message.*` names for the same signals
+// (migration 128); the `events` table stores the short forms below.
+
+/// Canonical `events.event_type` for spam complaints (FBL feedback).
+pub const EVENT_COMPLAINED: &str = "complained";
+/// Canonical `events.event_type` for unsubscribe signal.
+pub const EVENT_UNSUBSCRIBED: &str = "unsubscribed";
+/// Canonical `events.event_type` for message opens.
+pub const EVENT_OPENED: &str = "opened";
+/// Canonical `events.event_type` for link clicks.
+pub const EVENT_CLICKED: &str = "clicked";
+/// Canonical `events.event_type` for deliveries (rate denominator).
+pub const EVENT_DELIVERED: &str = "delivered";
+
+/// Lookback window for event-derived factors. Matches the analytics
+/// engagement/trust windows (`analytics` crate, api-server analytics).
+pub const EVENT_METRIC_WINDOW_DAYS: i64 = 90;
+
+/// Tenant-scoped canonical-event counts over [`EVENT_METRIC_WINDOW_DAYS`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalEventCounts {
+    pub complained: i64,
+    pub unsubscribed: i64,
+    pub opened: i64,
+    pub clicked: i64,
+    pub delivered: i64,
+}
+
+/// One tenant-scoped query over the canonical `events` table. Same
+/// `COUNT(*) FILTER` shape as the api-server analytics engagement queries;
+/// $1 = tenant_id, $2 = window in days.
+pub const CANONICAL_EVENT_COUNTS_SQL: &str = r#"
+        SELECT
+            COUNT(*) FILTER (WHERE event_type = 'complained')   AS complained,
+            COUNT(*) FILTER (WHERE event_type = 'unsubscribed') AS unsubscribed,
+            COUNT(*) FILTER (WHERE event_type = 'opened')       AS opened,
+            COUNT(*) FILTER (WHERE event_type = 'clicked')      AS clicked,
+            COUNT(*) FILTER (WHERE event_type = 'delivered')    AS delivered
+        FROM events
+        WHERE tenant_id = $1
+          AND timestamp >= NOW() - make_interval(days => $2::int)
+        "#;
+
+/// Collect [`CanonicalEventCounts`] for one tenant. Errors propagate as
+/// `sqlx::Error` so `collect_metrics` can join it with the other required
+/// sources and map failures uniformly — the complaint/unsubscribe source
+/// is a required risk input, never silently zero.
+pub async fn canonical_event_counts(
+    db: &PgPool,
+    tenant_id: &str,
+) -> Result<CanonicalEventCounts, sqlx::Error> {
+    let (complained, unsubscribed, opened, clicked, delivered) =
+        sqlx::query_as::<_, (i64, i64, i64, i64, i64)>(CANONICAL_EVENT_COUNTS_SQL)
+            .bind(tenant_id)
+            .bind(EVENT_METRIC_WINDOW_DAYS)
+            .fetch_one(db)
+            .await?;
+
+    Ok(CanonicalEventCounts {
+        complained,
+        unsubscribed,
+        opened,
+        clicked,
+        delivered,
+    })
+}
+
+/// `part` as a percentage of `total` (0.0 when `total` is not positive).
+pub fn percent_of(part: i64, total: i64) -> f64 {
+    if total <= 0 {
+        0.0
+    } else {
+        (part as f64 / total as f64) * 100.0
+    }
+}
+
+/// Map canonical event counts onto the rate fields of [`TenantMetrics`].
+/// Denominator is canonical delivered events in the window — the same
+/// complaint/engagement rate definition api-server analytics reports.
+fn apply_event_metrics(m: &mut TenantMetrics, ev: &CanonicalEventCounts) {
+    m.spam_rate = percent_of(ev.complained, ev.delivered);
+    m.unsub_rate = percent_of(ev.unsubscribed, ev.delivered);
+    m.open_rate = percent_of(ev.opened, ev.delivered);
+    m.click_rate = percent_of(ev.clicked, ev.delivered);
+}
+
+/// F57: payment failures from the billing dunning record. `dunning_records`
+/// (migrations 093/118) carries one row per tenant maintained by
+/// billing-service; `failed_payment_count` is its canonical failure counter
+/// and `last_failed_at` the recency anchor for the 90-day window. $1 = tenant.
+pub(crate) const PAYMENT_FAILURES_SQL: &str = r#"
+        SELECT failed_payment_count
+        FROM dunning_records
+        WHERE tenant_id = $1
+          AND last_failed_at > NOW() - INTERVAL '90 days'
+        "#;
+
+/// F57: content violations = scans the content scanner actually blocked
+/// (`scan_results`, migration 038; producer: compliance content_scanner.rs).
+/// $1 = tenant.
+pub(crate) const CONTENT_VIOLATIONS_SQL: &str = r#"
+        SELECT COUNT(*)
+        FROM scan_results
+        WHERE tenant_id = $1
+          AND overall_verdict = 'blocked'
+        "#;
 
 // ─── Scoring Functions (pure, unit-testable) ───────────────────
 
@@ -870,6 +964,7 @@ mod tests {
         let cfg = ComplianceConfig::from_env();
         let engine = RiskScoringEngine::new(unsafe_dummy_pool(), cfg);
         let mut m = TenantMetrics::default();
+        m.blocklist_available = true;
         m.blocklisted = true;
         let flags = engine.generate_flags(&m, RiskLevel::High);
         assert!(flags
@@ -1128,6 +1223,7 @@ mod tests {
     fn test_factor_weight_blocklist_listing() {
         let engine = make_engine();
         let mut m = TenantMetrics::default();
+        m.blocklist_available = true;
         m.blocklisted = true;
         let factors = engine.compute_factors(&m);
         let f = factors
@@ -1159,6 +1255,163 @@ mod tests {
         assert!(
             !has_blocklist,
             "BlocklistListing should NOT be present when tenant is not blocklisted"
+        );
+    }
+
+    // ══════════════════════════════════════════════════════════════
+    // 6. F57 — canonical event metrics adapter
+    // ══════════════════════════════════════════════════════════════
+
+    #[test]
+    fn canonical_event_constants_match_events_table_vocabulary() {
+        // The canonical `events.event_type` values written by
+        // tracking-service (unsubscribed/opened/clicked), api-server
+        // ses_notifications (complained) and worker-processors (delivered).
+        assert_eq!(EVENT_COMPLAINED, "complained");
+        assert_eq!(EVENT_UNSUBSCRIBED, "unsubscribed");
+        assert_eq!(EVENT_OPENED, "opened");
+        assert_eq!(EVENT_CLICKED, "clicked");
+        assert_eq!(EVENT_DELIVERED, "delivered");
+        // Analytics engagement/trust window.
+        assert_eq!(EVENT_METRIC_WINDOW_DAYS, 90);
+    }
+
+    #[test]
+    fn canonical_event_counts_sql_is_tenant_scoped_with_explicit_mapping() {
+        // Explicit event mapping: every factor event is named in the SQL.
+        for evt in [
+            EVENT_COMPLAINED,
+            EVENT_UNSUBSCRIBED,
+            EVENT_OPENED,
+            EVENT_CLICKED,
+            EVENT_DELIVERED,
+        ] {
+            assert!(
+                CANONICAL_EVENT_COUNTS_SQL.contains(&format!("event_type = '{evt}'")),
+                "SQL must filter on canonical event {evt}"
+            );
+        }
+        // Tenant-scoped and windowed via bound parameters.
+        assert!(CANONICAL_EVENT_COUNTS_SQL.contains("WHERE tenant_id = $1"));
+        assert!(CANONICAL_EVENT_COUNTS_SQL.contains("make_interval(days => $2::int)"));
+        // Reads only the canonical events table — no phantom tables.
+        assert!(CANONICAL_EVENT_COUNTS_SQL.contains("FROM events"));
+    }
+
+    #[test]
+    fn apply_event_metrics_maps_seeded_canonical_events() {
+        // Seeded canonical events: 3 complaints, 6 unsubs, 40 opens,
+        // 8 clicks over 200 deliveries in the window.
+        let ev = CanonicalEventCounts {
+            complained: 3,
+            unsubscribed: 6,
+            opened: 40,
+            clicked: 8,
+            delivered: 200,
+        };
+        let mut m = TenantMetrics::default();
+        apply_event_metrics(&mut m, &ev);
+        assert!(
+            (m.spam_rate - 1.5).abs() < 1e-9,
+            "spam_rate {}",
+            m.spam_rate
+        );
+        assert!(
+            (m.unsub_rate - 3.0).abs() < 1e-9,
+            "unsub_rate {}",
+            m.unsub_rate
+        );
+        assert!(
+            (m.open_rate - 20.0).abs() < 1e-9,
+            "open_rate {}",
+            m.open_rate
+        );
+        assert!(
+            (m.click_rate - 4.0).abs() < 1e-9,
+            "click_rate {}",
+            m.click_rate
+        );
+    }
+
+    #[test]
+    fn apply_event_metrics_with_zero_delivered_yields_zero_rates() {
+        let ev = CanonicalEventCounts {
+            complained: 2,
+            unsubscribed: 1,
+            ..Default::default()
+        };
+        let mut m = TenantMetrics::default();
+        apply_event_metrics(&mut m, &ev);
+        assert_eq!(m.spam_rate, 0.0);
+        assert_eq!(m.unsub_rate, 0.0);
+        assert_eq!(m.open_rate, 0.0);
+        assert_eq!(m.click_rate, 0.0);
+    }
+
+    #[test]
+    fn apply_event_metrics_feeds_factor_scoring() {
+        // 1% complaint rate over canonical events saturates spam_score.
+        let ev = CanonicalEventCounts {
+            complained: 10,
+            unsubscribed: 0,
+            opened: 0,
+            clicked: 0,
+            delivered: 1000,
+        };
+        let mut m = TenantMetrics::default();
+        apply_event_metrics(&mut m, &ev);
+        let engine = make_engine();
+        let factors = engine.compute_factors(&m);
+        let spam = factors
+            .iter()
+            .find(|f| matches!(f.factor_type, RiskFactorType::SpamComplaints))
+            .unwrap();
+        assert!((spam.score - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn percent_of_handles_degenerate_denominators() {
+        assert_eq!(percent_of(5, 0), 0.0);
+        assert_eq!(percent_of(5, -3), 0.0);
+        assert_eq!(percent_of(0, 10), 0.0);
+        assert!((percent_of(1, 4) - 25.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn payment_failures_sql_reads_billing_dunning_record() {
+        // Canonical payment-failure source: billing dunning_records
+        // (producer: billing-service), not the absent payment_events.
+        assert!(PAYMENT_FAILURES_SQL.contains("FROM dunning_records"));
+        assert!(PAYMENT_FAILURES_SQL.contains("failed_payment_count"));
+        assert!(PAYMENT_FAILURES_SQL.contains("WHERE tenant_id = $1"));
+        assert!(PAYMENT_FAILURES_SQL.contains("INTERVAL '90 days'"));
+        assert!(!PAYMENT_FAILURES_SQL.contains("payment_events"));
+    }
+
+    #[test]
+    fn content_violations_sql_reads_scanner_verdicts() {
+        // Canonical violation source: scans this crate's content scanner
+        // blocked (scan_results), not the absent content_violations.
+        assert!(CONTENT_VIOLATIONS_SQL.contains("FROM scan_results"));
+        assert!(CONTENT_VIOLATIONS_SQL.contains("overall_verdict = 'blocked'"));
+        assert!(CONTENT_VIOLATIONS_SQL.contains("WHERE tenant_id = $1"));
+        assert!(!CONTENT_VIOLATIONS_SQL.contains("content_violations"));
+    }
+
+    #[test]
+    fn blocklist_factor_is_skipped_when_source_unavailable() {
+        // F57: no tenant-scoped blocklist source exists — the factor must
+        // be explicitly skipped even if a stale flag were somehow set.
+        let engine = make_engine();
+        let mut m = TenantMetrics::default();
+        m.blocklist_available = false;
+        m.blocklisted = true;
+        let factors = engine.compute_factors(&m);
+        assert!(
+            !factors
+                .iter()
+                .any(|f| matches!(f.factor_type, RiskFactorType::BlocklistListing)),
+            "BlocklistListing must be skipped when the source is unavailable"
         );
     }
 

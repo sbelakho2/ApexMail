@@ -33,16 +33,13 @@ pub fn admin_router() -> Router<Arc<AppState>> {
         // SOC 2
         .route("/v1/admin/soc2/seed", post(soc2_seed_controls))
         .route("/v1/admin/soc2/controls", get(soc2_list_controls))
+        .route("/v1/admin/soc2/controls/:control_id", get(soc2_get_control))
         .route(
-            "/v1/admin/soc2/controls/{control_id}",
-            get(soc2_get_control),
-        )
-        .route(
-            "/v1/admin/soc2/controls/{control_id}/status",
+            "/v1/admin/soc2/controls/:control_id/status",
             post(soc2_update_status),
         )
         .route(
-            "/v1/admin/soc2/controls/{control_id}/evidence",
+            "/v1/admin/soc2/controls/:control_id/evidence",
             get(soc2_list_evidence),
         )
         .route("/v1/admin/soc2/run", post(soc2_run_collectors))
@@ -51,22 +48,22 @@ pub fn admin_router() -> Router<Arc<AppState>> {
             "/v1/admin/hipaa/baas",
             post(hipaa_request_baa).get(hipaa_list_baas),
         )
-        .route("/v1/admin/hipaa/baas/{baa_id}", get(hipaa_get_baa))
-        .route("/v1/admin/hipaa/baas/{baa_id}/sign", post(hipaa_sign))
+        .route("/v1/admin/hipaa/baas/:baa_id", get(hipaa_get_baa))
+        .route("/v1/admin/hipaa/baas/:baa_id/sign", post(hipaa_sign))
         .route(
-            "/v1/admin/hipaa/baas/{baa_id}/countersign",
+            "/v1/admin/hipaa/baas/:baa_id/countersign",
             post(hipaa_countersign),
         )
         .route(
-            "/v1/admin/hipaa/baas/{baa_id}/activate",
+            "/v1/admin/hipaa/baas/:baa_id/activate",
             post(hipaa_activate),
         )
         .route(
-            "/v1/admin/hipaa/baas/{baa_id}/terminate",
+            "/v1/admin/hipaa/baas/:baa_id/terminate",
             post(hipaa_terminate),
         )
         .route(
-            "/v1/admin/hipaa/tenants/{tenant_id}/active",
+            "/v1/admin/hipaa/tenants/:tenant_id/active",
             get(hipaa_active_for_tenant),
         )
         // Trust portal — admin
@@ -75,7 +72,7 @@ pub fn admin_router() -> Router<Arc<AppState>> {
             post(trust_upsert_document).get(trust_list_documents_admin),
         )
         .route(
-            "/v1/admin/trust/documents/{slug}/{version}/supersede",
+            "/v1/admin/trust/documents/:slug/:version/supersede",
             post(trust_supersede_document),
         )
         .route(
@@ -83,7 +80,7 @@ pub fn admin_router() -> Router<Arc<AppState>> {
             post(trust_upsert_subprocessor).get(trust_list_subprocessors_admin),
         )
         .route(
-            "/v1/admin/trust/subprocessors/{name}",
+            "/v1/admin/trust/subprocessors/:name",
             axum::routing::delete(trust_remove_subprocessor),
         )
         .route(
@@ -91,7 +88,7 @@ pub fn admin_router() -> Router<Arc<AppState>> {
             post(trust_create_incident).get(trust_list_incidents_admin),
         )
         .route(
-            "/v1/admin/trust/incidents/{incident_id}/updates",
+            "/v1/admin/trust/incidents/:incident_id/updates",
             post(trust_post_incident_update).get(trust_list_incident_updates),
         )
         .route(
@@ -99,11 +96,11 @@ pub fn admin_router() -> Router<Arc<AppState>> {
             get(trust_list_access_requests),
         )
         .route(
-            "/v1/admin/trust/access-requests/{request_id}/grant",
+            "/v1/admin/trust/access-requests/:request_id/grant",
             post(trust_grant_access),
         )
         .route(
-            "/v1/admin/trust/access-requests/{request_id}/revoke",
+            "/v1/admin/trust/access-requests/:request_id/revoke",
             post(trust_revoke_access),
         )
         .route(
@@ -111,7 +108,7 @@ pub fn admin_router() -> Router<Arc<AppState>> {
             get(trust_questionnaire_frameworks),
         )
         .route(
-            "/v1/admin/trust/questionnaires/{framework}/generate",
+            "/v1/admin/trust/questionnaires/:framework/generate",
             post(trust_generate_questionnaire),
         )
         .route(
@@ -124,10 +121,7 @@ pub fn public_trust_router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/trust/overview", get(public_trust_overview))
         .route("/trust/documents", get(public_trust_documents))
-        .route(
-            "/trust/documents/{slug}",
-            get(public_trust_document_by_slug),
-        )
+        .route("/trust/documents/:slug", get(public_trust_document_by_slug))
         .route("/trust/subprocessors", get(public_trust_subprocessors))
         .route("/trust/incidents", get(public_trust_incidents))
         .route("/trust/access-request", post(public_trust_access_request))
