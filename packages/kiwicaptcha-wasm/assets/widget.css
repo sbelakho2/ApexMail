@@ -235,11 +235,16 @@
   .kiwi-widget[data-state="done"] .kiwi-bar { background: var(--kiwi-success); }
   .kiwi-widget[data-state="failed"] .kiwi-bar { background: var(--kiwi-error); }
 
-  /* ── Bottom row: the RECEIPT typography (mono, muted) ── */
+  /* ── Bottom row: the RECEIPT typography (mono, muted) ──
+     Wraps: in the expired/failed states the Retry button shares this
+     row with the hint, and a hint that cannot fit beside it (narrow
+     integrations, longer locales) must wrap the button to its own
+     line instead of ellipsizing the actionable text. */
   .kiwi-bottom {
     display: flex;
     align-items: baseline;
     justify-content: space-between;
+    flex-wrap: wrap;
     gap: 8px;
     margin-top: 6px;
   }
