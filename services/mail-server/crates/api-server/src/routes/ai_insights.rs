@@ -4,7 +4,6 @@ use axum::extract::{Query, State};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::middleware::auth::{require_scopes, AuthUser};
@@ -66,8 +65,10 @@ pub struct ChurnPredictionResponse {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct BotDetectionQuery {
+    /// Event id — `events.id` is VARCHAR(64) (migration 075), so this is a
+    /// free-form string, never parsed as a UUID.
     #[serde(default)]
-    pub event_id: Option<Uuid>,
+    pub event_id: Option<String>,
     #[serde(default)]
     pub ip_address: Option<String>,
 }
@@ -317,6 +318,30 @@ async fn churn_prediction(
     }))
 }
 
+/// Validate an event id query parameter against the VARCHAR(64) column
+/// (same rule as events.rs): non-empty, at most 64 bytes, no control
+/// characters. An unvalidated value reaching the database surfaces as a
+/// 500 instead of a 400.
+fn is_valid_event_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64 && !id.bytes().any(|b| b.is_ascii_control())
+}
+
+/// Send-time evidence for bot detection (audit F12): `messages.id` is UUID
+/// while `events.message_id` is VARCHAR(64) (migrations 056/075), so the
+/// join crosses the type boundary explicitly with `m.id::text` — comparing
+/// them directly is a `operator does not exist: uuid = character varying`
+/// error that used to be swallowed by `.ok().flatten()`, silently disabling
+/// this signal. Tenant predicates apply on BOTH sides, and `m.sent_at` is
+/// nullable (outer Option = row found, inner = sent_at value).
+const BOT_SEND_TIME_SQL: &str = r#"
+    SELECT m.sent_at
+    FROM messages m
+    WHERE m.tenant_id = $2
+      AND m.id::text = (
+          SELECT e.message_id FROM events e
+          WHERE e.id = $1 AND e.tenant_id = $2
+      )"#;
+
 async fn bot_detection(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -370,7 +395,16 @@ async fn bot_detection(
     }
 
     // Check by event ID to get user-agent and timing patterns
-    if let Some(event_id) = params.event_id {
+    if let Some(event_id) = params.event_id.as_deref() {
+        // events.id is VARCHAR(64) (migration 075): validate the shape the
+        // same way events.rs does rather than parsing it as a UUID (which
+        // made the comparison against the varchar column invalid).
+        if !is_valid_event_id(event_id) {
+            return Err(ApiError::BadRequest(
+                "event id must be 1-64 characters without control characters".into(),
+            ));
+        }
+
         let event_data: Option<(
             Option<String>,
             Option<String>,
@@ -381,9 +415,7 @@ async fn bot_detection(
         .bind(event_id)
         .bind(&auth.tenant_id)
         .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
+        .await?;
 
         if let Some((user_agent, _ip, timestamp)) = event_data {
             // Check user agent against known bot patterns
@@ -422,17 +454,28 @@ async fn bot_detection(
                 }
             }
 
-            // Check for impossibly fast opens after send (< 1 second usually indicates prefetching)
-            let send_time: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
-                "SELECT sent_at FROM messages WHERE id = (SELECT message_id FROM events WHERE id = $1)"
-            )
-                .bind(event_id)
-                .fetch_optional(&state.db)
-                .await
-                .ok()
-                .flatten();
+            // Check for impossibly fast opens after send (< 1 second usually indicates prefetching).
+            let send_time: Option<Option<chrono::DateTime<chrono::Utc>>> =
+                sqlx::query_scalar(BOT_SEND_TIME_SQL)
+                    .bind(event_id)
+                    .bind(&auth.tenant_id)
+                    .fetch_optional(&state.db)
+                    .await
+                    .map_err(|error| {
+                        // A failed query is an error, not "no evidence": flatten-
+                        // to-None here would silently repeat the original bug.
+                        tracing::error!(
+                            error = %error,
+                            tenant_id = %auth.tenant_id,
+                            event_id = %event_id,
+                            "bot-detection send-time lookup failed"
+                        );
+                        ApiError::Internal("bot-detection send-time lookup failed".into())
+                    })?;
 
-            if let Some(sent) = send_time {
+            // sent_at is nullable (message not sent yet): the inner None is
+            // "no send-time evidence", distinct from a query failure above.
+            if let Some(Some(sent)) = send_time {
                 let delay = (timestamp - sent).num_milliseconds();
                 if delay < 1000 {
                     signals.push(format!("opened {}ms after send (prefetch likely)", delay));
@@ -496,5 +539,252 @@ mod tests {
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["is_bot"], false);
+    }
+
+    #[test]
+    fn test_event_id_validation() {
+        assert!(is_valid_event_id("evt_0001"));
+        assert!(!is_valid_event_id(""));
+        assert!(!is_valid_event_id(&"e".repeat(65)));
+        assert!(!is_valid_event_id("evt\u{0000}1"));
+        assert!(is_valid_event_id(&"e".repeat(64)));
+    }
+}
+
+// ─── F12 database tests ────────────────────────────────────────
+//
+// Exercise the send-time lookup's UUID/varchar boundary, tenant
+// predicates, nullable sent_at, and failure propagation against a real
+// PostgreSQL (audit_log.rs isolated-per-test database convention).
+// Skipped unless TEST_DATABASE_URL is set.
+
+#[cfg(test)]
+mod bot_detection_db_tests {
+    use super::*;
+    use sqlx::postgres::PgPoolOptions;
+    use std::time::Duration;
+
+    async fn isolated_pool(db_suffix: &str) -> Option<sqlx::PgPool> {
+        let database_url = std::env::var("TEST_DATABASE_URL")
+            .ok()
+            .filter(|value| !value.trim().is_empty())?;
+        let (server_part, db_part) = database_url.rsplit_once('/')?;
+        let db_only = db_part.split('?').next().unwrap_or(db_part);
+        let isolated_db = format!("{db_only}_api_ai_insights_f12_{db_suffix}");
+        let isolated_url = format!("{server_part}/{isolated_db}");
+        let admin_url = format!("{server_part}/postgres");
+
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(3))
+            .connect(&admin_url)
+            .await
+            .ok()?;
+        let _ = sqlx::query(&format!(
+            r#"DROP DATABASE IF EXISTS "{isolated_db}" WITH (FORCE)"#
+        ))
+        .execute(&admin)
+        .await;
+        let created = sqlx::query(&format!(r#"CREATE DATABASE "{isolated_db}""#))
+            .execute(&admin)
+            .await;
+        admin.close().await;
+        created.ok()?;
+
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(&isolated_url)
+            .await
+            .ok()?;
+        Some(pool)
+    }
+
+    async fn lookup(
+        pool: &sqlx::PgPool,
+        event_id: &str,
+        tenant_id: &str,
+    ) -> Result<Option<Option<chrono::DateTime<chrono::Utc>>>, sqlx::Error> {
+        sqlx::query_scalar::<_, Option<chrono::DateTime<chrono::Utc>>>(BOT_SEND_TIME_SQL)
+            .bind(event_id)
+            .bind(tenant_id)
+            .fetch_optional(pool)
+            .await
+    }
+
+    #[tokio::test]
+    async fn send_time_lookup_crosses_the_uuid_varchar_boundary() {
+        let Some(pool) = isolated_pool("boundary").await else {
+            eprintln!("skipping send_time_lookup_crosses_the_uuid_varchar_boundary: TEST_DATABASE_URL not set");
+            return;
+        };
+        // Minimal canonical shapes for this lookup (migrations 056/073/075):
+        // messages.id is UUID with nullable sent_at; events.id and
+        // events.message_id are VARCHAR(64). The full apexmail-db SCHEMA
+        // cannot be applied to a fresh database (its campaigns/templates
+        // FK is uuid-to-varchar), so the subset is spelled out here.
+        sqlx::raw_sql(
+            "CREATE TABLE messages (
+                id         UUID PRIMARY KEY,
+                tenant_id  VARCHAR(26) NOT NULL,
+                from_email TEXT NOT NULL,
+                to_emails  JSONB NOT NULL,
+                subject    TEXT NOT NULL,
+                sent_at    TIMESTAMPTZ
+            );
+            CREATE TABLE events (
+                id         VARCHAR(64) PRIMARY KEY,
+                tenant_id  VARCHAR(26) NOT NULL,
+                message_id VARCHAR(64),
+                event_type VARCHAR(50) NOT NULL,
+                timestamp  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            );",
+        )
+        .execute(&pool)
+        .await
+        .expect("canonical messages/events shapes");
+
+        let tenant = "test-f12-ten";
+        let other_tenant = "test-f12-oten";
+
+        let sent_at = chrono::Utc::now() - chrono::Duration::seconds(60);
+        let message_id = uuid::Uuid::new_v4();
+        let unsent_message_id = uuid::Uuid::new_v4();
+        let foreign_message_id = uuid::Uuid::new_v4();
+        for (id, sent) in [
+            (message_id, Some(sent_at)),
+            (unsent_message_id, None), // sent_at NULL
+        ] {
+            sqlx::query(
+                "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, sent_at) \
+                 VALUES ($1, $2, 'from@x.ee', '[]'::jsonb, 's', $3)",
+            )
+            .bind(id)
+            .bind(tenant)
+            .bind(sent)
+            .execute(&pool)
+            .await
+            .expect("message seed");
+        }
+        // A message that belongs to ANOTHER tenant but is referenced by an
+        // event in ours.
+        sqlx::query(
+            "INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, sent_at) \
+             VALUES ($1, $2, 'from@x.ee', '[]'::jsonb, 's', $3)",
+        )
+        .bind(foreign_message_id)
+        .bind(other_tenant)
+        .bind(sent_at)
+        .execute(&pool)
+        .await
+        .expect("foreign message seed");
+
+        let seed_event = |id: &str, message_id: Option<String>, tenant: &str| {
+            let pool = pool.clone();
+            let id = id.to_string();
+            let tenant = tenant.to_string();
+            async move {
+                sqlx::query(
+                    "INSERT INTO events (id, tenant_id, message_id, event_type) \
+                     VALUES ($1, $2, $3, 'opened')",
+                )
+                .bind(&id)
+                .bind(&tenant)
+                .bind(message_id)
+                .execute(&pool)
+                .await
+                .expect("event seed");
+            }
+        };
+        seed_event("evt_f12_open", Some(message_id.to_string()), tenant).await;
+        seed_event(
+            "evt_f12_unsent",
+            Some(unsent_message_id.to_string()),
+            tenant,
+        )
+        .await;
+        seed_event(
+            "evt_f12_foreign",
+            Some(foreign_message_id.to_string()),
+            tenant,
+        )
+        .await;
+        seed_event("evt_f12_nomsg", None, tenant).await;
+        seed_event("evt_f12_other", Some(message_id.to_string()), other_tenant).await;
+
+        // Matching event -> the send time (the old uuid = varchar form
+        // errored on every one of these lookups).
+        let found = lookup(&pool, "evt_f12_open", tenant)
+            .await
+            .expect("matching lookup is a query result, not an error");
+        assert_eq!(found.flatten(), Some(sent_at));
+
+        // Nullable sent_at: evidence of the message, but no send time.
+        let unsent = lookup(&pool, "evt_f12_unsent", tenant)
+            .await
+            .expect("unsent lookup is a query result, not an error");
+        assert_eq!(unsent, Some(None));
+
+        // Tenant predicates on both sides: a message owned by another
+        // tenant is not our send-time evidence.
+        let foreign = lookup(&pool, "evt_f12_foreign", tenant)
+            .await
+            .expect("foreign-message lookup is a query result, not an error");
+        assert_eq!(foreign, None, "foreign-tenant message must not match");
+
+        // Event with no message_id / event of another tenant: no evidence.
+        assert_eq!(
+            lookup(&pool, "evt_f12_nomsg", tenant)
+                .await
+                .expect("no-message lookup"),
+            None
+        );
+        assert_eq!(
+            lookup(&pool, "evt_f12_open", other_tenant)
+                .await
+                .expect("cross-tenant lookup"),
+            None,
+            "the event must only be visible to its own tenant"
+        );
+
+        pool.close().await;
+    }
+
+    /// A failed query must surface as Err — the old `.ok().flatten()`
+    /// conflated database failure with "no evidence" and silently dropped
+    /// the signal.
+    #[tokio::test]
+    async fn send_time_lookup_propagates_query_failure() {
+        let Some(pool) = isolated_pool("failure").await else {
+            eprintln!(
+                "skipping send_time_lookup_propagates_query_failure: TEST_DATABASE_URL not set"
+            );
+            return;
+        };
+        // events exists, messages does not -> every lookup errors.
+        sqlx::query(
+            "CREATE TABLE events (
+                id         VARCHAR(64) PRIMARY KEY,
+                tenant_id  VARCHAR(26) NOT NULL,
+                message_id VARCHAR(64),
+                event_type VARCHAR(50) NOT NULL,
+                timestamp  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("events seed table");
+        sqlx::query("INSERT INTO events (id, tenant_id, message_id, event_type) VALUES ('evt_x', 't', NULL, 'opened')")
+            .execute(&pool)
+            .await
+            .expect("event seed");
+
+        let result = lookup(&pool, "evt_x", "t").await;
+        assert!(
+            result.is_err(),
+            "a failed query must propagate as an error, not flatten to None"
+        );
+
+        pool.close().await;
     }
 }
