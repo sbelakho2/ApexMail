@@ -55,13 +55,13 @@ def transport
   RecordingTransport.new
 end
 
-# ── F1: send wire shape vs messages.rs SendMessageRequest ──────────────────
+# ── F1/F48: send wire shape — every accepted option is serialized ──────────
 
 t = transport
 emails = ApexMail::EmailsAPI.new(t)
 emails.send_email(
-  from: { email: "hello@example.com", name: "Ignored" },
-  to: ["user@example.com", { email: "second@example.com", name: "Dropped" }],
+  from: { email: "hello@example.com", name: "Hello" },
+  to: ["user@example.com", { email: "second@example.com", name: "Second" }],
   subject: "Hello!",
   html: "<h1>Hello World</h1>",
   cc: ["cc@example.com"],
@@ -69,33 +69,43 @@ emails.send_email(
   tags: ["welcome", { name: "campaign", value: "spring" }],
   scheduled_at: "2026-09-01T09:00:00Z",
   metadata: { source: "ruby-sdk-test" },
-  # Inputs the API rejects — must NOT be sent:
-  reply_to: "reply@example.com",
+  # F48: every accepted option must reach the wire.
+  reply_to: { email: "reply@example.com", name: "Replies" },
   template_id: "tpl_1",
+  template_data: { name: "Ada" },
   attachments: [{ filename: "a.txt", content: "eHg=" }],
   priority: "high",
+  headers: { "X-Custom" => "yes" },
 )
 
 body = t.calls[0][:body]
 expect("send posts to /v1/messages", t.calls[0][:method] == "POST" && t.calls[0][:path] == "/v1/messages")
-expect("send from is a bare address string", body[:from] == "hello@example.com")
-expect("send to is a bare string list", body[:to] == ["user@example.com", "second@example.com"])
+expect("send from preserves display name", body[:from] == "Hello <hello@example.com>")
+expect("send to preserves display names", body[:to] == ["user@example.com", "Second <second@example.com>"])
 expect("send cc/bcc coerced to string lists", body[:cc] == ["cc@example.com"] && body[:bcc] == ["bcc@example.com"])
+expect("send reply_to preserves display name", body[:reply_to] == "Replies <reply@example.com>")
+expect("send template_id serialized", body[:template_id] == "tpl_1")
+expect("send template_data serialized", body[:template_data] == { name: "Ada" })
+expect("send attachments serialized", body[:attachments] == [{ filename: "a.txt", content: "eHg=" }])
+expect("send priority serialized", body[:priority] == "high")
+expect("send headers serialized", body[:headers] == { "X-Custom" => "yes" })
 expect("send tags flattened to strings", body[:tags] == ["welcome", "campaign=spring"])
 expect("send scheduled_at is snake_case", body[:scheduled_at] == "2026-09-01T09:00:00Z")
-%w[replyTo reply_to templateId templateData attachments priority scheduledAt name].each do |forbidden|
-  expect("send does not serialize #{forbidden}", !body.key?(forbidden.to_sym) && !body.key?(forbidden))
+%w[replyTo templateId templateData scheduledAt name].each do |forbidden|
+  expect("send never uses camelCase #{forbidden}", !body.key?(forbidden.to_sym) && !body.key?(forbidden))
 end
 
-# batch uses the same coercion
+# batch uses the same serialization
 t = transport
 ApexMail::EmailsAPI.new(t).batch(messages: [
-  { from: "hello@example.com", to: "user@example.com", subject: "Hi", text: "Hello", priority: "high" },
+  { from: "hello@example.com", to: "user@example.com", subject: "Hi", text: "Hello", priority: "high",
+    reply_to: "reply@example.com" },
 ])
 message = t.calls[0][:body][:messages][0]
 expect("batch message to coerced to list", message[:to] == ["user@example.com"])
-expect("batch message from bare string", message[:from] == "hello@example.com")
-expect("batch drops priority", !message.key?(:priority))
+expect("batch message from address string", message[:from] == "hello@example.com")
+expect("batch message serializes priority", message[:priority] == "high")
+expect("batch message serializes reply_to", message[:reply_to] == "reply@example.com")
 
 # ── F2: webhook wire shapes vs webhooks.rs ─────────────────────────────────
 

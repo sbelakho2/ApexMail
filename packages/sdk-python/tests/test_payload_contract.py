@@ -99,28 +99,45 @@ class SendPayloadContract(unittest.TestCase):
             payload,
         )
 
-    def test_send_never_serializes_unknown_fields(self) -> None:
+    def test_send_serializes_every_accepted_option(self) -> None:
+        """F48: options the send() API accepts must reach the wire."""
+        payload = build_send_payload(
+            from_="hello@example.com",
+            to="user@example.com",
+            subject="Hi",
+            text="Hello",
+            reply_to="reply@example.com",
+            attachments=[{"filename": "a.txt", "content": "eHg="}],
+            headers={"X-Custom": "yes"},
+        )
+        self.assertEqual(payload["reply_to"], "reply@example.com")
+        self.assertEqual(payload["attachments"], [{"filename": "a.txt", "content": "eHg="}])
+        self.assertEqual(payload["headers"], {"X-Custom": "yes"})
+
+    def test_omitted_options_stay_absent(self) -> None:
         payload = build_send_payload(
             from_="hello@example.com",
             to="user@example.com",
             subject="Hi",
             text="Hello",
         )
-        for forbidden in (
-            "replyTo", "reply_to", "templateId", "templateData",
-            "attachments", "priority", "headers", "scheduledAt", "name",
-        ):
-            self.assertNotIn(forbidden, payload)
+        for absent in ("reply_to", "attachments", "headers", "cc", "bcc", "tags", "metadata"):
+            self.assertNotIn(absent, payload)
 
-    def test_recipient_dicts_flatten_to_bare_addresses(self) -> None:
+    def test_recipient_dicts_serialize_display_names(self) -> None:
+        """F48: display names survive as "Name <addr>" wire forms."""
         payload = build_send_payload(
-            from_="hello@example.com",
-            to=[{"email": "user@example.com", "name": "User"}],
+            from_={"email": "hello@example.com", "name": "Hello"},
+            to=[{"email": "user@example.com", "name": "User"}, "plain@example.com"],
             subject="Hi",
             text="Hello",
+            cc=[{"email": "cc@example.com", "name": "CC"}],
         )
-        self.assertEqual(payload["to"], ["user@example.com"])
-        self.assertNotIn("name", payload)
+        self.assertEqual(payload["from"], "Hello <hello@example.com>")
+        self.assertEqual(
+            payload["to"], ["User <user@example.com>", "plain@example.com"]
+        )
+        self.assertEqual(payload["cc"], ["CC <cc@example.com>"])
 
     def test_tags_flatten_to_string_list(self) -> None:
         payload = build_send_payload(
@@ -149,7 +166,7 @@ class BatchCoercionContract(unittest.TestCase):
         self.assertEqual(message["to"], ["user@example.com"])
         self.assertEqual(message["from"], "hello@example.com")
 
-    def test_batch_drops_unknown_fields_and_maps_scheduled_at(self) -> None:
+    def test_batch_maps_scheduled_at_and_forwards_options(self) -> None:
         self.resource.batch(
             [
                 {
@@ -158,7 +175,6 @@ class BatchCoercionContract(unittest.TestCase):
                     "subject": "Hi",
                     "text": "Hello",
                     "scheduledAt": "2026-09-01T09:00:00Z",
-                    "priority": "high",
                     "reply_to": "r@example.com",
                 }
             ]
@@ -166,9 +182,7 @@ class BatchCoercionContract(unittest.TestCase):
         message = self.client.calls[0]["json"]["messages"][0]
         self.assertEqual(message["scheduled_at"], "2026-09-01T09:00:00Z")
         self.assertNotIn("scheduledAt", message)
-        self.assertNotIn("priority", message)
-        self.assertNotIn("replyTo", message)
-        self.assertNotIn("reply_to", message)
+        self.assertEqual(message["reply_to"], "r@example.com")
 
     def test_batch_from_underscore_alias_accepted(self) -> None:
         self.resource.batch(

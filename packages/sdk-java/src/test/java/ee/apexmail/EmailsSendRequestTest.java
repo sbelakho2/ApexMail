@@ -30,7 +30,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class EmailsSendRequestTest {
     @Test
-    void typedSendRequestSerializesOnlyApiFields() {
+    void typedSendRequestSerializesEveryAcceptedOption() {
         CapturingHttpClient httpClient = new CapturingHttpClient(successResponse());
 
         try (ApexMailClient client = new ApexMailClient(
@@ -53,8 +53,9 @@ class EmailsSendRequestTest {
                 "idem_typed"
             ));
 
-            // F1: only API-accepted fields reach the wire — replyTo is NOT
-            // sent and scheduled_at is snake_case.
+            // F48: the accepted replyTo option reaches the wire as snake_case
+            // reply_to; scheduled_at is snake_case.
+            assertTrue(httpClient.lastRequestBody().contains("\"reply_to\":\"support@example.com\""));
             assertFalse(httpClient.lastRequestBody().contains("replyTo"));
             assertTrue(httpClient.lastRequestBody().contains("\"scheduled_at\":\"2026-05-01T09:00:00Z\""));
             assertTrue(httpClient.lastRequestBody().contains("\"from\":\"hello@example.com\""));
@@ -64,7 +65,7 @@ class EmailsSendRequestTest {
     }
 
     @Test
-    void mapSendSerializesOnlyApiFields() {
+    void mapSendSerializesEveryAcceptedOption() {
         CapturingHttpClient httpClient = new CapturingHttpClient(successResponse());
 
         Map<String, Object> params = new HashMap<>();
@@ -84,6 +85,8 @@ class EmailsSendRequestTest {
         )) {
             client.emails().send(params);
 
+            // F48: reply_to is serialized snake_case, never dropped.
+            assertTrue(httpClient.lastRequestBody().contains("\"reply_to\":\"support@example.com\""));
             assertFalse(httpClient.lastRequestBody().contains("replyTo"));
             assertFalse(httpClient.lastRequestBody().contains("scheduledAt"));
             assertTrue(httpClient.lastRequestBody().contains("\"scheduled_at\":\"2026-05-01T09:00:00Z\""));

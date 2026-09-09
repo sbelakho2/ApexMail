@@ -54,14 +54,16 @@ resp = requests.post(
         "html": "&lt;h1&gt;Hello!&lt;/h1&gt;",
     },
 )
-message = resp.json()
+resp.raise_for_status()  # 202 Accepted on success
+message = resp.json()["data"]  # {"id": ..., "status": "queued", ...}
 
 # Track delivery
-status = requests.get(
+detail = requests.get(
     f"https://api.apexmail.ee/v1/messages/{message['id']}",
     headers={"X-API-Key": "am_live_xxx"},
-).json()
-print(status["status"])  # 'delivered'</code></pre>
+)
+detail.raise_for_status()
+print(detail.json()["data"]["status"])  # 'queued'</code></pre>
           </div>
         </div>
       </div>
@@ -110,13 +112,14 @@ resp = requests.post(
         "to": ["user@example.com"],
         "subject": "Your monthly statement",
         "html": "&lt;p&gt;Your statement is ready.&lt;/p&gt;",
-        "tags": [{"name": "purpose", "value": "transactional"}],
+        "tags": ["purpose=transactional", "monthly-statement"],
     },
 )
+resp.raise_for_status()  # 202 Accepted on success
 
 # Every message's event history (accepted → delivered → opened)
 # feeds the audit trail exposed to compliance workflows
-message_id = resp.json()["id"]</code></pre>
+message_id = resp.json()["data"]["id"]</code></pre>
           </div>
         </div>
       </div>

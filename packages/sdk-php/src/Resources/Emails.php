@@ -16,14 +16,13 @@ class Emails
     /**
      * Send a single email.
      *
-     * The serialized body matches the server's SendMessageRequest exactly:
-     * from/to/cc/bcc are sent as BARE address strings (not {email, name}
-     * objects), and only fields the API accepts are serialized. Inputs the
-     * API does not support are still accepted here for backwards
-     * compatibility but are NOT sent: display names (the API has no name
-     * fields), template_id/template_data, attachments, priority, and
-     * reply_to (no such field on the server). Use html/text for the body;
-     * tags are serialized as a list of strings.
+     * Every accepted option is serialized (F48) — nothing is dropped
+     * silently: from/to/cc/bcc/reply_to are sent as address strings with
+     * display names preserved as RFC 5322 "Name <addr>" forms
+     * (["email" => ..., "name" => ...] inputs keep their name), tags as a
+     * list of strings, scheduled_at snake_case, and reply_to, attachments,
+     * headers, priority, template_id/template_data under their documented
+     * snake_case field names.
      *
      * @param array $params {
      *   @type string|array  $from            Sender ("addr" or ["email" => ..., "name" => ...])
@@ -31,6 +30,12 @@ class Emails
      *   @type string        $subject
      *   @type string        $html            HTML body
      *   @type string        $text            Plain-text body
+     *   @type string|array  $reply_to        Reply-To address (display-name aware)
+     *   @type array         $attachments     [{filename, content, contentType}, ...]
+     *   @type array         $headers         Custom email headers
+     *   @type string        $priority
+     *   @type string        $template_id
+     *   @type array         $template_data
      *   @type array         $tags            List of strings (or {name, value} maps, flattened)
      *   @type string        $scheduled_at    ISO 8601 (snake_case on the wire)
      *   @type array         $metadata
@@ -73,6 +78,10 @@ class Emails
         }
         if (!empty($params['bcc'])) {
             $this->validateRecipients($params['bcc'], 'bcc');
+        }
+        $replyTo = $params['reply_to'] ?? $params['replyTo'] ?? null;
+        if ($replyTo !== null && $replyTo !== '') {
+            $this->validateRecipients($replyTo, 'reply_to');
         }
 
         // SDK-B: automatic idempotency key (caller-supplied key wins) so a
@@ -136,65 +145,85 @@ class Emails
     // ── Private helpers ─────────────────────────────────────────────────────
 
     /**
-     * Build the wire payload for a send, matching the server's
-     * SendMessageRequest (messages.rs, `deny_unknown_fields`) exactly:
-     * {from: string, to: string[], cc?, bcc?, subject, html?, text?,
+     * Build the wire payload for a send (F48: every accepted option is
+     * serialized — nothing is dropped silently):
+     * {from, to, cc?, bcc?, reply_to?, subject, html?, text?,
+     *  attachments?, headers?, priority?, template_id?, template_data?,
      *  tags?: string[], metadata?, scheduled_at?}.
      *
-     * Legacy SDK inputs that the API does NOT accept — display names inside
-     * {email, name} objects, reply_to, template_id/template_data,
-     * attachments, priority — are still validated as inputs but are NOT
-     * serialized: sending them would be rejected with 422 by
-     * deny_unknown_fields.
+     * Address inputs ("addr" or ["email" => ..., "name" => ...]) serialize
+     * as address strings with display names preserved as "Name <addr>"
+     * forms. Attachments pass through in their documented shape
+     * ({filename, content, contentType}); headers/priority/template
+     * options are forwarded under their documented snake_case names.
      */
     private function buildSendPayload(array $params): array
     {
         $tags = $this->normalizeTags($params['tags'] ?? null);
+        $scheduledAt = $params['scheduled_at'] ?? $params['scheduledAt'] ?? null;
+        $replyTo = $params['reply_to'] ?? $params['replyTo'] ?? null;
+        $templateId = $params['template_id'] ?? $params['templateId'] ?? null;
+        $templateData = $params['template_data'] ?? $params['templateData'] ?? null;
 
         return array_filter([
-            'from'         => $this->normalizeAddress($params['from'] ?? null),
-            'to'           => $this->normalizeRecipients($params['to'] ?? null),
-            'cc'           => $this->normalizeRecipients($params['cc'] ?? null),
-            'bcc'          => $this->normalizeRecipients($params['bcc'] ?? null),
-            'subject'      => $params['subject'] ?? null,
-            'html'         => $params['html'] ?? null,
-            'text'         => $params['text'] ?? null,
-            'tags'         => $tags,
-            'scheduled_at' => $params['scheduled_at'] ?? $params['scheduledAt'] ?? null,
-            'metadata'     => $params['metadata'] ?? null,
+            'from'          => $this->serializeAddress($params['from'] ?? null),
+            'to'            => $this->serializeRecipients($params['to'] ?? null),
+            'cc'            => $this->serializeRecipients($params['cc'] ?? null),
+            'bcc'           => $this->serializeRecipients($params['bcc'] ?? null),
+            'reply_to'      => $replyTo === null ? null : $this->serializeAddress($replyTo),
+            'subject'       => $params['subject'] ?? null,
+            'html'          => $params['html'] ?? null,
+            'text'          => $params['text'] ?? null,
+            'attachments'   => $params['attachments'] ?? null,
+            'headers'       => $params['headers'] ?? null,
+            'priority'      => $params['priority'] ?? null,
+            'template_id'   => $templateId,
+            'template_data' => $templateData,
+            'tags'          => $tags,
+            'scheduled_at'  => $scheduledAt,
+            'metadata'      => $params['metadata'] ?? null,
         ], static fn ($v) => $v !== null && $v !== []);
     }
 
     /**
-     * Extract the bare address string from an address input. The API's
-     * SendMessageRequest has NO display-name field, so a {email, name}
-     * object contributes only its `email` on the wire (the name is accepted
-     * as input for backwards compatibility but unused).
+     * Serialize one address input, preserving the display name (F48): a
+     * ["email" => ..., "name" => ...] array becomes "Name <email>"; a bare
+     * string passes through unchanged.
      */
-    private function normalizeAddress(mixed $addr): ?string
+    private function serializeAddress(mixed $addr): ?string
     {
         if ($addr === null) {
             return null;
         }
         if (is_array($addr)) {
             $email = $addr['email'] ?? $addr['address'] ?? null;
-            return $email === null ? null : (string) $email;
+            if ($email === null) {
+                return null;
+            }
+            $name = $addr['name'] ?? null;
+            if ($name !== null && trim((string) $name) !== '') {
+                return "{$name} <{$email}>";
+            }
+            return (string) $email;
         }
         return (string) $addr;
     }
 
     /**
-     * Recipients are sent as a plain list of address strings — the API
-     * rejects the historical {email, name} object wrappers (422 via
-     * deny_unknown_fields).
+     * Recipients are sent as a list of address strings with display names
+     * preserved as "Name <addr>" forms (F48).
      */
-    private function normalizeRecipients(mixed $recips): ?array
+    private function serializeRecipients(mixed $recips): ?array
     {
         if ($recips === null) {
             return null;
         }
+        // A single address spec is one recipient, not a list of its values.
+        if (is_array($recips) && array_is_list($recips) === false) {
+            $recips = [$recips];
+        }
         $normalized = array_map(
-            fn ($recipient) => $this->normalizeAddress($recipient),
+            fn ($recipient) => $this->serializeAddress($recipient),
             (array) $recips,
         );
 

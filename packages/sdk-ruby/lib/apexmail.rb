@@ -399,13 +399,12 @@ module ApexMail
 
     # Send a single transactional email.
     #
-    # The serialized body matches the server's SendMessageRequest exactly
-    # (messages.rs, deny_unknown_fields): from/to/cc/bcc go out as BARE
-    # address strings ({email:, name:} hashes contribute only the address —
-    # the API has no display-name field), tags as a string list, and
-    # scheduled_at snake_case. Inputs the API rejects — reply_to,
-    # template_id/template_data, attachments, priority — are accepted as
-    # options for backwards compatibility but are NOT transmitted.
+    # Every accepted option is serialized (F48) — nothing is dropped
+    # silently: from/to/cc/bcc/reply_to go out as address strings with
+    # display names preserved as RFC 5322 "Name <addr>" forms, tags as a
+    # string list, scheduled_at snake_case, and reply_to, attachments,
+    # headers, priority, template_id/template_data under their documented
+    # snake_case field names.
     #
     # @param from    [String, Hash]        Sender ("addr" or { email:, name: })
     # @param to      [String, Array<String, Hash>] Recipients
@@ -415,6 +414,12 @@ module ApexMail
     # @param options [Hash]                Additional options
     # @option options [Array<String, Hash>] :cc
     # @option options [Array<String, Hash>] :bcc
+    # @option options [String, Hash] :reply_to  (display-name aware)
+    # @option options [Array<Hash>] :attachments  ({filename:, content:, contentType:})
+    # @option options [Hash] :headers  Custom email headers
+    # @option options [String] :priority
+    # @option options [String] :template_id
+    # @option options [Hash] :template_data
     # @option options [Array<String, Hash>] :tags  (flattened to strings)
     # @option options [String]  :scheduled_at  ISO 8601 datetime (snake_case on the wire)
     # @option options [Hash]    :metadata
@@ -434,6 +439,9 @@ module ApexMail
       validate_recipients(to, 'to')
       validate_recipients(options[:cc], 'cc') if options[:cc]
       validate_recipients(options[:bcc], 'bcc') if options[:bcc]
+      if (reply_to = fetch_option(options, :reply_to))
+        validate_recipients(reply_to, 'reply_to')
+      end
 
       # SDK-B: automatic idempotency key (caller-supplied key wins) so a
       # retried POST can never enqueue the same message twice.
@@ -492,36 +500,58 @@ module ApexMail
 
     private
 
-    # Exact SendMessageRequest wire shape: bare address strings, string
-    # tags, snake_case scheduled_at, and nothing the API would reject.
+    # Wire body for a send: address strings with display names preserved
+    # ("Name <addr>"), string tags, snake_case scheduled_at, and every
+    # accepted option (reply_to, attachments, headers, priority,
+    # template_id/template_data) serialized (F48).
     def build_send_payload(from:, to:, subject:, html: nil, text: nil, **options)
       compact({
-        from:         normalize_address(from),
-        to:           normalize_recipients(to),
-        cc:           normalize_recipients(options[:cc]),
-        bcc:          normalize_recipients(options[:bcc]),
-        subject:      subject,
-        html:         html,
-        text:         text,
-        tags:         normalize_tags(options[:tags]),
-        scheduled_at: options[:scheduled_at],
-        metadata:     options[:metadata],
+        from:          serialize_address(from),
+        to:            serialize_recipients(to),
+        cc:            serialize_recipients(options[:cc]),
+        bcc:           serialize_recipients(options[:bcc]),
+        reply_to:      serialize_address(fetch_option(options, :reply_to)),
+        subject:       subject,
+        html:          html,
+        text:          text,
+        attachments:   fetch_option(options, :attachments),
+        headers:       fetch_option(options, :headers),
+        priority:      fetch_option(options, :priority),
+        template_id:   fetch_option(options, :template_id),
+        template_data: fetch_option(options, :template_data),
+        tags:          normalize_tags(options[:tags]),
+        scheduled_at:  options[:scheduled_at] || options["scheduledAt"],
+        metadata:      options[:metadata],
       })
     end
 
-    # Extract the bare address string; the API has no display-name field.
-    def normalize_address(addr)
+    # Reads an option by symbol or string key (F48 options may arrive from
+    # either the keyword API or raw batch hashes).
+    def fetch_option(options, key)
+      options[key] || options[key.to_s]
+    end
+
+    # Serialize one address, preserving the display name as an RFC 5322
+    # "Name <addr>" form (F48); bare strings and nil pass through.
+    def serialize_address(addr)
       return nil if addr.nil?
-      return addr[:email].to_s if addr.is_a?(Hash) && addr[:email]
-      return addr["email"].to_s if addr.is_a?(Hash) && addr["email"]
+      if addr.is_a?(Hash)
+        email = addr[:email] || addr["email"]
+        return nil unless email
+        name = addr[:name] || addr["name"]
+        return name.to_s.empty? ? email.to_s : "#{name} <#{email}>"
+      end
       addr.to_s
     end
 
-    # Recipients go out as a plain list of address strings — the API rejects
-    # the historical {email:, name:} wrappers with 422.
-    def normalize_recipients(recips)
+    # Recipients go out as a list of address strings with display names
+    # preserved ("Name <addr>" forms, F48). A single {email:, name:} hash is
+    # ONE recipient — Array() on a Hash expands it to key/value pairs, so
+    # wrap hashes first.
+    def serialize_recipients(recips)
       return nil if recips.nil?
-      list = Array(recips).map { |recipient| normalize_address(recipient) }.compact
+      recips = [recips] if recips.is_a?(Hash)
+      list = Array(recips).map { |recipient| serialize_address(recipient) }.compact
       list.empty? ? nil : list
     end
 
@@ -572,8 +602,14 @@ module ApexMail
         text: params[:text] || params["text"],
         cc: params[:cc] || params["cc"],
         bcc: params[:bcc] || params["bcc"],
+        reply_to: params[:reply_to] || params["reply_to"] || params[:replyTo] || params["replyTo"],
+        attachments: params[:attachments] || params["attachments"],
+        headers: params[:headers] || params["headers"],
+        priority: params[:priority] || params["priority"],
+        template_id: params[:template_id] || params["template_id"] || params[:templateId] || params["templateId"],
+        template_data: params[:template_data] || params["template_data"] || params[:templateData] || params["templateData"],
         tags: params[:tags] || params["tags"],
-        scheduled_at: params[:scheduled_at] || params[:scheduled_at] || params[:scheduledAt] || params["scheduledAt"],
+        scheduled_at: params[:scheduled_at] || params["scheduled_at"] || params[:scheduledAt] || params["scheduledAt"],
         metadata: params[:metadata] || params["metadata"],
       )
     end
@@ -593,7 +629,7 @@ module ApexMail
       if (html.nil? || html.to_s.strip.empty?) && (text.nil? || text.to_s.strip.empty?)
         raise ArgumentError, template_id.nil? ?
           "#{label} missing html or text body" :
-          "#{label} missing html or text body (template_id is not supported by the send API)"
+          "#{label} missing html or text body (template_id alone cannot provide the body)"
       end
 
       validate_recipients(from, 'from')

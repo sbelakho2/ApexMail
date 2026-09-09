@@ -50,6 +50,7 @@ const (
 
 var apiKeyPattern = regexp.MustCompile(`^am_(live|test)_[A-Za-z0-9]{16,}$`)
 var emailPattern = regexp.MustCompile(`^[^@\s]+@[^@\s]+\.[^@\s]+$`)
+
 // Control characters (C0 + DEL) stripped from caller-supplied header values.
 var controlCharRegex = regexp.MustCompile(`[\x00-\x1F\x7F]`)
 
@@ -850,59 +851,74 @@ type EmailsAPI struct{ client *Client }
 
 // SendEmailRequest is the request body for sending a single email.
 //
-// The struct keeps its historical input shape (EmailAddress values,
-// TemplateID, Priority, ...) for backwards compatibility, but the wire
-// payload (MarshalJSON) matches the server's SendMessageRequest exactly
-// (messages.rs, deny_unknown_fields): from/to/cc/bcc are serialized as
-// BARE address strings and only API-accepted fields are emitted. Inputs
-// the API rejects — display names, ReplyTo, TemplateID/TemplateData,
-// Attachments, Priority — are validated as inputs but never serialized.
+// The wire payload (MarshalJSON) serializes every option the struct
+// accepts (F48): from/to/cc/bcc/reply_to go out as address strings with
+// display names preserved as RFC 5322 "Name <addr>" forms, tags as a
+// string list, and reply_to, template_id/template_data, attachments and
+// priority under their documented snake_case field names. Nothing the SDK
+// accepts is dropped silently.
 type SendEmailRequest struct {
-	From         EmailAddress   `json:"from"`
-	To           []EmailAddress `json:"to"`
-	CC           []EmailAddress `json:"cc,omitempty"`
-	BCC          []EmailAddress `json:"bcc,omitempty"`
-	ReplyTo      *EmailAddress  `json:"replyTo,omitempty"` // unused-input: not sent
-	Subject      string         `json:"subject"`
-	HTML         string         `json:"html,omitempty"`
-	Text         string         `json:"text,omitempty"`
-	TemplateID   string         `json:"templateId,omitempty"`   // unused-input: not sent
-	TemplateData interface{}    `json:"templateData,omitempty"` // unused-input: not sent
-	Attachments  []Attachment   `json:"attachments,omitempty"`  // unused-input: not sent
-	Tags         []string       `json:"tags,omitempty"`
-	Priority     string         `json:"priority,omitempty"`    // unused-input: not sent
-	ScheduledAt  string         `json:"scheduled_at,omitempty"` // wire: snake_case
-	Metadata     interface{}    `json:"metadata,omitempty"`
+	From         EmailAddress      `json:"from"`
+	To           []EmailAddress    `json:"to"`
+	CC           []EmailAddress    `json:"cc,omitempty"`
+	BCC          []EmailAddress    `json:"bcc,omitempty"`
+	ReplyTo      *EmailAddress     `json:"reply_to,omitempty"` // wire: display-name aware
+	Subject      string            `json:"subject"`
+	HTML         string            `json:"html,omitempty"`
+	Text         string            `json:"text,omitempty"`
+	TemplateID   string            `json:"template_id,omitempty"`   // wire: snake_case
+	TemplateData interface{}       `json:"template_data,omitempty"` // wire: snake_case
+	Attachments  []Attachment      `json:"attachments,omitempty"`
+	Tags         []string          `json:"tags,omitempty"`
+	Priority     string            `json:"priority,omitempty"`
+	Headers      map[string]string `json:"headers,omitempty"`
+	ScheduledAt  string            `json:"scheduled_at,omitempty"` // wire: snake_case
+	Metadata     interface{}       `json:"metadata,omitempty"`
 }
 
-// sendMessagePayload mirrors the server's SendMessageRequest serde shape
-// exactly (deny_unknown_fields — any extra key is a 422).
+// sendMessagePayload is the wire body for the messages send API. Every
+// accepted option is serialized (F48) — display names survive as
+// "Name <addr>" forms and extended options use their documented
+// snake_case field names.
 type sendMessagePayload struct {
-	From        string      `json:"from"`
-	To          []string    `json:"to"`
-	CC          []string    `json:"cc,omitempty"`
-	BCC         []string    `json:"bcc,omitempty"`
-	Subject     string      `json:"subject"`
-	HTML        string      `json:"html,omitempty"`
-	Text        string      `json:"text,omitempty"`
-	Tags        []string    `json:"tags,omitempty"`
-	Metadata    interface{} `json:"metadata,omitempty"`
-	ScheduledAt string      `json:"scheduled_at,omitempty"`
+	From         string            `json:"from"`
+	To           []string          `json:"to"`
+	CC           []string          `json:"cc,omitempty"`
+	BCC          []string          `json:"bcc,omitempty"`
+	ReplyTo      string            `json:"reply_to,omitempty"`
+	Subject      string            `json:"subject"`
+	HTML         string            `json:"html,omitempty"`
+	Text         string            `json:"text,omitempty"`
+	TemplateID   string            `json:"template_id,omitempty"`
+	TemplateData interface{}       `json:"template_data,omitempty"`
+	Attachments  []Attachment      `json:"attachments,omitempty"`
+	Tags         []string          `json:"tags,omitempty"`
+	Priority     string            `json:"priority,omitempty"`
+	Headers      map[string]string `json:"headers,omitempty"`
+	Metadata     interface{}       `json:"metadata,omitempty"`
+	ScheduledAt  string            `json:"scheduled_at,omitempty"`
 }
 
-// MarshalJSON serializes the exact SendMessageRequest wire shape.
+// MarshalJSON serializes the send payload with every accepted option on
+// the wire (F48).
 func (r *SendEmailRequest) MarshalJSON() ([]byte, error) {
 	payload := sendMessagePayload{
-		From:        r.From.Email,
-		To:          addressListToStrings(r.To),
-		CC:          addressListToStrings(r.CC),
-		BCC:         addressListToStrings(r.BCC),
-		Subject:     r.Subject,
-		HTML:        r.HTML,
-		Text:        r.Text,
-		Tags:        r.Tags,
-		Metadata:    r.Metadata,
-		ScheduledAt: r.ScheduledAt,
+		From:         formatEmailAddress(r.From),
+		To:           addressListToStrings(r.To),
+		CC:           addressListToStrings(r.CC),
+		BCC:          addressListToStrings(r.BCC),
+		ReplyTo:      formatEmailAddressPtr(r.ReplyTo),
+		Subject:      r.Subject,
+		HTML:         r.HTML,
+		Text:         r.Text,
+		TemplateID:   r.TemplateID,
+		TemplateData: r.TemplateData,
+		Attachments:  r.Attachments,
+		Tags:         r.Tags,
+		Priority:     r.Priority,
+		Headers:      r.Headers,
+		Metadata:     r.Metadata,
+		ScheduledAt:  r.ScheduledAt,
 	}
 	if payload.To == nil {
 		payload.To = []string{}
@@ -910,8 +926,25 @@ func (r *SendEmailRequest) MarshalJSON() ([]byte, error) {
 	return json.Marshal(payload)
 }
 
-// addressListToStrings flattens EmailAddress values (keeping only the
-// address — the API has no display-name field) and plain strings.
+// formatEmailAddress serializes one address with its display name
+// preserved: "Name <addr>" when a name is set, the bare address otherwise
+// (F48).
+func formatEmailAddress(address EmailAddress) string {
+	if address.Name != "" && address.Email != "" {
+		return address.Name + " <" + address.Email + ">"
+	}
+	return address.Email
+}
+
+func formatEmailAddressPtr(address *EmailAddress) string {
+	if address == nil {
+		return ""
+	}
+	return formatEmailAddress(*address)
+}
+
+// addressListToStrings serializes EmailAddress values to address strings,
+// preserving display names as "Name <addr>" forms (F48).
 func addressListToStrings(addresses []EmailAddress) []string {
 	if len(addresses) == 0 {
 		return nil
@@ -919,7 +952,7 @@ func addressListToStrings(addresses []EmailAddress) []string {
 	out := make([]string, 0, len(addresses))
 	for _, address := range addresses {
 		if address.Email != "" {
-			out = append(out, address.Email)
+			out = append(out, formatEmailAddress(address))
 		}
 	}
 	return out
@@ -1428,9 +1461,9 @@ func (r *UpdateWebhookRequest) MarshalJSON() ([]byte, error) {
 		}
 	}
 	return json.Marshal(struct {
-		URL     string   `json:"url,omitempty"`
-		Events  []string `json:"events,omitempty"`
-		Status  string   `json:"status,omitempty"`
+		URL    string   `json:"url,omitempty"`
+		Events []string `json:"events,omitempty"`
+		Status string   `json:"status,omitempty"`
 	}{URL: r.URL, Events: r.Events, Status: status})
 }
 
@@ -1483,15 +1516,15 @@ type TemplatesAPI struct{ client *Client }
 // Template matches the server's flat TemplateResponse: {id, name, subject,
 // html_body, text_body, version, status, created_at, updated_at}.
 type Template struct {
-	ID        string  `json:"id"`
-	Name      string  `json:"name"`
-	Subject   string  `json:"subject"`
-	HTMLBody  string  `json:"html_body"`
-	TextBody  string  `json:"text_body,omitempty"`
-	Version   int     `json:"version"`
-	Status    string  `json:"status"`
-	CreatedAt string  `json:"created_at"`
-	UpdatedAt string  `json:"updated_at"`
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Subject   string `json:"subject"`
+	HTMLBody  string `json:"html_body"`
+	TextBody  string `json:"text_body,omitempty"`
+	Version   int    `json:"version"`
+	Status    string `json:"status"`
+	CreatedAt string `json:"created_at"`
+	UpdatedAt string `json:"updated_at"`
 }
 
 // CreateTemplateRequest is the request body for creating a template. The
@@ -1501,7 +1534,7 @@ type Template struct {
 // only the API-accepted subset is serialized.
 type CreateTemplateRequest struct {
 	Name        string                 `json:"name"`
-	Slug        string                 `json:"slug,omitempty"`   // unused-input: not sent
+	Slug        string                 `json:"slug,omitempty"` // unused-input: not sent
 	Subject     string                 `json:"subject"`
 	HTML        string                 `json:"html_body"` // wire: html_body
 	Text        string                 `json:"text_body,omitempty"`
@@ -1512,10 +1545,10 @@ type CreateTemplateRequest struct {
 // MarshalJSON emits the exact {name, subject, html_body, text_body?} shape.
 func (r *CreateTemplateRequest) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Name      string `json:"name"`
-		Subject   string `json:"subject"`
-		HTMLBody  string `json:"html_body"`
-		TextBody  string `json:"text_body,omitempty"`
+		Name     string `json:"name"`
+		Subject  string `json:"subject"`
+		HTMLBody string `json:"html_body"`
+		TextBody string `json:"text_body,omitempty"`
 	}{Name: r.Name, Subject: r.Subject, HTMLBody: r.HTML, TextBody: r.Text})
 }
 
@@ -1604,10 +1637,10 @@ type UpdateTemplateRequest struct {
 // MarshalJSON emits the exact {name?, subject?, html_body?, text_body?} shape.
 func (r *UpdateTemplateRequest) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
-		Name      string `json:"name,omitempty"`
-		Subject   string `json:"subject,omitempty"`
-		HTMLBody  string `json:"html_body,omitempty"`
-		TextBody  string `json:"text_body,omitempty"`
+		Name     string `json:"name,omitempty"`
+		Subject  string `json:"subject,omitempty"`
+		HTMLBody string `json:"html_body,omitempty"`
+		TextBody string `json:"text_body,omitempty"`
 	}{Name: r.Name, Subject: r.Subject, HTMLBody: r.HTML, TextBody: r.Text})
 }
 

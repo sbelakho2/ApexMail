@@ -64,10 +64,10 @@ res, err := client.Emails.Send(ctx, &apexmail.SendEmailRequest{
 	ScheduledAt: "2026-01-15T10:00:00Z", // Optional (scheduled_at on the wire)
 })
 
-// NOTE: the API's SendMessageRequest accepts bare address strings only.
-// EmailAddress values are serialized as their address (display names are
-// ignored), and ReplyTo/TemplateID/Priority/Attachments are validated as
-// inputs but never transmitted (the server rejects them with 422).
+// NOTE: EmailAddress display names are serialized as RFC 5322
+// "Name <addr>" forms, and every accepted option (ReplyTo, TemplateID,
+// TemplateData, Priority, Attachments, Headers) is transmitted under its
+// documented snake_case field name.
 
 // Batch send (up to 1000 emails)
 res, err := client.Emails.Batch(ctx, &apexmail.BatchSendRequest{
