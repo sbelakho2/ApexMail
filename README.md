@@ -61,7 +61,7 @@ cargo test --manifest-path services/mail-server/Cargo.toml -p api-server
 cargo run --manifest-path services/mail-server/Cargo.toml -p api-server
 
 # Rebuild static marketing output when needed
-zola build --root apps/marketing-zola
+zola --root apps/marketing-zola build
 ```
 
 ### Compose Smoke Verification
@@ -269,7 +269,7 @@ cargo build --release --manifest-path services/mail-server/Cargo.toml
 ./services/mail-server/target/release/api-server
 
 # Build marketing site
-zola build --root apps/marketing-zola
+zola --root apps/marketing-zola build
 ```
 
 ## Security
