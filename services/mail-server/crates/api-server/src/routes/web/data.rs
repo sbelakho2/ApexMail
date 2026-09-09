@@ -10,6 +10,10 @@
 //!   empty dataset (rendered as an honest empty state), never demo rows.
 //! - Search / filter / sort / page query parameters are parsed and applied
 //!   server-side — the GET forms in the views serialize into them.
+//! - A failed query is NOT an empty dataset: loaders surface
+//!   [`LoadState::Unavailable`] and the page renders an explicit
+//!   "data unavailable" state so required financial and operational data
+//!   never reports false zeroes (audit F14).
 
 use std::collections::HashMap;
 
@@ -118,39 +122,136 @@ fn is_optional_schema_error(error: &sqlx::Error) -> bool {
     )
 }
 
-/// Fetch rows, tolerating a missing optional relation (returns empty).
-async fn optional_rows<T, F>(fetch: F) -> Vec<T>
-where
-    F: std::future::Future<Output = Result<Vec<T>, sqlx::Error>>,
-{
-    match fetch.await {
-        Ok(rows) => rows,
-        Err(error) if is_optional_schema_error(&error) => {
-            tracing::warn!(error = %error, "web data table missing; empty dataset");
-            Vec::new()
-        }
-        Err(error) => {
-            tracing::error!(error = %error, "web data query failed; empty dataset");
-            Vec::new()
+/// Typed outcome of one console-data query (audit F14).
+///
+/// A dataset that loaded — possibly genuinely empty — must stay
+/// distinguishable from a dataset that could NOT be read. Failures
+/// previously collapsed into empty lists and zero counts, so a database
+/// outage rendered as successful empty states with false zeroes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LoadState<T> {
+    /// The query succeeded. An empty payload is an honest empty state.
+    Loaded(T),
+    /// The query failed: the data is unknown — not empty, not zero.
+    Unavailable,
+}
+
+impl<T> LoadState<T> {
+    fn is_unavailable(&self) -> bool {
+        matches!(self, LoadState::Unavailable)
+    }
+}
+
+impl<T: Default> LoadState<T> {
+    /// Value with unknowns degraded to the default — capture
+    /// [`LoadState::is_unavailable`] BEFORE calling so "unknown" is not
+    /// silently rendered as the default (audit F14).
+    fn unwrap_or_default(self) -> T {
+        match self {
+            LoadState::Loaded(value) => value,
+            LoadState::Unavailable => T::default(),
         }
     }
 }
 
-/// COUNT(*) with the page's filters. Never fails the render: schema errors
-/// and query errors both yield 0.
-async fn count_rows(state: &AppState, sql: &str, binds: &[String]) -> i64 {
+impl<T> LoadState<Vec<T>> {
+    /// Rows plus a failure flag: failed queries yield zero rows AND the
+    /// flag so the page renders the explicit unavailable copy instead of
+    /// the honest empty state.
+    fn rows_or_unavailable(self) -> (Vec<T>, bool) {
+        match self {
+            LoadState::Loaded(rows) => (rows, false),
+            LoadState::Unavailable => (Vec::new(), true),
+        }
+    }
+}
+
+impl LoadState<i64> {
+    /// KPI value: the counted number, or an explicit "unavailable" —
+    /// never a false zero.
+    fn kpi_value(&self) -> String {
+        match self {
+            LoadState::Loaded(count) => count.to_string(),
+            LoadState::Unavailable => "unavailable".to_string(),
+        }
+    }
+
+    /// Pagination total. Unknown counts degrade to 0 (the unavailable
+    /// copy, not a number, carries the uncertainty).
+    fn total_or_zero(&self) -> i64 {
+        match self {
+            LoadState::Loaded(count) => *count,
+            LoadState::Unavailable => 0,
+        }
+    }
+}
+
+/// Monotonic per-process correlation id shared by every loader log line of
+/// one page render (audit F14). Binds (tenant ids, search terms) are never
+/// logged — only the stable query identity and this id.
+fn next_correlation_id() -> String {
+    static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("web-data-{seq}")
+}
+
+/// Run one console-data query, preserving failure as uncertainty (audit
+/// F14). A missing optional relation (42P01/42703) stays an honest empty
+/// dataset; every other error becomes [`LoadState::Unavailable`] so the
+/// render layer can show an explicit unavailable state instead of a fake
+/// empty list.
+async fn load_query<T: Default, F>(query_id: &str, correlation_id: &str, fetch: F) -> LoadState<T>
+where
+    F: std::future::Future<Output = Result<T, sqlx::Error>>,
+{
+    match fetch.await {
+        Ok(value) => LoadState::Loaded(value),
+        Err(error) if is_optional_schema_error(&error) => {
+            tracing::warn!(
+                query = query_id,
+                correlation_id = correlation_id,
+                error = %error,
+                "optional web-data relation missing; honest empty dataset"
+            );
+            LoadState::Loaded(T::default())
+        }
+        Err(error) => {
+            tracing::error!(
+                query = query_id,
+                correlation_id = correlation_id,
+                error = %error,
+                "web data query failed; data unavailable"
+            );
+            LoadState::Unavailable
+        }
+    }
+}
+
+/// COUNT(*) with the page's filters (audit F14): a missing optional
+/// relation tolerates to a loaded 0; any other failure surfaces as
+/// [`LoadState::Unavailable`] so counts never report false zeroes.
+async fn loaded_count(
+    state: &AppState,
+    query_id: &str,
+    correlation_id: &str,
+    sql: &str,
+    binds: &[String],
+) -> LoadState<i64> {
     let mut q = sqlx::query_scalar::<_, i64>(sql);
     for value in binds {
         q = q.bind(value);
     }
-    match q.fetch_one(&state.db).await {
-        Ok(value) => value,
-        Err(error) if is_optional_schema_error(&error) => 0,
-        Err(error) => {
-            tracing::warn!(error = %error, "count query failed");
-            0
-        }
-    }
+    load_query(query_id, correlation_id, q.fetch_one(&state.db)).await
+}
+
+/// Explicit unavailable-state copy (audit F14): a failed query must render
+/// as "data unavailable", never as the honest (optional-and-empty) state.
+fn mark_rows_unavailable(data: &mut ListPageData, what: &str) {
+    data.empty_title = "Data unavailable".into();
+    data.empty_description = format!(
+        "{what} could not be loaded — the query failed. This is not an empty list; \
+         figures shown as \"unavailable\" are unknown, not zero."
+    );
 }
 
 /// Escape `\`, `%` and `_` so user input is matched literally by LIKE/ILIKE.
@@ -301,13 +402,18 @@ pub(crate) async fn load_page_data(
     user: Option<&AuthUser>,
 ) -> RouteData {
     let list_query = parse_list_query(query);
+    // One correlation id per page render ties every loader log line
+    // together (audit F14) without logging any bind values.
+    let correlation_id = next_correlation_id();
     match surface {
         "web" => match user {
-            Some(user) => web_route_data(state, path, &list_query, user).await,
+            Some(user) => web_route_data(state, path, &list_query, user, &correlation_id).await,
             None => RouteData::default(),
         },
         "control-plane" => match user {
-            Some(user) => control_plane_route_data(state, path, &list_query, user).await,
+            Some(user) => {
+                control_plane_route_data(state, path, &list_query, user, &correlation_id).await
+            }
             None => RouteData::default(),
         },
         _ => RouteData::default(),
@@ -316,25 +422,31 @@ pub(crate) async fn load_page_data(
 
 // ─── Web (tenant-scoped) routes ─────────────────────────────────
 
-async fn web_route_data(state: &AppState, path: &str, q: &ListQuery, user: &AuthUser) -> RouteData {
+async fn web_route_data(
+    state: &AppState,
+    path: &str,
+    q: &ListQuery,
+    user: &AuthUser,
+    cid: &str,
+) -> RouteData {
     let tenant = user.tenant_id.clone();
     let list = match path {
-        "/dashboard" => Some(web_dashboard(state, &tenant).await),
-        "/campaigns" => Some(web_campaigns(state, &tenant, q).await),
-        "/contacts" => Some(web_contacts(state, &tenant, q).await),
-        "/lists" => Some(web_lists(state, &tenant, q).await),
-        "/templates" => Some(web_templates(state, &tenant, q).await),
-        "/domains" => Some(web_domains(state, &tenant, q).await),
-        "/events" => Some(web_events(state, &tenant, q).await),
-        "/analytics" => Some(web_analytics(state, &tenant).await),
-        "/reports" => Some(web_reports(state, &tenant).await),
-        "/reports/deliverability" => Some(web_deliverability(state, &tenant).await),
-        "/inbox-placement" => Some(web_inbox_placement(state, &tenant, q).await),
-        "/settings/api-keys" => Some(web_api_keys(state, &tenant).await),
-        "/settings/webhooks" => Some(web_webhooks(state, &tenant).await),
-        "/settings/team" => Some(web_team(state, &tenant).await),
-        "/settings/billing" => Some(web_billing(state, &tenant).await),
-        "/settings/dedicated-ips" => Some(web_dedicated_ips(state, &tenant).await),
+        "/dashboard" => Some(web_dashboard(state, &tenant, cid).await),
+        "/campaigns" => Some(web_campaigns(state, &tenant, q, cid).await),
+        "/contacts" => Some(web_contacts(state, &tenant, q, cid).await),
+        "/lists" => Some(web_lists(state, &tenant, q, cid).await),
+        "/templates" => Some(web_templates(state, &tenant, q, cid).await),
+        "/domains" => Some(web_domains(state, &tenant, q, cid).await),
+        "/events" => Some(web_events(state, &tenant, q, cid).await),
+        "/analytics" => Some(web_analytics(state, &tenant, cid).await),
+        "/reports" => Some(web_reports(state, &tenant, cid).await),
+        "/reports/deliverability" => Some(web_deliverability(state, &tenant, cid).await),
+        "/inbox-placement" => Some(web_inbox_placement(state, &tenant, q, cid).await),
+        "/settings/api-keys" => Some(web_api_keys(state, &tenant, cid).await),
+        "/settings/webhooks" => Some(web_webhooks(state, &tenant, cid).await),
+        "/settings/team" => Some(web_team(state, &tenant, cid).await),
+        "/settings/billing" => Some(web_billing(state, &tenant, cid).await),
+        "/settings/dedicated-ips" => Some(web_dedicated_ips(state, &tenant, cid).await),
         _ => None,
     };
     let campaign_edit = if path.starts_with("/campaigns/") && path.ends_with("/edit") {
@@ -352,27 +464,35 @@ async fn web_route_data(state: &AppState, path: &str, q: &ListQuery, user: &Auth
     }
 }
 
-async fn web_dashboard(state: &AppState, tenant: &str) -> ListPageData {
-    let campaigns = count_rows(
+async fn web_dashboard(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
+    let campaigns = loaded_count(
         state,
+        "web.dashboard.campaigns",
+        cid,
         "SELECT COUNT(*)::bigint FROM campaigns WHERE tenant_id = $1",
         &[tenant.to_string()],
     )
     .await;
-    let contacts = count_rows(
+    let contacts = loaded_count(
         state,
+        "web.dashboard.contacts",
+        cid,
         "SELECT COUNT(*)::bigint FROM contacts WHERE tenant_id = $1 AND status <> 'deleted'",
         &[tenant.to_string()],
     )
     .await;
-    let domains = count_rows(
+    let domains = loaded_count(
         state,
+        "web.dashboard.domains",
+        cid,
         "SELECT COUNT(*)::bigint FROM domains WHERE tenant_id = $1",
         &[tenant.to_string()],
     )
     .await;
-    let sent = count_rows(
+    let sent = loaded_count(
         state,
+        "web.dashboard.sent",
+        cid,
         "SELECT COUNT(*)::bigint FROM events WHERE tenant_id = $1 AND event_type = 'sent' AND timestamp >= NOW() - '30 days'::interval",
         &[tenant.to_string()],
     )
@@ -384,15 +504,15 @@ async fn web_dashboard(state: &AppState, tenant: &str) -> ListPageData {
         "/dashboard",
     );
     data.kpis = vec![
-        KpiCardData::new("Campaigns", campaigns.to_string()).with_hint("All statuses"),
-        KpiCardData::new("Contacts", contacts.to_string()).with_hint("Active addressable"),
-        KpiCardData::new("Domains", domains.to_string()).with_hint("Sending domains"),
-        KpiCardData::new("Sent (30d)", sent.to_string()).with_hint("Messages dispatched"),
+        KpiCardData::new("Campaigns", campaigns.kpi_value()).with_hint("All statuses"),
+        KpiCardData::new("Contacts", contacts.kpi_value()).with_hint("Active addressable"),
+        KpiCardData::new("Domains", domains.kpi_value()).with_hint("Sending domains"),
+        KpiCardData::new("Sent (30d)", sent.kpi_value()).with_hint("Messages dispatched"),
     ];
     data
 }
 
-async fn web_campaigns(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageData {
+async fn web_campaigns(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) -> ListPageData {
     let mut where_sql = WhereBuilder::new();
     where_sql.eq("tenant_id", tenant);
     where_sql.status_in(
@@ -411,13 +531,15 @@ async fn web_campaigns(state: &AppState, tenant: &str, q: &ListQuery) -> ListPag
     }
     let where_clause = where_sql.build();
 
-    let total = count_rows(
+    let total = loaded_count(
         state,
+        "web.campaigns.count",
+        cid,
         &format!("SELECT COUNT(*)::bigint FROM campaigns WHERE {where_clause}"),
         &where_sql.binds,
     )
     .await;
-    let (page, total_pages, offset) = paging(total, q.page);
+    let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
     let order = match q.sort.as_str() {
         "created" => "created_at DESC",
@@ -425,29 +547,33 @@ async fn web_campaigns(state: &AppState, tenant: &str, q: &ListQuery) -> ListPag
         _ => "updated_at DESC",
     };
 
-    let rows: Vec<(String, String, Option<String>, String, Option<chrono::DateTime<chrono::Utc>>)> =
-        optional_rows(
-            async {
-                let campaigns_sql = format!(
-                    "SELECT id::text, name, subject, status, updated_at FROM campaigns WHERE {where_clause} ORDER BY {order} LIMIT {PER_PAGE} OFFSET {offset}"
-                );
-                let mut query = sqlx::query_as::<
-                    _,
-                    (
-                        String,
-                        String,
-                        Option<String>,
-                        String,
-                        Option<chrono::DateTime<chrono::Utc>>,
-                    ),
-                >(&campaigns_sql);
-                for value in &where_sql.binds {
-                    query = query.bind(value);
-                }
-                query.fetch_all(&state.db).await
-            },
-        )
-        .await;
+    let rows = load_query(
+        "web.campaigns.list",
+        cid,
+        async {
+            let campaigns_sql = format!(
+                "SELECT id::text AS id, name, subject, status, updated_at FROM campaigns WHERE {where_clause} ORDER BY {order} LIMIT {PER_PAGE} OFFSET {offset}"
+            );
+            let mut query = sqlx::query_as::<
+                _,
+                (
+                    String,
+                    String,
+                    Option<String>,
+                    String,
+                    Option<chrono::DateTime<chrono::Utc>>,
+                ),
+            >(&campaigns_sql);
+            for value in &where_sql.binds {
+                query = query.bind(value);
+            }
+            query.fetch_all(&state.db).await
+        },
+    )
+    .await
+    .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "Campaigns",
@@ -476,7 +602,11 @@ async fn web_campaigns(state: &AppState, tenant: &str, q: &ListQuery) -> ListPag
     )];
     data.page = page;
     data.total_pages = total_pages;
-    data.total_count = total;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        total.total_or_zero()
+    };
     data.filter_query = filter_query(q);
     data.bulk_action = Some(BulkActionData {
         action: "/web/campaigns/delete-bulk".into(),
@@ -488,6 +618,9 @@ async fn web_campaigns(state: &AppState, tenant: &str, q: &ListQuery) -> ListPag
     data.delete_intent = Some("delete-campaign".into());
     data.empty_title = "No campaigns yet".into();
     data.empty_description = "Create your first email campaign to see it listed here.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Campaigns");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Name".into(),
@@ -546,7 +679,7 @@ async fn load_campaign_edit(
     })
 }
 
-async fn web_contacts(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageData {
+async fn web_contacts(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) -> ListPageData {
     let mut where_sql = WhereBuilder::new();
     where_sql.eq("tenant_id", tenant);
     where_sql.status_in(
@@ -558,37 +691,45 @@ async fn web_contacts(state: &AppState, tenant: &str, q: &ListQuery) -> ListPage
     }
     let where_clause = where_sql.build();
 
-    let total = count_rows(
+    let total = loaded_count(
         state,
+        "web.contacts.count",
+        cid,
         &format!("SELECT COUNT(*)::bigint FROM contacts WHERE {where_clause}"),
         &where_sql.binds,
     )
     .await;
-    let (page, total_pages, offset) = paging(total, q.page);
+    let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
-    let rows: Vec<(String, String, Option<String>, String, Option<chrono::DateTime<chrono::Utc>>)> =
-        optional_rows(
-            async {
-                let contacts_sql = format!(
-                    "SELECT id, email, name, status, updated_at FROM contacts WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
-                );
-                let mut query = sqlx::query_as::<
-                    _,
-                    (
-                        String,
-                        String,
-                        Option<String>,
-                        String,
-                        Option<chrono::DateTime<chrono::Utc>>,
-                    ),
-                >(&contacts_sql);
-                for value in &where_sql.binds {
-                    query = query.bind(value);
-                }
-                query.fetch_all(&state.db).await
-            },
-        )
-        .await;
+    let rows = load_query(
+        "web.contacts.list",
+        cid,
+        async {
+            // contacts.id is a UUID (migration 068): cast it to text for
+            // the String row shape instead of failing UUID decoding.
+            let contacts_sql = format!(
+                "SELECT id::text AS id, email, name, status, updated_at FROM contacts WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
+            );
+            let mut query = sqlx::query_as::<
+                _,
+                (
+                    String,
+                    String,
+                    Option<String>,
+                    String,
+                    Option<chrono::DateTime<chrono::Utc>>,
+                ),
+            >(&contacts_sql);
+            for value in &where_sql.binds {
+                query = query.bind(value);
+            }
+            query.fetch_all(&state.db).await
+        },
+    )
+    .await
+    .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "Contacts",
@@ -618,7 +759,11 @@ async fn web_contacts(state: &AppState, tenant: &str, q: &ListQuery) -> ListPage
     )];
     data.page = page;
     data.total_pages = total_pages;
-    data.total_count = total;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        total.total_or_zero()
+    };
     data.filter_query = filter_query(q);
     data.bulk_action = Some(BulkActionData {
         action: "/web/contacts/delete-bulk".into(),
@@ -627,6 +772,9 @@ async fn web_contacts(state: &AppState, tenant: &str, q: &ListQuery) -> ListPage
     data.primary_action = Some(("Add Contact".into(), "/contacts/new".into()));
     data.empty_title = "No contacts yet".into();
     data.empty_description = "Add your first contact to start building an audience.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Contacts");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Email".into(),
@@ -650,7 +798,7 @@ async fn web_contacts(state: &AppState, tenant: &str, q: &ListQuery) -> ListPage
     data
 }
 
-async fn web_lists(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageData {
+async fn web_lists(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) -> ListPageData {
     let mut where_sql = WhereBuilder::new();
     where_sql.eq("tenant_id", tenant);
     if !q.search.is_empty() {
@@ -658,19 +806,24 @@ async fn web_lists(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageDat
     }
     let where_clause = where_sql.build();
 
-    let total = count_rows(
+    let total = loaded_count(
         state,
+        "web.lists.count",
+        cid,
         &format!("SELECT COUNT(*)::bigint FROM lists WHERE {where_clause}"),
         &where_sql.binds,
     )
     .await;
-    let (page, total_pages, offset) = paging(total, q.page);
+    let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
-    let rows: Vec<(String, String, Option<chrono::DateTime<chrono::Utc>>)> = optional_rows(
+    let rows = load_query(
+        "web.lists.list",
+        cid,
         async {
-        let q1 = format!(
-            "SELECT id, name, updated_at FROM lists WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
-        );
+            // lists.id is a UUID (migration 068): decode as text.
+            let q1 = format!(
+                "SELECT id::text AS id, name, updated_at FROM lists WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
+            );
             let mut query =
                 sqlx::query_as::<_, (String, String, Option<chrono::DateTime<chrono::Utc>>)>(&q1);
             for value in &where_sql.binds {
@@ -679,7 +832,10 @@ async fn web_lists(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageDat
             query.fetch_all(&state.db).await
         },
     )
-    .await;
+    .await
+    .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "Lists",
@@ -691,7 +847,11 @@ async fn web_lists(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageDat
     data.current_query = q.search.clone();
     data.page = page;
     data.total_pages = total_pages;
-    data.total_count = total;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        total.total_or_zero()
+    };
     data.filter_query = filter_query(q);
     data.primary_action = Some(("New List".into(), "/lists/new".into()));
     data.detail_path_prefix = Some("/lists/".into());
@@ -699,6 +859,9 @@ async fn web_lists(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageDat
     data.delete_intent = Some("delete-list".into());
     data.empty_title = "No lists yet".into();
     data.empty_description = "Create a list to group contacts into an audience.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Lists");
+    }
     data.table = Some(TableData {
         columns: vec!["Name".into(), "Updated".into()],
         rows: rows
@@ -712,7 +875,7 @@ async fn web_lists(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageDat
     data
 }
 
-async fn web_templates(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageData {
+async fn web_templates(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) -> ListPageData {
     let mut where_sql = WhereBuilder::new();
     where_sql.eq("tenant_id", tenant);
     if !q.search.is_empty() {
@@ -720,16 +883,21 @@ async fn web_templates(state: &AppState, tenant: &str, q: &ListQuery) -> ListPag
     }
     let where_clause = where_sql.build();
 
-    let total = count_rows(
+    let total = loaded_count(
         state,
+        "web.templates.count",
+        cid,
         &format!("SELECT COUNT(*)::bigint FROM templates WHERE {where_clause}"),
         &where_sql.binds,
     )
     .await;
-    let (page, total_pages, offset) = paging(total, q.page);
+    let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
-    let rows: Vec<(String, String, String, Option<i32>, String, Option<chrono::DateTime<chrono::Utc>>)> =
-        optional_rows(
+    // templates.id is VARCHAR (migration 075) — decoded as String natively.
+    let rows =
+        load_query(
+            "web.templates.list",
+            cid,
             async {
                 let templates_sql = format!(
                     "SELECT id, name, COALESCE(subject, ''), version, status, updated_at FROM templates WHERE {where_clause} ORDER BY updated_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
@@ -751,7 +919,10 @@ async fn web_templates(state: &AppState, tenant: &str, q: &ListQuery) -> ListPag
                 query.fetch_all(&state.db).await
             },
         )
-        .await;
+        .await
+        .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "Templates",
@@ -763,11 +934,18 @@ async fn web_templates(state: &AppState, tenant: &str, q: &ListQuery) -> ListPag
     data.current_query = q.search.clone();
     data.page = page;
     data.total_pages = total_pages;
-    data.total_count = total;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        total.total_or_zero()
+    };
     data.filter_query = filter_query(q);
     data.primary_action = Some(("New Template".into(), "/templates/new".into()));
     data.empty_title = "No templates yet".into();
     data.empty_description = "Create a template to reuse email content across campaigns.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Templates");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Name".into(),
@@ -799,7 +977,7 @@ async fn web_templates(state: &AppState, tenant: &str, q: &ListQuery) -> ListPag
     data
 }
 
-async fn web_domains(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageData {
+async fn web_domains(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) -> ListPageData {
     let mut where_sql = WhereBuilder::new();
     where_sql.eq("tenant_id", tenant);
     where_sql.status_in(&["pending", "verified", "failed", "suspended"], &q.status);
@@ -808,19 +986,24 @@ async fn web_domains(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageD
     }
     let where_clause = where_sql.build();
 
-    let total = count_rows(
+    let total = loaded_count(
         state,
+        "web.domains.count",
+        cid,
         &format!("SELECT COUNT(*)::bigint FROM domains WHERE {where_clause}"),
         &where_sql.binds,
     )
     .await;
-    let (page, total_pages, offset) = paging(total, q.page);
+    let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
-    let rows: Vec<(String, String, String, Option<chrono::DateTime<chrono::Utc>>)> = optional_rows(
+    let rows = load_query(
+        "web.domains.list",
+        cid,
         async {
-        let q2 = format!(
-            "SELECT id, name, status, created_at FROM domains WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
-        );
+            // domains.id is a UUID (migration 052): decode as text.
+            let q2 = format!(
+                "SELECT id::text AS id, name, status, created_at FROM domains WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
+            );
             let mut query = sqlx::query_as::<
                 _,
                 (String, String, String, Option<chrono::DateTime<chrono::Utc>>),
@@ -831,7 +1014,10 @@ async fn web_domains(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageD
             query.fetch_all(&state.db).await
         },
     )
-    .await;
+    .await
+    .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "Domains",
@@ -853,12 +1039,19 @@ async fn web_domains(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageD
     )];
     data.page = page;
     data.total_pages = total_pages;
-    data.total_count = total;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        total.total_or_zero()
+    };
     data.filter_query = filter_query(q);
     data.primary_action = Some(("Add Domain".into(), "/domains/new".into()));
     data.delete_intent = Some("delete-domain".into());
     data.empty_title = "No domains yet".into();
     data.empty_description = "Add and verify a sending domain before dispatching mail.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Domains");
+    }
     data.table = Some(TableData {
         columns: vec!["Domain".into(), "Status".into(), "Added".into()],
         rows: rows
@@ -876,7 +1069,7 @@ async fn web_domains(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageD
     data
 }
 
-async fn web_events(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageData {
+async fn web_events(state: &AppState, tenant: &str, q: &ListQuery, cid: &str) -> ListPageData {
     let mut where_sql = WhereBuilder::new();
     where_sql.eq("tenant_id", tenant);
     where_sql.status_in(
@@ -896,16 +1089,21 @@ async fn web_events(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageDa
     }
     let where_clause = where_sql.build();
 
-    let total = count_rows(
+    let total = loaded_count(
         state,
+        "web.events.count",
+        cid,
         &format!("SELECT COUNT(*)::bigint FROM events WHERE {where_clause}"),
         &where_sql.binds,
     )
     .await;
-    let (page, total_pages, offset) = paging(total, q.page);
+    let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
-    let rows: Vec<(String, String, Option<String>, Option<String>, Option<chrono::DateTime<chrono::Utc>>)> =
-        optional_rows(
+    // events.id is VARCHAR (migration 075) — decoded as String natively.
+    let rows =
+        load_query(
+            "web.events.list",
+            cid,
             async {
                 let events_sql = format!(
                     "SELECT id, event_type, recipient, message_id, timestamp FROM events WHERE {where_clause} ORDER BY timestamp DESC LIMIT {PER_PAGE} OFFSET {offset}"
@@ -926,7 +1124,10 @@ async fn web_events(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageDa
                 query.fetch_all(&state.db).await
             },
         )
-        .await;
+        .await
+        .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "Events",
@@ -959,10 +1160,17 @@ async fn web_events(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageDa
     )];
     data.page = page;
     data.total_pages = total_pages;
-    data.total_count = total;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        total.total_or_zero()
+    };
     data.filter_query = filter_query(q);
     data.empty_title = "No events yet".into();
     data.empty_description = "Delivery events appear here as soon as mail starts flowing.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Events");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Type".into(),
@@ -988,9 +1196,11 @@ async fn web_events(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageDa
 
 async fn event_aggregate(
     state: &AppState,
+    query_id: &str,
+    cid: &str,
     where_sql: &str,
     binds: &[String],
-) -> HashMap<String, i64> {
+) -> LoadState<HashMap<String, i64>> {
     let sql = format!(
         "SELECT
             COALESCE(SUM(CASE WHEN event_type = 'sent' THEN 1 ELSE 0 END), 0)::bigint,
@@ -1005,24 +1215,34 @@ async fn event_aggregate(
     for value in binds {
         query = query.bind(value);
     }
-    let row: Option<(i64, i64, i64, i64, i64, i64)> = match query.fetch_optional(&state.db).await {
-        Ok(row) => row,
-        Err(error) if is_optional_schema_error(&error) => None,
-        Err(error) => {
-            tracing::warn!(error = %error, "event aggregate failed");
-            None
+    let row = load_query(query_id, cid, query.fetch_optional(&state.db)).await;
+    match row {
+        // A missing optional events relation (or an aggregate over zero
+        // rows) is an honest all-zero map; query failures stay
+        // Unavailable (audit F14).
+        LoadState::Loaded(None) => LoadState::Loaded(HashMap::new()),
+        LoadState::Loaded(Some((sent, delivered, opened, clicked, bounced, complained))) => {
+            let mut out = HashMap::new();
+            out.insert("sent".to_string(), sent);
+            out.insert("delivered".to_string(), delivered);
+            out.insert("opened".to_string(), opened);
+            out.insert("clicked".to_string(), clicked);
+            out.insert("bounced".to_string(), bounced);
+            out.insert("complained".to_string(), complained);
+            LoadState::Loaded(out)
         }
-    };
-    let mut out = HashMap::new();
-    if let Some((sent, delivered, opened, clicked, bounced, complained)) = row {
-        out.insert("sent".to_string(), sent);
-        out.insert("delivered".to_string(), delivered);
-        out.insert("opened".to_string(), opened);
-        out.insert("clicked".to_string(), clicked);
-        out.insert("bounced".to_string(), bounced);
-        out.insert("complained".to_string(), complained);
+        LoadState::Unavailable => LoadState::Unavailable,
     }
-    out
+}
+
+/// KPI value for an aggregate bucket: the number when the aggregate
+/// loaded, an explicit "unavailable" when it did not (audit F14).
+fn aggregate_kpi(loaded: bool, value: i64) -> String {
+    if loaded {
+        value.to_string()
+    } else {
+        "unavailable".to_string()
+    }
 }
 
 fn rate(part: i64, whole: i64) -> String {
@@ -1033,13 +1253,17 @@ fn rate(part: i64, whole: i64) -> String {
     }
 }
 
-async fn web_analytics(state: &AppState, tenant: &str) -> ListPageData {
-    let agg = event_aggregate(
+async fn web_analytics(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
+    let agg_state = event_aggregate(
         state,
+        "web.analytics.aggregate",
+        cid,
         "tenant_id = $1 AND timestamp >= NOW() - '30 days'::interval",
         &[tenant.to_string()],
     )
     .await;
+    let agg_loaded = !agg_state.is_unavailable();
+    let agg = agg_state.unwrap_or_default();
     let sent = *agg.get("sent").unwrap_or(&0);
     let delivered = agg.get("delivered").copied().unwrap_or(0);
     let opened = agg.get("opened").copied().unwrap_or(0);
@@ -1051,33 +1275,46 @@ async fn web_analytics(state: &AppState, tenant: &str) -> ListPageData {
         "/analytics",
     );
     data.kpis = vec![
-        KpiCardData::new("Sent", sent.to_string()).with_hint("Last 30 days"),
-        KpiCardData::new("Delivered", delivered.to_string()).with_hint(&rate(delivered, sent)),
-        KpiCardData::new("Opened", opened.to_string()).with_hint(&rate(opened, sent)),
-        KpiCardData::new("Clicked", clicked.to_string()).with_hint(&rate(clicked, sent)),
+        KpiCardData::new("Sent", aggregate_kpi(agg_loaded, sent)).with_hint("Last 30 days"),
+        KpiCardData::new("Delivered", aggregate_kpi(agg_loaded, delivered))
+            .with_hint(&rate(delivered, sent)),
+        KpiCardData::new("Opened", aggregate_kpi(agg_loaded, opened))
+            .with_hint(&rate(opened, sent)),
+        KpiCardData::new("Clicked", aggregate_kpi(agg_loaded, clicked))
+            .with_hint(&rate(clicked, sent)),
     ];
     data
 }
 
-async fn web_reports(state: &AppState, tenant: &str) -> ListPageData {
-    let agg = event_aggregate(
+async fn web_reports(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
+    let agg_state = event_aggregate(
         state,
+        "web.reports.aggregate",
+        cid,
         "tenant_id = $1 AND timestamp >= NOW() - '30 days'::interval",
         &[tenant.to_string()],
     )
     .await;
+    let agg_loaded = !agg_state.is_unavailable();
+    let agg = agg_state.unwrap_or_default();
     let sent = *agg.get("sent").unwrap_or(&0);
     let bounced = agg.get("bounced").copied().unwrap_or(0);
     let delivered = agg.get("delivered").copied().unwrap_or(0);
-    let campaigns = count_rows(
+    let campaigns = loaded_count(
         state,
+        "web.reports.campaigns",
+        cid,
         "SELECT COUNT(*)::bigint FROM campaigns WHERE tenant_id = $1",
         &[tenant.to_string()],
     )
     .await;
 
-    let rows: Vec<(String, String, String, Option<i32>, Option<chrono::DateTime<chrono::Utc>>)> =
-        optional_rows(
+    // campaigns.id is a UUID (migration 075): decode as text; sent_count
+    // stays INTEGER → Option<i32>.
+    let rows =
+        load_query(
+            "web.reports.campaign_rows",
+            cid,
             async {
                 sqlx::query_as::<
                     _,
@@ -1089,14 +1326,17 @@ async fn web_reports(state: &AppState, tenant: &str) -> ListPageData {
                         Option<chrono::DateTime<chrono::Utc>>,
                     ),
                 >(
-                    "SELECT id, name, status, sent_count, updated_at FROM campaigns WHERE tenant_id = $1 ORDER BY updated_at DESC LIMIT 10",
+                    "SELECT id::text AS id, name, status, sent_count, updated_at FROM campaigns WHERE tenant_id = $1 ORDER BY updated_at DESC LIMIT 10",
                 )
                 .bind(tenant)
                 .fetch_all(&state.db)
                 .await
             },
         )
-        .await;
+        .await
+        .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "Reports",
@@ -1104,15 +1344,27 @@ async fn web_reports(state: &AppState, tenant: &str) -> ListPageData {
         "/reports",
     );
     data.kpis = vec![
-        KpiCardData::new("Campaigns", campaigns.to_string()).with_hint("All time"),
-        KpiCardData::new("Sent (30d)", sent.to_string()).with_hint("Events table"),
-        KpiCardData::new("Bounces (30d)", bounced.to_string()).with_hint(&rate(bounced, sent)),
-        KpiCardData::new("Deliverability", rate(delivered, sent)).with_hint("Delivered ÷ sent"),
+        KpiCardData::new("Campaigns", campaigns.kpi_value()).with_hint("All time"),
+        KpiCardData::new("Sent (30d)", aggregate_kpi(agg_loaded, sent)).with_hint("Events table"),
+        KpiCardData::new("Bounces (30d)", aggregate_kpi(agg_loaded, bounced))
+            .with_hint(&rate(bounced, sent)),
+        KpiCardData::new(
+            "Deliverability",
+            if agg_loaded {
+                rate(delivered, sent)
+            } else {
+                "unavailable".to_string()
+            },
+        )
+        .with_hint("Delivered ÷ sent"),
     ];
     data.detail_path_prefix = Some("/campaigns/".into());
     data.detail_label = "Open".into();
     data.empty_title = "No reportable campaigns yet".into();
     data.empty_description = "Send a campaign to populate cross-campaign reports.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Campaign reports");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Campaign".into(),
@@ -1140,19 +1392,25 @@ async fn web_reports(state: &AppState, tenant: &str) -> ListPageData {
     data
 }
 
-async fn web_deliverability(state: &AppState, tenant: &str) -> ListPageData {
-    let agg = event_aggregate(
+async fn web_deliverability(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
+    let agg_state = event_aggregate(
         state,
+        "web.deliverability.aggregate",
+        cid,
         "tenant_id = $1 AND timestamp >= NOW() - '30 days'::interval",
         &[tenant.to_string()],
     )
     .await;
+    let agg_loaded = !agg_state.is_unavailable();
+    let agg = agg_state.unwrap_or_default();
     let sent = *agg.get("sent").unwrap_or(&0);
     let delivered = agg.get("delivered").copied().unwrap_or(0);
     let bounced = agg.get("bounced").copied().unwrap_or(0);
     let complained = agg.get("complained").copied().unwrap_or(0);
 
-    let rows: Vec<(String, i64)> = optional_rows(
+    let rows = load_query(
+        "web.deliverability.event_rows",
+        cid,
         async {
             sqlx::query_as::<_, (String, i64)>(
                 "SELECT event_type, COUNT(*)::bigint FROM events WHERE tenant_id = $1 AND timestamp >= NOW() - '30 days'::interval GROUP BY event_type ORDER BY 2 DESC",
@@ -1162,7 +1420,10 @@ async fn web_deliverability(state: &AppState, tenant: &str) -> ListPageData {
             .await
         },
     )
-    .await;
+    .await
+    .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "Deliverability",
@@ -1170,13 +1431,41 @@ async fn web_deliverability(state: &AppState, tenant: &str) -> ListPageData {
         "/reports/deliverability",
     );
     data.kpis = vec![
-        KpiCardData::new("Delivery rate", rate(delivered, sent)).with_hint("Delivered ÷ sent"),
-        KpiCardData::new("Bounce rate", rate(bounced, sent)).with_hint("Bounced ÷ sent"),
-        KpiCardData::new("Complaint rate", rate(complained, sent)).with_hint("Complained ÷ sent"),
-        KpiCardData::new("Sent (30d)", sent.to_string()).with_hint("Total dispatched"),
+        KpiCardData::new(
+            "Delivery rate",
+            if agg_loaded {
+                rate(delivered, sent)
+            } else {
+                "unavailable".to_string()
+            },
+        )
+        .with_hint("Delivered ÷ sent"),
+        KpiCardData::new(
+            "Bounce rate",
+            if agg_loaded {
+                rate(bounced, sent)
+            } else {
+                "unavailable".to_string()
+            },
+        )
+        .with_hint("Bounced ÷ sent"),
+        KpiCardData::new(
+            "Complaint rate",
+            if agg_loaded {
+                rate(complained, sent)
+            } else {
+                "unavailable".to_string()
+            },
+        )
+        .with_hint("Complained ÷ sent"),
+        KpiCardData::new("Sent (30d)", aggregate_kpi(agg_loaded, sent))
+            .with_hint("Total dispatched"),
     ];
     data.empty_title = "No delivery data yet".into();
     data.empty_description = "Deliverability metrics appear once messages are dispatched.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Delivery metrics");
+    }
     data.table = Some(TableData {
         columns: vec!["Event type".into(), "Count (30d)".into()],
         rows: rows
@@ -1193,7 +1482,12 @@ async fn web_deliverability(state: &AppState, tenant: &str) -> ListPageData {
     data
 }
 
-async fn web_inbox_placement(state: &AppState, tenant: &str, q: &ListQuery) -> ListPageData {
+async fn web_inbox_placement(
+    state: &AppState,
+    tenant: &str,
+    q: &ListQuery,
+    cid: &str,
+) -> ListPageData {
     let mut where_sql = WhereBuilder::new();
     where_sql.eq("tenant_id", tenant);
     where_sql.status_in(&["pending", "running", "completed", "failed"], &q.status);
@@ -1202,19 +1496,23 @@ async fn web_inbox_placement(state: &AppState, tenant: &str, q: &ListQuery) -> L
     }
     let where_clause = where_sql.build();
 
-    let total = count_rows(
+    let total = loaded_count(
         state,
+        "web.placement.count",
+        cid,
         &format!("SELECT COUNT(*)::bigint FROM placement_tests WHERE {where_clause}"),
         &where_sql.binds,
     )
     .await;
-    let (page, total_pages, offset) = paging(total, q.page);
+    let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
-    let rows: Vec<(String, Option<String>, String, Option<i32>, Option<i32>, Option<chrono::DateTime<chrono::Utc>>)> =
-        optional_rows(
+    let rows =
+        load_query(
+            "web.placement.list",
+            cid,
             async {
                 let placement_sql = format!(
-                    "SELECT id::text, name, status, total_accounts, completed_accounts, created_at FROM placement_tests WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
+                    "SELECT id::text AS id, name, status, total_accounts, completed_accounts, created_at FROM placement_tests WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
                 );
                 let mut query = sqlx::query_as::<
                     _,
@@ -1233,7 +1531,10 @@ async fn web_inbox_placement(state: &AppState, tenant: &str, q: &ListQuery) -> L
                 query.fetch_all(&state.db).await
             },
         )
-        .await;
+        .await
+        .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "Inbox Placement",
@@ -1259,11 +1560,18 @@ async fn web_inbox_placement(state: &AppState, tenant: &str, q: &ListQuery) -> L
     )];
     data.page = page;
     data.total_pages = total_pages;
-    data.total_count = total;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        total.total_or_zero()
+    };
     data.filter_query = filter_query(q);
     data.primary_action = Some(("New Test".into(), "/inbox-placement/new".into()));
     data.empty_title = "No placement tests yet".into();
     data.empty_description = "Start a seed-account test to measure inbox placement.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Placement tests");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Test".into(),
@@ -1293,37 +1601,68 @@ async fn web_inbox_placement(state: &AppState, tenant: &str, q: &ListQuery) -> L
     data
 }
 
-async fn web_api_keys(state: &AppState, tenant: &str) -> ListPageData {
-    let rows: Vec<(String, String, String, Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>)> =
-        optional_rows(
-            async {
-                sqlx::query_as::<
-                    _,
-                    (
-                        String,
-                        String,
-                        String,
-                        Option<chrono::DateTime<chrono::Utc>>,
-                        Option<chrono::DateTime<chrono::Utc>>,
-                    ),
-                >(
-                    "SELECT id, name, prefix, created_at, revoked_at FROM api_keys WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 100",
-                )
-                .bind(tenant)
-                .fetch_all(&state.db)
-                .await
-            },
-        )
-        .await;
+/// /settings/api-keys list query (audit F03). The schema column is
+/// `key_prefix` (`prefix` never existed — the old query failed with 42703
+/// on any populated database); `id` is a UUID, decoded as text; and
+/// `expires_at` is selected so the view model can distinguish active,
+/// expired, and revoked keys.
+const API_KEYS_SQL: &str = "SELECT id::text AS id, name, key_prefix AS prefix, created_at, revoked_at, expires_at FROM api_keys WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 100";
+
+/// API-key lifecycle state for the console (audit F03). Revocation wins
+/// over expiry — it is the irreversible operator action; a key whose
+/// `expires_at` has passed is "expired", never "active".
+fn api_key_state(
+    revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> &'static str {
+    if revoked_at.is_some() {
+        "revoked"
+    } else if expires_at.is_some_and(|expires| expires <= now) {
+        "expired"
+    } else {
+        "active"
+    }
+}
+
+async fn web_api_keys(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
+    let rows = load_query("web.api_keys.list", cid, async {
+        sqlx::query_as::<
+            _,
+            (
+                String,
+                String,
+                String,
+                Option<chrono::DateTime<chrono::Utc>>,
+                Option<chrono::DateTime<chrono::Utc>>,
+                Option<chrono::DateTime<chrono::Utc>>,
+            ),
+        >(API_KEYS_SQL)
+        .bind(tenant)
+        .fetch_all(&state.db)
+        .await
+    })
+    .await
+    .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "API Keys",
         "Machine credentials for this workspace. Secrets are shown once at creation.",
         "/settings/api-keys",
     );
-    data.total_count = rows.len() as i64;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        rows.len() as i64
+    };
     data.empty_title = "No API keys yet".into();
     data.empty_description = "Create a key to call the API programmatically.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "API keys");
+    }
+    let now = chrono::Utc::now();
     data.table = Some(TableData {
         columns: vec![
             "Name".into(),
@@ -1333,26 +1672,27 @@ async fn web_api_keys(state: &AppState, tenant: &str) -> ListPageData {
         ],
         rows: rows
             .into_iter()
-            .map(|(id, name, prefix, created, revoked)| DataRowData {
-                id,
-                cells: vec![
-                    DataCell::text(name),
-                    DataCell::mono(format!("{prefix}…")),
-                    DataCell::status(if revoked.is_some() {
-                        "paused"
-                    } else {
-                        "active"
-                    }),
-                    DataCell::text(relative_time(created)),
-                ],
-            })
+            .map(
+                |(id, name, prefix, created, revoked, expires)| DataRowData {
+                    id,
+                    cells: vec![
+                        DataCell::text(name),
+                        DataCell::mono(format!("{prefix}…")),
+                        DataCell::status(api_key_state(revoked, expires, now)),
+                        DataCell::text(relative_time(created)),
+                    ],
+                },
+            )
             .collect(),
     });
     data
 }
 
-async fn web_webhooks(state: &AppState, tenant: &str) -> ListPageData {
-    let rows: Vec<(String, String, bool, Option<chrono::DateTime<chrono::Utc>>)> = optional_rows(
+async fn web_webhooks(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
+    // webhooks.id is VARCHAR (migration 075) — decoded as String natively.
+    let rows = load_query(
+        "web.webhooks.list",
+        cid,
         async {
             sqlx::query_as::<_, (String, String, bool, Option<chrono::DateTime<chrono::Utc>>)>(
                 "SELECT id, url, enabled, last_triggered_at FROM webhooks WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 100",
@@ -1362,16 +1702,26 @@ async fn web_webhooks(state: &AppState, tenant: &str) -> ListPageData {
             .await
         },
     )
-    .await;
+    .await
+    .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "Webhooks",
         "HTTP endpoints notified about delivery events.",
         "/settings/webhooks",
     );
-    data.total_count = rows.len() as i64;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        rows.len() as i64
+    };
     data.empty_title = "No webhooks yet".into();
     data.empty_description = "Register an endpoint to receive delivery events.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Webhooks");
+    }
     data.table = Some(TableData {
         columns: vec!["Endpoint".into(), "Enabled".into(), "Last triggered".into()],
         rows: rows
@@ -1389,8 +1739,10 @@ async fn web_webhooks(state: &AppState, tenant: &str) -> ListPageData {
     data
 }
 
-async fn web_team(state: &AppState, tenant: &str) -> ListPageData {
-    let rows: Vec<(String, Option<String>, String, String, bool)> = optional_rows(
+async fn web_team(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
+    let rows = load_query(
+        "web.team.list",
+        cid,
         async {
             sqlx::query_as::<_, (String, Option<String>, String, String, bool)>(
                 "SELECT email, name, role, status, COALESCE(mfa_enabled, false) FROM users WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 100",
@@ -1400,16 +1752,26 @@ async fn web_team(state: &AppState, tenant: &str) -> ListPageData {
             .await
         },
     )
-    .await;
+    .await
+    .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "Team",
         "Workspace members and their access level.",
         "/settings/team",
     );
-    data.total_count = rows.len() as i64;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        rows.len() as i64
+    };
     data.empty_title = "No team members yet".into();
     data.empty_description = "Invite teammates to collaborate on this workspace.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Team members");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Email".into(),
@@ -1436,61 +1798,127 @@ async fn web_team(state: &AppState, tenant: &str) -> ListPageData {
     data
 }
 
-async fn web_billing(state: &AppState, tenant: &str) -> ListPageData {
-    let plan: Option<String> =
+/// /settings/billing invoice-list query (audit F04). The canonical
+/// invoices schema (migrations 052 + 076) has NO `amount_cents` column —
+/// 069's CREATE TABLE is a no-op after 052 — so the old query failed with
+/// 42703 on any populated database and rendered as an empty list. The
+/// canonical amount is `total` (nullable, written by billing-service
+/// invoice creation), with the legacy NOT NULL `amount` as fallback for
+/// pre-076 rows; `id` is a UUID, decoded as text.
+const BILLING_INVOICES_SQL: &str = "SELECT id::text AS id, COALESCE(total, amount, 0)::bigint AS total, currency, status::text AS status, created_at FROM invoices WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 50";
+
+/// Collectible outstanding per currency (audit F04), aggregated over the
+/// FULL eligible dataset — not the 50-row visible window.
+///
+/// No payment-allocation ledger exists in the current schema, so the
+/// outstanding rule is invoice-side: issued, unpaid, still-collectible
+/// totals (`status NOT IN ('draft', 'void', 'uncollectible', 'paid')` —
+/// draft invoices are not yet issued debt; the set otherwise matches
+/// billing.rs's dunning report). DEPENDENCY: once a payment-allocation
+/// table lands, allocated amounts must be subtracted here instead of
+/// treating every non-paid invoice as fully owed.
+const BILLING_OUTSTANDING_SQL: &str = "SELECT currency, COALESCE(SUM(COALESCE(total, amount, 0)), 0)::bigint FROM invoices WHERE tenant_id = $1 AND status::text NOT IN ('draft', 'void', 'uncollectible', 'paid') GROUP BY currency ORDER BY currency";
+
+/// Render a cents amount with its own currency code (audit F04: totals
+/// are never labelled with a hard-coded currency).
+fn format_cents(cents: i64, currency: &str) -> String {
+    format!("{:.2} {currency}", cents as f64 / 100.0)
+}
+
+/// Outstanding KPI cards from the per-currency buckets (audit F04): one
+/// card per currency, "0.00" only when nothing collectible exists, and an
+/// explicit "unavailable" card when the aggregate query failed.
+fn outstanding_kpis(buckets: LoadState<Vec<(String, i64)>>) -> Vec<KpiCardData> {
+    match buckets {
+        LoadState::Loaded(buckets) if buckets.is_empty() => {
+            vec![KpiCardData::new("Outstanding", "0.00").with_hint("Nothing currently due")]
+        }
+        LoadState::Loaded(buckets) => buckets
+            .into_iter()
+            .map(|(currency, cents)| {
+                KpiCardData::new(
+                    &format!("Outstanding ({currency})"),
+                    format_cents(cents, &currency),
+                )
+                .with_hint("Unpaid collectible total")
+            })
+            .collect(),
+        LoadState::Unavailable => {
+            vec![KpiCardData::new("Outstanding", "unavailable").with_hint("Could not be computed")]
+        }
+    }
+}
+
+async fn web_billing(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
+    let plan_state = load_query("web.billing.plan", cid, async {
         sqlx::query_scalar::<_, String>("SELECT plan FROM tenants WHERE id::text = $1")
             .bind(tenant)
             .fetch_optional(&state.db)
             .await
-            .ok()
-            .flatten();
+    })
+    .await;
+    let plan = match plan_state {
+        LoadState::Loaded(plan) => plan.unwrap_or_else(|| "free".into()),
+        LoadState::Unavailable => "unavailable".to_string(),
+    };
 
-    let rows: Vec<(String, i64, String, String, Option<chrono::DateTime<chrono::Utc>>)> =
-        optional_rows(
-            async {
-                sqlx::query_as::<
-                    _,
-                    (
-                        String,
-                        i64,
-                        String,
-                        String,
-                        Option<chrono::DateTime<chrono::Utc>>,
-                    ),
-                >(
-                    "SELECT id, amount_cents, currency, status, created_at FROM invoices WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 50",
-                )
-                .bind(tenant)
-                .fetch_all(&state.db)
-                .await
-            },
-        )
-        .await;
+    let rows = load_query("web.billing.invoices", cid, async {
+        sqlx::query_as::<
+            _,
+            (
+                String,
+                i64,
+                String,
+                String,
+                Option<chrono::DateTime<chrono::Utc>>,
+            ),
+        >(BILLING_INVOICES_SQL)
+        .bind(tenant)
+        .fetch_all(&state.db)
+        .await
+    })
+    .await
+    .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
-    let outstanding: i64 = rows
-        .iter()
-        .filter(|row| row.3 != "paid")
-        .map(|row| row.1)
-        .sum();
+    let outstanding = load_query("web.billing.outstanding", cid, async {
+        sqlx::query_as::<_, (String, i64)>(BILLING_OUTSTANDING_SQL)
+            .bind(tenant)
+            .fetch_all(&state.db)
+            .await
+    })
+    .await;
 
     let mut data = base_list(
         "Billing",
         "Plan, invoices, and payment posture for this workspace.",
         "/settings/billing",
     );
-    data.kpis = vec![
-        KpiCardData::new("Current plan", plan.unwrap_or_else(|| "free".into()))
-            .with_hint("Tenant record"),
-        KpiCardData::new("Invoices", rows.len().to_string()).with_hint("On record"),
+    let mut kpis = vec![
+        KpiCardData::new("Current plan", plan).with_hint("Tenant record"),
         KpiCardData::new(
-            "Outstanding",
-            format!("{:.2} EUR", outstanding as f64 / 100.0),
+            "Invoices",
+            if rows_unavailable {
+                "unavailable".to_string()
+            } else {
+                rows.len().to_string()
+            },
         )
-        .with_hint("Unpaid total"),
+        .with_hint("On record"),
     ];
-    data.total_count = rows.len() as i64;
+    kpis.extend(outstanding_kpis(outstanding));
+    data.kpis = kpis;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        rows.len() as i64
+    };
     data.empty_title = "No invoices yet".into();
     data.empty_description = "Invoices appear here once a paid plan is active.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Invoices");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Invoice".into(),
@@ -1501,10 +1929,10 @@ async fn web_billing(state: &AppState, tenant: &str) -> ListPageData {
         ],
         rows: rows
             .into_iter()
-            .map(|(id, amount, currency, status, created)| DataRowData {
+            .map(|(id, total, currency, status, created)| DataRowData {
                 cells: vec![
                     DataCell::mono(id.chars().take(12).collect::<String>()),
-                    DataCell::text(format!("{:.2}", amount as f64 / 100.0)),
+                    DataCell::text(format!("{:.2}", total as f64 / 100.0)),
                     DataCell::text(currency),
                     DataCell::status(&status),
                     DataCell::text(relative_time(created)),
@@ -1516,21 +1944,30 @@ async fn web_billing(state: &AppState, tenant: &str) -> ListPageData {
     data
 }
 
-async fn web_dedicated_ips(state: &AppState, tenant: &str) -> ListPageData {
-    let rows: Vec<(String, Option<String>, Option<String>, String, Option<f64>)> = optional_rows(
+async fn web_dedicated_ips(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
+    // dedicated_ips.id is a UUID (migration 003): decode as text;
+    // ip_address is TEXT.
+    let rows = load_query(
+        "web.dedicated_ips.list",
+        cid,
         async {
             sqlx::query_as::<_, (String, Option<String>, Option<String>, String, Option<f64>)>(
-                "SELECT id, ip_address, region, status, warmup_progress FROM dedicated_ips WHERE tenant_id::text = $1 ORDER BY created_at DESC LIMIT 100",
+                "SELECT id::text AS id, ip_address, region, status, warmup_progress FROM dedicated_ips WHERE tenant_id::text = $1 ORDER BY created_at DESC LIMIT 100",
             )
             .bind(tenant)
             .fetch_all(&state.db)
             .await
         },
     )
-    .await;
+    .await
+    .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
-    let pending = count_rows(
+    let pending = loaded_count(
         state,
+        "web.dedicated_ips.pending",
+        cid,
         "SELECT COUNT(*)::bigint FROM dedicated_ip_provisioning_requests WHERE tenant_id = $1 AND status = 'pending'",
         &[tenant.to_string()],
     )
@@ -1542,13 +1979,28 @@ async fn web_dedicated_ips(state: &AppState, tenant: &str) -> ListPageData {
         "/settings/dedicated-ips",
     );
     data.kpis = vec![
-        KpiCardData::new("Assigned", rows.len().to_string()).with_hint("Active allocations"),
-        KpiCardData::new("Pending requests", pending.to_string())
+        KpiCardData::new(
+            "Assigned",
+            if rows_unavailable {
+                "unavailable".to_string()
+            } else {
+                rows.len().to_string()
+            },
+        )
+        .with_hint("Active allocations"),
+        KpiCardData::new("Pending requests", pending.kpi_value())
             .with_hint("Awaiting the provisioner"),
     ];
-    data.total_count = rows.len() as i64;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        rows.len() as i64
+    };
     data.empty_title = "No dedicated IPs yet".into();
     data.empty_description = "Request an allocation — the provisioner completes it.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Dedicated IPs");
+    }
     data.table = Some(TableData {
         columns: vec![
             "IP".into(),
@@ -1583,25 +2035,26 @@ async fn control_plane_route_data(
     path: &str,
     q: &ListQuery,
     _user: &AuthUser,
+    cid: &str,
 ) -> RouteData {
     let list = match path {
-        "/" => Some(cp_home(state).await),
-        "/cp" | "/dashboard" => Some(cp_dashboard(state).await),
-        "/cp/tenants" | "/tenants" => Some(cp_tenants(state, q).await),
-        "/operators" => Some(cp_operators(state, q).await),
-        "/cp/sales" | "/sales" => Some(cp_sales(state, q).await),
-        "/cp/audit" | "/audit" => Some(cp_audit(state, q).await),
-        "/jobs" => Some(cp_jobs(state).await),
-        "/infrastructure/nodes" => Some(cp_nodes(state).await),
-        "/infrastructure/queues" => Some(cp_queues(state).await),
-        "/alerts" => Some(cp_alerts(state, q).await),
+        "/" => Some(cp_home(state, cid).await),
+        "/cp" | "/dashboard" => Some(cp_dashboard(state, cid).await),
+        "/cp/tenants" | "/tenants" => Some(cp_tenants(state, q, cid).await),
+        "/operators" => Some(cp_operators(state, q, cid).await),
+        "/cp/sales" | "/sales" => Some(cp_sales(state, q, cid).await),
+        "/cp/audit" | "/audit" => Some(cp_audit(state, q, cid).await),
+        "/jobs" => Some(cp_jobs(state, cid).await),
+        "/infrastructure/nodes" => Some(cp_nodes(state, cid).await),
+        "/infrastructure/queues" => Some(cp_queues(state, cid).await),
+        "/alerts" => Some(cp_alerts(state, q, cid).await),
         "/alerts/rules" => Some(cp_alert_rules()),
-        "/domains" => Some(cp_domains(state, q).await),
-        "/billing/plans" => Some(cp_plans(state).await),
-        "/compliance" => Some(cp_compliance(state).await),
-        "/compliance/gdpr" => Some(cp_gdpr(state, q).await),
-        "/discovery" => Some(cp_discovery(state).await),
-        "/analytics" => Some(cp_analytics(state).await),
+        "/domains" => Some(cp_domains(state, q, cid).await),
+        "/billing/plans" => Some(cp_plans(state, cid).await),
+        "/compliance" => Some(cp_compliance(state, cid).await),
+        "/compliance/gdpr" => Some(cp_gdpr(state, q, cid).await),
+        "/discovery" => Some(cp_discovery(state, cid).await),
+        "/analytics" => Some(cp_analytics(state, cid).await),
         _ => None,
     };
     RouteData {
@@ -1611,24 +2064,45 @@ async fn control_plane_route_data(
     }
 }
 
-async fn cp_home(state: &AppState) -> ListPageData {
-    let tenants = count_rows(state, "SELECT COUNT(*)::bigint FROM tenants", &[]).await;
-    let users = count_rows(state, "SELECT COUNT(*)::bigint FROM users", &[]).await;
-    let alerts = count_rows(
+async fn cp_home(state: &AppState, cid: &str) -> ListPageData {
+    let tenants = loaded_count(
         state,
+        "cp.home.tenants_count",
+        cid,
+        "SELECT COUNT(*)::bigint FROM tenants",
+        &[],
+    )
+    .await;
+    let users = loaded_count(
+        state,
+        "cp.home.users_count",
+        cid,
+        "SELECT COUNT(*)::bigint FROM users",
+        &[],
+    )
+    .await;
+    let alerts = loaded_count(
+        state,
+        "cp.home.alerts_count",
+        cid,
         "SELECT COUNT(*)::bigint FROM system_alerts WHERE acknowledged = false",
         &[],
     )
     .await;
-    let queue_depth = count_rows(
+    let queue_depth = loaded_count(
         state,
+        "cp.home.queue_depth",
+        cid,
         "SELECT COUNT(*)::bigint FROM queue_jobs WHERE status = 'pending'",
         &[],
     )
     .await;
 
-    let rows: Vec<(String, String, Option<String>, String, Option<chrono::DateTime<chrono::Utc>>)> =
-        optional_rows(
+    // tenants.id is a UUID (migration 052): decode as text.
+    let rows =
+        load_query(
+            "cp.home.tenant_rows",
+            cid,
             async {
                 sqlx::query_as::<
                     _,
@@ -1640,13 +2114,16 @@ async fn cp_home(state: &AppState) -> ListPageData {
                         Option<chrono::DateTime<chrono::Utc>>,
                     ),
                 >(
-                    "SELECT id, name, slug, COALESCE(plan, ''), created_at FROM tenants ORDER BY created_at DESC LIMIT 10",
+                    "SELECT id::text AS id, name, slug, COALESCE(plan, ''), created_at FROM tenants ORDER BY created_at DESC LIMIT 10",
                 )
                 .fetch_all(&state.db)
                 .await
             },
         )
-        .await;
+        .await
+        .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "Control Plane",
@@ -1654,14 +2131,17 @@ async fn cp_home(state: &AppState) -> ListPageData {
         "/",
     );
     data.kpis = vec![
-        KpiCardData::new("Tenants", tenants.to_string()).with_hint("Workspaces"),
-        KpiCardData::new("Users", users.to_string()).with_hint("All tenants"),
-        KpiCardData::new("Open alerts", alerts.to_string()).with_hint("Unacknowledged"),
-        KpiCardData::new("Queue depth", queue_depth.to_string()).with_hint("Pending jobs"),
+        KpiCardData::new("Tenants", tenants.kpi_value()).with_hint("Workspaces"),
+        KpiCardData::new("Users", users.kpi_value()).with_hint("All tenants"),
+        KpiCardData::new("Open alerts", alerts.kpi_value()).with_hint("Unacknowledged"),
+        KpiCardData::new("Queue depth", queue_depth.kpi_value()).with_hint("Pending jobs"),
     ];
     data.empty_title = "No tenants yet".into();
     data.empty_description =
         "Provision the first tenant workspace to populate the fleet view.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Recent tenants");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Tenant".into(),
@@ -1685,29 +2165,45 @@ async fn cp_home(state: &AppState) -> ListPageData {
     data
 }
 
-async fn cp_dashboard(state: &AppState) -> ListPageData {
-    let alerts = count_rows(
+async fn cp_dashboard(state: &AppState, cid: &str) -> ListPageData {
+    let alerts = loaded_count(
         state,
+        "cp.dashboard.alerts",
+        cid,
         "SELECT COUNT(*)::bigint FROM system_alerts WHERE acknowledged = false",
         &[],
     )
     .await;
-    let critical = count_rows(
+    let critical = loaded_count(
         state,
+        "cp.dashboard.critical",
+        cid,
         "SELECT COUNT(*)::bigint FROM system_alerts WHERE acknowledged = false AND severity = 'critical'",
         &[],
     )
     .await;
-    let tenants = count_rows(state, "SELECT COUNT(*)::bigint FROM tenants", &[]).await;
-    let gdpr_pending = count_rows(
+    let tenants = loaded_count(
         state,
+        "cp.dashboard.tenants",
+        cid,
+        "SELECT COUNT(*)::bigint FROM tenants",
+        &[],
+    )
+    .await;
+    let gdpr_pending = loaded_count(
+        state,
+        "cp.dashboard.gdpr_pending",
+        cid,
         "SELECT COUNT(*)::bigint FROM gdpr_requests WHERE status = 'pending'",
         &[],
     )
     .await;
 
-    let rows: Vec<(String, String, String, String, bool, Option<chrono::DateTime<chrono::Utc>>)> =
-        optional_rows(
+    // system_alerts.id is a UUID (migration 020): decode as text.
+    let rows =
+        load_query(
+            "cp.dashboard.alert_rows",
+            cid,
             async {
                 sqlx::query_as::<
                     _,
@@ -1720,13 +2216,16 @@ async fn cp_dashboard(state: &AppState) -> ListPageData {
                         Option<chrono::DateTime<chrono::Utc>>,
                     ),
                 >(
-                    "SELECT id, severity, alert_type, message, acknowledged, created_at FROM system_alerts ORDER BY created_at DESC LIMIT 10",
+                    "SELECT id::text AS id, severity, alert_type, message, acknowledged, created_at FROM system_alerts ORDER BY created_at DESC LIMIT 10",
                 )
                 .fetch_all(&state.db)
                 .await
             },
         )
-        .await;
+        .await
+        .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "Dashboard",
@@ -1734,14 +2233,17 @@ async fn cp_dashboard(state: &AppState) -> ListPageData {
         "/dashboard",
     );
     data.kpis = vec![
-        KpiCardData::new("Open alerts", alerts.to_string()).with_hint("Unacknowledged"),
-        KpiCardData::new("Critical", critical.to_string()).with_hint("Severity"),
-        KpiCardData::new("Tenants", tenants.to_string()).with_hint("Fleet"),
-        KpiCardData::new("GDPR pending", gdpr_pending.to_string()).with_hint("Requests"),
+        KpiCardData::new("Open alerts", alerts.kpi_value()).with_hint("Unacknowledged"),
+        KpiCardData::new("Critical", critical.kpi_value()).with_hint("Severity"),
+        KpiCardData::new("Tenants", tenants.kpi_value()).with_hint("Fleet"),
+        KpiCardData::new("GDPR pending", gdpr_pending.kpi_value()).with_hint("Requests"),
     ];
     data.empty_title = "No alerts recorded".into();
     data.empty_description =
         "Fleet alert signals will list here when the alerting pipeline fires.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Recent alerts");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Severity".into(),
@@ -1774,7 +2276,7 @@ async fn cp_dashboard(state: &AppState) -> ListPageData {
     data
 }
 
-async fn cp_tenants(state: &AppState, q: &ListQuery) -> ListPageData {
+async fn cp_tenants(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     let mut where_sql = WhereBuilder::new();
     where_sql.status_in(&["pending", "active", "suspended", "cancelled"], &q.status);
     if !q.search.is_empty() {
@@ -1782,19 +2284,24 @@ async fn cp_tenants(state: &AppState, q: &ListQuery) -> ListPageData {
     }
     let where_clause = where_sql.build();
 
-    let total = count_rows(
+    let total = loaded_count(
         state,
+        "cp.tenants.count",
+        cid,
         &format!("SELECT COUNT(*)::bigint FROM tenants WHERE {where_clause}"),
         &where_sql.binds,
     )
     .await;
-    let (page, total_pages, offset) = paging(total, q.page);
+    let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
-    let rows: Vec<(String, String, Option<String>, String, String, Option<chrono::DateTime<chrono::Utc>>)> =
-        optional_rows(
+    // tenants.id is a UUID (migration 052): decode as text.
+    let rows =
+        load_query(
+            "cp.tenants.list",
+            cid,
             async {
             let q3 = format!(
-                "SELECT id, name, slug, COALESCE(plan, ''), COALESCE(status, ''), created_at FROM tenants WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
+                "SELECT id::text AS id, name, slug, COALESCE(plan, ''), COALESCE(status, ''), created_at FROM tenants WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
             );
                 let mut query = sqlx::query_as::<
                     _,
@@ -1813,7 +2320,10 @@ async fn cp_tenants(state: &AppState, q: &ListQuery) -> ListPageData {
                 query.fetch_all(&state.db).await
             },
         )
-        .await;
+        .await
+        .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "Tenants",
@@ -1839,11 +2349,18 @@ async fn cp_tenants(state: &AppState, q: &ListQuery) -> ListPageData {
     )];
     data.page = page;
     data.total_pages = total_pages;
-    data.total_count = total;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        total.total_or_zero()
+    };
     data.filter_query = filter_query(q);
     data.primary_action = Some(("Add Tenant".into(), "/tenants/new".into()));
     data.empty_title = "No tenants yet".into();
     data.empty_description = "Create the first tenant workspace.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Tenants");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Name".into(),
@@ -1869,7 +2386,7 @@ async fn cp_tenants(state: &AppState, q: &ListQuery) -> ListPageData {
     data
 }
 
-async fn cp_operators(state: &AppState, q: &ListQuery) -> ListPageData {
+async fn cp_operators(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     // role IN ('admin','owner') with an optional ILIKE across email/name —
     // written directly because the builder models single-column equality.
     // LIKE metacharacters in the search are escaped (audit F7), matching
@@ -1886,15 +2403,19 @@ async fn cp_operators(state: &AppState, q: &ListQuery) -> ListPageData {
         vec![escape_like(&q.search)]
     };
 
-    let total = count_rows(
+    let total = loaded_count(
         state,
+        "cp.operators.count",
+        cid,
         &format!("SELECT COUNT(*)::bigint FROM users WHERE {where_clause}"),
         &binds,
     )
     .await;
 
-    let rows: Vec<(String, Option<String>, String, bool, String, Option<chrono::DateTime<chrono::Utc>>)> =
-        optional_rows(
+    let rows =
+        load_query(
+            "cp.operators.list",
+            cid,
             async {
             let q4 = format!(
                 "SELECT email, name, role, COALESCE(mfa_enabled, false), COALESCE(status, ''), created_at FROM users WHERE {where_clause} ORDER BY created_at DESC LIMIT 100"
@@ -1916,7 +2437,10 @@ async fn cp_operators(state: &AppState, q: &ListQuery) -> ListPageData {
                 query.fetch_all(&state.db).await
             },
         )
-        .await;
+        .await
+        .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "Operators",
@@ -1926,10 +2450,17 @@ async fn cp_operators(state: &AppState, q: &ListQuery) -> ListPageData {
     data.search_label = "Search operators".into();
     data.search_placeholder = "Search by email or name".into();
     data.current_query = q.search.clone();
-    data.total_count = total;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        total.total_or_zero()
+    };
     data.primary_action = Some(("Add Operator".into(), "/operators/new".into()));
     data.empty_title = "No operators yet".into();
     data.empty_description = "Invite an administrator with controlled access.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Operators");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Email".into(),
@@ -1958,7 +2489,7 @@ async fn cp_operators(state: &AppState, q: &ListQuery) -> ListPageData {
     data
 }
 
-async fn cp_sales(state: &AppState, q: &ListQuery) -> ListPageData {
+async fn cp_sales(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     let stage = if q.stage.is_empty() {
         q.status.clone()
     } else {
@@ -1981,16 +2512,20 @@ async fn cp_sales(state: &AppState, q: &ListQuery) -> ListPageData {
     }
     let where_clause = where_sql.build();
 
-    let total = count_rows(
+    let total = loaded_count(
         state,
+        "cp.sales.count",
+        cid,
         &format!("SELECT COUNT(*)::bigint FROM sales_leads WHERE {where_clause}"),
         &where_sql.binds,
     )
     .await;
-    let (page, total_pages, offset) = paging(total, q.page);
+    let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
-    let rows: Vec<(String, Option<String>, String, Option<i32>, Option<chrono::DateTime<chrono::Utc>>)> =
-        optional_rows(
+    let rows =
+        load_query(
+            "cp.sales.list",
+            cid,
             async {
             let q5 = format!(
                 "SELECT id, company_name, COALESCE(status, ''), score, created_at FROM sales_leads WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
@@ -2011,10 +2546,15 @@ async fn cp_sales(state: &AppState, q: &ListQuery) -> ListPageData {
                 query.fetch_all(&state.db).await
             },
         )
-        .await;
+        .await
+        .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
-    let qualified = count_rows(
+    let qualified = loaded_count(
         state,
+        "cp.sales.qualified",
+        cid,
         "SELECT COUNT(*)::bigint FROM sales_leads WHERE status = 'qualified'",
         &[],
     )
@@ -2041,15 +2581,22 @@ async fn cp_sales(state: &AppState, q: &ListQuery) -> ListPageData {
         ],
     )];
     data.kpis = vec![
-        KpiCardData::new("Leads", total.to_string()).with_hint("Pipeline"),
-        KpiCardData::new("Qualified", qualified.to_string()).with_hint("Stage"),
+        KpiCardData::new("Leads", total.kpi_value()).with_hint("Pipeline"),
+        KpiCardData::new("Qualified", qualified.kpi_value()).with_hint("Stage"),
     ];
     data.page = page;
     data.total_pages = total_pages;
-    data.total_count = total;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        total.total_or_zero()
+    };
     data.filter_query = filter_query(q);
     data.empty_title = "No leads yet".into();
     data.empty_description = "Discovery runs populate the pipeline as leads are identified.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Leads");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Company".into(),
@@ -2073,7 +2620,7 @@ async fn cp_sales(state: &AppState, q: &ListQuery) -> ListPageData {
     data
 }
 
-async fn cp_audit(state: &AppState, q: &ListQuery) -> ListPageData {
+async fn cp_audit(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     // Item M: the search widens to (action ILIKE OR user_id ILIKE OR
     // resource_type ILIKE), with an optional recency window in days —
     // the SAME clause the CSV export applies.
@@ -2098,16 +2645,20 @@ async fn cp_audit(state: &AppState, q: &ListQuery) -> ListPageData {
         clauses.join(" AND ")
     };
 
-    let total = count_rows(
+    let total = loaded_count(
         state,
+        "cp.audit.count",
+        cid,
         &format!("SELECT COUNT(*)::bigint FROM audit_logs WHERE {where_clause}"),
         &binds,
     )
     .await;
-    let (page, total_pages, offset) = paging(total, q.page);
+    let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
-    let rows: Vec<(Option<chrono::DateTime<chrono::Utc>>, String, Option<String>, Option<String>)> =
-        optional_rows(
+    let rows =
+        load_query(
+            "cp.audit.list",
+            cid,
             async {
             let q6 = format!(
                 "SELECT created_at, action, resource_type, user_id FROM audit_logs WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
@@ -2127,7 +2678,10 @@ async fn cp_audit(state: &AppState, q: &ListQuery) -> ListPageData {
                 query.fetch_all(&state.db).await
             },
         )
-        .await;
+        .await
+        .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "Audit Logs",
@@ -2139,10 +2693,17 @@ async fn cp_audit(state: &AppState, q: &ListQuery) -> ListPageData {
     data.current_query = q.search.clone();
     data.page = page;
     data.total_pages = total_pages;
-    data.total_count = total;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        total.total_or_zero()
+    };
     data.filter_query = filter_query(q);
     data.empty_title = "No audit events yet".into();
     data.empty_description = "Operator actions are recorded here as they happen.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Audit events");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Timestamp".into(),
@@ -2173,8 +2734,10 @@ async fn cp_audit(state: &AppState, q: &ListQuery) -> ListPageData {
     data
 }
 
-async fn cp_jobs(state: &AppState) -> ListPageData {
-    let rows: Vec<(String, String, i64, Option<chrono::DateTime<chrono::Utc>>)> = optional_rows(
+async fn cp_jobs(state: &AppState, cid: &str) -> ListPageData {
+    let rows = load_query(
+        "cp.jobs.list",
+        cid,
         async {
             sqlx::query_as::<_, (String, String, i64, Option<chrono::DateTime<chrono::Utc>>)>(
                 "SELECT COALESCE(queue, 'default') AS q, status, COUNT(*)::bigint AS c, MAX(updated_at) FROM queue_jobs GROUP BY 1, 2 ORDER BY 1, 2",
@@ -2183,7 +2746,10 @@ async fn cp_jobs(state: &AppState) -> ListPageData {
             .await
         },
     )
-    .await;
+    .await
+    .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let pending: i64 = rows.iter().filter(|r| r.1 == "pending").map(|r| r.2).sum();
     let queues = rows
@@ -2194,11 +2760,30 @@ async fn cp_jobs(state: &AppState) -> ListPageData {
 
     let mut data = base_list("Jobs", "Background work and remediation queues.", "/jobs");
     data.kpis = vec![
-        KpiCardData::new("Pending", pending.to_string()).with_hint("Across queues"),
-        KpiCardData::new("Queues", queues.to_string()).with_hint("Distinct"),
+        KpiCardData::new(
+            "Pending",
+            if rows_unavailable {
+                "unavailable".to_string()
+            } else {
+                pending.to_string()
+            },
+        )
+        .with_hint("Across queues"),
+        KpiCardData::new(
+            "Queues",
+            if rows_unavailable {
+                "unavailable".to_string()
+            } else {
+                queues.to_string()
+            },
+        )
+        .with_hint("Distinct"),
     ];
     data.empty_title = "No queued jobs".into();
     data.empty_description = "Background work appears here as workers enqueue it.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Job queues");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Queue".into(),
@@ -2223,17 +2808,24 @@ async fn cp_jobs(state: &AppState) -> ListPageData {
     data
 }
 
-async fn cp_nodes(state: &AppState) -> ListPageData {
-    let rows: Vec<(String, Option<String>, Option<String>, String, Option<i32>)> = optional_rows(
-        async {
-            sqlx::query_as::<_, (String, Option<String>, Option<String>, String, Option<i32>)>(
-                "SELECT id, ip_address, pool_id, status, warmup_day FROM ip_pool_addresses ORDER BY ip_address LIMIT 100",
-            )
-            .fetch_all(&state.db)
-            .await
-        },
-    )
-    .await;
+/// /infrastructure/nodes query (audit F58). ip_pool_addresses.id is a UUID
+/// and ip_address is INET (migration 093); both must be decoded as text —
+/// `id::text` for the row id and `host(ip_address)` for the bare address
+/// (INET never decodes as a String).
+const NODES_SQL: &str = "SELECT id::text AS id, host(ip_address) AS ip_address, pool_id, status, warmup_day FROM ip_pool_addresses ORDER BY ip_address LIMIT 100";
+
+async fn cp_nodes(state: &AppState, cid: &str) -> ListPageData {
+    let rows = load_query("cp.nodes.list", cid, async {
+        sqlx::query_as::<_, (String, Option<String>, Option<String>, String, Option<i32>)>(
+            NODES_SQL,
+        )
+        .fetch_all(&state.db)
+        .await
+    })
+    .await
+    .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let active = rows.iter().filter(|r| r.3 == "active").count();
     let mut data = base_list(
@@ -2242,12 +2834,31 @@ async fn cp_nodes(state: &AppState) -> ListPageData {
         "/infrastructure/nodes",
     );
     data.kpis = vec![
-        KpiCardData::new("Nodes", rows.len().to_string()).with_hint("MTA pool"),
-        KpiCardData::new("Active", active.to_string()).with_hint("Sending"),
+        KpiCardData::new(
+            "Nodes",
+            if rows_unavailable {
+                "unavailable".to_string()
+            } else {
+                rows.len().to_string()
+            },
+        )
+        .with_hint("MTA pool"),
+        KpiCardData::new(
+            "Active",
+            if rows_unavailable {
+                "unavailable".to_string()
+            } else {
+                active.to_string()
+            },
+        )
+        .with_hint("Sending"),
     ];
     data.empty_title = "No nodes registered".into();
     data.empty_description =
         "MTA pool addresses appear here as infrastructure registers them.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Nodes");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Node".into(),
@@ -2277,8 +2888,8 @@ async fn cp_nodes(state: &AppState) -> ListPageData {
     data
 }
 
-async fn cp_queues(state: &AppState) -> ListPageData {
-    let rows: Vec<(String, i64, i64)> = optional_rows(async {
+async fn cp_queues(state: &AppState, cid: &str) -> ListPageData {
+    let rows = load_query("cp.queues.list", cid, async {
         sqlx::query_as::<_, (String, i64, i64)>(
             "SELECT COALESCE(queue, 'default') AS q,
                         SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END)::bigint AS depth,
@@ -2288,7 +2899,10 @@ async fn cp_queues(state: &AppState) -> ListPageData {
         .fetch_all(&state.db)
         .await
     })
-    .await;
+    .await
+    .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let depth: i64 = rows.iter().map(|r| r.1).sum();
     let mut data = base_list(
@@ -2297,11 +2911,30 @@ async fn cp_queues(state: &AppState) -> ListPageData {
         "/infrastructure/queues",
     );
     data.kpis = vec![
-        KpiCardData::new("Total depth", depth.to_string()).with_hint("Pending jobs"),
-        KpiCardData::new("Queues", rows.len().to_string()).with_hint("Distinct"),
+        KpiCardData::new(
+            "Total depth",
+            if rows_unavailable {
+                "unavailable".to_string()
+            } else {
+                depth.to_string()
+            },
+        )
+        .with_hint("Pending jobs"),
+        KpiCardData::new(
+            "Queues",
+            if rows_unavailable {
+                "unavailable".to_string()
+            } else {
+                rows.len().to_string()
+            },
+        )
+        .with_hint("Distinct"),
     ];
     data.empty_title = "No queues reporting".into();
     data.empty_description = "Queue telemetry appears once workers enqueue jobs.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Queues");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Queue".into(),
@@ -2325,24 +2958,29 @@ async fn cp_queues(state: &AppState) -> ListPageData {
     data
 }
 
-async fn cp_alerts(state: &AppState, q: &ListQuery) -> ListPageData {
+async fn cp_alerts(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     let mut where_sql = WhereBuilder::new();
     where_sql.status_in(&["critical", "high", "medium", "low", "info"], &q.status);
     let where_clause = where_sql.build();
 
-    let total = count_rows(
+    let total = loaded_count(
         state,
+        "cp.alerts.count",
+        cid,
         &format!("SELECT COUNT(*)::bigint FROM system_alerts WHERE {where_clause}"),
         &where_sql.binds,
     )
     .await;
-    let (page, total_pages, offset) = paging(total, q.page);
+    let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
-    let rows: Vec<(String, String, String, String, bool, Option<chrono::DateTime<chrono::Utc>>)> =
-        optional_rows(
+    // system_alerts.id is a UUID (migration 020): decode as text.
+    let rows =
+        load_query(
+            "cp.alerts.list",
+            cid,
             async {
             let q7 = format!(
-                "SELECT id, severity, alert_type, message, acknowledged, created_at FROM system_alerts WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
+                "SELECT id::text AS id, severity, alert_type, message, acknowledged, created_at FROM system_alerts WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
             );
                 let mut query = sqlx::query_as::<
                     _,
@@ -2361,10 +2999,15 @@ async fn cp_alerts(state: &AppState, q: &ListQuery) -> ListPageData {
                 query.fetch_all(&state.db).await
             },
         )
-        .await;
+        .await
+        .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
-    let unacknowledged = count_rows(
+    let unacknowledged = loaded_count(
         state,
+        "cp.alerts.unacknowledged",
+        cid,
         "SELECT COUNT(*)::bigint FROM system_alerts WHERE acknowledged = false",
         &[],
     )
@@ -2387,13 +3030,20 @@ async fn cp_alerts(state: &AppState, q: &ListQuery) -> ListPageData {
         ],
     )];
     data.kpis =
-        vec![KpiCardData::new("Unacknowledged", unacknowledged.to_string()).with_hint("Open")];
+        vec![KpiCardData::new("Unacknowledged", unacknowledged.kpi_value()).with_hint("Open")];
     data.page = page;
     data.total_pages = total_pages;
-    data.total_count = total;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        total.total_or_zero()
+    };
     data.filter_query = filter_query(q);
     data.empty_title = "No alerts".into();
     data.empty_description = "Fleet alert signals appear here when raised.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Alerts");
+    }
     data.bulk_action = Some(BulkActionData {
         action: "/web/admin/alerts/ack-bulk".into(),
         button_label: "Acknowledge selected".into(),
@@ -2452,7 +3102,7 @@ fn cp_alert_rules() -> ListPageData {
     data
 }
 
-async fn cp_domains(state: &AppState, q: &ListQuery) -> ListPageData {
+async fn cp_domains(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     let mut where_sql = WhereBuilder::new();
     where_sql.status_in(&["pending", "verified", "failed", "suspended"], &q.status);
     if !q.search.is_empty() {
@@ -2460,21 +3110,27 @@ async fn cp_domains(state: &AppState, q: &ListQuery) -> ListPageData {
     }
     let where_clause = where_sql.build();
 
-    let total = count_rows(
+    let total = loaded_count(
         state,
+        "cp.domains.count",
+        cid,
         &format!("SELECT COUNT(*)::bigint FROM domains WHERE {where_clause}"),
         &where_sql.binds,
     )
     .await;
-    let (page, total_pages, offset) = paging(total, q.page);
+    let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
     // domains.status may be absent on legacy deployments (verified flags
     // instead) — the status cell degrades to "pending" rather than failing.
-    let rows: Vec<(String, String, Option<String>, Option<chrono::DateTime<chrono::Utc>>)> =
-        optional_rows(
+    // domains.id and domains.tenant_id are UUIDs (migration 052): decode
+    // both as text.
+    let rows =
+        load_query(
+            "cp.domains.list",
+            cid,
             async {
             let q8 = format!(
-                "SELECT id, name, tenant_id, created_at FROM domains WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
+                "SELECT id::text AS id, name, tenant_id::text AS tenant_id, created_at FROM domains WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
             );
                 let mut query = sqlx::query_as::<
                     _,
@@ -2486,10 +3142,15 @@ async fn cp_domains(state: &AppState, q: &ListQuery) -> ListPageData {
                 query.fetch_all(&state.db).await
             },
         )
-        .await;
+        .await
+        .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
-    let verified = count_rows(
+    let verified = loaded_count(
         state,
+        "cp.domains.verified",
+        cid,
         "SELECT COUNT(*)::bigint FROM domains WHERE status = 'verified'",
         &[],
     )
@@ -2504,15 +3165,22 @@ async fn cp_domains(state: &AppState, q: &ListQuery) -> ListPageData {
     data.search_placeholder = "Search by domain name".into();
     data.current_query = q.search.clone();
     data.kpis = vec![
-        KpiCardData::new("Domains", total.to_string()).with_hint("Fleet-wide"),
-        KpiCardData::new("Verified", verified.to_string()).with_hint("Sending-ready"),
+        KpiCardData::new("Domains", total.kpi_value()).with_hint("Fleet-wide"),
+        KpiCardData::new("Verified", verified.kpi_value()).with_hint("Sending-ready"),
     ];
     data.page = page;
     data.total_pages = total_pages;
-    data.total_count = total;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        total.total_or_zero()
+    };
     data.filter_query = filter_query(q);
     data.empty_title = "No domains registered".into();
     data.empty_description = "Tenant domains appear here as they are added.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Domains");
+    }
     data.table = Some(TableData {
         columns: vec!["Domain".into(), "Tenant".into(), "Added".into()],
         rows: rows
@@ -2530,17 +3198,27 @@ async fn cp_domains(state: &AppState, q: &ListQuery) -> ListPageData {
     data
 }
 
-async fn cp_plans(state: &AppState) -> ListPageData {
-    let rows: Vec<(String, Option<String>, i64)> = optional_rows(async {
+async fn cp_plans(state: &AppState, cid: &str) -> ListPageData {
+    let rows = load_query("cp.plans.list", cid, async {
         sqlx::query_as::<_, (String, Option<String>, i64)>(
             "SELECT name, display_name, price_cents FROM plans ORDER BY price_cents ASC LIMIT 50",
         )
         .fetch_all(&state.db)
         .await
     })
-    .await;
+    .await
+    .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
-    let tenants = count_rows(state, "SELECT COUNT(*)::bigint FROM tenants", &[]).await;
+    let tenants = loaded_count(
+        state,
+        "cp.plans.tenants",
+        cid,
+        "SELECT COUNT(*)::bigint FROM tenants",
+        &[],
+    )
+    .await;
 
     let mut data = base_list(
         "Plans",
@@ -2548,12 +3226,23 @@ async fn cp_plans(state: &AppState) -> ListPageData {
         "/billing/plans",
     );
     data.kpis = vec![
-        KpiCardData::new("Plans", rows.len().to_string()).with_hint("Catalog"),
-        KpiCardData::new("Tenants", tenants.to_string()).with_hint("On any plan"),
+        KpiCardData::new(
+            "Plans",
+            if rows_unavailable {
+                "unavailable".to_string()
+            } else {
+                rows.len().to_string()
+            },
+        )
+        .with_hint("Catalog"),
+        KpiCardData::new("Tenants", tenants.kpi_value()).with_hint("On any plan"),
     ];
     data.empty_title = "No plans in the catalog".into();
     data.empty_description =
         "Plan packaging appears here once the billing catalog is seeded.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Plans");
+    }
     data.table = Some(TableData {
         columns: vec!["Plan".into(), "Display name".into(), "Price".into()],
         rows: rows
@@ -2571,22 +3260,36 @@ async fn cp_plans(state: &AppState) -> ListPageData {
     data
 }
 
-async fn cp_compliance(state: &AppState) -> ListPageData {
-    let gdpr_pending = count_rows(
+async fn cp_compliance(state: &AppState, cid: &str) -> ListPageData {
+    let gdpr_pending = loaded_count(
         state,
+        "cp.compliance.gdpr_pending",
+        cid,
         "SELECT COUNT(*)::bigint FROM gdpr_requests WHERE status = 'pending'",
         &[],
     )
     .await;
-    let gdpr_total = count_rows(state, "SELECT COUNT(*)::bigint FROM gdpr_requests", &[]).await;
-    let alerts = count_rows(
+    let gdpr_total = loaded_count(
         state,
+        "cp.compliance.gdpr_total",
+        cid,
+        "SELECT COUNT(*)::bigint FROM gdpr_requests",
+        &[],
+    )
+    .await;
+    let alerts = loaded_count(
+        state,
+        "cp.compliance.alerts",
+        cid,
         "SELECT COUNT(*)::bigint FROM system_alerts WHERE acknowledged = false",
         &[],
     )
     .await;
 
-    let rows: Vec<(String, String, String, Option<chrono::DateTime<chrono::Utc>>)> = optional_rows(
+    // gdpr_requests.id is VARCHAR (migration 069) — decoded as String.
+    let rows = load_query(
+        "cp.compliance.list",
+        cid,
         async {
             sqlx::query_as::<_, (String, String, String, Option<chrono::DateTime<chrono::Utc>>)>(
                 "SELECT id, request_type, status, created_at FROM gdpr_requests ORDER BY created_at DESC LIMIT 10",
@@ -2595,7 +3298,10 @@ async fn cp_compliance(state: &AppState) -> ListPageData {
             .await
         },
     )
-    .await;
+    .await
+    .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "Compliance",
@@ -2603,13 +3309,16 @@ async fn cp_compliance(state: &AppState) -> ListPageData {
         "/compliance",
     );
     data.kpis = vec![
-        KpiCardData::new("GDPR pending", gdpr_pending.to_string()).with_hint("Requests"),
-        KpiCardData::new("GDPR total", gdpr_total.to_string()).with_hint("All time"),
-        KpiCardData::new("Open alerts", alerts.to_string()).with_hint("Fleet"),
+        KpiCardData::new("GDPR pending", gdpr_pending.kpi_value()).with_hint("Requests"),
+        KpiCardData::new("GDPR total", gdpr_total.kpi_value()).with_hint("All time"),
+        KpiCardData::new("Open alerts", alerts.kpi_value()).with_hint("Fleet"),
     ];
     data.primary_action = Some(("GDPR queue".into(), "/compliance/gdpr".into()));
     data.empty_title = "No compliance requests".into();
     data.empty_description = "GDPR and trust workflows appear here as they are filed.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Compliance requests");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Request".into(),
@@ -2636,7 +3345,7 @@ async fn cp_compliance(state: &AppState) -> ListPageData {
     data
 }
 
-async fn cp_gdpr(state: &AppState, q: &ListQuery) -> ListPageData {
+async fn cp_gdpr(state: &AppState, q: &ListQuery, cid: &str) -> ListPageData {
     let mut where_sql = WhereBuilder::new();
     where_sql.status_in(
         &["pending", "in_progress", "completed", "rejected"],
@@ -2644,16 +3353,20 @@ async fn cp_gdpr(state: &AppState, q: &ListQuery) -> ListPageData {
     );
     let where_clause = where_sql.build();
 
-    let total = count_rows(
+    let total = loaded_count(
         state,
+        "cp.gdpr.count",
+        cid,
         &format!("SELECT COUNT(*)::bigint FROM gdpr_requests WHERE {where_clause}"),
         &where_sql.binds,
     )
     .await;
-    let (page, total_pages, offset) = paging(total, q.page);
+    let (page, total_pages, offset) = paging(total.total_or_zero(), q.page);
 
-    let rows: Vec<(String, String, String, String, Option<chrono::DateTime<chrono::Utc>>)> =
-        optional_rows(
+    let rows =
+        load_query(
+            "cp.gdpr.list",
+            cid,
             async {
             let q9 = format!(
                 "SELECT id, email, request_type, status, created_at FROM gdpr_requests WHERE {where_clause} ORDER BY created_at DESC LIMIT {PER_PAGE} OFFSET {offset}"
@@ -2674,7 +3387,10 @@ async fn cp_gdpr(state: &AppState, q: &ListQuery) -> ListPageData {
                 query.fetch_all(&state.db).await
             },
         )
-        .await;
+        .await
+        .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
     let mut data = base_list(
         "GDPR Compliance",
@@ -2701,10 +3417,17 @@ async fn cp_gdpr(state: &AppState, q: &ListQuery) -> ListPageData {
     )];
     data.page = page;
     data.total_pages = total_pages;
-    data.total_count = total;
+    data.total_count = if rows_unavailable {
+        0
+    } else {
+        total.total_or_zero()
+    };
     data.filter_query = filter_query(q);
     data.empty_title = "No GDPR requests".into();
     data.empty_description = "Data-subject requests appear here as they arrive.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "GDPR requests");
+    }
     data.table = Some(TableData {
         columns: vec![
             "Email".into(),
@@ -2728,8 +3451,10 @@ async fn cp_gdpr(state: &AppState, q: &ListQuery) -> ListPageData {
     data
 }
 
-async fn cp_discovery(state: &AppState) -> ListPageData {
-    let rows: Vec<(String, i64)> = optional_rows(
+async fn cp_discovery(state: &AppState, cid: &str) -> ListPageData {
+    let rows = load_query(
+        "cp.discovery.list",
+        cid,
         async {
             sqlx::query_as::<_, (String, i64)>(
                 "SELECT COALESCE(source, 'unknown'), COUNT(*)::bigint FROM sales_leads GROUP BY 1 ORDER BY 2 DESC LIMIT 25",
@@ -2738,18 +3463,31 @@ async fn cp_discovery(state: &AppState) -> ListPageData {
             .await
         },
     )
-    .await;
+    .await
+    .rows_or_unavailable();
+    let rows_unavailable = rows.1;
+    let rows = rows.0;
 
-    let total = count_rows(state, "SELECT COUNT(*)::bigint FROM sales_leads", &[]).await;
+    let total = loaded_count(
+        state,
+        "cp.discovery.total",
+        cid,
+        "SELECT COUNT(*)::bigint FROM sales_leads",
+        &[],
+    )
+    .await;
 
     let mut data = base_list(
         "Service Discovery",
         "Registered lead sources and routing state.",
         "/discovery",
     );
-    data.kpis = vec![KpiCardData::new("Leads", total.to_string()).with_hint("All sources")];
+    data.kpis = vec![KpiCardData::new("Leads", total.kpi_value()).with_hint("All sources")];
     data.empty_title = "No discovery sources reporting".into();
     data.empty_description = "Discovery runs register their sources here as they execute.".into();
+    if rows_unavailable {
+        mark_rows_unavailable(&mut data, "Discovery sources");
+    }
     data.table = Some(TableData {
         columns: vec!["Source".into(), "Leads".into()],
         rows: rows
@@ -2763,8 +3501,17 @@ async fn cp_discovery(state: &AppState) -> ListPageData {
     data
 }
 
-async fn cp_analytics(state: &AppState) -> ListPageData {
-    let agg = event_aggregate(state, "timestamp >= NOW() - '30 days'::interval", &[]).await;
+async fn cp_analytics(state: &AppState, cid: &str) -> ListPageData {
+    let agg_state = event_aggregate(
+        state,
+        "cp.analytics.aggregate",
+        cid,
+        "timestamp >= NOW() - '30 days'::interval",
+        &[],
+    )
+    .await;
+    let agg_loaded = !agg_state.is_unavailable();
+    let agg = agg_state.unwrap_or_default();
     let sent = *agg.get("sent").unwrap_or(&0);
     let delivered = agg.get("delivered").copied().unwrap_or(0);
     let bounced = agg.get("bounced").copied().unwrap_or(0);
@@ -2776,10 +3523,13 @@ async fn cp_analytics(state: &AppState) -> ListPageData {
         "/analytics",
     );
     data.kpis = vec![
-        KpiCardData::new("Sent (30d)", sent.to_string()).with_hint("Fleet-wide"),
-        KpiCardData::new("Delivered", delivered.to_string()).with_hint(&rate(delivered, sent)),
-        KpiCardData::new("Bounced", bounced.to_string()).with_hint(&rate(bounced, sent)),
-        KpiCardData::new("Complaints", complained.to_string()).with_hint(&rate(complained, sent)),
+        KpiCardData::new("Sent (30d)", aggregate_kpi(agg_loaded, sent)).with_hint("Fleet-wide"),
+        KpiCardData::new("Delivered", aggregate_kpi(agg_loaded, delivered))
+            .with_hint(&rate(delivered, sent)),
+        KpiCardData::new("Bounced", aggregate_kpi(agg_loaded, bounced))
+            .with_hint(&rate(bounced, sent)),
+        KpiCardData::new("Complaints", aggregate_kpi(agg_loaded, complained))
+            .with_hint(&rate(complained, sent)),
     ];
     data
 }
@@ -3143,15 +3893,24 @@ pub(crate) async fn tenant_lists_for_select(
     db: &sqlx::PgPool,
     tenant: &str,
 ) -> Vec<(String, String, bool)> {
-    let rows: Vec<(String, String)> = optional_rows(async {
-        sqlx::query_as::<_, (String, String)>(
-            "SELECT id::text, name FROM lists WHERE tenant_id = $1 ORDER BY name ASC LIMIT 200",
-        )
-        .bind(tenant)
-        .fetch_all(db)
+    // Called outside the page-render path — own correlation id (audit F14).
+    let correlation_id = next_correlation_id();
+    let rows: Vec<(String, String)> =
+        match load_query("web.campaign_detail.lists", &correlation_id, async {
+            sqlx::query_as::<_, (String, String)>(
+                "SELECT id::text, name FROM lists WHERE tenant_id = $1 ORDER BY name ASC LIMIT 200",
+            )
+            .bind(tenant)
+            .fetch_all(db)
+            .await
+        })
         .await
-    })
-    .await;
+        {
+            LoadState::Loaded(rows) => rows,
+            // The select degrades to empty rather than blocking campaign
+            // detail rendering; the failure is logged with the query id.
+            LoadState::Unavailable => Vec::new(),
+        };
     rows.into_iter()
         .map(|(id, name)| (id, name, false))
         .collect()
@@ -3160,15 +3919,20 @@ pub(crate) async fn tenant_lists_for_select(
 /// Plan names from the billing catalog (item I) — the tenant-create
 /// form's plan select is validated against this exact set.
 pub(crate) async fn tenant_plan_names(db: &sqlx::PgPool) -> Vec<String> {
-    optional_rows(async {
+    // Called outside the page-render path — own correlation id (audit F14).
+    let correlation_id = next_correlation_id();
+    match load_query("web.tenant_create.plans", &correlation_id, async {
         sqlx::query_as::<_, (String,)>("SELECT name FROM plans ORDER BY price_cents ASC LIMIT 50")
             .fetch_all(db)
             .await
     })
     .await
-    .into_iter()
-    .map(|(name,)| name)
-    .collect()
+    {
+        LoadState::Loaded(rows) => rows.into_iter().map(|(name,)| name).collect(),
+        // An unreadable catalog degrades to an empty select; the failure
+        // is logged with the query id rather than silently swallowed.
+        LoadState::Unavailable => Vec::new(),
+    }
 }
 
 /// Render the admin transfer-suggestion data (item J) as list-page data.
@@ -3349,5 +4113,155 @@ mod tests {
         let q = parse_list_query(Some("query=a b&status=draft&stage=proposal"));
         assert_eq!(filter_query(&q), "query=a%20b&status=draft&stage=proposal");
         assert_eq!(filter_query(&ListQuery::default()), "");
+    }
+
+    // ─── Audit F03: API-keys console query + view-model states ───────
+
+    #[test]
+    fn api_keys_sql_selects_only_schema_columns() {
+        // The mandated exact statement: `key_prefix` (the real column)
+        // aliased to the display name, UUID id decoded as text, and
+        // expires_at present for the active/expired distinction.
+        assert_eq!(
+            API_KEYS_SQL,
+            "SELECT id::text AS id, name, key_prefix AS prefix, created_at, revoked_at, expires_at FROM api_keys WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 100"
+        );
+    }
+
+    #[test]
+    fn api_key_states_distinguish_active_expired_revoked() {
+        let now = chrono::Utc::now();
+        let past = now - chrono::Duration::hours(1);
+        let future = now + chrono::Duration::hours(1);
+
+        assert_eq!(api_key_state(None, None, now), "active");
+        assert_eq!(api_key_state(None, Some(future), now), "active");
+        // expires_at exactly now has passed — expired, never active.
+        assert_eq!(api_key_state(None, Some(now), now), "expired");
+        assert_eq!(api_key_state(None, Some(past), now), "expired");
+        // Revocation wins over expiry (irreversible operator action).
+        assert_eq!(api_key_state(Some(past), Some(past), now), "revoked");
+        assert_eq!(api_key_state(Some(past), None, now), "revoked");
+    }
+
+    // ─── Audit F04: billing canonical columns + currency buckets ─────
+
+    #[test]
+    fn billing_sql_reads_canonical_invoice_columns() {
+        // No amount_cents (absent on the fully-migrated schema: migration
+        // 069's CREATE TABLE is a no-op after 052); canonical total with
+        // the legacy `amount` fallback; UUID id decoded as text; status
+        // coerced to text for enum lineages.
+        assert!(BILLING_INVOICES_SQL.contains("id::text AS id"));
+        assert!(BILLING_INVOICES_SQL.contains("COALESCE(total, amount, 0)"));
+        assert!(!BILLING_INVOICES_SQL.contains("amount_cents"));
+        assert!(BILLING_INVOICES_SQL.contains("status::text AS status"));
+
+        // Outstanding aggregates the FULL dataset (no LIMIT), per currency.
+        assert!(!BILLING_OUTSTANDING_SQL.contains("LIMIT"));
+        assert!(BILLING_OUTSTANDING_SQL.contains("GROUP BY currency"));
+        // Collectible rule: draft/void/uncollectible/paid owe nothing.
+        for excluded in ["'draft'", "'void'", "'uncollectible'", "'paid'"] {
+            assert!(
+                BILLING_OUTSTANDING_SQL.contains(excluded),
+                "outstanding must exclude {excluded}"
+            );
+        }
+    }
+
+    #[test]
+    fn outstanding_kpis_separate_currencies_and_never_fabricate_zeroes() {
+        // Loaded buckets → one labelled card per currency.
+        let kpis = outstanding_kpis(LoadState::Loaded(vec![
+            ("EUR".to_string(), 12_345),
+            ("USD".to_string(), 500),
+        ]));
+        assert_eq!(kpis.len(), 2);
+        assert_eq!(kpis[0].label, "Outstanding (EUR)");
+        assert_eq!(kpis[0].value, "123.45 EUR");
+        assert_eq!(kpis[1].label, "Outstanding (USD)");
+        assert_eq!(kpis[1].value, "5.00 USD");
+
+        // Genuinely nothing due → a single honest 0.00 card.
+        let kpis = outstanding_kpis(LoadState::Loaded(Vec::new()));
+        assert_eq!(kpis.len(), 1);
+        assert_eq!(kpis[0].value, "0.00");
+
+        // Unknown (query failed) is NOT zero.
+        let kpis = outstanding_kpis(LoadState::Unavailable);
+        assert_eq!(kpis.len(), 1);
+        assert_eq!(kpis[0].value, "unavailable");
+    }
+
+    #[test]
+    fn format_cents_carries_its_own_currency() {
+        assert_eq!(format_cents(0, "EUR"), "0.00 EUR");
+        assert_eq!(format_cents(1, "USD"), "0.01 USD");
+        assert_eq!(format_cents(123_456_789, "JPY"), "1234567.89 JPY");
+    }
+
+    // ─── Audit F58: nodes query decodes UUID + INET ──────────────────
+
+    #[test]
+    fn nodes_sql_decodes_uuid_id_and_inet_address() {
+        assert!(NODES_SQL.contains("id::text AS id"));
+        assert!(NODES_SQL.contains("host(ip_address) AS ip_address"));
+    }
+
+    // ─── Audit F14: unavailable states stay distinguishable ──────────
+
+    #[test]
+    fn load_state_keeps_unavailable_distinct_from_empty() {
+        let loaded_empty: LoadState<Vec<u8>> = LoadState::Loaded(Vec::new());
+        let unavailable: LoadState<Vec<u8>> = LoadState::Unavailable;
+        assert!(!loaded_empty.is_unavailable());
+        assert!(unavailable.is_unavailable());
+
+        let (rows, failed) = LoadState::Loaded(vec![1u8, 2]).rows_or_unavailable();
+        assert_eq!(rows, vec![1, 2]);
+        assert!(!failed);
+        let (rows, failed) = LoadState::<Vec<u8>>::Unavailable.rows_or_unavailable();
+        assert!(rows.is_empty());
+        assert!(failed);
+
+        // Counts degrade to explicit "unavailable", never a false zero.
+        assert_eq!(LoadState::Loaded(7).kpi_value(), "7");
+        assert_eq!(LoadState::<i64>::Unavailable.kpi_value(), "unavailable");
+        assert_eq!(LoadState::Loaded(7).total_or_zero(), 7);
+        assert_eq!(LoadState::<i64>::Unavailable.total_or_zero(), 0);
+        assert_eq!(
+            LoadState::<i64>::Unavailable.unwrap_or_default(),
+            0,
+            "unknown counts must be captured via is_unavailable before degrading"
+        );
+    }
+
+    #[test]
+    fn unavailable_copy_is_distinct_from_honest_empty_state() {
+        // A failed query must render different copy than a genuinely
+        // optional-and-empty dataset (audit F14).
+        let mut honest_empty = base_list("Contacts", "desc", "/contacts");
+        honest_empty.empty_title = "No contacts yet".into();
+        honest_empty.empty_description = "Add your first contact.".into();
+
+        let mut unavailable = base_list("Contacts", "desc", "/contacts");
+        mark_rows_unavailable(&mut unavailable, "Contacts");
+
+        assert_eq!(unavailable.empty_title, "Data unavailable");
+        assert_ne!(honest_empty.empty_title, unavailable.empty_title);
+        assert_ne!(
+            honest_empty.empty_description,
+            unavailable.empty_description
+        );
+        assert!(unavailable.empty_description.contains("not an empty list"));
+    }
+
+    #[test]
+    fn correlation_ids_are_unique_and_monotonic() {
+        let first = next_correlation_id();
+        let second = next_correlation_id();
+        assert_ne!(first, second);
+        assert!(second > first, "ids share a prefix and increase");
+        assert!(first.starts_with("web-data-"));
     }
 }
