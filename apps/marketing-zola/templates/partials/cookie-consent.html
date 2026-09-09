@@ -68,17 +68,14 @@
   data-analytics-enabled="{{ config.extra.analytics_enabled | default(value=false) }}"
   class="cookie-consent-banner"
 >
-  <div class="flex flex-col gap-2.5 md:gap-3">
-    <div>
-      <div class="mb-2 flex items-center gap-2">
-        <div class="w-2 h-2 bg-brand-500"></div>
-        <h2 id="cookie-consent-heading" class="text-xs font-bold text-surface-950 tracking-[0.16em] md:tracking-[0.05em]">
-          {{- consent_heading -}}
-        </h2>
-      </div>
-      <p id="cookie-consent-copy" class="text-[11px] text-surface-600 leading-[1.35] md:text-[13px] md:leading-[1.45]">
-        {{- consent_copy -}}
-      </p>
+  {# A slim full-width bottom BAR, not a floating corner card: at short
+     viewports the old 28rem card permanently covered a quarter of the
+     screen over page text, which read as broken overlay soup. A bar is
+     page chrome — one line of copy, inline actions, ~64px tall. #}
+  <div class="cookie-consent-inner">
+    <div class="cookie-consent-copy">
+      <span class="cookie-consent-heading"><span class="cookie-consent-dot" aria-hidden="true"></span><span id="cookie-consent-heading">{{ consent_heading }}</span></span>
+      <p id="cookie-consent-copy">{{- consent_copy -}}</p>
     </div>
     <div class="cookie-consent-actions">
       {% if consent_choices | length > 0 %}
@@ -122,9 +119,7 @@
           {{- consent_accept_all -}}
         </a>
       {% endif %}
-    </div>
-    <div class="mt-1">
-      <a href="{{ config.extra.cookie_consent_policy_path | default(value='/cookies/') }}" class="text-xs text-surface-500 underline hover:text-brand-600 transition-colors">
+      <a href="{{ config.extra.cookie_consent_policy_path | default(value='/cookies/') }}" class="cookie-consent-policy text-xs text-surface-500 underline hover:text-brand-600 transition-colors">
         {{- consent_policy_link -}}
       </a>
     </div>

@@ -864,6 +864,14 @@ html.dark :focus-visible {
      of .apex-card (same recipe, different names). Templates use .apex-card. */
 
   .btn-primary {
+    /* inline-flex, not the <a> default inline: vertical padding on an
+       inline box bleeds over the neighbouring text line (the pricing
+       teaser's volume copy collided with its own button), and
+       w-full/mt-* utilities are ignored. Flex centering makes the
+       label+arrow pairs align in every context. */
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     @apply px-6 py-3 text-white font-semibold rounded-lg border border-brand-700 transition-premium tracking-tight text-sm;
     background: var(--brand-gradient);
     min-height: 44px;
@@ -881,6 +889,9 @@ html.dark :focus-visible {
   }
 
   .btn-secondary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
     @apply px-6 py-3 border border-surface-200 hover:border-surface-950 hover:bg-surface-50 bg-surface-50 text-surface-950 font-semibold rounded-lg transition-premium tracking-tight text-sm;
     min-height: 44px;
   }
@@ -1106,37 +1117,93 @@ html.dark :focus-visible {
     @apply bg-warning-50/30 border-warning-200 text-warning-700;
   }
 
+  /* A slim full-width bottom bar: the old 28rem corner card permanently
+     covered a quarter of short viewports over page text. The bar is page
+     chrome — one copy line with inline actions — and stops being an
+     obstruction instead of a dialog impersonating content. */
   .cookie-consent-banner {
     position: fixed;
-    right: 1.5rem;
-    bottom: 1.5rem;
+    left: 0;
+    right: 0;
+    bottom: 0;
     z-index: 40;
-    width: min(28rem, calc(100vw - 2rem));
-    border: 1px solid rgb(var(--surface-800));
+    border-top: 1px solid rgb(var(--surface-800));
     background: rgb(var(--surface-50));
-    padding: 1rem;
-    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05);
+    padding: 0.625rem 1rem;
+    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.07);
+  }
+
+  .cookie-consent-inner {
+    max-width: 80rem;
+    margin: 0 auto;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.25rem;
+  }
+
+  .cookie-consent-copy {
+    flex: 1 1 22rem;
+    min-width: 0;
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  .cookie-consent-heading {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: rgb(var(--surface-950));
+    white-space: nowrap;
+  }
+
+  .cookie-consent-dot {
+    width: 8px;
+    height: 8px;
+    flex-shrink: 0;
+    background: rgb(var(--brand-500));
+  }
+
+  #cookie-consent-copy {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.45;
+    color: rgb(var(--surface-600));
+    min-width: 0;
   }
 
   .cookie-consent-actions {
-    display: grid;
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
     gap: 0.5rem;
+  }
+
+  .cookie-consent-policy {
+    margin-left: 0.25rem;
+    white-space: nowrap;
   }
 
   .cookie-consent-button {
     display: inline-flex;
     min-width: 0;
-    min-height: 44px;
+    min-height: 36px;
     align-items: center;
     justify-content: center;
     border-radius: var(--radius-sm);
-    padding: 0.55rem 0.5rem;
+    padding: 0.4rem 0.75rem;
     text-align: center;
     font-size: 11px;
     font-weight: 700;
     line-height: 1.15;
-    overflow-wrap: anywhere;
+    white-space: nowrap;
     transition: color 200ms cubic-bezier(0.23, 1, 0.32, 1), background-color 200ms cubic-bezier(0.23, 1, 0.32, 1), border-color 200ms cubic-bezier(0.23, 1, 0.32, 1);
   }
 
@@ -1162,17 +1229,34 @@ html.dark :focus-visible {
   }
 }
 
-@media (max-width: 479px) {
+@media (max-width: 639px) {
   .cookie-consent-banner {
-    right: 0.5rem;
-    bottom: 0.5rem;
-    left: 0.5rem;
-    width: auto;
-    padding: 0.625rem;
+    padding: 0.625rem 0.75rem;
+  }
+
+  .cookie-consent-inner {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.625rem;
+  }
+
+  .cookie-consent-copy {
+    flex-basis: auto;
+  }
+
+  #cookie-consent-copy {
+    font-size: 11px;
   }
 
   .cookie-consent-actions {
+    display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .cookie-consent-policy {
+    grid-column: 1 / -1;
+    text-align: center;
+    margin-left: 0;
   }
 
   .cookie-consent-button[data-cookie-consent-value="all"] {

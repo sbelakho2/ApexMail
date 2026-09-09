@@ -145,6 +145,31 @@ message_id = resp.json()["id"]</code></pre>
           </a>
         </div>
         <div>
-          <div class="rounded-sm border border-surface-200 bg-surface-900 overflow-hidden">
+          <div class="rounded-lg border border-surface-700 bg-surface-950 overflow-hidden">
             <div class="flex items-center gap-2 px-4 py-3 border-b border-surface-800 bg-surface-950/50">
-              </section>
+              <div class="flex gap-1.5">
+                <span class="w-2.5 h-2.5 rounded-sm bg-surface-700"></span>
+                <span class="w-2.5 h-2.5 rounded-sm bg-surface-700"></span>
+                <span class="w-2.5 h-2.5 rounded-sm bg-surface-700"></span>
+              </div>
+              <span class="text-xs text-surface-400 ml-2 font-mono font-medium">events.py</span>
+            </div>
+            <pre class="p-4 text-sm text-surface-200 font-mono overflow-x-auto max-w-full"><code>import requests
+
+# Every message carries its full event history
+events = requests.get(
+    "https://api.apexmail.ee/v1/events?message_id=msg_2xk9",
+    headers={"X-API-Key": "am_live_xxx"},
+).json()
+
+for event in events:
+    print(event["event_type"], event["timestamp"])
+# message.accepted 2026-09-09T10:41:02Z
+# message.delivered 2026-09-09T10:41:04Z
+# message.opened 2026-09-09T11:02:47Z</code></pre>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
