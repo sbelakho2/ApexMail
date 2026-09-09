@@ -62,7 +62,7 @@ printf 'PASS: Zola company configuration is present\n'
 
 if [[ ! -f "$ZOLA_DIR/public/index.html" || ! -f "$ZOLA_DIR/public/pricing/index.html" ]]; then
     command -v zola >/dev/null 2>&1 || fail "generated marketing output is missing and zola is unavailable"
-    zola build --root "$ZOLA_DIR"
+    zola --root "$ZOLA_DIR" build
 fi
 
 python3 "$PROJECT_ROOT/tools/validate_pricing_drift.py"

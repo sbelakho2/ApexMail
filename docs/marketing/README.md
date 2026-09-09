@@ -54,7 +54,7 @@ zola serve --root apps/marketing-zola --port 1111
 ## Build
 
 ```bash
-zola build --root apps/marketing-zola
+zola --root apps/marketing-zola build
 ```
 
 This writes the generated static site to `apps/marketing-zola/public/`.

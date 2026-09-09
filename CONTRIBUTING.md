@@ -14,7 +14,7 @@ cargo test --manifest-path services/mail-server/Cargo.toml
 If you touch the marketing site, regenerate it with:
 
 ```bash
-zola build --root apps/marketing-zola
+zola --root apps/marketing-zola build
 ```
 
 ## Before Opening a Pull Request

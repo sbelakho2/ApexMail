@@ -227,7 +227,7 @@ apexmail/
 |---------|-------------|
 | `cargo run --manifest-path services/mail-server/Cargo.toml -p api-server` | Start the main API and SSR surfaces |
 | `cargo test --manifest-path services/mail-server/Cargo.toml` | Run the Rust test suite |
-| `zola build --root apps/marketing-zola` | Rebuild the static marketing output |
+| `zola --root apps/marketing-zola build` | Rebuild the static marketing output |
 | `docker compose up -d` | Start backend services |
 | `docker compose logs -f tracking` | View tracking service logs |
 
