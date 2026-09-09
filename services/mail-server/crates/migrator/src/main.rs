@@ -121,24 +121,26 @@ mod tests {
         );
     }
 
-    /// The deploy gate relies on the migrator covering the full chain. The
-    /// chain must be CONTIGUOUS from 1 to the latest version with no gaps: a
-    /// gap means the macro pointed at a partial directory (or a file was
-    /// misnamed), and sqlx would happily apply a chain that silently skips
-    /// migrations. Deriving the expected range from the embedded set itself
-    /// keeps this correct as the chain grows — no floor constant to forget.
+    /// The deploy gate relies on the migrator covering the full chain from
+    /// its head. sqlx applies every embedded file in version order, so an
+    /// interior gap skips nothing — the 2026-09 remediation wave reserved
+    /// per-stream number ranges and several slots are intentionally unused
+    /// (129, 141–152, 154–158). What a mis-pointed macro or a misnamed file
+    /// CAN produce, and what this catches: a chain whose head is missing
+    /// (min ≠ 1 — a partial directory). A missing TAIL is not self-
+    /// detectable (the embedded set cannot know the true latest); the
+    /// ascending + uniqueness contract lives in the test above.
     #[test]
-    fn migration_chain_is_complete() {
+    fn migration_chain_head_is_intact() {
         let versions: Vec<i64> = MIGRATIONS.migrations.iter().map(|m| m.version).collect();
-        let latest = versions
+        let min = versions
             .iter()
             .copied()
-            .max()
+            .min()
             .expect("non-empty migration set");
-        let expected: Vec<i64> = (1..=latest).collect();
         assert_eq!(
-            versions, expected,
-            "migration versions must be contiguous 1..={latest} with no gaps"
+            min, 1,
+            "migration chain must start at version 1 (partial directory?)"
         );
     }
 

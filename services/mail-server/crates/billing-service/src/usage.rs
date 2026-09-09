@@ -227,15 +227,37 @@ pub async fn record_usage(
     let meta = enrich_usage_metadata(pool, tenant_id, now, metadata).await?;
     let cycle_anchor = tenant_cycle_anchor(pool, tenant_id, now).await;
 
-    // 1. Persist to DB and append an immutable audit record in the same transaction.
+    // 1. Persist to DB and append an immutable audit record in the same
+    //    transaction. metering_events is RANGE-partitioned by "timestamp"
+    //    with PRIMARY KEY (id, timestamp), so the ON CONFLICT arbiter must
+    //    include the partition key (a bare (id) arbiter is 42P10). Dedupe
+    //    stays keyed on id alone: the existence pre-check catches
+    //    sequential retries (which re-derive the same deterministic event
+    //    id with a fresh timestamp), and the arbiter only fences the
+    //    same-instant race.
     let mut tx = pool.begin().await.map_err(UsageError::Db)?;
     let event_type_str = event_type_to_str(event_type);
     let audit_result = async {
+        let already_recorded: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM metering_events WHERE id = $1)")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(UsageError::Db)?;
+
+        if already_recorded {
+            // Duplicate: no insert, no audit. The Redis dedup key from the
+            // original recording still steers the counter below, so the
+            // function's duplicate result comes from the EVAL path.
+            tx.commit().await.map_err(UsageError::Db)?;
+            return Ok(());
+        }
+
         sqlx::query(
             r#"
             INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
             VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (id) DO NOTHING
+            ON CONFLICT (id, "timestamp") DO NOTHING
             "#,
         )
         .bind(id)
@@ -776,16 +798,31 @@ pub async fn record_with_quota_check(
     }
 
     // 4. Persist to DB and append an immutable audit record in the same
-    //    transaction. rows_affected == 0 means the DB unique key recognised
-    //    a replay (crash between reservation and dedup-key set).
+    //    transaction. metering_events is partitioned by "timestamp" with
+    //    PRIMARY KEY (id, timestamp): the arbiter must carry the partition
+    //    key (bare (id) is 42P10), so the id-keyed replay recognition is
+    //    the existence pre-check (retries re-derive the deterministic id
+    //    with a fresh timestamp) and rows_affected == 0 covers only the
+    //    same-instant race.
     let mut tx = pool.begin().await.map_err(UsageError::Db)?;
     let event_type_str = event_type_to_str(event_type);
     let persist_result: Result<u64, UsageError> = async {
+        let already_recorded: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM metering_events WHERE id = $1)")
+                .bind(id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(UsageError::Db)?;
+        if already_recorded {
+            tx.commit().await.map_err(UsageError::Db)?;
+            return Ok(0);
+        }
+
         let inserted = sqlx::query(
             r#"
             INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
             VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (id) DO NOTHING
+            ON CONFLICT (id, "timestamp") DO NOTHING
             "#,
         )
         .bind(id)

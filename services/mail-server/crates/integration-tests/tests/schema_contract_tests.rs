@@ -599,10 +599,10 @@ async fn metering_events_table_exists() {
     // 050): the table is RANGE-partitioned by "timestamp" with PRIMARY KEY
     // (id, timestamp) — on a partitioned table the ON CONFLICT arbiter must
     // include the partition key, so the arbiter is (id, "timestamp").
-    // NOTE: billing-service/src/usage.rs still specifies ON CONFLICT (id),
-    // which PostgreSQL rejects with 42P10 against this canonical shape — a
-    // production-code divergence surfaced by the F01 centralization that
-    // needs its own remediation.
+    // usage.rs specifies this canonical arbiter; its id-keyed replay
+    // recognition is an existence pre-check (retries re-derive the
+    // deterministic id with a fresh timestamp), with the arbiter fencing
+    // only the same-instant race.
     let result = sqlx::query(
         "INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
          VALUES ($1, $2, $3, $4, $5, $6)
