@@ -70,6 +70,14 @@ pub fn build_router(state: AppState) -> Router {
             &format!("{unsub_path}/:token"),
             get(unsubscribe::handle_unsub_get),
         )
+        // F39:browser-facing manual confirmation form submit (plain HTML
+        // form POST — no JS). Deliberately separate from the RFC 8058
+        // one-click route so the `List-Unsubscribe=One-Click` body contract
+        // stays untouched, and GET /u/:token stays side-effect free.
+        .route(
+            &format!("{unsub_path}/:token/confirm"),
+            post(unsubscribe::handle_unsub_confirm_post),
+        )
         // Preferences center
         .route(
             &format!("{prefs_path}/:token"),
@@ -398,11 +406,11 @@ pub(crate) mod test_support {
         }
     }
 
-    fn state_with(trusted_proxies: &[&str], redis: deadpool_redis::Pool) -> AppState {
+    fn state_with(trusted_proxies: &[&str], redis: deadpool_redis::Pool, db_url: &str) -> AppState {
         let cfg = test_config(trusted_proxies);
         let db = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .connect_lazy(&cfg.database.url)
+            .max_connections(2)
+            .connect_lazy(db_url)
             .expect("lazy pg pool");
         let clickhouse = clickhouse::Client::default();
         let processor = std::sync::Arc::new(EventProcessor::new(
@@ -433,7 +441,11 @@ pub(crate) mod test_support {
 
     /// State wired to a dead Redis port — for tests that never touch Redis.
     pub(crate) fn offline_state(trusted_proxies: &[&str]) -> AppState {
-        state_with(trusted_proxies, dead_redis_pool())
+        state_with(
+            trusted_proxies,
+            dead_redis_pool(),
+            "postgresql://offline:offline@127.0.0.1:1/offline",
+        )
     }
 
     /// State wired to the live test Redis (`TEST_REDIS_URL`, workspace
@@ -455,7 +467,50 @@ pub(crate) mod test_support {
             .query_async::<String>(&mut *conn)
             .await
             .ok()?;
-        Some((state_with(trusted_proxies, pool.clone()), pool))
+        let state = state_with(trusted_proxies, pool.clone(), &offline_db_url());
+        Some((state, pool))
+    }
+
+    /// Placeholder DB url for states whose Postgres is never expected to
+    /// answer (handlers must tolerate DB failures).
+    pub(crate) fn offline_db_url() -> String {
+        "postgresql://offline:offline@127.0.0.1:1/offline".into()
+    }
+
+    /// F38/F13:state wired to BOTH the live test Redis (`TEST_REDIS_URL`)
+    /// and the live test Postgres (`TEST_DATABASE_URL`, api-server
+    /// convention). The database must already carry the canonical schema
+    /// (tenants, messages, suppressions, subscription_preferences,
+    /// email_categories, webhooks, webhook_queue). Returns `None`
+    /// (soft-skip) when either is unset or unreachable.
+    #[allow(clippy::type_complexity)]
+    pub(crate) async fn live_redis_pg_state(
+        trusted_proxies: &[&str],
+    ) -> Option<(AppState, deadpool_redis::Pool, sqlx::PgPool)> {
+        let redis_url = std::env::var("TEST_REDIS_URL").ok()?;
+        let db_url = std::env::var("TEST_DATABASE_URL").ok()?;
+
+        let redis = deadpool_redis::Config::from_url(&redis_url)
+            .builder()
+            .ok()?
+            .max_size(4)
+            .runtime(deadpool_redis::Runtime::Tokio1)
+            .build()
+            .ok()?;
+        let mut conn = redis.get().await.ok()?;
+        redis::cmd("PING")
+            .query_async::<String>(&mut *conn)
+            .await
+            .ok()?;
+
+        let db = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&db_url)
+            .await
+            .ok()?;
+
+        let state = state_with(trusted_proxies, redis.clone(), &db_url);
+        Some((state, redis, db))
     }
 }
 

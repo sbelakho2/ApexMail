@@ -10755,6 +10755,7 @@ dependencies = [
  "aho-corasick",
  "analytics",
  "anyhow",
+ "apexmail-lib",
  "async-stream",
  "axum 0.7.9",
  "axum-test",
