@@ -6,6 +6,7 @@ pub mod config;
 pub mod content_scanner;
 pub mod dsar_rate_limit;
 pub mod dsr_outbox_flush;
+pub mod entitlements;
 pub mod gdpr_automation;
 pub mod hipaa;
 pub mod retention;

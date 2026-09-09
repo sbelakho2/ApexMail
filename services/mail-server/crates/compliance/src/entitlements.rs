@@ -1,7 +1,25 @@
+//! Tenant entitlement snapshot derived from the authoritative billing
+//! model — the same tables api-server and billing-service compute with:
+//!
+//! - effective plan: `tenants.plan`, overridden by an active, unexpired
+//!   `plan_overrides` row, joined to `plans` for limits/features
+//!   (mirrors billing-service `TENANT_PLAN_LIMITS_SQL`, migrations
+//!   069/093/098 — producers: api-server billing admin routes);
+//! - contract window: `enterprise_contracts` active period
+//!   (migration 022 — producers: enterprise contracts + billing admin);
+//! - subscription state: `stripe_subscriptions` (producer: billing-service
+//!   stripe webhooks);
+//! - monthly usage: `metering_events` `emails_sent` month-to-date — the
+//!   same counter the quota-enforcement path (`record_with_quota_check`)
+//!   charges.
+//!
+//! F61: the previous version joined `subscription_contracts` and
+//! `plan_discounts`, which have no migration and no producer — the helper
+//! could never answer a request. Every table read here has a producer.
+
 use chrono::{DateTime, NaiveDate, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EntitlementResponse {
@@ -51,102 +69,130 @@ pub struct EntitlementResponse {
 
 #[derive(sqlx::FromRow)]
 struct TenantEntitlementRow {
+    /// Selected to preserve the row anchor used by the authoritative
+    /// limits statement (billing-service TENANT_PLAN_LIMITS_SQL).
+    #[expect(
+        dead_code,
+        reason = "tenant_id is selected to mirror the authoritative limits SQL"
+    )]
     tenant_id: String,
     plan_name: String,
+    /// An active, unexpired plan override applies to this tenant.
+    has_override: bool,
+    override_expires_at: Option<DateTime<Utc>>,
     status: String,
     email_limit: Option<i64>,
+    /// Selected alongside email_limit for parity with the authoritative
+    /// limits statement; the response surface only exposes email allowance.
+    #[expect(
+        dead_code,
+        reason = "api_call_limit is selected to mirror the authoritative limits SQL"
+    )]
     api_call_limit: Option<i64>,
     features: Option<serde_json::Value>,
     contract_start: Option<NaiveDate>,
     contract_end: Option<NaiveDate>,
-    discount_type: Option<String>,
-    discount_percentage: Option<f64>,
-    founding_customer: Option<bool>,
-    startup_program: Option<bool>,
-    contract_override: Option<bool>,
-    expiring_at: Option<DateTime<Utc>>,
-    trial: Option<bool>,
+    /// `enterprise_contracts.annual_prepay_discount` (percent, 0 = none).
+    annual_prepay_discount: Option<i32>,
+    /// Latest stripe subscription status (NULL when never subscribed).
+    stripe_status: Option<String>,
 }
 
-#[derive(sqlx::FromRow)]
-struct UsageRow {
-    current_usage: Option<i64>,
+/// Effective-plan + contract + subscription lookup. Mirrors billing-service
+/// `TENANT_PLAN_LIMITS_SQL` (usage.rs): an active, unexpired override wins
+/// over the tenant's own plan. $1 = tenant_id.
+const TENANT_ENTITLEMENT_SQL: &str = r#"
+        SELECT
+            t.id                                AS tenant_id,
+            COALESCE(po.plan, t.plan)           AS plan_name,
+            (po.id IS NOT NULL)                 AS has_override,
+            po.expires_at                       AS override_expires_at,
+            COALESCE(t.status, 'active')        AS status,
+            p.email_limit,
+            p.api_call_limit,
+            p.features,
+            ec.start_date::date                 AS contract_start,
+            ec.end_date::date                   AS contract_end,
+            ec.annual_prepay_discount,
+            ss.status                           AS stripe_status
+        FROM tenants t
+        LEFT JOIN plan_overrides po
+               ON po.tenant_id = t.id
+              AND po.active = true
+              AND (po.expires_at IS NULL OR po.expires_at > NOW())
+        LEFT JOIN plans p ON p.name = COALESCE(po.plan, t.plan)
+        LEFT JOIN LATERAL (
+            SELECT start_date, end_date, annual_prepay_discount
+            FROM enterprise_contracts
+            WHERE tenant_id = t.id
+              AND status = 'active'
+              AND start_date <= NOW()
+              AND end_date > NOW()
+            ORDER BY end_date DESC
+            LIMIT 1
+        ) ec ON true
+        LEFT JOIN LATERAL (
+            SELECT status
+            FROM stripe_subscriptions
+            WHERE tenant_id = t.id
+            ORDER BY updated_at DESC
+            LIMIT 1
+        ) ss ON true
+        WHERE t.id = $1
+        "#;
+
+/// Month-to-date `emails_sent` usage — the same metering counter the
+/// quota-enforcement path charges (billing-service usage.rs). $1 = tenant.
+const TENANT_USAGE_SQL: &str = r#"
+        SELECT COALESCE(SUM(quantity), 0)::bigint AS current_usage
+        FROM metering_events
+        WHERE tenant_id = $1
+          AND event_type = 'emails_sent'
+          AND timestamp >= date_trunc('month', NOW())
+        "#;
+
+/// Map the active contract's annual-prepay discount onto the response
+/// fields. Only real, producer-backed discounts surface here — the legacy
+/// `plan_discounts` notions (founding customer, startup program) have no
+/// source and report `false` rather than invented values.
+fn contract_discount(annual_prepay_discount: Option<i32>) -> (Option<String>, Option<f64>) {
+    match annual_prepay_discount {
+        Some(pct) if pct > 0 => (Some("annual_prepay".to_string()), Some(pct as f64)),
+        _ => (None, None),
+    }
 }
 
 pub async fn get_tenant_entitlements(
     pool: &PgPool,
     tenant_id: &str,
 ) -> Result<EntitlementResponse, anyhow::Error> {
-    let row: Option<TenantEntitlementRow> = sqlx::query_as(
-        r#"
-        SELECT
-            t.id               AS tenant_id,
-            t.plan             AS plan_name,
-            COALESCE(t.status, 'active') AS status,
-            p.email_limit,
-            p.api_call_limit,
-            p.features,
-            s.contract_start,
-            s.contract_end,
-            d.discount_type,
-            d.discount_percentage,
-            d.founding_customer,
-            d.startup_program,
-            d.contract_override,
-            d.expiring_at,
-            d.trial_or_beta AS trial
-        FROM tenants t
-        LEFT JOIN plans p ON t.plan = p.name
-        LEFT JOIN subscription_contracts s ON s.tenant_id = t.id
-        LEFT JOIN plan_discounts d ON d.tenant_id = t.id
-        WHERE t.id = $1
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<TenantEntitlementRow> = sqlx::query_as(TENANT_ENTITLEMENT_SQL)
+        .bind(tenant_id)
+        .fetch_optional(pool)
+        .await?;
 
     let Some(row) = row else {
         return Err(anyhow::anyhow!("Tenant {tenant_id} not found"));
     };
 
     let suspended = row.status == "suspended";
-    let trial_or_beta = row.trial.unwrap_or(false);
+    let trial_or_beta = row.stripe_status.as_deref() == Some("trialing");
 
-    let usage: UsageRow = sqlx::query_as(
-        r#"
-        SELECT COUNT(*)::bigint AS current_usage
-        FROM messages
-        WHERE tenant_id = $1
-          AND created_at >= date_trunc('month', NOW())
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_one(pool)
-    .await?;
+    let usage: (i64,) = sqlx::query_as(TENANT_USAGE_SQL)
+        .bind(tenant_id)
+        .fetch_one(pool)
+        .await?;
 
     let features: serde_json::Value = row.features.unwrap_or_default();
 
-    let domain_limit = features["max_sending_domains"]
-        .as_i64()
-        .unwrap_or(1) as i32;
-    let user_limit = features["max_team_members"]
-        .as_i64()
-        .unwrap_or(1) as i32;
-    let event_retention = features["max_retention_days"]
-        .as_i64()
-        .unwrap_or(7) as i32;
-    let content_retention = features["max_retention_days"]
-        .as_i64()
-        .unwrap_or(1) as i32;
+    let domain_limit = features["max_sending_domains"].as_i64().unwrap_or(1) as i32;
+    let user_limit = features["max_team_members"].as_i64().unwrap_or(1) as i32;
+    let event_retention = features["max_retention_days"].as_i64().unwrap_or(7) as i32;
+    let content_retention = features["max_retention_days"].as_i64().unwrap_or(1) as i32;
     let sso = features["sso_enabled"].as_bool().unwrap_or(false);
     let audit = features["audit_logs"].as_bool().unwrap_or(false);
-    let dedicated_ips = features["dedicated_ip_count"]
-        .as_i64()
-        .unwrap_or(0) as i32;
-    let subaccounts = features["max_subaccounts"]
-        .as_i64()
-        .unwrap_or(0) as i32;
+    let dedicated_ips = features["dedicated_ip_count"].as_i64().unwrap_or(0) as i32;
+    let subaccounts = features["max_subaccounts"].as_i64().unwrap_or(0) as i32;
     let sla = features["sla_guarantee"].as_bool().unwrap_or(false);
     let inbound = features["inbound_email"].as_bool().unwrap_or(false);
 
@@ -240,12 +286,20 @@ pub async fn get_tenant_entitlements(
         _ => None,
     };
 
+    let (discount_type, discount_percentage) = contract_discount(row.annual_prepay_discount);
+
+    // Expiring entitlements: the plan override's expiry timestamp. The
+    // active contract's end date is surfaced separately via `contract_end`.
+    let expiring_entitlements_at = row.override_expires_at;
+
     Ok(EntitlementResponse {
         active_plan: row.plan_name.clone(),
         contract_start: row.contract_start,
         contract_end: row.contract_end,
+        // Authoritative allowance: the effective plan's email limit (the
+        // override path swaps the plan rather than patching the number).
         monthly_message_allowance: row.email_limit.unwrap_or(0),
-        current_usage: usage.current_usage.unwrap_or(0),
+        current_usage: usage.0,
         overage_rate_cents_per_1000: overage_rate,
         daily_send_limit: daily_send,
         hourly_burst_limit: burst_limit,
@@ -274,13 +328,75 @@ pub async fn get_tenant_entitlements(
         baa_review_eligible: matches!(row.plan_name.as_str(), "enterprise"),
         dedicated_tenancy_eligible: matches!(row.plan_name.as_str(), "enterprise"),
         byoc_eligible: matches!(row.plan_name.as_str(), "enterprise"),
-        discount_type: row.discount_type,
-        discount_percentage: row.discount_percentage,
-        founding_customer: row.founding_customer.unwrap_or(false),
-        startup_program: row.startup_program.unwrap_or(false),
-        contract_override: row.contract_override.unwrap_or(false),
-        expiring_entitlements_at: row.expiring_at,
+        discount_type,
+        discount_percentage,
+        // No producer-backed source for these legacy plan_discounts flags.
+        founding_customer: false,
+        startup_program: false,
+        // An active plan override is the real "contract override" signal.
+        contract_override: row.has_override,
+        expiring_entitlements_at,
         suspended,
         trial_or_beta,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn entitlement_sql_resolves_effective_plan_via_overrides() {
+        // Authoritative pattern (billing-service TENANT_PLAN_LIMITS_SQL):
+        // an active, unexpired override wins over tenants.plan.
+        assert!(TENANT_ENTITLEMENT_SQL.contains("plan_overrides po"));
+        assert!(TENANT_ENTITLEMENT_SQL.contains("po.active = true"));
+        assert!(TENANT_ENTITLEMENT_SQL.contains("po.expires_at > NOW()"));
+        assert!(TENANT_ENTITLEMENT_SQL.contains("COALESCE(po.plan, t.plan)"));
+    }
+
+    #[test]
+    fn entitlement_sql_reads_only_producer_backed_tables() {
+        for table in [
+            "tenants t",
+            "plan_overrides po",
+            "plans p",
+            "enterprise_contracts",
+            "stripe_subscriptions",
+        ] {
+            assert!(
+                TENANT_ENTITLEMENT_SQL.contains(table),
+                "expected entitlement source {table}"
+            );
+        }
+        // F61: the absent, producer-less tables must be gone.
+        assert!(!TENANT_ENTITLEMENT_SQL.contains("subscription_contracts"));
+        assert!(!TENANT_ENTITLEMENT_SQL.contains("plan_discounts"));
+    }
+
+    #[test]
+    fn entitlement_contract_window_requires_active_period() {
+        assert!(TENANT_ENTITLEMENT_SQL.contains("status = 'active'"));
+        assert!(TENANT_ENTITLEMENT_SQL.contains("start_date <= NOW()"));
+        assert!(TENANT_ENTITLEMENT_SQL.contains("end_date > NOW()"));
+    }
+
+    #[test]
+    fn usage_sql_reads_canonical_metering_counter() {
+        // Same counter the quota-enforcement path charges.
+        assert!(TENANT_USAGE_SQL.contains("FROM metering_events"));
+        assert!(TENANT_USAGE_SQL.contains("event_type = 'emails_sent'"));
+        assert!(TENANT_USAGE_SQL.contains("date_trunc('month', NOW())"));
+        assert!(!TENANT_USAGE_SQL.contains("FROM messages"));
+    }
+
+    #[test]
+    fn contract_discount_maps_active_prepay_only() {
+        assert_eq!(contract_discount(None), (None, None));
+        assert_eq!(contract_discount(Some(0)), (None, None));
+        assert_eq!(contract_discount(Some(-5)), (None, None));
+        let (kind, pct) = contract_discount(Some(20));
+        assert_eq!(kind.as_deref(), Some("annual_prepay"));
+        assert_eq!(pct, Some(20.0));
+    }
 }

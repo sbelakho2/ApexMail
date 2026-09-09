@@ -100,10 +100,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/health", get(health_check))
         .route("/health/ready", get(health_ready))
         // Risk scoring
-        .route("/risk/assess/{tenant_id}", post(risk_assess))
-        .route("/risk/profile/{tenant_id}", get(risk_profile))
-        .route("/risk/limits/{tenant_id}", post(risk_update_limits))
-        .route("/risk/resolve/{tenant_id}", post(risk_resolve_flag))
+        .route("/risk/assess/:tenant_id", post(risk_assess))
+        .route("/risk/profile/:tenant_id", get(risk_profile))
+        .route("/risk/limits/:tenant_id", post(risk_update_limits))
+        .route("/risk/resolve/:tenant_id", post(risk_resolve_flag))
         .route("/risk/critical", get(risk_critical_tenants))
         .route("/risk/stats", get(risk_stats))
         // Content scanning
@@ -115,23 +115,23 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         // Audit
         .route("/audit", post(audit_create))
         .route("/audit/query", post(audit_query))
-        .route("/audit/{id}", get(audit_get_entry))
+        .route("/audit/:id", get(audit_get_entry))
         .route("/audit/verify", post(audit_verify_chain))
         .route("/audit/export", post(audit_export))
         .route("/audit/stats", get(audit_stats))
         // Secrets
         .route("/secrets", post(secret_create).get(secret_list))
         .route(
-            "/secrets/{id}",
+            "/secrets/:id",
             get(secret_get).put(secret_update).delete(secret_delete),
         )
-        .route("/secrets/{id}/rotate", post(secret_rotate))
-        .route("/secrets/{id}/access", post(secret_grant_access))
-        .route("/secrets/{id}/versions", get(secret_versions))
-        .route("/secrets/{id}/rollback/{version}", post(secret_rollback))
+        .route("/secrets/:id/rotate", post(secret_rotate))
+        .route("/secrets/:id/access", post(secret_grant_access))
+        .route("/secrets/:id/versions", get(secret_versions))
+        .route("/secrets/:id/rollback/:version", post(secret_rollback))
         // GDPR
         .route("/gdpr/submit", post(gdpr_submit_request))
-        .route("/gdpr/verify/{request_id}", post(gdpr_verify_request))
+        .route("/gdpr/verify/:request_id", post(gdpr_verify_request))
         .route("/gdpr/record-consent", post(gdpr_record_consent))
         .route("/gdpr/consents", post(gdpr_get_consents))
         .route(
@@ -143,17 +143,17 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/gdpr/stats", get(gdpr_stats))
         // G: real download route for stored access exports (export_url
         // points here via export_base_url).
-        .route("/gdpr/exports/{id}", get(gdpr_download_export))
+        .route("/gdpr/exports/:id", get(gdpr_download_export))
         // Internal breach-report workflow (GDPR 72h / HIPAA 60-day
         // deadlines): audited lifecycle, signed notification documents.
         .route("/breaches", post(breach_report))
-        .route("/breaches/{tenant_id}", get(breach_list))
-        .route("/breaches/{id}/notify-dpa", post(breach_notify_dpa))
+        .route("/breaches/:tenant_id", get(breach_list))
+        .route("/breaches/:id/notify-dpa", post(breach_notify_dpa))
         .route(
-            "/breaches/{id}/notify-subjects",
+            "/breaches/:id/notify-subjects",
             post(breach_notify_subjects),
         )
-        .route("/breaches/{id}/resolve", post(breach_resolve))
+        .route("/breaches/:id/resolve", post(breach_resolve))
         // SOC2 / HIPAA / Trust Portal
         .merge(crate::admin_routes::admin_router())
         .merge(crate::admin_routes::public_trust_router())
@@ -2803,5 +2803,93 @@ mod tests {
         assert_eq!(body.subscriber_id, "s1");
         assert_eq!(body.consent_type, "marketing");
         assert_eq!(body.token, "abc-123-def");
+    }
+
+    // ── F56: route capture syntax (pinned axum 0.7) ─────────────────
+
+    /// Extract the first string literal of every `.route(...)` call in a
+    /// source file (multi-line friendly; byte-safe on non-ASCII sources,
+    /// route paths contain no escapes).
+    fn route_path_literals(src: &str) -> Vec<(usize, &str)> {
+        const NEEDLE: &[u8] = b".route(";
+        let bytes = src.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i..].starts_with(NEEDLE) {
+                let mut j = i + NEEDLE.len();
+                while j < bytes.len() && matches!(bytes[j], b' ' | b'\n' | b'\t' | b'\r') {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'"' {
+                    let start = j + 1;
+                    let mut k = start;
+                    while k < bytes.len() && bytes[k] != b'"' {
+                        k += 1;
+                    }
+                    if k < bytes.len() {
+                        let line = src[..i].lines().count();
+                        let literal =
+                            std::str::from_utf8(&bytes[start..k]).expect("route literal is UTF-8");
+                        out.push((line, literal));
+                    }
+                }
+                i = j.max(i + 1);
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// F56: this crate pins axum 0.7, whose path syntax is `:name` — the
+    /// `{name}` form is axum 0.8+ and silently never matches real path
+    /// segments here. Every route literal must use `:` captures (or be
+    /// static), and the two files together must carry exactly the 32
+    /// converted parameterised routes (34 captures: two routes take two
+    /// parameters).
+    #[test]
+    fn test_route_paths_use_axum07_colon_captures() {
+        let manifest = env!("CARGO_MANIFEST_DIR");
+        let mut colon_routes = 0;
+        let mut colon_captures = 0;
+
+        for file in ["src/routes.rs", "src/admin_routes.rs"] {
+            let full = std::fs::read_to_string(format!("{manifest}/{file}"))
+                .unwrap_or_else(|e| panic!("cannot read {file}: {e}"));
+            // Scan production code only — the test module's own literals
+            // (including this scanner's needle) must not be counted.
+            let src = &full[..full.find("#[cfg(test)]").unwrap_or(full.len())];
+            for (line, path) in route_path_literals(src) {
+                assert!(
+                    !path.contains('{'),
+                    "{file}:{line} route path {path:?} uses axum-0.8 {{name}} capture syntax; this crate pins axum 0.7 (use :name)"
+                );
+                let captures = path.matches(':').count();
+                if captures > 0 {
+                    colon_routes += 1;
+                    colon_captures += captures;
+                    for segment in path.split('/') {
+                        if let Some(param) = segment.strip_prefix(':') {
+                            assert!(
+                                !param.is_empty()
+                                    && param.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                                "{file}:{line} malformed capture :{param} in {path:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // The F56 conversion: 16 parameterised routes per file.
+        assert_eq!(
+            colon_routes, 32,
+            "expected 32 parameterised routes (16 per file), found {colon_routes}"
+        );
+        assert_eq!(
+            colon_captures, 34,
+            "expected 34 captures (two 2-param routes), found {colon_captures}"
+        );
     }
 }
