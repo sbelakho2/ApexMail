@@ -12,7 +12,9 @@
 //! It connects via `DATABASE_URL` (assembled from `DB_*` + the
 //! `postgres_password` Docker secret by `deploy/scripts/entrypoint-wrapper.sh`,
 //! same as every sibling service) and applies the workspace migration set
-//! embedded at compile time from `services/mail-server/migrations`.
+//! embedded at compile time from `services/mail-server/migrations` via the
+//! library's [`migrator::apply_migrations`] — the same apply path the
+//! `test_support` module exposes to test infrastructure (audit F01).
 //!
 //! The interactive fallback (`sqlx migrate run --source
 //! services/mail-server/migrations`) remains documented in
@@ -30,45 +32,18 @@
 use anyhow::{Context, Result};
 use std::process::ExitCode;
 
-/// Embed the canonical workspace migration set at compile time.
-///
-/// The path is resolved relative to this crate's manifest directory
-/// (`services/mail-server/crates/migrator`) at BUILD time, so the binary
-/// carries the migrations that match its own build — no runtime mounting of
-/// SQL files, no drift between the image and the repo.
-static MIGRATIONS: sqlx::migrate::Migrator = sqlx::migrate!("./../../migrations");
-
 fn print_migrations() {
-    println!("embedded migrations: {}", MIGRATIONS.migrations.len());
-    for migration in MIGRATIONS.migrations.iter() {
+    println!(
+        "embedded migrations: {}",
+        migrator::MIGRATIONS.migrations.len()
+    );
+    for migration in migrator::MIGRATIONS.migrations.iter() {
         println!(
             "  {:>4} {} ({}sql)",
             migration.version,
             migration.description,
             if migration.sql.is_empty() { "no " } else { "" }
         );
-    }
-}
-
-/// Number of migrations already recorded in `_sqlx_migrations` (0 when the
-/// table does not exist yet, i.e. a fresh database before the first run).
-///
-/// `to_regclass(...)` returns a ROW with a NULL column (not zero rows) when
-/// the relation does not exist, so the scalar must decode as `Option<String>`
-/// — a plain `String` fails with "unexpected null" on a completely fresh
-/// database (pipeline finding F2).
-async fn applied_count(pool: &sqlx::PgPool) -> Result<i64> {
-    let table: Option<Option<String>> =
-        sqlx::query_scalar("SELECT to_regclass('public._sqlx_migrations')::text")
-            .fetch_optional(pool)
-            .await
-            .context("failed to check for _sqlx_migrations")?;
-    match table.flatten() {
-        Some(_) => Ok(sqlx::query_scalar("SELECT count(*) FROM _sqlx_migrations")
-            .fetch_one(pool)
-            .await
-            .context("failed to count applied migrations")?),
-        None => Ok(0),
     }
 }
 
@@ -80,49 +55,7 @@ async fn apply_migrations(database_url: &str) -> Result<()> {
         .await
         .context("failed to connect to DATABASE_URL")?;
 
-    let before = applied_count(&pool).await?;
-    println!("applied migrations before run: {before}");
-
-    // sqlx records applied versions in _sqlx_migrations; re-running against
-    // an up-to-date database is a no-op that exits 0.
-    MIGRATIONS
-        .run(&pool)
-        .await
-        .context("failed to apply migrations")?;
-
-    let after = applied_count(&pool).await?;
-    println!(
-        "applied migrations after run: {after} ({} new)",
-        after - before
-    );
-
-    // Partition runway: the high-volume tables are RANGE-partitioned with a
-    // static partition horizon (050/058 created partitions to 2027-12 /
-    // 2030-Q1) and nothing else calls create_future_partitions() at runtime.
-    // Once the horizon passes, every insert lands in the *_default partition
-    // and future ATTACHes need an exclusive full scan of it. Extending the
-    // horizon on every deploy keeps it ahead forever. Absence of the
-    // function (pre-050 databases mid-upgrade) is a notice, not an error —
-    // the migration that creates it is the same one that partitions the
-    // tables, so by the time it exists the extension is meaningful.
-    // Same NULL-decoding shape as `applied_count`. Note to_regprocedure, not
-    // to_regclass: functions are not relations, and to_regclass on a function
-    // name returns NULL even when the function exists.
-    let runway: Option<Option<String>> =
-        sqlx::query_scalar("SELECT to_regprocedure('public.create_future_partitions()')::text")
-            .fetch_optional(&pool)
-            .await
-            .context("failed to check for create_future_partitions")?;
-    match runway.flatten() {
-        Some(_) => {
-            sqlx::query("SELECT create_future_partitions()")
-                .execute(&pool)
-                .await
-                .context("failed to extend the partition runway")?;
-            println!("migrator: partition runway extended");
-        }
-        None => println!("migrator: create_future_partitions absent — runway not extended"),
-    }
+    migrator::apply_migrations(&pool).await?;
 
     pool.close().await;
     Ok(())
@@ -166,7 +99,7 @@ async fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use migrator::MIGRATIONS;
 
     /// The `sqlx::migrate!` macro compiled and embedded the workspace
     /// migration directory. No live database is required for this test.
@@ -224,7 +157,7 @@ mod tests {
             .await
             .expect("connect TEST_DATABASE_URL");
         MIGRATIONS.run(&pool).await.expect("apply migrations");
-        let applied = applied_count(&pool).await.expect("count applied");
+        let applied = migrator::applied_count(&pool).await.expect("count applied");
         assert_eq!(applied as usize, MIGRATIONS.migrations.len());
         // Idempotency: a second run is a no-op that still succeeds.
         MIGRATIONS.run(&pool).await.expect("re-run migrations");
@@ -258,7 +191,7 @@ mod tests {
             exists.flatten().is_none(),
             "TEST_FRESH_DATABASE_URL must point at an empty database"
         );
-        let count = applied_count(&pool)
+        let count = migrator::applied_count(&pool)
             .await
             .expect("applied_count on fresh DB");
         assert_eq!(count, 0, "fresh database must report 0 applied migrations");

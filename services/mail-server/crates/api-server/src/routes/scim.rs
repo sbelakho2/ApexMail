@@ -2643,73 +2643,6 @@ mod tests {
 
     // ── Cross-tenant member injection (audit C) + lifecycle/patch DB tests ──
 
-    /// Apply tools/migrations to the isolated test database (same approach
-    /// as routes::messages tests — sqlx Migrator over a copied directory so
-    /// CONCURRENTLY-index statements are normalized).
-    async fn apply_tool_migrations(pool: &sqlx::PgPool) {
-        use sqlx::migrate::Migrator;
-        use std::{fs, path::PathBuf};
-
-        let source_dir =
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../tools/migrations");
-        let temp_dir = std::env::temp_dir().join(format!(
-            "apexmail-api-scim-up-migrations-{}",
-            Uuid::new_v4()
-        ));
-
-        fs::create_dir_all(&temp_dir).expect("failed to create temp sqlx migration directory");
-
-        let mut entries: Vec<PathBuf> = fs::read_dir(&source_dir)
-            .expect("failed to read tools/migrations")
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| {
-                        !name.ends_with("_down.sql") && !name.contains("performance_indexes")
-                    })
-                    .unwrap_or(false)
-            })
-            .collect();
-        entries.sort();
-
-        for path in entries {
-            let file_name = path.file_name().expect("migration path missing filename");
-            let raw = fs::read_to_string(&path)
-                .unwrap_or_else(|error| panic!("failed to read migration {:?}: {error}", path));
-            let normalized = raw
-                .replace("CREATE UNIQUE INDEX CONCURRENTLY", "CREATE UNIQUE INDEX")
-                .replace("CREATE INDEX CONCURRENTLY", "CREATE INDEX");
-            fs::write(temp_dir.join(file_name), normalized).unwrap_or_else(|error| {
-                panic!("failed to write copied migration {:?}: {error}", path)
-            });
-        }
-
-        let migrator = Migrator::new(temp_dir.clone())
-            .await
-            .expect("failed to load copied up migrations");
-        migrator
-            .run(pool)
-            .await
-            .expect("failed to apply copied up migrations");
-
-        let _ = fs::remove_dir_all(&temp_dir);
-    }
-
-    /// DB-backed assertions only make sense on the UUID users.id lineage
-    /// (see the note in the cross-tenant test below).
-    async fn uuid_users_lineage(pool: &sqlx::PgPool) -> bool {
-        let users_id_type: (String,) = sqlx::query_as(
-            "SELECT data_type FROM information_schema.columns
-             WHERE table_schema = 'public' AND table_name = 'users' AND column_name = 'id'",
-        )
-        .fetch_one(pool)
-        .await
-        .expect("failed to inspect users.id type");
-        users_id_type.0 == "uuid"
-    }
-
     async fn insert_test_tenant(pool: &sqlx::PgPool, tenant_id: &str) {
         sqlx::query(
             "INSERT INTO tenants (id, name, slug, plan, status)
@@ -2732,7 +2665,6 @@ mod tests {
         else {
             return;
         };
-        apply_tool_migrations(&pool).await;
 
         // Malformed member ids are rejected with a 400 before any DB access
         // (schema-independent assertion).
@@ -2749,15 +2681,9 @@ mod tests {
             other => panic!("expected BadRequest, got {other:?}"),
         }
 
-        // The two migration lineages disagree on users.id: the production
-        // (services/mail-server/migrations) lineage uses UUID — matching the
-        // route's `Uuid::parse_str` convention — while the tools/migrations
-        // lineage uses VARCHAR(26) ULIDs. Only exercise the DB assertions on
-        // the UUID lineage.
-        if !uuid_users_lineage(&pool).await {
-            eprintln!("skipping scim tenant-scoping DB assertions: users.id is non-UUID lineage");
-            return;
-        }
+        // The shared `<db>_api` database now carries the canonical production
+        // chain (users.id UUID — matching this route's `Uuid::parse_str`
+        // convention), so the tenant-scoping DB assertions always run.
 
         // tenants.id is VARCHAR(26) — keep the generated IDs within bounds.
         let tenant_a = format!("ten_scm_{}", &Uuid::new_v4().simple().to_string()[..18]);
@@ -2779,14 +2705,13 @@ mod tests {
         .await
         .expect("failed to insert foreign user");
 
-        // Tenant A's admin tries to enrol tenant B's user.
-        let error = validate_members_in_tenant(
-            &pool,
-            &tenant_a,
-            &[foreign_user_id.to_string(), "not-a-uuid".to_string()],
-        )
-        .await
-        .expect_err("foreign-tenant member must be rejected");
+        // Tenant A's admin tries to enrol tenant B's user. (All ids here are
+        // well-formed UUIDs: the handler's syntax gate rejects garbage ids
+        // with its own message before any tenant scoping, which is the
+        // assertion proven above.)
+        let error = validate_members_in_tenant(&pool, &tenant_a, &[foreign_user_id.to_string()])
+            .await
+            .expect_err("foreign-tenant member must be rejected");
 
         match error {
             ApiError::BadRequest(message) => {
@@ -2839,13 +2764,13 @@ mod tests {
         }
     }
 
-    /// Create a throwaway database shaped like the PRODUCTION lineage
-    /// (users.id UUID, tenant_id VARCHAR(26), name/status columns — the
-    /// shape the SCIM `$1::uuid` casts and status writes target). The
-    /// tools/migrations lineage used by `optional_pg_pool` keeps users.id
-    /// VARCHAR(26), so the SCIM write helpers cannot run there; rather than
-    /// skip, these tests stand up the minimal production shape themselves.
-    /// Returns the pool plus what `drop_test_database` needs for cleanup.
+    /// Create a throwaway database carrying the REAL production schema:
+    /// the full canonical migration chain applied through the production
+    /// migrator (`migrator::test_support::fresh_canonical_db` — audit F01),
+    /// i.e. the exact users.id UUID / tenant_id VARCHAR(26) shape the SCIM
+    /// `$1::uuid` casts and status writes target, plus every constraint a
+    /// deploy installs. Returns the pool plus what `drop_test_database`
+    /// needs for cleanup.
     async fn prod_lineage_pool(test_name: &str) -> Option<(sqlx::PgPool, String, String)> {
         let database_url = std::env::var("TEST_DATABASE_URL")
             .ok()
@@ -2857,76 +2782,10 @@ mod tests {
         let (server_part, _) = database_url.rsplit_once('/')?;
 
         let db_name = format!(
-            "apexmail_scim_uuid_{}",
+            "apexmail_scim_canon_{}",
             &Uuid::new_v4().simple().to_string()[..12]
         );
-        let admin_url = format!("{server_part}/postgres");
-        let admin = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(std::time::Duration::from_secs(30))
-            .connect(&admin_url)
-            .await
-            .map_err(|error| eprintln!("skipping {test_name}: {error}"))
-            .ok()?;
-        if let Err(error) = sqlx::query(&format!("CREATE DATABASE {db_name}"))
-            .execute(&admin)
-            .await
-        {
-            eprintln!("skipping {test_name}: cannot create test database: {error}");
-            let _ = admin.close().await;
-            return None;
-        }
-        admin.close().await;
-
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .acquire_timeout(std::time::Duration::from_secs(30))
-            .connect(&format!("{server_part}/{db_name}"))
-            .await
-            .map_err(|error| eprintln!("skipping {test_name}: {error}"))
-            .ok()?;
-
-        // Minimal production-shaped tables (mail-server migrations
-        // 052/056/064: UUID user ids, VARCHAR(26) tenant ids).
-        let schema_error: Option<sqlx::Error> = match sqlx::query(
-            "CREATE TABLE tenants (
-                id         VARCHAR(26) PRIMARY KEY,
-                name       VARCHAR(255) NOT NULL,
-                slug       VARCHAR(255),
-                plan       VARCHAR(50) NOT NULL DEFAULT 'free',
-                status     VARCHAR(50) NOT NULL DEFAULT 'active'
-            )",
-        )
-        .execute(&pool)
-        .await
-        {
-            Ok(_) => sqlx::query(
-                "CREATE TABLE users (
-                    id            UUID PRIMARY KEY,
-                    tenant_id     VARCHAR(26) NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
-                    email         VARCHAR(255) NOT NULL,
-                    password_hash VARCHAR(255),
-                    name          VARCHAR(255),
-                    role          VARCHAR(50) NOT NULL DEFAULT 'member',
-                    status        VARCHAR(20) NOT NULL DEFAULT 'active',
-                    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-                    UNIQUE (tenant_id, email)
-                )",
-            )
-            .execute(&pool)
-            .await
-            .map(|_| ())
-            .err(),
-            Err(error) => Some(error),
-        };
-        if let Some(error) = schema_error {
-            eprintln!("skipping {test_name}: cannot create prod-shaped schema: {error}");
-            let _ = pool.close().await;
-            drop_test_database(server_part, &db_name).await;
-            return None;
-        }
-
+        let pool = migrator::test_support::fresh_canonical_db(&database_url, &db_name).await?;
         Some((pool, db_name, server_part.to_string()))
     }
 

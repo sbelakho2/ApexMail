@@ -29,13 +29,18 @@ pub(crate) mod test_db {
     /// key under each other mid-flight.
     pub(crate) static DKIM_ENV_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    /// api-server unit tests apply `tools/migrations` against the test DB.
-    /// Other test binaries (e.g. `integration-tests::integration_routes`) use
-    /// runtime `CREATE TABLE IF NOT EXISTS` schemas (e.g. `sales_leads.id UUID`)
-    /// that are MUTUALLY INCOMPATIBLE with those migrations
-    /// (`sales_leads.id VARCHAR(64)`). To prevent cross-binary pollution of
-    /// `TEST_DATABASE_URL` we route api-server tests to a dedicated database
-    /// derived by appending `_api` to the dbname segment of the URL.
+    /// api-server unit tests run against the CANONICAL production schema:
+    /// the bootstrap applies the full `services/mail-server/migrations` chain
+    /// through the REAL production migrator (`migrator::MIGRATIONS`, the same
+    /// embedded set every deploy applies before `up`) — never a test-only
+    /// schema or the archived `tools/migrations` tree (audit F01).
+    ///
+    /// The schema lives in a dedicated database derived by appending `_api`
+    /// to the dbname segment of `TEST_DATABASE_URL`: other test binaries
+    /// (e.g. `integration-tests::integration_routes`) create runtime
+    /// `CREATE TABLE IF NOT EXISTS` tables (e.g. `sales_leads`) on their own
+    /// databases that would pollute this one's catalog and its
+    /// `_sqlx_migrations` lineage ledger.
     ///
     /// Concurrency contract (57P01 flake fix): `cargo nextest` runs EVERY test
     /// in its own process, so a "drop + recreate once per test-binary run"
@@ -47,15 +52,22 @@ pub(crate) mod test_db {
     /// The bootstrap instead:
     ///   1. takes a session-level `pg_advisory_lock` on the admin database,
     ///      keyed by the isolated db name, so only ONE process bootstrap at a
-    ///      time (the lock releases when the admin connection closes);
+    ///      time (the lock releases when the admin connection closes) — this
+    ///      also serializes the canonical migration apply itself;
     ///   2. REUSES an existing healthy `<db>_api` database instead of
     ///      dropping it (tests seed unique rows and scope assertions to them,
-    ///      exactly as they already do under `cargo test`'s parallel threads);
+    ///      exactly as they already do under `cargo test`'s parallel threads),
+    ///      bringing it up to date with any newly added canonical migrations
+    ///      (idempotent `Migrator::run`);
     ///   3. only drops + recreates when the database is missing, carries no
     ///      api-server marker table (a name collision with a foreign
-    ///      database), or has a dirty `_sqlx_migrations` row (a previously
-    ///      crashed/failed migration apply that would poison every
-    ///      subsequent `Migrator::run` with `Dirty(version)`).
+    ///      database), or its `_sqlx_migrations` ledger disagrees with the
+    ///      embedded canonical chain — a dirty row (a previously
+    ///      crashed/failed apply) or a foreign lineage (e.g. the legacy
+    ///      `tools/migrations` bootstrap this database carried before audit
+    ///      F01, or a chain from a newer build) would poison every subsequent
+    ///      `Migrator::run` with `Dirty(version)`/`VersionMismatch`/checksum
+    ///      errors.
     pub(crate) async fn optional_pg_pool(test_name: &str) -> Option<PgPool> {
         static INIT_DB: OnceCell<()> = OnceCell::const_new();
 
@@ -118,19 +130,23 @@ pub(crate) mod test_db {
                 .unwrap_or(false);
 
                 // Health verdict for an EXISTING database. Only POSITIVE
-                // proof of an unusable database (foreign/unmarked schema, or
-                // a committed dirty migration row) justifies a drop; a
+                // proof of an unusable database (foreign/unmarked schema, a
+                // committed dirty migration row, or a `_sqlx_migrations`
+                // ledger from a different lineage) justifies a drop; a
                 // failed probe (e.g. transient connection exhaustion under
                 // a parallel nextest run) must NOT — dropping on it is what
                 // massacred concurrent test processes with 57P01.
                 //
-                // Both checks consult pg_catalog only until the guard
-                // passes: referencing `_sqlx_migrations` in SQL PARSES the
-                // table even in an untaken CASE branch, which would error
-                // (42P01) on a fresh database that simply has not applied
-                // migrations yet — and misclassify it as unhealthy.
+                // The marker check consults pg_catalog only until it passes;
+                // `canonical_lineage` then verifies the applied (version,
+                // checksum, success) rows against the embedded canonical
+                // chain — the audit-F01 self-heal: a `<db>_api` last
+                // provisioned from the archived `tools/migrations` tree is
+                // POSITIVELY unusable for canonical tests and is recreated.
                 // sqlx applies each migration inside a transaction, so a
-                // CONCURRENT apply by another process is invisible here.
+                // CONCURRENT apply by another process is invisible here
+                // (and impossible anyway: the advisory lock above
+                // serializes all bootstraps).
                 let mut healthy = false;
                 if exists {
                     for attempt in 0..3 {
@@ -155,30 +171,11 @@ pub(crate) mod test_db {
                                         // foreign database on our name.
                                         return Some(false);
                                     }
-                                    let migrations_table: bool = sqlx::query_scalar(
-                                        "SELECT EXISTS(SELECT 1 FROM pg_tables \
-                                         WHERE schemaname = 'public' \
-                                           AND tablename = '_sqlx_migrations')",
-                                    )
-                                    .fetch_one(&pool)
-                                    .await
-                                    .ok()?;
-                                    if !migrations_table {
-                                        // Fresh database, migrations not
-                                        // applied yet — healthy.
-                                        return Some(true);
-                                    }
-                                    // sqlx 0.8 records a failed apply as
-                                    // `success = false` (there is no `dirty`
-                                    // column — the pre-0.7 layout persists).
-                                    let dirty: bool = sqlx::query_scalar(
-                                        "SELECT EXISTS(SELECT 1 FROM _sqlx_migrations \
-                                         WHERE success = false)",
-                                    )
-                                    .fetch_one(&pool)
-                                    .await
-                                    .ok()?;
-                                    Some(!dirty)
+                                    // Some(true): empty ledger (fresh) or a
+                                    // canonical prefix; Some(false): dirty
+                                    // rows or a foreign lineage; None:
+                                    // transient probe failure (do not drop).
+                                    migrator::test_support::canonical_lineage(&pool).await
                                 };
                                 let verdict: Option<bool> = check_test_db_marker().await;
                                 pool.close().await;
@@ -215,28 +212,41 @@ pub(crate) mod test_db {
                     let _ = sqlx::query(&format!("CREATE DATABASE \"{isolated_db}\""))
                         .execute(&admin)
                         .await;
-                    if let Ok(pool) = PgPoolOptions::new()
-                        .max_connections(1)
-                        .acquire_timeout(Duration::from_secs(5))
-                        .connect(&isolated_url)
-                        .await
+                }
+
+                // Marker + canonical migrations, still under the advisory
+                // lock: the marker identifies the database as api-server
+                // test infrastructure (guards against reusing a
+                // name-colliding foreign database forever), and the
+                // production migrator brings the database to the full
+                // canonical chain (no-op when already up to date — the
+                // reuse path just picks up newly added migrations).
+                if let Ok(pool) = PgPoolOptions::new()
+                    .max_connections(1)
+                    .acquire_timeout(Duration::from_secs(30))
+                    .connect(&isolated_url)
+                    .await
+                {
+                    let _ = sqlx::query(
+                        "CREATE TABLE IF NOT EXISTS _apexmail_api_test_db \
+                         (marker TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
+                    )
+                    .execute(&pool)
+                    .await;
+                    let _ = sqlx::query(
+                        "INSERT INTO _apexmail_api_test_db (marker) VALUES ('api-server')",
+                    )
+                    .execute(&pool)
+                    .await;
+                    if let Err(error) =
+                        migrator::test_support::apply_canonical_migrations(&pool).await
                     {
-                        // Marker: identifies the database as api-server test
-                        // infrastructure (guards against reusing a name-colliding
-                        // foreign database forever).
-                        let _ = sqlx::query(
-                            "CREATE TABLE IF NOT EXISTS _apexmail_api_test_db \
-                             (marker TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW())",
-                        )
-                        .execute(&pool)
-                        .await;
-                        let _ = sqlx::query(
-                            "INSERT INTO _apexmail_api_test_db (marker) VALUES ('api-server')",
-                        )
-                        .execute(&pool)
-                        .await;
-                        pool.close().await;
+                        eprintln!(
+                            "api-server test DB bootstrap: canonical migration apply failed \
+                             on {isolated_db}: {error:#}"
+                        );
                     }
+                    pool.close().await;
                 }
                 // Dropping the admin pool releases the advisory lock.
                 admin.close().await;
@@ -258,13 +268,10 @@ pub(crate) mod test_db {
         )
     }
 
-    /// Canonical-shape test fixture DDL (the production lineage).
-    ///
-    /// The `<db>_api` database used by `optional_pg_pool` carries the
-    /// tools/migrations lineage, whose `users.id` is VARCHAR(26) — the
-    /// OPPOSITE of production. The canonical production lineage
-    /// (services/mail-server/migrations, embedded at build time by the
-    /// `migrator` crate and applied before every deploy) has:
+    /// A per-test isolated database carrying the REAL canonical production
+    /// schema: the full `services/mail-server/migrations` chain applied by
+    /// the production migrator (`migrator::test_support::fresh_canonical_pool`
+    /// — audit F01), not a distilled fixture DDL. The canonical lineage has:
     ///
     ///   * `users.id` UUID (migration 052) — user ids are UUIDs;
     ///   * `tenants.id` / every `*_tenant_id`/`tenant_id` column
@@ -276,172 +283,13 @@ pub(crate) mod test_db {
     ///
     /// Handler tests that prove id-binding correctness (signup, the
     /// `WHERE id = $n` family) run against THIS shape so a green test
-    /// means the bind works against production, not against the legacy
-    /// test-only lineage.
-    pub(crate) const CANONICAL_TEST_DDL: &str = r#"
-        CREATE TABLE IF NOT EXISTS tenants (
-            id          VARCHAR(26) PRIMARY KEY,
-            name        TEXT        NOT NULL,
-            slug        TEXT        NOT NULL UNIQUE,
-            plan        TEXT        NOT NULL DEFAULT 'free',
-            status      TEXT        NOT NULL DEFAULT 'active',
-            settings    JSONB       NOT NULL DEFAULT '{}'::jsonb,
-            metadata    JSONB       NOT NULL DEFAULT '{}'::jsonb,
-            legal_hold  BOOLEAN     NOT NULL DEFAULT false,
-            created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-
-        CREATE TABLE IF NOT EXISTS users (
-            id                  UUID PRIMARY KEY,
-            tenant_id           VARCHAR(26),
-            email               VARCHAR(255) NOT NULL UNIQUE,
-            password_hash       TEXT,
-            name                VARCHAR(255),
-            role                VARCHAR(50)  NOT NULL DEFAULT 'member',
-            status              VARCHAR(20)  NOT NULL DEFAULT 'active',
-            email_verified      BOOLEAN      NOT NULL DEFAULT false,
-            mfa_enabled         BOOLEAN      NOT NULL DEFAULT false,
-            mfa_secret          TEXT,
-            mfa_recovery_hashes JSONB       NOT NULL DEFAULT '[]'::jsonb,
-            username            VARCHAR(255),
-            metadata            JSONB       NOT NULL DEFAULT '{}'::jsonb,
-            created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-        CREATE INDEX IF NOT EXISTS idx_users_tenant ON users(tenant_id);
-        CREATE INDEX IF NOT EXISTS idx_users_email  ON users(email);
-
-        CREATE TABLE IF NOT EXISTS domains (
-            id                   UUID PRIMARY KEY,
-            tenant_id            VARCHAR(26),
-            name                 TEXT        NOT NULL,
-            status               VARCHAR(20) NOT NULL DEFAULT 'pending',
-            verified             BOOLEAN     NOT NULL DEFAULT false,
-            ses_verified         BOOLEAN     NOT NULL DEFAULT false,
-            dkim_enabled         BOOLEAN     NOT NULL DEFAULT false,
-            spf_verified         BOOLEAN,
-            dkim_verified        BOOLEAN,
-            dmarc_verified       BOOLEAN,
-            return_path_verified BOOLEAN,
-            mta_sts_verified     BOOLEAN,
-            bimi_verified        BOOLEAN,
-            tlsrpt_verified      BOOLEAN,
-            dkim_selector        TEXT,
-            dkim_public_key      TEXT,
-            dkim_private_key     TEXT,
-            created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            UNIQUE(tenant_id, name)
-        );
-
-        CREATE TABLE IF NOT EXISTS messages (
-            id          UUID PRIMARY KEY,
-            tenant_id   VARCHAR(26),
-            from_email  TEXT        NOT NULL,
-            to_emails   JSONB       NOT NULL,
-            subject     TEXT,
-            html_body   TEXT,
-            text_body   TEXT,
-            status      VARCHAR(50) NOT NULL DEFAULT 'queued',
-            tags        JSONB,
-            created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-
-        CREATE TABLE IF NOT EXISTS email_queue (
-            id            UUID PRIMARY KEY,
-            message_id    UUID,
-            tenant_id     VARCHAR(26),
-            domain_id     UUID,
-            from_address  TEXT   NOT NULL,
-            to_addresses  TEXT[] NOT NULL,
-            subject       TEXT   NOT NULL,
-            "from"        TEXT,
-            "to"          TEXT,
-            html          TEXT,
-            text          TEXT,
-            tags          TEXT[],
-            metadata      JSONB  DEFAULT '{}'::jsonb,
-            scheduled_at  TIMESTAMPTZ,
-            priority      INTEGER NOT NULL DEFAULT 0,
-            status        TEXT   NOT NULL DEFAULT 'pending',
-            created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-
-        CREATE TABLE IF NOT EXISTS lists (
-            id          UUID PRIMARY KEY,
-            tenant_id   VARCHAR(26),
-            name        TEXT        NOT NULL,
-            created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-
-        CREATE TABLE IF NOT EXISTS campaigns (
-            id            UUID PRIMARY KEY,
-            tenant_id     VARCHAR(26),
-            name          TEXT        NOT NULL,
-            subject       TEXT,
-            status        TEXT        NOT NULL DEFAULT 'draft',
-            scheduled_at  TIMESTAMPTZ,
-            created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-
-        CREATE TABLE IF NOT EXISTS system_alerts (
-            id              UUID PRIMARY KEY,
-            tenant_id       VARCHAR(26),
-            severity        TEXT NOT NULL,
-            alert_type      TEXT NOT NULL,
-            message         TEXT NOT NULL,
-            acknowledged    BOOLEAN NOT NULL DEFAULT false,
-            acknowledged_by TEXT,
-            acknowledged_at TIMESTAMPTZ,
-            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
-        );
-    "#;
-
-    /// A per-test isolated database carrying the CANONICAL production shape
-    /// (see [`CANONICAL_TEST_DDL`]). The suffix must be unique per test so
-    /// parallel tests never share it. Soft-skips without
-    /// `TEST_DATABASE_URL` (workspace convention).
+    /// means the bind works against the database a deploy produces.
+    ///
+    /// The suffix must be unique per test so parallel tests never share the
+    /// database (it is dropped + recreated + re-migrated on every call).
+    /// Soft-skips without `TEST_DATABASE_URL` (workspace convention).
     pub(crate) async fn canonical_pool(db_suffix: &str) -> Option<PgPool> {
-        let database_url = std::env::var("TEST_DATABASE_URL")
-            .ok()
-            .filter(|value| !value.trim().is_empty())?;
-        let (server_part, db_part) = database_url.rsplit_once('/')?;
-        let db_only = db_part.split('?').next().unwrap_or(db_part);
-        let isolated_db = format!("{db_only}_api_canon_{db_suffix}");
-        let isolated_url = format!("{server_part}/{isolated_db}");
-        let admin_url = format!("{server_part}/postgres");
-
-        let admin = PgPoolOptions::new()
-            .max_connections(1)
-            .acquire_timeout(Duration::from_secs(30))
-            .connect(&admin_url)
+        migrator::test_support::fresh_canonical_pool(db_suffix, &format!("api_canon_{db_suffix}"))
             .await
-            .ok()?;
-        let _ = sqlx::query(&format!(
-            r#"DROP DATABASE IF EXISTS "{isolated_db}" WITH (FORCE)"#
-        ))
-        .execute(&admin)
-        .await;
-        let created = sqlx::query(&format!(r#"CREATE DATABASE "{isolated_db}""#))
-            .execute(&admin)
-            .await;
-        admin.close().await;
-        created.ok()?;
-
-        let pool = PgPoolOptions::new()
-            .max_connections(4)
-            .acquire_timeout(Duration::from_secs(5))
-            .connect(&isolated_url)
-            .await
-            .ok()?;
-        sqlx::raw_sql(CANONICAL_TEST_DDL)
-            .execute(&pool)
-            .await
-            .expect("canonical test DDL must apply");
-        Some(pool)
     }
 }

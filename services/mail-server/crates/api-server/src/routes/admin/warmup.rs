@@ -231,61 +231,6 @@ async fn warmup_action(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, path::PathBuf};
-
-    use sqlx::{migrate::Migrator, PgPool};
-    use uuid::Uuid;
-
-    fn tool_migrations_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../tools/migrations")
-    }
-
-    async fn apply_tool_migrations(pool: &PgPool) {
-        let source_dir = tool_migrations_dir();
-        let temp_dir = std::env::temp_dir().join(format!(
-            "apexmail-api-warmup-up-migrations-{}",
-            Uuid::new_v4()
-        ));
-
-        fs::create_dir_all(&temp_dir).expect("failed to create temp sqlx migration directory");
-
-        let mut entries: Vec<PathBuf> = fs::read_dir(&source_dir)
-            .expect("failed to read tools/migrations")
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| {
-                        !name.ends_with("_down.sql") && !name.contains("performance_indexes")
-                    })
-                    .unwrap_or(false)
-            })
-            .collect();
-        entries.sort();
-
-        for path in entries {
-            let file_name = path.file_name().expect("migration path missing filename");
-            let raw = fs::read_to_string(&path)
-                .unwrap_or_else(|error| panic!("failed to read migration {:?}: {error}", path));
-            let normalized = raw
-                .replace("CREATE UNIQUE INDEX CONCURRENTLY", "CREATE UNIQUE INDEX")
-                .replace("CREATE INDEX CONCURRENTLY", "CREATE INDEX");
-            fs::write(temp_dir.join(file_name), normalized).unwrap_or_else(|error| {
-                panic!("failed to write copied migration {:?}: {error}", path)
-            });
-        }
-
-        let migrator = Migrator::new(temp_dir.clone())
-            .await
-            .expect("failed to load copied up migrations");
-        migrator
-            .run(pool)
-            .await
-            .expect("failed to apply copied up migrations");
-
-        let _ = fs::remove_dir_all(&temp_dir);
-    }
 
     #[tokio::test]
     async fn warmup_action_returns_not_found_for_missing_pool() {
@@ -295,7 +240,6 @@ mod tests {
         else {
             return;
         };
-        apply_tool_migrations(&pool).await;
 
         let error = update_pool_status(&pool, "pool_missing", "active")
             .await
@@ -311,7 +255,6 @@ mod tests {
         else {
             return;
         };
-        apply_tool_migrations(&pool).await;
 
         let pool_id = apexmail_lib::id::generate_id("ipp", 22);
         sqlx::query("INSERT INTO ip_pools (id, name, status) VALUES ($1, $2, 'pending')")

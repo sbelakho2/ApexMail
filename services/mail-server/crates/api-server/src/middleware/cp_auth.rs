@@ -651,6 +651,16 @@ mod tests {
         async fn seed_operator(db: &sqlx::PgPool, mfa_enabled: bool) -> (String, String) {
             let email = format!("cp-mw-{}@apexmail.ee", uuid::Uuid::new_v4().simple());
             let user_id = uuid::Uuid::new_v4();
+            // Canonical users.tenant_id FKs to tenants(id): the real chain has
+            // no bare 'system' tenant, so seed it before the operator.
+            sqlx::query(
+                "INSERT INTO tenants (id, name, slug, plan, status)
+                 VALUES ('system', 'System', 'system-cp-mw', 'enterprise', 'active')
+                 ON CONFLICT (id) DO NOTHING",
+            )
+            .execute(db)
+            .await
+            .expect("seed system tenant");
             sqlx::query(
                 "INSERT INTO users (id, tenant_id, email, name, password_hash, role, status,
                                     email_verified, mfa_enabled, metadata, created_at, updated_at)

@@ -5824,7 +5824,7 @@ mod tests {
             "INSERT INTO domains (id, tenant_id, name, status, verified, ses_verified,
                                   dkim_enabled, dkim_selector, dkim_public_key, dkim_private_key)
              VALUES ($1, $2, $3, 'verified', true, true, true, 'testsel', $4, $5)
-             ON CONFLICT (tenant_id, name) DO UPDATE
+             ON CONFLICT (tenant_id, lower(name)) DO UPDATE
                SET status = 'verified', verified = true, ses_verified = true,
                    dkim_enabled = true, dkim_selector = 'testsel',
                    dkim_public_key = EXCLUDED.dkim_public_key,

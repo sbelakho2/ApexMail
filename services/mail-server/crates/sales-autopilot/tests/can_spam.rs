@@ -1,13 +1,13 @@
 //! CAN-SPAM regression tests for the campaign dispatch path (fix I-2).
 //!
 //! These tests exercise `CampaignManager::start_campaign` end-to-end against
-//! a real Postgres instance when one is available (`SALES_TEST_DATABASE_URL`,
-//! default `postgres://127.0.0.1:5432/apexmail_test`). Without Postgres the
-//! tests soft-skip so `cargo test` stays green everywhere.
+//! a real Postgres instance when one is available (`SALES_TEST_DATABASE_URL`).
+//! Without Postgres the tests soft-skip so `cargo test` stays green everywhere.
 //!
-//! `mod common` also applies the PLATFORM schema (tools/migrations) — the
-//! due-recipient query reads the platform `suppressions` table, exactly like
-//! the REST send path does.
+//! `mod common` also applies the PLATFORM schema — the canonical production
+//! chain via the real production migrator (audit F01). The due-recipient
+//! query reads the platform `suppressions` table, exactly like the REST send
+//! path does.
 
 mod common;
 

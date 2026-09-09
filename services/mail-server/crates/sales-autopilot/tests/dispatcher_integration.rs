@@ -115,6 +115,9 @@ impl QuotaGateway for FakeQuotaGateway {
 struct Fixture {
     db: PgPool,
     tenant_id: String,
+    /// The per-fixture verified sender domain (globally unique in canonical
+    /// `domains`); rebuilt dispatchers must keep sending from it.
+    domain: String,
     manager: CampaignManager,
     dispatcher: Arc<ProductionCampaignDispatcher>,
     quota: Arc<FakeQuotaGateway>,
@@ -123,12 +126,15 @@ struct Fixture {
 async fn fixture(test_name: &str) -> Option<Fixture> {
     let db = common::test_pool(test_name).await?;
     let tenant_id = common::insert_test_tenant(&db, test_name).await;
-    common::insert_verified_domain(&db, &tenant_id, "example.com").await;
+    // Per-fixture domain: canonical domains.name is GLOBALLY unique and this
+    // suite's tests share one database, so each fixture claims its own.
+    let domain = common::unique_test_domain();
+    common::insert_verified_domain(&db, &tenant_id, &domain).await;
 
     let quota = Arc::new(FakeQuotaGateway::new());
     let dispatcher = Arc::new(
         ProductionCampaignDispatcher::new(
-            common::test_dispatch_config(),
+            common::test_dispatch_config_for(&domain),
             db.clone(),
             quota.clone() as Arc<dyn QuotaGateway>,
         )
@@ -140,6 +146,7 @@ async fn fixture(test_name: &str) -> Option<Fixture> {
     Some(Fixture {
         db,
         tenant_id,
+        domain,
         manager,
         dispatcher,
         quota,
@@ -494,7 +501,7 @@ async fn quota_exhausted_pauses_campaign_with_error_state() {
     fx.quota = Arc::new(FakeQuotaGateway::with_limit(1));
     fx.dispatcher = Arc::new(
         ProductionCampaignDispatcher::new(
-            common::test_dispatch_config(),
+            common::test_dispatch_config_for(&fx.domain),
             fx.db.clone(),
             fx.quota.clone() as Arc<dyn QuotaGateway>,
         )
@@ -547,7 +554,7 @@ async fn quota_exhausted_pauses_campaign_with_error_state() {
     fx.quota = Arc::new(FakeQuotaGateway::new());
     fx.dispatcher = Arc::new(
         ProductionCampaignDispatcher::new(
-            common::test_dispatch_config(),
+            common::test_dispatch_config_for(&fx.domain),
             fx.db.clone(),
             fx.quota.clone() as Arc<dyn QuotaGateway>,
         )
@@ -582,7 +589,7 @@ async fn batch_failure_is_retried_without_duplicates() {
     fx.quota = Arc::new(FakeQuotaGateway::with_transient_failure_at(2));
     fx.dispatcher = Arc::new(
         ProductionCampaignDispatcher::new(
-            common::test_dispatch_config(),
+            common::test_dispatch_config_for(&fx.domain),
             fx.db.clone(),
             fx.quota.clone() as Arc<dyn QuotaGateway>,
         )
@@ -620,7 +627,7 @@ async fn batch_failure_is_retried_without_duplicates() {
     fx.quota = Arc::new(FakeQuotaGateway::new());
     fx.dispatcher = Arc::new(
         ProductionCampaignDispatcher::new(
-            common::test_dispatch_config(),
+            common::test_dispatch_config_for(&fx.domain),
             fx.db.clone(),
             fx.quota.clone() as Arc<dyn QuotaGateway>,
         )
@@ -1136,12 +1143,13 @@ mod unsub_http {
             return;
         };
         let tenant_id = common::insert_test_tenant(&db, "unsub-excl").await;
-        common::insert_verified_domain(&db, &tenant_id, "example.com").await;
+        let domain = common::unique_test_domain();
+        common::insert_verified_domain(&db, &tenant_id, &domain).await;
 
         let quota = Arc::new(FakeQuotaGateway::new());
         let dispatcher = Arc::new(
             ProductionCampaignDispatcher::new(
-                common::test_dispatch_config(),
+                common::test_dispatch_config_for(&domain),
                 db.clone(),
                 quota.clone() as Arc<dyn QuotaGateway>,
             )
@@ -1223,9 +1231,10 @@ mod reply_http {
     async fn reply_fixture(test_name: &str) -> Option<(axum::Router, PgPool, String, Uuid)> {
         let db = common::test_pool(test_name).await?;
         let tenant_id = common::insert_test_tenant(&db, test_name).await;
-        common::insert_verified_domain(&db, &tenant_id, "example.com").await;
+        let domain = common::unique_test_domain();
+        common::insert_verified_domain(&db, &tenant_id, &domain).await;
 
-        let dispatch = common::test_dispatch_config();
+        let dispatch = common::test_dispatch_config_for(&domain);
         let dispatcher = Arc::new(
             ProductionCampaignDispatcher::new(
                 dispatch.clone(),
@@ -1480,8 +1489,9 @@ mod reply_http {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         let queue: (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM email_queue WHERE metadata->>'kind' = 'inbox-reply'",
+            "SELECT COUNT(*) FROM email_queue              WHERE metadata->>'kind' = 'inbox-reply' AND tenant_id = $1",
         )
+        .bind(&tenant_id)
         .fetch_one(&db)
         .await
         .unwrap();

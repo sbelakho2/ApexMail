@@ -2513,61 +2513,9 @@ async fn rollback_email_quota(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, path::PathBuf};
 
-    use sqlx::{migrate::Migrator, PgPool};
+    use sqlx::PgPool;
     use uuid::Uuid;
-
-    fn tool_migrations_dir() -> PathBuf {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../tools/migrations")
-    }
-
-    async fn apply_tool_migrations(pool: &PgPool) {
-        let source_dir = tool_migrations_dir();
-        let temp_dir = std::env::temp_dir().join(format!(
-            "apexmail-api-messages-up-migrations-{}",
-            Uuid::new_v4()
-        ));
-
-        fs::create_dir_all(&temp_dir).expect("failed to create temp sqlx migration directory");
-
-        let mut entries: Vec<PathBuf> = fs::read_dir(&source_dir)
-            .expect("failed to read tools/migrations")
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sql"))
-            .filter(|path| {
-                path.file_name()
-                    .and_then(|name| name.to_str())
-                    .map(|name| {
-                        !name.ends_with("_down.sql") && !name.contains("performance_indexes")
-                    })
-                    .unwrap_or(false)
-            })
-            .collect();
-        entries.sort();
-
-        for path in entries {
-            let file_name = path.file_name().expect("migration path missing filename");
-            let raw = fs::read_to_string(&path)
-                .unwrap_or_else(|error| panic!("failed to read migration {:?}: {error}", path));
-            let normalized = raw
-                .replace("CREATE UNIQUE INDEX CONCURRENTLY", "CREATE UNIQUE INDEX")
-                .replace("CREATE INDEX CONCURRENTLY", "CREATE INDEX");
-            fs::write(temp_dir.join(file_name), normalized).unwrap_or_else(|error| {
-                panic!("failed to write copied migration {:?}: {error}", path)
-            });
-        }
-
-        let migrator = Migrator::new(temp_dir.clone())
-            .await
-            .expect("failed to load copied up migrations");
-        migrator
-            .run(pool)
-            .await
-            .expect("failed to apply copied up migrations");
-
-        let _ = fs::remove_dir_all(&temp_dir);
-    }
 
     fn bounded_id(prefix: &str) -> String {
         let suffix_len = 26usize.saturating_sub(prefix.len() + 1);
@@ -2590,21 +2538,33 @@ mod tests {
     }
 
     async fn insert_verified_domain(pool: &PgPool, tenant_id: &str, domain: &str) -> String {
-        // Prod domain ids are uuid; the send path casts domain_id::uuid, so
-        // the test fixture must use uuid ids too.
-        let id = Uuid::new_v4().to_string();
+        // Canonical domains.id is UUID (migration lineage): bind a real UUID
+        // — the send path binds domain_id strings that Postgres casts via
+        // `::uuid`, and a String bind against the uuid column is a 42804.
+        let id = Uuid::new_v4();
         sqlx::query(
             "INSERT INTO domains (id, tenant_id, name, status, verified, dkim_enabled, ses_verified,
              dkim_selector, dkim_public_key, dkim_private_key)
              VALUES ($1, $2, $3, 'verified', true, true, true, 'test-selector', 'test-public-key', 'dkim:v1:test')",
         )
-        .bind(&id)
+        .bind(id)
         .bind(tenant_id)
         .bind(domain)
         .execute(pool)
         .await
         .expect("failed to insert verified domain");
-        id
+        id.to_string()
+    }
+
+    /// A per-test unique sender domain: canonical `domains` carries a GLOBAL
+    /// unique index on name (a domain is claimable by one tenant — the API's
+    /// "already claimed" 409), and these tests share one database, so two
+    /// parallel fixtures inserting `example.com` would collide on it.
+    fn unique_sender_domain() -> String {
+        format!(
+            "sender-{}.example.com",
+            &Uuid::new_v4().simple().to_string()[..12]
+        )
     }
 
     #[test]
@@ -2671,10 +2631,10 @@ mod tests {
         else {
             return;
         };
-        apply_tool_migrations(&pool).await;
 
         let tenant_id = insert_test_tenant(&pool, "message-queue").await;
-        let domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
+        let unique_domain = unique_sender_domain();
+        let domain_id = insert_verified_domain(&pool, &tenant_id, &unique_domain).await;
 
         // Postgres TIMESTAMPTZ keeps microsecond precision; an untruncated
         // Utc::now() carries nanoseconds that cannot survive the round-trip
@@ -2685,7 +2645,7 @@ mod tests {
         )
         .expect("timestamp_micros is always representable as a DateTime");
         let body = SendMessageRequest {
-            from: "sender@example.com".into(),
+            from: format!("sender@{unique_domain}"),
             to: vec!["to@example.com".into()],
             cc: Some(vec!["cc@example.com".into()]),
             bcc: Some(vec!["bcc@example.com".into()]),
@@ -2734,7 +2694,7 @@ mod tests {
         assert_eq!(message_row.1, Some(scheduled_at));
 
         let queue_rows: Vec<(String, String, String, Option<DateTime<Utc>>)> = sqlx::query_as(
-            r#"SELECT "to", message_id::text, domain_id, scheduled_at
+            r#"SELECT "to", message_id::text, domain_id::text, scheduled_at
              FROM email_queue WHERE message_id = $1::uuid ORDER BY "to""#,
         )
         .bind(&persisted.id)
@@ -2768,10 +2728,10 @@ mod tests {
         else {
             return;
         };
-        apply_tool_migrations(&pool).await;
 
         let tenant_id = insert_test_tenant(&pool, "message-suppression").await;
-        let _domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
+        let unique_domain = unique_sender_domain();
+        let _domain_id = insert_verified_domain(&pool, &tenant_id, &unique_domain).await;
 
         sqlx::query(
             "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
@@ -2787,7 +2747,7 @@ mod tests {
         .expect("failed to insert suppression record");
 
         let body = SendMessageRequest {
-            from: "sender@example.com".into(),
+            from: format!("sender@{unique_domain}"),
             to: vec!["Blocked@Example.com".into(), "allowed@example.com".into()],
             cc: None,
             bcc: None,
@@ -3014,15 +2974,15 @@ mod tests {
         else {
             return;
         };
-        apply_tool_migrations(&pool).await;
 
         let tenant_id = insert_test_tenant(&pool, "message-crlf").await;
-        let _domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
+        let unique_domain = unique_sender_domain();
+        let _domain_id = insert_verified_domain(&pool, &tenant_id, &unique_domain).await;
 
         // The quoted local part below is designed so a naive email validator
         // would accept it; CR/LF smuggling a Bcc header must be rejected.
         let body = SendMessageRequest {
-            from: "sender@example.com".into(),
+            from: format!("sender@{unique_domain}"),
             to: vec![r#""x
 Bcc: victim@example.com"@example.com"#
                 .into()],
@@ -3158,12 +3118,12 @@ Bcc: victim@example.com"@example.com"#
         else {
             return;
         };
-        apply_tool_migrations(&pool).await;
 
         let tenant_id = insert_test_tenant(&pool, "message-cancel").await;
-        let domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
+        let unique_domain = unique_sender_domain();
+        let domain_id = insert_verified_domain(&pool, &tenant_id, &unique_domain).await;
         let body = SendMessageRequest {
-            from: "sender@example.com".into(),
+            from: format!("sender@{unique_domain}"),
             to: vec!["to@example.com".into()],
             cc: None,
             bcc: None,
@@ -3634,10 +3594,10 @@ Bcc: victim@example.com"@example.com"#
         else {
             return;
         };
-        apply_tool_migrations(&pool).await;
 
         let tenant_id = insert_test_tenant(&pool, "message-race").await;
-        let domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
+        let unique_domain = unique_sender_domain();
+        let domain_id = insert_verified_domain(&pool, &tenant_id, &unique_domain).await;
         let body = options_request();
 
         let mut create_tx = pool.begin().await.expect("begin create");
@@ -3692,10 +3652,10 @@ Bcc: victim@example.com"@example.com"#
         else {
             return;
         };
-        apply_tool_migrations(&pool).await;
 
         let tenant_id = insert_test_tenant(&pool, "message-clean-cancel").await;
-        let domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
+        let unique_domain = unique_sender_domain();
+        let domain_id = insert_verified_domain(&pool, &tenant_id, &unique_domain).await;
         let mut body = options_request();
         body.cc = Some(vec!["cc@example.com".into()]);
         body.bcc = Some(vec!["bcc@example.com".into()]);
@@ -3750,10 +3710,10 @@ Bcc: victim@example.com"@example.com"#
         else {
             return;
         };
-        apply_tool_migrations(&pool).await;
 
         let tenant_id = insert_test_tenant(&pool, "message-savepoint").await;
-        let domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
+        let unique_domain = unique_sender_domain();
+        let domain_id = insert_verified_domain(&pool, &tenant_id, &unique_domain).await;
         let body = options_request();
 
         let mut tx = pool.begin().await.expect("begin");
@@ -3835,10 +3795,10 @@ Bcc: victim@example.com"@example.com"#
         else {
             return;
         };
-        apply_tool_migrations(&pool).await;
 
         let tenant_id = insert_test_tenant(&pool, "message-mime").await;
-        let domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
+        let unique_domain = unique_sender_domain();
+        let domain_id = insert_verified_domain(&pool, &tenant_id, &unique_domain).await;
         let mut body = options_request();
         body.cc = Some(vec!["cc@example.com".into()]);
         body.bcc = Some(vec!["bcc@example.com".into()]);
