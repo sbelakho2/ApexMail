@@ -305,7 +305,7 @@ async fn status_page(State(state): State<AppState>) -> impl IntoResponse {
     // sees actual health and a last-checked timestamp — never "Loading…".
     // The inline script only refreshes periodically; if its fetch fails the
     // server-rendered state remains visible with the original timestamp.
-    let (services, all_operational) = probe_services(&state).await;
+    let (services, _all_operational) = probe_services(&state).await;
     let updated = chrono::Utc::now().format("%Y-%m-%d %H:%M UTC");
 
     let esc = |v: &str| -> String {
