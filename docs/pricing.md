@@ -43,11 +43,11 @@ Annual billing is 10 times the monthly price: two months free, or roughly a
 | Webhooks, custom templates, advanced analytics, data export | Starter and above |
 | Custom tracking domain and send-time optimization | Pro and above |
 | A/B testing, audit logs, time-travel debugging, custom retention | Growth and above |
-| SAML SSO, inbound email, template approval workflow, subaccounts | Scale and Enterprise |
-| 99.9% SLA and dedicated CSM | Scale (10% credit cap) and Enterprise (25% credit cap) |
-| White-label, private cloud, and BYOIP capability flags | Enterprise |
+| SAML SSO, inbound email, template approval workflow, subaccounts | Business and Enterprise Cloud |
+| 99.9% SLA and dedicated CSM | Business (graduated to 30%) and Enterprise Cloud (25%) |
+| White-label, private cloud, and BYOIP capability flags | Enterprise Cloud |
 
-HIPAA availability and SOC 2 certification are **not currently offered**.
+HIPAA availability is **not currently offered**.
 Features must not be interpreted as a certification, a business associate
 agreement, or authorization to process regulated workloads without written
 confirmation and the required agreement.

@@ -40,7 +40,6 @@ The sales team will confirm the available deployment model, support terms, data-
 
 - ApexMail supports GDPR-oriented data-processing workflows and provides a DPA.
 - HIPAA availability is **not currently offered**. Do not send protected health information on the assumption that an Enterprise plan creates a HIPAA or BAA entitlement.
-- ApexMail is **not currently SOC 2 certified**. Internal readiness work is not an included plan feature or a certification-date commitment.
 - Security questionnaires and documentation are reviewed case by case. Any commitment is effective only when included in the signed agreement.
 
 ## Billing and Entitlement Lifecycle

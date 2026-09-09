@@ -15,7 +15,6 @@ ApexMail provides security documentation to qualified Enterprise prospects and c
 
 - **SIG / CAIQ / HECVAT** — Standardised security assessment responses for qualified Enterprise customers.
 - **Penetration test summary** — A summary of findings and remediation will be available after the first external application penetration test is completed.
-- **SOC 2 control mapping** — SOC 2 Trust Services Criteria control mapping and readiness assessment documentation (note: ApexMail is not currently SOC 2 certified).
 - **Security architecture review** — A walkthrough of ApexMail's security controls, encryption architecture, audit logging, and deployment isolation models.
 - **Data flow diagrams** — Visual documentation of data processing, storage locations, and subprocessor relationships.
 
@@ -53,7 +52,6 @@ ApexMail provides security documentation to qualified Enterprise prospects and c
       <option value="hecvat">HECVAT Questionnaire</option>
       <option value="custom">Custom Security Questionnaire</option>
       <option value="pentest">Penetration Test Summary</option>
-      <option value="soc2">SOC 2 Control Mapping</option>
       <option value="architecture_review">Security Architecture Review</option>
       <option value="data_flow">Data Flow Diagrams</option>
     </select>

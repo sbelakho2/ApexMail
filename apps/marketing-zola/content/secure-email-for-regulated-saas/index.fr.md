@@ -20,7 +20,7 @@ ApexMail fournit des workflows de sécurité et de confidentialité autour de la
   </div>
   <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
     <h3 class="text-xl font-semibold mb-3">Position de conformité actuelle</h3>
-    <p>La documentation de traitement orientée RGPD et une DPA sont disponibles. La disponibilité HIPAA et la certification SOC 2 ne sont pas proposées actuellement.</p>
+    <p>La documentation de traitement orientée RGPD et une DPA sont disponibles. La disponibilité HIPAA ne sont pas proposées actuellement.</p>
   </div>
   <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
     <h3 class="text-xl font-semibold mb-3">Revue de sécurité</h3>
@@ -36,7 +36,6 @@ ApexMail fournit des workflows de sécurité et de confidentialité autour de la
 | Capacités d'identité et d'audit | Fonctionnalités d'exécution conditionnées au forfait ; le SAML SSO démarre sur Scale |
 | Revue Enterprise | Revue contractuelle de sécurité, de déploiement et d'opérations |
 | HIPAA / BAA | Non proposé actuellement |
-| Certification SOC 2 | Non proposée actuellement ; prévue, mais ne constitue pas un droit |
 
 ## Décidez à partir du contrat actuel
 

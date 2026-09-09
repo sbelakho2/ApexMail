@@ -20,7 +20,7 @@ ApexMail provides security and privacy workflows around email delivery, includin
   </div>
   <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
     <h3 class="text-xl font-semibold mb-3">Current Compliance Position</h3>
-    <p>GDPR-oriented processing documentation and a DPA are available. HIPAA availability and SOC 2 certification are not currently offered.</p>
+    <p>GDPR-oriented processing documentation and a DPA are available. HIPAA availability is not currently offered.</p>
   </div>
   <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
     <h3 class="text-xl font-semibold mb-3">Security Review</h3>
@@ -36,7 +36,6 @@ ApexMail provides security and privacy workflows around email delivery, includin
 | Identity and audit capabilities | Plan-gated runtime features; SAML SSO starts on Business |
 | Enterprise review | Contractual security, deployment, and operational review |
 | HIPAA / BAA | Not currently offered |
-| SOC 2 certification | Not currently offered; planned, not an entitlement |
 
 ## Make Decisions From the Current Contract
 

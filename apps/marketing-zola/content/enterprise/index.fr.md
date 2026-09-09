@@ -35,7 +35,6 @@ Un acheteur qualifié peut demander la DPA actuelle, les informations sur les so
 
 - ApexMail prend en charge la documentation de traitement orientée RGPD et propose une DPA à examiner.
 - La disponibilité HIPAA et une BAA ne sont **pas proposées actuellement**.
-- ApexMail n'est **pas actuellement certifié SOC 2**. Le travail interne de préparation ne constitue ni un droit produit, ni un engagement sur une date de certification.
 - Tout SLA, périmètre de résidence des données, réponse à un questionnaire de sécurité ou engagement de déploiement privé est régi par l'accord signé.
 
 ## Cycle de facturation

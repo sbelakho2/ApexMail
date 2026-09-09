@@ -1527,7 +1527,7 @@ pub fn control_plane_home_page() -> String {
                 </div>
                 <div class="px-5 py-5">
                     <p class="text-xs font-bold uppercase tracking-[0.2em] text-surface-500">03 · Trust evidence gate</p>
-                    <p class="mt-2 text-sm font-bold text-surface-950">Compile SOC2, HIPAA BAA, and SIG/CAIQ/HECVAT packs</p>
+                    
                     <p class="mt-1 text-xs leading-5 text-surface-500">Route security questionnaire manifests to legal and procurement reviewers.</p>
                 </div>
                 <div class="px-5 py-5">
@@ -2052,7 +2052,6 @@ pub fn web_signup_page_with_plan(csrf_token: &str, selected_plan: Option<&str>) 
 {csrf}\
 {plan_input}\
 {plan_notice}\
-        // 2026-09-08 review: first screen is email + password only; name/company are collected post-verification (backend defaults them from the email local-part).\
 </div>\
 <div class=\"space-y-2\">\
 <label class=\"apex-klabel\" for=\"signup-email\"><svg class=\"apex-arc\" viewBox=\"0 0 24 14\" width=\"17\" height=\"11\" fill=\"none\" aria-hidden=\"true\"><path d=\"M4 12 A 9 9 0 0 1 20 12\" stroke=\"currentColor\" stroke-width=\"2.6\" stroke-linecap=\"round\"/></svg>Email</label>\
@@ -4462,7 +4461,7 @@ pub fn marketing_compliance_page() -> String {
 <h1 class=\"text-4xl font-bold text-surface-900 mb-4\">Compliance</h1>\
 <p class=\"text-lg text-surface-600 mb-8\">Compliance workflow support for regulated email operations.</p>\
 <div class=\"space-y-8\">\
-<div class=\"rounded-sm border p-6\"><h3 class=\"text-lg font-bold\">SOC 2 Evidence</h3><p class=\"text-sm text-surface-500 mt-2\">Control evidence workflows for Enterprise security review.</p></div>\
+
 <div class=\"rounded-sm border p-6\"><h3 class=\"text-lg font-bold\">GDPR Workflows</h3><p class=\"text-sm text-surface-500 mt-2\">DSR, consent, DPA, and EU-hosted data workflows.</p></div>\
 <div class=\"rounded-sm border p-6\"><h3 class=\"text-lg font-bold\">HIPAA BAA</h3><p class=\"text-sm text-surface-500 mt-2\">Enterprise BAA lifecycle workflow for healthcare implementation review.</p></div>\
 </div></div></section>".to_string()
@@ -4517,7 +4516,7 @@ pub fn marketing_compare_page(competitor: &str) -> String {
 <th class=\"p-4 text-center font-bold\">{display}</th>\
 </tr></thead><tbody>\
 <tr class=\"border-b\"><td class=\"p-4\">Dedicated IPs</td><td class=\"p-4 text-center\">Included</td><td class=\"p-4 text-center\">Limited</td></tr>\
-<tr class=\"border-b\"><td class=\"p-4\">SOC 2 evidence workflows</td><td class=\"p-4 text-center\">Included</td><td class=\"p-4 text-center\">Varies</td></tr>\
+
 <tr class=\"border-b\"><td class=\"p-4\">Private Cloud</td><td class=\"p-4 text-center\">Available</td><td class=\"p-4 text-center\">Not standard</td></tr>\
 </tbody></table></div></div></section>",
     )
@@ -5838,7 +5837,6 @@ mod tests {
     #[test]
     fn marketing_compliance_renders_certifications() {
         let html = marketing_compliance_page();
-        assert!(html.contains("SOC 2 Evidence"));
         assert!(html.contains("GDPR"));
         assert!(html.contains("HIPAA"));
     }
@@ -5848,7 +5846,6 @@ mod tests {
         let html = marketing_compare_page("sendgrid");
         assert!(html.contains("ApexMail vs SendGrid"));
         assert!(html.contains("Dedicated IPs"));
-        assert!(html.contains("SOC 2 evidence workflows"));
     }
 
     #[test]

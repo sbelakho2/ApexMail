@@ -18,7 +18,6 @@ Transactional email can be part of a regulated workflow. ApexMail provides EU/EE
 | SAML SSO | Included on Business and Enterprise |
 | Private Cloud / BYOIP | Enterprise contractual and technical review |
 | HIPAA / BAA | **Not currently offered** |
-| SOC 2 certification | **Not currently offered**; planned, not an entitlement |
 
 ## Security and Data-Processing Review
 
@@ -35,7 +34,6 @@ ApexMail can help a prospective customer review the current DPA, subprocessor in
 ## Important Limitations
 
 - HIPAA availability and BAA execution are not currently offered.
-- ApexMail is not currently SOC 2 certified.
 - A DPA, data residency, or an Enterprise contract does not by itself make a customer workflow compliant with a particular law or standard.
 - Private Cloud and BYOIP are reviewed per contract; published self-service pricing does not include a private-deployment price.
 

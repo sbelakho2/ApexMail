@@ -113,7 +113,6 @@ L'intégrité du système est vérifiée par des contrôles automatisés et réc
 
 ## Preuves d'audit et de conformité
 
-- ApexMail n'est pas actuellement certifié SOC 2. La cartographie interne des contrôles et les travaux de préparation ne constituent ni une certification, ni un droit de produit, ni un engagement de date de certification.
 - Résumé du test d'intrusion : prévu pour publication après la réalisation du premier test d'intrusion externe de l'application et la remédiation des résultats élevés/critiques. Actuellement non disponible.
 - Les demandes de questionnaires de sécurité sont évaluées au cas par cas à partir des éléments de revue actuels ; les packs SIG, CAIQ ou HECVAT standardisés ne constituent pas un droit de produit.
 - Les journaux d'audit sont disponibles sur Growth, Business et Enterprise ; la conservation dépend du forfait souscrit.

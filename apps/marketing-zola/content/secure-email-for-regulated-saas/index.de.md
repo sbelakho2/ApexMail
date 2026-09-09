@@ -20,7 +20,7 @@ ApexMail bietet Sicherheits- und Datenschutz-Workflows rund um die E-Mail-Zustel
   </div>
   <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
     <h3 class="text-xl font-semibold mb-3">Aktuelle Compliance-Position</h3>
-    <p>DSGVO-orientierte Verarbeitungsdokumentation und eine AVV sind verfügbar. HIPAA-Verfügbarkeit und SOC-2-Zertifizierung werden derzeit nicht angeboten.</p>
+    <p>DSGVO-orientierte Verarbeitungsdokumentation und eine AVV sind verfügbar. HIPAA-Verfügbarkeit wird derzeit nicht angeboten.</p>
   </div>
   <div class="bg-surface-900 border border-surface-800 rounded-lg p-6">
     <h3 class="text-xl font-semibold mb-3">Security-Review</h3>
@@ -36,7 +36,6 @@ ApexMail bietet Sicherheits- und Datenschutz-Workflows rund um die E-Mail-Zustel
 | Identity- und Audit-Funktionen | Laufzeitfunktionen je Tarif; SAML SSO ab Scale |
 | Enterprise-Review | Vertragliche Sicherheits-, Bereitstellungs- und Betriebsprüfung |
 | HIPAA / BAA | Derzeit nicht angeboten |
-| SOC-2-Zertifizierung | Derzeit nicht angeboten; geplant, keine Berechtigung |
 
 ## Entscheidungen auf Basis des aktuellen Vertrags treffen
 

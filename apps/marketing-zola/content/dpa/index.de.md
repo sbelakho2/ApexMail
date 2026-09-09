@@ -68,7 +68,6 @@ Die bereitgestellte Konfiguration zielt für Kerninfrastruktur und Telemetrie-Ob
 - TLS 1.2+ bei der Übertragung (TLS 1.3 bevorzugt)
 - Argon2id-Passwort-Hashing
 - Audit-Protokollierung mit Hash-Ketten-Integrität
-- SOC-2-orientierte Sicherheitskontrollen (derzeit nicht zertifiziert; Kontrollkartierung und Bereitschaftsbewertung im Gange)
 - Zugriffskontrolle mit Multi-Faktor-Authentifizierung
 - Kontinuierliches Schwachstellen-Scanning; unabhängiges Penetrationstestprogramm wird aufgebaut, erster Test geplant
 - Behebung nach Schweregrad gemäß der Schwachstellenmanagement-Richtlinie von ApexMail

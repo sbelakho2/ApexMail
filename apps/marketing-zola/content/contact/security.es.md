@@ -15,7 +15,6 @@ ApexMail proporciona documentación de seguridad a clientes y candidatos Enterpr
 
 - **SIG / CAIQ / HECVAT** — Respuestas estandarizadas de evaluación de seguridad para clientes Enterprise cualificados.
 - **Resumen del test de intrusión** — Un resumen de hallazgos y correcciones estará disponible una vez completado el primer test de intrusión externo de la aplicación.
-- **Mapeo de controles SOC 2** — Documentación del mapeo de controles según los criterios Trust Services Criteria de SOC 2 y de la evaluación de preparación (nota: ApexMail no cuenta actualmente con la certificación SOC 2).
 - **Revisión de arquitectura de seguridad** — Un recorrido por los controles de seguridad de ApexMail, su arquitectura de cifrado, el registro de auditoría y los modelos de aislamiento de despliegue.
 - **Diagramas de flujo de datos** — Documentación visual del procesamiento de datos, las ubicaciones de almacenamiento y las relaciones con subprocesadores.
 
@@ -53,7 +52,6 @@ ApexMail proporciona documentación de seguridad a clientes y candidatos Enterpr
       <option value="hecvat">Cuestionario HECVAT</option>
       <option value="custom">Cuestionario de seguridad personalizado</option>
       <option value="pentest">Resumen del test de intrusión</option>
-      <option value="soc2">Mapeo de controles SOC 2</option>
       <option value="architecture_review">Revisión de arquitectura de seguridad</option>
       <option value="data_flow">Diagramas de flujo de datos</option>
     </select>

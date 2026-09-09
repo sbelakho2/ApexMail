@@ -18,7 +18,6 @@ Transaktions-E-Mails können Teil eines regulierten Workflows sein. ApexMail bie
 | SAML SSO | In Business und Enterprise enthalten |
 | Private Cloud / BYOIP | Vertragliche und technische Enterprise-Prüfung |
 | HIPAA / BAA | **Derzeit nicht angeboten** |
-| SOC-2-Zertifizierung | **Derzeit nicht angeboten**; geplant, keine Berechtigung |
 
 ## Sicherheits- und Datenverarbeitungsprüfung
 
@@ -35,7 +34,6 @@ ApexMail kann Interessenten bei der Prüfung der aktuellen AVV, der Unterauftrag
 ## Wichtige Einschränkungen
 
 - HIPAA-Verfügbarkeit und der Abschluss einer BAA werden derzeit nicht angeboten.
-- ApexMail ist derzeit nicht SOC-2-zertifiziert.
 - Eine AVV, Datenresidenz oder ein Enterprise-Vertrag machen einen Kunden-Workflow für sich genommen nicht mit einem bestimmten Gesetz oder Standard konform.
 - Private Cloud und BYOIP werden je Vertrag geprüft; die veröffentlichten Self-Service-Preise enthalten keinen Preis für private Bereitstellungen.
 

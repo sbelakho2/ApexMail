@@ -30,7 +30,6 @@ comparison_sections = [
   { title = "CONFORMITÉ", rows = [
     { feature = "Automatisation RGPD", apex = '<span class="text-brand-600 font-semibold">Traitement complet des DSR</span>', comp = '<span class="text-surface-600">Gestion autonome</span>', winner = "none" },
     { feature = "Disponibilité HIPAA", apex = '<span class="text-surface-600 font-semibold">Non proposée actuellement</span>', comp = '<span class="text-surface-600">Voir la documentation du fournisseur</span>', winner = "none" },
-    { feature = "Certification SOC 2", apex = '<span class="text-surface-600 font-semibold">Non proposée actuellement</span>', comp = '<span class="text-surface-600">Voir la documentation du fournisseur</span>', winner = "none" },
     { feature = "Journaux d’audit", apex = '<span class="text-brand-600 font-semibold">Forfait Growth et supérieurs</span>', comp = '<span class="text-surface-600">Journaux d’événements uniquement</span>', winner = "none" },
     { feature = "Gestion du consentement", apex = '<span class="text-brand-600 font-semibold">Intégrée</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},

@@ -18,7 +18,6 @@ L'email transactionnel peut s'inscrire dans un workflow réglementé. ApexMail f
 | SAML SSO | Inclus sur Business et Enterprise |
 | Cloud Privé / BYOIP | Revue contractuelle et technique Enterprise |
 | HIPAA / BAA | **Non proposé actuellement** |
-| Certification SOC 2 | **Non proposée actuellement** ; prévue, mais ne constitue pas un droit |
 
 ## Revue de sécurité et de traitement des données
 
@@ -35,7 +34,6 @@ ApexMail peut accompagner un prospect dans la revue de la DPA actuelle, des info
 ## Limites importantes
 
 - La disponibilité HIPAA et la signature d'une BAA ne sont pas proposées actuellement.
-- ApexMail n'est pas actuellement certifié SOC 2.
 - Une DPA, la résidence des données ou un contrat Enterprise ne rendent pas à eux seuls un workflow client conforme à une loi ou à une norme donnée.
 - Le Cloud privé et le BYOIP sont revus au cas par cas au contrat ; la tarification self-service publiée n'inclut pas de prix de déploiement privé.
 

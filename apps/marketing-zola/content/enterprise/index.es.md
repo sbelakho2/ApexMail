@@ -35,7 +35,6 @@ Un comprador cualificado puede solicitar la DPA vigente, información sobre subp
 
 - ApexMail admite documentación de procesamiento orientada al RGPD y ofrece una DPA para revisión.
 - La disponibilidad HIPAA y un BAA **no se ofrecen actualmente**.
-- ApexMail **no cuenta actualmente con la certificación SOC 2**. El trabajo interno de preparación no constituye un derecho del producto ni un compromiso de fecha de certificación.
 - Cualquier SLA, alcance de residencia de datos, respuesta a cuestionarios de seguridad o compromiso de despliegue privado se rige por el acuerdo firmado.
 
 ## Ciclo de vida de facturación

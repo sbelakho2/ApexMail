@@ -117,7 +117,6 @@ The term "System Integrity Controls" refers to the combination of these controls
 
 ## Audit and Compliance Evidence
 
-- ApexMail is not currently SOC 2 certified. Internal control mapping and readiness work do not create a certification, product entitlement, or certification-date commitment.
 - Penetration test summary: planned for publication after the first external application penetration test is completed and high/critical findings are remediated. Not currently available.
 - Security-questionnaire requests are assessed case by case using current review material; no standardized SIG, CAIQ, or HECVAT pack is a product entitlement.
 - Audit logs are available on Growth, Business, and Enterprise Cloud, with retention determined by the subscribed plan.

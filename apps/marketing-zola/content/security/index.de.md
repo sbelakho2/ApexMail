@@ -113,7 +113,6 @@ Die Systemintegrität wird durch automatisierte, wiederkehrende Prüfungen im ge
 
 ## Audit- und Compliance-Nachweise
 
-- ApexMail ist derzeit nicht SOC-2-zertifiziert. Interne Kontrollkartierung und Bereitschaftsarbeit begründen weder eine Zertifizierung noch ein Produktmerkmal oder eine Zusage für ein Zertifizierungsdatum.
 - Zusammenfassung des Penetrationstests: geplant zur Veröffentlichung nach Abschluss des ersten externen Anwendungs-Penetrationstests und Behebung hoher/kritischer Ergebnisse. Derzeit nicht verfügbar.
 - Sicherheitsfragebögen werden anhand aktueller Prüfdokumentation im Einzelfall bewertet; standardisierte SIG-, CAIQ- oder HECVAT-Pakete sind kein Produktmerkmal.
 - Audit-Protokolle sind für Growth, Business und Enterprise verfügbar; die Aufbewahrung richtet sich nach dem abonnierten Tarif.

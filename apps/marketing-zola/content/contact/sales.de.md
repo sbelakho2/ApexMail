@@ -111,8 +111,6 @@ Für Enterprise-Beschaffung, Sicherheitsprüfung oder Private-Cloud-Planung fül
         <span>HIPAA-Anwendungsfall (derzeit nicht angeboten; Alternativen besprechen)</span>
       </label>
       <label class="flex items-center gap-3 text-sm text-surface-700">
-        <input type="checkbox" name="compliance_needs" value="soc2" class="accent-brand-500" />
-        <span>SOC 2-/ISO-27001-Nachweise</span>
       </label>
       <label class="flex items-center gap-3 text-sm text-surface-700">
         <input type="checkbox" name="compliance_needs" value="ccpa" class="accent-brand-500" />

@@ -35,7 +35,6 @@ Qualifizierte Käufer können die aktuelle AVV, Unterauftragsverarbeiter-Informa
 
 - ApexMail unterstützt DSGVO-orientierte Verarbeitungsdokumentation und stellt eine AVV zur Prüfung bereit.
 - HIPAA-Verfügbarkeit und eine BAA werden **derzeit nicht angeboten**.
-- ApexMail ist **derzeit nicht SOC-2-zertifiziert**. Interne Vorbereitungsarbeiten sind keine Produktberechtigung und keine Zusage zu einem Zertifizierungsdatum.
 - Jede SLA, jeder Datenresidenz-Umfang, jede Antwort auf Sicherheitsfragebögen und jede Zusage privater Bereitstellungen wird durch die unterzeichnete Vereinbarung geregelt.
 
 ## Abrechnungslebenszyklus

@@ -177,13 +177,6 @@
             <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-brand/10">
               <svg class="w-4 h-4 text-brand-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="0" ry="0"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
             </div>
-            <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_soc2_title"] %}{{ i18n_data[l]["features"]["f_soc2_title"] }}{% else %}SOC 2 Status{% endif %}</h4>
-            <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_soc2_desc"] %}{{ i18n_data[l]["features"]["f_soc2_desc"] }}{% else %}SOC 2 certification is not currently offered; current security-review material is available on request{% endif %}</p>
-          </div>
-          <div class="animate-in p-6 rounded-lg border border-surface-200 hover:bg-surface-50 transition-all bg-surface-50">
-            <div class="w-8 h-8 rounded-sm flex items-center justify-center mb-4 bg-brand/10">
-              <svg class="w-4 h-4 text-brand-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="0" ry="0"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-            </div>
             <h4 class="font-semibold text-surface-950 mb-2">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_data_residency_title"] %}{{ i18n_data[l]["features"]["f_data_residency_title"] }}{% else %}Data Residency{% endif %}</h4>
             <p class="text-sm text-surface-600">{% if i18n_data and i18n_data[l] and i18n_data[l]["features"] and i18n_data[l]["features"]["f_data_residency_desc"] %}{{ i18n_data[l]["features"]["f_data_residency_desc"] }}{% else %}Region and residency requirements scoped during Enterprise architecture review{% endif %}</p>
           </div>

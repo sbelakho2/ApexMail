@@ -58,11 +58,11 @@ pub const WEBHOOK_PROCESSING_TARGET: &str = "p95 ≤ 5 seconds";
 pub const DATA_RESIDENCY_WORDING: &str =
     "Data-residency commitments depend on the active deployment and applicable agreement. The supplied production configuration defaults telemetry object storage to an EU/EEA region; confirm active storage locations and transfer safeguards with ApexMail.";
 pub const SECURITY_STATUS_WORDING: &str =
-    "ApexMail is not currently SOC 2 certified, and an independent penetration test has not yet been completed. Internal defense-in-depth controls include WAF, rate limiting, DDoS protection, audit logging, and encryption at rest and in transit.";
+    "An independent penetration test has not yet been completed. Internal defense-in-depth controls include WAF, rate limiting, DDoS protection, audit logging, and encryption at rest and in transit.";
 pub const COMPLIANCE_STATUS_WORDING: &str =
     "GDPR-oriented data-processing service. DPA available for review. Subprocessor list maintained. HIPAA not currently available. ISO 27001 certification is not currently offered.";
 pub const CERTIFICATION_STATUS: &str =
-    "SOC 2: not currently certified. ISO 27001: not currently certified. PCI DSS: not applicable (Stripe processes payments).";
+    "ISO 27001: not currently certified. PCI DSS: not applicable (Stripe processes payments).";
 pub const PENETRATION_TEST_STATUS: &str =
     "Planned — annual independent penetration test not yet completed.";
 

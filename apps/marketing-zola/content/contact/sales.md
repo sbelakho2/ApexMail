@@ -114,8 +114,6 @@ For enterprise buying, security review, or private-cloud planning, complete the 
         <span>HIPAA use case (not currently offered; discuss alternatives)</span>
       </label>
       <label class="flex items-center gap-3 text-sm text-surface-700">
-        <input type="checkbox" name="compliance_needs" value="soc2" class="accent-brand-500" />
-        <span>SOC 2 / ISO 27001 evidence</span>
       </label>
       <label class="flex items-center gap-3 text-sm text-surface-700">
         <input type="checkbox" name="compliance_needs" value="ccpa" class="accent-brand-500" />

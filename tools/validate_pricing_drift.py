@@ -361,7 +361,7 @@ def display_limit(value: int) -> str:
 def validate_pricing_reference(catalog: dict[str, ParsedPlan], errors: list[str]) -> None:
     text = read(DOCS_PRICING)
     check_contains(DOCS_PRICING, "the active `plans` records, and verified Stripe webhooks", errors)
-    check_contains(DOCS_PRICING, "HIPAA availability and SOC 2 certification are **not currently offered**", errors)
+    check_contains(DOCS_PRICING, "HIPAA availability is **not currently offered**", errors)
     check_contains(DOCS_PRICING, "Only `active` or `trialing`", errors)
     for plan_id in MARKETING_PLAN_IDS:
         plan = catalog.get(plan_id)

@@ -68,7 +68,6 @@ La configuración proporcionada apunta a regiones de la UE/EEE para la infraestr
 - TLS 1.2+ en tránsito (TLS 1.3 preferido)
 - Hashing de contraseñas Argon2id
 - Registro de auditoría con integridad de cadena hash
-- Controles de seguridad alineados con SOC 2 (no certificado actualmente; mapeo de controles y evaluación de preparación en curso)
 - Control de acceso con autenticación multifactor
 - Escaneo continuo de vulnerabilidades; programa independiente de pruebas de penetración en establecimiento, primera prueba planificada
 - Remediación según gravedad conforme a la política de gestión de vulnerabilidades de ApexMail

@@ -113,7 +113,6 @@ La integridad del sistema se verifica mediante controles automatizados y recurre
 
 ## Evidencia de auditoría y cumplimiento
 
-- ApexMail no cuenta actualmente con certificación SOC 2. El mapeo interno de controles y el trabajo de preparación no crean una certificación, un derecho de producto ni un compromiso de fecha de certificación.
 - Resumen de prueba de penetración: planificado para publicación después de completar la primera prueba de penetración externa de la aplicación y remediar los hallazgos altos/críticos. Actualmente no disponible.
 - Las solicitudes de cuestionarios de seguridad se evalúan caso por caso usando los materiales de revisión actuales; los paquetes SIG, CAIQ o HECVAT estandarizados no son un derecho de producto.
 - Los registros de auditoría están disponibles en Growth, Business y Enterprise; la retención depende del plan contratado.

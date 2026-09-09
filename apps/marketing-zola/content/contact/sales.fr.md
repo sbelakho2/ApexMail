@@ -111,8 +111,6 @@ Pour un achat Enterprise, une revue de sécurité ou la planification d'un cloud
         <span>Cas d'usage HIPAA (non proposé actuellement ; discuter des alternatives)</span>
       </label>
       <label class="flex items-center gap-3 text-sm text-surface-700">
-        <input type="checkbox" name="compliance_needs" value="soc2" class="accent-brand-500" />
-        <span>Justificatifs SOC 2 / ISO 27001</span>
       </label>
       <label class="flex items-center gap-3 text-sm text-surface-700">
         <input type="checkbox" name="compliance_needs" value="ccpa" class="accent-brand-500" />

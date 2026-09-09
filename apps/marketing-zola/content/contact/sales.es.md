@@ -111,8 +111,6 @@ Para compras empresariales, revisiones de seguridad o planificación de nube pri
         <span>Caso de uso HIPAA (no disponible actualmente; consultar alternativas)</span>
       </label>
       <label class="flex items-center gap-3 text-sm text-surface-700">
-        <input type="checkbox" name="compliance_needs" value="soc2" class="accent-brand-500" />
-        <span>Evidencias SOC 2 / ISO 27001</span>
       </label>
       <label class="flex items-center gap-3 text-sm text-surface-700">
         <input type="checkbox" name="compliance_needs" value="ccpa" class="accent-brand-500" />

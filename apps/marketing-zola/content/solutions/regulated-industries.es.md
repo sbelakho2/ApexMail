@@ -18,7 +18,6 @@ El email transaccional puede formar parte de un flujo de trabajo regulado. ApexM
 | SAML SSO | Incluido en Business y Enterprise |
 | Private Cloud / BYOIP | Revisión contractual y técnica Enterprise |
 | HIPAA / BAA | **No disponible actualmente** |
-| Certificación SOC 2 | **No disponible actualmente**; planificada, no constituye un derecho |
 
 ## Revisión de seguridad y de procesamiento de datos
 
@@ -35,7 +34,6 @@ ApexMail puede ayudar a un cliente potencial a revisar la DPA vigente, la inform
 ## Limitaciones importantes
 
 - La disponibilidad HIPAA y la firma de BAA no se ofrecen actualmente.
-- ApexMail no cuenta actualmente con la certificación SOC 2.
 - Una DPA, la residencia de datos o un contrato Enterprise no convierten por sí solos un flujo de trabajo del cliente en conforme con una ley o norma concreta.
 - Private Cloud y BYOIP se revisan por contrato; los precios públicos de autoservicio no incluyen un precio de despliegue privado.
 

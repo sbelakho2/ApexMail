@@ -30,7 +30,6 @@ comparison_sections = [
   { title = "COMPLIANCE", rows = [
     { feature = "GDPR Automation", apex = '<span class="text-brand-600 font-semibold">Full DSR handling</span>', comp = '<span class="text-surface-600">Self-managed</span>', winner = "none" },
     { feature = "HIPAA availability", apex = '<span class="text-surface-600 font-semibold">Not currently offered</span>', comp = '<span class="text-surface-600">See provider documentation</span>', winner = "none" },
-    { feature = "SOC 2 certification", apex = '<span class="text-surface-600 font-semibold">Not currently offered</span>', comp = '<span class="text-surface-600">See provider documentation</span>', winner = "none" },
     { feature = "Audit Logs", apex = '<span class="text-brand-600 font-semibold">Growth plan & above</span>', comp = '<span class="text-surface-600">Event logs only</span>', winner = "none" },
     { feature = "Consent Management", apex = '<span class="text-brand-600 font-semibold">Built-in</span>', comp = '<span class="text-surface-400">✗</span>', winner = "none" }
   ]},

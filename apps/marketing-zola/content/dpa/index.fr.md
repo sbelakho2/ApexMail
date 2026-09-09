@@ -68,7 +68,6 @@ La configuration fournie cible des régions de l'UE/EEE pour l'infrastructure pr
 - TLS 1.2+ en transit (TLS 1.3 préféré)
 - Hachage de mot de passe Argon2id
 - Journalisation d'audit avec intégrité par chaîne de hachage
-- Contrôles de sécurité alignés SOC 2 (non certifié actuellement ; cartographie des contrôles et évaluation de préparation en cours)
 - Contrôle d'accès avec authentification multi-facteurs
 - Analyse continue des vulnérabilités ; programme indépendant de test d'intrusion en cours d'établissement, premier test planifié
 - Remédiation selon la gravité conformément à la politique de gestion des vulnérabilités d'ApexMail

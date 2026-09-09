@@ -68,7 +68,6 @@ The supplied deployment configuration targets EU/EEA regions for core infrastruc
 - TLS 1.2+ in transit (TLS 1.3 preferred)
 - Argon2id password hashing
 - Audit logging with hash-chain integrity
-- Security controls and audit logging; ApexMail is not currently SOC 2 certified
 - Access control with multi-factor authentication
 - Weekly automated vulnerability scanning; first external penetration test planned — results to be published after completion and remediation
 
