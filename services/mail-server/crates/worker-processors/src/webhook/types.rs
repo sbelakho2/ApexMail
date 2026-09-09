@@ -35,6 +35,13 @@ pub struct WebhookJob {
     pub backoff_multiplier: f64,
     #[sqlx(rename = "createdAt")]
     pub created_at: DateTime<Utc>,
+    /// F10: owner token of the claim that fetched this job. Minted by the
+    /// claim (`gen_random_uuid()`), held for the delivery's lifetime, and
+    /// required by every completion write — a worker whose visibility lease
+    /// expired (and whose row was re-claimed) can no longer reschedule or
+    /// delete the new owner's row. `None` for legacy/token-less claims.
+    #[sqlx(default)]
+    pub claim_token: Option<String>,
 }
 
 /// Result of a webhook delivery attempt.

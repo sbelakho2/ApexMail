@@ -126,6 +126,16 @@ enum Outgoing<'a> {
     Envelope(mail_send::smtp::message::Message<'static>),
 }
 
+/// F26: the MAIL FROM strategy for the SMTP send — VERP when attributable,
+/// the explicit sender address whenever preserved MIME To/Cc headers must
+/// NOT drive envelope derivation, and header derivation only for legacy
+/// single-recipient messages whose To header IS the envelope destination.
+enum OutgoingMailFrom {
+    Verp(String),
+    Sender(String),
+    DeriveFromHeaders,
+}
+
 /// Send either outgoing form over a connected client, signing when a signer
 /// is present. Generic over the stream type because `connect()` and
 /// `connect_plain()` yield different `SmtpClient` instantiations.
@@ -368,10 +378,17 @@ impl SmtpTransport {
     }
 
     fn build_message<'a>(&self, email: &'a PreparedEmail) -> MessageBuilder<'a> {
+        // F26: the MIME To/Cc headers show the ORIGINAL visible recipient
+        // list when the per-recipient expansion preserved it; the ENVELOPE
+        // destination (`email.to`) is what delivery targets and is set by
+        // the caller (VERP path / mail-send's header derivation).
         let mut builder = MessageBuilder::new()
             .from(email.from.as_str())
-            .to(email.to.as_str())
+            .to(email.mime_to.as_deref().unwrap_or(email.to.as_str()))
             .subject(email.subject.as_str());
+        if let Some(mime_cc) = email.mime_cc.as_deref() {
+            builder = builder.cc(mime_cc);
+        }
 
         for (key, value) in &email.headers {
             builder = builder.header(key.as_str(), Text::new(value.as_str()));
@@ -463,8 +480,22 @@ impl EmailTransport for SmtpTransport {
         // The message is pre-serialized for the explicit-envelope path —
         // the legacy path hands the builder to mail-send so its From/To/Cc
         // envelope derivation stays byte-identical to before.
-        let outgoing = match verp_return_path_for(email) {
-            Some(return_path) => {
+        // F26: whenever the MIME To/Cc headers were preserved from the
+        // original multi-recipient message, the envelope MUST be explicit —
+        // mail-send's builder path derives RCPT TO from the To/Cc headers,
+        // which would fan one per-recipient copy out to every visible
+        // address. The explicit envelope pins RCPT TO to the single
+        // envelope destination while the headers keep showing the original
+        // list. VERP keeps priority for the MAIL FROM address.
+        let explicit_envelope = match verp_return_path_for(email) {
+            Some(return_path) => OutgoingMailFrom::Verp(return_path),
+            None if email.mime_to.is_some() || email.mime_cc.is_some() => {
+                OutgoingMailFrom::Sender(email.from.clone())
+            }
+            None => OutgoingMailFrom::DeriveFromHeaders,
+        };
+        let outgoing = match explicit_envelope {
+            OutgoingMailFrom::Verp(return_path) => {
                 let raw = self.build_message(email).write_to_vec().map_err(|e| {
                     ProcessorError::Transport(format!("MIME serialization for VERP failed: {e}"))
                 })?;
@@ -478,7 +509,23 @@ impl EmailTransport for SmtpTransport {
                     body: raw.into(),
                 })
             }
-            None => Outgoing::Builder(self.build_message(email)),
+            OutgoingMailFrom::Sender(mail_from) => {
+                let raw = self.build_message(email).write_to_vec().map_err(|e| {
+                    ProcessorError::Transport(format!(
+                        "MIME serialization for preserved headers failed: {e}"
+                    ))
+                })?;
+                Outgoing::Envelope(mail_send::smtp::message::Message {
+                    mail_from: mail_from.into(),
+                    rcpt_to: vec![email
+                        .to
+                        .trim_matches(|c| c == '<' || c == '>')
+                        .to_string()
+                        .into()],
+                    body: raw.into(),
+                })
+            }
+            OutgoingMailFrom::DeriveFromHeaders => Outgoing::Builder(self.build_message(email)),
         };
 
         let builder = self.smtp_builder()?;
@@ -636,10 +683,15 @@ impl SesTransport {
     /// We use `mail-builder` to construct the message identically to
     /// how `SmtpTransport` does it, then extract the raw bytes for SES.
     fn build_raw_mime(email: &PreparedEmail) -> Vec<u8> {
+        // F26: same MIME To/Cc preservation as the SMTP path (see
+        // SmtpTransport::build_message).
         let mut builder = MessageBuilder::new()
             .from(email.from.as_str())
-            .to(email.to.as_str())
+            .to(email.mime_to.as_deref().unwrap_or(email.to.as_str()))
             .subject(email.subject.as_str());
+        if let Some(mime_cc) = email.mime_cc.as_deref() {
+            builder = builder.cc(mime_cc);
+        }
 
         for (key, value) in &email.headers {
             builder = builder.header(key.as_str(), Text::new(value.as_str()));
@@ -879,6 +931,8 @@ mod tests {
             headers: vec![("X-Custom".into(), "value".into())],
             attachments: vec![],
             dkim: None,
+            mime_to: None,
+            mime_cc: None,
         };
         let raw = SesTransport::build_raw_mime(&email);
         let raw_str = String::from_utf8_lossy(&raw);
@@ -900,6 +954,8 @@ mod tests {
             headers: vec![],
             attachments: vec![],
             dkim: None,
+            mime_to: None,
+            mime_cc: None,
         };
         let raw = SesTransport::build_raw_mime(&email);
         // Should produce *something* even with no body
@@ -922,6 +978,8 @@ mod tests {
                 content_type: "text/plain".into(),
             }],
             dkim: None,
+            mime_to: None,
+            mime_cc: None,
         };
         let raw = SesTransport::build_raw_mime(&email);
         let raw_str = String::from_utf8_lossy(&raw);
@@ -1419,6 +1477,8 @@ mod tests {
             headers: vec![("X-Other".into(), "value".into())],
             attachments: vec![],
             dkim: None,
+            mime_to: None,
+            mime_cc: None,
         };
         assert!(
             verp_return_path_for(&email).is_none(),

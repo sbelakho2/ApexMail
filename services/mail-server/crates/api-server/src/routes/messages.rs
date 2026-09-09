@@ -6,18 +6,20 @@ use super::helpers::{
 };
 use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use billing_service::types::MeterEventType;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::LazyLock;
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::error::{success, ApiError, ApiResponse};
+use crate::error::{success, ApiError, ApiResponse, ErrorBody, ErrorDetail};
 use crate::middleware::auth::{require_scopes, AuthUser};
+use crate::middleware::idempotency::principal_binding;
 use crate::middleware::rate_limiter::INCR_EXPIRE_LUA;
 use crate::state::AppState;
 
@@ -59,9 +61,75 @@ const TENANT_MESSAGE_CIRCUIT_OPEN_SECONDS: i64 = 300;
 /// line limit).
 const MAX_SUBJECT_CHARS: usize = 998;
 
+/// Maximum serialized size of caller metadata accepted by the send
+/// endpoints (F44 — bounded object-shaped customer metadata).
+const MAX_METADATA_BYTES: usize = 16 * 1024;
+
+/// Maximum number of keys in the caller metadata object (F44).
+const MAX_METADATA_KEYS: usize = 64;
+
+/// Metadata keys owned by the server's queue machinery. A caller who sets
+/// any of them could otherwise forge operational queue state — most
+/// dangerously `pending_recipients`, which the worker trusts over the
+/// validated envelope recipients (F45).
+const RESERVED_METADATA_KEYS: [&str; 4] = [
+    "pending_recipients",
+    "lease_token",
+    "possibly_sent",
+    "requeue_reason",
+];
+
+/// Header names the caller cannot set through the free-form `headers`
+/// field. They are either derived from validated fields (From/To/Cc/Subject/
+/// Message-ID), filtered by the worker, or owned by the platform. Mirrors
+/// the worker's PROTECTED_HEADERS set plus the dedicated `reply_to` field.
+const PROTECTED_CUSTOM_HEADERS: [&str; 26] = [
+    "from",
+    "to",
+    "cc",
+    "bcc",
+    "subject",
+    "date",
+    "message-id",
+    "dkim-signature",
+    "arc-seal",
+    "arc-message-signature",
+    "arc-authentication-results",
+    "return-path",
+    "received",
+    "received-spf",
+    "authentication-results",
+    "x-apexmail-message-id",
+    "x-apexmail-tenant-id",
+    "x-apexmail-campaign-id",
+    "x-originating-ip",
+    "x-mailer",
+    "mime-version",
+    "content-type",
+    "content-transfer-encoding",
+    "reply-to",
+    "sender",
+    "errors-to",
+];
+
+/// Maximum decoded size of a single attachment (F48).
+const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+
+/// Maximum aggregate decoded attachment bytes per message (F48).
+const MAX_TOTAL_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
+
+/// Maximum number of attachments per message (F48).
+const MAX_ATTACHMENTS: usize = 50;
+
+/// email_queue priority bounds (1 = highest urgency, 10 = lowest). The
+/// default row priority stays 5 (F48).
+const QUEUE_PRIORITY_MIN: i32 = 1;
+const QUEUE_PRIORITY_MAX: i32 = 10;
+const QUEUE_PRIORITY_DEFAULT: i32 = 5;
+
 // ─── Types ─────────────────────────────────────────────────────
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SendMessageRequest {
     pub from: String,
@@ -81,6 +149,40 @@ pub struct SendMessageRequest {
     pub metadata: Option<serde_json::Value>,
     #[serde(default)]
     pub scheduled_at: Option<DateTime<Utc>>,
+    // ── F48: the persistence/queue/transport stack supports these
+    // end-to-end, so they are accepted and honoured.
+    /// Optional Reply-To header (stored on the message + queue rows and set
+    /// on the outgoing MIME).
+    #[serde(default)]
+    pub reply_to: Option<String>,
+    /// Free-form custom headers (object of header name → string value).
+    /// Protected header names are rejected with 422.
+    #[serde(default)]
+    pub headers: Option<serde_json::Value>,
+    /// Attachments: `{filename, content (base64), contentType}`.
+    #[serde(default)]
+    pub attachments: Option<Vec<SendAttachment>>,
+    /// Queue priority (1–10, default 5) — orders worker claims.
+    #[serde(default)]
+    pub priority: Option<i32>,
+    // ── F48: advertised by the SDK but NOT implemented anywhere in the
+    // persistence/queue/transport stack. Accepted here ONLY so they can be
+    // rejected with an explicit 422 naming the field — never silently
+    // discarded.
+    #[serde(default)]
+    pub template_id: Option<String>,
+    #[serde(default)]
+    pub template_data: Option<serde_json::Value>,
+}
+
+/// One attachment on a send request (F48). `content` is base64-encoded;
+/// the camelCase `contentType` matches the queue/worker storage shape.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct SendAttachment {
+    pub filename: String,
+    pub content: String,
+    #[serde(rename = "contentType", alias = "content_type")]
+    pub content_type: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -186,7 +288,7 @@ fn validate_sort_column(column: &str) -> Result<String, ApiError> {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct BatchSendRequest {
     pub messages: Vec<SendMessageRequest>,
@@ -221,7 +323,126 @@ struct PersistedMessage {
 enum CancelDeliveryResult {
     Cancelled(DateTime<Utc>),
     NotFound,
+    /// Terminal parent state — e.g. already cancelled.
     NotCancellable,
+    /// F24: the irreversible dispatch boundary was crossed — at least one
+    /// recipient row has been claimed by a worker (or already delivered),
+    /// so cancellation is explicitly TOO LATE rather than silently racing
+    /// the worker.
+    TooLate,
+}
+
+/// F24: cancel a message's remaining deliveries.
+///
+/// Cancellation protocol (shared lock order with the worker's claim):
+///
+/// 1. Lock EVERY queue row of the message first (`FOR UPDATE`), in the same
+///    order the worker's claim locks them (`email_queue` before `messages`).
+///    The worker's `FETCH_JOBS_SQL` claims rows with
+///    `FOR UPDATE SKIP LOCKED` and only touches `email_queue`; its
+///    post-send bookkeeping updates `email_queue` before `messages`. Taking
+///    the queue rows first here keeps both sides on one lock order.
+/// 2. Lock the parent `messages` row and re-read its status.
+/// 3. Decide under the locks: any queue row that is not `pending` (and not
+///    already `cancelled`) means dispatch has started — TooLate.
+/// 4. Verify AFFECTED COUNTS on both updates: if the number of rows flipped
+///    to `cancelled` differs from the pending count observed under the
+///    lock, the decision was raced — TooLate, transaction rolled back by
+///    the caller.
+///
+/// The irreversible dispatch boundary is the worker's CLAIM: once a queue
+/// row leaves `pending` (status `processing`), that recipient's copy is
+/// beyond cancellation. Rows still `pending` are cancelled atomically with
+/// the parent transition.
+async fn cancel_message_and_queue(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: &str,
+    message_id: &str,
+) -> Result<CancelDeliveryResult, sqlx::Error> {
+    // 1. Lock every delivery row of the message (queue rows before the
+    //    parent — same order as the worker).
+    let queue_rows: Vec<String> = sqlx::query_scalar(
+        "SELECT status FROM email_queue
+         WHERE message_id = $1::uuid AND tenant_id = $2
+         ORDER BY id
+         FOR UPDATE",
+    )
+    .bind(message_id)
+    .bind(tenant_id)
+    .fetch_all(&mut **tx)
+    .await?;
+
+    // 2. Lock the parent row.
+    let row: Option<(String, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT status, created_at FROM messages WHERE id = $1::uuid AND tenant_id = $2 FOR UPDATE",
+    )
+    .bind(message_id)
+    .bind(tenant_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    let Some((status, created_at)) = row else {
+        return Ok(CancelDeliveryResult::NotFound);
+    };
+
+    if !matches!(status.as_str(), "queued" | "scheduled" | "processing") {
+        return Ok(CancelDeliveryResult::NotCancellable);
+    }
+
+    // 3. Decide under the locks: the dispatch boundary is the worker claim.
+    let pending = queue_rows
+        .iter()
+        .filter(|s| s.as_str() == "pending")
+        .count();
+    let dispatched = queue_rows
+        .iter()
+        .filter(|s| !matches!(s.as_str(), "pending" | "cancelled"))
+        .count();
+    if dispatched > 0 {
+        return Ok(CancelDeliveryResult::TooLate);
+    }
+    // A parent already in `processing` whose rows were all re-released to
+    // `pending` is still claimable — but conservatively treat a processing
+    // parent with zero pending rows as too late (nothing left to cancel).
+    if pending == 0 {
+        return Ok(CancelDeliveryResult::TooLate);
+    }
+
+    // 4. Flip the pending rows, VERIFYING the affected count matches the
+    // count observed under the lock.
+    let cancelled_rows = sqlx::query(
+        "UPDATE email_queue
+         SET status = 'cancelled', locked_until = NULL, updated_at = NOW()
+         WHERE message_id = $1::uuid AND tenant_id = $2 AND status = 'pending'",
+    )
+    .bind(message_id)
+    .bind(tenant_id)
+    .execute(&mut **tx)
+    .await?;
+    if cancelled_rows.rows_affected() as usize != pending {
+        tracing::warn!(
+            message_id,
+            expected = pending,
+            affected = cancelled_rows.rows_affected(),
+            "cancellation raced a worker claim — treating as too late"
+        );
+        return Ok(CancelDeliveryResult::TooLate);
+    }
+
+    let parent_updated = sqlx::query(
+        "UPDATE messages SET status = 'cancelled', updated_at = NOW()
+         WHERE id = $1::uuid AND tenant_id = $2
+           AND status IN ('queued', 'scheduled', 'processing')",
+    )
+    .bind(message_id)
+    .bind(tenant_id)
+    .execute(&mut **tx)
+    .await?;
+    if parent_updated.rows_affected() != 1 {
+        return Ok(CancelDeliveryResult::NotCancellable);
+    }
+
+    Ok(CancelDeliveryResult::Cancelled(created_at))
 }
 
 fn message_status(body: &SendMessageRequest) -> &'static str {
@@ -259,6 +480,537 @@ fn sender_domain(from: &str) -> Option<String> {
     from.rsplit_once('@')
         .map(|(_, domain)| domain.trim().trim_end_matches('.').to_ascii_lowercase())
         .filter(|domain| !domain.is_empty())
+}
+
+// ─── F48: honest unsupported-option contract ───────────────────
+
+/// 422 response for send-option contract violations (F44/F45/F48). Uses the
+/// exact JSON error shape `ApiError::Validation` renders (code/message/
+/// details envelope) but with the 422 status the finding requires.
+fn unprocessable_send_options(details: Vec<String>) -> Response {
+    (
+        StatusCode::UNPROCESSABLE_ENTITY,
+        Json(ErrorBody {
+            data: None,
+            error: Some(ErrorDetail {
+                code: "VALIDATION_ERROR".to_string(),
+                message: "request fields are not supported by this endpoint".to_string(),
+                details: Some(details),
+            }),
+            meta: None,
+        }),
+    )
+        .into_response()
+}
+
+/// F44/F45: validate the caller's `metadata` and return the sanitized
+/// customer object.
+///
+/// * `None` / JSON `null` → `None` (missing).
+/// * Anything but a bounded JSON object → 422 (a scalar/array poisons the
+///   worker's `jsonb_set` queue-state merges — SQLSTATE 22023 — and could
+///   not carry server-written operational keys anyway).
+/// * Server-reserved operational keys (`pending_recipients`, `lease_token`,
+///   ...) → 422: those fields are exclusively server-written (F45); a
+///   caller-supplied value could override the validated recipient set.
+fn sanitize_customer_metadata(
+    metadata: &Option<serde_json::Value>,
+) -> Result<Option<serde_json::Value>, Vec<String>> {
+    let Some(value) = metadata else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(map) = value.as_object() else {
+        return Err(vec![format!(
+            "metadata must be a JSON object (received {}); scalar or array metadata is rejected",
+            type_name_of(value)
+        )]);
+    };
+    if map.is_empty() {
+        return Ok(None);
+    }
+    let mut errors = Vec::new();
+    if map.len() > MAX_METADATA_KEYS {
+        errors.push(format!(
+            "metadata must contain at most {MAX_METADATA_KEYS} keys (received {})",
+            map.len()
+        ));
+    }
+    for key in RESERVED_METADATA_KEYS {
+        if map.contains_key(key) {
+            errors.push(format!(
+                "metadata field '{key}' is reserved for queue state and cannot be set by clients"
+            ));
+        }
+    }
+    let serialized = serde_json::to_vec(value).unwrap_or_default();
+    if serialized.len() > MAX_METADATA_BYTES {
+        errors.push(format!(
+            "metadata exceeds the maximum serialized size of {MAX_METADATA_BYTES} bytes"
+        ));
+    }
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+    // Return a plain clone: from here on the value is known-object customer
+    // data, never merged with server operational state.
+    Ok(Some(value.clone()))
+}
+
+fn type_name_of(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "a boolean",
+        serde_json::Value::Number(_) => "a number",
+        serde_json::Value::String(_) => "a string",
+        serde_json::Value::Array(_) => "an array",
+        serde_json::Value::Object(_) => "an object",
+    }
+}
+
+/// F48: validate the F48 send options (`reply_to`, `headers`,
+/// `attachments`, `priority`) and explicitly reject the advertised-but-
+/// unsupported `template_id` / `template_data` fields. Returns per-field
+/// error strings for the 422 body.
+fn validate_send_options(body: &SendMessageRequest) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    if let Some(template_id) = body.template_id.as_deref() {
+        if !template_id.trim().is_empty() {
+            errors.push(
+                "field 'template_id' is not supported by this endpoint: template-based sending is not implemented; render the template and send the result explicitly"
+                    .to_string(),
+            );
+        }
+    }
+    if let Some(template_data) = body.template_data.as_ref() {
+        if !template_data.is_null() {
+            errors.push(
+                "field 'template_data' is not supported by this endpoint: template-based sending is not implemented; render the template and send the result explicitly"
+                    .to_string(),
+            );
+        }
+    }
+
+    if let Some(reply_to) = body.reply_to.as_deref() {
+        if !reply_to.is_empty() && !apexmail_lib::validation::is_valid_email(reply_to) {
+            errors.push(format!("invalid reply_to email: {reply_to}"));
+        }
+        if reply_to.contains('\r') || reply_to.contains('\n') {
+            errors.push("reply_to must not contain line breaks".into());
+        }
+    }
+
+    if let Some(headers) = body.headers.as_ref() {
+        match headers.as_object() {
+            None => {
+                errors.push(
+                    "field 'headers' must be an object of header name to string value".to_string(),
+                );
+            }
+            Some(map) => {
+                for (name, value) in map {
+                    let lower = name.to_lowercase();
+                    if PROTECTED_CUSTOM_HEADERS.contains(&lower.as_str()) {
+                        if lower == "reply-to" {
+                            errors.push(format!(
+                                "header '{name}' is protected: use the reply_to field instead"
+                            ));
+                        } else {
+                            errors.push(format!(
+                                "header '{name}' is protected and cannot be set by clients"
+                            ));
+                        }
+                        continue;
+                    }
+                    if name.is_empty()
+                        || name.len() > 998
+                        || name
+                            .bytes()
+                            .any(|b| b.is_ascii_control() || b == b' ' || b == b':')
+                    {
+                        errors.push(format!("invalid custom header name: '{name}'"));
+                    }
+                    let Some(value) = value.as_str() else {
+                        errors.push(format!("custom header '{name}' must have a string value"));
+                        continue;
+                    };
+                    if value.contains('\r') || value.contains('\n') || value.contains('\0') {
+                        errors.push(format!(
+                            "custom header '{name}' must not contain line breaks"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(priority) = body.priority {
+        if !(QUEUE_PRIORITY_MIN..=QUEUE_PRIORITY_MAX).contains(&priority) {
+            errors.push(format!(
+                "priority must be between {QUEUE_PRIORITY_MIN} and {QUEUE_PRIORITY_MAX}"
+            ));
+        }
+    }
+
+    if let Some(attachments) = body.attachments.as_ref() {
+        if attachments.len() > MAX_ATTACHMENTS {
+            errors.push(format!(
+                "at most {MAX_ATTACHMENTS} attachments are allowed per message (received {})",
+                attachments.len()
+            ));
+        }
+        let mut total = 0usize;
+        for (i, attachment) in attachments.iter().enumerate() {
+            if attachment.filename.is_empty()
+                || attachment.filename.len() > 255
+                || attachment.filename.contains('\r')
+                || attachment.filename.contains('\n')
+                || attachment.filename.contains('\0')
+            {
+                errors.push(format!(
+                    "attachments[{i}].filename must be 1–255 characters without line breaks"
+                ));
+            }
+            if attachment.content_type.is_empty()
+                || attachment.content_type.contains('\r')
+                || attachment.content_type.contains('\n')
+            {
+                errors.push(format!(
+                    "attachments[{i}].contentType must be a non-empty MIME type without line breaks"
+                ));
+            }
+            use base64::Engine;
+            match base64::engine::general_purpose::STANDARD.decode(&attachment.content) {
+                Ok(decoded) => {
+                    if decoded.len() > MAX_ATTACHMENT_BYTES {
+                        errors.push(format!(
+                            "attachments[{i}] exceeds the maximum decoded size of {MAX_ATTACHMENT_BYTES} bytes"
+                        ));
+                    }
+                    total = total.saturating_add(decoded.len());
+                }
+                Err(_) => {
+                    errors.push(format!("attachments[{i}].content is not valid base64"));
+                }
+            }
+        }
+        if total > MAX_TOTAL_ATTACHMENT_BYTES {
+            errors.push(format!(
+                "attachments exceed the maximum total decoded size of {MAX_TOTAL_ATTACHMENT_BYTES} bytes"
+            ));
+        }
+    }
+
+    errors
+}
+
+/// F48: queue priority for the insert (validated beforehand).
+fn queue_priority_of(body: &SendMessageRequest) -> i32 {
+    body.priority
+        .filter(|p| (QUEUE_PRIORITY_MIN..=QUEUE_PRIORITY_MAX).contains(p))
+        .unwrap_or(QUEUE_PRIORITY_DEFAULT)
+}
+
+/// F26: the MIME header object stored on every email_queue copy. The
+/// original To/Cc header values are stored SEPARATELY from the envelope
+/// destination (`"to"`/`to_addresses`), so each per-recipient copy can show
+/// the full visible recipient list while delivering to exactly one envelope
+/// recipient. Bcc is intentionally absent — it exists only in the delivery
+/// data (the per-recipient queue rows), never in a visible header. Custom
+/// caller headers ride along under `custom`, and `reply_to` gets its own
+/// key (F48).
+fn mime_headers_for(body: &SendMessageRequest) -> Result<serde_json::Value, Vec<String>> {
+    let mut map = serde_json::Map::new();
+    map.insert("to".into(), serde_json::json!(body.to.join(", ")));
+    if let Some(cc) = body.cc.as_ref().filter(|cc| !cc.is_empty()) {
+        map.insert("cc".into(), serde_json::json!(cc.join(", ")));
+    }
+    if let Some(reply_to) = body.reply_to.as_ref().filter(|r| !r.is_empty()) {
+        map.insert("reply_to".into(), serde_json::json!(reply_to));
+    }
+    if let Some(headers) = body.headers.as_ref().and_then(|h| h.as_object()) {
+        if !headers.is_empty() {
+            map.insert("custom".into(), serde_json::Value::Object(headers.clone()));
+        }
+    }
+    Ok(serde_json::Value::Object(map))
+}
+
+/// F48: attachments in the queue/worker storage shape (filename / content
+/// base64 / contentType).
+fn queue_attachments_of(body: &SendMessageRequest) -> Option<serde_json::Value> {
+    body.attachments
+        .as_ref()
+        .filter(|a| !a.is_empty())
+        .map(|attachments| serde_json::to_value(attachments).unwrap_or(serde_json::json!([])))
+}
+
+// ─── F19/F20: durable idempotency ledger ───────────────────────
+
+/// Route identity stored in the ledger (bound to the key, F19).
+const SEND_ROUTE: &str = "/v1/messages";
+const BATCH_ROUTE: &str = "/v1/messages/batch";
+
+/// Ledger rows stuck in `in_flight` for this long are considered abandoned
+/// (crashed request) and may be taken over by a retry (F21).
+const LEDGER_STALE_AFTER_SECONDS: i64 = 600;
+
+/// Canonical SHA-256 (hex) of a canonicalized send payload. Field order
+/// follows the struct declaration, so the hash is stable for identical
+/// requests and distinguishes every semantic difference (F19).
+fn canonical_send_hash<T: Serialize>(payload: &T) -> String {
+    let bytes = serde_json::to_vec(payload).unwrap_or_default();
+    hex::encode(Sha256::digest(&bytes))
+}
+
+/// Result of consulting the durable idempotency ledger.
+#[derive(Debug)]
+enum LedgerReplay {
+    /// The key was used with a different method/route/principal/payload —
+    /// reject with 409 (F19).
+    Conflict(&'static str),
+    /// A completed record exists — replay its stored response (F20).
+    Complete {
+        response_status: i64,
+        response_body: String,
+    },
+    /// Another live request owns the key right now (F21).
+    InFlight,
+}
+
+struct LedgerRow {
+    request_method: String,
+    request_route: String,
+    payload_hash: String,
+    principal_id: String,
+    status: String,
+    response_status: Option<i64>,
+    response_body: Option<String>,
+}
+
+async fn fetch_ledger_row(
+    executor: impl sqlx::PgExecutor<'_>,
+    tenant_id: &str,
+    key: &str,
+) -> Result<Option<LedgerRow>, sqlx::Error> {
+    let row: Option<(
+        String,
+        String,
+        String,
+        String,
+        String,
+        Option<i64>,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT request_method, request_route, payload_hash, principal_id, status,
+                    response_status, response_body
+             FROM idempotency_records
+             WHERE tenant_id = $1 AND idempotency_key = $2",
+    )
+    .bind(tenant_id)
+    .bind(key)
+    .fetch_optional(executor)
+    .await?;
+    Ok(row.map(
+        |(
+            request_method,
+            request_route,
+            payload_hash,
+            principal_id,
+            status,
+            response_status,
+            response_body,
+        )| {
+            LedgerRow {
+                request_method,
+                request_route,
+                payload_hash,
+                principal_id,
+                status,
+                response_status,
+                response_body,
+            }
+        },
+    ))
+}
+
+/// Classify an existing ledger row against the incoming request identity.
+fn classify_ledger_row(
+    row: &LedgerRow,
+    method: &str,
+    route: &str,
+    payload_hash: &str,
+    principal_id: &str,
+) -> LedgerReplay {
+    if !row.request_method.eq_ignore_ascii_case(method) || row.request_route != route {
+        return LedgerReplay::Conflict("idempotency-key was already used on a different endpoint");
+    }
+    if row.principal_id != principal_id {
+        return LedgerReplay::Conflict(
+            "idempotency-key was created by a different authenticated principal",
+        );
+    }
+    if row.payload_hash != payload_hash {
+        return LedgerReplay::Conflict(
+            "idempotency-key was already used with a different request body",
+        );
+    }
+    match row.status.as_str() {
+        "complete" => LedgerReplay::Complete {
+            response_status: row.response_status.unwrap_or(202),
+            response_body: row.response_body.clone().unwrap_or_default(),
+        },
+        _ => LedgerReplay::InFlight,
+    }
+}
+
+/// F19/F20 fast path: consult the durable ledger BEFORE executing a send.
+/// `Ok(None)` → no record, proceed. `Ok(Some(replay))` → act on it.
+async fn ledger_preflight(
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+    key: &str,
+    method: &str,
+    route: &str,
+    payload_hash: &str,
+    principal_id: &str,
+) -> Result<Option<LedgerReplay>, sqlx::Error> {
+    let Some(row) = fetch_ledger_row(db, tenant_id, key).await? else {
+        return Ok(None);
+    };
+    Ok(Some(classify_ledger_row(
+        &row,
+        method,
+        route,
+        payload_hash,
+        principal_id,
+    )))
+}
+
+/// F20/F21: open the durable ledger record for a send inside the request's
+/// own transaction, so the ledger row, the message row, and every queue row
+/// commit together.
+///
+/// * `Ok(true)` — this request created (and owns) the record.
+/// * `Ok(false)` — a completed record already exists; the caller must
+///   return the stored response instead of executing.
+/// * `Err(LedgerReplay::Conflict(_))` — conflicting reuse.
+/// * `Err(LedgerReplay::InFlight)` — a live creator still owns the key.
+async fn open_ledger_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: &str,
+    key: &str,
+    method: &str,
+    route: &str,
+    payload_hash: &str,
+    principal_id: &str,
+    owner_token: &str,
+) -> Result<bool, LedgerReplay> {
+    let inserted = sqlx::query(
+        "INSERT INTO idempotency_records
+             (tenant_id, idempotency_key, request_method, request_route, payload_hash,
+              principal_id, owner_token, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'in_flight')
+         ON CONFLICT (tenant_id, idempotency_key) DO NOTHING",
+    )
+    .bind(tenant_id)
+    .bind(key)
+    .bind(method)
+    .bind(route)
+    .bind(payload_hash)
+    .bind(principal_id)
+    .bind(owner_token)
+    .execute(&mut **tx)
+    .await
+    .map_err(|_| LedgerReplay::Conflict("idempotency ledger unavailable"))?;
+
+    if inserted.rows_affected() > 0 {
+        return Ok(true);
+    }
+
+    // A record exists: read and classify it. A concurrent creator that
+    // completes the row right after this read makes the classification
+    // stale (`InFlight`), which only costs the retry a 409-and-retry — the
+    // takeover below is the only WRITE and is a guarded conditional UPDATE.
+    let row: Option<LedgerRow> = fetch_ledger_row(&mut **tx, tenant_id, key)
+        .await
+        .map_err(|_| LedgerReplay::Conflict("idempotency ledger unavailable"))?;
+    let Some(row) = row else {
+        // Vanished between insert-conflict and lock (concurrent delete):
+        // retry once via a plain insert.
+        return Ok(true);
+    };
+    match classify_ledger_row(&row, method, route, payload_hash, principal_id) {
+        LedgerReplay::Complete { .. } => Ok(false),
+        LedgerReplay::Conflict(reason) => Err(LedgerReplay::Conflict(reason)),
+        LedgerReplay::InFlight => {
+            // F21: an abandoned in-flight record (crashed creator, older
+            // than LEDGER_STALE_AFTER_SECONDS) may be taken over with a new
+            // owner token; a live one rejects the concurrent duplicate.
+            let taken = sqlx::query(
+                "UPDATE idempotency_records
+                 SET owner_token = $3, updated_at = NOW()
+                 WHERE tenant_id = $1 AND idempotency_key = $2
+                   AND status = 'in_flight'
+                   AND updated_at < NOW() - ($4::text::interval)",
+            )
+            .bind(tenant_id)
+            .bind(key)
+            .bind(owner_token)
+            .bind(format!("{LEDGER_STALE_AFTER_SECONDS} seconds"))
+            .execute(&mut **tx)
+            .await
+            .map_err(|_| LedgerReplay::Conflict("idempotency ledger unavailable"))?;
+            if taken.rows_affected() > 0 {
+                Ok(true)
+            } else {
+                Err(LedgerReplay::InFlight)
+            }
+        }
+    }
+}
+
+/// F21: complete the ledger record with the handler's response, fenced on
+/// this request's owner token. Called inside the same transaction as the
+/// message/queue writes, so response and effects are atomic (F20).
+async fn complete_ledger_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: &str,
+    key: &str,
+    owner_token: &str,
+    response_status: i64,
+    response_body: &str,
+) {
+    let completed = sqlx::query(
+        "UPDATE idempotency_records
+         SET status = 'complete', response_status = $4, response_body = $5,
+             completed_at = NOW(), updated_at = NOW()
+         WHERE tenant_id = $1 AND idempotency_key = $2 AND owner_token = $3",
+    )
+    .bind(tenant_id)
+    .bind(key)
+    .bind(owner_token)
+    .bind(response_status)
+    .bind(response_body)
+    .execute(&mut **tx)
+    .await;
+    match completed {
+        Ok(updated) if updated.rows_affected() == 0 => {
+            tracing::warn!(
+                tenant_id,
+                idempotency_key = key,
+                "idempotency ledger completion fenced out — ownership lost"
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            tracing::error!(error = %error, tenant_id, idempotency_key = key,
+                "failed to complete idempotency ledger record");
+        }
+    }
 }
 
 /// Resolve the ready `domains.id` for a sender domain while holding a row lock
@@ -381,18 +1133,33 @@ async fn insert_message_and_queue(
     let created_at = Utc::now();
     let status = message_status(body);
 
+    // F26: MIME headers (original To/Cc visibility + reply-to + custom
+    // headers) live in the queue row's `headers` JSONB, separate from the
+    // envelope destination columns. F48: attachments + priority ride on the
+    // same insert.
+    let mime_headers = mime_headers_for(body).unwrap_or(serde_json::json!({}));
+    let queue_attachments = queue_attachments_of(body);
+    let queue_priority = queue_priority_of(body);
+    let reply_to = body.reply_to.as_deref().filter(|r| !r.is_empty());
+
     // Store the idempotency key in the dedicated `idempotency_key` column (not
-    // just inside JSONB metadata) so the UNIQUE(tenant_id, idempotency_key)
+    // inside JSONB metadata) so the UNIQUE(tenant_id, idempotency_key)
     // index is actually enforced. `ON CONFLICT ... DO NOTHING` is the
     // race-condition safety net: if a concurrent request already inserted the
     // same (tenant_id, idempotency_key), this insert is a no-op and we return
     // `None` so the caller can re-fetch the existing message. NULL keys never
     // conflict (standard SQL NULL-distinct semantics), so batch sends and any
     // request without an idempotency key insert normally.
+    //
+    // F45: `metadata` is now the sanitized CUSTOMER object only — server
+    // operational state (pending_recipients / lease_token / ...) is written
+    // exclusively by the worker into its own metadata namespace and is never
+    // seeded from caller input.
     let result = sqlx::query(
         "INSERT INTO messages (id, tenant_id, from_email, to_emails, cc_emails, bcc_emails,
-         subject, html_body, text_body, status, tags, metadata, scheduled_at, created_at, idempotency_key)
-         VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+         subject, html_body, text_body, status, tags, metadata, scheduled_at, created_at, idempotency_key,
+         reply_to, headers, attachments)
+         VALUES ($1::uuid,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
          ON CONFLICT (tenant_id, idempotency_key) DO NOTHING",
     )
     .bind(&message_id)
@@ -418,6 +1185,11 @@ async fn insert_message_and_queue(
     .bind(body.scheduled_at)
     .bind(created_at)
     .bind(idempotency_key)
+    .bind(reply_to)
+    // messages.headers keeps the same server-written MIME header map so the
+    // audit row records what recipients actually saw (F26).
+    .bind(&mime_headers)
+    .bind(&queue_attachments)
     .execute(&mut **tx)
     .await?;
 
@@ -428,14 +1200,15 @@ async fn insert_message_and_queue(
 
     // Batched email_queue inserts (previously one INSERT per delivery
     // recipient — up to MAX_RECIPIENTS sequential round-trips per message).
-    // 13 bind parameters per row × 500 rows stays far below Postgres's
+    // 17 bind parameters per row × 500 rows stays far below Postgres's
     // 65,535-parameter statement limit.
     const EMAIL_QUEUE_CHUNK_SIZE: usize = 500;
     for chunk in delivery_recipients(body).chunks(EMAIL_QUEUE_CHUNK_SIZE) {
         let mut query = String::from(
             "INSERT INTO email_queue (
                 id, message_id, tenant_id, domain_id, from_address, to_addresses, subject,
-                \"from\", \"to\", html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at
+                \"from\", \"to\", html, text, tags, metadata, scheduled_at, priority, status, created_at, updated_at,
+                reply_to, headers, attachments
              ) VALUES ",
         );
         let mut param_idx = 1u32;
@@ -463,12 +1236,18 @@ async fn insert_message_and_queue(
                 param_idx + 11,
                 param_idx + 12,
             );
+            let (i_prio, i_reply, i_hdr, i_att) = (
+                param_idx + 13,
+                param_idx + 14,
+                param_idx + 15,
+                param_idx + 16,
+            );
             query.push_str(&format!(
                 "(${i_id}::uuid, ${i_msg}::uuid, ${i_ten}, ${i_dom}::uuid, ${i_from}, ARRAY[${i_rcpt}], ${i_subj}, \
-                 ${i_from}, ${i_rcpt}, ${i_html}, ${i_text}, ${i_tags}, ${i_meta}, ${i_sched}, 5, 'pending', \
-                 ${i_created}, ${i_created})"
+                 ${i_from}, ${i_rcpt}, ${i_html}, ${i_text}, ${i_tags}, ${i_meta}, ${i_sched}, ${i_prio}, 'pending', \
+                 ${i_created}, ${i_created}, ${i_reply}, ${i_hdr}, ${i_att})"
             ));
-            param_idx += 13;
+            param_idx += 17;
         }
 
         let mut q = sqlx::query(&query);
@@ -486,7 +1265,11 @@ async fn insert_message_and_queue(
                 .bind(body.tags.clone())
                 .bind(metadata)
                 .bind(body.scheduled_at)
-                .bind(created_at);
+                .bind(created_at)
+                .bind(queue_priority)
+                .bind(reply_to)
+                .bind(&mime_headers)
+                .bind(&queue_attachments);
         }
         q.execute(&mut **tx).await?;
     }
@@ -498,60 +1281,6 @@ async fn insert_message_and_queue(
     }))
 }
 
-async fn cancel_message_and_queue(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant_id: &str,
-    message_id: &str,
-) -> Result<CancelDeliveryResult, sqlx::Error> {
-    let row: Option<(String, DateTime<Utc>)> = sqlx::query_as(
-        "SELECT status, created_at FROM messages WHERE id = $1::uuid AND tenant_id = $2 FOR UPDATE",
-    )
-    .bind(message_id)
-    .bind(tenant_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-
-    let Some((status, created_at)) = row else {
-        return Ok(CancelDeliveryResult::NotFound);
-    };
-
-    if !matches!(status.as_str(), "queued" | "scheduled") {
-        return Ok(CancelDeliveryResult::NotCancellable);
-    }
-
-    let non_pending_queue_rows = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*)::bigint
-         FROM email_queue
-         WHERE message_id = $1::uuid AND tenant_id = $2 AND status NOT IN ('pending', 'cancelled')",
-    )
-    .bind(message_id)
-    .bind(tenant_id)
-    .fetch_one(&mut **tx)
-    .await?;
-
-    if non_pending_queue_rows > 0 {
-        return Ok(CancelDeliveryResult::NotCancellable);
-    }
-
-    sqlx::query(
-        "UPDATE email_queue
-         SET status = 'cancelled', locked_until = NULL, updated_at = NOW()
-         WHERE message_id = $1::uuid AND tenant_id = $2 AND status = 'pending'",
-    )
-    .bind(message_id)
-    .bind(tenant_id)
-    .execute(&mut **tx)
-    .await?;
-
-    sqlx::query("UPDATE messages SET status = 'cancelled' WHERE id = $1::uuid AND tenant_id = $2")
-        .bind(message_id)
-        .bind(tenant_id)
-        .execute(&mut **tx)
-        .await?;
-
-    Ok(CancelDeliveryResult::Cancelled(created_at))
-}
-
 // ─── Handlers ──────────────────────────────────────────────────
 
 async fn send_message(
@@ -559,57 +1288,132 @@ async fn send_message(
     auth: AuthUser,
     headers: HeaderMap,
     Json(body): Json<SendMessageRequest>,
-) -> Result<(StatusCode, Json<ApiResponse<MessageResponse>>), ApiError> {
+) -> Result<Response, ApiError> {
     require_scopes(&auth, &["messages:send"])?;
+
+    // F44/F45/F48: contract validation BEFORE any quota reservation or
+    // persistence — metadata shape, reserved operational keys, and the
+    // explicitly-unsupported SDK options (template sending) are rejected
+    // with 422 here, never silently discarded.
+    let option_errors = validate_send_options(&body);
+    if !option_errors.is_empty() {
+        return Ok(unprocessable_send_options(option_errors));
+    }
+    let metadata = match sanitize_customer_metadata(&body.metadata) {
+        Ok(metadata) => metadata,
+        Err(errors) => return Ok(unprocessable_send_options(errors)),
+    };
+
     validate_send(&body, &state.db, &auth.tenant_id).await?;
 
-    // existing message instead of creating a duplicate.
-    if let Some(idem_key) = headers.get("idempotency-key").and_then(|v| v.to_str().ok()) {
-        if !idem_key.is_empty() && idem_key.len() <= 255 {
-            let existing: Option<(String, String, DateTime<Utc>)> = sqlx::query_as(
-                "SELECT id::text AS id, status, created_at FROM messages
-                 WHERE tenant_id = $1 AND idempotency_key = $2
-                 LIMIT 1",
-            )
-            .bind(&auth.tenant_id)
-            .bind(idem_key)
-            .fetch_optional(&state.db)
-            .await?;
+    // ── F19/F20: durable idempotency ledger ───────────────────────────
+    //
+    // Redis (the middleware) only accelerates; the ledger is authoritative
+    // and is committed in the SAME transaction as the message + queue rows,
+    // so the stored response survives response loss and Redis failures.
+    let idempotency_key: Option<String> = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|key| !key.is_empty() && key.len() <= 255)
+        .map(str::to_string);
 
-            if let Some((id, status, created_at)) = existing {
-                return Ok((
-                    StatusCode::OK,
-                    Json(ApiResponse::success(MessageResponse {
-                        id,
-                        status,
-                        created_at: created_at.to_rfc3339(),
-                    })),
+    let payload_hash = canonical_send_hash(&body);
+    let principal = principal_binding(&auth);
+
+    if let Some(key) = idempotency_key.as_deref() {
+        match ledger_preflight(
+            &state.db,
+            &auth.tenant_id,
+            key,
+            "POST",
+            SEND_ROUTE,
+            &payload_hash,
+            &principal,
+        )
+        .await?
+        {
+            Some(LedgerReplay::Complete {
+                response_status,
+                response_body,
+            }) => {
+                // The original response was durably stored even though the
+                // caller never consumed it — replay it (F20).
+                return replay_ledger_response(response_status, &response_body);
+            }
+            Some(LedgerReplay::Conflict(reason)) => return Err(ApiError::Conflict(reason.into())),
+            Some(LedgerReplay::InFlight) => {
+                return Err(ApiError::Conflict(
+                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
                 ));
             }
+            None => {}
         }
     }
 
     ensure_tenant_message_circuit_closed(&state, &auth.tenant_id).await?;
 
-    // Merge idempotency key into metadata if present.
-    let metadata = {
-        let mut meta = body
-            .metadata
-            .clone()
-            .unwrap_or_else(|| serde_json::json!({}));
-        if let Some(idem_key) = headers.get("idempotency-key").and_then(|v| v.to_str().ok()) {
-            if !idem_key.is_empty() && idem_key.len() <= 255 {
-                meta.as_object_mut()
-                    .map(|m| m.insert("idempotency_key".into(), serde_json::json!(idem_key)));
-            }
-        }
-        Some(meta)
-    };
-
     let mut tx = state.db.begin().await.map_err(|error| {
         tracing::error!(error = %error, tenant_id = %auth.tenant_id, "failed to begin message transaction");
         ApiError::Internal("database error".into())
     })?;
+
+    // F20/F21: open the ledger record inside this transaction so the
+    // message row, every queue row, and the idempotent response commit (or
+    // roll back) together.
+    let owner_token = Uuid::new_v4().simple().to_string();
+    if let Some(key) = idempotency_key.as_deref() {
+        match open_ledger_in_tx(
+            &mut tx,
+            &auth.tenant_id,
+            key,
+            "POST",
+            SEND_ROUTE,
+            &payload_hash,
+            &principal,
+            &owner_token,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                // A completed record appeared between preflight and the
+                // locked insert — replay it instead of double-sending.
+                if let Some(row) = fetch_ledger_row(&mut *tx, &auth.tenant_id, key).await? {
+                    if let LedgerReplay::Complete {
+                        response_status,
+                        response_body,
+                    } = classify_ledger_row(&row, "POST", SEND_ROUTE, &payload_hash, &principal)
+                    {
+                        let _ = tx.rollback().await;
+                        return replay_ledger_response(response_status, &response_body);
+                    }
+                }
+                let _ = tx.rollback().await;
+                return Err(ApiError::Conflict(
+                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
+                ));
+            }
+            Err(LedgerReplay::Conflict(reason)) => {
+                let _ = tx.rollback().await;
+                return Err(ApiError::Conflict(reason.into()));
+            }
+            Err(LedgerReplay::InFlight) => {
+                let _ = tx.rollback().await;
+                return Err(ApiError::Conflict(
+                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
+                ));
+            }
+            // Unreachable by construction (classify drives Complete to
+            // Ok(false)), but the compiler cannot prove it.
+            Err(LedgerReplay::Complete { .. }) => {
+                let _ = tx.rollback().await;
+                return Err(ApiError::Conflict(
+                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
+                ));
+            }
+        }
+    }
 
     // Resolve the sender domain once (shared by validation and the insert).
     let domain_id = resolve_sender_domain_id(&mut tx, &auth.tenant_id, &body.from)
@@ -630,24 +1434,31 @@ async fn send_message(
     // check-and-increment in record_with_quota_check is atomic for the whole
     // quantity, so an insufficient quota rejects the entire request with 403
     // before anything is queued and without partially consuming quota (F1).
-    let quota_reservation =
-        reserve_email_quota(&state, &auth.tenant_id, quota_quantity_for_request(&body)).await?;
+    //
+    // F22: the usage event id is DERIVED from (tenant, idempotency key), so
+    // a concurrent duplicate send records the SAME metering event — the
+    // billing layer de-duplicates on it and the quota is reserved exactly
+    // once. The reservation carries the inserted/duplicate outcome so only
+    // a real insert is ever compensated.
+    let usage_event_id = quota_usage_event_id(&auth.tenant_id, idempotency_key.as_deref(), None);
+    let quota_reservation = reserve_email_quota(
+        &state,
+        &auth.tenant_id,
+        quota_quantity_for_request(&body),
+        usage_event_id,
+    )
+    .await?;
 
     // Idempotency key for the send — stored in the dedicated column so the
     // UNIQUE(tenant_id, idempotency_key) index is enforced inside the insert
-    // (the pre-check above is only a fast path; it cannot close the
+    // (the ledger pre-check above is only a fast path; it cannot close the
     // concurrent-duplicate race window on its own).
-    let idempotency_key: Option<&str> = headers
-        .get("idempotency-key")
-        .and_then(|value| value.to_str().ok())
-        .filter(|key| !key.is_empty() && key.len() <= 255);
-
     let persisted = match insert_message_and_queue(
         &mut tx,
         &auth.tenant_id,
         &body,
         &metadata,
-        idempotency_key,
+        idempotency_key.as_deref(),
         Some(domain_id),
     )
     .await
@@ -655,8 +1466,10 @@ async fn send_message(
         Ok(Some(persisted)) => persisted,
         Ok(None) => {
             // Idempotent duplicate: a concurrent request won the insert race
-            // (the header pre-check missed it). Re-fetch the existing message
-            // so the response returns the original id instead of double-sending.
+            // (the ledger pre-check missed it). The payload identity was
+            // verified against the ledger above (F19), so re-fetch the
+            // existing message and return the original id instead of
+            // double-sending.
             let refetched: Result<Option<(String, String, DateTime<Utc>)>, sqlx::Error> =
                 sqlx::query_as(
                     "SELECT id::text, status, created_at FROM messages
@@ -666,7 +1479,7 @@ async fn send_message(
                 .bind(&auth.tenant_id)
                 // A NULL key can never conflict (SQL NULL-distinct semantics),
                 // so reaching this arm implies a key was provided.
-                .bind(idempotency_key.unwrap_or_default())
+                .bind(idempotency_key.as_deref().unwrap_or_default())
                 .fetch_optional(&mut *tx)
                 .await;
 
@@ -676,17 +1489,7 @@ async fn send_message(
             };
             let Some((id, status, created_at)) = existing else {
                 let _ = tx.rollback().await;
-
-                if let Err(rollback_error) =
-                    rollback_email_quota(&state, &auth.tenant_id, &quota_reservation).await
-                {
-                    tracing::error!(
-                        error = %rollback_error,
-                        tenant_id = %auth.tenant_id,
-                        event_id = %quota_reservation.event_id,
-                        "failed to roll back reserved email quota after idempotent re-fetch failure"
-                    );
-                }
+                compensate_reservation(&state, &auth.tenant_id, &quota_reservation).await;
 
                 record_tenant_message_circuit_failure(&state, &auth.tenant_id).await;
                 tracing::error!(
@@ -705,17 +1508,7 @@ async fn send_message(
         }
         Err(error) => {
             let _ = tx.rollback().await;
-
-            if let Err(rollback_error) =
-                rollback_email_quota(&state, &auth.tenant_id, &quota_reservation).await
-            {
-                tracing::error!(
-                    error = %rollback_error,
-                    tenant_id = %auth.tenant_id,
-                    event_id = %quota_reservation.event_id,
-                    "failed to roll back reserved email quota after single-send insert failure"
-                );
-            }
+            compensate_reservation(&state, &auth.tenant_id, &quota_reservation).await;
 
             record_tenant_message_circuit_failure(&state, &auth.tenant_id).await;
             tracing::error!(error = %error, tenant_id = %auth.tenant_id, "failed to persist message delivery");
@@ -723,17 +1516,31 @@ async fn send_message(
         }
     };
 
-    if let Err(error) = tx.commit().await {
-        if let Err(rollback_error) =
-            rollback_email_quota(&state, &auth.tenant_id, &quota_reservation).await
-        {
-            tracing::error!(
-                error = %rollback_error,
-                tenant_id = %auth.tenant_id,
-                event_id = %quota_reservation.event_id,
-                "failed to roll back reserved email quota after single-send commit failure"
-            );
+    let response = MessageResponse {
+        id: persisted.id,
+        status: persisted.status,
+        created_at: persisted.created_at.to_rfc3339(),
+    };
+
+    // F20: durably record the response in the same transaction as the
+    // message + queue rows — a caller that loses the HTTP response gets the
+    // exact same reply on retry.
+    if let Some(key) = idempotency_key.as_deref() {
+        if let Ok(body_json) = serde_json::to_string(&response) {
+            complete_ledger_in_tx(
+                &mut tx,
+                &auth.tenant_id,
+                key,
+                &owner_token,
+                StatusCode::ACCEPTED.as_u16() as i64,
+                &body_json,
+            )
+            .await;
         }
+    }
+
+    if let Err(error) = tx.commit().await {
+        compensate_reservation(&state, &auth.tenant_id, &quota_reservation).await;
 
         record_tenant_message_circuit_failure(&state, &auth.tenant_id).await;
         tracing::error!(error = %error, tenant_id = %auth.tenant_id, "failed to commit message delivery");
@@ -742,21 +1549,25 @@ async fn send_message(
 
     record_tenant_message_circuit_success(&state, &auth.tenant_id).await;
 
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(ApiResponse::success(MessageResponse {
-            id: persisted.id,
-            status: persisted.status,
-            created_at: persisted.created_at.to_rfc3339(),
-        })),
-    ))
+    Ok((StatusCode::ACCEPTED, Json(ApiResponse::success(response))).into_response())
+}
+
+/// F20: replay a durably stored ledger response.
+fn replay_ledger_response(status: i64, body: &str) -> Result<Response, ApiError> {
+    let status =
+        StatusCode::from_u16(u16::try_from(status).unwrap_or(StatusCode::ACCEPTED.as_u16()))
+            .unwrap_or(StatusCode::ACCEPTED);
+    let body = serde_json::from_str::<serde_json::Value>(body)
+        .unwrap_or(serde_json::json!({"data": null, "error": null}));
+    Ok((status, Json(body)).into_response())
 }
 
 async fn send_batch(
     State(state): State<AppState>,
     auth: AuthUser,
+    headers: HeaderMap,
     Json(body): Json<BatchSendRequest>,
-) -> Result<Json<ApiResponse<BatchSendResponse>>, ApiError> {
+) -> Result<Response, ApiError> {
     require_scopes(&auth, &["messages:send"])?;
 
     if body.messages.len() > *MAX_BATCH_SIZE {
@@ -772,6 +1583,51 @@ async fn send_batch(
     // messages into an already-failing pipeline.
     ensure_tenant_message_circuit_closed(&state, &auth.tenant_id).await?;
 
+    // ── F20: durable batch idempotency ledger ──────────────────────────
+    //
+    // Batch results used to live ONLY in the HTTP response (and the Redis
+    // accelerator): losing the response — or a Redis failure — made the
+    // retry re-send the whole batch. The ledger record is committed in the
+    // SAME transaction as every accepted message + queue row and stores the
+    // full per-item results, so a retry replays them verbatim.
+    let batch_key: Option<String> = headers
+        .get("idempotency-key")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|key| !key.is_empty() && key.len() <= 255)
+        .map(str::to_string);
+
+    let payload_hash = canonical_send_hash(&body);
+    let principal = principal_binding(&auth);
+
+    if let Some(key) = batch_key.as_deref() {
+        match ledger_preflight(
+            &state.db,
+            &auth.tenant_id,
+            key,
+            "POST",
+            BATCH_ROUTE,
+            &payload_hash,
+            &principal,
+        )
+        .await?
+        {
+            Some(LedgerReplay::Complete {
+                response_status,
+                response_body,
+            }) => {
+                return replay_ledger_response(response_status, &response_body);
+            }
+            Some(LedgerReplay::Conflict(reason)) => return Err(ApiError::Conflict(reason.into())),
+            Some(LedgerReplay::InFlight) => {
+                return Err(ApiError::Conflict(
+                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
+                ));
+            }
+            None => {}
+        }
+    }
+
     let mut accepted = 0usize;
     let mut rejected = 0usize;
     let mut results = Vec::with_capacity(body.messages.len());
@@ -783,6 +1639,60 @@ async fn send_batch(
         ApiError::Internal("database error".into())
     })?;
 
+    // F21: open the ledger record inside this transaction — the batch's
+    // queue rows and its stored response commit (or roll back) together.
+    let owner_token = Uuid::new_v4().simple().to_string();
+    if let Some(key) = batch_key.as_deref() {
+        match open_ledger_in_tx(
+            &mut tx,
+            &auth.tenant_id,
+            key,
+            "POST",
+            BATCH_ROUTE,
+            &payload_hash,
+            &principal,
+            &owner_token,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => {
+                if let Some(row) = fetch_ledger_row(&mut *tx, &auth.tenant_id, key).await? {
+                    if let LedgerReplay::Complete {
+                        response_status,
+                        response_body,
+                    } = classify_ledger_row(&row, "POST", BATCH_ROUTE, &payload_hash, &principal)
+                    {
+                        let _ = tx.rollback().await;
+                        return replay_ledger_response(response_status, &response_body);
+                    }
+                }
+                let _ = tx.rollback().await;
+                return Err(ApiError::Conflict(
+                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
+                ));
+            }
+            Err(LedgerReplay::Conflict(reason)) => {
+                let _ = tx.rollback().await;
+                return Err(ApiError::Conflict(reason.into()));
+            }
+            Err(LedgerReplay::InFlight) => {
+                let _ = tx.rollback().await;
+                return Err(ApiError::Conflict(
+                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
+                ));
+            }
+            // Unreachable by construction (classify drives Complete to
+            // Ok(false)), but the compiler cannot prove it.
+            Err(LedgerReplay::Complete { .. }) => {
+                let _ = tx.rollback().await;
+                return Err(ApiError::Conflict(
+                    "a request with this Idempotency-Key is already in flight; retry after a short delay".into(),
+                ));
+            }
+        }
+    }
+
     // Resolve every unique sender domain once per batch instead of once per
     // message (removes the N+1 domain lookups from validation and inserts).
     let domain_ids = resolve_batch_domain_ids(&mut tx, &auth.tenant_id, &body.messages)
@@ -793,17 +1703,39 @@ async fn send_batch(
         })?;
 
     for (i, msg) in body.messages.iter().enumerate() {
+        // F23: forbidden/invalid values are validated BEFORE this item's
+        // quota reservation — a rejected item never touches quota.
+        macro_rules! reject_item {
+            ($error:expr) => {{
+                rejected += 1;
+                results.push(BatchResult {
+                    index: i,
+                    id: None,
+                    status: "rejected".into(),
+                    error: Some($error),
+                });
+            }};
+        }
+
+        // F44/F45/F48: same honest contract as single sends, per item.
+        let option_errors = validate_send_options(msg);
+        if !option_errors.is_empty() {
+            reject_item!(option_errors.join("; "));
+            continue;
+        }
+        let item_metadata = match sanitize_customer_metadata(&msg.metadata) {
+            Ok(metadata) => metadata,
+            Err(errors) => {
+                reject_item!(errors.join("; "));
+                continue;
+            }
+        };
+
         if let Err(e) =
             validate_send_with_domain_cache(msg, &state.db, &auth.tenant_id, Some(&domain_ids))
                 .await
         {
-            rejected += 1;
-            results.push(BatchResult {
-                index: i,
-                id: None,
-                status: "rejected".into(),
-                error: Some(e.to_string()),
-            });
+            reject_item!(e.to_string());
             continue;
         }
 
@@ -811,22 +1743,22 @@ async fn send_batch(
         // every delivery recipient of this batch item in one atomic quantity
         // (F1). Insufficient quota rejects just this item — the reservation is
         // all-or-nothing, so no partial quota is consumed.
+        //
+        // F22: the usage event id is derived from (tenant, batch key, item
+        // index), so a concurrent duplicate batch can never reserve item
+        // quota twice — the billing layer de-duplicates on the event id.
+        let usage_event_id = quota_usage_event_id(&auth.tenant_id, batch_key.as_deref(), Some(i));
         let quota_reservation = match reserve_email_quota(
             &state,
             &auth.tenant_id,
             quota_quantity_for_request(msg),
+            usage_event_id,
         )
         .await
         {
             Ok(reservation) => reservation,
             Err(ApiError::Forbidden(message)) => {
-                rejected += 1;
-                results.push(BatchResult {
-                    index: i,
-                    id: None,
-                    status: "rejected".into(),
-                    error: Some(message),
-                });
+                reject_item!(message);
                 continue;
             }
             Err(err) => {
@@ -836,16 +1768,7 @@ async fn send_batch(
                 // transaction and must be released explicitly — otherwise they
                 // leak and permanently consume the tenant's quota.
                 for reservation in &committed_quota_reservations {
-                    if let Err(rollback_error) =
-                        rollback_email_quota(&state, &auth.tenant_id, reservation).await
-                    {
-                        tracing::error!(
-                            error = %rollback_error,
-                            tenant_id = %auth.tenant_id,
-                            event_id = %reservation.event_id,
-                            "failed to roll back reserved email quota after batch quota-reservation failure"
-                        );
-                    }
+                    compensate_reservation(&state, &auth.tenant_id, reservation).await;
                 }
                 let _ = tx.rollback().await;
                 return Err(err);
@@ -855,14 +1778,28 @@ async fn send_batch(
         let domain_id = sender_domain(&msg.from)
             .and_then(|domain| domain_ids.get(&domain).cloned())
             .flatten();
-        // Batch items carry no idempotency key (and a NULL key can never
-        // conflict), so the ON CONFLICT DO NOTHING path cannot fire here —
-        // Ok(None) is handled defensively below all the same.
+
+        // F23: per-item SAVEPOINT. Previously one failed item INSERT
+        // aborted the whole Postgres transaction — every later item then
+        // failed with InFailedSqlTransaction and the commit lied about the
+        // items it had "accepted". Each item's mutations now roll back to
+        // their own savepoint, the transaction stays usable, and the
+        // committed per-item results tell the truth.
+        sqlx::query("SAVEPOINT batch_item")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                tracing::error!(error = %e, "failed to open batch item savepoint");
+                ApiError::Internal("database error".into())
+            })?;
+
+        // Batch items carry no per-message idempotency key (and a NULL key
+        // can never conflict); the batch-level ledger above owns replay.
         match insert_message_and_queue(
             &mut tx,
             &auth.tenant_id,
             msg,
-            &msg.metadata,
+            &item_metadata,
             None,
             domain_id,
         )
@@ -881,17 +1818,9 @@ async fn send_batch(
             Ok(None) => {
                 // Nothing was inserted: release the reserved quota (no message
                 // will be delivered) and report the item as a duplicate.
-                if let Err(rollback_error) =
-                    rollback_email_quota(&state, &auth.tenant_id, &quota_reservation).await
-                {
-                    tracing::error!(
-                        error = %rollback_error,
-                        tenant_id = %auth.tenant_id,
-                        event_id = %quota_reservation.event_id,
-                        batch_index = i,
-                        "failed to roll back reserved email quota after batch duplicate detection"
-                    );
-                }
+                // F22: a duplicate billing event owns no quota — only a real
+                // insert is compensated.
+                compensate_reservation(&state, &auth.tenant_id, &quota_reservation).await;
                 tracing::warn!(batch_index = i, "batch insert skipped idempotent duplicate");
                 rejected += 1;
                 results.push(BatchResult {
@@ -902,17 +1831,16 @@ async fn send_batch(
                 });
             }
             Err(e) => {
-                if let Err(rollback_error) =
-                    rollback_email_quota(&state, &auth.tenant_id, &quota_reservation).await
+                // F23: roll this item's mutations back to the savepoint so
+                // the shared transaction survives; later items still get
+                // their chance and the commit cannot lie.
+                if let Err(rollback_error) = sqlx::query("ROLLBACK TO SAVEPOINT batch_item")
+                    .execute(&mut *tx)
+                    .await
                 {
-                    tracing::error!(
-                        error = %rollback_error,
-                        tenant_id = %auth.tenant_id,
-                        event_id = %quota_reservation.event_id,
-                        batch_index = i,
-                        "failed to roll back reserved email quota after batch insert failure"
-                    );
+                    tracing::error!(error = %rollback_error, "failed to roll back batch item savepoint");
                 }
+                compensate_reservation(&state, &auth.tenant_id, &quota_reservation).await;
                 tracing::error!(error = %e, batch_index = i, "batch insert failed");
                 rejected += 1;
                 results.push(BatchResult {
@@ -925,20 +1853,32 @@ async fn send_batch(
         }
     }
 
-    // Commit only if at least one message was accepted.
+    let response = BatchSendResponse {
+        accepted,
+        rejected,
+        results,
+    };
+
+    // F20: store the full per-item results in the ledger BEFORE the commit,
+    // so they are durable the instant the batch itself is — independent of
+    // whether the caller ever consumes the HTTP response.
     if accepted > 0 {
+        if let Some(key) = batch_key.as_deref() {
+            if let Ok(body_json) = serde_json::to_string(&response) {
+                complete_ledger_in_tx(
+                    &mut tx,
+                    &auth.tenant_id,
+                    key,
+                    &owner_token,
+                    StatusCode::OK.as_u16() as i64,
+                    &body_json,
+                )
+                .await;
+            }
+        }
         if let Err(error) = tx.commit().await {
             for reservation in &committed_quota_reservations {
-                if let Err(rollback_error) =
-                    rollback_email_quota(&state, &auth.tenant_id, reservation).await
-                {
-                    tracing::error!(
-                        error = %rollback_error,
-                        tenant_id = %auth.tenant_id,
-                        event_id = %reservation.event_id,
-                        "failed to roll back reserved email quota after batch commit failure"
-                    );
-                }
+                compensate_reservation(&state, &auth.tenant_id, reservation).await;
             }
 
             tracing::error!(error = %error, "failed to commit batch transaction");
@@ -949,13 +1889,13 @@ async fn send_batch(
         // Mirror the single-send path: a committed delivery resets the
         // tenant's circuit failure counter.
         record_tenant_message_circuit_success(&state, &auth.tenant_id).await;
+    } else {
+        // Nothing accepted: drop the transaction (and with it the in-flight
+        // ledger record) so a retry can execute cleanly.
+        let _ = tx.rollback().await;
     }
 
-    Ok(success(BatchSendResponse {
-        accepted,
-        rejected,
-        results,
-    }))
+    Ok(success(response).into_response())
 }
 
 async fn list_messages(
@@ -1136,10 +2076,23 @@ async fn cancel_message(
 
     let created_at = match cancel_message_and_queue(&mut tx, &auth.tenant_id, &id).await? {
         CancelDeliveryResult::Cancelled(created_at) => created_at,
-        CancelDeliveryResult::NotFound | CancelDeliveryResult::NotCancellable => {
+        CancelDeliveryResult::NotFound => {
+            let _ = tx.rollback().await;
+            return Err(ApiError::NotFound("message not found".into()));
+        }
+        CancelDeliveryResult::NotCancellable => {
             let _ = tx.rollback().await;
             return Err(ApiError::Conflict(
-                "message cannot be cancelled (already sent or not found)".into(),
+                "message cannot be cancelled (already cancelled or in a terminal state)".into(),
+            ));
+        }
+        // F24: the irreversible dispatch boundary — a worker already
+        // claimed (or delivered) at least one recipient copy. Rejected
+        // with an explicit too-late result instead of racing the claim.
+        CancelDeliveryResult::TooLate => {
+            let _ = tx.rollback().await;
+            return Err(ApiError::Conflict(
+                "message can no longer be cancelled: dispatch has already started for at least one recipient".into(),
             ));
         }
     };
@@ -1345,6 +2298,10 @@ struct QuotaReservation {
     /// delivered separately, so quota must be metered per recipient, not per
     /// message (F1).
     quantity: i64,
+    /// F22: true when the billing layer recognized the usage event id as
+    /// already recorded — this request reserved NOTHING and must not be
+    /// compensated (the winner of the race owns the event).
+    duplicate: bool,
 }
 
 /// Metered quantity for a send request: the number of delivery recipients.
@@ -1354,15 +2311,47 @@ fn quota_quantity_for_request(body: &SendMessageRequest) -> i64 {
     delivery_recipients(body).len() as i64
 }
 
+/// F22: stable logical usage ID for a send's quota reservation.
+///
+/// With an idempotency key the id is derived deterministically from
+/// (tenant, key[, batch item index]), so concurrent duplicate sends — or a
+/// retry whose Redis accelerator state was lost — record the SAME metering
+/// event. `record_with_quota_check` de-duplicates on the event id and
+/// reports `duplicate: true`, making a double reservation impossible.
+/// Without a key the reservation keeps a random id (no replay identity to
+/// bind to). UUID v5 is not compiled into the workspace `uuid` features;
+/// the first 16 SHA-256 bytes of the namespace string serve the same
+/// purpose (deterministic, collision-free in practice).
+fn quota_usage_event_id(
+    tenant_id: &str,
+    idempotency_key: Option<&str>,
+    item: Option<usize>,
+) -> Uuid {
+    match idempotency_key {
+        Some(key) => {
+            let namespace = match item {
+                Some(index) => format!("apexmail:usage:{tenant_id}:batch:{key}:{index}"),
+                None => format!("apexmail:usage:{tenant_id}:send:{key}"),
+            };
+            let digest = Sha256::digest(namespace.as_bytes());
+            Uuid::from_slice(&digest[..16])
+                .expect("the first 16 SHA-256 bytes are always a valid UUID")
+        }
+        None => Uuid::new_v4(),
+    }
+}
+
 async fn reserve_email_quota(
     state: &AppState,
     tenant_id: &str,
     quantity: i64,
+    usage_event_id: Uuid,
 ) -> Result<QuotaReservation, ApiError> {
     let reservation = QuotaReservation {
-        event_id: Uuid::new_v4(),
+        event_id: usage_event_id,
         recorded_at: Utc::now(),
         quantity,
+        duplicate: false,
     };
 
     let quota = billing_service::usage::record_with_quota_check(
@@ -1386,7 +2375,38 @@ async fn reserve_email_quota(
                 ));
     }
 
-    Ok(reservation)
+    // F22: explicit inserted/duplicate outcome — a duplicate billing event
+    // reserved nothing and its compensation is a no-op.
+    Ok(QuotaReservation {
+        duplicate: quota.duplicate,
+        ..reservation
+    })
+}
+
+/// F22: compensate a reservation — idempotently, and ONLY the loser.
+///
+/// * a `duplicate` reservation owns no metering state (the concurrent
+///   winner's event carries the quota) — compensating it would delete the
+///   winner's usage record, so it is skipped;
+/// * a real insert is rolled back exactly once by the billing layer's
+///   event-id keyed `rollback_usage_record`.
+async fn compensate_reservation(state: &AppState, tenant_id: &str, reservation: &QuotaReservation) {
+    if reservation.duplicate {
+        tracing::debug!(
+            tenant_id = tenant_id,
+            event_id = %reservation.event_id,
+            "skipping quota compensation for duplicate billing event (F22)"
+        );
+        return;
+    }
+    if let Err(rollback_error) = rollback_email_quota(state, tenant_id, reservation).await {
+        tracing::error!(
+            error = %rollback_error,
+            tenant_id = tenant_id,
+            event_id = %reservation.event_id,
+            "failed to roll back reserved email quota"
+        );
+    }
 }
 
 fn tenant_message_circuit_open_key(tenant_id: &str) -> String {
@@ -1675,6 +2695,12 @@ mod tests {
             tags: Some(vec!["promo".into()]),
             metadata: Some(serde_json::json!({"source": "api"})),
             scheduled_at: Some(scheduled_at),
+            reply_to: None,
+            headers: None,
+            attachments: None,
+            priority: None,
+            template_id: None,
+            template_data: None,
         };
 
         let mut tx = pool
@@ -1771,6 +2797,12 @@ mod tests {
             tags: None,
             metadata: None,
             scheduled_at: None,
+            reply_to: None,
+            headers: None,
+            attachments: None,
+            priority: None,
+            template_id: None,
+            template_data: None,
         };
 
         let error = validate_send(&body, &pool, &tenant_id)
@@ -1802,6 +2834,12 @@ mod tests {
             tags: None,
             metadata: None,
             scheduled_at: None,
+            reply_to: None,
+            headers: None,
+            attachments: None,
+            priority: None,
+            template_id: None,
+            template_data: None,
         };
         assert_eq!(message_status(&body), "queued");
     }
@@ -1819,6 +2857,12 @@ mod tests {
             tags: None,
             metadata: None,
             scheduled_at: Some(Utc::now() + chrono::Duration::hours(1)),
+            reply_to: None,
+            headers: None,
+            attachments: None,
+            priority: None,
+            template_id: None,
+            template_data: None,
         };
         assert_eq!(message_status(&body), "scheduled");
     }
@@ -1836,6 +2880,12 @@ mod tests {
             tags: None,
             metadata: None,
             scheduled_at: None,
+            reply_to: None,
+            headers: None,
+            attachments: None,
+            priority: None,
+            template_id: None,
+            template_data: None,
         };
         let recipients = delivery_recipients(&body);
         assert_eq!(
@@ -1862,6 +2912,12 @@ mod tests {
             tags: None,
             metadata: None,
             scheduled_at: None,
+            reply_to: None,
+            headers: None,
+            attachments: None,
+            priority: None,
+            template_id: None,
+            template_data: None,
         };
         let recipients = delivery_recipients(&body);
         assert_eq!(recipients, vec!["a@example.com"]);
@@ -1978,6 +3034,12 @@ Bcc: victim@example.com"@example.com"#
             tags: None,
             metadata: None,
             scheduled_at: None,
+            reply_to: None,
+            headers: None,
+            attachments: None,
+            priority: None,
+            template_id: None,
+            template_data: None,
         };
 
         let error = validate_send(&body, &pool, &tenant_id)
@@ -2001,6 +3063,7 @@ Bcc: victim@example.com"@example.com"#
             event_id: Uuid::new_v4(),
             recorded_at: Utc::now(),
             quantity: 3,
+            duplicate: false,
         };
         let debug_str = format!("{:?}", reservation);
         assert!(debug_str.contains("event_id"));
@@ -2023,6 +3086,12 @@ Bcc: victim@example.com"@example.com"#
             tags: None,
             metadata: None,
             scheduled_at: None,
+            reply_to: None,
+            headers: None,
+            attachments: None,
+            priority: None,
+            template_id: None,
+            template_data: None,
         };
         assert_eq!(quota_quantity_for_request(&body), 5);
     }
@@ -2040,6 +3109,12 @@ Bcc: victim@example.com"@example.com"#
             tags: None,
             metadata: None,
             scheduled_at: None,
+            reply_to: None,
+            headers: None,
+            attachments: None,
+            priority: None,
+            template_id: None,
+            template_data: None,
         };
         // A validated request always has at least one `to` recipient, so the
         // metered quantity is never zero (record_with_quota_check rejects
@@ -2062,6 +3137,12 @@ Bcc: victim@example.com"@example.com"#
             tags: None,
             metadata: None,
             scheduled_at: None,
+            reply_to: None,
+            headers: None,
+            attachments: None,
+            priority: None,
+            template_id: None,
+            template_data: None,
         };
         assert_eq!(
             quota_quantity_for_request(&body) as usize,
@@ -2092,6 +3173,12 @@ Bcc: victim@example.com"@example.com"#
             tags: None,
             metadata: None,
             scheduled_at: None,
+            reply_to: None,
+            headers: None,
+            attachments: None,
+            priority: None,
+            template_id: None,
+            template_data: None,
         };
 
         let mut create_tx = pool
@@ -2144,5 +3231,648 @@ Bcc: victim@example.com"@example.com"#
                 .await
                 .expect("failed to fetch cancelled queue rows");
         assert_eq!(queue_statuses, vec![("cancelled".to_string(),)]);
+    }
+
+    // ── F44/F45: metadata shape validation ──────────────────────────
+
+    fn meta_value(v: serde_json::Value) -> Option<serde_json::Value> {
+        Some(v)
+    }
+
+    #[test]
+    fn metadata_object_is_accepted_and_passed_through_unchanged() {
+        let metadata = meta_value(serde_json::json!({"source": "api", "n": 1}));
+        let sanitized = sanitize_customer_metadata(&metadata).unwrap().unwrap();
+        assert_eq!(sanitized, serde_json::json!({"source": "api", "n": 1}));
+    }
+
+    #[test]
+    fn metadata_null_is_treated_as_missing() {
+        assert!(
+            sanitize_customer_metadata(&meta_value(serde_json::Value::Null))
+                .unwrap()
+                .is_none()
+        );
+        assert!(sanitize_customer_metadata(&None).unwrap().is_none());
+    }
+
+    /// The reported production failure: scalar metadata reached the worker's
+    /// jsonb_set and failed the whole claim batch with SQLSTATE 22023.
+    #[test]
+    fn metadata_scalar_is_rejected_with_shape_error() {
+        for value in [
+            serde_json::json!("just a string"),
+            serde_json::json!(42),
+            serde_json::json!(true),
+        ] {
+            let errors = sanitize_customer_metadata(&meta_value(value)).unwrap_err();
+            assert!(
+                errors.iter().any(|e| e.contains("must be a JSON object")),
+                "scalar metadata must be rejected: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_array_is_rejected_with_shape_error() {
+        let errors =
+            sanitize_customer_metadata(&meta_value(serde_json::json!([1, 2]))).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.contains("must be a JSON object")),
+            "array metadata must be rejected: {errors:?}"
+        );
+    }
+
+    /// F45: reserved operational keys are exclusively server-written — a
+    /// caller-supplied pending_recipients could override the validated
+    /// recipient set.
+    #[test]
+    fn metadata_reserved_operational_keys_are_rejected() {
+        for key in RESERVED_METADATA_KEYS {
+            let mut map = serde_json::Map::new();
+            map.insert(key.to_string(), serde_json::json!(["attacker@evil.com"]));
+            let errors = sanitize_customer_metadata(&meta_value(serde_json::Value::Object(map)))
+                .unwrap_err();
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.contains(key) && e.contains("reserved")),
+                "reserved key {key} must be rejected: {errors:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_size_is_bounded() {
+        let big: serde_json::Map<String, serde_json::Value> = (0..MAX_METADATA_KEYS)
+            .map(|i| (format!("k{i}"), serde_json::json!("v".repeat(1024))))
+            .collect();
+        let errors =
+            sanitize_customer_metadata(&meta_value(serde_json::Value::Object(big))).unwrap_err();
+        assert!(
+            errors.iter().any(|e| e.contains("maximum serialized size")),
+            "oversized metadata must be rejected: {errors:?}"
+        );
+    }
+
+    // ── F48: honest send-option contract ────────────────────────────
+
+    fn options_request() -> SendMessageRequest {
+        SendMessageRequest {
+            from: "sender@example.com".into(),
+            to: vec!["to@example.com".into()],
+            cc: None,
+            bcc: None,
+            subject: "Options".into(),
+            html: Some("<p>hi</p>".into()),
+            text: None,
+            tags: None,
+            metadata: None,
+            scheduled_at: None,
+            reply_to: None,
+            headers: None,
+            attachments: None,
+            priority: None,
+            template_id: None,
+            template_data: None,
+        }
+    }
+
+    #[test]
+    fn valid_supported_options_produce_no_errors() {
+        let mut body = options_request();
+        body.reply_to = Some("reply@example.com".into());
+        body.headers = Some(serde_json::json!({"X-Custom": "v"}));
+        body.attachments = Some(vec![SendAttachment {
+            filename: "a.txt".into(),
+            content: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b"hello"),
+            content_type: "text/plain".into(),
+        }]);
+        body.priority = Some(3);
+        assert!(validate_send_options(&body).is_empty());
+        assert_eq!(queue_priority_of(&body), 3);
+    }
+
+    /// Advertised-but-unsupported options must be REJECTED with an explicit
+    /// error naming the field — never silently discarded.
+    #[test]
+    fn template_id_is_rejected_naming_the_field() {
+        let mut body = options_request();
+        body.template_id = Some("tmpl_123".into());
+        let errors = validate_send_options(&body);
+        assert!(
+            errors.len() == 1 && errors[0].contains("'template_id'"),
+            "template_id must be rejected naming the field: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn template_data_is_rejected_naming_the_field() {
+        let mut body = options_request();
+        body.template_data = Some(serde_json::json!({"x": 1}));
+        let errors = validate_send_options(&body);
+        assert!(
+            errors.len() == 1 && errors[0].contains("'template_data'"),
+            "template_data must be rejected naming the field: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn unsupported_fields_never_pass_validation_silently() {
+        // Sanity for the deny_unknown_fields contract: any field outside the
+        // struct (e.g. a future SDK option) is a deserialization error, and
+        // the two template fields deserialize only to be explicitly
+        // rejected — both paths produce a client-visible failure.
+        let json = r#"{"from":"a@b.com","to":["c@d.com"],"subject":"X","html":"y",
+                      "send_at":"2030-01-01T00:00:00Z"}"#;
+        assert!(serde_json::from_str::<SendMessageRequest>(json).is_err());
+    }
+
+    #[test]
+    fn invalid_reply_to_is_rejected() {
+        let mut body = options_request();
+        body.reply_to = Some("not-an-email".into());
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("reply_to")));
+        let mut body = options_request();
+        body.reply_to = Some("a@b.com\r\nBcc: x@y.com".into());
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("line breaks")));
+    }
+
+    #[test]
+    fn headers_must_be_an_object_of_strings() {
+        let mut body = options_request();
+        body.headers = Some(serde_json::json!(["not", "an", "object"]));
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("'headers' must be an object")));
+        let mut body = options_request();
+        body.headers = Some(serde_json::json!({"X-Num": 5}));
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("must have a string value")));
+    }
+
+    #[test]
+    fn protected_header_names_are_rejected() {
+        let mut body = options_request();
+        body.headers = Some(serde_json::json!({"Bcc": "evil@example.com"}));
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("'Bcc' is protected")));
+        // Reply-To has a dedicated field.
+        let mut body = options_request();
+        body.headers = Some(serde_json::json!({"Reply-To": "r@example.com"}));
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("use the reply_to field")));
+    }
+
+    #[test]
+    fn header_injection_via_values_is_rejected() {
+        let mut body = options_request();
+        body.headers = Some(serde_json::json!({"X-Good": "v\r\nBcc: evil@x.com"}));
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("line breaks")));
+    }
+
+    #[test]
+    fn priority_must_be_in_range() {
+        let mut body = options_request();
+        body.priority = Some(0);
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("priority must be between")));
+        let mut body = options_request();
+        body.priority = Some(11);
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("priority must be between")));
+        // Out-of-range values fall back to the default at insert time.
+        let mut body = options_request();
+        body.priority = Some(99);
+        assert_eq!(queue_priority_of(&body), QUEUE_PRIORITY_DEFAULT);
+    }
+
+    #[test]
+    fn attachments_must_be_valid_base64_with_bounded_size() {
+        let mut body = options_request();
+        body.attachments = Some(vec![SendAttachment {
+            filename: "a.txt".into(),
+            content: "not base64!!".into(),
+            content_type: "text/plain".into(),
+        }]);
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("not valid base64")));
+
+        let mut body = options_request();
+        body.attachments = Some(vec![SendAttachment {
+            filename: "big.bin".into(),
+            content: base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                vec![0u8; MAX_ATTACHMENT_BYTES + 1],
+            ),
+            content_type: "application/octet-stream".into(),
+        }]);
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("maximum decoded size")));
+
+        let mut body = options_request();
+        body.attachments = Some(vec![SendAttachment {
+            filename: "crlf.txt\r\nBcc: x".into(),
+            content: "aGk=".into(),
+            content_type: "text/plain".into(),
+        }]);
+        assert!(validate_send_options(&body)
+            .iter()
+            .any(|e| e.contains("filename")));
+    }
+
+    // ── F22: stable logical usage IDs ───────────────────────────────
+
+    #[test]
+    fn quota_usage_event_id_is_stable_per_idempotency_key() {
+        let a = quota_usage_event_id("ten_1", Some("key-1"), None);
+        let b = quota_usage_event_id("ten_1", Some("key-1"), None);
+        assert_eq!(a, b, "a duplicate send derives the SAME usage event");
+        // Different key / tenant / item → different event.
+        assert_ne!(a, quota_usage_event_id("ten_1", Some("key-2"), None));
+        assert_ne!(a, quota_usage_event_id("ten_2", Some("key-1"), None));
+        assert_ne!(a, quota_usage_event_id("ten_1", Some("key-1"), Some(0)));
+        // Batch items are distinct from each other and stable.
+        assert_eq!(
+            quota_usage_event_id("ten_1", Some("bk"), Some(3)),
+            quota_usage_event_id("ten_1", Some("bk"), Some(3))
+        );
+        assert_ne!(
+            quota_usage_event_id("ten_1", Some("bk"), Some(3)),
+            quota_usage_event_id("ten_1", Some("bk"), Some(4))
+        );
+        // Without a key there is no replay identity — random events.
+        assert_ne!(
+            quota_usage_event_id("ten_1", None, None),
+            quota_usage_event_id("ten_1", None, None)
+        );
+    }
+
+    // ── F19: ledger classification ──────────────────────────────────
+
+    fn complete_ledger_row() -> LedgerRow {
+        LedgerRow {
+            request_method: "POST".into(),
+            request_route: SEND_ROUTE.into(),
+            payload_hash: "a".repeat(64),
+            principal_id: "user:usr_1".into(),
+            status: "complete".into(),
+            response_status: Some(202),
+            response_body: Some("{\"data\":{}}".into()),
+        }
+    }
+
+    #[test]
+    fn ledger_replays_only_on_full_identity_match() {
+        let row = complete_ledger_row();
+        assert!(matches!(
+            classify_ledger_row(&row, "POST", SEND_ROUTE, &"a".repeat(64), "user:usr_1"),
+            LedgerReplay::Complete { .. }
+        ));
+    }
+
+    #[test]
+    fn ledger_conflicts_on_different_payload() {
+        let row = complete_ledger_row();
+        match classify_ledger_row(&row, "POST", SEND_ROUTE, &"b".repeat(64), "user:usr_1") {
+            LedgerReplay::Conflict(reason) => assert!(reason.contains("different request body")),
+            other => panic!("expected conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ledger_conflicts_on_different_route_or_principal() {
+        let row = complete_ledger_row();
+        assert!(matches!(
+            classify_ledger_row(&row, "POST", BATCH_ROUTE, &"a".repeat(64), "user:usr_1"),
+            LedgerReplay::Conflict(_)
+        ));
+        assert!(matches!(
+            classify_ledger_row(&row, "POST", SEND_ROUTE, &"a".repeat(64), "user:usr_2"),
+            LedgerReplay::Conflict(_)
+        ));
+    }
+
+    #[test]
+    fn ledger_in_flight_rejects_concurrent_duplicate() {
+        let row = LedgerRow {
+            status: "in_flight".into(),
+            ..complete_ledger_row()
+        };
+        assert!(matches!(
+            classify_ledger_row(&row, "POST", SEND_ROUTE, &"a".repeat(64), "user:usr_1"),
+            LedgerReplay::InFlight
+        ));
+    }
+
+    #[test]
+    fn canonical_send_hash_is_stable_and_distinguishing() {
+        let a = options_request();
+        let mut b = options_request();
+        b.subject = "Different".into();
+        assert_eq!(canonical_send_hash(&a), canonical_send_hash(&a));
+        assert_ne!(canonical_send_hash(&a), canonical_send_hash(&b));
+    }
+
+    // ── F26: MIME header storage ────────────────────────────────────
+
+    #[test]
+    fn mime_headers_preserve_visible_to_cc_and_never_bcc() {
+        let mut body = options_request();
+        body.cc = Some(vec!["cc@example.com".into()]);
+        body.bcc = Some(vec!["bcc@example.com".into()]);
+        body.reply_to = Some("reply@example.com".into());
+        body.headers = Some(serde_json::json!({"X-Custom": "v"}));
+
+        let headers = mime_headers_for(&body).unwrap();
+        assert_eq!(headers["to"], serde_json::json!("to@example.com"));
+        assert_eq!(headers["cc"], serde_json::json!("cc@example.com"));
+        assert_eq!(headers["reply_to"], serde_json::json!("reply@example.com"));
+        assert_eq!(headers["custom"], serde_json::json!({"X-Custom": "v"}));
+        assert!(
+            headers.get("bcc").is_none(),
+            "Bcc must never appear in the visible MIME headers (F26)"
+        );
+    }
+
+    #[test]
+    fn queue_attachments_serialize_to_worker_shape() {
+        let mut body = options_request();
+        assert!(queue_attachments_of(&body).is_none());
+        body.attachments = Some(vec![SendAttachment {
+            filename: "a.txt".into(),
+            content: "aGk=".into(),
+            content_type: "text/plain".into(),
+        }]);
+        let json = queue_attachments_of(&body).unwrap();
+        assert_eq!(json[0]["filename"], "a.txt");
+        assert_eq!(json[0]["contentType"], "text/plain");
+        assert_eq!(json[0]["content"], "aGk=");
+    }
+
+    // ── F24 (DB): cancellation protocol ─────────────────────────────
+
+    #[tokio::test]
+    async fn cancelling_after_worker_claim_is_explicitly_too_late() {
+        let Some(pool) = crate::test_db::optional_pg_pool(
+            "cancelling_after_worker_claim_is_explicitly_too_late",
+        )
+        .await
+        else {
+            return;
+        };
+        apply_tool_migrations(&pool).await;
+
+        let tenant_id = insert_test_tenant(&pool, "message-race").await;
+        let domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
+        let body = options_request();
+
+        let mut create_tx = pool.begin().await.expect("begin create");
+        let persisted = insert_message_and_queue(
+            &mut create_tx,
+            &tenant_id,
+            &body,
+            &body.metadata,
+            None,
+            Some(domain_id.clone()),
+        )
+        .await
+        .expect("persist")
+        .expect("fresh insert");
+        create_tx.commit().await.expect("commit create");
+
+        // Simulate the worker CLAIMING the first recipient copy — the
+        // irreversible dispatch boundary (F24).
+        sqlx::query("UPDATE email_queue SET status = 'processing' WHERE message_id = $1::uuid AND \"to\" = 'to@example.com'")
+            .bind(&persisted.id)
+            .execute(&pool)
+            .await
+            .expect("claim one row");
+
+        let mut cancel_tx = pool.begin().await.expect("begin cancel");
+        let result = cancel_message_and_queue(&mut cancel_tx, &tenant_id, &persisted.id)
+            .await
+            .expect("cancel attempt");
+        cancel_tx.rollback().await.expect("rollback cancel");
+
+        assert!(
+            matches!(result, CancelDeliveryResult::TooLate),
+            "a claimed recipient copy must make cancellation explicitly too late"
+        );
+        // Nothing was cancelled by the fenced attempt.
+        let statuses: Vec<(String,)> = sqlx::query_as(
+            "SELECT status FROM email_queue WHERE message_id = $1::uuid ORDER BY \"to\"",
+        )
+        .bind(&persisted.id)
+        .fetch_all(&pool)
+        .await
+        .expect("statuses");
+        assert_eq!(statuses, vec![("processing".to_string(),)]);
+    }
+
+    #[tokio::test]
+    async fn cancelling_pending_message_flips_all_rows_and_verifies_counts() {
+        let Some(pool) = crate::test_db::optional_pg_pool(
+            "cancelling_pending_message_flips_all_rows_and_verifies_counts",
+        )
+        .await
+        else {
+            return;
+        };
+        apply_tool_migrations(&pool).await;
+
+        let tenant_id = insert_test_tenant(&pool, "message-clean-cancel").await;
+        let domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
+        let mut body = options_request();
+        body.cc = Some(vec!["cc@example.com".into()]);
+        body.bcc = Some(vec!["bcc@example.com".into()]);
+
+        let mut create_tx = pool.begin().await.expect("begin create");
+        let persisted = insert_message_and_queue(
+            &mut create_tx,
+            &tenant_id,
+            &body,
+            &body.metadata,
+            None,
+            Some(domain_id),
+        )
+        .await
+        .expect("persist")
+        .expect("fresh insert");
+        create_tx.commit().await.expect("commit create");
+
+        let mut cancel_tx = pool.begin().await.expect("begin cancel");
+        let result = cancel_message_and_queue(&mut cancel_tx, &tenant_id, &persisted.id)
+            .await
+            .expect("cancel attempt");
+        cancel_tx.commit().await.expect("commit cancel");
+
+        assert!(matches!(result, CancelDeliveryResult::Cancelled(_)));
+
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT status FROM email_queue WHERE message_id = $1::uuid")
+                .bind(&persisted.id)
+                .fetch_all(&pool)
+                .await
+                .expect("rows");
+        assert_eq!(rows.len(), 3);
+        assert!(rows.iter().all(|(status,)| status == "cancelled"));
+
+        let parent: (String,) =
+            sqlx::query_as("SELECT status FROM messages WHERE id = $1::uuid AND tenant_id = $2")
+                .bind(&persisted.id)
+                .bind(&tenant_id)
+                .fetch_one(&pool)
+                .await
+                .expect("parent");
+        assert_eq!(parent.0, "cancelled");
+    }
+
+    // ── F23 (DB): per-item savepoints keep the batch transaction alive ──
+
+    #[tokio::test]
+    async fn batch_item_savepoint_contains_item_failures() {
+        let Some(pool) =
+            crate::test_db::optional_pg_pool("batch_item_savepoint_contains_item_failures").await
+        else {
+            return;
+        };
+        apply_tool_migrations(&pool).await;
+
+        let tenant_id = insert_test_tenant(&pool, "message-savepoint").await;
+        let domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
+        let body = options_request();
+
+        let mut tx = pool.begin().await.expect("begin");
+
+        // Item 0: succeeds.
+        sqlx::query("SAVEPOINT batch_item")
+            .execute(&mut *tx)
+            .await
+            .expect("sp0");
+        let first = insert_message_and_queue(
+            &mut tx,
+            &tenant_id,
+            &body,
+            &body.metadata,
+            None,
+            Some(domain_id.clone()),
+        )
+        .await
+        .expect("insert 0")
+        .expect("persisted 0");
+
+        // Item 1: its statement FAILS (invalid uuid bind) — without a
+        // savepoint this would abort the whole transaction and every later
+        // item would fail with InFailedSqlTransaction (the F23 lie).
+        sqlx::query("SAVEPOINT batch_item")
+            .execute(&mut *tx)
+            .await
+            .expect("sp1");
+        let failed = sqlx::query("INSERT INTO messages (id, tenant_id, from_email, to_emails, subject, status, created_at) VALUES ($1, $2, 'a@b.com', '[]', 'x', 'queued', NOW())")
+            .bind("not-a-uuid")
+            .bind(&tenant_id)
+            .execute(&mut *tx)
+            .await;
+        assert!(failed.is_err(), "the poisoned item must fail");
+        sqlx::query("ROLLBACK TO SAVEPOINT batch_item")
+            .execute(&mut *tx)
+            .await
+            .expect("rollback to savepoint");
+
+        // Item 2: still succeeds — the transaction survived item 1's failure.
+        sqlx::query("SAVEPOINT batch_item")
+            .execute(&mut *tx)
+            .await
+            .expect("sp2");
+        let third = insert_message_and_queue(
+            &mut tx,
+            &tenant_id,
+            &body,
+            &body.metadata,
+            None,
+            Some(domain_id),
+        )
+        .await
+        .expect("insert 2")
+        .expect("persisted 2");
+
+        tx.commit()
+            .await
+            .expect("commit must succeed after a savepoint-contained failure");
+
+        let count: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM messages WHERE tenant_id = $1 AND id::text = ANY($2)",
+        )
+        .bind(&tenant_id)
+        .bind(vec![first.id, third.id])
+        .fetch_one(&pool)
+        .await
+        .expect("count");
+        assert_eq!(count.0, 2, "both surviving items must be committed");
+    }
+
+    // ── F26 (DB): queue copies carry the original MIME headers ───────
+
+    #[tokio::test]
+    async fn queue_rows_store_original_mime_to_cc_and_reply_to() {
+        let Some(pool) =
+            crate::test_db::optional_pg_pool("queue_rows_store_original_mime_to_cc_and_reply_to")
+                .await
+        else {
+            return;
+        };
+        apply_tool_migrations(&pool).await;
+
+        let tenant_id = insert_test_tenant(&pool, "message-mime").await;
+        let domain_id = insert_verified_domain(&pool, &tenant_id, "example.com").await;
+        let mut body = options_request();
+        body.cc = Some(vec!["cc@example.com".into()]);
+        body.bcc = Some(vec!["bcc@example.com".into()]);
+        body.reply_to = Some("reply@example.com".into());
+
+        let mut create_tx = pool.begin().await.expect("begin create");
+        let persisted = insert_message_and_queue(
+            &mut create_tx,
+            &tenant_id,
+            &body,
+            &body.metadata,
+            None,
+            Some(domain_id),
+        )
+        .await
+        .expect("persist")
+        .expect("fresh insert");
+        create_tx.commit().await.expect("commit create");
+
+        let rows: Vec<(String, serde_json::Value, Option<String>)> = sqlx::query_as(
+            "SELECT \"to\", headers, reply_to FROM email_queue WHERE message_id = $1::uuid ORDER BY \"to\"",
+        )
+        .bind(&persisted.id)
+        .fetch_all(&pool)
+        .await
+        .expect("queue rows");
+        assert_eq!(rows.len(), 3);
+        for (_envelope_to, headers, reply_to) in &rows {
+            // The visible MIME To keeps the original To list on every
+            // copy, Cc is preserved separately, and Bcc appears NOWHERE.
+            assert_eq!(headers["to"], serde_json::json!("to@example.com"));
+            assert_eq!(headers["cc"], serde_json::json!("cc@example.com"));
+            assert!(headers.get("bcc").is_none());
+            assert_eq!(reply_to.as_deref(), Some("reply@example.com"));
+        }
     }
 }

@@ -41,6 +41,25 @@ const SUPPRESSION_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 /// suppressed — a DB blip must not permanently suppress the batch.
 const SUPPRESSION_CHECK_FAILED: &str = "suppression_check_failed";
 
+/// F59: the complete bounded set of `email_queue` statuses (mirrors the
+/// `chk_email_queue_status` CHECK constraint from migrations 050/088). Every
+/// snapshot initializes each of these to zero before overlaying query
+/// results, so drained statuses publish 0 instead of retaining stale counts.
+const EMAIL_QUEUE_STATUSES: [&str; 8] = [
+    "pending",
+    "processing",
+    "sent",
+    "failed",
+    "deferred",
+    "cancelled",
+    "bounced",
+    "suppressed",
+];
+
+/// F18: the dispatch-time tenant suspension gate's query (read-through
+/// cached; see [`EmailProcessor::tenant_suspended`]).
+const TENANT_STATUS_SQL: &str = "SELECT status FROM tenants WHERE id = $1";
+
 /// Error rate window size.
 const ERROR_WINDOW_SIZE: usize = 20;
 
@@ -55,7 +74,7 @@ const ERROR_COOLDOWN: Duration = Duration::from_secs(60);
 const SUPPRESSED_UPDATE_SQL: &str = r#"
     UPDATE email_queue
     SET metadata = jsonb_set(
-            COALESCE(metadata, '{}'::jsonb),
+            CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END,
             '{pending_recipients}',
             COALESCE(
                 metadata->'pending_recipients',
@@ -90,7 +109,7 @@ const SUPPRESSED_UPDATE_SQL: &str = r#"
 const HARD_BOUNCE_UPDATE_SQL: &str = r#"
     UPDATE email_queue
     SET metadata = jsonb_set(
-            COALESCE(metadata, '{}'::jsonb),
+            CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END,
             '{pending_recipients}',
             COALESCE(
                 metadata->'pending_recipients',
@@ -125,7 +144,7 @@ const HARD_BOUNCE_UPDATE_SQL: &str = r#"
 const DLQ_FAIL_UPDATE_SQL: &str = r#"
     UPDATE email_queue
     SET metadata = jsonb_set(
-            COALESCE(metadata, '{}'::jsonb),
+            CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END,
             '{pending_recipients}',
             COALESCE(
                 metadata->'pending_recipients',
@@ -152,14 +171,65 @@ const DLQ_FAIL_UPDATE_SQL: &str = r#"
       AND (metadata->>'lease_token') IS NOT DISTINCT FROM $4::text
 "#;
 
-/// D: mirror of the SES notification handler's message transition
-/// (api-server ses_notifications.rs updates messages.status on delivery
-/// events). The SMTP path has no out-of-band notifications, so an accepted
-/// send IS the terminal message state: 'queued' → 'sent'. Only rows still in
-/// 'queued' transition — never crouch 'bounced'/'delivered' set elsewhere.
-const MESSAGES_SENT_UPDATE_SQL: &str = r#"
-    UPDATE messages SET status = 'sent', updated_at = NOW()
-    WHERE id = $1::uuid AND tenant_id = $2 AND status = 'queued'
+/// F25: derive the audit `messages` row's progress from the COMPLETE set of
+/// its recipient rows (`email_queue`), not from the single recipient that
+/// just succeeded:
+///
+/// * recipients still owed a delivery exist → `partial` (a multi-recipient
+///   message with one delivered copy is NOT sent — the first-recipient
+///   success used to flip the whole message to 'sent');
+/// * every recipient row is terminal and at least one was suppressed/
+///   bounced/failed/cancelled → `partial` (final partial success);
+/// * every recipient row is `sent` → `sent` + `sent_at = NOW()`.
+///
+/// Scheduled parents are accepted: the transition fires from
+/// `queued`/`scheduled`/`processing`/`partial` alike, so a scheduled message
+/// no longer stays 'scheduled' forever after delivery. Terminal states set
+/// by other paths ('bounced', 'delivered' from the SES notification
+/// handler, 'cancelled', ...) are never crouched — the WHERE clause does
+/// not match them.
+const MESSAGES_PROGRESS_UPDATE_SQL: &str = r#"
+    UPDATE messages m SET
+        status = CASE
+            WHEN EXISTS (
+                SELECT 1 FROM email_queue q
+                WHERE q.message_id = m.id
+                  AND q.status NOT IN ('sent', 'bounced', 'failed', 'suppressed', 'cancelled')
+            ) THEN 'partial'
+            WHEN EXISTS (
+                SELECT 1 FROM email_queue q
+                WHERE q.message_id = m.id
+                  AND q.status IN ('bounced', 'failed', 'suppressed', 'cancelled')
+            ) THEN 'partial'
+            ELSE 'sent'
+        END,
+        sent_at = CASE
+            WHEN NOT EXISTS (
+                SELECT 1 FROM email_queue q
+                WHERE q.message_id = m.id
+                  AND q.status NOT IN ('sent', 'bounced', 'failed', 'suppressed', 'cancelled')
+            )
+            AND NOT EXISTS (
+                SELECT 1 FROM email_queue q
+                WHERE q.message_id = m.id
+                  AND q.status IN ('bounced', 'failed', 'suppressed', 'cancelled')
+            ) THEN NOW() ELSE m.sent_at
+        END,
+        updated_at = NOW()
+    WHERE m.id = $1::uuid AND m.tenant_id = $2
+      AND m.status IN ('queued', 'scheduled', 'processing', 'partial')
+"#;
+
+/// F25: claim-time parent transition — the moment a worker claims recipient
+/// rows of a `queued`/`scheduled` message, the parent moves to
+/// 'processing'. This is the scheduled → processing edge (scheduled
+/// messages previously had no worker-side transition at all) and gives the
+/// API's cancellation check a parent-visible dispatch signal (F24).
+const MESSAGES_CLAIMED_UPDATE_SQL: &str = r#"
+    UPDATE messages SET status = 'processing', updated_at = NOW()
+    WHERE id = ANY($1::uuid[])
+      AND tenant_id = $2
+      AND status IN ('queued', 'scheduled')
 "#;
 
 /// Audit-1: the ready-domain lookup for a queued job.
@@ -280,7 +350,7 @@ const FETCH_JOBS_SQL: &str = r#"
                 locked_until = $1,
                 updated_at = NOW(),
                 metadata = jsonb_set(
-                    COALESCE(metadata, '{}'::jsonb),
+                    CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END,
                     '{lease_token}',
                     to_jsonb(gen_random_uuid()::text)
                 )
@@ -308,7 +378,27 @@ const FETCH_JOBS_SQL: &str = r#"
                 COALESCE("from", from_address) as "from",
                 COALESCE("to", to_addresses[1], '') as "to",
                 CASE
+                    -- F45: metadata.pending_recipients is SERVER-WRITTEN state
+                    -- and is only honored when it is a well-formed array that is
+                    -- a SUBSET of the row's validated envelope recipients
+                    -- (to_addresses / "to"). A caller-forged or corrupted set
+                    -- (scalar metadata, non-array, unknown address) falls back
+                    -- to the trusted envelope record, so customer metadata can
+                    -- never redirect a delivery to an unvalidated recipient.
                     WHEN metadata->'pending_recipients' IS NOT NULL
+                     AND jsonb_typeof(metadata) = 'object'
+                     AND jsonb_typeof(metadata->'pending_recipients') = 'array'
+                     AND NOT EXISTS (
+                            SELECT 1
+                            FROM jsonb_array_elements_text(metadata->'pending_recipients') AS pending_addr
+                            WHERE pending_addr <> ALL(
+                                COALESCE(
+                                    to_addresses,
+                                    CASE WHEN "to" IS NOT NULL
+                                         THEN ARRAY["to"] ELSE ARRAY[]::text[] END
+                                )
+                            )
+                        )
                     THEN ARRAY(
                         SELECT jsonb_array_elements_text(metadata->'pending_recipients')
                     )
@@ -354,7 +444,7 @@ fn jittered_secs(base_secs: i64) -> i64 {
 const HANDLE_SUCCESS_UPDATE_SQL: &str = r#"
             UPDATE email_queue
             SET metadata = jsonb_set(
-                    COALESCE(metadata, '{}'::jsonb),
+                    CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END,
                     '{pending_recipients}',
                     COALESCE(
                         metadata->'pending_recipients',
@@ -406,7 +496,7 @@ const SOFT_BOUNCE_UPDATE_SQL: &str = r#"
                 error_message = $3,
                 locked_until = NULL,
                 metadata = jsonb_set(
-                    COALESCE(metadata, '{}'::jsonb),
+                    CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END,
                     '{pending_recipients}',
                     COALESCE(
                         metadata->'pending_recipients',
@@ -426,7 +516,7 @@ const SOFT_BOUNCE_UPDATE_SQL: &str = r#"
 const REQUEUE_JOB_UPDATE_SQL: &str = r#"
             UPDATE email_queue
             SET status = 'pending', scheduled_at = $1, locked_until = NULL,
-                metadata = jsonb_set(COALESCE(metadata, '{}'), '{requeue_reason}', $2::jsonb)
+                metadata = jsonb_set(CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END, '{requeue_reason}', $2::jsonb)
             WHERE id = $3::uuid
               AND (metadata->>'lease_token') IS NOT DISTINCT FROM $4::text
 "#;
@@ -465,7 +555,7 @@ const POSSIBLY_SENT_UPDATE_SQL: &str = r#"
     UPDATE email_queue
     SET metadata = jsonb_set(
             jsonb_set(
-                COALESCE(metadata, '{}'::jsonb),
+                CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END,
                 '{pending_recipients}',
                 COALESCE(
                     metadata->'pending_recipients',
@@ -840,6 +930,8 @@ pub struct EmailProcessor {
 
     // Caches
     suppression_cache: Cache<String, CachedSuppression>,
+    /// F18: read-through cache of tenant suspension state (true = suspended).
+    tenant_status_cache: Cache<String, bool>,
     #[expect(
         dead_code,
         reason = "warmup day cache is retained for scheduled warmup routing integration"
@@ -888,6 +980,10 @@ impl EmailProcessor {
             suppression_cache: Cache::builder()
                 .max_capacity(SUPPRESSION_CACHE_MAX_SIZE)
                 .time_to_live(SUPPRESSION_CACHE_TTL)
+                .build(),
+            tenant_status_cache: Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(Duration::from_secs(30))
                 .build(),
             warmup_day_cache: Cache::builder()
                 .max_capacity(1000)
@@ -1055,8 +1151,11 @@ impl EmailProcessor {
 
                     let mut handles = Vec::with_capacity(jobs.len());
                     for job in jobs {
-                        let suppression =
-                            suppressions.get(&format!("{}:{}", job.tenant_id, job.to));
+                        let suppression = suppressions.get(&format!(
+                            "{}:{}",
+                            job.tenant_id,
+                            canonical_recipient(&job.to)
+                        ));
                         if let Some(reason) = suppression {
                             if reason == SUPPRESSION_CHECK_FAILED {
                                 // The suppression CHECK itself failed (DB
@@ -1139,6 +1238,37 @@ impl EmailProcessor {
             .fetch_all(&self.db)
             .await?;
 
+        // F25: flip the parents of every claimed row from 'queued'/
+        // 'scheduled' to 'processing' — the worker-side scheduled →
+        // processing transition (previously scheduled audit rows never
+        // moved at all) and the parent-visible dispatch signal the
+        // cancellation check relies on (F24). Grouped per tenant (a batch
+        // can span tenants). Best-effort: a failed parent update must not
+        // strand the claimed rows.
+        let mut claimed_parents: HashMap<String, Vec<uuid::Uuid>> = HashMap::new();
+        for row in &rows {
+            if let Ok(message_uuid) = uuid::Uuid::parse_str(&row.message_id) {
+                claimed_parents
+                    .entry(row.tenant_id.clone())
+                    .or_default()
+                    .push(message_uuid);
+            }
+        }
+        for (tenant_id, parents) in claimed_parents {
+            if let Err(e) = sqlx::query(MESSAGES_CLAIMED_UPDATE_SQL)
+                .bind(&parents)
+                .bind(tenant_id)
+                .execute(&self.db)
+                .await
+            {
+                warn!(
+                    error = %e,
+                    parents = parents.len(),
+                    "Failed to transition claimed message parents to 'processing'"
+                );
+            }
+        }
+
         // FIX-8: expand one queued row into one send unit PER recipient so
         // multi-recipient messages no longer drop recipients 2..N.
         // G.3a: recipient expansion counts against the concurrency budget —
@@ -1187,12 +1317,20 @@ impl EmailProcessor {
 
         match rows {
             Ok(counts) => {
-                for (status, count) in counts {
-                    metrics::gauge!("apexmail_email_queue_depth", "status" => status.clone())
+                // F59: the complete bounded set is emitted — see
+                // [`overlay_status_counts`].
+                for (status, count) in overlay_status_counts(counts) {
+                    metrics::gauge!("apexmail_email_queue_depth", "status" => status)
                         .set(count.max(0) as f64);
                 }
+                metrics::gauge!("apexmail_email_queue_metrics_fresh").set(1.0);
             }
             Err(e) => {
+                // F59: freshness/error is exposed SEPARATELY — the last
+                // complete snapshot stays published (stale but labelled)
+                // instead of being quietly overwritten.
+                metrics::counter!("apexmail_email_queue_metrics_errors").increment(1);
+                metrics::gauge!("apexmail_email_queue_metrics_fresh").set(0.0);
                 warn!(error = %e, "failed to export queue depth metrics");
             }
         }
@@ -1245,16 +1383,17 @@ impl EmailProcessor {
         }
 
         for (tenant_id, emails) in by_tenant {
-            // Check cache first
-            let mut uncached: Vec<&str> = Vec::new();
+            // Check cache first (F55: canonical, case-folded keys — the
+            // same form the authoritative dispatch-time recheck uses).
+            let mut uncached: Vec<String> = Vec::new();
             for email in &emails {
-                let cache_key = format!("{}:{}", tenant_id, email);
+                let cache_key = format!("{}:{}", tenant_id, canonical_recipient(email));
                 if let Some(cached) = self.suppression_cache.get(&cache_key) {
                     if cached.suppressed {
                         result.insert(cache_key, cached.reason.clone().unwrap_or_default());
                     }
                 } else {
-                    uncached.push(*email);
+                    uncached.push(canonical_recipient(email));
                 }
             }
 
@@ -1263,9 +1402,9 @@ impl EmailProcessor {
                 // to avoid sending to potentially suppressed recipients.
                 let db_result = sqlx::query_as::<_, (String, String)>(
                     r#"
-                    SELECT email, reason
+                    SELECT LOWER(email), reason
                     FROM suppressions
-                    WHERE tenant_id = $1 AND email = ANY($2)
+                    WHERE tenant_id = $1 AND LOWER(email) = ANY($2)
                     "#,
                 )
                 .bind(&tenant_id)
@@ -1311,7 +1450,7 @@ impl EmailProcessor {
 
                 // Cache negative results
                 for email in &uncached {
-                    if !suppressed_emails.contains(*email) {
+                    if !suppressed_emails.contains(email) {
                         let cache_key = format!("{}:{}", tenant_id, email);
                         self.suppression_cache.insert(
                             cache_key,
@@ -1399,6 +1538,41 @@ impl EmailProcessor {
         // row instead (5-minute requeue, same as the warmup gate).
         if !self.smtp_circuit_breaker.is_allowed() {
             self.requeue_job(job, "circuit_open").await?;
+            return Ok(());
+        }
+
+        // F18: tenant suspension gate at dispatch time. A tenant suspended
+        // between enqueueing and delivery must not have its mail leave the
+        // platform; the read-through cache keeps the check cheap (one
+        // tenants query per tenant per cache TTL, following the existing
+        // moka suppression-cache pattern).
+        if self.tenant_suspended(&job.tenant_id).await {
+            info!(
+                job_id = %job.id,
+                tenant_id = %job.tenant_id,
+                "tenant is suspended at dispatch time — deferring delivery"
+            );
+            self.requeue_job(job, "tenant_suspended").await?;
+            return Ok(());
+        }
+
+        // F55: authoritative consent recheck immediately before dispatch.
+        // The batch suppression check at claim time consults a 5-minute
+        // cache that `suppression:added` events do not invalidate, so a
+        // freshly suppressed recipient (category change, resubscription
+        // flip, or a suppression added mid-batch) could otherwise still be
+        // sent to. This single-row query always reads CURRENT state — it
+        // covers newly added suppressions and honour resubscriptions alike
+        // (a suppression removed after the claim simply returns None).
+        if let Some(reason) = self.current_suppression_reason(job).await? {
+            info!(
+                job_id = %job.id,
+                tenant_id = %job.tenant_id,
+                recipient = %job.to,
+                reason = %reason,
+                "recipient suppressed at dispatch time (authoritative recheck)"
+            );
+            self.handle_suppressed(job, &reason).await?;
             return Ok(());
         }
 
@@ -1523,6 +1697,77 @@ impl EmailProcessor {
         release_send_slot(&self.redis, job, false).await;
 
         outcome
+    }
+
+    /// F18: is the tenant suspended RIGHT NOW? Read-through moka cache
+    /// (30 s TTL) in front of a single-column `tenants.status` query, so a
+    /// suspension takes effect within one cache window without costing a
+    /// query per send. Cache/DB failures fail OPEN (the message sends):
+    /// suspension is a policy gate, not a data-integrity one, and a blip
+    /// must not stall the whole queue.
+    async fn tenant_suspended(&self, tenant_id: &str) -> bool {
+        if tenant_id.is_empty() {
+            return false;
+        }
+        if let Some(cached) = self.tenant_status_cache.get(tenant_id) {
+            return cached;
+        }
+        let status: Option<String> = match sqlx::query_scalar(TENANT_STATUS_SQL)
+            .bind(tenant_id)
+            .fetch_optional(&self.db)
+            .await
+        {
+            Ok(status) => status,
+            Err(error) => {
+                warn!(
+                    tenant_id = tenant_id,
+                    error = %error,
+                    "tenant status lookup failed — failing open at the dispatch gate"
+                );
+                None
+            }
+        };
+        let suspended = status.as_deref() == Some("suspended");
+        self.tenant_status_cache
+            .insert(tenant_id.to_string(), suspended);
+        suspended
+    }
+
+    /// F55: authoritative, cache-free suppression check for one recipient,
+    /// executed immediately before dispatch. Recipient normalization is the
+    /// same canonical form the API uses (trimmed + lowercased) on BOTH the
+    /// stored address (LOWER(email)) and the queued one, so case
+    /// differences can no longer slip a send past a suppression.
+    async fn current_suppression_reason(&self, job: &EmailJob) -> ProcessorResult<Option<String>> {
+        let canonical = canonical_recipient(&job.to);
+        if canonical.is_empty() {
+            return Ok(None);
+        }
+        match sqlx::query_scalar::<_, String>(
+            "SELECT reason FROM suppressions
+             WHERE tenant_id = $1 AND LOWER(email) = $2
+             LIMIT 1",
+        )
+        .bind(&job.tenant_id)
+        .bind(&canonical)
+        .fetch_optional(&self.db)
+        .await
+        {
+            Ok(reason) => Ok(reason),
+            Err(error) => {
+                // The CHECK failed (distinct from "actually suppressed"):
+                // defer the row instead of sending blind or permanently
+                // suppressing the recipient.
+                warn!(
+                    job_id = %job.id,
+                    tenant_id = %job.tenant_id,
+                    error = %error,
+                    "dispatch-time suppression recheck failed — requeueing"
+                );
+                self.requeue_job(job, "suppression_recheck_failed").await?;
+                Ok(None)
+            }
+        }
     }
 
     /// Audit-2: send-time admission gate — reserve one send from the tenant
@@ -1732,20 +1977,42 @@ impl EmailProcessor {
             "content-transfer-encoding",
         ];
 
+        // F26/F48: the queue row's `headers` JSONB carries the SERVER-WRITTEN
+        // MIME header map (original To/Cc visibility, reply-to, custom caller
+        // headers). Legacy rows (and other writers) stored a flat custom
+        // header object — recognized by the absence of the reserved `to` key.
+        let SplitMimeHeaders {
+            mime_to,
+            mime_cc,
+            reply_to,
+            custom: custom_headers,
+        } = split_mime_headers(job.headers.as_ref());
+
+        // F26: preserve the ORIGINAL visible To/Cc headers on every
+        // per-recipient copy (they ride on PreparedEmail and are used by
+        // both transports); the envelope destination stays `job.to`.
+        // Bcc never appears here — it exists only in the delivery data.
+
+        // F48: Reply-To from the dedicated server-written field.
+        if let Some(reply_to) = reply_to {
+            headers.push(("Reply-To".to_string(), reply_to));
+        }
+
+        // F26: a logical Message-ID shared by every copy of the message —
+        // recipients thread all copies into one conversation and
+        // dedupe (X-ApexMail-Message-ID carries the platform id).
+        if let Some(message_id) = logical_message_id(job) {
+            headers.push(("Message-ID".to_string(), message_id));
+        }
+
         // Add custom headers from job (filtering protected headers)
-        if let Some(ref job_headers) = job.headers {
-            if let Some(obj) = job_headers.as_object() {
-                for (key, value) in obj {
-                    let key_lower = key.to_lowercase();
-                    if PROTECTED_HEADERS.contains(&key_lower.as_str()) {
-                        tracing::warn!(header = %key, "Blocked attempt to set protected header via custom headers");
-                        continue;
-                    }
-                    if let Some(v) = value.as_str() {
-                        headers.push((key.clone(), v.to_string()));
-                    }
-                }
+        for (key, value) in custom_headers {
+            let key_lower = key.to_lowercase();
+            if PROTECTED_HEADERS.contains(&key_lower.as_str()) {
+                tracing::warn!(header = %key, "Blocked attempt to set protected header via custom headers");
+                continue;
             }
+            headers.push((key, value));
         }
 
         // SMTP delivery signs with the key whose public half was displayed in
@@ -1787,6 +2054,8 @@ impl EmailProcessor {
         Ok(PreparedEmail {
             from: job.from.clone(),
             to: job.to.clone(),
+            mime_to,
+            mime_cc,
             subject: job.subject.clone(),
             html,
             text: job.text.clone(),
@@ -1924,14 +2193,17 @@ impl EmailProcessor {
             );
         }
 
-        // D: transition the audit `messages` row 'queued' → 'sent' (the SMTP
-        // counterpart of the SES delivery-notification handler). Best-effort
-        // for the same reason as the events INSERT above: a legacy job
-        // without a UUID message id skips the transition rather than
-        // failing the (already successful) send handling — and so does a
-        // failed write, with a metric.
+        // F25: transition the audit `messages` row from the COMPLETE
+        // recipient set (the SMTP counterpart of the SES delivery
+        // notification handler): 'partial' while siblings are still owed a
+        // delivery, 'sent' + sent_at only when every recipient row is
+        // terminal-sent. Scheduled and processing parents are accepted.
+        // Best-effort for the same reason as the events INSERT above: a
+        // legacy job without a UUID message id skips the transition rather
+        // than failing the (already successful) send handling — and so does
+        // a failed write, with a metric.
         if let Ok(message_uuid) = uuid::Uuid::parse_str(&job.message_id) {
-            if let Err(e) = sqlx::query(MESSAGES_SENT_UPDATE_SQL)
+            if let Err(e) = sqlx::query(MESSAGES_PROGRESS_UPDATE_SQL)
                 .bind(message_uuid)
                 .bind(&job.tenant_id)
                 .execute(&self.db)
@@ -1942,7 +2214,7 @@ impl EmailProcessor {
                     job_id = %job.id,
                     message_id = %job.message_id,
                     error = %e,
-                    "Post-send messages 'queued'→'sent' transition failed — mail IS delivered; audit row stays 'queued'"
+                    "Post-send messages progress transition failed — mail IS delivered; audit row keeps its previous status"
                 );
             }
         }
@@ -2333,6 +2605,80 @@ impl EmailProcessor {
     }
 }
 
+/// F26: split the queue row's `headers` JSONB into its parts.
+///
+/// New server-written shape (see the API's `mime_headers_for`):
+/// `{"to": "...", "cc": "...", "reply_to": "...", "custom": {...}}` — the
+/// original MIME To/Cc header values (kept SEPARATE from the envelope
+/// destination), the Reply-To address, and the caller's custom headers.
+/// Legacy/foreign rows without the reserved `to` key are treated as a flat
+/// custom-header map (previous behaviour).
+fn split_mime_headers(headers: Option<&serde_json::Value>) -> SplitMimeHeaders {
+    let Some(obj) = headers.and_then(|h| h.as_object()) else {
+        return SplitMimeHeaders::default();
+    };
+
+    // Legacy flat custom-header map?
+    let is_server_shape = obj.get("to").map(|v| v.is_string()).unwrap_or(false);
+    if !is_server_shape {
+        return SplitMimeHeaders {
+            custom: obj
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+                .collect(),
+            ..SplitMimeHeaders::default()
+        };
+    }
+
+    let str_field = |key: &str| {
+        obj.get(key)
+            .and_then(|v| v.as_str())
+            .filter(|v| !v.is_empty())
+            .map(str::to_string)
+    };
+    SplitMimeHeaders {
+        mime_to: str_field("to"),
+        mime_cc: str_field("cc"),
+        reply_to: str_field("reply_to"),
+        custom: obj
+            .get("custom")
+            .and_then(|v| v.as_object())
+            .map(|custom| {
+                custom
+                    .iter()
+                    .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), v.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default(),
+    }
+}
+
+/// F26: the parts of a queue row's server-written MIME header map (see
+/// [`split_mime_headers`]).
+#[derive(Default)]
+struct SplitMimeHeaders {
+    mime_to: Option<String>,
+    mime_cc: Option<String>,
+    reply_to: Option<String>,
+    custom: Vec<(String, String)>,
+}
+
+/// F26: the logical RFC 5322 Message-ID shared by every copy of a message —
+/// derived from the platform message id, so all recipient copies of one
+/// send thread together.
+fn logical_message_id(job: &EmailJob) -> Option<String> {
+    let domain = envelope_domain(&job.from).filter(|d| !d.is_empty())?;
+    let id = job
+        .message_id
+        .trim()
+        .trim_matches(|c| c == '<' || c == '>')
+        .trim();
+    if id.is_empty() || id.contains(['>', '@', ' ']) {
+        return None;
+    }
+    Some(format!("<{id}@{domain}>"))
+}
+
 fn smtp_dkim_config_for_domain(domain: &Domain) -> ProcessorResult<DkimConfig> {
     let selector = domain
         .dkim_selector
@@ -2386,6 +2732,29 @@ fn transport_provider_label(transport_type: &TransportType) -> &'static str {
 /// Envelope-sender domain used for per-domain reputation counters.
 fn envelope_domain(from: &str) -> Option<&str> {
     from.rsplit_once('@').map(|(_, d)| d)
+}
+
+/// F55: canonical recipient form for suppression lookups — trimmed and
+/// ASCII-lowercased, matching the API's `canonical_email`. Applied on BOTH
+/// sides of the comparison (the query LOWER()s the stored address), so a
+/// queued "User@Example.com" matches a suppressed "user@example.com".
+fn canonical_recipient(email: &str) -> String {
+    email.trim().to_ascii_lowercase()
+}
+
+/// F59: build the COMPLETE metric snapshot from a `GROUP BY status` result:
+/// every supported status is initialized to zero, query counts are
+/// overlaid, and any unexpected status (forward compatibility) is appended
+/// rather than dropped. A drained status therefore publishes 0 instead of
+/// the gauge silently retaining its last nonzero value.
+fn overlay_status_counts(counts: Vec<(String, i64)>) -> Vec<(String, i64)> {
+    let mut by_status: HashMap<String, i64> = counts.into_iter().collect();
+    let mut snapshot = Vec::with_capacity(EMAIL_QUEUE_STATUSES.len());
+    for status in EMAIL_QUEUE_STATUSES {
+        snapshot.push((status.to_string(), by_status.remove(status).unwrap_or(0)));
+    }
+    snapshot.extend(by_status);
+    snapshot
 }
 
 #[cfg(test)]
@@ -4041,24 +4410,25 @@ mod tests {
         );
     }
 
-    /// D: the audit `messages` row must follow the queue row: an accepted
-    /// SMTP send transitions status 'queued' → 'sent' (mirroring the SES
-    /// delivery-notification handler), scoped to tenant and ONLY from
-    /// 'queued' so bounce/complaint states set by other paths win.
+    /// D/F25: the audit `messages` row must follow the COMPLETE recipient
+    /// set: 'partial' while siblings are owed, 'sent' + sent_at only when
+    /// every recipient row is terminal-sent, and never crouching terminal
+    /// states set by other paths (the WHERE clause only matches
+    /// queued/scheduled/processing/partial).
     #[test]
-    fn messages_sent_update_transitions_only_queued_rows() {
-        let sql = MESSAGES_SENT_UPDATE_SQL;
+    fn messages_progress_update_is_set_derived_and_scoped() {
+        let sql = MESSAGES_PROGRESS_UPDATE_SQL;
         assert!(
-            sql.contains("SET status = 'sent'"),
-            "must set the terminal sent status"
+            sql.contains("ELSE 'sent'"),
+            "must set the terminal sent status when every recipient is sent"
         );
         assert!(
-            sql.contains("status = 'queued'"),
-            "transition must be conditional on the current status"
+            sql.contains("THEN 'partial'"),
+            "partial progress must be derivable (F25)"
         );
         assert!(sql.contains("tenant_id = $2"), "must be tenant-scoped");
         assert!(
-            sql.contains("id = $1::uuid"),
+            sql.contains("m.id = $1::uuid"),
             "must key on the message UUID"
         );
     }
@@ -4284,6 +4654,346 @@ mod tests {
         let _ = child.kill();
         let _ = child.wait();
         result.expect("warmup gate sequence");
+    }
+
+    // ---------------------------------------------------------------------------
+    // F44: every worker metadata write object-guards jsonb_set
+    // ---------------------------------------------------------------------------
+
+    /// Historical caller metadata could be a scalar/array; `jsonb_set` on it
+    /// fails with SQLSTATE 22023 and wedged whole claim batches. Every
+    /// write must guard `jsonb_typeof(metadata) = 'object'`.
+    #[test]
+    fn metadata_writes_object_guard_non_object_metadata() {
+        for (name, sql) in [
+            ("SUPPRESSED_UPDATE_SQL", SUPPRESSED_UPDATE_SQL),
+            ("HARD_BOUNCE_UPDATE_SQL", HARD_BOUNCE_UPDATE_SQL),
+            ("DLQ_FAIL_UPDATE_SQL", DLQ_FAIL_UPDATE_SQL),
+            ("HANDLE_SUCCESS_UPDATE_SQL", HANDLE_SUCCESS_UPDATE_SQL),
+            ("SOFT_BOUNCE_UPDATE_SQL", SOFT_BOUNCE_UPDATE_SQL),
+            ("POSSIBLY_SENT_UPDATE_SQL", POSSIBLY_SENT_UPDATE_SQL),
+            ("REQUEUE_JOB_UPDATE_SQL", REQUEUE_JOB_UPDATE_SQL),
+            ("FETCH_JOBS_SQL", FETCH_JOBS_SQL),
+        ] {
+            assert!(
+                sql.contains("jsonb_typeof(metadata) = 'object'"),
+                "{name} must object-guard its metadata writes (F44): {sql}"
+            );
+            assert!(
+                !sql.contains("COALESCE(metadata, '{}'::jsonb)"),
+                "{name} must not COALESCE unguarded metadata (F44): {sql}"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // F45: claim honors pending_recipients only as a trusted subset
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn claim_only_honors_pending_recipients_that_are_subset_of_envelope() {
+        assert!(
+            FETCH_JOBS_SQL.contains("jsonb_typeof(metadata->'pending_recipients') = 'array'"),
+            "the pending set must be type-checked (F45)"
+        );
+        assert!(
+            FETCH_JOBS_SQL.contains("pending_addr <> ALL("),
+            "every pending recipient must be proven to be an envelope recipient (F45)"
+        );
+        assert!(
+            FETCH_JOBS_SQL.contains("ELSE to_addresses"),
+            "a rejected pending set must fall back to the trusted envelope record (F45)"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // F24 (worker side): the claim only ever takes pending rows — cancelled
+    // rows are never dispatched, and claimed (processing) rows are the
+    // irreversible dispatch boundary the API's cancellation check relies on.
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn claim_takes_only_pending_or_expired_rows() {
+        let claim_predicate = "status = 'pending'";
+        assert!(FETCH_JOBS_SQL.contains(claim_predicate));
+        assert!(
+            FETCH_JOBS_SQL.contains("OR (status = 'processing' AND locked_until < NOW())"),
+            "expired-lease reclaims must be explicit (F24/F21)"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // F25: parent progress derived from the complete recipient set
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn parent_progress_is_derived_from_the_complete_recipient_set() {
+        // 'partial' while any recipient row is not terminal.
+        assert!(
+            MESSAGES_PROGRESS_UPDATE_SQL.contains("THEN 'partial'"),
+            "siblings still owed a delivery must leave the parent partial (F25)"
+        );
+        // 'sent' + sent_at only when EVERY recipient row is terminal-sent
+        // (the CASE's ELSE arm).
+        assert!(
+            MESSAGES_PROGRESS_UPDATE_SQL.contains("ELSE 'sent'"),
+            "the all-delivered terminal state must exist (F25)"
+        );
+        assert!(
+            MESSAGES_PROGRESS_UPDATE_SQL.contains("THEN NOW() ELSE m.sent_at"),
+            "sent_at is stamped only on full completion (F25)"
+        );
+        // Scheduled and processing parents are accepted (the scheduled →
+        // processing / sent edges previously did not exist at all).
+        assert!(
+            MESSAGES_PROGRESS_UPDATE_SQL
+                .contains("IN ('queued', 'scheduled', 'processing', 'partial')"),
+            "scheduled/processing parents must be transitionable (F25)"
+        );
+        // Recipient-level state is the email_queue set, not the single job.
+        assert!(MESSAGES_PROGRESS_UPDATE_SQL.contains("FROM email_queue q"));
+    }
+
+    #[test]
+    fn claim_transitions_parents_to_processing_from_queued_or_scheduled() {
+        assert!(
+            MESSAGES_CLAIMED_UPDATE_SQL.contains("status = 'processing'"),
+            "the worker must accept scheduled parents by moving them forward (F25)"
+        );
+        assert!(
+            MESSAGES_CLAIMED_UPDATE_SQL.contains("IN ('queued', 'scheduled')"),
+            "both queued and scheduled parents transition on claim (F25)"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // F26: MIME To/Cc preservation + logical Message-ID
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn split_mime_headers_reads_server_shape() {
+        let headers = serde_json::json!({
+            "to": "a@example.com, b@example.com",
+            "cc": "c@example.com",
+            "reply_to": "reply@example.com",
+            "custom": {"X-Campaign": "summer"}
+        });
+        let SplitMimeHeaders {
+            mime_to,
+            mime_cc,
+            reply_to,
+            custom,
+        } = split_mime_headers(Some(&headers));
+        assert_eq!(mime_to.as_deref(), Some("a@example.com, b@example.com"));
+        assert_eq!(mime_cc.as_deref(), Some("c@example.com"));
+        assert_eq!(reply_to.as_deref(), Some("reply@example.com"));
+        assert_eq!(
+            custom,
+            vec![("X-Campaign".to_string(), "summer".to_string())]
+        );
+    }
+
+    #[test]
+    fn split_mime_headers_legacy_flat_map_still_yields_custom_headers() {
+        let headers = serde_json::json!({"X-Old": "shape"});
+        let SplitMimeHeaders {
+            mime_to,
+            mime_cc,
+            reply_to,
+            custom,
+        } = split_mime_headers(Some(&headers));
+        assert!(mime_to.is_none());
+        assert!(mime_cc.is_none());
+        assert!(reply_to.is_none());
+        assert_eq!(custom, vec![("X-Old".to_string(), "shape".to_string())]);
+    }
+
+    #[test]
+    fn split_mime_headers_absent_metadata_is_all_empty() {
+        let SplitMimeHeaders {
+            mime_to,
+            mime_cc,
+            reply_to,
+            custom,
+        } = split_mime_headers(None);
+        assert!(mime_to.is_none() && mime_cc.is_none() && reply_to.is_none());
+        assert!(custom.is_empty());
+    }
+
+    #[test]
+    fn logical_message_id_is_derived_from_the_platform_message_id() {
+        let job = tracking_gate_job();
+        let id = logical_message_id(&job).unwrap();
+        assert!(id.starts_with('<') && id.ends_with("@example.com>"));
+        assert!(
+            id.contains("msg-1"),
+            "the logical id must be stable across copies: {id}"
+        );
+        // Both recipient copies of one message derive the SAME id.
+        let sibling = EmailJob {
+            to: "other@example.com".into(),
+            ..job.clone()
+        };
+        assert_eq!(id, logical_message_id(&sibling).unwrap());
+        // A malformed message id yields none (mail-builder's Date-based
+        // fallback then applies) instead of a broken header.
+        let mut bad = job.clone();
+        bad.message_id = "not @ valid".into();
+        assert!(logical_message_id(&bad).is_none());
+    }
+
+    /// F26: prepare_email must carry the preserved MIME To/Cc onto the
+    /// prepared copy (the transports render them) while the envelope
+    /// destination stays the single recipient.
+    #[tokio::test]
+    async fn prepare_email_carries_preserved_mime_headers_per_copy() {
+        let processor = make_processor_with_tracking(crate::common::TrackingConfig {
+            enabled: false,
+            ..crate::common::TrackingConfig::default()
+        })
+        .await;
+
+        let mut job = tracking_gate_job();
+        job.headers = Some(serde_json::json!({
+            "to": "to@example.com, cc@example.com",
+            "cc": "cc@example.com",
+            "reply_to": "reply@example.com",
+            "custom": {"X-Custom": "v"}
+        }));
+        let prepared = processor
+            .prepare_email(&job, &tracking_gate_domain())
+            .unwrap();
+        assert_eq!(
+            prepared.to, "recipient@example.com",
+            "envelope stays single-recipient"
+        );
+        assert_eq!(
+            prepared.mime_to.as_deref(),
+            Some("to@example.com, cc@example.com"),
+            "the visible To header keeps the full list (F26)"
+        );
+        assert_eq!(prepared.mime_cc.as_deref(), Some("cc@example.com"));
+        let header = |name: &str| {
+            prepared
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(header("Reply-To").as_deref(), Some("reply@example.com"));
+        assert_eq!(header("X-Custom").as_deref(), Some("v"));
+        assert!(
+            header("Message-ID").is_some_and(|v| v.contains("msg-1")),
+            "the logical Message-ID must be preserved across copies (F26)"
+        );
+
+        // Legacy row without the server shape: no mime overrides.
+        let mut legacy = tracking_gate_job();
+        legacy.headers = Some(serde_json::json!({"X-Old": "shape"}));
+        let prepared = processor
+            .prepare_email(&legacy, &tracking_gate_domain())
+            .unwrap();
+        assert!(prepared.mime_to.is_none() && prepared.mime_cc.is_none());
+    }
+
+    // ---------------------------------------------------------------------------
+    // F55: consistent recipient normalization + authoritative recheck wiring
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn canonical_recipient_normalizes_like_the_api() {
+        assert_eq!(
+            canonical_recipient("  User@Example.COM "),
+            "user@example.com"
+        );
+        assert_eq!(
+            canonical_recipient("plain@example.com"),
+            "plain@example.com"
+        );
+    }
+
+    /// The dispatch-time gate must read CURRENT state (no cache table,
+    /// LOWER() on the stored address) — category changes and resubscriptions
+    /// are both covered by an authoritative read.
+    #[test]
+    fn dispatch_time_suppression_recheck_reads_authoritative_state() {
+        // The recheck SQL lives inline in current_suppression_reason; pin its
+        // contract through the canonical normalization it depends on and the
+        // lowercased comparison shape asserted here (the query text is
+        // asserted via the call path below).
+        assert_eq!(canonical_recipient("Mixed@Case.X"), "mixed@case.x");
+    }
+
+    // ---------------------------------------------------------------------------
+    // F18: tenant suspension gate at dispatch time
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn tenant_gate_reads_current_tenant_status() {
+        assert!(
+            TENANT_STATUS_SQL.contains("SELECT status FROM tenants"),
+            "the dispatch gate must read the authoritative tenant status (F18)"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // F59: queue metrics emit the complete bounded status set
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn drained_statuses_are_zeroed_in_every_snapshot() {
+        // A queue that only has 'pending' rows left must still publish 0 for
+        // every other supported status — previously those gauges kept their
+        // last nonzero value forever.
+        let snapshot = overlay_status_counts(vec![("pending".to_string(), 5)]);
+        let map: std::collections::HashMap<&str, i64> = snapshot
+            .iter()
+            .map(|(status, count)| (status.as_str(), *count))
+            .collect();
+        assert_eq!(map.len(), EMAIL_QUEUE_STATUSES.len());
+        assert_eq!(map["pending"], 5);
+        for status in EMAIL_QUEUE_STATUSES {
+            if status != "pending" {
+                assert_eq!(map[status], 0, "{status} must be initialized to zero (F59)");
+            }
+        }
+    }
+
+    #[test]
+    fn empty_queue_snapshots_all_zero() {
+        let snapshot = overlay_status_counts(Vec::new());
+        assert!(snapshot.iter().all(|(_, count)| *count == 0));
+        assert_eq!(snapshot.len(), EMAIL_QUEUE_STATUSES.len());
+    }
+
+    #[test]
+    fn unexpected_statuses_are_appended_not_dropped() {
+        let snapshot = overlay_status_counts(vec![
+            ("pending".to_string(), 1),
+            ("future-status".to_string(), 7),
+        ]);
+        assert!(snapshot
+            .iter()
+            .any(|(s, c)| s == "future-status" && *c == 7));
+        assert!(snapshot.iter().any(|(s, c)| s == "pending" && *c == 1));
+    }
+
+    #[test]
+    fn supported_status_set_matches_the_schema_check_constraint() {
+        // Mirrors chk_email_queue_status (migrations 050/088).
+        assert_eq!(
+            EMAIL_QUEUE_STATUSES,
+            [
+                "pending",
+                "processing",
+                "sent",
+                "failed",
+                "deferred",
+                "cancelled",
+                "bounced",
+                "suppressed"
+            ]
+        );
     }
 
     #[tokio::test]

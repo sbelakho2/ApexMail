@@ -154,7 +154,14 @@ impl WebhookProcessor {
             r#"
             WITH claimed_jobs AS (
                 UPDATE webhook_queue wq
-                SET status = 'processing', locked_until = NOW() + $2 * INTERVAL '1 second', updated_at = NOW()
+                SET status = 'processing',
+                    locked_until = NOW() + $2 * INTERVAL '1 second',
+                    -- F10: mint the claim's owner token — every completion
+                    -- write below is fenced on it, so a worker whose lease
+                    -- expired cannot reschedule or delete a row the new
+                    -- owner holds.
+                    claim_token = gen_random_uuid()::text,
+                    updated_at = NOW()
                 WHERE wq.id IN (
                     SELECT wq2.id
                     FROM webhook_queue wq2
@@ -168,11 +175,12 @@ impl WebhookProcessor {
                     FOR UPDATE OF wq2 SKIP LOCKED
                 )
                 RETURNING wq.id, wq.webhook_id, wq.tenant_id, wq.event_type,
-                          wq.payload, wq.attempt, wq.created_at
+                          wq.payload, wq.attempt, wq.created_at, wq.claim_token
             )
             SELECT
                 cj.id, cj.webhook_id as "webhookId", cj.tenant_id as "tenantId",
                 cj.event_type as "eventType", cj.payload, cj.attempt, cj.created_at as "createdAt",
+                cj.claim_token as "claimToken",
                 w.url, w.secret, w.headers,
                 (w.retry_policy->>'maxRetries')::int as "maxRetries",
                 (w.retry_policy->>'retryDelay')::int as "retryDelay",
@@ -209,12 +217,18 @@ impl WebhookProcessor {
                 "Per-tenant concurrency limit reached, rescheduling"
             );
             // Reschedule for later
-            sqlx::query(
-                "UPDATE webhook_queue SET status = 'pending', scheduled_at = NOW() + INTERVAL '5 seconds', locked_until = NULL, updated_at = NOW() WHERE id = $1"
+            // F10: fenced on this claim's owner token.
+            let rescheduled = sqlx::query(
+                "UPDATE webhook_queue SET status = 'pending', scheduled_at = NOW() + INTERVAL '5 seconds', locked_until = NULL, updated_at = NOW()
+                 WHERE id = $1 AND (claim_token IS NOT DISTINCT FROM $2)"
             )
             .bind(&job.id)
+            .bind(&job.claim_token)
             .execute(&self.db)
             .await?;
+            if rescheduled.rows_affected() == 0 {
+                warn!(job_id = %job.id, "per-tenant-limit reschedule fenced out — lease lost");
+            }
             return Ok(());
         }
 
@@ -350,10 +364,17 @@ impl WebhookProcessor {
                 attempt = job.attempt,
                 "Webhook already delivered (dedup), cleaning up"
             );
-            sqlx::query("DELETE FROM webhook_queue WHERE id = $1")
-                .bind(&job.id)
-                .execute(&self.db)
-                .await?;
+            // F10: fenced on this claim's owner token.
+            let deleted = sqlx::query(
+                "DELETE FROM webhook_queue WHERE id = $1 AND (claim_token IS NOT DISTINCT FROM $2)",
+            )
+            .bind(&job.id)
+            .bind(&job.claim_token)
+            .execute(&self.db)
+            .await?;
+            if deleted.rows_affected() == 0 {
+                warn!(job_id = %job.id, "dedup cleanup fenced out — lease lost");
+            }
             return Ok(());
         }
 
@@ -369,13 +390,22 @@ impl WebhookProcessor {
             );
             // Reschedule without incrementing attempt
             let retry_delay = job.next_retry_delay_ms().min(30000);
-            sqlx::query(
-                "UPDATE webhook_queue SET status = 'pending', scheduled_at = NOW() + $1 * INTERVAL '1 millisecond', locked_until = NULL, last_error = 'Circuit breaker open — waiting for recovery', updated_at = NOW() WHERE id = $2"
+            // F10: the column is error_message (webhook_queue has no
+            // last_error — the old write failed every time); fenced on the
+            // claim's owner token; attempt is intentionally NOT incremented
+            // (a breaker-open deferral is not a delivery attempt).
+            let rescheduled = sqlx::query(
+                "UPDATE webhook_queue SET status = 'pending', scheduled_at = NOW() + $1 * INTERVAL '1 millisecond', locked_until = NULL, error_message = 'Circuit breaker open — waiting for recovery', updated_at = NOW()
+                 WHERE id = $2 AND (claim_token IS NOT DISTINCT FROM $3)"
             )
             .bind(retry_delay)
             .bind(&job.id)
+            .bind(&job.claim_token)
             .execute(&self.db)
             .await?;
+            if rescheduled.rows_affected() == 0 {
+                warn!(job_id = %job.id, "circuit-breaker reschedule fenced out — lease lost");
+            }
             return Ok(());
         }
 
@@ -744,10 +774,18 @@ impl WebhookProcessor {
             .execute(&self.db)
             .await?;
 
-            sqlx::query("DELETE FROM webhook_queue WHERE id = $1")
-                .bind(&job.id)
-                .execute(&self.db)
-                .await?;
+            // F10: fenced on the claim's owner token.
+            let deleted = sqlx::query(
+                "DELETE FROM webhook_queue WHERE id = $1 AND (claim_token IS NOT DISTINCT FROM $2)",
+            )
+            .bind(&job.id)
+            .bind(&job.claim_token)
+            .execute(&self.db)
+            .await?;
+            if deleted.rows_affected() == 0 {
+                warn!(job_id = %job.id, "dead-letter delete fenced out — lease lost");
+                return Ok(());
+            }
 
             error!(
                 job_id = %job.id,
@@ -764,14 +802,24 @@ impl WebhookProcessor {
                         .map(|ms| ms as i64)
                         .unwrap_or_else(|| job.next_retry_delay_ms());
 
-                    sqlx::query(
-                        "UPDATE webhook_queue SET status = 'pending', attempt = attempt + 1, scheduled_at = NOW() + $1 * INTERVAL '1 millisecond', locked_until = NULL, last_error = $2, updated_at = NOW() WHERE id = $3"
+                    // F10: the column is error_message (webhook_queue has
+                    // no last_error); fenced on the claim's owner token — a
+                    // stale worker must not reschedule the new owner's row.
+                    // Attempt counting and backoff scheduling are unchanged.
+                    let rescheduled = sqlx::query(
+                        "UPDATE webhook_queue SET status = 'pending', attempt = attempt + 1, scheduled_at = NOW() + $1 * INTERVAL '1 millisecond', locked_until = NULL, error_message = $2, updated_at = NOW()
+                         WHERE id = $3 AND (claim_token IS NOT DISTINCT FROM $4)"
                     )
                     .bind(retry_delay)
                     .bind(error_msg)
                     .bind(&job.id)
+                    .bind(&job.claim_token)
                     .execute(&self.db)
                     .await?;
+                    if rescheduled.rows_affected() == 0 {
+                        warn!(job_id = %job.id, "retry reschedule fenced out — lease lost");
+                        return Ok(());
+                    }
 
                     debug!(
                         job_id = %job.id,
@@ -800,10 +848,18 @@ impl WebhookProcessor {
                     .execute(&self.db)
                     .await?;
 
-                    sqlx::query("DELETE FROM webhook_queue WHERE id = $1")
-                        .bind(&job.id)
-                        .execute(&self.db)
-                        .await?;
+                    // F10: fenced on the claim's owner token.
+                    let deleted = sqlx::query(
+                        "DELETE FROM webhook_queue WHERE id = $1 AND (claim_token IS NOT DISTINCT FROM $2)"
+                    )
+                    .bind(&job.id)
+                    .bind(&job.claim_token)
+                    .execute(&self.db)
+                    .await?;
+                    if deleted.rows_affected() == 0 {
+                        warn!(job_id = %job.id, "budget dead-letter delete fenced out — lease lost");
+                        return Ok(());
+                    }
 
                     error!(
                         job_id = %job.id,
@@ -824,14 +880,23 @@ impl WebhookProcessor {
                         .map(|ms| ms as i64)
                         .unwrap_or_else(|| job.next_retry_delay_ms());
 
-                    sqlx::query(
-                        "UPDATE webhook_queue SET status = 'pending', attempt = attempt + 1, scheduled_at = NOW() + $1 * INTERVAL '1 millisecond', locked_until = NULL, last_error = $2, updated_at = NOW() WHERE id = $3"
+                    // F10: error_message (not the nonexistent last_error)
+                    // + claim-token fencing, same as the budget-available
+                    // retry branch.
+                    let rescheduled = sqlx::query(
+                        "UPDATE webhook_queue SET status = 'pending', attempt = attempt + 1, scheduled_at = NOW() + $1 * INTERVAL '1 millisecond', locked_until = NULL, error_message = $2, updated_at = NOW()
+                         WHERE id = $3 AND (claim_token IS NOT DISTINCT FROM $4)"
                     )
                     .bind(retry_delay)
                     .bind(error_msg)
                     .bind(&job.id)
+                    .bind(&job.claim_token)
                     .execute(&self.db)
                     .await?;
+                    if rescheduled.rows_affected() == 0 {
+                        warn!(job_id = %job.id, "retry reschedule (budget-check failure) fenced out — lease lost");
+                        return Ok(());
+                    }
 
                     debug!(
                         job_id = %job.id,
@@ -860,10 +925,18 @@ impl WebhookProcessor {
             .execute(&self.db)
             .await?;
 
-            sqlx::query("DELETE FROM webhook_queue WHERE id = $1")
-                .bind(&job.id)
-                .execute(&self.db)
-                .await?;
+            // F10: fenced on the claim's owner token.
+            let deleted = sqlx::query(
+                "DELETE FROM webhook_queue WHERE id = $1 AND (claim_token IS NOT DISTINCT FROM $2)",
+            )
+            .bind(&job.id)
+            .bind(&job.claim_token)
+            .execute(&self.db)
+            .await?;
+            if deleted.rows_affected() == 0 {
+                warn!(job_id = %job.id, "non-retryable dead-letter delete fenced out — lease lost");
+                return Ok(());
+            }
 
             warn!(
                 job_id = %job.id,
@@ -927,11 +1000,15 @@ impl WebhookProcessor {
                 error!(error = %e, job_id = %job.id, "Failed to insert delivery record");
             }
 
-            // Delete from queue
-            if let Err(e) = sqlx::query("DELETE FROM webhook_queue WHERE id = $1")
-                .bind(&job.id)
-                .execute(&mut *tx)
-                .await
+            // Delete from queue — F10: fenced on this claim's owner token
+            // (a success flush can outlive its visibility lease).
+            if let Err(e) = sqlx::query(
+                "DELETE FROM webhook_queue WHERE id = $1 AND (claim_token IS NOT DISTINCT FROM $2)",
+            )
+            .bind(&job.id)
+            .bind(&job.claim_token)
+            .execute(&mut *tx)
+            .await
             {
                 error!(error = %e, job_id = %job.id, "Failed to delete from queue");
             }
