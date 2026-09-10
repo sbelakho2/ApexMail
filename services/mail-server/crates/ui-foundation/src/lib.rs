@@ -182,8 +182,7 @@ mod tests {
         );
         assert!(
             MARKETING_INPUT_CSS.contains("linear-gradient(135deg, #a81818, #7f1d1d)"),
-            "brand gradient must be red (AA-deepened 2026-09-10: white text "
-                + "needs 4.5+ on every stop)"
+            "brand gradient must be red (AA-deepened 2026-09-10: white text needs 4.5+ on every stop)"
         );
         // The indigo regression values must stay gone.
         assert!(
