@@ -1,4 +1,4 @@
--- 170: contacts.tags validator repair + conservative data reconciliation
+-- Migration 170: contacts.tags validator repair + conservative data reconciliation
 -- (audit F70).
 --
 -- DEFECT BEING REPAIRED (migration 150, already APPLIED in production — its

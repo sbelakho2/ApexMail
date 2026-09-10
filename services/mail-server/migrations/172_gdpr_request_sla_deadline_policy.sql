@@ -1,4 +1,4 @@
--- 172: shared calendar-aware GDPR request SLA deadline policy (audit F78).
+-- Migration 172: shared calendar-aware GDPR request SLA deadline policy (audit F78).
 --
 -- DEFECT: the admin compliance overview queried gdpr_requests.sla_deadline
 -- twice, but that column does not exist in the canonical gdpr_requests

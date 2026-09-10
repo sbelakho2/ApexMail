@@ -1,4 +1,4 @@
--- 082: Health check history — stores periodic system health snapshots.
+-- Migration 082: Health check history — stores periodic system health snapshots.
 --
 -- Used by the health monitoring background task to retain 7 days of hourly
 -- health scores for the /v1/admin/health/history endpoint.

@@ -16,7 +16,10 @@ use sqlx::PgPool;
 use zeroize::Zeroizing;
 
 async fn canonical_pool(db_suffix: &str) -> Option<PgPool> {
-    migrator::test_support::fresh_canonical_pool("isolation_f63", db_suffix).await
+    match migrator::test_support::fresh_canonical_pool("isolation_f63", db_suffix).await {
+        Ok(pool) => pool,
+        Err(error) => panic!("{}", error.panic_message()),
+    }
 }
 
 async fn seed_org_and_workspace(

@@ -1,4 +1,4 @@
--- 182: reconcile legacy abuse reports into the review queue (audit F09).
+-- Migration 182: reconcile legacy abuse reports into the review queue (audit F09).
 --
 -- Migration 133 labelled every pre-existing abuse report 'resolved' with
 -- no review evidence, so recovery logic could never see a legacy abuse

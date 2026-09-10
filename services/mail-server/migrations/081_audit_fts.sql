@@ -1,4 +1,4 @@
--- 081: Full-text search on audit_logs via tsvector column + GIN index.
+-- Migration 081: Full-text search on audit_logs via tsvector column + GIN index.
 --
 -- Adds a generated tsvector column that combines action, resource, resource_id,
 -- user_id, tenant_id, ip_address, and details fields for fast full-text queries.

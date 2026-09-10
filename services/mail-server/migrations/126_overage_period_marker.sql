@@ -1,4 +1,4 @@
--- 126_overage_period_marker.sql
+-- Migration 126: Overage period marker
 --
 -- =============================================================================
 -- 1. invoices.overage_period — explicit idempotency marker for the usage

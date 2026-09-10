@@ -1,4 +1,4 @@
--- 178: complete effective pricing snapshot at period creation (audit F32).
+-- Migration 178: complete effective pricing snapshot at period creation (audit F32).
 --
 -- billing_periods.overage_rate_millicents and currency existed but were
 -- never written: the sweep re-read the CURRENT plan ladder and hardcoded

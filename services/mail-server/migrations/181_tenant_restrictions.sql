@@ -1,4 +1,4 @@
--- 181: independent tenant access restrictions (audit F09).
+-- Migration 181: independent tenant access restrictions (audit F09).
 --
 -- Payment recovery wrote tenants.status = 'active' whenever no open abuse
 -- row existed — clearing administrator suspensions and pending

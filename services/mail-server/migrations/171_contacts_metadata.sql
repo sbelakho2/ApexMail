@@ -1,4 +1,4 @@
--- 171: canonical contacts.metadata column (audit F07).
+-- Migration 171: canonical contacts.metadata column (audit F07).
 --
 -- DEFECT: every contact writer/reader (api-server contacts CRUD, the CSV
 -- import, apexmail-db ContactsRepo) selects or writes contacts.metadata,

@@ -11,7 +11,10 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 async fn canonical_pool(db_suffix: &str) -> Option<PgPool> {
-    migrator::test_support::fresh_canonical_pool("analytics_f84", db_suffix).await
+    match migrator::test_support::fresh_canonical_pool("analytics_f84", db_suffix).await {
+        Ok(pool) => pool,
+        Err(error) => panic!("{}", error.panic_message()),
+    }
 }
 
 async fn seed_placement_result(

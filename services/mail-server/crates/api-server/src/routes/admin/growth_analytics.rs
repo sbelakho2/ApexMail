@@ -870,9 +870,12 @@ mod tests {
     /// schema via the production migrator; gated on TEST_DATABASE_URL.
     #[tokio::test]
     async fn avg_time_to_first_send_matches_exact_expectation() {
-        let Some(pool) =
-            migrator::test_support::fresh_canonical_pool("growth_f79", "first_send").await
-        else {
+        let pool =
+            match migrator::test_support::fresh_canonical_pool("growth_f79", "first_send").await {
+                Ok(pool) => pool,
+                Err(error) => panic!("{}", error.panic_message()),
+            };
+        let Some(pool) = pool else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
             return;
         };

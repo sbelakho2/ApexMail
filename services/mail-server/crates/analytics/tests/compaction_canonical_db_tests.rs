@@ -73,7 +73,10 @@ impl Drop for EphemeralRedis {
 }
 
 async fn canonical_pool(db_suffix: &str) -> Option<PgPool> {
-    migrator::test_support::fresh_canonical_pool("analytics_f83", db_suffix).await
+    match migrator::test_support::fresh_canonical_pool("analytics_f83", db_suffix).await {
+        Ok(pool) => pool,
+        Err(error) => panic!("{}", error.panic_message()),
+    }
 }
 
 fn worker(pool: &PgPool, redis: &EphemeralRedis, storage: &std::path::Path) -> CompactionWorker {

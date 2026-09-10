@@ -1,4 +1,4 @@
--- 197_campaign_arms.sql
+-- Migration 197: Campaign arms
 --
 -- =============================================================================
 -- F85: canonical schema for the campaign autopilot's Thompson-sampling arm

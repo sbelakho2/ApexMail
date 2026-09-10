@@ -1,4 +1,4 @@
--- 180: exclusive collection ownership lease (audit F33).
+-- Migration 180: exclusive collection ownership lease (audit F33).
 --
 -- Collection claiming accepted pending/in_progress rows with no owner: a
 -- claim failure was logged and collection proceeded anyway, and two

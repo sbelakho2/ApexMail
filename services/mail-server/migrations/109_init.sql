@@ -1,4 +1,4 @@
--- 109: folded from crates/mailstore-core/migrations/202602260001_init.sql (idempotent copy) —
+-- Migration 109: folded from crates/mailstore-core/migrations/202602260001_init.sql (idempotent copy) —
 -- the canonical chain owns the shared database's _sqlx_migrations; mailstore's
 -- runtime auto-migrate is gated behind MAILSTORE_RUN_EMBEDDED_MIGRATIONS.
 CREATE EXTENSION IF NOT EXISTS pgcrypto;

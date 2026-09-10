@@ -1,4 +1,4 @@
--- 107: Template version snapshots (audit item L-1).
+-- Migration 107: Template version snapshots (audit item L-1).
 --
 -- POST /v1/templates/:id/rollback restores a template from
 -- `template_versions`, but nothing ever created the table or wrote rows to

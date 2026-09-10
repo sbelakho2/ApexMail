@@ -1,4 +1,4 @@
--- 087: Create scim_users and dunning_records tables.
+-- Migration 087: Create scim_users and dunning_records tables.
 -- These tables are queried by routes/scim.rs (SCIM user provisioning) and
 -- routes/billing.rs (dunning management) but were never created by a migration,
 -- causing runtime 42703 (undefined_table) errors.

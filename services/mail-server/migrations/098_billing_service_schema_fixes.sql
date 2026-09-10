@@ -1,4 +1,4 @@
--- 098: Billing-service schema fixes.
+-- Migration 098: Billing-service schema fixes.
 --
 -- Closes the gap between the billing-service Rust code and the database
 -- schema. Every statement below is idempotent and safe to re-run.

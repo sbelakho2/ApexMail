@@ -1,4 +1,4 @@
--- 058_fix_high_severity_faults.sql
+-- Migration 058: Fix high severity faults
 --
 -- =============================================================================
 -- HIGH SEVERITY MIGRATION FAULTS (H-01 through H-12) + FK INDEX GAP (G-01)

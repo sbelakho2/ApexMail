@@ -1,4 +1,4 @@
--- 089_analytics_hourly.sql
+-- Migration 089: Analytics hourly
 --
 -- =============================================================================
 -- SPLIT-BRAIN RESOLUTION (cont.): analytics_hourly aggregation table

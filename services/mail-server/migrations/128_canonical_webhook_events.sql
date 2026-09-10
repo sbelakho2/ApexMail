@@ -1,4 +1,4 @@
--- 128: canonical webhook event vocabulary (external review 2026-09-08 §7).
+-- Migration 128: canonical webhook event vocabulary (external review 2026-09-08 §7).
 --
 -- Exactly one namespace for message-scoped events: message.*. The legacy
 -- email.* aliases and message.sent are retired; this migration rewrites

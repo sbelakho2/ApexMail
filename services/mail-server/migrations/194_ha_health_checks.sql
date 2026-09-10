@@ -1,4 +1,4 @@
--- 194_ha_health_checks.sql
+-- Migration 194: Ha health checks
 --
 -- =============================================================================
 -- F63: canonical schema for the HA service's persisted health-check results.

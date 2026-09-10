@@ -1,4 +1,4 @@
--- 113: folded from crates/mailstore-core/migrations/202608210001_dedup_exempt.sql (idempotent copy) —
+-- Migration 113: folded from crates/mailstore-core/migrations/202608210001_dedup_exempt.sql (idempotent copy) —
 -- the canonical chain owns the shared database's _sqlx_migrations; mailstore's
 -- runtime auto-migrate is gated behind MAILSTORE_RUN_EMBEDDED_MIGRATIONS.
 -- Scope message-id deduplication to the delivery path (see the shared

@@ -1,4 +1,4 @@
--- 183: credit-note disposition split (audit F60).
+-- Migration 183: credit-note disposition split (audit F60).
 --
 -- Crediting an unpaid invoice both reduced the debt (the outstanding
 -- calculation subtracted the credit) AND minted spendable wallet value —

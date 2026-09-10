@@ -1,4 +1,4 @@
--- 095_mta_bounce_fbl_hardening.sql
+-- Migration 095: Mta bounce fbl hardening
 --
 -- =============================================================================
 -- MTA bounce / FBL hardening support

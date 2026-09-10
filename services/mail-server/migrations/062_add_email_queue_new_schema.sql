@@ -1,4 +1,4 @@
--- 062_add_email_queue_new_schema.sql
+-- Migration 062: Add email queue new schema
 --
 -- Adds columns to email_queue that the EmailProcessor worker and the
 -- API send-message flow (routes/messages.rs) expect but were never

@@ -1,4 +1,4 @@
--- 187_message_category.sql
+-- Migration 187: Message category
 --
 -- F55 (audit findings-2026-09-10): carry a validated, server-owned message
 -- category through enqueue and dispatch so subscription_preferences can be

@@ -1,4 +1,4 @@
--- 138: invoice collection outbox (audit F33).
+-- Migration 138: invoice collection outbox (audit F33).
 --
 -- Collection of a usage invoice (wallet application, Stripe invoice item,
 -- dunning transition) previously ran as best-effort inline code with

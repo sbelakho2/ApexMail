@@ -1,4 +1,4 @@
--- 132: billing_addresses.state / .email (audit F08).
+-- Migration 132: billing_addresses.state / .email (audit F08).
 --
 -- Consumers (api-server admin invoice creation, the accounting CSV export)
 -- select `state` and `email` from billing_addresses, but migration 069's

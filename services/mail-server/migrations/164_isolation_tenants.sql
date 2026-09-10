@@ -1,4 +1,4 @@
--- 164_isolation_tenants.sql
+-- Migration 164: Isolation tenants
 --
 -- =============================================================================
 -- F63: canonical schema for the isolation crate's organization / workspace

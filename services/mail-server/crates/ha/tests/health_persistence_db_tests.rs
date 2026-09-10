@@ -11,7 +11,10 @@ use sqlx::PgPool;
 use std::sync::Arc;
 
 async fn canonical_pool(db_suffix: &str) -> Option<PgPool> {
-    migrator::test_support::fresh_canonical_pool("ha_f63", db_suffix).await
+    match migrator::test_support::fresh_canonical_pool("ha_f63", db_suffix).await {
+        Ok(pool) => pool,
+        Err(error) => panic!("{}", error.panic_message()),
+    }
 }
 
 fn service(pool: &PgPool, node: &str) -> HealthCheckService {

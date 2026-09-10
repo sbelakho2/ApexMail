@@ -1,4 +1,4 @@
--- 186_recipient_delivery_state.sql
+-- Migration 186: Recipient delivery state
 --
 -- F25/F75 (audit findings-2026-09-10): canonical per-recipient delivery
 -- confirmation and the provider-message attribution index.

@@ -1,4 +1,4 @@
--- 061_fix_remaining_db_faults.sql
+-- Migration 061: Fix remaining db faults
 --
 -- =============================================================================
 -- REMAINING MEDIUM/LOW/INFO DATABASE FAULTS (M-01 through M-14, L-01 through

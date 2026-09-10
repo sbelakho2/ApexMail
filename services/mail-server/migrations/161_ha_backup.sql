@@ -1,4 +1,4 @@
--- 161_ha_backup.sql
+-- Migration 161: Ha backup
 --
 -- =============================================================================
 -- F63: canonical schema for the ha crate's backup catalog. backup.rs writes

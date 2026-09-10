@@ -1,4 +1,4 @@
--- 133: abuse_reports status lifecycle (audit F09).
+-- Migration 133: abuse_reports status lifecycle (audit F09).
 --
 -- Payment-recovery paths (billing-service maintenance.rs mark_payment_recovered
 -- and the api-server admin dunning reset) gate tenant reactivation on

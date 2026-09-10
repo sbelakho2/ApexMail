@@ -1,4 +1,4 @@
--- 079: Estonia OÜ legal compliance — submission + deadline tracking.
+-- Migration 079: Estonia OÜ legal compliance — submission + deadline tracking.
 --
 -- Tracks all mandatory Estonian OÜ filings and their deadlines:
 --   1. Annual Report (Majandusaasta aruanne) — due June 30

@@ -1,4 +1,4 @@
--- 050_partition_high_volume_tables.sql
+-- Migration 050: Partition high volume tables
 --
 -- T-102: Table Partitioning for High-Volume Tables
 -- =============================================================================

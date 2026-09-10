@@ -1,4 +1,4 @@
--- 130: invoices.xml_url (audit F05).
+-- Migration 130: invoices.xml_url (audit F05).
 --
 -- The canonical invoice list/detail query in api-server billing.rs selects
 -- `xml_url`, but no migration ever created the column — every list/detail

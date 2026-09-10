@@ -1,4 +1,4 @@
--- 060_add_down_migration_support.sql
+-- Migration 060: Add down migration support
 --
 -- =============================================================================
 -- DOWN MIGRATION INFRASTRUCTURE + TYPE RECONCILIATION

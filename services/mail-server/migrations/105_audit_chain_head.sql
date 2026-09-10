@@ -1,4 +1,4 @@
--- 105: Audit hash-chain head table (audit item M-10).
+-- Migration 105: Audit hash-chain head table (audit item M-10).
 --
 -- Every audited event (login, MFA, recovery, billing, admin actions) used to
 -- link into the hash chain with:

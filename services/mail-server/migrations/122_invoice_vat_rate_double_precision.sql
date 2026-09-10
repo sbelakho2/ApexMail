@@ -1,4 +1,4 @@
--- 122: invoices.vat_rate must hold fractional statutory VAT rates.
+-- Migration 122: invoices.vat_rate must hold fractional statutory VAT rates.
 --
 -- Finland's standard VAT rate is 25.5 % (since 1 September 2024). The
 -- INTEGER column could not represent it, so Finnish B2C invoices were

@@ -1,4 +1,4 @@
--- 177: per-period sweep attempt state (audit F31).
+-- Migration 177: per-period sweep attempt state (audit F31).
 --
 -- One failing period aborted the whole overage sweep (`...await?` on the
 -- first unresolved period), and the sweep's 40-day lookback silently aged

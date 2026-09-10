@@ -1,4 +1,4 @@
--- 051_add_missing_performance_indexes.sql
+-- Migration 051: Add missing performance indexes
 --
 -- T-201: Add Missing Database Indexes (Performance & Scalability Remediation)
 -- =============================================================================

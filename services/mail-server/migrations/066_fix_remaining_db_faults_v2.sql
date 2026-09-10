@@ -1,4 +1,4 @@
--- 066_fix_remaining_db_faults_v2.sql
+-- Migration 066: Fix remaining db faults v2
 --
 -- =============================================================================
 -- COMPREHENSIVE REMAINING DB FAULT FIXES (Phase 2)

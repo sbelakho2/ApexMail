@@ -39,6 +39,11 @@ SHARED_EN = (
     "/privacy/do-not-sell",  # CCPA notice — US-legal document
     "/route-inventory",      # internal tooling page
     "/pgp-key.txt",          # static security-contact key
+    # Delivery Diagnostics: the page's console-screenshot timeline, SMTP
+    # response codes and event vocabulary ARE the product's English
+    # terminology — same developer-audience convention as /docs (the
+    # footer already localizes its link label via i18n footer keys).
+    "/email-logs",
 )
 
 LOCALES = ("de", "fr", "es")

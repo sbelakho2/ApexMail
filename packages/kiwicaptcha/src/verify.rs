@@ -4061,7 +4061,7 @@ mod tests {
     #[test]
     fn binding_tag_canonicalizes_ipv4_mapped_and_parses_families() {
         let secret = "0123456789abcdef0123456789abcdef"; // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret — named test constant / well-known example value in a unit test — no credential
-        // IPv4-mapped IPv6 normalizes to 4-byte IPv4.
+                                                         // IPv4-mapped IPv6 normalizes to 4-byte IPv4.
         assert_eq!(
             binding_tag("n", "::ffff:192.168.1.5", secret).unwrap(),
             binding_tag("n", "192.168.1.5", secret).unwrap()

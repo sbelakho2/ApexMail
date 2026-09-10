@@ -1,4 +1,4 @@
--- 139: separate Stripe invoice-item ids from invoice ids (audit F34).
+-- Migration 139: separate Stripe invoice-item ids from invoice ids (audit F34).
 --
 -- The overage collection ladder stored the id of the Stripe INVOICE ITEM
 -- it created (`ii_...`) into invoices.stripe_invoice_id — a column the

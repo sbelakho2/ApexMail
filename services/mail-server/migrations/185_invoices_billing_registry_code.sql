@@ -1,4 +1,4 @@
--- 185: freeze the export-relevant buyer registry identity at issue time
+-- Migration 185: freeze the export-relevant buyer registry identity at issue time
 -- (audit F08).
 --
 -- The accounting export's Registrikood column was sourced from mutable

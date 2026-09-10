@@ -1,4 +1,4 @@
--- 179: canonical logical usage-operation ledger (audit F71).
+-- Migration 179: canonical logical usage-operation ledger (audit F71).
 --
 -- Generic metering deduplicated with a check-then-insert race: the
 -- existence pre-check keys on metering_events.id, but that table is

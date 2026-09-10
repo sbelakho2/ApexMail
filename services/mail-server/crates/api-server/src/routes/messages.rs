@@ -4441,14 +4441,22 @@ Bcc: victim@example.com"@example.com"#
 
         let parsed = test_parsed_addresses(&body);
         let headers = mime_headers_for(&body, &parsed).unwrap();
-        assert_eq!(headers["to"], serde_json::json!("to@example.com"));
+        // Joined legacy strings carry EVERY visible recipient (the
+        // comma-joined display form the worker's legacy parser reads).
+        assert_eq!(
+            headers["to"],
+            serde_json::json!("to@example.com, second@example.com")
+        );
         assert_eq!(headers["cc"], serde_json::json!("cc@example.com"));
         assert_eq!(headers["reply_to"], serde_json::json!("reply@example.com"));
         assert_eq!(headers["custom"], serde_json::json!({"X-Custom": "v"}));
         // F48: the structured mailbox arrays mirror the joined strings.
         assert_eq!(
             headers["to_mailboxes"],
-            serde_json::json!([{ "email": "to@example.com" }])
+            serde_json::json!([
+                { "email": "to@example.com" },
+                { "email": "second@example.com" }
+            ])
         );
         assert_eq!(
             headers["from_mailbox"],

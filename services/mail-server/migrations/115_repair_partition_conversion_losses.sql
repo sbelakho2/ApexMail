@@ -1,4 +1,4 @@
--- 115_repair_partition_conversion_losses.sql
+-- Migration 115: Repair partition conversion losses
 --
 -- =============================================================================
 -- Fix-forward repair for databases that ran the canonical chain while

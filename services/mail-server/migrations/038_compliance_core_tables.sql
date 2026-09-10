@@ -1,4 +1,4 @@
--- 038: Compliance core tables.
+-- Migration 038: Compliance core tables.
 --
 -- Persists state for the `compliance` crate (audit_logger, secret_manager,
 -- risk_scoring, content_scanner, gdpr_automation). Prior migrations did not

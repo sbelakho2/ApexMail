@@ -1,4 +1,4 @@
--- 140: durable invoice payment allocations (audit F35).
+-- Migration 140: durable invoice payment allocations (audit F35).
 --
 -- Wallet deductions settled usage invoices by writing a wallet_transactions
 -- row only — nothing tied the payment to the invoice, so outstanding

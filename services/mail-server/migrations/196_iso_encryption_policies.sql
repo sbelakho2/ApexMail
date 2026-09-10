@@ -1,4 +1,4 @@
--- 196_iso_encryption_policies.sql
+-- Migration 196: Iso encryption policies
 --
 -- =============================================================================
 -- F63: canonical schema for the isolation crate's field-encryption policy

@@ -1,4 +1,4 @@
--- 198_status_page_incidents_resolved_at.sql
+-- Migration 198: Status page incidents resolved at
 --
 -- =============================================================================
 -- F86: status_page_incidents.resolved_at. The IncidentRepo

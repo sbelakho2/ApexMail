@@ -1,4 +1,4 @@
--- 135: backfill stripe_subscriptions.plan from the authoritative price
+-- Migration 135: backfill stripe_subscriptions.plan from the authoritative price
 -- mapping (audit F27).
 --
 -- The subscription upsert never persisted `plan` (it stayed NULL on insert

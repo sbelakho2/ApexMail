@@ -1,4 +1,4 @@
--- 118_dunning_event_invoice_id_width.sql
+-- Migration 118: Dunning event invoice id width
 --
 -- =============================================================================
 -- dunning_events.invoice_id was VARCHAR(26), sized for local 26-char ids,

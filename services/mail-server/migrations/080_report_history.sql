@@ -1,4 +1,4 @@
--- 080: Automated report generation — report_history table.
+-- Migration 080: Automated report generation — report_history table.
 --
 -- Stores generated daily/weekly/monthly reports for admin download.
 

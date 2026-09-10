@@ -1,4 +1,4 @@
--- 150: canonical contacts.tags column (audit F07).
+-- Migration 150: canonical contacts.tags column (audit F07).
 --
 -- contacts has two creation shapes in the chain and neither gives bulk
 -- tagging a usable column:

@@ -1,4 +1,4 @@
--- 199_payroll_tax_inputs.sql
+-- Migration 199: Payroll tax inputs
 --
 -- =============================================================================
 -- F81: canonical payroll model with the per-employee tax inputs the

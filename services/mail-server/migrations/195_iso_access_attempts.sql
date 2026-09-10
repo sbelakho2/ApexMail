@@ -1,4 +1,4 @@
--- 195_iso_access_attempts.sql
+-- Migration 195: Iso access attempts
 --
 -- =============================================================================
 -- F63: canonical schema for the isolation crate's data-access audit trail.

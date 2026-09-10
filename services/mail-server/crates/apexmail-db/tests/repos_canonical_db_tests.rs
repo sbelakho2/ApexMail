@@ -9,7 +9,10 @@ use apexmail_db::types::IspWarmupExecution;
 use sqlx::PgPool;
 
 async fn canonical_pool(db_suffix: &str) -> Option<PgPool> {
-    migrator::test_support::fresh_canonical_pool("apexdb_f86_f87", db_suffix).await
+    match migrator::test_support::fresh_canonical_pool("apexdb_f86_f87", db_suffix).await {
+        Ok(pool) => pool,
+        Err(error) => panic!("{}", error.panic_message()),
+    }
 }
 
 // ── F86: incidents ───────────────────────────────────────────────────────────

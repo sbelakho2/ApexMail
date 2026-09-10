@@ -1,4 +1,4 @@
--- 096_messages_idempotency_column.sql
+-- Migration 096: Messages idempotency column
 --
 -- =============================================================================
 -- Idempotency key column on `messages`

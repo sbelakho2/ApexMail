@@ -1,4 +1,4 @@
--- 184: subscription event ordering watermark (audit F36).
+-- Migration 184: subscription event ordering watermark (audit F36).
 --
 -- handle_subscription_change read and validated the current subscription
 -- BEFORE acquiring the tenant entitlement lock, then applied the event

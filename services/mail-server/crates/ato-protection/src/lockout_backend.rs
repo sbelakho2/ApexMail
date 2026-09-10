@@ -450,7 +450,10 @@ mod tests {
 
     #[test]
     fn test_redis_backend_noop() {
-        let backend = RedisLockoutBackend::new("redis://localhost:6379".into());
+        // Port 1 is the deterministic dead-end the CI pipeline pins (a
+        // developer-machine Redis on 6379 made this test environment-
+        // dependent: the backend then actually recorded the lockout).
+        let backend = RedisLockoutBackend::new("redis://127.0.0.1:1".into());
         backend.record_lockout("user1", 3600);
         assert_eq!(backend.recent_lockouts("user1", 3600), 0);
         backend.clear("user1"); // Should not panic

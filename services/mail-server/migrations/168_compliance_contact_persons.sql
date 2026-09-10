@@ -1,4 +1,4 @@
--- 168_compliance_contact_persons.sql
+-- Migration 168: Compliance contact persons
 --
 -- =============================================================================
 -- F63: canonical schema for the compliance crate's Estonian OÜ contact

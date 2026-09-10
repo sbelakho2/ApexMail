@@ -567,9 +567,13 @@ mod tests {
     /// TEST_DATABASE_URL via the canonical migrator fixture.
     #[tokio::test]
     async fn inbound_reply_ingests_exactly_one_analytics_event_under_retry() {
-        let Some(pool) =
-            migrator::test_support::fresh_canonical_pool("worker_f67", "reply_handoff").await
-        else {
+        let pool = match migrator::test_support::fresh_canonical_pool("worker_f67", "reply_handoff")
+            .await
+        {
+            Ok(pool) => pool,
+            Err(error) => panic!("{}", error.panic_message()),
+        };
+        let Some(pool) = pool else {
             eprintln!("skipping: set TEST_DATABASE_URL to run DB-backed test");
             return;
         };
