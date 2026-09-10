@@ -256,7 +256,7 @@ mod tests {
 
     #[test]
     fn confirmation_page_renders_post_form_not_get_link() {
-        let token = "qLR6jSz1GePJxneHSEllfRrJbLjpeqSiDD6NaB6nFF6_3Jv3ciCb2g7ZEVUic7np62bt2Dgnd9-mt5USUxH4wJCdfP4";
+        let token = "TESTTOKEN0TESTTOKEN0TESTTOKEN0TESTTOKEN0TESTTOKEN0TESTTOKEN0TESTTOKEN";
         let html = render_confirmation_page(token, "user@example.com", "/u");
 
         // Plain HTML form POST (accessible, no JS) to the confirm endpoint.
