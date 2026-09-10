@@ -471,6 +471,13 @@ async function auditTask(browser, port, task, results) {
       let verdict = null, failSource = null;
       if (domFail) { verdict = 'fail-aa'; failSource = gradientBg ? 'pixel' : 'dom'; stats.textAaFail++; }
       else if (!gradientBg && pixelFail && pixel < aaTh - 0.75) { verdict = 'pixel-suspect'; failSource = 'pixel'; stats.pixelSuspect++; }
+      // Gradient floors: when the element also paints a SOLID fallback
+      // color whose DOM ratio clears AA by a full point, a pixel reading
+      // below AA is a measurement conflict (fullPage captures mis-sample
+      // elements in sticky headers on very tall pages), not proof —
+      // downgrade to review. Genuine gradient failures keep failing:
+      // their solid-floor DOM ratio is marginal, so this arm never fires.
+      else if (gradientBg && effPixel != null && effPixel < aaTh && domRatio >= aaTh + 1) { verdict = 'pixel-suspect'; failSource = 'pixel'; stats.pixelSuspect++; }
       else if (effRatio < aaaTh) { verdict = 'fail-aaa'; stats.textAaaOnlyFail++; }
       if (verdict) {
         violations.push({
