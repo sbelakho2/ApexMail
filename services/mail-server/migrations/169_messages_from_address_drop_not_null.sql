@@ -24,7 +24,19 @@
 -- constraint, keep the data. The 001 CHECK on the column treats NULL as
 -- satisfied, so no further change is needed. DROP NOT NULL on the
 -- partitioned parent propagates to every partition.
-ALTER TABLE messages ALTER COLUMN from_address DROP NOT NULL;
+-- Existence-guarded: production's live chain partitioned/recreated `messages`
+-- via the runtime shape (050/073) and no longer carries from_address at all —
+-- the canonical scratch chain (001 legacy base) does. Both lineages are valid
+-- post-073; the constraint relaxation only applies where the column exists.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'public'
+                 AND table_name = 'messages'
+                 AND column_name = 'from_address') THEN
+        EXECUTE 'ALTER TABLE messages ALTER COLUMN from_address DROP NOT NULL';
+    END IF;
+END $$;
 
 -- Same convergence class, second instance surfaced by the F01 test
 -- centralization: `support_tickets` (075) was created without the id DEFAULT
