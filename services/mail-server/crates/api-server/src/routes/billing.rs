@@ -348,6 +348,9 @@ fn map_usage_error(error: usage::UsageError) -> ApiError {
         usage::UsageError::InvalidQuantity(quantity) => {
             ApiError::BadRequest(format!("usage quantity must be positive, got {quantity}"))
         }
+        usage::UsageError::OperationConflict { event_id, detail } => ApiError::Conflict(format!(
+            "usage operation {event_id} was already used with different content: {detail}"
+        )),
     }
 }
 
@@ -3962,60 +3965,25 @@ async fn admin_reset_dunning(
     }
 
     let admin_id = admin_actor_id(&auth);
+
+    // Audit F09 — the manual reset follows the SAME restriction-aware rule
+    // as payment recovery, through the shared billing-service contract:
+    // clear ONLY the billing restriction, preserve pending verification,
+    // administrative and abuse restrictions, and recompute tenant state +
+    // queued-message eligibility in one transaction with its own abuse
+    // predicate. A single status column write can no longer clear an
+    // unrelated hold.
+    billing_service::maintenance::admin_reset_dunning_restriction_aware(
+        &state.db,
+        &state.redis,
+        &tenant_id,
+        &admin_id,
+        &body.reason,
+    )
+    .await
+    .map_err(ApiError::Internal)?;
+
     let mut tx = state.db.begin().await?;
-
-    sqlx::query(
-        r#"
-        WITH update_dunning AS (
-            UPDATE dunning_records
-            SET status = 'healthy',
-                failed_payment_count = 0,
-                first_failed_at = NULL,
-                last_failed_at = NULL,
-                next_retry_at = NULL,
-                suspended_at = NULL,
-                grace_period_ends_at = NULL,
-                updated_at = NOW()
-            WHERE tenant_id = $1
-            RETURNING tenant_id
-        ),
-        log_recovery AS (
-            INSERT INTO dunning_events (id, tenant_id, event_type, created_at)
-            VALUES (gen_random_uuid(), $1, 'payment_recovered', NOW())
-            RETURNING tenant_id
-        ),
-        reactivate_tenant AS (
-            UPDATE tenants
-            SET status = 'active', updated_at = NOW()
-            WHERE id = $1
-              AND NOT EXISTS (
-                SELECT 1 FROM abuse_reports ar
-                WHERE ar.tenant_id = $1 AND ar.status IN ('open', 'investigating', 'confirmed')
-              )
-            RETURNING id
-        )
-        SELECT 1
-        "#,
-    )
-    .bind(&tenant_id)
-    .execute(&mut *tx)
-    .await?;
-
-    let _released_count: i64 = sqlx::query_scalar(
-        r#"
-        WITH updated AS (
-            UPDATE messages
-            SET status = 'queued', updated_at = NOW()
-            WHERE tenant_id = $1 AND status = 'dunning_queued'
-            RETURNING id
-        )
-        SELECT COUNT(*)::bigint FROM updated
-        "#,
-    )
-    .bind(&tenant_id)
-    .fetch_one(&mut *tx)
-    .await?;
-
     let actor_id: Option<uuid::Uuid> = uuid::Uuid::parse_str(&admin_id).ok();
     sqlx::query(
         r#"
@@ -4028,7 +3996,7 @@ async fn admin_reset_dunning(
     .bind("dunning_reset")
     .bind(actor_id)
     .bind("admin")
-    .bind(serde_json::json!({ "reason": body.reason }))
+    .bind(serde_json::json!({ "reason": body.reason, "restrictionAware": true }))
     .execute(&mut *tx)
     .await?;
 
@@ -4150,6 +4118,30 @@ async fn admin_create_invoice(
         email: address.email,
     };
 
+    // Audit F08 — the admin writer snapshots the SAME versioned address
+    // contract billing-service writers use: snapshotVersion + the
+    // export-relevant registry identity frozen at issue time. Null/empty
+    // optional fields stay null in the snapshot (readers choose
+    // snapshot-vs-live once per invoice and never refill them).
+    let billing_registry_code: Option<String> =
+        sqlx::query_scalar("SELECT settings->>'registryCode' FROM tenants WHERE id = $1")
+            .bind(&tenant_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let address_snapshot = serde_json::json!({
+        "snapshotVersion": billing_service::invoices::BILLING_ADDRESS_SNAPSHOT_VERSION,
+        "company_name": billing_address.company_name,
+        "vat_number": billing_address.vat_number,
+        "address_line1": billing_address.address_line1,
+        "address_line2": billing_address.address_line2,
+        "city": billing_address.city,
+        "state": billing_address.state,
+        "postal_code": billing_address.postal_code,
+        "country": billing_address.country,
+        "email": billing_address.email,
+        "registry_code": billing_registry_code,
+    });
+
     // EU/Estonian VAT requires unique, sequential invoice numbers; the admin
     // path shares the platform sequence (YYYY-NNNNNN) instead of minting
     // random, gapped numbers that interleave with the sequence-based ones.
@@ -4246,11 +4238,13 @@ async fn admin_create_invoice(
         INSERT INTO invoices (
             id, tenant_id, stripe_invoice_id, invoice_number, status, currency,
             amount, subtotal, vat_total, total, line_items, billing_address,
+            billing_registry_code,
             issued_at, due_at, period_start, period_end,
             purchase_order_number, notes, created_at, updated_at
         ) VALUES (
             gen_random_uuid(), $1, NULL, $2, 'draft', $3,
             $6, $4, $5, $6, $7, $8,
+            $14,
             $9, $10, $11, $12,
             NULL, $13, NOW(), NOW()
         )
@@ -4264,12 +4258,13 @@ async fn admin_create_invoice(
     .bind(vat_total)
     .bind(total)
     .bind(serde_json::to_value(&line_items)?)
-    .bind(serde_json::to_value(&billing_address)?)
+    .bind(&address_snapshot)
     .bind(now)
     .bind(due_at)
     .bind(period_start)
     .bind(period_end)
     .bind(body.notes.clone())
+    .bind(&billing_registry_code)
     .fetch_one(&mut *tx)
     .await?;
 

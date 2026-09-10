@@ -7,12 +7,123 @@ use chrono::{DateTime, Datelike, Utc};
 use deadpool_redis::Pool as RedisPool;
 use redis::AsyncCommands;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::plans::builtin_quota_limits;
 use crate::routes::append_audit_log;
 use crate::types::{MeterEventType, UsageSummary};
+
+// ---------------------------------------------------------------------------
+// Canonical logical usage-operation ledger (audit F71)
+// ---------------------------------------------------------------------------
+
+/// Outcome of claiming a logical usage operation in the canonical
+/// `usage_operations` ledger (migration 179).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UsageOperationClaim {
+    /// First claim of this logical operation. `original_timestamp` is the
+    /// IMMUTABLE first-claim timestamp every durable (re-)recording of the
+    /// operation must use — the partitioned metering table can never hold
+    /// two rows for one logical operation at different timestamps.
+    Claimed { original_timestamp: DateTime<Utc> },
+    /// The same logical operation with the SAME bound content was already
+    /// claimed — an idempotent replay.
+    Replay { original_timestamp: DateTime<Utc> },
+    /// The logical id was reused with DIFFERENT content — rejected, never
+    /// silently re-counted.
+    Conflict,
+}
+
+/// Canonical content hash binding a logical usage operation to its
+/// tenant/kind/payload (audit F71). Computed from the CALLER-supplied
+/// payload only (before subscription-context enrichment, which varies
+/// over time), so a genuine retry hashes identically and a divergent
+/// reuse does not.
+pub fn usage_payload_hash(
+    tenant_id: &str,
+    event_type: &str,
+    quantity: i64,
+    event_id: Uuid,
+    metadata: Option<&serde_json::Value>,
+) -> String {
+    let canonical = serde_json::json!({
+        "tenant": tenant_id,
+        "kind": event_type,
+        "quantity": quantity,
+        "eventId": event_id,
+        "metadata": metadata.unwrap_or(&serde_json::Value::Null),
+    });
+    let digest = Sha256::digest(canonical.to_string().as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// Globally-unique logical operation key (audit F71): tenant + kind +
+/// logical event id. The ledger's UNIQUE(operation_key) is the durable,
+/// cross-process fence the Redis dedup key cannot provide.
+fn usage_operation_key(tenant_id: &str, event_type: &str, event_id: Uuid) -> String {
+    format!("{tenant_id}:{event_type}:{event_id}")
+}
+
+/// The SHARED operation claim API (audit F71): claims a logical usage
+/// operation exactly once in the canonical ledger, on the caller's
+/// transaction, BEFORE the metering row (and its quota effects) is
+/// written. Both generic metering ([`record_usage`]) and send
+/// reservations ([`record_with_quota_check`] — preserving F22's claim
+/// ordering: Redis fast-path, reservation, then this durable fence)
+/// route through it.
+async fn claim_usage_operation_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: &str,
+    event_type: &str,
+    event_id: Uuid,
+    quantity: i64,
+    metadata: Option<&serde_json::Value>,
+) -> Result<UsageOperationClaim, UsageError> {
+    let payload_hash = usage_payload_hash(tenant_id, event_type, quantity, event_id, metadata);
+    let operation_key = usage_operation_key(tenant_id, event_type, event_id);
+
+    let inserted: Option<DateTime<Utc>> = sqlx::query_scalar(
+        r#"
+        INSERT INTO usage_operations (
+            operation_key, tenant_id, event_kind, event_id, payload_hash, original_timestamp
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        ON CONFLICT (operation_key) DO NOTHING
+        RETURNING original_timestamp
+        "#,
+    )
+    .bind(&operation_key)
+    .bind(tenant_id)
+    .bind(event_type)
+    .bind(event_id)
+    .bind(&payload_hash)
+    .bind(Utc::now())
+    .fetch_optional(&mut **tx)
+    .await?;
+    if let Some(original_timestamp) = inserted {
+        return Ok(UsageOperationClaim::Claimed { original_timestamp });
+    }
+
+    // Lost the race (or a retry): same content is a replay, different
+    // content is a rejected reuse of the logical id.
+    let existing: Option<(String, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT payload_hash, original_timestamp FROM usage_operations WHERE operation_key = $1",
+    )
+    .bind(&operation_key)
+    .fetch_optional(&mut **tx)
+    .await?;
+    match existing {
+        Some((hash, original_timestamp)) if hash == payload_hash => {
+            Ok(UsageOperationClaim::Replay { original_timestamp })
+        }
+        Some(_) => Ok(UsageOperationClaim::Conflict),
+        // Unreachable without concurrent deletion; treat conservatively as
+        // a conflict so nothing is double-counted.
+        None => Ok(UsageOperationClaim::Conflict),
+    }
+}
 
 /// Lua script that atomically sets the dedup key and increments the counter.
 /// This prevents the data race between dedup-check and counter-update that
@@ -224,70 +335,90 @@ pub async fn record_usage(
 
     let id = event_id.unwrap_or_else(Uuid::new_v4);
     let now = Utc::now();
+    let caller_metadata = metadata.clone();
     let meta = enrich_usage_metadata(pool, tenant_id, now, metadata).await?;
     let cycle_anchor = tenant_cycle_anchor(pool, tenant_id, now).await;
 
     // 1. Persist to DB and append an immutable audit record in the same
     //    transaction. metering_events is RANGE-partitioned by "timestamp"
     //    with PRIMARY KEY (id, timestamp), so the ON CONFLICT arbiter must
-    //    include the partition key (a bare (id) arbiter is 42P10). Dedupe
-    //    stays keyed on id alone: the existence pre-check catches
-    //    sequential retries (which re-derive the same deterministic event
-    //    id with a fresh timestamp), and the arbiter only fences the
-    //    same-instant race.
+    //    include the partition key (a bare (id) arbiter is 42P10).
+    //
+    //    Audit F71: the check-then-insert existence race is closed by
+    //    claiming the logical operation in the canonical usage_operations
+    //    ledger FIRST, in the SAME transaction. The claim fixes the
+    //    IMMUTABLE original timestamp, so two attempts carrying the same
+    //    logical id at different wall-clock times can never produce two
+    //    metering rows (quantity counted twice); a divergent reuse of the
+    //    id is rejected outright.
     let mut tx = pool.begin().await.map_err(UsageError::Db)?;
     let event_type_str = event_type_to_str(event_type);
-    let audit_result = async {
-        let already_recorded: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM metering_events WHERE id = $1)")
+    // Ok(true) = a NEW metering row was written; Ok(false) = ledger replay
+    // (the row already exists — the Redis dedup key is republished instead
+    // of re-running the counter EVAL, which would otherwise double-count
+    // after a Redis flush).
+    let audit_result: Result<bool, UsageError> = async {
+        match claim_usage_operation_in_tx(
+            &mut tx,
+            tenant_id,
+            event_type_str,
+            id,
+            quantity,
+            caller_metadata.as_ref(),
+        )
+        .await?
+        {
+            UsageOperationClaim::Claimed { original_timestamp } => {
+                let recorded_at = original_timestamp;
+                sqlx::query(
+                    r#"
+                    INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (id, "timestamp") DO NOTHING
+                    "#,
+                )
                 .bind(id)
-                .fetch_one(&mut *tx)
+                .bind(tenant_id)
+                .bind(event_type_str)
+                .bind(quantity)
+                .bind(recorded_at)
+                .bind(&meta)
+                .execute(&mut *tx)
                 .await
                 .map_err(UsageError::Db)?;
 
-        if already_recorded {
-            // Duplicate: no insert, no audit. The Redis dedup key from the
-            // original recording still steers the counter below, so the
-            // function's duplicate result comes from the EVAL path.
-            tx.commit().await.map_err(UsageError::Db)?;
-            return Ok(());
+                append_audit_log(
+                    &mut tx,
+                    tenant_id,
+                    "billing.metering_event_recorded",
+                    "metering_event",
+                    Some(&id.to_string()),
+                    serde_json::Value::Object(build_metering_audit_metadata(
+                        event_type_str,
+                        quantity,
+                        recorded_at,
+                        &meta,
+                    )),
+                    recorded_at,
+                )
+                .await
+                .map_err(UsageError::Audit)?;
+
+                tx.commit().await.map_err(UsageError::Db)?;
+                Ok(true)
+            }
+            UsageOperationClaim::Replay { .. } => {
+                // The durable row exists (or a concurrent writer is
+                // committing it under the same claim); nothing to insert
+                // or audit.
+                tx.commit().await.map_err(UsageError::Db)?;
+                Ok(false)
+            }
+            UsageOperationClaim::Conflict => Err(UsageError::OperationConflict {
+                event_id: id,
+                detail: "usage operation id reused with different tenant/kind/payload".into(),
+            }),
         }
-
-        sqlx::query(
-            r#"
-            INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (id, "timestamp") DO NOTHING
-            "#,
-        )
-        .bind(id)
-        .bind(tenant_id)
-        .bind(event_type_str)
-        .bind(quantity)
-        .bind(now)
-        .bind(&meta)
-        .execute(&mut *tx)
-        .await
-        .map_err(UsageError::Db)?;
-
-        append_audit_log(
-            &mut tx,
-            tenant_id,
-            "billing.metering_event_recorded",
-            "metering_event",
-            Some(&id.to_string()),
-            serde_json::Value::Object(build_metering_audit_metadata(
-                event_type_str,
-                quantity,
-                now,
-                &meta,
-            )),
-            now,
-        )
-        .await
-        .map_err(UsageError::Audit)?;
-
-        tx.commit().await.map_err(UsageError::Db)
     }
     .await;
 
@@ -301,8 +432,12 @@ pub async fn record_usage(
     let period_key = usage_counter_key_anchored(tenant_id, event_type, now, cycle_anchor);
     let mut conn = redis.get().await.map_err(UsageError::Redis)?;
 
-    // DB insert failed — nothing was persisted, no Redis state to rollback.
-    audit_result?;
+    // DB outcome (audit F71): a ledger REPLAY whose Redis dedup key is
+    // still present EVALs to 0 below (duplicate). If the key was lost
+    // (Redis flush / post-commit compensation), the EVAL re-publishes it
+    // and restores the real-time counter — the durable ledger keeps the
+    // billing-side exactly-once either way.
+    let _newly_recorded = audit_result?;
 
     // Execute the atomic Lua script: SET NX dedup + INCRBY counter.
     // Fix F8 — on a post-commit Redis failure the DB row is already durable
@@ -727,6 +862,7 @@ pub async fn record_with_quota_check(
 
     let id = event_id.unwrap_or_else(Uuid::new_v4);
     let now = Utc::now();
+    let caller_metadata = metadata.clone();
     let meta = enrich_usage_metadata(pool, tenant_id, now, metadata).await?;
     // Billing-cycle period key (see record_usage): the reservation gate, the
     // fast-path read here, and the rollback must all derive the SAME key or
@@ -798,68 +934,82 @@ pub async fn record_with_quota_check(
     }
 
     // 4. Persist to DB and append an immutable audit record in the same
-    //    transaction. metering_events is partitioned by "timestamp" with
-    //    PRIMARY KEY (id, timestamp): the arbiter must carry the partition
-    //    key (bare (id) is 42P10), so the id-keyed replay recognition is
-    //    the existence pre-check (retries re-derive the deterministic id
-    //    with a fresh timestamp) and rows_affected == 0 covers only the
-    //    same-instant race.
+    //    transaction. Audit F71: the logical operation is claimed in the
+    //    canonical usage_operations ledger FIRST, inside this transaction —
+    //    the claim binds tenant/kind/payload (divergent reuse is rejected)
+    //    and fixes the IMMUTABLE original timestamp, so the partitioned
+    //    metering table's (id, timestamp) uniqueness fences the row exactly
+    //    (two attempts of one logical operation at different wall-clock
+    //    times can never count twice). Send reservations (F22's
+    //    deterministic event ids) route through the SAME claim API, keeping
+    //    the reservation-then-durable-fence ordering.
     let mut tx = pool.begin().await.map_err(UsageError::Db)?;
     let event_type_str = event_type_to_str(event_type);
-    let persist_result: Result<u64, UsageError> = async {
-        let already_recorded: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM metering_events WHERE id = $1)")
-                .bind(id)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(UsageError::Db)?;
-        if already_recorded {
-            tx.commit().await.map_err(UsageError::Db)?;
-            return Ok(0);
-        }
-
-        let inserted = sqlx::query(
-            r#"
-            INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
-            VALUES ($1, $2, $3, $4, $5, $6)
-            ON CONFLICT (id, "timestamp") DO NOTHING
-            "#,
-        )
-        .bind(id)
-        .bind(tenant_id)
-        .bind(event_type_str)
-        .bind(quantity)
-        .bind(now)
-        .bind(&meta)
-        .execute(&mut *tx)
-        .await
-        .map_err(UsageError::Db)?;
-
-        append_audit_log(
+    let persist_result: Result<bool, UsageError> = async {
+        match claim_usage_operation_in_tx(
             &mut tx,
             tenant_id,
-            "billing.metering_event_recorded",
-            "metering_event",
-            Some(&id.to_string()),
-            serde_json::Value::Object(build_metering_audit_metadata(
-                event_type_str,
-                quantity,
-                now,
-                &meta,
-            )),
-            now,
+            event_type_str,
+            id,
+            quantity,
+            caller_metadata.as_ref(),
         )
-        .await
-        .map_err(UsageError::Audit)?;
+        .await?
+        {
+            UsageOperationClaim::Claimed { original_timestamp } => {
+                let recorded_at = original_timestamp;
+                let inserted = sqlx::query(
+                    r#"
+                    INSERT INTO metering_events (id, tenant_id, event_type, quantity, timestamp, metadata)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    ON CONFLICT (id, "timestamp") DO NOTHING
+                    "#,
+                )
+                .bind(id)
+                .bind(tenant_id)
+                .bind(event_type_str)
+                .bind(quantity)
+                .bind(recorded_at)
+                .bind(&meta)
+                .execute(&mut *tx)
+                .await
+                .map_err(UsageError::Db)?;
 
-        tx.commit().await.map_err(UsageError::Db)?;
-        Ok(inserted.rows_affected())
+                append_audit_log(
+                    &mut tx,
+                    tenant_id,
+                    "billing.metering_event_recorded",
+                    "metering_event",
+                    Some(&id.to_string()),
+                    serde_json::Value::Object(build_metering_audit_metadata(
+                        event_type_str,
+                        quantity,
+                        recorded_at,
+                        &meta,
+                    )),
+                    recorded_at,
+                )
+                .await
+                .map_err(UsageError::Audit)?;
+
+                tx.commit().await.map_err(UsageError::Db)?;
+                Ok(inserted.rows_affected() > 0)
+            }
+            UsageOperationClaim::Replay { .. } => {
+                tx.commit().await.map_err(UsageError::Db)?;
+                Ok(false)
+            }
+            UsageOperationClaim::Conflict => Err(UsageError::OperationConflict {
+                event_id: id,
+                detail: "usage operation id reused with different tenant/kind/payload".into(),
+            }),
+        }
     }
     .await;
 
     match persist_result {
-        Ok(rows_affected) => {
-            if rows_affected == 0 {
+        Ok(newly_recorded) => {
+            if !newly_recorded {
                 // Duplicate replay that raced past the Redis fast path:
                 // compensate the reservation and mark the dedup key so the
                 // next replay short-circuits in step 1.
@@ -1261,6 +1411,10 @@ pub enum UsageError {
     RedisCmd(#[from] redis::RedisError),
     #[error("quantity must be positive, got {0}")]
     InvalidQuantity(i64),
+    /// Audit F71: a logical usage operation id was reused with different
+    /// tenant/kind/payload content — rejected instead of re-counted.
+    #[error("usage operation {event_id} conflict: {detail}")]
+    OperationConflict { event_id: Uuid, detail: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -1696,6 +1850,86 @@ mod tests {
         assert_eq!(
             enriched["subscriptionId"],
             serde_json::json!("sub_existing")
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // Audit F71 — the logical usage operation is bound to its content.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn usage_payload_hash_is_deterministic_for_identical_content() {
+        let id = Uuid::new_v4();
+        let metadata = serde_json::json!({ "messageId": "m-1" });
+        let first = usage_payload_hash("tenant-1", "emails_sent", 3, id, Some(&metadata));
+        let second = usage_payload_hash("tenant-1", "emails_sent", 3, id, Some(&metadata));
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
+    }
+
+    #[test]
+    fn usage_payload_hash_rejects_divergent_reuse() {
+        let id = Uuid::new_v4();
+        let base = usage_payload_hash("tenant-1", "emails_sent", 3, id, None);
+        // Different tenant, kind, quantity, event id or payload content
+        // each produce a DIFFERENT hash — the ledger flags them as a
+        // rejected Conflict, never as a replay.
+        assert_ne!(
+            usage_payload_hash("tenant-2", "emails_sent", 3, id, None),
+            base
+        );
+        assert_ne!(
+            usage_payload_hash("tenant-1", "api_calls", 3, id, None),
+            base
+        );
+        assert_ne!(
+            usage_payload_hash("tenant-1", "emails_sent", 4, id, None),
+            base
+        );
+        assert_ne!(
+            usage_payload_hash("tenant-1", "emails_sent", 3, Uuid::new_v4(), None),
+            base
+        );
+        assert_ne!(
+            usage_payload_hash(
+                "tenant-1",
+                "emails_sent",
+                3,
+                id,
+                Some(&serde_json::json!({ "messageId": "m-2" }))
+            ),
+            base
+        );
+        // Absent and explicitly-null metadata bind identically.
+        assert_eq!(
+            usage_payload_hash(
+                "tenant-1",
+                "emails_sent",
+                3,
+                id,
+                Some(&serde_json::Value::Null)
+            ),
+            base
+        );
+    }
+
+    #[test]
+    fn usage_operation_key_is_globally_unique_per_logical_operation() {
+        let id = Uuid::new_v4();
+        assert_eq!(
+            usage_operation_key("tenant-1", "emails_sent", id),
+            format!("tenant-1:emails_sent:{id}")
+        );
+        // Different tenant or kind with the SAME event id is a DIFFERENT
+        // logical operation — but the ledger still binds the tenant/kind
+        // through the payload hash.
+        assert_ne!(
+            usage_operation_key("tenant-2", "emails_sent", id),
+            usage_operation_key("tenant-1", "emails_sent", id)
+        );
+        assert_ne!(
+            usage_operation_key("tenant-1", "api_calls", id),
+            usage_operation_key("tenant-1", "emails_sent", id)
         );
     }
 }

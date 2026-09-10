@@ -260,7 +260,18 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
                         pending_dunning = result.pending_dunning,
                         deferred_no_address = result.skipped_no_address,
                         skipped_unknown_plan = result.skipped_unknown_plan,
+                        failed_periods = result.failed_periods,
+                        oldest_unresolved_age_secs = ?result.oldest_unresolved_age_secs,
+                        aged_needs_review = result.aged_needs_review,
+                        pricing_needs_review = result.pricing_needs_review,
                         "processed period usage invoices"
+                    );
+                }
+                Ok(result) if result.failed_periods > 0 => {
+                    warn!(
+                        failed_periods = result.failed_periods,
+                        oldest_unresolved_age_secs = ?result.oldest_unresolved_age_secs,
+                        "period overage sweep finished with isolated period failures — recorded with backoff"
                     );
                 }
                 Ok(_) => {}
@@ -322,11 +333,16 @@ pub fn start_periodic_jobs(state: std::sync::Arc<AppState>) {
 
             // Audit F33 — resume stranded usage-invoice collection
             // operations (invoice created, collection interrupted): the
-            // idempotent ladder re-runs wallet application, Stripe item and
-            // the dunning transition until the outbox row is done.
+            // idempotent ladder re-runs wallet application, the finalized
+            // Stripe invoice and the dunning handoff until the outbox row
+            // is done. Exhausted attempts dead-letter visibly.
             match crate::overage::resume_pending_collections(grace_state.as_ref()).await {
-                Ok(resumed) if resumed > 0 => {
-                    info!(resumed, "resumed stranded usage invoice collections");
+                Ok(stats) if stats.resumed > 0 || stats.dead_lettered > 0 => {
+                    info!(
+                        resumed = stats.resumed,
+                        dead_lettered = stats.dead_lettered,
+                        "resumed stranded usage invoice collections"
+                    );
                 }
                 Ok(_) => {}
                 Err(error_message) => {
@@ -3206,29 +3222,42 @@ fn release_reserved_cents_clamp(reserved: i64, released_total: i64) -> i64 {
     reserved.saturating_sub(released_total).max(0)
 }
 
-/// Fix F4 — record a payment recovery and restore healthy dunning state.
+/// Fix F4/F09 — record a payment recovery and restore access according to
+/// the INDEPENDENT restriction model.
 ///
 /// `invoice_id` scopes the recovery to that invoice's failure history: the
-/// tenant-level reset (dunning counters + status, tenant reactivation,
-/// queued-message release, cached-status invalidation) only happens when
-/// the tenant's most recent `payment_failed` event belongs to the settled
-/// invoice — a DIFFERENT invoice that is still failing keeps the tenant in
-/// dunning. The `payment_recovered` dunning event is always written (with
-/// the invoice id) so the settled invoice's history is complete either
-/// way. `None` restores the legacy unscoped blanket reset (used when no
-/// invoice context is available).
+/// tenant-level reset only happens when the tenant's most recent
+/// `payment_failed` event belongs to the settled invoice — a DIFFERENT
+/// invoice that is still failing keeps the tenant in dunning. The
+/// `payment_recovered` dunning event is always written (with the invoice
+/// id) so the settled invoice's history is complete either way. `None`
+/// restores the legacy unscoped blanket reset (used when no invoice
+/// context is available).
 ///
-/// Audit F09 — billing and abuse holds stay DISTINCT: this clears only the
-/// BILLING hold. Tenant reactivation and the queued-message release happen
-/// only when no open/investigating/confirmed abuse report remains (the
-/// abuse lifecycle's constrained statuses, migration 133); an abuse hold
-/// survives payment recovery untouched.
+/// Audit F09 — restrictions are represented independently
+/// (billing/administrative/verification/abuse, migration 181) and this
+/// recovery clears ONLY the billing restriction. Tenant state and
+/// queued-message eligibility are then recomputed IN THE SAME TRANSACTION
+/// from every remaining hold:
+///
+/// * a tenant still `pending` verification stays pending;
+/// * an active administrative/verification restriction keeps the tenant
+///   restricted (recovery cannot clear what it did not impose);
+/// * an open/investigating/confirmed abuse report keeps the hold;
+/// * only a suspension ATTRIBUTABLE to billing (an active billing
+///   restriction existed and was just cleared) reactivates the tenant.
 pub(crate) async fn mark_payment_recovered(
     state: &AppState,
     tenant_id: &str,
     invoice_id: Option<&str>,
 ) -> Result<(), String> {
-    let (reset_allowed, _dunning_reset): (bool, i64) = sqlx::query_as(
+    let (reset_allowed, billing_cleared, dunning_reset, _reactivated, _released): (
+        bool,
+        i64,
+        i64,
+        i64,
+        i64,
+    ) = sqlx::query_as(
         r#"
         WITH latest_failure AS (
             SELECT invoice_id
@@ -3249,6 +3278,19 @@ pub(crate) async fn mark_payment_recovered(
                 )
             ) AS allowed
         ),
+        -- Audit F09: clear ONLY the billing restriction. Administrative,
+        -- verification and abuse restrictions survive recovery untouched.
+        cleared_billing AS (
+            UPDATE tenant_restrictions
+            SET cleared_at = NOW(),
+                cleared_by = 'payment_recovery',
+                cleared_reason = 'confirmed payment recovery'
+            WHERE tenant_id = $1
+              AND kind = 'billing'
+              AND cleared_at IS NULL
+              AND (SELECT allowed FROM reset_allowed)
+            RETURNING id
+        ),
         update_dunning AS (
             UPDATE dunning_records
             SET status = 'healthy',
@@ -3268,11 +3310,46 @@ pub(crate) async fn mark_payment_recovered(
             VALUES (gen_random_uuid(), $1, 'payment_recovered', $2, NOW())
             RETURNING tenant_id
         ),
+        -- Audit F09: recompute effective state from the REMAINING holds in
+        -- the SAME transaction. `pending` verification is preserved; an
+        -- active non-billing restriction or an open abuse report blocks
+        -- reactivation; only a billing-attributed suspension reactivates.
         reactivate_tenant AS (
             UPDATE tenants
             SET status = 'active', updated_at = NOW()
             WHERE id = $1
               AND (SELECT allowed FROM reset_allowed)
+              AND tenants.status <> 'pending'
+              AND EXISTS (SELECT 1 FROM cleared_billing)
+              AND NOT EXISTS (
+                SELECT 1
+                FROM tenant_restrictions tr
+                WHERE tr.tenant_id = $1
+                  AND tr.cleared_at IS NULL
+                  AND tr.kind <> 'billing'
+              )
+              AND NOT EXISTS (
+                SELECT 1
+                FROM abuse_reports ar
+                WHERE ar.tenant_id = $1
+                  AND ar.status IN ('open', 'investigating', 'confirmed')
+              )
+            RETURNING id
+        ),
+        -- Queued-message eligibility recomputed under the same holds.
+        release_messages AS (
+            UPDATE messages
+            SET status = 'queued', updated_at = NOW()
+            WHERE tenant_id = $1
+              AND status = 'dunning_queued'
+              AND (SELECT allowed FROM reset_allowed)
+              AND NOT EXISTS (
+                SELECT 1
+                FROM tenant_restrictions tr
+                WHERE tr.tenant_id = $1
+                  AND tr.cleared_at IS NULL
+                  AND tr.kind <> 'billing'
+              )
               AND NOT EXISTS (
                 SELECT 1
                 FROM abuse_reports ar
@@ -3282,7 +3359,10 @@ pub(crate) async fn mark_payment_recovered(
             RETURNING id
         )
         SELECT (SELECT allowed FROM reset_allowed),
-               (SELECT COUNT(*)::bigint FROM update_dunning)
+               (SELECT COUNT(*)::bigint FROM cleared_billing),
+               (SELECT COUNT(*)::bigint FROM update_dunning),
+               (SELECT COUNT(*)::bigint FROM reactivate_tenant),
+               (SELECT COUNT(*)::bigint FROM release_messages)
         "#,
     )
     .bind(tenant_id)
@@ -3303,34 +3383,16 @@ pub(crate) async fn mark_payment_recovered(
         return Ok(());
     }
 
-    // Audit F09 — releasing sending is gated on EVERY applicable hold: the
-    // dunning hold cleared above AND the abuse hold (which payment recovery
-    // must never clear).
-    let released_count: i64 = sqlx::query_scalar(
-        r#"
-        WITH updated AS (
-            UPDATE messages
-            SET status = 'queued', updated_at = NOW()
-            WHERE tenant_id = $1
-              AND status = 'dunning_queued'
-              AND NOT EXISTS (
-                SELECT 1
-                FROM abuse_reports ar
-                WHERE ar.tenant_id = $1
-                  AND ar.status IN ('open', 'investigating', 'confirmed')
-              )
-            RETURNING id
-        )
-        SELECT COUNT(*)::bigint FROM updated
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(0);
-
-    if released_count > 0 {
-        info!(tenant_id = %tenant_id, released_count, "released queued messages after payment recovery");
+    if billing_cleared == 0 {
+        // Audit F09: nothing billing-attributed was holding this tenant —
+        // any remaining suspension belongs to another cause and is left
+        // untouched (an unattributable suspension is never auto-cleared).
+        info!(
+            tenant_id = %tenant_id,
+            invoice_id = ?invoice_id,
+            dunning_reset,
+            "payment recovered; no billing restriction was active — administrative/verification/abuse holds left untouched"
+        );
     }
 
     if let Ok(mut conn) = state.redis.get().await {
@@ -3338,6 +3400,128 @@ pub(crate) async fn mark_payment_recovered(
         let delete_result: Result<i64, _> = conn.del(&cache_key).await;
         if let Err(error) = delete_result {
             warn!(tenant_id = %tenant_id, error = %error, "failed to clear cached dunning status");
+        }
+    }
+
+    Ok(())
+}
+
+/// The manual admin dunning reset (audit F09): the SAME restriction-aware
+/// rule as [`mark_payment_recovered`] — clear only the billing hold, then
+/// recompute tenant state and queued-message eligibility in one
+/// transaction, with the admin actor recorded on the clearance. Exposed
+/// so the api-server admin route and the billing-service recovery path
+/// share one contract (no divergent abuse predicates).
+pub async fn admin_reset_dunning_restriction_aware(
+    db: &sqlx::PgPool,
+    redis: &deadpool_redis::Pool,
+    tenant_id: &str,
+    admin_actor: &str,
+    reason: &str,
+) -> Result<(), String> {
+    let (billing_cleared, _dunning_reset, _reactivated, released): (i64, i64, i64, i64) =
+        sqlx::query_as(
+            r#"
+            WITH cleared_billing AS (
+                UPDATE tenant_restrictions
+                SET cleared_at = NOW(),
+                    cleared_by = $2,
+                    cleared_reason = $3
+                WHERE tenant_id = $1
+                  AND kind = 'billing'
+                  AND cleared_at IS NULL
+                RETURNING id
+            ),
+            update_dunning AS (
+                UPDATE dunning_records
+                SET status = 'healthy',
+                    failed_payment_count = 0,
+                    first_failed_at = NULL,
+                    last_failed_at = NULL,
+                    next_retry_at = NULL,
+                    suspended_at = NULL,
+                    grace_period_ends_at = NULL,
+                    updated_at = NOW()
+                WHERE tenant_id = $1
+                RETURNING tenant_id
+            ),
+            log_recovery AS (
+                INSERT INTO dunning_events (id, tenant_id, event_type, created_at)
+                VALUES (gen_random_uuid(), $1, 'payment_recovered', NOW())
+                RETURNING tenant_id
+            ),
+            reactivate_tenant AS (
+                UPDATE tenants
+                SET status = 'active', updated_at = NOW()
+                WHERE id = $1
+                  AND tenants.status <> 'pending'
+                  AND EXISTS (SELECT 1 FROM cleared_billing)
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM tenant_restrictions tr
+                    WHERE tr.tenant_id = $1
+                      AND tr.cleared_at IS NULL
+                      AND tr.kind <> 'billing'
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM abuse_reports ar
+                    WHERE ar.tenant_id = $1
+                      AND ar.status IN ('open', 'investigating', 'confirmed')
+                  )
+                RETURNING id
+            ),
+            release_messages AS (
+                UPDATE messages
+                SET status = 'queued', updated_at = NOW()
+                WHERE tenant_id = $1
+                  AND status = 'dunning_queued'
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM tenant_restrictions tr
+                    WHERE tr.tenant_id = $1
+                      AND tr.cleared_at IS NULL
+                      AND tr.kind <> 'billing'
+                  )
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM abuse_reports ar
+                    WHERE ar.tenant_id = $1
+                      AND ar.status IN ('open', 'investigating', 'confirmed')
+                  )
+                RETURNING id
+            )
+            SELECT (SELECT COUNT(*)::bigint FROM cleared_billing),
+                   (SELECT COUNT(*)::bigint FROM update_dunning),
+                   (SELECT COUNT(*)::bigint FROM reactivate_tenant),
+                   (SELECT COUNT(*)::bigint FROM release_messages)
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(admin_actor)
+        .bind(format!("admin dunning reset: {reason}"))
+        .fetch_one(db)
+        .await
+        .map_err(|error| format!("Failed to reset dunning for {tenant_id}: {error}"))?;
+
+    if billing_cleared == 0 {
+        info!(
+            tenant_id = tenant_id,
+            "admin dunning reset: no billing restriction was active — other holds left untouched"
+        );
+    }
+    if released > 0 {
+        info!(
+            tenant_id = tenant_id,
+            released, "released queued messages after admin dunning reset"
+        );
+    }
+
+    if let Ok(mut conn) = redis.get().await {
+        let cache_key = format!("dunning:status:{tenant_id}");
+        let delete_result: Result<i64, _> = conn.del(&cache_key).await;
+        if let Err(error) = delete_result {
+            warn!(tenant_id = tenant_id, error = %error, "failed to clear cached dunning status");
         }
     }
 
@@ -3398,42 +3582,202 @@ pub async fn tenant_has_open_abuse_hold(state: &AppState, tenant_id: &str) -> Re
     Ok(open)
 }
 
-/// Review an abuse report: move it along the lifecycle. Allowed moves are
-/// constrained by the schema CHECK (migration 133); invalid moves are
-/// rejected SQL-side.
+// ---------------------------------------------------------------------------
+// Audited state transitions (audit F09): a CHECK of allowed labels is not
+// transition authorization. These are the canonical, audit-logged writers
+// for abuse review/resolution and for administrative restrictions; the
+// recovery paths above consume their state but never bypass them.
+// ---------------------------------------------------------------------------
+
+/// Allowed abuse-report transitions (open -> investigating ->
+/// confirmed | dismissed | resolved; confirmed may still be resolved after
+/// remediation; dismissed/resolved are terminal for a NEW review cycle).
+fn abuse_transition_allowed(from: &str, to: &str) -> bool {
+    matches!(
+        (from, to),
+        ("open", "investigating")
+            | ("open", "dismissed")
+            | ("open", "resolved")
+            | ("investigating", "confirmed")
+            | ("investigating", "dismissed")
+            | ("investigating", "resolved")
+            | ("confirmed", "resolved")
+    )
+}
+
+/// Advance an abuse report through an AUTHORIZED, audited transition. The
+/// reviewer identity is recorded (`reviewed_by`/`reviewed_at`) — evidence
+/// that distinguishes a genuine resolution from the legacy blanket
+/// resolves migration 182 re-opened.
 pub async fn review_abuse_report(
-    state: &AppState,
+    db: &sqlx::PgPool,
     report_id: Uuid,
-    new_status: &str,
-    reviewed_by: Option<&str>,
+    to_status: &str,
+    reviewer: &str,
+    notes: &str,
 ) -> Result<(), String> {
+    let mut tx = db
+        .begin()
+        .await
+        .map_err(|error| format!("Failed to begin abuse review transaction: {error}"))?;
+    let current: Option<String> =
+        sqlx::query_scalar("SELECT status::text FROM abuse_reports WHERE id = $1 FOR UPDATE")
+            .bind(report_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(|error| format!("Failed to load abuse report: {error}"))?;
+    let Some(from) = current else {
+        return Err(format!("Abuse report {report_id} not found"));
+    };
+    if !abuse_transition_allowed(&from, to_status) {
+        return Err(format!(
+            "Unauthorized abuse report transition: {from} -> {to_status}"
+        ));
+    }
     sqlx::query(
         r#"
         UPDATE abuse_reports
         SET status = $2,
             reviewed_at = NOW(),
             reviewed_by = $3,
-            resolved_at = CASE WHEN $2 IN ('dismissed', 'resolved') THEN NOW() ELSE resolved_at END
+            resolved_at = CASE WHEN $2 IN ('resolved', 'dismissed') THEN NOW() ELSE NULL END
         WHERE id = $1
         "#,
     )
     .bind(report_id)
-    .bind(new_status)
-    .bind(reviewed_by)
-    .execute(&state.db)
+    .bind(to_status)
+    .bind(reviewer)
+    .execute(&mut *tx)
     .await
-    .map_err(|error| format!("Failed to review abuse report {report_id}: {error}"))?;
+    .map_err(|error| format!("Failed to update abuse report: {error}"))?;
+
+    // The abuse restriction mirrors the report lifecycle: an active report
+    // imposes the restriction; a terminal dismissed/resolved one clears it.
+    let tenant_id: String = sqlx::query_scalar("SELECT tenant_id FROM abuse_reports WHERE id = $1")
+        .bind(report_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|error| format!("Failed to load abuse report tenant: {error}"))?;
+    if to_status == "dismissed" || to_status == "resolved" {
+        sqlx::query(
+            r#"
+            UPDATE tenant_restrictions
+            SET cleared_at = NOW(), cleared_by = $2, cleared_reason = $3
+            WHERE tenant_id = $1 AND kind = 'abuse' AND cleared_at IS NULL
+            "#,
+        )
+        .bind(&tenant_id)
+        .bind(reviewer)
+        .bind(format!("abuse report {report_id} {to_status}: {notes}"))
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("Failed to clear abuse restriction: {error}"))?;
+    } else {
+        sqlx::query(
+            r#"
+            INSERT INTO tenant_restrictions (tenant_id, kind, reason, actor_type, actor_id)
+            VALUES ($1, 'abuse', $2, 'admin', $3)
+            ON CONFLICT (tenant_id, kind) WHERE cleared_at IS NULL DO NOTHING
+            "#,
+        )
+        .bind(&tenant_id)
+        .bind(format!("abuse report {report_id} {to_status}"))
+        .bind(reviewer)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("Failed to impose abuse restriction: {error}"))?;
+    }
+
+    append_audit_log(
+        &mut tx,
+        &tenant_id,
+        "billing.abuse_report_transition",
+        "abuse_report",
+        Some(&report_id.to_string()),
+        serde_json::json!({
+            "fromStatus": from,
+            "toStatus": to_status,
+            "reviewer": reviewer,
+            "notes": notes,
+        }),
+        Utc::now(),
+    )
+    .await
+    .map_err(|error| format!("Failed to append abuse audit log: {error}"))?;
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("Failed to commit abuse review: {error}"))?;
     Ok(())
 }
 
-/// Resolve an abuse report (terminal) — releases the abuse hold once no
-/// other open/investigating/confirmed report remains.
-pub async fn resolve_abuse_report(
-    state: &AppState,
-    report_id: Uuid,
-    reviewed_by: Option<&str>,
+/// Impose an administrative restriction on a tenant (audit F09): recorded
+/// independently with actor/reason, so payment recovery and dunning resets
+/// can never clear it — only the symmetric [`clear_tenant_restriction`].
+pub async fn impose_tenant_restriction(
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+    kind: &str,
+    reason: &str,
+    actor_type: &str,
+    actor_id: Option<&str>,
 ) -> Result<(), String> {
-    review_abuse_report(state, report_id, "resolved", reviewed_by).await
+    sqlx::query(
+        r#"
+        INSERT INTO tenant_restrictions (tenant_id, kind, reason, actor_type, actor_id)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT (tenant_id, kind) WHERE cleared_at IS NULL
+        DO UPDATE SET reason = EXCLUDED.reason, actor_type = EXCLUDED.actor_type,
+                      actor_id = EXCLUDED.actor_id
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(kind)
+    .bind(reason)
+    .bind(actor_type)
+    .bind(actor_id)
+    .execute(db)
+    .await
+    .map_err(|error| format!("Failed to impose tenant restriction: {error}"))?;
+    Ok(())
+}
+
+/// Clear one specific restriction by kind (audit F09) — the ONLY writer
+/// that lifts administrative/verification/abuse restrictions, with the
+/// clearing actor and reason recorded.
+pub async fn clear_tenant_restriction(
+    db: &sqlx::PgPool,
+    tenant_id: &str,
+    kind: &str,
+    cleared_by: &str,
+    cleared_reason: &str,
+) -> Result<bool, String> {
+    let cleared = sqlx::query(
+        r#"
+        UPDATE tenant_restrictions
+        SET cleared_at = NOW(), cleared_by = $3, cleared_reason = $4
+        WHERE tenant_id = $1 AND kind = $2 AND cleared_at IS NULL
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(kind)
+    .bind(cleared_by)
+    .bind(cleared_reason)
+    .execute(db)
+    .await
+    .map_err(|error| format!("Failed to clear tenant restriction: {error}"))?;
+    Ok(cleared.rows_affected() > 0)
+}
+
+/// Resolve an abuse report (terminal) through the audited transition
+/// above — releases the abuse restriction in the same transaction.
+pub async fn resolve_abuse_report(
+    db: &sqlx::PgPool,
+    report_id: Uuid,
+    reviewed_by: &str,
+    notes: &str,
+) -> Result<(), String> {
+    review_abuse_report(db, report_id, "resolved", reviewed_by, notes).await
 }
 
 fn stripe_api_base_url() -> String {
@@ -3514,6 +3858,37 @@ struct StripeInvoiceSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ------------------------------------------------------------------
+    // Audit F09 — authorized abuse-report transitions: a CHECK of allowed
+    // labels alone is not transition authorization.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn abuse_lifecycle_follows_only_forward_transitions() {
+        assert!(abuse_transition_allowed("open", "investigating"));
+        assert!(abuse_transition_allowed("investigating", "confirmed"));
+        // A confirmed report can still be resolved after remediation.
+        assert!(abuse_transition_allowed("confirmed", "resolved"));
+        // Early dismissals terminate the report.
+        assert!(abuse_transition_allowed("open", "dismissed"));
+        assert!(abuse_transition_allowed("investigating", "dismissed"));
+        assert!(abuse_transition_allowed("investigating", "resolved"));
+        assert!(abuse_transition_allowed("open", "resolved"));
+    }
+
+    #[test]
+    fn abuse_transitions_reject_reopening_and_skipping() {
+        // Terminal states never reopen...
+        assert!(!abuse_transition_allowed("resolved", "open"));
+        assert!(!abuse_transition_allowed("dismissed", "investigating"));
+        // ...investigation cannot be skipped to confirmed...
+        assert!(!abuse_transition_allowed("open", "confirmed"));
+        // ...and resolved reports cannot be re-resolved or re-confirmed.
+        assert!(!abuse_transition_allowed("resolved", "resolved"));
+        assert!(!abuse_transition_allowed("resolved", "confirmed"));
+        assert!(!abuse_transition_allowed("confirmed", "investigating"));
+    }
 
     // ------------------------------------------------------------------
     // Fix I5 — KMD backfill covers every missed month.

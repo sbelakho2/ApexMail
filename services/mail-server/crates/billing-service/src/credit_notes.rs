@@ -45,6 +45,13 @@ pub struct CreditNote {
     pub reason: String,
     pub idempotency_key: String,
     pub created_at: DateTime<Utc>,
+    /// Audit F60 — the part of `amount` reducing the unpaid obligation.
+    #[serde(default)]
+    pub debt_reduction_cents: i64,
+    /// Audit F60 — the part of `amount` refunding actually-paid value
+    /// (the only part that minted wallet balance).
+    #[serde(default)]
+    pub refunded_cents: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -83,7 +90,7 @@ pub enum CreditNoteError {
 /// Invoice row lookup used by [`create_credit_note`]. `FOR UPDATE` serializes
 /// concurrent credit-note writers on the same invoice so the read of
 /// `already_credited` can never race (Fix F — TOCTOU over-credit).
-const LOCK_INVOICE_FOR_CREDIT_SQL: &str = "SELECT status::text, total, currency FROM invoices WHERE id = $1 AND tenant_id = $2 FOR UPDATE";
+const LOCK_INVOICE_FOR_CREDIT_SQL: &str = "SELECT status::text, COALESCE(total, amount, 0)::bigint, currency FROM invoices WHERE id = $1 AND tenant_id = $2 FOR UPDATE";
 
 /// Validate a credit amount against the invoice total and the amount already
 /// credited (pure — Fix F). Callers must hold a row lock on the invoice while
@@ -100,6 +107,30 @@ fn validate_credit_amount(
         return Err(CreditNoteError::AmountExceedsInvoice);
     }
     Ok(())
+}
+
+/// Split a credit into its two dispositions (audit F60, pure — unit-tested):
+///
+/// * `debt_reduction` — the part reducing the still-UNPAID obligation
+///   (what the outstanding derivation subtracts);
+/// * `refund` — the part returning value that was ACTUALLY PAID (the only
+///   part eligible to mint wallet balance).
+///
+/// Splitting prevents the double benefit: crediting an unpaid invoice
+/// reduces its debt without creating spendable wallet value; only the
+/// genuinely-paid part becomes refundable value.
+fn split_credit_disposition(
+    amount: i64,
+    payments_cents: i64,
+    outstanding_before: i64,
+) -> (i64, i64) {
+    let debt_reduction = amount.min(outstanding_before.max(0));
+    let refund = (amount - debt_reduction)
+        // The refund can never exceed what was actually paid (it can only
+        // originate from the paid part of the obligation).
+        .min(payments_cents.max(0))
+        .max(0);
+    (debt_reduction, refund)
 }
 
 /// Replay comparison (audit F60): a retried request with the same
@@ -177,7 +208,8 @@ pub async fn create_credit_note(
     // an error. Nothing below this point runs for a replay.
     let replayed: Option<CreditNoteRow> = sqlx::query_as(
         r#"
-        SELECT id, invoice_id, tenant_id, amount, currency, reason, idempotency_key, created_at
+        SELECT id, invoice_id, tenant_id, amount, currency, reason, idempotency_key,
+               debt_reduction_cents, refunded_cents, created_at
         FROM credit_notes
         WHERE tenant_id = $1 AND idempotency_key = $2
         "#,
@@ -218,6 +250,10 @@ pub async fn create_credit_note(
             reason: credit_note.reason,
             idempotency_key: credit_note.idempotency_key,
             created_at: credit_note.created_at,
+            debt_reduction_cents: credit_note
+                .debt_reduction_cents
+                .unwrap_or(credit_note.amount),
+            refunded_cents: credit_note.refunded_cents.unwrap_or(0),
         });
     }
 
@@ -243,12 +279,51 @@ pub async fn create_credit_note(
         return Err(error);
     }
 
+    // ── Audit F60: derive the credit's DISPOSITION under the lock ─────
+    // The split decides which part reduces the unpaid obligation and
+    // which part refunds value that was actually paid (see
+    // `split_credit_disposition`). Everything below — the credit note
+    // row, its unique operation id and (only for the refund part) the
+    // wallet mint — derives from this split inside the same locked
+    // transaction, so concurrent credits can never over-derive capacity.
+    let payments_cents: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(amount_cents), 0)::BIGINT FROM invoice_payment_allocations WHERE invoice_id = $1",
+    )
+    .bind(input.invoice_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(CreditNoteError::Db)?;
+    let existing_debt_reduction: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(SUM(
+            CASE WHEN debt_reduction_cents IS NULL THEN amount ELSE debt_reduction_cents END
+        ), 0)::BIGINT
+        FROM credit_notes WHERE invoice_id = $1
+        "#,
+    )
+    .bind(input.invoice_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(CreditNoteError::Db)?;
+    let outstanding_before = invoice_total
+        .saturating_sub(payments_cents)
+        .saturating_sub(existing_debt_reduction)
+        .max(0);
+    let (debt_reduction_cents, refunded_cents) =
+        split_credit_disposition(input.amount, payments_cents, outstanding_before);
+
+    let operation_id = format!("credit_note:{}:{}", input.tenant_id, input.idempotency_key);
+
     let row: Option<CreditNoteRow> = sqlx::query_as(
         r#"
-        INSERT INTO credit_notes (invoice_id, tenant_id, amount, currency, reason, idempotency_key, created_at)
-        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        INSERT INTO credit_notes (
+            invoice_id, tenant_id, amount, currency, reason, idempotency_key,
+            operation_id, debt_reduction_cents, refunded_cents, created_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
         ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
-        RETURNING id, invoice_id, tenant_id, amount, currency, reason, idempotency_key, created_at
+        RETURNING id, invoice_id, tenant_id, amount, currency, reason, idempotency_key,
+                   debt_reduction_cents, refunded_cents, created_at
         "#,
     )
     .bind(input.invoice_id)
@@ -257,6 +332,9 @@ pub async fn create_credit_note(
     .bind(&invoice_currency)
     .bind(&input.reason)
     .bind(&input.idempotency_key)
+    .bind(&operation_id)
+    .bind(debt_reduction_cents)
+    .bind(refunded_cents)
     .bind(now)
     .fetch_optional(&mut *tx)
     .await
@@ -264,76 +342,79 @@ pub async fn create_credit_note(
 
     let credit_note = match row {
         Some(row) => {
-            // First-time insert — also credit the wallet in the same
-            // transaction so that wallet + credit_note are consistent.
-            // Wallet credit in two sequential statements within the same tx:
-            // 1. Ensure a wallet row exists (balance 0, idempotent).
-            // 2. Increment the balance via UPDATE ... RETURNING and record the
-            //    transaction using the RETURNING balance as `balance_after`.
-            // Sequential statements (not sibling CTEs) because data-modifying
-            // CTEs cannot see each other's writes — the UPDATE would miss a
-            // wallet created in the same statement.
-            // The wallet is single-currency: a credit in the invoice's
-            // currency must never land in a wallet held in another currency
-            // (a 10_000-cent USD credit in a EUR wallet is €100.00 of
-            // phantom money). Create with the invoice currency; when a wallet
+            // First-time insert — mint wallet value ONLY for the actually
+            // paid, refundable part of the credit (audit F60: the
+            // debt-reduction part reduces the unpaid obligation and must
+            // NOT create spendable value — that was the double benefit).
+            // The wallet is single-currency: a refund in the invoice's
+            // currency must never land in a wallet held in another
+            // currency. Create with the invoice currency; when a wallet
             // already exists, refuse the mismatch instead of mixing.
-            sqlx::query(
-                r#"
-                INSERT INTO wallets (tenant_id, balance, reserved, currency, created_at, updated_at)
-                VALUES ($1, 0, 0, $2, NOW(), NOW())
-                ON CONFLICT (tenant_id) DO NOTHING
-                "#,
-            )
-            .bind(&input.tenant_id)
-            .bind(&invoice_currency)
-            .execute(&mut *tx)
-            .await
-            .map_err(CreditNoteError::Db)?;
-
-            let wallet_currency: String =
-                sqlx::query_scalar("SELECT currency FROM wallets WHERE tenant_id = $1")
-                    .bind(&input.tenant_id)
-                    .fetch_one(&mut *tx)
-                    .await
-                    .map_err(CreditNoteError::Db)?;
-            if !wallet_currency.eq_ignore_ascii_case(&invoice_currency) {
-                tracing::error!(
-                    tenant_id = %input.tenant_id,
-                    invoice_id = %input.invoice_id,
-                    invoice_currency = %invoice_currency,
-                    wallet_currency = %wallet_currency,
-                    "credit-note currency mismatch refused — refund via the payment provider instead"
-                );
-                return Err(CreditNoteError::CurrencyMismatch {
-                    invoice_currency,
-                    wallet_currency,
-                });
-            }
-
-            sqlx::query(
-                r#"
-                WITH credit_wallet AS (
-                    UPDATE wallets
-                    SET balance = balance + $2::int8,
-                        updated_at = NOW()
-                    WHERE tenant_id = $1
-                    RETURNING id, balance
+            if refunded_cents > 0 {
+                sqlx::query(
+                    r#"
+                    INSERT INTO wallets (tenant_id, balance, reserved, currency, created_at, updated_at)
+                    VALUES ($1, 0, 0, $2, NOW(), NOW())
+                    ON CONFLICT (tenant_id) DO NOTHING
+                    "#,
                 )
-                INSERT INTO wallet_transactions
-                    (wallet_id, tenant_id, type, amount, balance_after, description, reference, created_at)
-                SELECT id, $1, 'credit', $2::int8, balance, $3, $4, $5
-                FROM credit_wallet
-                "#,
-            )
-            .bind(&input.tenant_id)
-            .bind(input.amount) // positive amount = credit
-            .bind(&input.reason)
-            .bind(row.id.to_string())
-            .bind(now)
-            .execute(&mut *tx)
-            .await
-            .map_err(CreditNoteError::Db)?;
+                .bind(&input.tenant_id)
+                .bind(&invoice_currency)
+                .execute(&mut *tx)
+                .await
+                .map_err(CreditNoteError::Db)?;
+
+                let wallet_currency: String =
+                    sqlx::query_scalar("SELECT currency FROM wallets WHERE tenant_id = $1")
+                        .bind(&input.tenant_id)
+                        .fetch_one(&mut *tx)
+                        .await
+                        .map_err(CreditNoteError::Db)?;
+                if !wallet_currency.eq_ignore_ascii_case(&invoice_currency) {
+                    tracing::error!(
+                        tenant_id = %input.tenant_id,
+                        invoice_id = %input.invoice_id,
+                        invoice_currency = %invoice_currency,
+                        wallet_currency = %wallet_currency,
+                        "credit-note refund currency mismatch refused — refund via the payment provider instead"
+                    );
+                    return Err(CreditNoteError::CurrencyMismatch {
+                        invoice_currency,
+                        wallet_currency,
+                    });
+                }
+
+                // Wallet credit in two sequential statements within the same tx:
+                // 1. Ensure a wallet row exists (balance 0, idempotent).
+                // 2. Increment the balance via UPDATE ... RETURNING and record the
+                //    transaction using the RETURNING balance as `balance_after`.
+                // Sequential statements (not sibling CTEs) because data-modifying
+                // CTEs cannot see each other's writes — the UPDATE would miss a
+                // wallet created in the same statement.
+                sqlx::query(
+                    r#"
+                    WITH credit_wallet AS (
+                        UPDATE wallets
+                        SET balance = balance + $2::int8,
+                            updated_at = NOW()
+                        WHERE tenant_id = $1
+                        RETURNING id, balance
+                    )
+                    INSERT INTO wallet_transactions
+                        (wallet_id, tenant_id, type, amount, balance_after, description, reference, created_at)
+                    SELECT id, $1, 'credit', $2::int8, balance, $3, $4, $5
+                    FROM credit_wallet
+                    "#,
+                )
+                .bind(&input.tenant_id)
+                .bind(refunded_cents) // positive amount = credit (refund part only)
+                .bind(&input.reason)
+                .bind(row.id.to_string())
+                .bind(now)
+                .execute(&mut *tx)
+                .await
+                .map_err(CreditNoteError::Db)?;
+            }
 
             // Audit trail.
             append_audit_log(
@@ -348,6 +429,8 @@ pub async fn create_credit_note(
                     "currency": invoice_currency,
                     "reason": input.reason,
                     "idempotencyKey": input.idempotency_key,
+                    "debtReductionCents": debt_reduction_cents,
+                    "refundedCents": refunded_cents,
                 }),
                 now,
             )
@@ -362,7 +445,8 @@ pub async fn create_credit_note(
             // reject a divergent payload (audit F60).
             let existing: CreditNoteRow = sqlx::query_as(
                 r#"
-                SELECT id, invoice_id, tenant_id, amount, currency, reason, idempotency_key, created_at
+                SELECT id, invoice_id, tenant_id, amount, currency, reason, idempotency_key,
+               debt_reduction_cents, refunded_cents, created_at
                 FROM credit_notes
                 WHERE tenant_id = $1 AND idempotency_key = $2
                 "#,
@@ -400,6 +484,10 @@ pub async fn create_credit_note(
         reason: credit_note.reason,
         idempotency_key: credit_note.idempotency_key,
         created_at: credit_note.created_at,
+        debt_reduction_cents: credit_note
+            .debt_reduction_cents
+            .unwrap_or(credit_note.amount),
+        refunded_cents: credit_note.refunded_cents.unwrap_or(0),
     })
 }
 
@@ -416,6 +504,10 @@ struct CreditNoteRow {
     currency: String,
     reason: String,
     idempotency_key: String,
+    /// Audit F60 disposition split (NULL on rows that predate migration
+    /// 183 — treated as a full debt reduction).
+    debt_reduction_cents: Option<i64>,
+    refunded_cents: Option<i64>,
     created_at: DateTime<Utc>,
 }
 
@@ -456,6 +548,8 @@ mod tests {
             reason: "SLA breach credit".into(),
             idempotency_key: Uuid::new_v4().to_string(),
             created_at: Utc::now(),
+            debt_reduction_cents: 2000,
+            refunded_cents: 3000,
         };
         let json = serde_json::to_value(&note).unwrap();
         let deserialized: CreditNote = serde_json::from_value(json).unwrap();
@@ -478,6 +572,8 @@ mod tests {
             currency: "EUR".into(),
             reason: "goodwill".into(),
             idempotency_key: "idem-001".into(),
+            debt_reduction_cents: Some(amount),
+            refunded_cents: Some(0),
             created_at: Utc::now(),
         }
     }
@@ -565,5 +661,65 @@ mod tests {
     #[test]
     fn credit_note_invoice_lookup_locks_the_row() {
         assert!(LOCK_INVOICE_FOR_CREDIT_SQL.contains("FOR UPDATE"));
+    }
+
+    // ------------------------------------------------------------------
+    // Audit F60 — the disposition split: one credit yields exactly one
+    // unit of benefit per cent, split between debt reduction and refund.
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn credit_on_a_fully_unpaid_invoice_is_pure_debt_reduction() {
+        // 100 unpaid, credit 20: debt 100 -> 80, wallet +0 (no double
+        // benefit).
+        let (debt, refund) = split_credit_disposition(20, 0, 100);
+        assert_eq!((debt, refund), (20, 0));
+    }
+
+    #[test]
+    fn credit_on_a_fully_paid_invoice_is_a_pure_refund() {
+        // 100 fully paid (outstanding 0): the whole credit refunds paid
+        // value; the debt was already zero.
+        let (debt, refund) = split_credit_disposition(20, 100, 0);
+        assert_eq!((debt, refund), (0, 20));
+    }
+
+    #[test]
+    fn partial_payment_splits_the_credit_exactly_once() {
+        // 100 invoice, 40 paid, outstanding 60; credit 20: 20 goes to debt
+        // (60 -> 40), nothing refunds. Credit 70 instead: 60 clears the
+        // debt and 10 refunds paid value — 70 units of benefit total.
+        let (debt, refund) = split_credit_disposition(20, 40, 60);
+        assert_eq!((debt, refund), (20, 0));
+        let (debt, refund) = split_credit_disposition(70, 40, 60);
+        assert_eq!((debt, refund), (60, 10));
+    }
+
+    #[test]
+    fn split_never_exceeds_the_paid_part_or_goes_negative() {
+        // Degenerate inputs (hostile outstanding/payments) clamp safely.
+        let (debt, refund) = split_credit_disposition(30, 5, -100);
+        assert_eq!((debt, refund), (0, 5));
+        let (debt, refund) = split_credit_disposition(10, -5, 50);
+        assert_eq!((debt, refund), (10, 0));
+        assert!(debt >= 0 && refund >= 0);
+    }
+
+    #[test]
+    fn total_benefit_always_equals_the_credited_amount() {
+        for &(amount, payments, outstanding) in &[
+            (20_i64, 0_i64, 100_i64),
+            (20, 100, 0),
+            (70, 40, 60),
+            (100, 100, 0),
+            (50, 50, 50),
+        ] {
+            let (debt, refund) = split_credit_disposition(amount, payments, outstanding);
+            assert_eq!(
+                debt + refund,
+                amount.min(payments.max(0) + outstanding.max(0)),
+                "amount {amount} payments {payments} outstanding {outstanding}"
+            );
+        }
     }
 }

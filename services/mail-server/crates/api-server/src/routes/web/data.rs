@@ -1807,17 +1807,30 @@ async fn web_team(state: &AppState, tenant: &str, cid: &str) -> ListPageData {
 /// pre-076 rows; `id` is a UUID, decoded as text.
 const BILLING_INVOICES_SQL: &str = "SELECT id::text AS id, COALESCE(total, amount, 0)::bigint AS total, currency, status::text AS status, created_at FROM invoices WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 50";
 
-/// Collectible outstanding per currency (audit F04), aggregated over the
-/// FULL eligible dataset — not the 50-row visible window.
+/// Collectible outstanding per currency (audits F04/F60/F73), aggregated
+/// over the FULL eligible invoice set — not the 50-row visible window.
 ///
-/// No payment-allocation ledger exists in the current schema, so the
-/// outstanding rule is invoice-side: issued, unpaid, still-collectible
-/// totals (`status NOT IN ('draft', 'void', 'uncollectible', 'paid')` —
-/// draft invoices are not yet issued debt; the set otherwise matches
-/// billing.rs's dunning report). DEPENDENCY: once a payment-allocation
-/// table lands, allocated amounts must be subtracted here instead of
-/// treating every non-paid invoice as fully owed.
-const BILLING_OUTSTANDING_SQL: &str = "SELECT currency, COALESCE(SUM(COALESCE(total, amount, 0)), 0)::bigint FROM invoices WHERE tenant_id = $1 AND status::text NOT IN ('draft', 'void', 'uncollectible', 'paid') GROUP BY currency ORDER BY currency";
+/// The summary consults the ALLOCATION LEDGER through the ONE shared
+/// authoritative balance (`billing_service::invoices::
+/// tenant_outstanding_by_currency`): invoice obligation minus confirmed
+/// payment allocations minus the debt-reduction part of credit notes —
+/// the same accounting model the collector, dunning service and credit
+/// limits use. A 100-unit invoice with 40 wallet units already allocated
+/// therefore reports 60, not 100. An unavailable balance propagates as
+/// `LoadState::Unavailable` (rendered as an explicit "unavailable" card),
+/// never as a silent zero.
+async fn billing_outstanding_buckets(
+    state: &AppState,
+    tenant: &str,
+    checkpoint: &str,
+) -> LoadState<Vec<(String, i64)>> {
+    load_query(
+        "web.billing.outstanding",
+        checkpoint,
+        billing_service::invoices::tenant_outstanding_by_currency(&state.db, tenant),
+    )
+    .await
+}
 
 /// Render a cents amount with its own currency code (audit F04: totals
 /// are never labelled with a hard-coded currency).
@@ -1882,13 +1895,7 @@ async fn web_billing(state: &AppState, tenant: &str, cid: &str) -> ListPageData 
     let rows_unavailable = rows.1;
     let rows = rows.0;
 
-    let outstanding = load_query("web.billing.outstanding", cid, async {
-        sqlx::query_as::<_, (String, i64)>(BILLING_OUTSTANDING_SQL)
-            .bind(tenant)
-            .fetch_all(&state.db)
-            .await
-    })
-    .await;
+    let outstanding = billing_outstanding_buckets(state, tenant, cid).await;
 
     let mut data = base_list(
         "Billing",
@@ -4156,17 +4163,24 @@ mod tests {
         assert!(BILLING_INVOICES_SQL.contains("COALESCE(total, amount, 0)"));
         assert!(!BILLING_INVOICES_SQL.contains("amount_cents"));
         assert!(BILLING_INVOICES_SQL.contains("status::text AS status"));
+    }
 
-        // Outstanding aggregates the FULL dataset (no LIMIT), per currency.
-        assert!(!BILLING_OUTSTANDING_SQL.contains("LIMIT"));
-        assert!(BILLING_OUTSTANDING_SQL.contains("GROUP BY currency"));
-        // Collectible rule: draft/void/uncollectible/paid owe nothing.
-        for excluded in ["'draft'", "'void'", "'uncollectible'", "'paid'"] {
-            assert!(
-                BILLING_OUTSTANDING_SQL.contains(excluded),
-                "outstanding must exclude {excluded}"
-            );
-        }
+    #[test]
+    fn outstanding_summary_consults_the_shared_allocation_aware_balance() {
+        // Audit F04: the console's outstanding no longer sums full invoice
+        // totals — it delegates to the ONE authoritative balance
+        // (billing_service::invoices::tenant_outstanding_by_currency),
+        // which subtracts confirmed payment allocations and
+        // debt-reduction credits per currency bucket over the whole
+        // eligible set. The delegation is pinned in billing-service's own
+        // tests (invoices::tenant_outstanding_aggregates_the_whole_set_by_currency_bucket).
+        let source_file = include_str!("../../../../billing-service/src/invoices.rs");
+        assert!(source_file.contains("pub async fn tenant_outstanding_by_currency"));
+        assert!(source_file.contains("TENANT_OUTSTANDING_SQL"));
+        // The shared derivation subtracts allocations and debt-reduction
+        // credits — never a bare SUM of invoice totals.
+        assert!(source_file.contains("invoice_payment_allocations"));
+        assert!(source_file.contains("debt_reduction_cents"));
     }
 
     #[test]

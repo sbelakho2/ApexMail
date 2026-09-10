@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use tokio::time::timeout;
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 use crate::routes::{append_audit_log, generate_audit_log_id};
 use crate::AppState;
@@ -785,49 +786,6 @@ async fn handle_subscription_change(
         return Ok(());
     };
 
-    let current_subscription = sqlx::query_as::<
-        _,
-        (
-            String,
-            String,
-            Option<DateTime<Utc>>,
-            Option<DateTime<Utc>>,
-            Option<String>,
-        ),
-    >(
-        r#"
-        SELECT tenant_id, status::text, billing_cycle_start, billing_cycle_end, plan
-        FROM stripe_subscriptions
-        WHERE stripe_subscription_id = $1
-        "#,
-    )
-    .bind(&subscription.id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|error| format!("Failed to load current Stripe subscription: {error}"))?;
-
-    if let Some((current_tenant_id, current_status, ..)) = current_subscription.as_ref() {
-        if current_tenant_id.as_str() != tenant_id {
-            return Err(format!(
-                "Stripe subscription {} is already bound to a different tenant",
-                subscription.id
-            ));
-        }
-        if current_status.as_str() != subscription.status.as_str()
-            && !subscription.status.can_transition_from(current_status)
-        {
-            return Err(format!(
-                "Invalid subscription status transition: {current_status} -> {}",
-                subscription.status.as_str()
-            ));
-        }
-    } else if !subscription.status.is_valid_initial_status() {
-        return Err(format!(
-            "Invalid initial subscription state: {}",
-            subscription.status.as_str()
-        ));
-    }
-
     let Some(primary_item) = subscription.items.data.first() else {
         return Err(format!(
             "Subscription {} has no line items",
@@ -882,12 +840,11 @@ async fn handle_subscription_change(
 
     // Run the upsert inside a tenant-scoped entitlement transaction (audit
     // F36): the advisory lock serializes every entitlement writer (create,
-    // update, delete) for this tenant, so reconciled plans can never
-    // interleave. The transaction first deactivates any other active
-    // subscription rows for the tenant. Migration 078 added a partial
-    // unique index on (tenant_id) WHERE status = 'active', so inserting a
-    // second active row for the tenant (e.g. a renewed Stripe subscription
-    // id after an upgrade) would abort the ON CONFLICT upsert.
+    // update, delete) for this tenant, and the CURRENT subscription state
+    // is read and validated INSIDE the lock (below), so reconciled plans
+    // can never interleave with a stale event. Migration 078's partial
+    // unique index on (tenant_id) WHERE status = 'active' is protected the
+    // same way.
     let mut tx = state
         .db
         .begin()
@@ -900,12 +857,120 @@ async fn handle_subscription_change(
         .await
         .map_err(|error| format!("Failed to lock tenant entitlement: {error}"))?;
 
+    // ── Audit F36: read/validate the CURRENT state INSIDE the lock ────
+    // The old flow validated before acquiring the tenant lock and then
+    // applied unconditionally: a delayed event could pass validation
+    // against an earlier snapshot, wait while a replacement committed,
+    // then restore the old subscription and cancel the new one. The
+    // in-lock re-read (FOR UPDATE) plus the event/version watermark
+    // (migration 184) makes that impossible.
+    let current_subscription = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            Option<DateTime<Utc>>,
+            Option<DateTime<Utc>>,
+            Option<String>,
+            Option<DateTime<Utc>>,
+        ),
+    >(
+        r#"
+        SELECT tenant_id, status::text, billing_cycle_start, billing_cycle_end, plan,
+               event_watermark
+        FROM stripe_subscriptions
+        WHERE stripe_subscription_id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(&subscription.id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to load current Stripe subscription: {error}"))?;
+
+    if let Some((current_tenant_id, current_status, .., current_watermark)) =
+        current_subscription.as_ref()
+    {
+        if current_tenant_id.as_str() != tenant_id {
+            return Err(format!(
+                "Stripe subscription {} is already bound to a different tenant",
+                subscription.id
+            ));
+        }
+        if current_status.as_str() != subscription.status.as_str()
+            && !subscription.status.can_transition_from(current_status)
+        {
+            return Err(format!(
+                "Invalid subscription status transition: {current_status} -> {}",
+                subscription.status.as_str()
+            ));
+        }
+        // Watermark check (audit F36): an event whose billing cycle is
+        // OLDER than the last applied event for this subscription must not
+        // rewind the cycle (same-status older price/period updates, or a
+        // long-delayed active update racing a committed renewal).
+        if subscription_event_is_stale(incoming_period_start, *current_watermark) {
+            info!(
+                tenant_id = %tenant_id,
+                subscription_id = %subscription.id,
+                incoming_cycle = ?incoming_period_start,
+                applied_watermark = ?current_watermark,
+                "stale stripe subscription update ignored — event predates the applied cycle watermark"
+            );
+            let _ = tx.rollback().await;
+            return Ok(());
+        }
+    } else if !subscription.status.is_valid_initial_status() {
+        return Err(format!(
+            "Invalid initial subscription state: {}",
+            subscription.status.as_str()
+        ));
+    }
+
+    // Replacement proof (audit F36): a superseded ACTIVE subscription may
+    // be canceled only when the incoming event represents the CURRENT
+    // replacement — no other active row may carry a NEWER event watermark.
+    // If one does, this event is stale relative to a committed replacement
+    // and is ignored wholesale (it must not cancel the newer row).
+    if let Some(incoming_start) = incoming_period_start {
+        let newer_replacement: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT stripe_subscription_id
+            FROM stripe_subscriptions
+            WHERE tenant_id = $1
+              AND stripe_subscription_id <> $2
+              AND status = 'active'
+              AND event_watermark IS NOT NULL
+              AND event_watermark > $3
+            LIMIT 1
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(&subscription.id)
+        .bind(incoming_start)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| format!("Failed to check replacement currency: {error}"))?;
+        if let Some(newer) = newer_replacement {
+            info!(
+                tenant_id = %tenant_id,
+                subscription_id = %subscription.id,
+                newer_subscription = %newer,
+                "stale stripe subscription update ignored — a newer active replacement exists"
+            );
+            let _ = tx.rollback().await;
+            return Ok(());
+        }
+    }
+
     // Audit F30: before the upsert overwrites the period bounds, snapshot
     // the subscription's CLOSING cycle into the immutable billing_periods
     // table — a renewal must never erase the just-ended period before the
     // overage sweep has read it. Only a genuine period transition (new
-    // start differs from the stored one) snapshots the old cycle.
-    if let Some((_, previous_status, Some(previous_start), Some(previous_end), previous_plan)) =
+    // start differs from the stored one) snapshots the old cycle. The
+    // snapshot comes from the LOCKED state (audit F36) and freezes the
+    // complete pricing context (audit F32).
+    if let Some((_, previous_status, Some(previous_start), Some(previous_end), previous_plan, _)) =
         current_subscription.as_ref()
     {
         if incoming_period_start.is_none_or(|incoming| incoming != *previous_start) {
@@ -959,18 +1024,23 @@ async fn handle_subscription_change(
     // Audit F27: the upsert persists BOTH the resolved plan and the Stripe
     // price — the old DO UPDATE preserved a stale price (and never wrote
     // `plan` at all), so consumers keying on ss.plan mis-resolved after
-    // upgrades/downgrades.
+    // upgrades/downgrades. The event watermark (audit F36) records the
+    // cycle of the last APPLIED event; replays of the same cycle are
+    // idempotent, older cycles were rejected above.
     sqlx::query(
         r#"
         WITH upsert_subscription AS (
             INSERT INTO stripe_subscriptions (
                 id, tenant_id, stripe_subscription_id, stripe_customer_id, stripe_price_id,
                 plan, status, billing_interval, billing_cycle_start, billing_cycle_end,
-                cancel_at_period_end, canceled_at, trial_end, created_at, updated_at
+                cancel_at_period_end, canceled_at, trial_end, event_watermark,
+                created_at, updated_at
             )
             VALUES (
                 gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7,
-                to_timestamp($8), to_timestamp($9), $10, to_timestamp($11), to_timestamp($12), NOW(), NOW()
+                to_timestamp($8), to_timestamp($9), $10, to_timestamp($11), to_timestamp($12),
+                COALESCE(to_timestamp($8), NOW()),
+                NOW(), NOW()
             )
             ON CONFLICT (stripe_subscription_id) DO UPDATE SET
                 stripe_price_id = $4,
@@ -982,6 +1052,7 @@ async fn handle_subscription_change(
                 cancel_at_period_end = $10,
                 canceled_at = to_timestamp($11),
                 trial_end = to_timestamp($12),
+                event_watermark = COALESCE(to_timestamp($8), stripe_subscriptions.event_watermark),
                 updated_at = NOW()
             RETURNING tenant_id
         ),
@@ -1011,8 +1082,8 @@ async fn handle_subscription_change(
     .await
     .map_err(|error| format!("Failed to upsert Stripe subscription: {error}"))?;
 
-    // Audit F30: the incoming cycle gets its period record now, with the
-    // resolved plan snapshotted.
+    // Audit F30/F32: the incoming cycle gets its period record now, with
+    // the resolved plan AND the complete effective pricing snapshotted.
     if let (Some(period_start), Some(period_end)) = (incoming_period_start, incoming_period_end) {
         snapshot_billing_period(
             &mut tx,
@@ -1230,7 +1301,10 @@ async fn auto_provision_dedicated_ips_background(
 /// transaction. `status` is the subscription's status while the cycle was
 /// in force — ACTIVE cycles snapshot the tenant-level override-aware plan
 /// (the same source the enforcement gate used), terminal cycles the
-/// subscription's own plan.
+/// subscription's own plan. The COMPLETE effective pricing is frozen at
+/// snapshot time (audit F32): email allowance, integer overage rate
+/// (resolved from the SAME plan the allowance came from) and currency —
+/// the sweep prices exclusively from these fields, never today's plan.
 async fn snapshot_billing_period(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: &str,
@@ -1244,9 +1318,10 @@ async fn snapshot_billing_period(
         return Ok(());
     }
 
-    let effective: Option<(String, Option<i64>)> = sqlx::query_as(
+    let effective: Option<(String, Option<i64>, String)> = sqlx::query_as(
         r#"
-        SELECT p.name, p.email_limit
+        SELECT p.name, p.email_limit,
+               COALESCE(t.settings->>'billingCurrency', 'EUR')
         FROM tenants t
         LEFT JOIN plan_overrides po
           ON po.tenant_id = t.id
@@ -1268,18 +1343,42 @@ async fn snapshot_billing_period(
     .await
     .map_err(|error| format!("Failed to snapshot billing period plan: {error}"))?;
 
-    let (plan_name, email_allowance) = match effective {
-        Some((name, limit)) => (Some(name), limit),
-        None => (subscription_plan.map(str::to_string), None),
+    let (plan_name, email_allowance, currency) = match effective {
+        Some((name, limit, currency)) => {
+            let currency = normalize_period_currency(&currency);
+            (Some(name), limit, currency)
+        }
+        None => (
+            subscription_plan.map(str::to_string),
+            None,
+            crate::overage::default_period_currency(),
+        ),
     };
+
+    // Rate comes from the SAME plan the allowance/name came from — the
+    // builtin per-plan ladder (review 2026-09-08 §9). Free/PAYG plans
+    // resolve to None (no automatic overage) and stay NULL on the period.
+    let rate_millicents = plan_name
+        .as_deref()
+        .and_then(crate::plans::plan_overage_rate_millicents);
+
+    let pricing_snapshot = serde_json::json!({
+        "snapshotVersion": 1,
+        "planName": plan_name,
+        "emailAllowance": email_allowance,
+        "overageRateMillicents": rate_millicents,
+        "currency": currency,
+        "overrideAware": status == "active",
+    });
 
     sqlx::query(
         r#"
         INSERT INTO billing_periods (
             tenant_id, stripe_subscription_id, usage_kind,
-            period_start, period_end, currency, plan_name, email_allowance
+            period_start, period_end, currency, plan_name, email_allowance,
+            overage_rate_millicents, pricing_snapshot, pricing_resolved_at
         )
-        VALUES ($1, $2, 'subscription', $3, $4, 'EUR', $5, $6)
+        VALUES ($1, $2, 'subscription', $3, $4, $5, $6, $7, $8, $9::jsonb, NOW())
         ON CONFLICT (tenant_id, usage_kind, period_start) DO NOTHING
         "#,
     )
@@ -1287,12 +1386,27 @@ async fn snapshot_billing_period(
     .bind(stripe_subscription_id)
     .bind(period_start)
     .bind(period_end)
+    .bind(&currency)
     .bind(plan_name)
     .bind(email_allowance)
+    .bind(rate_millicents)
+    .bind(pricing_snapshot.to_string())
     .execute(&mut **tx)
     .await
     .map_err(|error| format!("Failed to snapshot billing period: {error}"))?;
     Ok(())
+}
+
+/// Normalize a tenant billing-currency setting to a 3-letter uppercase ISO
+/// code, defaulting to EUR (audit F32: the default is applied ONCE at
+/// snapshot time and frozen, not per-invoice-read).
+fn normalize_period_currency(raw: &str) -> String {
+    let normalized = raw.trim().to_uppercase();
+    if normalized.len() == 3 && normalized.chars().all(|c| c.is_ascii_uppercase()) {
+        normalized
+    } else {
+        crate::overage::default_period_currency().to_string()
+    }
 }
 
 /// Entitlement decision after a subscription was deleted (audit F36):
@@ -1305,6 +1419,23 @@ fn reconciled_entitlement_plan(remaining: Option<(Option<&str>, &str)>) -> Strin
     match remaining {
         Some((Some(plan), _status)) if !plan.trim().is_empty() => plan.trim().to_string(),
         _ => "free".to_string(),
+    }
+}
+
+/// Audit F36 — pure staleness check for a subscription event against the
+/// last APPLIED event watermark (migration 184): an event whose billing
+/// cycle predates the watermark must not rewind the cycle (same-status
+/// older price/period updates, or a delayed active update racing a
+/// committed renewal). Same-cycle events apply (plan changes at a cycle
+/// boundary are legitimate); a missing watermark or a missing cycle in
+/// the event is never treated as stale.
+fn subscription_event_is_stale(
+    incoming_cycle: Option<DateTime<Utc>>,
+    applied_watermark: Option<DateTime<Utc>>,
+) -> bool {
+    match (incoming_cycle, applied_watermark) {
+        (Some(incoming), Some(watermark)) => incoming < watermark,
+        _ => false,
     }
 }
 
@@ -1488,71 +1619,160 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
         ));
     };
 
-    // Atomically update the invoice, resolving tenant_id either from event
-    // metadata or via a subquery on stripe_subscriptions. This eliminates the
-    // TOCTOU window between tenant resolution and the UPDATE. A confirmed
-    // payment allocation (audit F35) is written in the same statement so
-    // the outstanding derivation sees Stripe-settled invoices as paid.
-    let result = sqlx::query(
+    // Settle the local invoice(s) bound to this Stripe invoice (audits
+    // F72/F73). The old modifying CTE ended in `SELECT 1` and relied on
+    // rows_affected — but PostgreSQL's CommandComplete for `SELECT 1`
+    // reports one retrieved row even when the marked/allocation CTEs
+    // contained ZERO invoices, so a missing local invoice was
+    // indistinguishable from a real settlement. The replacement locks and
+    // RETURNS the actual invoice identities, and the allocation records
+    // the VERIFIED payment amount (amount_paid), capped against the
+    // authoritative remaining obligation (total − confirmed allocations −
+    // debt-reduction credits) in the MATCHING currency — never the full
+    // invoice total on top of existing wallet payments. Zero-value
+    // invoices settle without a positive allocation (the amount_cents > 0
+    // CHECK forbids storing one). Legacy nullable totals resolve through
+    // the canonical COALESCE(total, amount, 0) resolver.
+    let payment_cents = verified_payment_cents(&invoice);
+    let event_currency = invoice
+        .currency
+        .as_deref()
+        .map(|raw| normalize_stripe_currency(Some(raw)));
+
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|error| format!("Failed to begin invoice settlement transaction: {error}"))?;
+
+    let marked: Vec<(Uuid, String, String)> = sqlx::query_as(
         r#"
-        WITH marked AS (
-            UPDATE invoices SET status = 'paid', paid_at = NOW(), updated_at = NOW()
-            WHERE stripe_invoice_id = $1
-              AND (tenant_id = $2 OR tenant_id IS NULL)
-            RETURNING id, tenant_id, total, currency
-        ),
-        allocation AS (
-            INSERT INTO invoice_payment_allocations (
-                id, tenant_id, invoice_id, operation_id, source, amount_cents, currency
-            )
-            SELECT gen_random_uuid(), tenant_id, id, $3, 'stripe', total, currency
-            FROM marked
-            ON CONFLICT (operation_id) DO NOTHING
-        )
-        SELECT 1
+        SELECT id, tenant_id, currency
+        FROM invoices
+        WHERE stripe_invoice_id = $1
+          AND (tenant_id = $2 OR tenant_id IS NULL)
+        ORDER BY created_at
+        FOR UPDATE
         "#,
     )
     .bind(&invoice.id)
     .bind(&tenant_id)
-    .bind(format!("stripe:{}", invoice.id))
-    .execute(&state.db)
-    .await;
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|error| format!("Failed to lock invoices for Stripe {}: {error}", invoice.id))?;
 
-    // Fix F4 — dunning recovery is only legitimate when this event actually
-    // settled THE tenant's subscription-linked invoice. Track whether the
-    // local invoice row was really affected by this handler.
-    let invoice_persisted = match result {
-        Ok(execution) if execution.rows_affected() > 0 => {
-            // existing row marked paid
-            true
-        }
-        Ok(_) => {
-            // Fix A — no local row matched, meaning the invoice was created
-            // on Stripe's side (e.g. subscription billing or Meter usage)
-            // without a local draft. Insert the paid invoice so revenue is
-            // recorded. ON CONFLICT makes replays idempotent. Rows == 0
-            // means the tenant guard rejected the upsert (the local row is
-            // bound to a DIFFERENT tenant) — not this tenant's invoice.
-            let inserted = insert_paid_invoice_from_stripe(state, &invoice, &tenant_id).await?;
-            if inserted == 0 {
-                warn!(
-                    invoice_id = %invoice.id,
-                    tenant_id = %tenant_id,
-                    "invoice.paid upsert matched 0 rows (invoice bound to another tenant) — dunning state left untouched"
-                );
+    for (invoice_row_id, row_tenant, invoice_currency) in &marked {
+        if let Some(event_currency) = event_currency.as_deref() {
+            if !event_currency.eq_ignore_ascii_case(invoice_currency.trim()) {
+                // A payment in a different currency must never be recorded
+                // against this invoice's obligation — surface for
+                // reconciliation instead of minting phantom value.
+                return Err(format!(
+                    "invoice.paid for {} carries currency {event_currency} but local invoice \
+                     {invoice_row_id} is denominated in {invoice_currency}",
+                    invoice.id
+                ));
             }
-            inserted > 0
         }
-        Err(error) => return Err(format!("Failed to mark invoice as paid: {error}")),
-    };
+
+        let outstanding = crate::invoices::invoice_outstanding_cents_in(&mut *tx, *invoice_row_id)
+            .await
+            .map_err(|error| {
+                format!("Failed to derive outstanding for {invoice_row_id}: {error}")
+            })?;
+
+        let allocation = payment_cents.min(outstanding).max(0);
+        if payment_cents > outstanding {
+            warn!(
+                invoice_id = %invoice_row_id,
+                stripe_invoice_id = %invoice.id,
+                payment_cents,
+                outstanding,
+                "stripe payment exceeds the remaining obligation — allocating only the \
+                 authoritative remainder (over-allocation rejected)"
+            );
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE invoices
+            SET status = 'paid',
+                paid_at = COALESCE(paid_at, NOW()),
+                updated_at = NOW()
+            WHERE id = $1
+            "#,
+        )
+        .bind(invoice_row_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|error| format!("Failed to mark invoice {invoice_row_id} paid: {error}"))?;
+
+        if allocation > 0 {
+            sqlx::query(
+                r#"
+                INSERT INTO invoice_payment_allocations (
+                    id, tenant_id, invoice_id, operation_id, source, amount_cents, currency
+                )
+                VALUES (
+                    gen_random_uuid(), $1, $2, $3, 'stripe', $4, $5
+                )
+                ON CONFLICT (operation_id) DO NOTHING
+                "#,
+            )
+            .bind(row_tenant)
+            .bind(invoice_row_id)
+            .bind(format!("stripe:{}", invoice.id))
+            .bind(allocation)
+            .bind(invoice_currency.trim().to_uppercase())
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| format!("Failed to record Stripe payment allocation: {error}"))?;
+        } else {
+            info!(
+                invoice_id = %invoice_row_id,
+                stripe_invoice_id = %invoice.id,
+                payment_cents,
+                outstanding,
+                "stripe invoice settled without a positive allocation (zero-value/already covered)"
+            );
+        }
+    }
+
+    tx.commit()
+        .await
+        .map_err(|error| format!("Failed to commit invoice settlement: {error}"))?;
+
+    // Fix F4/F72 — dunning recovery is only legitimate when this event
+    // actually settled THE tenant's invoice. `marked` contains the REAL
+    // returned invoice identities (never a constant SELECT result), so a
+    // missing local invoice falls through to the external-invoice
+    // reconciliation/import path keyed on the unique Stripe invoice id.
+    let invoice_persisted = !marked.is_empty();
+    if !invoice_persisted {
+        // Fix A — no local row matched, meaning the invoice was created
+        // on Stripe's side (e.g. subscription billing, Meter usage, or a
+        // finalized usage-collection invoice whose local draft was never
+        // linked) without a local row. Insert the paid invoice so revenue
+        // is recorded. ON CONFLICT makes replays idempotent. Rows == 0
+        // means the tenant guard rejected the upsert (the local row is
+        // bound to a DIFFERENT tenant) — not this tenant's invoice.
+        let inserted = insert_paid_invoice_from_stripe(state, &invoice, &tenant_id).await?;
+        if inserted == 0 {
+            warn!(
+                invoice_id = %invoice.id,
+                tenant_id = %tenant_id,
+                "invoice.paid upsert matched 0 rows (invoice bound to another tenant) — dunning state left untouched"
+            );
+        }
+    }
 
     // If a previously-dunning invoice was settled, clear the tenant's dunning
     // state (healthy again), release queued messages and drop the cached
     // status — mirrors the auto-pay recovery path in maintenance.rs.
-    // Fix F4 — only when the invoice upsert actually affected rows above; a
-    // 0-row/guard-rejected event must never blanket-reset dunning or
-    // reactivate the tenant. The recovery is scoped to this invoice's
-    // failure history inside mark_payment_recovered.
+    // Fix F4 — only when the settlement actually persisted an invoice for
+    // this tenant above; a guard-rejected event must never blanket-reset
+    // dunning or reactivate the tenant. The recovery is scoped to this
+    // invoice's failure history inside mark_payment_recovered.
     if invoice_persisted {
         crate::maintenance::mark_payment_recovered(state, &tenant_id, Some(&invoice.id)).await?;
     }
@@ -1560,10 +1780,31 @@ async fn handle_invoice_paid(state: &AppState, invoice: InvoiceEvent) -> Result<
     info!(
         invoice_id = %invoice.id,
         tenant_id = %tenant_id,
+        settled_invoices = marked.len(),
+        payment_cents,
         dunning_recovery = invoice_persisted,
         "stripe invoice marked as paid"
     );
     Ok(())
+}
+
+/// The VERIFIED payment amount for an `invoice.paid` event (audit F73):
+/// Stripe's own `amount_paid` when present; otherwise the canonical
+/// derived total (never `invoices.total`, which may already be partially
+/// covered by wallet allocations). Clamped at zero.
+fn verified_payment_cents(invoice: &InvoiceEvent) -> i64 {
+    match invoice.amount_paid {
+        Some(paid) => paid.max(0),
+        None => {
+            let (_, _, total) = derive_invoice_totals(
+                invoice.subtotal,
+                invoice.tax,
+                invoice.total,
+                invoice.amount_due,
+            );
+            total.max(0)
+        }
+    }
 }
 
 /// Insert a paid invoice from a Stripe `invoice.paid` event when no local
@@ -1683,21 +1924,28 @@ async fn insert_paid_invoice_from_stripe(
     // invoices created directly from Stripe carry no local VAT derivation,
     // so store the current address; the VAT rate is derived from the Stripe
     // amounts themselves. Audit F08: the FULL address is snapshotted
-    // immutably onto the invoice, not just the country.
+    // immutably onto the invoice in the SAME versioned contract the
+    // billing-service and api-server writers use (snapshotVersion +
+    // registry identity) — null/empty optional fields stay null and are
+    // never refilled from the live account on re-export.
     let address_snapshot: Option<String> = sqlx::query_scalar(
         r#"
         SELECT json_build_object(
-            'company_name', company_name,
-            'vat_number', vat_number,
-            'address_line1', address_line1,
-            'address_line2', address_line2,
-            'city', city,
-            'state', state,
-            'postal_code', postal_code,
-            'country', country,
-            'email', email
+            'snapshotVersion', 1,
+            'company_name', ba.company_name,
+            'vat_number', ba.vat_number,
+            'address_line1', ba.address_line1,
+            'address_line2', ba.address_line2,
+            'city', ba.city,
+            'state', ba.state,
+            'postal_code', ba.postal_code,
+            'country', ba.country,
+            'email', ba.email,
+            'registry_code', t.settings->>'registryCode'
         )::text
-        FROM billing_addresses WHERE tenant_id = $1
+        FROM billing_addresses ba
+        JOIN tenants t ON t.id = ba.tenant_id
+        WHERE ba.tenant_id = $1
         "#,
     )
     .bind(tenant_id)
@@ -1714,6 +1962,15 @@ async fn insert_paid_invoice_from_stripe(
                 .and_then(|value| value.as_str())
                 .map(|country| country.to_uppercase())
         });
+    let billing_registry_code: Option<String> = address_snapshot
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(raw).ok())
+        .and_then(|snapshot| {
+            snapshot
+                .get("registry_code")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        });
 
     let result = sqlx::query(
         r#"
@@ -1721,14 +1978,14 @@ async fn insert_paid_invoice_from_stripe(
             id, tenant_id, stripe_invoice_id, invoice_number, status,
             currency, amount, subtotal, vat_total, total, line_items,
             issued_at, due_at, paid_at, period_start, period_end,
-            billing_country, vat_rate, billing_address,
+            billing_country, vat_rate, billing_address, billing_registry_code,
             created_at, updated_at
         ) VALUES (
             gen_random_uuid(), $1, $2,
             COALESCE($3, to_char(NOW(), 'YYYY') || '-' || LPAD(nextval('invoice_number_seq')::text, 6, '0')),
             'paid', $4, $7, $5, $6, $7, $13,
             to_timestamp($8), to_timestamp($8), NOW(), to_timestamp($9), to_timestamp($10),
-            $11, $12, $14,
+            $11, $12, $14, $15,
             NOW(), NOW()
         )
         ON CONFLICT (stripe_invoice_id) DO UPDATE SET
@@ -1758,6 +2015,7 @@ async fn insert_paid_invoice_from_stripe(
     .bind(vat_rate)
     .bind(line_items_json)
     .bind(address_snapshot)
+    .bind(billing_registry_code)
     .execute(&state.db)
     .await
     .map_err(|error| format!("Failed to insert paid Stripe invoice {}: {error}", invoice.id))?;
@@ -2087,6 +2345,17 @@ async fn record_failed_payment(
             SET status = 'suspended', updated_at = NOW()
             WHERE id = $1 AND $6 = true
             RETURNING id
+        ),
+        -- Audit F09: a dunning suspension is a BILLING restriction. It is
+        -- recorded independently so payment recovery can clear exactly
+        -- this hold without touching administrative, verification or
+        -- abuse restrictions on the same tenant.
+        billing_restriction AS (
+            INSERT INTO tenant_restrictions (tenant_id, kind, reason, actor_type)
+            SELECT $1, 'billing', 'dunning hard suspension', 'system'
+            WHERE $6 = true
+            ON CONFLICT (tenant_id, kind) WHERE cleared_at IS NULL
+            DO NOTHING
         )
         SELECT 1
         "#,
@@ -2602,6 +2871,11 @@ impl StripeBillingInterval {
 struct InvoiceEvent {
     id: String,
     amount_due: i64,
+    /// The amount ACTUALLY paid in this settlement (audit F73) — the
+    /// verified payment amount, in the invoice currency's minor unit.
+    /// Falls back to the canonical derived total when Stripe omits it.
+    #[serde(default)]
+    amount_paid: Option<i64>,
     #[serde(default)]
     currency: Option<String>,
     /// Subtotal excluding VAT, in the invoice currency's minor unit (cents).
@@ -3114,6 +3388,95 @@ mod tests {
     // ------------------------------------------------------------------
     // Audit F36 — entitlement reconciliation after a subscription delete.
     // ------------------------------------------------------------------
+
+    fn ts(secs: i64) -> Option<DateTime<Utc>> {
+        DateTime::from_timestamp(secs, 0)
+    }
+
+    #[test]
+    fn older_cycle_events_are_stale_against_the_applied_watermark() {
+        // F36 verification shape: pause update A after its initial read,
+        // process replacement B (watermark advances), resume A — B stays.
+        assert!(subscription_event_is_stale(ts(1_000), ts(2_000)));
+        // Same cycle (replay or same-boundary plan change) is NOT stale.
+        assert!(!subscription_event_is_stale(ts(2_000), ts(2_000)));
+        // A newer cycle is the current replacement.
+        assert!(!subscription_event_is_stale(ts(3_000), ts(2_000)));
+        // Missing watermark (legacy row) or missing cycle in the event is
+        // never treated as stale.
+        assert!(!subscription_event_is_stale(ts(1_000), None));
+        assert!(!subscription_event_is_stale(None, ts(2_000)));
+        assert!(!subscription_event_is_stale(None, None));
+    }
+
+    // ------------------------------------------------------------------
+    // Audit F73 — the verified payment amount drives the allocation.
+    // ------------------------------------------------------------------
+
+    fn invoice_event_with(amount_paid: Option<i64>, total: Option<i64>, due: i64) -> InvoiceEvent {
+        InvoiceEvent {
+            id: "in_test".into(),
+            amount_due: due,
+            amount_paid,
+            currency: Some("eur".into()),
+            subtotal: None,
+            tax: None,
+            total,
+            number: None,
+            created: None,
+            period_start: None,
+            period_end: None,
+            attempt_count: None,
+            subscription_details: None,
+            subscription: None,
+            lines: None,
+        }
+    }
+
+    #[test]
+    fn verified_payment_prefers_amount_paid_over_totals() {
+        // The confirmed payment wins over any derived total.
+        let event = invoice_event_with(Some(6_000), Some(10_000), 10_000);
+        assert_eq!(verified_payment_cents(&event), 6_000);
+    }
+
+    #[test]
+    fn verified_payment_falls_back_to_the_canonical_derived_total() {
+        // No amount_paid: the canonical derivation prefers Stripe's own
+        // explicit total...
+        let mut event = invoice_event_with(None, Some(10_000), 10_000);
+        event.subtotal = Some(8_000);
+        event.tax = Some(1_920);
+        assert_eq!(verified_payment_cents(&event), 10_000);
+        // ...then subtotal + tax when total is absent...
+        let mut event = invoice_event_with(None, None, 0);
+        event.subtotal = Some(8_000);
+        event.tax = Some(1_920);
+        assert_eq!(verified_payment_cents(&event), 9_920);
+        // ...and otherwise amount_due.
+        let event = invoice_event_with(None, None, 7_500);
+        assert_eq!(verified_payment_cents(&event), 7_500);
+    }
+
+    #[test]
+    fn verified_payment_never_goes_negative() {
+        let event = invoice_event_with(Some(-5), None, 0);
+        assert_eq!(verified_payment_cents(&event), 0);
+    }
+
+    #[test]
+    fn zero_value_payments_settle_without_a_positive_allocation() {
+        // F73: a zero-value paid invoice must not attempt an allocation
+        // (the amount_cents > 0 CHECK would fail the callback); the
+        // settlement marks it paid with no allocation row.
+        let event = invoice_event_with(Some(0), Some(0), 0);
+        let payment = verified_payment_cents(&event);
+        assert_eq!(payment, 0);
+        // The allocation decision mirrors the handler: only positive
+        // amounts against a positive remainder allocate.
+        let outstanding = 0_i64;
+        assert_eq!(payment.min(outstanding).max(0), 0);
+    }
 
     #[test]
     fn delete_with_a_remaining_active_subscription_keeps_its_plan() {
