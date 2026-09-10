@@ -873,7 +873,8 @@ html.dark :focus-visible {
     align-items: center;
     justify-content: center;
     @apply px-6 py-3 text-white font-semibold rounded-lg border border-brand-700 transition-premium tracking-tight text-sm;
-    background: var(--brand-gradient);
+    background-color: rgb(var(--brand-600));
+    background-image: var(--brand-gradient);
     min-height: 44px;
   }
   .btn-primary:hover {
@@ -1599,7 +1600,13 @@ header a[aria-current="page"] {
   line-height: 1.9;
   color: rgb(var(--surface-500));
 }
-.k-receipt .ok { color: rgb(var(--brand-500)); font-weight: 600; }
+.k-receipt .ok { color: rgb(var(--brand-600)); font-weight: 600; }
+@media (prefers-color-scheme: dark) {
+  :root:not(.light) .k-receipt,
+  :root:not(.light) .k-arc-label { color: rgb(var(--surface-600)); }
+}
+html.dark .k-receipt,
+html.dark .k-arc-label { color: rgb(var(--surface-600)); }
 
 
 /* ── Spiral-Lock DNA v2 (2026-09-06) — the mark's geometry, platform-wide ── */
@@ -1645,7 +1652,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   background: rgb(var(--surface-200)); color: rgb(var(--surface-600));
   font: 700 12px var(--font-mono, ui-monospace, Menlo, monospace);
 }
-.ribbon span.m { background: rgb(var(--brand-500)); color: #fff; }
+.ribbon span.m { background: rgb(var(--brand-600)); color: #fff; }
 
 /* ── Themed card surface for the bg-card utility (inputs, badges, panels).
       The class was used by templates but never defined — it rendered
@@ -1690,7 +1697,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
   border: 1px solid #27272a; border-radius: 16px 16px 9px 9px; /* ARCH-lg */
   overflow: hidden; font: 12.5px/1.7 var(--font-mono, ui-monospace, Menlo, monospace);
 }
-.term-bar { display: flex; gap: 6px; align-items: center; padding: 9px 14px; border-bottom: 1px solid #27272a; color: #71717a; }
+.term-bar { display: flex; gap: 6px; align-items: center; padding: 9px 14px; border-bottom: 1px solid #27272a; color: #a1a1aa; }
 .term-bar b { font-weight: 600; letter-spacing: 0.1em; font-size: 10px; margin-left: 8px; }
 .term-dot { width: 9px; height: 9px; border-radius: 50%; background: #3f3f46; }
 .term-pre { padding: 18px; overflow-x: auto; margin: 0; white-space: pre; }
@@ -1747,7 +1754,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 }
 .slot-nav a:hover { color: rgb(var(--surface-950)); background: rgb(var(--surface-100)); }
 .slot-nav a.on, .slot-nav a[aria-current="page"] {
-  background: rgb(var(--brand-500)); color: #fff;
+  background: rgb(var(--brand-600)); color: #fff;
 }
 
 /* ── Ledger feature cards: hex tag slots + the red index ── */
