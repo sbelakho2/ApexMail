@@ -59,7 +59,7 @@ RUN zola build
 # =============================================================================
 # Production Stage
 # =============================================================================
-FROM nginx:1.29-alpine@sha256:3bcf852aed06467cf075c6105892e4d5a6ebbbafa0ce22d35062db9e90ddef4c AS runtime
+FROM nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de AS runtime
 
 # Create non-root user
 RUN apk add --no-cache curl \
