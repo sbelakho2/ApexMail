@@ -61,8 +61,11 @@ RUN zola build
 # =============================================================================
 FROM nginx:1.29-alpine@sha256:5616878291a2eed594aee8db4dade5878cf7edcb475e59193904b198d9b830de AS runtime
 
-# Create non-root user
-RUN apk add --no-cache curl \
+# Create non-root user. apk upgrade first: the pinned base digest's apk
+# packages can lag published CVE fixes (curl 8.17 carried five HIGHs fixed
+# in 8.22) — lifting them here keeps the trivy gate honest without
+# chasing ever-newer base digests.
+RUN apk upgrade --no-cache && apk add --no-cache curl \
     && adduser -D -H -u 10001 -s /sbin/nologin apexmail \
     && chown -R apexmail:apexmail /var/cache/nginx /var/log/nginx /etc/nginx/conf.d \
     && chmod -R 755 /var/cache/nginx
