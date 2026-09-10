@@ -34,7 +34,8 @@ static INIT: tokio::sync::OnceCell<bool> = tokio::sync::OnceCell::const_new();
 /// Connect to the test database (None ⇒ soft-skip). The platform schema
 /// (canonical chain via the production migrator) and the sales schema
 /// (initialize_schema) are prepared once per process; each test gets a
-/// fresh pool on the same database.
+/// fresh pool on the same database. A CONFIGURED provisioning failure
+/// aborts the suite (audit F01) instead of reading as a skip.
 pub async fn test_pool(test_name: &str) -> Option<PgPool> {
     let ready = INIT
         .get_or_init(|| async {
@@ -42,12 +43,18 @@ pub async fn test_pool(test_name: &str) -> Option<PgPool> {
                 eprintln!("SKIP [{test_name}]: SALES_TEST_DATABASE_URL unset/unparseable");
                 return false;
             };
-            let Some(db) =
-                migrator::test_support::fresh_canonical_db(base_url.as_str(), SALES_TEST_DB).await
-            else {
-                eprintln!(
-                    "SKIP [{test_name}]: cannot provision {SALES_TEST_DB} on the test server"
-                );
+            let db =
+                match migrator::test_support::fresh_canonical_db(base_url.as_str(), SALES_TEST_DB)
+                    .await
+                {
+                    Ok(db) => db,
+                    // F01: the URL is configured, so an unreachable server or a
+                    // failed clone/migration is an infrastructure FAILURE — it
+                    // must fail the suite, not silently skip every test.
+                    Err(error) => panic!("{}", error.panic_message()),
+                };
+            let Some(db) = db else {
+                eprintln!("SKIP [{test_name}]: unconfigured");
                 return false;
             };
             if let Err(e) = sales_autopilot::routes::initialize_schema(&db).await {

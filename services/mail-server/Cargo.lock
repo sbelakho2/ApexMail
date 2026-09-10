@@ -2048,6 +2048,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "mail-common",
+ "migrator",
  "moka",
  "observability-service",
  "rand 0.9.4",

@@ -504,6 +504,97 @@ fn get_compliance_info(params: &serde_json::Value) -> serde_json::Value {
     }
 }
 
+/// Canonical audit_logs column set (migration 038/050 lineage) — the
+/// generated investigation query may only reference columns from this set,
+/// which tests pin (audit F89: the previous output referenced
+/// audit_logs.api_key_id, a column that does not exist — its SQL failed
+/// with 42703).
+#[cfg(test)]
+const AUDIT_LOG_CANONICAL_COLUMNS: &[&str] = &[
+    "id",
+    "tenant_id",
+    "user_id",
+    "session_id",
+    "action",
+    "resource",
+    "resource_id",
+    "details",
+    "ip_address",
+    "user_agent",
+    "outcome",
+    "error_message",
+    "timestamp",
+    "hash",
+    "previous_hash",
+    "signature",
+    "created_at",
+    "fts_vector",
+];
+
+/// Build the incident-investigation guidance from the SUPPORTED audit
+/// search interface and the identity the audit trail actually records
+/// (audit F89).
+///
+/// What the canonical schema records per entry: the principal `user_id`,
+/// `session_id`, `tenant_id` and free-form `details`. It does NOT persist
+/// an `api_key_id` (API-key-authenticated requests carry user_id NULL),
+/// so a key-scoped audit timeline is NOT claimed here — the response says
+/// so explicitly and scopes the query by the recorded principal instead.
+///
+/// The window is DERIVED from the caller's exposure estimate, not a fixed
+/// 48 hours, and every artifact below is parameterized and tenant-owned.
+fn incident_investigation_guidance(key_id: &str, exposure_hours: i64) -> serde_json::Value {
+    // Bound the derived window: an incident exposure estimate of 0 or a
+    // garbage-negative value still yields a sane minimum lookback.
+    let window_hours = exposure_hours.clamp(1, 24 * 30);
+    let window_end = chrono::Utc::now();
+    let window_start = window_end - chrono::Duration::hours(window_hours);
+    let fmt =
+        |ts: chrono::DateTime<chrono::Utc>| ts.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    serde_json::json!({
+        "derived_window": {
+            "exposure_hours_requested": exposure_hours,
+            "window_hours_used": window_hours,
+            "from": fmt(window_start),
+            "to": fmt(window_end),
+            "note": "window derived from the reported exposure, not a fixed interval"
+        },
+        // Tenant-owned, parameterized investigation endpoint (the supported
+        // audit search interface — GET /v1/admin/audit/search with from/to
+        // filters, plus the CSV/JSON export for the evidence pack).
+        "apexmail_investigation_endpoint": format!(
+            "GET /v1/admin/audit/search?tenant_id=<your-tenant>&from={}&to={}",
+            fmt(window_start),
+            fmt(window_end)
+        ),
+        "apexmail_evidence_export": "POST /v1/admin/audit/export",
+        // Parameterized SQL over columns that exist on canonical
+        // audit_logs. `user_id IS NOT DISTINCT FROM $2` keeps NULL
+        // (API-key) principals when scoping by the tenant only.
+        "parameterized_sql": "SELECT id, tenant_id, user_id, session_id, action, resource, \
+             resource_id, outcome, error_message, timestamp \
+             FROM audit_logs \
+             WHERE tenant_id = $1 \
+               AND user_id IS NOT DISTINCT FROM $2 \
+               AND timestamp >= $3::timestamptz AND timestamp < $4::timestamptz \
+             ORDER BY timestamp",
+        "sql_binds": [
+            "$1: your tenant_id (tenant-owned scope)",
+            "$2: principal user_id the audit trail records (NULL = all principals in the tenant)",
+            "$3: window start (derived from the exposure window)",
+            "$4: window end (now)"
+        ],
+        "key_scoping": {
+            "key_id": key_id,
+            "recorded_identity": "audit_logs records user_id/session_id/tenant_id per entry; api_keys.id is not persisted on audit entries",
+            "limitation": "a KEY-scoped audit timeline is not available until key identity is recorded at audit-write time; identify the key's tenant via api_keys.key_prefix, then investigate by tenant + principal within the derived window"
+        },
+        // The tool itself retrieved NO evidence — say so (audit F89).
+        "evidence_status": "advisory_only: no audit evidence has been retrieved by this tool; execute the investigation endpoint/SQL above to collect it"
+    })
+}
+
 fn generate_incident_timeline(params: &serde_json::Value) -> serde_json::Value {
     let key_id = params
         .get("key_id")
@@ -518,7 +609,7 @@ fn generate_incident_timeline(params: &serde_json::Value) -> serde_json::Value {
         "exposure_hours": hours,
         "recommended_timeline": [
             {"step":1,"action":"Immediate revocation","who":"Admin via Dashboard → API Keys → Revoke","timeframe":"< 1 minute"},
-            {"step":2,"action":"Scope assessment","who":"Query audit_logs for key activity","timeframe":"< 15 minutes"},
+            {"step":2,"action":"Scope assessment","who":"Collect audit evidence for the derived window (see investigation guidance)","timeframe":"< 15 minutes"},
             {"step":3,"action":"Containment","who":"Rotate related keys, notify security team","timeframe":"< 30 minutes"},
             {"step":4,"action":"Legal assessment","who":"Determine if GDPR Art. 33 notification required","timeframe":format!("< {} hours", if hours>0{hours/2}else{2})},
             {"step":5,"action":"Supervisory authority notification","who":"DPO files with AKI (Estonia DPA)","timeframe":"< 72 hours"},
@@ -526,7 +617,7 @@ fn generate_incident_timeline(params: &serde_json::Value) -> serde_json::Value {
             {"step":7,"action":"Root cause analysis","who":"Engineering + Security","timeframe":"< 7 days"},
             {"step":8,"action":"Remediation","who":"Implement git-secrets, Gitleaks, pre-commit hooks","timeframe":"< 30 days"},
         ],
-        "apexmail_audit_log_query": "SELECT * FROM audit_logs WHERE api_key_id = $1 AND created_at > NOW() - INTERVAL '48 hours' ORDER BY created_at",
+        "investigation": incident_investigation_guidance(key_id, hours),
         "apexmail_incident_contact": "security@apexmail.ee"
     })
 }
@@ -801,11 +892,17 @@ mod tests {
         let r = generate_incident_timeline(
             &serde_json::json!({"key_id":"key' OR '1'='1","exposure_hours":4}),
         );
-        let query = r["apexmail_audit_log_query"].as_str().unwrap();
+        // F89: the guidance now lives under `investigation` and is built
+        // from the supported audit search interface + recorded principal.
+        let query = r["investigation"]["parameterized_sql"].as_str().unwrap();
         assert!(query.contains("$1"), "query must use a $1 placeholder");
         assert!(
             !query.contains("key'"),
             "key_id must never be interpolated into SQL"
+        );
+        assert!(
+            !query.contains("api_key_id"),
+            "must not reference the absent audit_logs.api_key_id column"
         );
     }
     #[test]
@@ -951,5 +1048,125 @@ mod tests {
     fn test_webhook_setup() {
         let r = get_webhook_setup(&serde_json::json!({"event_types":["sent","delivered"]}));
         assert_eq!(r["requested"].as_array().unwrap().len(), 2);
+    }
+
+    // ── F89: incident-advice investigation guidance ──────────────────
+
+    fn incident_output(exposure_hours: i64) -> serde_json::Value {
+        generate_incident_timeline(&serde_json::json!({
+            "key_id": "key_123",
+            "exposure_hours": exposure_hours
+        }))
+    }
+
+    /// The generated query must reference ONLY canonical audit_logs
+    /// columns — the old output's audit_logs.api_key_id failed with 42703.
+    #[test]
+    fn f89_generated_sql_uses_only_canonical_audit_columns() {
+        let output = incident_output(4);
+        let sql = output["investigation"]["parameterized_sql"]
+            .as_str()
+            .expect("parameterized_sql present");
+        assert!(
+            !sql.contains("api_key_id"),
+            "the query must not reference the absent api_key_id column"
+        );
+        assert!(!sql.to_lowercase().contains("sla_"), "no invented columns");
+        // Every bare identifier referenced by the SELECT/WHERE belongs to
+        // the canonical column set.
+        for column in [
+            "id",
+            "tenant_id",
+            "user_id",
+            "session_id",
+            "action",
+            "resource",
+            "resource_id",
+            "outcome",
+            "error_message",
+            "timestamp",
+        ] {
+            assert!(
+                sql.contains(column),
+                "expected column {column} in the projection"
+            );
+            assert!(
+                AUDIT_LOG_CANONICAL_COLUMNS.contains(&column),
+                "{column} must be a canonical audit_logs column"
+            );
+        }
+    }
+
+    /// Parameterized and tenant-owned: $1..$4 binds, no string-interpolated
+    /// values, no fixed 48-hour interval.
+    #[test]
+    fn f89_generated_sql_is_parameterized_and_window_derived() {
+        let output = incident_output(6);
+        let sql = output["investigation"]["parameterized_sql"]
+            .as_str()
+            .unwrap();
+        for parameter in ["$1", "$2", "$3", "$4"] {
+            assert!(sql.contains(parameter), "expected bind {parameter}");
+        }
+        assert!(
+            !sql.contains("48 hours") && !sql.contains("'48'"),
+            "no fixed 48-hour window"
+        );
+        assert!(!sql.contains("key_123"), "no interpolated key id");
+
+        // The window DERIVES from the requested exposure: different
+        // requests produce different `from` instants.
+        let short = incident_output(1);
+        let long = incident_output(48);
+        let short_from = short["investigation"]["derived_window"]["from"]
+            .as_str()
+            .unwrap();
+        let long_from = long["investigation"]["derived_window"]["from"]
+            .as_str()
+            .unwrap();
+        assert_ne!(short_from, long_from, "window must follow exposure_hours");
+        assert_eq!(
+            long["investigation"]["derived_window"]["window_hours_used"],
+            48
+        );
+        // Nonsense exposure values are clamped, not trusted.
+        let clamped = incident_output(-5);
+        assert_eq!(
+            clamped["investigation"]["derived_window"]["window_hours_used"],
+            1
+        );
+    }
+
+    /// The response is honest about key scoping and about which evidence
+    /// has actually been retrieved (none — advisory only).
+    #[test]
+    fn f89_response_states_key_scoping_limit_and_evidence_status() {
+        let output = incident_output(4);
+        let investigation = &output["investigation"];
+        assert!(
+            investigation["key_scoping"]["limitation"]
+                .as_str()
+                .unwrap()
+                .contains("KEY-scoped audit timeline is not available"),
+            "must not claim a key-scoped investigation"
+        );
+        assert!(
+            investigation["evidence_status"]
+                .as_str()
+                .unwrap()
+                .starts_with("advisory_only"),
+            "must state that no evidence was retrieved"
+        );
+        let endpoint = investigation["apexmail_investigation_endpoint"]
+            .as_str()
+            .unwrap();
+        assert!(
+            endpoint.starts_with("GET /v1/admin/audit/search?tenant_id="),
+            "tenant-owned investigation endpoint, got {endpoint}"
+        );
+        assert!(
+            endpoint.contains("from="),
+            "endpoint carries the derived window"
+        );
     }
 }

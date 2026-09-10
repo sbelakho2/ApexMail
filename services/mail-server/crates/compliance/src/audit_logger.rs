@@ -30,6 +30,21 @@ fn truncate_to_micros(ts: DateTime<Utc>) -> DateTime<Utc> {
         .expect("truncating a valid timestamp to microseconds is always valid")
 }
 
+/// Explicit, type-aligned projection shared by EVERY live ∪ archive read
+/// and by the archival copy (audit F76).
+///
+/// On the canonical chain `audit_logs` has 18 columns (the live-only
+/// `created_at` and `fts_vector` additions) while `audit_logs_archive`
+/// has 16 — every `SELECT *` UNION between them was invalid with SQLSTATE
+/// 42601 ("each UNION query must have the same number of columns"),
+/// breaking search, export, statistics and integrity checks even when both
+/// tables were empty. Pinning ONE column list keeps the live search indexes
+/// and FTS column untouched (they are simply not selected here) and keeps
+/// archive insertion/copying aligned with the read model.
+const AUDIT_ENTRY_COLUMNS: &str = "id, tenant_id, user_id, session_id, action, resource, \
+       resource_id, details, ip_address, user_agent, outcome, error_message, \
+       timestamp, hash, previous_hash, signature";
+
 pub struct AuditLogger {
     db: PgPool,
     #[expect(
@@ -452,9 +467,15 @@ impl AuditLogger {
             "SELECT id, tenant_id, user_id, session_id, action, resource, resource_id,
                     details, ip_address, user_agent, outcome, error_message,
                     timestamp, hash, previous_hash, signature
-             FROM (SELECT * FROM audit_logs
+             FROM (SELECT id, tenant_id, user_id, session_id, action, resource, resource_id,
+                          details, ip_address, user_agent, outcome, error_message,
+                          timestamp, hash, previous_hash, signature
+                   FROM audit_logs
                    UNION ALL
-                   SELECT * FROM audit_logs_archive) entries
+                   SELECT id, tenant_id, user_id, session_id, action, resource, resource_id,
+                          details, ip_address, user_agent, outcome, error_message,
+                          timestamp, hash, previous_hash, signature
+                   FROM audit_logs_archive) entries
              WHERE ($1::text IS NULL OR tenant_id = $1)
                AND ($2::text IS NULL OR user_id = $2)
                AND ($3::text IS NULL OR action = $3)
@@ -484,9 +505,11 @@ impl AuditLogger {
     async fn count_entries_simple(&self, q: &AuditLogQuery) -> Result<i64, String> {
         let (count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM (
-               SELECT * FROM audit_logs
+               SELECT tenant_id, user_id, action, resource, outcome, timestamp
+               FROM audit_logs
                UNION ALL
-               SELECT * FROM audit_logs_archive) entries
+               SELECT tenant_id, user_id, action, resource, outcome, timestamp
+               FROM audit_logs_archive) entries
              WHERE ($1::text IS NULL OR tenant_id = $1)
                AND ($2::text IS NULL OR user_id = $2)
                AND ($3::text IS NULL OR action = $3)
@@ -640,9 +663,15 @@ impl AuditLogger {
             "SELECT id, tenant_id, user_id, session_id, action, resource, resource_id,
                     details, ip_address, user_agent, outcome, error_message,
                     timestamp, hash, previous_hash, signature
-             FROM (SELECT * FROM audit_logs
+             FROM (SELECT id, tenant_id, user_id, session_id, action, resource, resource_id,
+                          details, ip_address, user_agent, outcome, error_message,
+                          timestamp, hash, previous_hash, signature
+                   FROM audit_logs
                    UNION ALL
-                   SELECT * FROM audit_logs_archive) entries
+                   SELECT id, tenant_id, user_id, session_id, action, resource, resource_id,
+                          details, ip_address, user_agent, outcome, error_message,
+                          timestamp, hash, previous_hash, signature
+                   FROM audit_logs_archive) entries
              WHERE ($1::text IS NULL OR tenant_id = $1)
                AND ($2::timestamptz IS NULL OR timestamp >= $2)
                AND ($3::timestamptz IS NULL OR timestamp <= $3)
@@ -725,9 +754,9 @@ impl AuditLogger {
     pub async fn get_stats(&self, tenant_id: Option<&str>) -> Result<serde_json::Value, String> {
         let (total,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM (
-               SELECT * FROM audit_logs
+               SELECT tenant_id FROM audit_logs
                UNION ALL
-               SELECT * FROM audit_logs_archive) entries
+               SELECT tenant_id FROM audit_logs_archive) entries
              WHERE ($1::text IS NULL OR tenant_id = $1)",
         )
         .bind(tenant_id)
@@ -737,9 +766,9 @@ impl AuditLogger {
 
         let by_action: Vec<(String, i64)> = sqlx::query_as(
             "SELECT action, COUNT(*) FROM (
-               SELECT * FROM audit_logs
+               SELECT action, tenant_id FROM audit_logs
                UNION ALL
-               SELECT * FROM audit_logs_archive) entries
+               SELECT action, tenant_id FROM audit_logs_archive) entries
              WHERE ($1::text IS NULL OR tenant_id = $1) GROUP BY action",
         )
         .bind(tenant_id)
@@ -749,9 +778,9 @@ impl AuditLogger {
 
         let by_resource: Vec<(String, i64)> = sqlx::query_as(
             "SELECT resource, COUNT(*) FROM (
-               SELECT * FROM audit_logs
+               SELECT resource, tenant_id FROM audit_logs
                UNION ALL
-               SELECT * FROM audit_logs_archive) entries
+               SELECT resource, tenant_id FROM audit_logs_archive) entries
              WHERE ($1::text IS NULL OR tenant_id = $1) GROUP BY resource",
         )
         .bind(tenant_id)
@@ -761,9 +790,9 @@ impl AuditLogger {
 
         let by_outcome: Vec<(String, i64)> = sqlx::query_as(
             "SELECT outcome, COUNT(*) FROM (
-               SELECT * FROM audit_logs
+               SELECT outcome, tenant_id FROM audit_logs
                UNION ALL
-               SELECT * FROM audit_logs_archive) entries
+               SELECT outcome, tenant_id FROM audit_logs_archive) entries
              WHERE ($1::text IS NULL OR tenant_id = $1) GROUP BY outcome",
         )
         .bind(tenant_id)
@@ -826,7 +855,11 @@ impl AuditLogger {
 
         let copy_sql = format!(
             "INSERT INTO audit_logs_archive
-             SELECT * FROM audit_logs a WHERE a.timestamp < $1{not_held}
+                 (id, tenant_id, user_id, session_id, action, resource, resource_id,
+                  details, ip_address, user_agent, outcome, error_message,
+                  timestamp, hash, previous_hash, signature)
+             SELECT {AUDIT_ENTRY_COLUMNS}
+             FROM audit_logs a WHERE a.timestamp < $1{not_held}
              ON CONFLICT DO NOTHING"
         );
         let mut copy = sqlx::query(&copy_sql).bind(older_than);

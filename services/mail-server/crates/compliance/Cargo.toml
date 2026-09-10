@@ -47,3 +47,7 @@ async-trait = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "macros"] }
+# Canonical test fixtures (audits F76/F77): provision throwaway databases
+# carrying the REAL production migration chain through the production
+# migrator's test_support, instead of hand-written schema subsets.
+migrator = { path = "../migrator" }

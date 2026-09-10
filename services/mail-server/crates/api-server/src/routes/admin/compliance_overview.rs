@@ -107,6 +107,36 @@ fn summarize_gdpr_request_counts(rows: &[(String, i64)], overdue: i64) -> GdprRe
     summary
 }
 
+/// Count OPEN GDPR requests whose SLA deadline has passed (audit F78).
+///
+/// `gdpr_requests.sla_deadline` does not exist in the canonical model — the
+/// old query failed to prepare with 42703 after the table-existence guard
+/// passed. Deadlines are deliberately DERIVED from the recorded creation
+/// timestamp through the ONE shared calendar-aware policy installed by
+/// migration 172 (`gdpr_request_sla_deadline(created_at) = created_at + one
+/// calendar month`, GDPR Art. 12(3)): calendar-month arithmetic, so counts
+/// agree across short months and leap Februaries. Both overview branches
+/// (tenant-scoped and global) route through THIS function, so they can
+/// never disagree on the derivation.
+async fn gdpr_overdue_request_count(
+    db: &sqlx::PgPool,
+    tenant_id: Option<&str>,
+) -> Result<i64, ApiError> {
+    const SQL: &str = "SELECT COUNT(*)::bigint
+             FROM gdpr_requests
+             WHERE status NOT IN ('completed', 'rejected')
+               AND gdpr_request_sla_deadline(created_at) < NOW()";
+    let overdue = if let Some(tenant_id) = tenant_id {
+        sqlx::query_scalar::<_, i64>(&format!("{SQL} AND tenant_id = $1"))
+            .bind(tenant_id)
+            .fetch_one(db)
+            .await?
+    } else {
+        sqlx::query_scalar::<_, i64>(SQL).fetch_one(db).await?
+    };
+    Ok(overdue)
+}
+
 async fn get_compliance_overview(
     State(state): State<AppState>,
     auth: AuthUser,
@@ -197,28 +227,17 @@ async fn get_compliance_overview(
                 .await?
         };
 
-        // COUNT(*) always returns a row, so fetch_one will not fail from empty results
-        let overdue = if tenant_scoped {
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*)::bigint
-             FROM gdpr_requests
-             WHERE tenant_id = $1
-               AND status NOT IN ('completed', 'rejected')
-               AND sla_deadline < NOW()",
-            )
-            .bind(&auth.tenant_id)
-            .fetch_one(db)
-            .await?
-        } else {
-            sqlx::query_scalar::<_, i64>(
-                "SELECT COUNT(*)::bigint
-             FROM gdpr_requests
-             WHERE status NOT IN ('completed', 'rejected')
-               AND sla_deadline < NOW()",
-            )
-            .fetch_one(db)
-            .await?
-        };
+        // Overdue: derived SLA deadlines via the shared calendar-aware
+        // policy (audit F78) — no sla_deadline column exists.
+        let overdue = gdpr_overdue_request_count(
+            db,
+            if tenant_scoped {
+                Some(auth.tenant_id.as_str())
+            } else {
+                None
+            },
+        )
+        .await?;
 
         gdpr_requests = summarize_gdpr_request_counts(&rows, overdue);
     }
@@ -628,6 +647,7 @@ fn empty_vat_widget(year: i32, month: u32) -> VatSummaryWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone as _;
 
     #[test]
     fn summarize_gdpr_request_counts_uses_deadline_based_overdue_total() {
@@ -644,6 +664,182 @@ mod tests {
         assert_eq!(summary.processing, 2);
         assert_eq!(summary.completed, 5);
         assert_eq!(summary.overdue, 4);
+    }
+
+    /// F78: the shared calendar-aware SLA derivation installed by
+    /// migration 172 — one calendar month after creation (short months and
+    /// leap Februaries included), never a fixed 30x24h interval.
+    #[tokio::test]
+    async fn f78_sla_deadline_policy_is_calendar_aware_on_canonical_schema() {
+        let Some(pool) = crate::test_db::canonical_pool("f78_policy").await else {
+            eprintln!("skipping f78_sla_deadline_policy_is_calendar_aware_on_canonical_schema: TEST_DATABASE_URL not set");
+            return;
+        };
+        let (deadline,): (chrono::DateTime<chrono::Utc>,) =
+            sqlx::query_as("SELECT gdpr_request_sla_deadline($1)")
+                .bind(chrono::Utc.with_ymd_and_hms(2026, 1, 31, 9, 0, 0).unwrap())
+                .fetch_one(&pool)
+                .await
+                .expect("policy function exists on the canonical chain");
+        assert_eq!(
+            deadline,
+            chrono::Utc.with_ymd_and_hms(2026, 2, 28, 9, 0, 0).unwrap(),
+            "Jan 31 + one calendar month = Feb 28"
+        );
+        let (leap,): (chrono::DateTime<chrono::Utc>,) =
+            sqlx::query_as("SELECT gdpr_request_sla_deadline($1)")
+                .bind(chrono::Utc.with_ymd_and_hms(2024, 1, 31, 9, 0, 0).unwrap())
+                .fetch_one(&pool)
+                .await
+                .expect("leap-year boundary");
+        assert_eq!(
+            leap,
+            chrono::Utc.with_ymd_and_hms(2024, 2, 29, 9, 0, 0).unwrap(),
+            "leap February keeps Feb 29"
+        );
+        pool.close().await;
+    }
+
+    /// F78: the overdue count derives deadlines from request timestamps on
+    /// the canonical schema — the empty overview succeeds (the old
+    /// sla_deadline query failed to prepare even with no rows), and counts
+    /// agree with the per-request derivation across calendar boundaries,
+    /// statuses and tenants.
+    #[tokio::test]
+    async fn f78_overdue_counts_derive_from_timestamps_across_boundaries() {
+        let Some(pool) = crate::test_db::canonical_pool("f78_overdue").await else {
+            eprintln!("skipping f78_overdue_counts_derive_from_timestamps_across_boundaries: TEST_DATABASE_URL not set");
+            return;
+        };
+        let tenant = "ten_f78";
+
+        // Empty: succeeds and is zero (the F76-class failure mode: the old
+        // query referenced a nonexistent column).
+        assert_eq!(gdpr_overdue_request_count(&pool, None).await.unwrap(), 0);
+        assert_eq!(
+            gdpr_overdue_request_count(&pool, Some(tenant))
+                .await
+                .unwrap(),
+            0
+        );
+
+        async fn seed(
+            pool: &sqlx::PgPool,
+            id: &str,
+            tenant_id: &str,
+            status: &str,
+            created: chrono::DateTime<chrono::Utc>,
+        ) {
+            sqlx::query(
+                "INSERT INTO gdpr_requests (id, tenant_id, email, request_type, status, created_at, updated_at)
+                 VALUES ($1, $2, $3, 'access', $4, $5, $5)",
+            )
+            .bind(id)
+            .bind(tenant_id)
+            .bind(format!("{id}@x.ee"))
+            .bind(status)
+            .bind(created)
+            .execute(pool)
+            .await
+            .expect("seed gdpr request");
+        }
+        // 40 days old, open → overdue.
+        seed(
+            &pool,
+            "old_open",
+            tenant,
+            "pending",
+            chrono::Utc::now() - chrono::Duration::days(40),
+        )
+        .await;
+        // Created Jan 31 → deadline Feb 28 (calendar boundary) → overdue.
+        seed(
+            &pool,
+            "jan31",
+            tenant,
+            "processing",
+            chrono::Utc.with_ymd_and_hms(2026, 1, 31, 12, 0, 0).unwrap(),
+        )
+        .await;
+        // 3 days old, open → NOT overdue.
+        seed(
+            &pool,
+            "recent",
+            tenant,
+            "pending",
+            chrono::Utc::now() - chrono::Duration::days(3),
+        )
+        .await;
+        // 40 days old but completed → not counted.
+        seed(
+            &pool,
+            "old_done",
+            tenant,
+            "completed",
+            chrono::Utc::now() - chrono::Duration::days(40),
+        )
+        .await;
+        // Another tenant's overdue request: invisible when scoped.
+        seed(
+            &pool,
+            "other",
+            "ten_f78_other",
+            "pending",
+            chrono::Utc::now() - chrono::Duration::days(40),
+        )
+        .await;
+
+        assert_eq!(
+            gdpr_overdue_request_count(&pool, Some(tenant))
+                .await
+                .unwrap(),
+            2,
+            "scoped: old_open + jan31 only"
+        );
+        assert_eq!(
+            gdpr_overdue_request_count(&pool, None).await.unwrap(),
+            3,
+            "global: + the other tenant's overdue request"
+        );
+
+        // The count AGREES with the per-request derivation of the same
+        // rows — the definition both overview queries share.
+        let (recomputed,): (i64,) = sqlx::query_as(
+            "SELECT count(*) FROM gdpr_requests              WHERE tenant_id = $1 AND status NOT IN ('completed', 'rejected')                AND gdpr_request_sla_deadline(created_at) < NOW()",
+        )
+        .bind(tenant)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            gdpr_overdue_request_count(&pool, Some(tenant))
+                .await
+                .unwrap(),
+            recomputed
+        );
+
+        // Fulfilled-at is recorded by the workflow; the derived deadline
+        // for the completed request is still past but it is not counted.
+        let (rows, overdue) = (
+            sqlx::query_as::<_, (String, i64)>("SELECT status, COUNT(*)::bigint FROM gdpr_requests WHERE tenant_id = $1 GROUP BY status")
+                .bind(tenant)
+                .fetch_all(&pool)
+                .await
+                .unwrap(),
+            gdpr_overdue_request_count(&pool, Some(tenant)).await.unwrap(),
+        );
+        let summary = summarize_gdpr_request_counts(&rows, overdue);
+        assert_eq!(
+            (
+                summary.pending,
+                summary.processing,
+                summary.completed,
+                summary.overdue
+            ),
+            (2, 1, 1, 2)
+        );
+
+        pool.close().await;
     }
 
     /// Verify that all 27 EU member states have a defined VAT rate and
