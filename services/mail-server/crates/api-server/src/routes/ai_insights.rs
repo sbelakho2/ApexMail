@@ -650,8 +650,7 @@ mod bot_detection_db_tests {
         // Postgres TIMESTAMPTZ keeps microsecond precision — truncate the
         // seed so the read-back comparison is exact.
         let seeded_at = chrono::Utc::now() - chrono::Duration::seconds(60);
-        let submicro_nanos =
-            i64::from(<seeded_at as chrono::Timelike>::nanosecond(&seeded_at) % 1_000);
+        let submicro_nanos = i64::from(chrono::Timelike::nanosecond(&seeded_at) % 1_000);
         let sent_at = seeded_at - chrono::Duration::nanoseconds(submicro_nanos);
         let message_id = uuid::Uuid::new_v4();
         let unsent_message_id = uuid::Uuid::new_v4();
