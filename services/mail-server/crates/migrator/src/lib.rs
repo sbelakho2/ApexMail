@@ -183,15 +183,166 @@ pub mod test_support {
         Some(true)
     }
 
-    /// A fresh, empty database named `db_name` on the server behind
-    /// `base_url` (any database name in `base_url` is ignored — only host,
-    /// port, and credentials are used). Drops an existing database of the
-    /// same name first, so the result always carries exactly one lineage:
-    /// the canonical chain applied by [`apply_canonical_migrations`].
+    /// A fresh database named `db_name` carrying the canonical production
+    /// schema, cloned from a once-provisioned template.
+    ///
+    /// Applying the ~170-file chain per test was fine for a handful of
+    /// local DB tests, but at CI parallelism (thousands of tests in one
+    /// nextest run against one Postgres) the concurrent DDL/lock load
+    /// exhausted the cluster's shared lock memory ("out of shared memory",
+    /// migration 64) and every DB-backed test slowed to a crawl. The chain
+    /// is therefore applied exactly ONCE into `apexmail_canonical_tpl`
+    /// (under a cluster advisory lock, verified per process), and each
+    /// test database is a `CREATE DATABASE ... TEMPLATE` clone — a fast
+    /// filesystem copy with no DDL storm.
     ///
     /// `None` means the server is unreachable or the database could not be
     /// created/migrated; callers soft-skip (workspace convention).
     pub async fn fresh_canonical_db(base_url: &str, db_name: &str) -> Option<PgPool> {
+        const TEMPLATE_DB: &str = "apexmail_canonical_tpl";
+        // "AXPM-TPL" — cluster-wide exclusive lock guarding template
+        // creation/top-up. Per-test clones run WITHOUT the lock (they must
+        // not serialize); a clone racing a top-up retries below.
+        const TEMPLATE_LOCK_KEY: i64 = 0x4158_504D_5450_4C21;
+        static TEMPLATE_VERIFIED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+
+        let (server_part, _) = base_url.rsplit_once('/')?;
+        let admin_url = format!("{server_part}/postgres");
+
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(Duration::from_secs(60))
+            .connect(&admin_url)
+            .await
+            .ok()?;
+
+        if TEMPLATE_VERIFIED.set(()).is_ok() {
+            // First DB test in this process: create or top up the template.
+            let _ = sqlx::query("SELECT pg_advisory_lock($1)")
+                .bind(TEMPLATE_LOCK_KEY)
+                .execute(&admin)
+                .await;
+            let outcome = async {
+                let template_exists: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_database WHERE datname = $1)",
+                )
+                .bind(TEMPLATE_DB)
+                .fetch_one(&admin)
+                .await
+                .unwrap_or(false);
+
+                if !template_exists {
+                    sqlx::query(&format!(r#"CREATE DATABASE "{TEMPLATE_DB}""#))
+                        .execute(&admin)
+                        .await
+                        .ok()?;
+                }
+
+                // Connect, verify/complete the lineage, disconnect (a
+                // connected template blocks clones — keep this window
+                // short and exclusive to the advisory lock).
+                let template_pool = PgPoolOptions::new()
+                    .max_connections(1)
+                    .acquire_timeout(Duration::from_secs(60))
+                    .connect(&format!("{server_part}/{TEMPLATE_DB}"))
+                    .await
+                    .ok()?;
+                let healthy = canonical_lineage(&template_pool).await;
+                let result = match healthy {
+                    Some(true) => {
+                        apply_canonical_migrations(&template_pool).await.ok()?;
+                        Some(())
+                    }
+                    // Foreign/dirty lineage or an unreadable probe on a
+                    // template WE own: rebuild it from scratch.
+                    _ => {
+                        template_pool.close().await;
+                        sqlx::query(&format!(
+                            r#"DROP DATABASE IF EXISTS "{TEMPLATE_DB}" WITH (FORCE)"#
+                        ))
+                        .execute(&admin)
+                        .await
+                        .ok()?;
+                        sqlx::query(&format!(r#"CREATE DATABASE "{TEMPLATE_DB}""#))
+                            .execute(&admin)
+                            .await
+                            .ok()?;
+                        let rebuilt = PgPoolOptions::new()
+                            .max_connections(1)
+                            .acquire_timeout(Duration::from_secs(60))
+                            .connect(&format!("{server_part}/{TEMPLATE_DB}"))
+                            .await
+                            .ok()?;
+                        apply_canonical_migrations(&rebuilt).await.ok()?;
+                        rebuilt.close().await;
+                        Some(())
+                    }
+                };
+                if healthy == Some(true) {
+                    template_pool.close().await;
+                }
+                result
+            }
+            .await;
+            let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+                .bind(TEMPLATE_LOCK_KEY)
+                .execute(&admin)
+                .await;
+            if outcome.is_none() {
+                eprintln!(
+                    "canonical test template bootstrap failed; falling back to a direct apply"
+                );
+            }
+        }
+
+        // Per-test database: drop any leftover, clone the template. The
+        // retry absorbs a clone racing another process's top-up window
+        // ("source database is being accessed by other users").
+        let _ = sqlx::query(&format!(
+            r#"DROP DATABASE IF EXISTS "{db_name}" WITH (FORCE)"#
+        ))
+        .execute(&admin)
+        .await;
+        let mut cloned = false;
+        for attempt in 0..12 {
+            match sqlx::query(&format!(
+                r#"CREATE DATABASE "{db_name}" TEMPLATE "{TEMPLATE_DB}""#
+            ))
+            .execute(&admin)
+            .await
+            {
+                Ok(_) => {
+                    cloned = true;
+                    break;
+                }
+                Err(error) => {
+                    let busy = error.to_string().contains("source database")
+                        || error.to_string().contains("accessed by other users");
+                    if !busy || attempt == 11 {
+                        eprintln!("canonical test DB clone failed for {db_name}: {error}");
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                }
+            }
+        }
+        admin.close().await;
+        if !cloned {
+            return None;
+        }
+
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(&format!("{server_part}/{db_name}"))
+            .await
+            .ok()?;
+        Some(pool)
+    }
+
+    /// Direct (non-template) provisioning retained for callers that want
+    /// the chain applied into a specific database: drop + create + apply.
+    pub async fn fresh_canonical_db_direct(base_url: &str, db_name: &str) -> Option<PgPool> {
         let (server_part, _) = base_url.rsplit_once('/')?;
         let admin_url = format!("{server_part}/postgres");
 
