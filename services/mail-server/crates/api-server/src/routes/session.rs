@@ -151,7 +151,17 @@ async fn get_session(
             // API surface would refuse. Failures surface as
             // authenticated:false plus a human-readable reason (the
             // endpoint's contract is a state report, not an error status).
-            match crate::middleware::auth::authenticate_jwt(&token, &state).await {
+            // Introspection is not bound to one route; the tenant gate runs
+            // with the session endpoint's own method/path (introspection
+            // stays reachable for suspended tenants as a state report).
+            match crate::middleware::auth::authenticate_jwt(
+                &token,
+                &axum::http::Method::GET,
+                "/v1/session/introspect",
+                &state,
+            )
+            .await
+            {
                 Ok(auth_user) => {
                     let profile: Option<(String, String, Option<String>, String)> = sqlx::query_as(
                         "SELECT id::text, email, name, role FROM users

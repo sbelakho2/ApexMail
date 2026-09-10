@@ -5,6 +5,7 @@ pub mod cache;
 pub mod config;
 pub mod crypto;
 pub mod dkim;
+pub mod email_headers;
 pub mod error_codes;
 pub mod http_client;
 pub mod http_error;

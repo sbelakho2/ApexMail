@@ -25,6 +25,10 @@ pub struct EmailJob {
     pub attachments: Option<JsonValue>,
     #[sqlx(rename = "campaignId")]
     pub campaign_id: Option<String>,
+    /// F55: the validated server-owned send category (migration 187,
+    /// default 'marketing'), enforced at dispatch against
+    /// subscription_preferences.
+    pub message_category: String,
     pub tags: Option<Vec<String>>,
     pub metadata: Option<JsonValue>,
     #[sqlx(rename = "scheduledAt")]
@@ -32,6 +36,113 @@ pub struct EmailJob {
     pub attempt: i32,
     #[sqlx(rename = "createdAt")]
     pub created_at: DateTime<Utc>,
+}
+
+/// F26: one structured RFC 5322 mailbox (`Name <local@domain>`). Visible
+/// To/Cc lists and Reply-To are carried as ARRAYS of these end-to-end
+/// (queue JSONB → `EmailJob` → `PreparedEmail` → MIME) — never as one
+/// comma-joined string, which mail-builder 0.3.2's `From<&str>` would wrap
+/// into a single angle-bracket mailbox (`<a@x, b@y>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mailbox {
+    /// Display name (already RFC 2047-encoded by the transport when set).
+    pub name: Option<String>,
+    /// Bare address (`local@domain`).
+    pub email: String,
+}
+
+impl Mailbox {
+    /// Parse ONE mailbox from its header string form. Accepts
+    /// `local@domain` and `Name <local@domain>` (quoted or unquoted name);
+    /// returns `None` when no `@` survives the trim or the value contains
+    /// line breaks (header-injection defence).
+    pub fn parse(value: &str) -> Option<Self> {
+        if value.contains(['\r', '\n']) {
+            return None;
+        }
+        let trimmed = value.trim();
+        if let Some((name, addr)) = split_display_name(trimmed) {
+            let addr = addr.trim().trim_matches(|c| c == '<' || c == '>').trim();
+            if addr.contains('@') && !addr.is_empty() {
+                let name = name.trim().trim_matches('"').trim();
+                return Some(Self {
+                    name: (!name.is_empty()).then(|| name.to_string()),
+                    email: addr.to_string(),
+                });
+            }
+            return None;
+        }
+        if trimmed.contains('@') && !trimmed.is_empty() {
+            return Some(Self {
+                name: None,
+                email: trimmed.to_string(),
+            });
+        }
+        None
+    }
+
+    /// Parse a header VALUE that may hold several comma-separated
+    /// mailboxes — the LEGACY comma-joined representation stored by older
+    /// writers (F26 backfill path: parse, do not re-serialize). Splitting
+    /// is QUOTE-AWARE so a display name like `"Doe, Jane"` survives as one
+    /// mailbox. Empty segments are skipped; unparsable segments are
+    /// dropped (the send-time validation already rejected malformed
+    /// recipients, so this is defense in depth for queue rows persisted
+    /// before then).
+    pub fn parse_list(value: &str) -> Vec<Self> {
+        split_mailbox_list(value)
+            .into_iter()
+            .filter_map(|segment| Mailbox::parse(&segment))
+            .filter(|mailbox| !mailbox.email.is_empty())
+            .collect()
+    }
+}
+
+/// Split a comma-separated mailbox list on the commas that are NOT inside
+/// a double-quoted display name (RFC 5322 quoted strings may contain
+/// commas).
+fn split_mailbox_list(value: &str) -> Vec<String> {
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for ch in value.chars() {
+        match ch {
+            '\\' if in_quotes => {
+                escaped = !escaped;
+                current.push(ch);
+            }
+            '"' if !escaped => {
+                in_quotes = !in_quotes;
+                current.push(ch);
+            }
+            ',' if !in_quotes => {
+                segments.push(std::mem::take(&mut current));
+            }
+            _ => {
+                escaped = false;
+                current.push(ch);
+            }
+        }
+    }
+    segments.push(current);
+    segments
+}
+
+/// Split `Name <addr>` into `(name, <addr>)`, tolerating quoted display
+/// names containing commas/angles. Returns `None` for bare addresses.
+fn split_display_name(value: &str) -> Option<(String, &str)> {
+    let open = value.rfind('<')?;
+    let close = value.rfind('>')?;
+    if close <= open || !value.ends_with('>') {
+        return None;
+    }
+    let name = value.get(..open)?.trim().to_string();
+    let addr = value.get(open..=close)?;
+    if addr.contains(['\r', '\n']) || name.contains(['\r', '\n']) {
+        return None;
+    }
+    Some((name, addr))
 }
 
 /// Domain configuration for sending.
@@ -65,12 +176,14 @@ pub struct PreparedEmail {
     pub from: String,
     /// Envelope destination: exactly ONE recipient (the send unit).
     pub to: String,
-    /// F26: the ORIGINAL MIME `To` header value (the full visible recipient
-    /// list). `None` falls back to `to` (legacy single-recipient rows).
-    pub mime_to: Option<String>,
-    /// F26: the ORIGINAL MIME `Cc` header value. Bcc intentionally has no
-    /// representation here — it lives only in the delivery data.
-    pub mime_cc: Option<String>,
+    /// F26: the ORIGINAL visible MIME `To` mailbox list. Empty falls back to
+    /// `to` (legacy single-recipient rows).
+    pub mime_to: Vec<Mailbox>,
+    /// F26: the ORIGINAL visible MIME `Cc` mailbox list. Bcc intentionally
+    /// has no representation here — it lives only in the delivery data.
+    pub mime_cc: Vec<Mailbox>,
+    /// F26: structured Reply-To mailbox (display-name capable).
+    pub reply_to: Option<Mailbox>,
     pub subject: String,
     pub html: Option<String>,
     pub text: Option<String>,
@@ -190,4 +303,53 @@ pub struct RateLimitResult {
     pub limit: i64,
     pub retry_after_ms: Option<u64>,
     pub isp: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mailbox_parses_bare_address() {
+        let m = Mailbox::parse("user@example.com").unwrap();
+        assert_eq!(m.email, "user@example.com");
+        assert!(m.name.is_none());
+    }
+
+    #[test]
+    fn mailbox_parses_display_name_forms() {
+        let m = Mailbox::parse("Jane Doe <jane@example.com>").unwrap();
+        assert_eq!(m.email, "jane@example.com");
+        assert_eq!(m.name.as_deref(), Some("Jane Doe"));
+
+        let m = Mailbox::parse("\"Doe, Jane\" <jane@example.com>").unwrap();
+        assert_eq!(m.email, "jane@example.com");
+        assert_eq!(m.name.as_deref(), Some("Doe, Jane"));
+    }
+
+    #[test]
+    fn mailbox_rejects_malformed() {
+        assert!(Mailbox::parse("no-at-sign").is_none());
+        assert!(Mailbox::parse("  ").is_none());
+        // Header injection attempts are rejected outright.
+        assert!(Mailbox::parse("a@b.com\r\nBcc: x@y.z").is_none());
+        assert!(Mailbox::parse("Name <a@b.com>\r\nBcc: x@y.z").is_none());
+    }
+
+    #[test]
+    fn mailbox_list_parses_legacy_comma_joined() {
+        let list = Mailbox::parse_list("a@example.com, B <b@example.com>, , c@example.com");
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0].email, "a@example.com");
+        assert_eq!(list[1].name.as_deref(), Some("B"));
+        assert_eq!(list[2].email, "c@example.com");
+    }
+
+    #[test]
+    fn mailbox_list_parses_quoted_comma_name() {
+        let list = Mailbox::parse_list("\"Doe, Jane\" <jane@example.com>, bob@example.com");
+        assert_eq!(list.len(), 2);
+        assert_eq!(list[0].name.as_deref(), Some("Doe, Jane"));
+        assert_eq!(list[1].email, "bob@example.com");
+    }
 }

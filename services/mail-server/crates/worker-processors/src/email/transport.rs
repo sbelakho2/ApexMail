@@ -11,13 +11,14 @@ use aws_sdk_sesv2::types::{Destination, EmailContent, RawMessage};
 use aws_sdk_sesv2::Client as SesClient;
 use mail_send::mail_auth::common::crypto::{RsaKey, Sha256};
 use mail_send::mail_auth::dkim::DkimSigner;
+use mail_send::mail_builder::headers::address::Address;
 use mail_send::mail_builder::headers::text::Text;
 use mail_send::mail_builder::MessageBuilder;
 use mail_send::{Credentials, SmtpClientBuilder};
 use tracing::{debug, error, info, warn};
 use zeroize::Zeroizing;
 
-use super::types::{PreparedEmail, SendResult};
+use super::types::{Mailbox, PreparedEmail, SendResult};
 use crate::common::error::{ProcessorError, ProcessorResult};
 use crate::common::{EmailConfig, SesConfig, SmtpConfig, TransportType};
 
@@ -44,7 +45,37 @@ pub trait EmailTransport: Send + Sync {
 /// Header carrying the platform message UUID (added by `prepare_email`).
 /// The MTA bounce parser resolves it back to the queue row via
 /// `email_queue.id::text = $1 OR message_id::text = $1`.
-const VERP_MESSAGE_ID_HEADER: &str = "X-ApexMail-Message-ID";
+/// F74: shared canonical constant — the SES callback handler parses the
+/// same names case-insensitively.
+const VERP_MESSAGE_ID_HEADER: &str = apexmail_lib::email_headers::HEADER_MESSAGE_ID;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// F26: structured mailbox lists → mail-builder Address conversion
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// F26: convert structured [`Mailbox`]es into a mail-builder
+/// [`Address::List`] via `Address::new_list`. The pinned mail-builder
+/// 0.3.2's `From<&str>` wraps the WHOLE string in ONE angle-bracket
+/// mailbox (`<a@x, b@y>`), so a comma-joined To/Cc string can never be
+/// handed to `MessageBuilder::to/cc` — only structured lists.
+fn mailbox_list(mailboxes: &[Mailbox]) -> Address<'_> {
+    Address::new_list(
+        mailboxes
+            .iter()
+            .map(|mailbox| match &mailbox.name {
+                Some(name) => Address::new_address(Some(name.as_str()), mailbox.email.as_str()),
+                None => Address::new_address(None::<&str>, mailbox.email.as_str()),
+            })
+            .collect(),
+    )
+}
+
+/// F26: the envelope-fallback visible `To` for legacy single-recipient rows
+/// without a preserved mailbox list — a ONE-element list of the bare
+/// envelope destination.
+fn single_mailbox(email: &str) -> Address<'_> {
+    Address::new_address(None::<&str>, email)
+}
 
 /// Default VERP domain — MUST stay identical to the MTA bounce server's
 /// `default_verp_domain()` (crates/mta/src/config.rs) so generated
@@ -379,15 +410,25 @@ impl SmtpTransport {
 
     fn build_message<'a>(&self, email: &'a PreparedEmail) -> MessageBuilder<'a> {
         // F26: the MIME To/Cc headers show the ORIGINAL visible recipient
-        // list when the per-recipient expansion preserved it; the ENVELOPE
+        // LIST when the per-recipient expansion preserved it — structured
+        // `Address::new_list`, never a comma-joined `&str` (mail-builder
+        // 0.3.2 would wrap the whole string in one mailbox). The ENVELOPE
         // destination (`email.to`) is what delivery targets and is set by
-        // the caller (VERP path / mail-send's header derivation).
+        // the caller (VERP path / mail-send's header derivation). Reply-To
+        // uses the same structured model.
         let mut builder = MessageBuilder::new()
             .from(email.from.as_str())
-            .to(email.mime_to.as_deref().unwrap_or(email.to.as_str()))
             .subject(email.subject.as_str());
-        if let Some(mime_cc) = email.mime_cc.as_deref() {
-            builder = builder.cc(mime_cc);
+        if email.mime_to.is_empty() {
+            builder = builder.to(single_mailbox(email.to.as_str()));
+        } else {
+            builder = builder.to(mailbox_list(&email.mime_to));
+        }
+        if !email.mime_cc.is_empty() {
+            builder = builder.cc(mailbox_list(&email.mime_cc));
+        }
+        if let Some(reply_to) = &email.reply_to {
+            builder = builder.reply_to(mailbox_list(std::slice::from_ref(reply_to)));
         }
 
         for (key, value) in &email.headers {
@@ -489,7 +530,7 @@ impl EmailTransport for SmtpTransport {
         // list. VERP keeps priority for the MAIL FROM address.
         let explicit_envelope = match verp_return_path_for(email) {
             Some(return_path) => OutgoingMailFrom::Verp(return_path),
-            None if email.mime_to.is_some() || email.mime_cc.is_some() => {
+            None if !email.mime_to.is_empty() || !email.mime_cc.is_empty() => {
                 OutgoingMailFrom::Sender(email.from.clone())
             }
             None => OutgoingMailFrom::DeriveFromHeaders,
@@ -683,14 +724,22 @@ impl SesTransport {
     /// We use `mail-builder` to construct the message identically to
     /// how `SmtpTransport` does it, then extract the raw bytes for SES.
     fn build_raw_mime(email: &PreparedEmail) -> Vec<u8> {
-        // F26: same MIME To/Cc preservation as the SMTP path (see
-        // SmtpTransport::build_message).
+        // F26: same structured MIME To/Cc/Reply-To construction as the SMTP
+        // path (see `SmtpTransport::build_message`) — `Address::new_list`
+        // mailbox arrays, never comma-joined strings.
         let mut builder = MessageBuilder::new()
             .from(email.from.as_str())
-            .to(email.mime_to.as_deref().unwrap_or(email.to.as_str()))
             .subject(email.subject.as_str());
-        if let Some(mime_cc) = email.mime_cc.as_deref() {
-            builder = builder.cc(mime_cc);
+        if email.mime_to.is_empty() {
+            builder = builder.to(single_mailbox(email.to.as_str()));
+        } else {
+            builder = builder.to(mailbox_list(&email.mime_to));
+        }
+        if !email.mime_cc.is_empty() {
+            builder = builder.cc(mailbox_list(&email.mime_cc));
+        }
+        if let Some(reply_to) = &email.reply_to {
+            builder = builder.reply_to(mailbox_list(std::slice::from_ref(reply_to)));
         }
 
         for (key, value) in &email.headers {
@@ -920,6 +969,195 @@ mod tests {
         assert_eq!(t.transport_name(), "smtp");
     }
 
+    // ── F26: structured mailbox lists render as real mailbox lists ────────
+
+    /// Extract one header's folded value from raw MIME (headers are
+    /// case-insensitive; mail-builder folds long lines with CRLF+space,
+    /// which is unfolded before comparison).
+    fn mime_header(raw: &str, name: &str) -> Option<String> {
+        let mut value: Option<String> = None;
+        for line in raw.split("\r\n") {
+            if let Some(rest) = line.strip_prefix(&format!("{name}:")) {
+                if value.is_none() {
+                    value = Some(rest.trim_start().to_string());
+                }
+            } else if line.starts_with(' ') || line.starts_with('\t') {
+                if let Some(v) = value.as_mut() {
+                    v.push_str(line.trim());
+                }
+            } else if !line.is_empty() {
+                // A different header ends the capture.
+                if value.is_some() {
+                    break;
+                }
+            }
+        }
+        value
+    }
+
+    /// F26 verification per the finding: build real MIME with mail-builder
+    /// 0.3.2 for TWO To, TWO Cc and one Bcc (envelope-only) recipient, and
+    /// assert the visible mailbox lists are two separate entries — not the
+    /// malformed single angle-bracket mailbox `<a@x, b@y>` that
+    /// `From<&str>` used to produce — that no Bcc header exists, and that
+    /// the envelope destination stays out of the visible headers.
+    #[test]
+    fn mailbox_lists_render_as_separate_mailboxes_not_one_malformed_mailbox() {
+        let email = PreparedEmail {
+            from: "sender@example.com".into(),
+            // Envelope destination of THIS copy (the Bcc recipient).
+            to: "bcc-recipient@example.net".into(),
+            mime_to: vec![
+                Mailbox {
+                    name: None,
+                    email: "a@example.com".into(),
+                },
+                Mailbox {
+                    name: Some("B Person".into()),
+                    email: "b@example.com".into(),
+                },
+            ],
+            mime_cc: vec![
+                Mailbox {
+                    name: None,
+                    email: "c@example.com".into(),
+                },
+                Mailbox {
+                    name: None,
+                    email: "d@example.com".into(),
+                },
+            ],
+            reply_to: Some(Mailbox {
+                name: Some("Support".into()),
+                email: "support@example.com".into(),
+            }),
+            subject: "Structured mailboxes".into(),
+            html: Some("<p>Hello</p>".into()),
+            text: None,
+            headers: vec![],
+            attachments: vec![],
+            dkim: None,
+        };
+        let raw = SesTransport::build_raw_mime(&email);
+        let raw_str = String::from_utf8_lossy(&raw);
+
+        // TWO separate To mailboxes: the second keeps its display name
+        // (RFC 5322 name-addr), and neither is wrapped with the whole
+        // comma-joined list inside one pair of angle brackets.
+        let to = mime_header(&raw_str, "To").expect("To header present");
+        assert!(
+            to.contains("a@example.com") && to.contains("b@example.com"),
+            "both To mailboxes must be present: {to}"
+        );
+        // The F26 bug form was the WHOLE comma-joined list inside ONE
+        // angle-bracket pair: `<a@example.com, b@example.com>`. A list of
+        // two mailboxes (each possibly bracketed) is correct.
+        if let Some(rest) = to.strip_prefix('<') {
+            let first_mailbox = rest.split('>').next().unwrap_or("");
+            assert!(
+                !first_mailbox.contains(','),
+                "To must NOT be one malformed angle-bracket mailbox: {to}"
+            );
+        }
+        assert!(
+            to.contains("B Person") || to.contains("B Person <b@example.com>"),
+            "display names survive (possibly RFC 2047-encoded): {to}"
+        );
+        // (The malformed joined form would show the comma INSIDE one
+        // bracket pair — already excluded by the first-mailbox check.)
+        assert!(!to.contains("a@example.com,b@example.com"));
+
+        let cc = mime_header(&raw_str, "Cc").expect("Cc header present");
+        assert!(cc.contains("c@example.com") && cc.contains("d@example.com"));
+        if let Some(rest) = cc.strip_prefix('<') {
+            let first_mailbox = rest.split('>').next().unwrap_or("");
+            assert!(!first_mailbox.contains(','), "Cc must be a list: {cc}");
+        }
+
+        let reply_to = mime_header(&raw_str, "Reply-To").expect("Reply-To present");
+        assert!(reply_to.contains("support@example.com"));
+
+        // Bcc lives ONLY in the envelope: no Bcc header may exist, and the
+        // envelope destination must not leak into any visible header.
+        assert!(
+            mime_header(&raw_str, "Bcc").is_none(),
+            "Bcc must never be a visible header"
+        );
+        for header in ["To", "Cc", "Reply-To"] {
+            let value = mime_header(&raw_str, header).unwrap_or_default();
+            assert!(
+                !value.contains("bcc-recipient@example.net"),
+                "envelope destination must stay out of {header}: {value}"
+            );
+        }
+    }
+
+    /// The SMTP builder path produces the identical structured shape (the
+    /// two transports share `mailbox_list`).
+    #[test]
+    fn smtp_builder_renders_the_same_structured_mailboxes() {
+        let transport = SmtpTransport::new(SmtpConfig::default());
+        let email = PreparedEmail {
+            from: "sender@example.com".into(),
+            to: "envelope@example.net".into(),
+            mime_to: vec![
+                Mailbox {
+                    name: None,
+                    email: "a@example.com".into(),
+                },
+                Mailbox {
+                    name: None,
+                    email: "b@example.com".into(),
+                },
+            ],
+            mime_cc: vec![Mailbox {
+                name: None,
+                email: "c@example.com".into(),
+            }],
+            reply_to: None,
+            subject: "SMTP shape".into(),
+            html: None,
+            text: Some("body".into()),
+            headers: vec![],
+            attachments: vec![],
+            dkim: None,
+        };
+        let raw = transport.build_message(&email).write_to_vec().unwrap();
+        let raw_str = String::from_utf8_lossy(&raw);
+        let to = mime_header(&raw_str, "To").expect("To header present");
+        assert!(to.contains("a@example.com") && to.contains("b@example.com"));
+        if let Some(rest) = to.strip_prefix('<') {
+            let first_mailbox = rest.split('>').next().unwrap_or("");
+            assert!(
+                !first_mailbox.contains(','),
+                "no malformed single mailbox: {to}"
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_single_recipient_row_falls_back_to_the_envelope_destination() {
+        // No preserved mailbox list: the visible To is the envelope
+        // destination as a ONE-element list.
+        let email = PreparedEmail {
+            from: "sender@example.com".into(),
+            to: "only@example.net".into(),
+            mime_to: vec![],
+            mime_cc: vec![],
+            reply_to: None,
+            subject: "legacy".into(),
+            html: None,
+            text: Some("body".into()),
+            headers: vec![],
+            attachments: vec![],
+            dkim: None,
+        };
+        let raw = SesTransport::build_raw_mime(&email);
+        let raw_str = String::from_utf8_lossy(&raw);
+        let to = mime_header(&raw_str, "To").expect("To header present");
+        // mail-builder writes the single mailbox in angle-bracket addr form.
+        assert_eq!(to, "<only@example.net>");
+    }
     #[test]
     fn test_build_raw_mime_basic() {
         let email = PreparedEmail {
@@ -931,8 +1169,9 @@ mod tests {
             headers: vec![("X-Custom".into(), "value".into())],
             attachments: vec![],
             dkim: None,
-            mime_to: None,
-            mime_cc: None,
+            mime_to: vec![],
+            mime_cc: vec![],
+            reply_to: None,
         };
         let raw = SesTransport::build_raw_mime(&email);
         let raw_str = String::from_utf8_lossy(&raw);
@@ -954,8 +1193,9 @@ mod tests {
             headers: vec![],
             attachments: vec![],
             dkim: None,
-            mime_to: None,
-            mime_cc: None,
+            mime_to: vec![],
+            mime_cc: vec![],
+            reply_to: None,
         };
         let raw = SesTransport::build_raw_mime(&email);
         // Should produce *something* even with no body
@@ -978,8 +1218,9 @@ mod tests {
                 content_type: "text/plain".into(),
             }],
             dkim: None,
-            mime_to: None,
-            mime_cc: None,
+            mime_to: vec![],
+            mime_cc: vec![],
+            reply_to: None,
         };
         let raw = SesTransport::build_raw_mime(&email);
         let raw_str = String::from_utf8_lossy(&raw);
@@ -1477,8 +1718,9 @@ mod tests {
             headers: vec![("X-Other".into(), "value".into())],
             attachments: vec![],
             dkim: None,
-            mime_to: None,
-            mime_cc: None,
+            mime_to: vec![],
+            mime_cc: vec![],
+            reply_to: None,
         };
         assert!(
             verp_return_path_for(&email).is_none(),

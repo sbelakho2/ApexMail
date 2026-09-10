@@ -18,11 +18,11 @@ use tokio::sync::Notify;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
-use super::tracking::{add_tracking_pixel, rewrite_links};
+use super::tracking::{add_tracking_pixel, rewrite_links, unsubscribe_link};
 use super::transport::{create_transport_from_config, EmailTransport};
 use super::types::{
-    Attachment, CachedSuppression, DkimConfig, Domain, EmailJob, PreparedEmail, SendOutcome,
-    SendResult, WarmupLimits,
+    Attachment, CachedSuppression, DkimConfig, Domain, EmailJob, Mailbox, PreparedEmail,
+    SendOutcome, SendResult, WarmupLimits,
 };
 use crate::common::{
     Backpressure, BackpressureConfig, CircuitBreaker, CircuitBreakerConfig, EmailConfig,
@@ -56,9 +56,63 @@ const EMAIL_QUEUE_STATUSES: [&str; 8] = [
     "suppressed",
 ];
 
-/// F18: the dispatch-time tenant suspension gate's query (read-through
-/// cached; see [`EmailProcessor::tenant_suspended`]).
+/// F18: the dispatch-time tenant policy gate's query. NEVER wrapped in an
+/// allow-cache — see [`EmailProcessor::tenant_policy`].
 const TENANT_STATUS_SQL: &str = "SELECT status FROM tenants WHERE id = $1";
+
+/// F18: the explicit dispatch-time tenant policy result. Nothing but
+/// [`TenantPolicy::Allowed`] may reach the external transport; every other
+/// variant DEFERS the job (requeue) and exits dispatch — the gate never
+/// fails open and never treats pending/unknown as permitted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TenantPolicy {
+    /// The tenant row was read and its status is `active`.
+    Allowed,
+    /// The tenant is confirmed not eligible to send (missing row, empty
+    /// identity, `pending`, `suspended`, ...). The job defers until the
+    /// restriction is lifted.
+    Restricted(String),
+    /// The policy could not be determined (DB lookup failure). The job
+    /// defers; the next claim re-attempts the lookup.
+    TemporarilyUnavailable,
+}
+
+impl TenantPolicy {
+    /// The `requeue_reason` recorded on the deferred row.
+    fn requeue_reason(&self) -> &str {
+        match self {
+            Self::Allowed => "allowed",
+            Self::Restricted(reason) => reason,
+            Self::TemporarilyUnavailable => "tenant_policy_unavailable",
+        }
+    }
+}
+
+/// F55: the explicit dispatch-time consent result. `Deferred` is distinct
+/// from both "no suppression" and "suppressed" — a FAILED verification is
+/// never interpreted as permission to send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ConsentDecision {
+    /// Current authoritative state permits this send.
+    Allowed,
+    /// Current authoritative state forbids it (durable reason recorded).
+    Suppressed(String),
+    /// The verification itself failed — defer, do not send.
+    Deferred(&'static str),
+}
+
+/// F55: the single authoritative dispatch-time consent query — global
+/// suppression AND the per-category preference, read together so the two
+/// dimensions cannot disagree.
+const DISPATCH_CONSENT_SQL: &str = r#"
+    SELECT
+        (SELECT reason FROM suppressions
+          WHERE tenant_id = $1 AND LOWER(email) = $2
+          LIMIT 1) AS global_reason,
+        (SELECT NOT subscribed FROM subscription_preferences
+          WHERE tenant_id = $1 AND LOWER(email) = $2 AND category = $3
+          LIMIT 1) AS category_opted_out
+"#;
 
 /// Error rate window size.
 const ERROR_WINDOW_SIZE: usize = 20;
@@ -172,53 +226,30 @@ const DLQ_FAIL_UPDATE_SQL: &str = r#"
 "#;
 
 /// F25: derive the audit `messages` row's progress from the COMPLETE set of
-/// its recipient rows (`email_queue`), not from the single recipient that
-/// just succeeded:
+/// its recipient rows (`email_queue`) — the shared canonical contract lives
+/// in `apexmail_lib::email_headers::RECONCILE_MESSAGE_PROGRESS_SQL` (also
+/// executed by the SES callback handler, F75) so the worker and the API
+/// cannot drift apart. Semantics are documented there:
 ///
 /// * recipients still owed a delivery exist → `partial` (a multi-recipient
 ///   message with one delivered copy is NOT sent — the first-recipient
 ///   success used to flip the whole message to 'sent');
-/// * every recipient row is terminal and at least one was suppressed/
-///   bounced/failed/cancelled → `partial` (final partial success);
-/// * every recipient row is `sent` → `sent` + `sent_at = NOW()`.
+/// * every recipient row terminal with ≥1 suppressed/bounced/failed/
+///   cancelled → `partial` (final partial success — includes all-failed,
+///   which used to stay 'processing' forever because only successes
+///   reconciled);
+/// * every recipient row `sent`, ≥1 not yet confirmed delivered → `sent`
+///   (provider acceptance, `sent_at` stamped at the actual event);
+/// * every recipient row `sent` AND confirmed delivered (`delivered_at`) →
+///   `delivered` + `messages.delivered_at` (aggregate: ALL recipients
+///   confirmed delivered).
 ///
 /// Scheduled parents are accepted: the transition fires from
-/// `queued`/`scheduled`/`processing`/`partial` alike, so a scheduled message
-/// no longer stays 'scheduled' forever after delivery. Terminal states set
-/// by other paths ('bounced', 'delivered' from the SES notification
-/// handler, 'cancelled', ...) are never crouched — the WHERE clause does
-/// not match them.
-const MESSAGES_PROGRESS_UPDATE_SQL: &str = r#"
-    UPDATE messages m SET
-        status = CASE
-            WHEN EXISTS (
-                SELECT 1 FROM email_queue q
-                WHERE q.message_id = m.id
-                  AND q.status NOT IN ('sent', 'bounced', 'failed', 'suppressed', 'cancelled')
-            ) THEN 'partial'
-            WHEN EXISTS (
-                SELECT 1 FROM email_queue q
-                WHERE q.message_id = m.id
-                  AND q.status IN ('bounced', 'failed', 'suppressed', 'cancelled')
-            ) THEN 'partial'
-            ELSE 'sent'
-        END,
-        sent_at = CASE
-            WHEN NOT EXISTS (
-                SELECT 1 FROM email_queue q
-                WHERE q.message_id = m.id
-                  AND q.status NOT IN ('sent', 'bounced', 'failed', 'suppressed', 'cancelled')
-            )
-            AND NOT EXISTS (
-                SELECT 1 FROM email_queue q
-                WHERE q.message_id = m.id
-                  AND q.status IN ('bounced', 'failed', 'suppressed', 'cancelled')
-            ) THEN NOW() ELSE m.sent_at
-        END,
-        updated_at = NOW()
-    WHERE m.id = $1::uuid AND m.tenant_id = $2
-      AND m.status IN ('queued', 'scheduled', 'processing', 'partial')
-"#;
+/// `queued`/`scheduled`/`processing`/`partial`/`sent` alike. Terminal states
+/// set by other paths ('cancelled') are never crouched — the WHERE clause
+/// does not match them.
+const MESSAGES_PROGRESS_UPDATE_SQL: &str =
+    apexmail_lib::email_headers::RECONCILE_MESSAGE_PROGRESS_SQL;
 
 /// F25: claim-time parent transition — the moment a worker claims recipient
 /// rows of a `queued`/`scheduled` message, the parent moves to
@@ -406,7 +437,7 @@ const FETCH_JOBS_SQL: &str = r#"
                 END as "toAddresses",
                 subject, html, text, headers, attachments,
                 campaign_id::text as "campaignId", tags, metadata, scheduled_at as "scheduledAt",
-                attempt, created_at as "createdAt"
+                message_category, attempt, created_at as "createdAt"
 "#;
 
 /// Audit-5: this claim's lease token, transported inside the job's
@@ -751,6 +782,8 @@ struct QueuedEmailRow {
     attachments: Option<serde_json::Value>,
     #[sqlx(rename = "campaignId")]
     campaign_id: Option<String>,
+    /// F55: validated server-owned send category (migration 187).
+    message_category: String,
     tags: Option<Vec<String>>,
     metadata: Option<serde_json::Value>,
     #[sqlx(rename = "scheduledAt")]
@@ -787,6 +820,7 @@ fn queued_row_to_jobs(row: QueuedEmailRow) -> Vec<EmailJob> {
             headers: row.headers.clone(),
             attachments: row.attachments.clone(),
             campaign_id: row.campaign_id.clone(),
+            message_category: row.message_category.clone(),
             tags: row.tags.clone(),
             metadata: row.metadata.clone(),
             scheduled_at: row.scheduled_at,
@@ -930,8 +964,10 @@ pub struct EmailProcessor {
 
     // Caches
     suppression_cache: Cache<String, CachedSuppression>,
-    /// F18: read-through cache of tenant suspension state (true = suspended).
-    tenant_status_cache: Cache<String, bool>,
+    /// F18: cache of CONFIRMED tenant restrictions only (reason string).
+    /// Allowed/TemporarilyUnavailable decisions are never cached — see
+    /// [`EmailProcessor::tenant_policy`].
+    tenant_restriction_cache: Cache<String, String>,
     #[expect(
         dead_code,
         reason = "warmup day cache is retained for scheduled warmup routing integration"
@@ -981,7 +1017,7 @@ impl EmailProcessor {
                 .max_capacity(SUPPRESSION_CACHE_MAX_SIZE)
                 .time_to_live(SUPPRESSION_CACHE_TTL)
                 .build(),
-            tenant_status_cache: Cache::builder()
+            tenant_restriction_cache: Cache::builder()
                 .max_capacity(10_000)
                 .time_to_live(Duration::from_secs(30))
                 .build(),
@@ -1016,6 +1052,24 @@ impl EmailProcessor {
                     metrics_self.record_queue_depth_metrics().await;
                     tokio::select! {
                         _ = sleep(Duration::from_secs(15)) => {}
+                        _ = shutdown.notified() => break,
+                    }
+                }
+            });
+        }
+
+        // F25: restart reconciliation — sweep parents whose recipient rows
+        // are ALL terminal but whose aggregate status is not (the residue
+        // of a crash between a recipient transition and its parent
+        // reconciliation), once immediately and then every 60 s.
+        {
+            let reconcile_self = Arc::clone(&self);
+            let shutdown = Arc::clone(&self.shutdown_notify);
+            tokio::spawn(async move {
+                loop {
+                    reconcile_self.reconcile_stuck_parents().await;
+                    tokio::select! {
+                        _ = sleep(Duration::from_secs(60)) => {}
                         _ = shutdown.notified() => break,
                     }
                 }
@@ -1369,37 +1423,58 @@ impl EmailProcessor {
         }
     }
 
-    /// Batch suppression check for efficiency.
+    /// Batch suppression check for efficiency (claim-time).
+    ///
+    /// F55: POSITIVE suppression decisions are NEVER cached anymore — a
+    /// cached positive could terminalize a job for a recipient who
+    /// resubscribed after the cache was primed (a `suppression:added` /
+    /// preference-change event missed by this replica would not
+    /// invalidate it). Only NEGATIVE results (no suppression row) are
+    /// cached; any positive verdict comes from a database row read in
+    /// THIS batch, which is the authoritative state at claim time — and
+    /// every job that proceeds to dispatch gets the authoritative
+    /// `dispatch_consent` recheck anyway.
+    ///
+    /// F55: the batch ALSO enforces subscription_preferences for the
+    /// send's validated server-owned category (non-exempt categories
+    /// only), so a category opt-out suppresses at claim time exactly like
+    /// the dispatch-time recheck does.
     async fn batch_suppression_check(&self, jobs: &[EmailJob]) -> HashMap<String, String> {
         let mut result = HashMap::new();
 
-        // Group by tenant
+        // Group by tenant (suppressions) and tenant+category (preferences).
         let mut by_tenant: HashMap<String, Vec<&str>> = HashMap::new();
+        let mut by_tenant_category: HashMap<(String, String), Vec<&str>> = HashMap::new();
         for job in jobs {
             by_tenant
                 .entry(job.tenant_id.clone())
                 .or_default()
                 .push(&job.to);
+            if !apexmail_lib::email_headers::message_category::is_preference_exempt(
+                &job.message_category,
+            ) {
+                by_tenant_category
+                    .entry((job.tenant_id.clone(), job.message_category.clone()))
+                    .or_default()
+                    .push(&job.to);
+            }
         }
 
         for (tenant_id, emails) in by_tenant {
-            // Check cache first (F55: canonical, case-folded keys — the
-            // same form the authoritative dispatch-time recheck uses).
+            // Negative-only cache: a cached "no suppression" skips the
+            // suppressions query; anything else is read fresh.
             let mut uncached: Vec<String> = Vec::new();
             for email in &emails {
                 let cache_key = format!("{}:{}", tenant_id, canonical_recipient(email));
-                if let Some(cached) = self.suppression_cache.get(&cache_key) {
-                    if cached.suppressed {
-                        result.insert(cache_key, cached.reason.clone().unwrap_or_default());
-                    }
-                } else {
-                    uncached.push(canonical_recipient(email));
+                match self.suppression_cache.get(&cache_key) {
+                    Some(cached) if !cached.suppressed => {}
+                    Some(_) => unreachable!("positive suppression results are never cached"),
+                    None => uncached.push(canonical_recipient(email)),
                 }
             }
 
             // Query database for uncached
             if !uncached.is_empty() {
-                // to avoid sending to potentially suppressed recipients.
                 let db_result = sqlx::query_as::<_, (String, String)>(
                     r#"
                     SELECT LOWER(email), reason
@@ -1434,21 +1509,13 @@ impl EmailProcessor {
                 let suppressed_emails: std::collections::HashSet<String> =
                     suppressions.iter().map(|(e, _)| e.clone()).collect();
 
-                // Cache and collect positive results
+                // Collect positive results WITHOUT caching them (F55).
                 for (email, reason) in suppressions {
                     let cache_key = format!("{}:{}", tenant_id, email);
-                    self.suppression_cache.insert(
-                        cache_key.clone(),
-                        CachedSuppression {
-                            suppressed: true,
-                            reason: Some(reason.clone()),
-                            expires_at: Instant::now() + SUPPRESSION_CACHE_TTL,
-                        },
-                    );
-                    result.insert(cache_key, reason);
+                    result.insert(cache_key, format!("global_suppression:{reason}"));
                 }
 
-                // Cache negative results
+                // Cache negative results only
                 for email in &uncached {
                     if !suppressed_emails.contains(email) {
                         let cache_key = format!("{}:{}", tenant_id, email);
@@ -1462,6 +1529,49 @@ impl EmailProcessor {
                         );
                     }
                 }
+            }
+        }
+
+        // F55: category preference opt-outs (always read fresh — never
+        // cached, matching the authoritative dispatch-time recheck).
+        for ((tenant_id, category), emails) in by_tenant_category {
+            let canonical: Vec<String> = emails
+                .iter()
+                .map(|email| canonical_recipient(email))
+                .collect();
+            let opted_out: Vec<(String,)> = match sqlx::query_as(
+                r#"
+                SELECT LOWER(email)
+                FROM subscription_preferences
+                WHERE tenant_id = $1 AND category = $2 AND subscribed = false
+                  AND LOWER(email) = ANY($3)
+                "#,
+            )
+            .bind(&tenant_id)
+            .bind(&category)
+            .bind(&canonical)
+            .fetch_all(&self.db)
+            .await
+            {
+                Ok(rows) => rows,
+                Err(e) => {
+                    tracing::error!(tenant_id = %tenant_id, category = %category, error = %e,
+                        "Failed to check category preferences; flagging for requeue (not suppression)");
+                    for email in canonical {
+                        let cache_key = format!("{}:{}", tenant_id, email);
+                        result.insert(cache_key, SUPPRESSION_CHECK_FAILED.to_string());
+                    }
+                    continue;
+                }
+            };
+            for (email,) in opted_out {
+                let cache_key = format!("{}:{}", tenant_id, email);
+                // Global suppression (checked above) takes precedence in
+                // the recorded reason; insert only when not already
+                // suppressed.
+                result
+                    .entry(cache_key)
+                    .or_insert_with(|| format!("category_opt_out:{category}"));
             }
         }
 
@@ -1541,39 +1651,60 @@ impl EmailProcessor {
             return Ok(());
         }
 
-        // F18: tenant suspension gate at dispatch time. A tenant suspended
-        // between enqueueing and delivery must not have its mail leave the
-        // platform; the read-through cache keeps the check cheap (one
-        // tenants query per tenant per cache TTL, following the existing
-        // moka suppression-cache pattern).
-        if self.tenant_suspended(&job.tenant_id).await {
-            info!(
-                job_id = %job.id,
-                tenant_id = %job.tenant_id,
-                "tenant is suspended at dispatch time — deferring delivery"
-            );
-            self.requeue_job(job, "tenant_suspended").await?;
-            return Ok(());
+        // F18: dispatch-time tenant policy gate. Only a CONFIRMED active
+        // tenant may reach the external transport: any other status — and
+        // any lookup failure, missing tenant row, or empty id — DEFERS the
+        // job and exits dispatch. The gate never fails open.
+        match self.tenant_policy(&job.tenant_id).await {
+            TenantPolicy::Allowed => {}
+            policy => {
+                let reason = policy.requeue_reason();
+                info!(
+                    job_id = %job.id,
+                    tenant_id = %job.tenant_id,
+                    reason = %reason,
+                    "tenant policy is not Allowed at dispatch time — deferring delivery"
+                );
+                self.requeue_job(job, reason).await?;
+                // Exit dispatch immediately: the row is retryable, nothing
+                // below may run (not even the consent gate — a deferred
+                // job must not terminalize on the way out).
+                return Ok(());
+            }
         }
 
-        // F55: authoritative consent recheck immediately before dispatch.
-        // The batch suppression check at claim time consults a 5-minute
-        // cache that `suppression:added` events do not invalidate, so a
-        // freshly suppressed recipient (category change, resubscription
-        // flip, or a suppression added mid-batch) could otherwise still be
-        // sent to. This single-row query always reads CURRENT state — it
-        // covers newly added suppressions and honour resubscriptions alike
-        // (a suppression removed after the claim simply returns None).
-        if let Some(reason) = self.current_suppression_reason(job).await? {
-            info!(
-                job_id = %job.id,
-                tenant_id = %job.tenant_id,
-                recipient = %job.to,
-                reason = %reason,
-                "recipient suppressed at dispatch time (authoritative recheck)"
-            );
-            self.handle_suppressed(job, &reason).await?;
-            return Ok(());
+        // F55: authoritative consent decision immediately before dispatch —
+        // global suppression AND the per-category preference, both read
+        // from CURRENT database state (no cache participates in the
+        // decision). `Deferred` means the lookup itself failed: the row is
+        // requeued and dispatch EXITS here — a consent-verification
+        // failure must never continue into the transport.
+        match self.dispatch_consent(job).await? {
+            ConsentDecision::Suppressed(reason) => {
+                info!(
+                    job_id = %job.id,
+                    tenant_id = %job.tenant_id,
+                    recipient = %job.to,
+                    reason = %reason,
+                    "recipient suppressed at dispatch time (authoritative recheck)"
+                );
+                self.handle_suppressed(job, &reason).await?;
+                return Ok(());
+            }
+            ConsentDecision::Deferred(reason) => {
+                info!(
+                    job_id = %job.id,
+                    tenant_id = %job.tenant_id,
+                    recipient = %job.to,
+                    reason = %reason,
+                    "consent verification unavailable at dispatch time — deferring"
+                );
+                self.requeue_job(job, reason).await?;
+                // F55: exit dispatch IMMEDIATELY after the successful
+                // requeue — never fall through into transport.
+                return Ok(());
+            }
+            ConsentDecision::Allowed => {}
         }
 
         // Load and validate current domain state before any per-domain rate
@@ -1699,18 +1830,30 @@ impl EmailProcessor {
         outcome
     }
 
-    /// F18: is the tenant suspended RIGHT NOW? Read-through moka cache
-    /// (30 s TTL) in front of a single-column `tenants.status` query, so a
-    /// suspension takes effect within one cache window without costing a
-    /// query per send. Cache/DB failures fail OPEN (the message sends):
-    /// suspension is a policy gate, not a data-integrity one, and a blip
-    /// must not stall the whole queue.
-    async fn tenant_suspended(&self, tenant_id: &str) -> bool {
+    /// F18: the dispatch-time tenant policy decision. Only a CONFIRMED
+    /// `active` tenant is [`TenantPolicy::Allowed`]:
+    ///
+    /// * DB lookup failure → [`TenantPolicy::TemporarilyUnavailable`] — the
+    ///   job is DEFERRED and dispatch exits (never fail open; the previous
+    ///   fail-open-on-error behavior sent restricted mail during DB blips);
+    /// * missing tenant row / empty id → [`TenantPolicy::Restricted`] (the
+    ///   job defers and stays visible — no mail leaves for an
+    ///   unidentifiable owner);
+    /// * any non-active status (`pending`, `suspended`, ...) →
+    ///   [`TenantPolicy::Restricted`] — pending/unknown is NOT permitted.
+    ///
+    /// Caching: ALLOW decisions are NEVER cached (a primed 30 s allow cache
+    /// used to keep sending through a suspension applied on another
+    /// instance with no invalidation path). Only positive RESTRICTED
+    /// results are cached (30 s, moka) — a restriction arriving during the
+    /// TTL window takes effect on the next claim at the latest, and an
+    /// allow→restricted transition can never be served from cache.
+    async fn tenant_policy(&self, tenant_id: &str) -> TenantPolicy {
         if tenant_id.is_empty() {
-            return false;
+            return TenantPolicy::Restricted("tenant_identity_missing".to_string());
         }
-        if let Some(cached) = self.tenant_status_cache.get(tenant_id) {
-            return cached;
+        if let Some(reason) = self.tenant_restriction_cache.get(tenant_id) {
+            return TenantPolicy::Restricted(reason);
         }
         let status: Option<String> = match sqlx::query_scalar(TENANT_STATUS_SQL)
             .bind(tenant_id)
@@ -1722,52 +1865,93 @@ impl EmailProcessor {
                 warn!(
                     tenant_id = tenant_id,
                     error = %error,
-                    "tenant status lookup failed — failing open at the dispatch gate"
+                    "tenant status lookup failed — deferring the job (fail closed)"
                 );
-                None
+                // Never cached: the next claim re-attempts the lookup.
+                return TenantPolicy::TemporarilyUnavailable;
             }
         };
-        let suspended = status.as_deref() == Some("suspended");
-        self.tenant_status_cache
-            .insert(tenant_id.to_string(), suspended);
-        suspended
-    }
-
-    /// F55: authoritative, cache-free suppression check for one recipient,
-    /// executed immediately before dispatch. Recipient normalization is the
-    /// same canonical form the API uses (trimmed + lowercased) on BOTH the
-    /// stored address (LOWER(email)) and the queued one, so case
-    /// differences can no longer slip a send past a suppression.
-    async fn current_suppression_reason(&self, job: &EmailJob) -> ProcessorResult<Option<String>> {
-        let canonical = canonical_recipient(&job.to);
-        if canonical.is_empty() {
-            return Ok(None);
-        }
-        match sqlx::query_scalar::<_, String>(
-            "SELECT reason FROM suppressions
-             WHERE tenant_id = $1 AND LOWER(email) = $2
-             LIMIT 1",
-        )
-        .bind(&job.tenant_id)
-        .bind(&canonical)
-        .fetch_optional(&self.db)
-        .await
-        {
-            Ok(reason) => Ok(reason),
-            Err(error) => {
-                // The CHECK failed (distinct from "actually suppressed"):
-                // defer the row instead of sending blind or permanently
-                // suppressing the recipient.
-                warn!(
-                    job_id = %job.id,
-                    tenant_id = %job.tenant_id,
-                    error = %error,
-                    "dispatch-time suppression recheck failed — requeueing"
-                );
-                self.requeue_job(job, "suppression_recheck_failed").await?;
-                Ok(None)
+        match status.as_deref() {
+            Some("active") => TenantPolicy::Allowed,
+            Some(other) => {
+                let reason = format!("tenant_{other}").replace(' ', "_");
+                self.tenant_restriction_cache
+                    .insert(tenant_id.to_string(), reason.clone());
+                TenantPolicy::Restricted(reason)
+            }
+            None => {
+                self.tenant_restriction_cache
+                    .insert(tenant_id.to_string(), "tenant_missing".to_string());
+                TenantPolicy::Restricted("tenant_missing".to_string())
             }
         }
+    }
+
+    /// F55: the authoritative, cache-free consent decision for one
+    /// recipient immediately before dispatch:
+    ///
+    /// * [`ConsentDecision::Allowed`] — no global suppression AND no
+    ///   applicable category opt-out (or the category is a
+    ///   transactional/service exemption);
+    /// * [`ConsentDecision::Suppressed`] — a durable reason to not send
+    ///   (global suppression row, or `subscription_preferences` opted-out
+    ///   for this non-exempt category);
+    /// * [`ConsentDecision::Deferred`] — the lookup itself failed. The
+    ///   CALLER requeues and exits dispatch; a failed verification is
+    ///   never interpreted as permission.
+    ///
+    /// Recipient normalization is the canonical form the API uses (trimmed
+    /// + lowercased) on BOTH the stored address (LOWER(email)) and the
+    ///   queued one, so case differences cannot slip a send past consent.
+    async fn dispatch_consent(&self, job: &EmailJob) -> ProcessorResult<ConsentDecision> {
+        let canonical = canonical_recipient(&job.to);
+        if canonical.is_empty() {
+            // An empty envelope recipient cannot be consent-checked — defer
+            // rather than send (the address was validated at enqueue; an
+            // empty value here means corrupted row state).
+            return Ok(ConsentDecision::Deferred(
+                "consent_recipient_identity_missing",
+            ));
+        }
+        // ONE query reads both consent dimensions, so they cannot disagree:
+        // the global suppression reason, and the category opt-out flag for
+        // this send's validated server-owned category (exempt categories
+        // ignore the preference — enforced by the `category_enforced` flag
+        // in Rust; global suppression ALWAYS applies).
+        let category = &job.message_category;
+        let category_enforced =
+            !apexmail_lib::email_headers::message_category::is_preference_exempt(category);
+        let (global_reason, category_opted_out) =
+            match sqlx::query_as::<_, (Option<String>, Option<bool>)>(DISPATCH_CONSENT_SQL)
+                .bind(&job.tenant_id)
+                .bind(&canonical)
+                .bind(category)
+                .fetch_optional(&self.db)
+                .await
+            {
+                Ok(row) => row.unwrap_or((None, None)),
+                Err(error) => {
+                    warn!(
+                        job_id = %job.id,
+                        tenant_id = %job.tenant_id,
+                        error = %error,
+                        "dispatch-time consent recheck failed — deferring"
+                    );
+                    return Ok(ConsentDecision::Deferred("consent_check_deferred"));
+                }
+            };
+
+        if let Some(reason) = global_reason {
+            return Ok(ConsentDecision::Suppressed(format!(
+                "global_suppression:{reason}"
+            )));
+        }
+        if category_enforced && category_opted_out == Some(true) {
+            return Ok(ConsentDecision::Suppressed(format!(
+                "category_opt_out:{category}"
+            )));
+        }
+        Ok(ConsentDecision::Allowed)
     }
 
     /// Audit-2: send-time admission gate — reserve one send from the tenant
@@ -1931,6 +2115,7 @@ impl EmailProcessor {
     /// Prepare email for sending.
     fn prepare_email(&self, job: &EmailJob, domain: &Domain) -> ProcessorResult<PreparedEmail> {
         let mut html = job.html.clone();
+        let mut text = job.text.clone();
 
         // Add tracking if enabled
         if self.config.tracking.enabled {
@@ -1941,14 +2126,50 @@ impl EmailProcessor {
             }
         }
 
-        // Build headers
-        let mut headers = vec![
-            ("X-ApexMail-Message-ID".to_string(), job.message_id.clone()),
-            ("X-ApexMail-Tenant-ID".to_string(), job.tenant_id.clone()),
-        ];
+        // F13: generate the server-owned unsubscribe URL for THIS copy —
+        // a v2 signed token carrying the persisted tenant/message/envelope
+        // recipient identity (see `unsubscribe_link`). It feeds the
+        // List-Unsubscribe header and the {{unsubscribe_url}} placeholders
+        // in the caller's HTML/text. Best-effort by design: suppression
+        // NEVER depends on attribution success — a missing token leaves
+        // the body untouched and the send proceeds.
+        let unsubscribe = unsubscribe_link(job, &self.config.tracking);
+        let mut headers: Vec<(String, String)> = Vec::new();
+        if let Some((_token, url)) = &unsubscribe {
+            // RFC 2369 angle-bracket https URL + RFC 8058 one-click POST —
+            // the tracking-service serves the POST variant on the same
+            // route (`handle_unsub_post`).
+            headers.push(("List-Unsubscribe".to_string(), format!("<{url}>")));
+            headers.push(("List-Unsubscribe-Post".to_string(), "Yes".to_string()));
+            // Visible preference/unsubscribe links: the caller's template
+            // placeholders receive the same server-owned URL.
+            if let Some(ref h) = html {
+                html = Some(h.replace("{{unsubscribe_url}}", url));
+            }
+            if let Some(ref t) = text {
+                text = Some(t.replace("{{unsubscribe_url}}", url));
+            }
+        }
+
+        // F74: internal identity headers, generated EXCLUSIVELY from the
+        // authenticated persisted job context (never merged from caller
+        // input — the whole X-ApexMail-* namespace is filtered below and
+        // at the API boundary). Shared canonical constants keep the SES
+        // callback parser and this emitter in lockstep.
+        headers.push((
+            apexmail_lib::email_headers::HEADER_MESSAGE_ID.to_string(),
+            job.message_id.clone(),
+        ));
+        headers.push((
+            apexmail_lib::email_headers::HEADER_TENANT_ID.to_string(),
+            job.tenant_id.clone(),
+        ));
 
         if let Some(ref campaign_id) = job.campaign_id {
-            headers.push(("X-ApexMail-Campaign-ID".to_string(), campaign_id.clone()));
+            headers.push((
+                apexmail_lib::email_headers::HEADER_CAMPAIGN_ID.to_string(),
+                campaign_id.clone(),
+            ));
         }
 
         const PROTECTED_HEADERS: &[&str] = &[
@@ -1967,14 +2188,14 @@ impl EmailProcessor {
             "received",
             "received-spf",
             "authentication-results",
-            "x-apexmail-message-id",
-            "x-apexmail-tenant-id",
-            "x-apexmail-campaign-id",
             "x-originating-ip",
             "x-mailer",
             "mime-version",
             "content-type",
             "content-transfer-encoding",
+            "reply-to",
+            "list-unsubscribe",
+            "list-unsubscribe-post",
         ];
 
         // F26/F48: the queue row's `headers` JSONB carries the SERVER-WRITTEN
@@ -1988,15 +2209,11 @@ impl EmailProcessor {
             custom: custom_headers,
         } = split_mime_headers(job.headers.as_ref());
 
-        // F26: preserve the ORIGINAL visible To/Cc headers on every
-        // per-recipient copy (they ride on PreparedEmail and are used by
-        // both transports); the envelope destination stays `job.to`.
-        // Bcc never appears here — it exists only in the delivery data.
-
-        // F48: Reply-To from the dedicated server-written field.
-        if let Some(reply_to) = reply_to {
-            headers.push(("Reply-To".to_string(), reply_to));
-        }
+        // F26: preserve the ORIGINAL visible To/Cc mailbox LISTS on every
+        // per-recipient copy (structured `Mailbox` arrays used by BOTH
+        // transports via Address::new_list); the envelope destination stays
+        // `job.to`. Bcc never appears here — it exists only in the delivery
+        // data. Reply-To rides as a structured mailbox too.
 
         // F26: a logical Message-ID shared by every copy of the message —
         // recipients thread all copies into one conversation and
@@ -2005,11 +2222,21 @@ impl EmailProcessor {
             headers.push(("Message-ID".to_string(), message_id));
         }
 
-        // Add custom headers from job (filtering protected headers)
+        // Add custom headers from job (filtering protected headers and the
+        // reserved X-ApexMail-* namespace — case-insensitive, F74: legacy
+        // alias spellings like X-ApexMail-TenantId must be blocked here
+        // exactly like the canonical ones).
+        let mut seen_custom: std::collections::HashSet<String> = std::collections::HashSet::new();
         for (key, value) in custom_headers {
             let key_lower = key.to_lowercase();
-            if PROTECTED_HEADERS.contains(&key_lower.as_str()) {
-                tracing::warn!(header = %key, "Blocked attempt to set protected header via custom headers");
+            if PROTECTED_HEADERS.contains(&key_lower.as_str())
+                || apexmail_lib::email_headers::is_reserved_internal_header(&key)
+            {
+                tracing::warn!(header = %key, "Blocked attempt to set protected/reserved header via custom headers");
+                continue;
+            }
+            if !seen_custom.insert(key_lower.clone()) {
+                tracing::warn!(header = %key, "Blocked duplicate custom header");
                 continue;
             }
             headers.push((key, value));
@@ -2056,13 +2283,73 @@ impl EmailProcessor {
             to: job.to.clone(),
             mime_to,
             mime_cc,
+            reply_to,
             subject: job.subject.clone(),
             html,
-            text: job.text.clone(),
+            text,
             headers,
             attachments,
             dkim,
         })
+    }
+
+    /// F25: the ONE tenant/message-scoped parent-progress reconciliation,
+    /// run after EVERY durable recipient transition (success, suppression,
+    /// bounce, dead-letter, deferral, possibly-sent) and after every SES
+    /// callback transition (F75 uses the same shared statement). Derives
+    /// the parent state from the COMPLETE set of recipient rows; see
+    /// `apexmail_lib::email_headers::RECONCILE_MESSAGE_PROGRESS_SQL` for
+    /// the documented state model. Best-effort by design — the recipient
+    /// transition already committed, so a reconciliation failure is logged,
+    /// counted, and picked up by the restart sweep
+    /// ([`EmailProcessor::reconcile_stuck_parents`]) instead of failing
+    /// the send path.
+    async fn reconcile_parent_progress(&self, job: &EmailJob) {
+        let Ok(message_uuid) = uuid::Uuid::parse_str(&job.message_id) else {
+            return;
+        };
+        if let Err(e) = sqlx::query(MESSAGES_PROGRESS_UPDATE_SQL)
+            .bind(message_uuid)
+            .bind(&job.tenant_id)
+            .execute(&self.db)
+            .await
+        {
+            metrics::counter!("email.parent_reconciliation_failed").increment(1);
+            error!(
+                job_id = %job.id,
+                message_id = %job.message_id,
+                tenant_id = %job.tenant_id,
+                error = %e,
+                "parent progress reconciliation failed — restart sweep will recover the aggregate"
+            );
+        }
+    }
+
+    /// F25: reconcile every parent whose recipient rows are ALL terminal but
+    /// whose aggregate status is not — the missed-event recovery for a crash
+    /// between a recipient transition and its reconciliation. Runs once at
+    /// processor start and periodically thereafter; idempotent.
+    async fn reconcile_stuck_parents(&self) {
+        match sqlx::query(apexmail_lib::email_headers::RECONCILE_STUCK_PARENTS_SQL)
+            .execute(&self.db)
+            .await
+        {
+            Ok(updated) => {
+                if updated.rows_affected() > 0 {
+                    info!(
+                        parents = updated.rows_affected(),
+                        "reconciled stuck parent messages with all-terminal recipients"
+                    );
+                }
+            }
+            Err(e) => {
+                metrics::counter!("email.parent_reconciliation_failed").increment(1);
+                warn!(
+                    error = %e,
+                    "stuck-parent reconciliation sweep failed — retried on the next interval"
+                );
+            }
+        }
     }
 
     /// Record one row per delivery attempt in `email_delivery_log`
@@ -2201,23 +2488,10 @@ impl EmailProcessor {
         // Best-effort for the same reason as the events INSERT above: a
         // legacy job without a UUID message id skips the transition rather
         // than failing the (already successful) send handling — and so does
-        // a failed write, with a metric.
-        if let Ok(message_uuid) = uuid::Uuid::parse_str(&job.message_id) {
-            if let Err(e) = sqlx::query(MESSAGES_PROGRESS_UPDATE_SQL)
-                .bind(message_uuid)
-                .bind(&job.tenant_id)
-                .execute(&self.db)
-                .await
-            {
-                metrics::counter!("email.sent_message_transition_failed").increment(1);
-                error!(
-                    job_id = %job.id,
-                    message_id = %job.message_id,
-                    error = %e,
-                    "Post-send messages progress transition failed — mail IS delivered; audit row keeps its previous status"
-                );
-            }
-        }
+        // a failed write, with a metric. The same shared reconciliation
+        // runs on EVERY durable recipient transition (suppression, bounce,
+        // DLQ, deferral) and from the restart sweep.
+        self.reconcile_parent_progress(job).await;
 
         // FIX-9/M56: feed the FBL server's complaint-rate alerting. The
         // `mta:reputation:{domain}:{date}` "sent" counter was never written
@@ -2293,7 +2567,13 @@ impl EmailProcessor {
                 recipient = %job.to,
                 "handle_suppressed fenced out — lease lost, row write skipped"
             );
+            return Ok(());
         }
+
+        // F25: suppression is a durable recipient transition — the parent
+        // must reconcile even when every recipient is suppressed (the
+        // all-suppressed parent previously stayed 'processing' forever).
+        self.reconcile_parent_progress(job).await;
 
         Ok(())
     }
@@ -2317,7 +2597,11 @@ impl EmailProcessor {
                 recipient = %job.to,
                 "handle_possibly_sent fenced out — lease lost, row write skipped"
             );
+            return Ok(());
         }
+
+        // F25: possibly-sent is a durable recipient transition.
+        self.reconcile_parent_progress(job).await;
 
         Ok(())
     }
@@ -2363,7 +2647,14 @@ impl EmailProcessor {
                 recipient = %job.to,
                 "handle_soft_bounce fenced out — lease lost, requeue skipped"
             );
+            return Ok(());
         }
+
+        // F25: the deferral is a durable recipient transition — the parent
+        // re-derives (stays 'processing' while nothing is terminal, so the
+        // scheduled retry remains cancellable; 'partial' once siblings
+        // completed).
+        self.reconcile_parent_progress(job).await;
 
         Ok(())
     }
@@ -2430,6 +2721,11 @@ impl EmailProcessor {
             );
         }
 
+        // F25: the hard bounce is a durable (terminal) recipient transition
+        // — reconcile the parent. The all-bounced parent previously stayed
+        // 'processing' forever.
+        self.reconcile_parent_progress(job).await;
+
         // Record bounce event (for the bounced recipient only)
         sqlx::query(
             r#"
@@ -2475,6 +2771,11 @@ impl EmailProcessor {
                 );
                 return Ok(());
             }
+
+            // F25: exhausted-retry dead-lettering is a durable recipient
+            // transition — reconcile the parent (the all-exhausted parent
+            // previously stayed 'processing' forever).
+            self.reconcile_parent_progress(job).await;
 
             sqlx::query(
                 r#"
@@ -2528,6 +2829,12 @@ impl EmailProcessor {
         }
 
         transaction.commit().await?;
+
+        // F25: permanent rejection is a durable terminal recipient
+        // transition — reconcile the parent (an all-rejected message
+        // previously stayed 'processing' forever).
+        self.reconcile_parent_progress(job).await;
+
         Ok(())
     }
 
@@ -2608,18 +2915,21 @@ impl EmailProcessor {
 /// F26: split the queue row's `headers` JSONB into its parts.
 ///
 /// New server-written shape (see the API's `mime_headers_for`):
-/// `{"to": "...", "cc": "...", "reply_to": "...", "custom": {...}}` — the
-/// original MIME To/Cc header values (kept SEPARATE from the envelope
-/// destination), the Reply-To address, and the caller's custom headers.
-/// Legacy/foreign rows without the reserved `to` key are treated as a flat
+/// `{"to": [...], "cc": [...], "reply_to": "...", "custom": {...}}` — the
+/// original MIME To/Cc header values as ARRAYS of mailbox strings (kept
+/// SEPARATE from the envelope destination), the Reply-To address, and the
+/// caller's custom headers. LEGACY rows persisted the comma-joined string
+/// form (`"a@x, b@y"`) — parsed here explicitly into the structured list
+/// (the documented backfill path; no re-serialization needed). Older
+/// legacy/foreign rows without the reserved `to` key are treated as a flat
 /// custom-header map (previous behaviour).
 fn split_mime_headers(headers: Option<&serde_json::Value>) -> SplitMimeHeaders {
     let Some(obj) = headers.and_then(|h| h.as_object()) else {
         return SplitMimeHeaders::default();
     };
 
-    // Legacy flat custom-header map?
-    let is_server_shape = obj.get("to").map(|v| v.is_string()).unwrap_or(false);
+    // Legacy flat custom-header map (no reserved keys)?
+    let is_server_shape = obj.contains_key("to") || obj.contains_key("custom");
     if !is_server_shape {
         return SplitMimeHeaders {
             custom: obj
@@ -2630,15 +2940,30 @@ fn split_mime_headers(headers: Option<&serde_json::Value>) -> SplitMimeHeaders {
         };
     }
 
+    let mailbox_field = |value: Option<&serde_json::Value>| -> Vec<Mailbox> {
+        match value {
+            Some(serde_json::Value::Array(items)) => items
+                .iter()
+                .filter_map(|item| item.as_str())
+                .filter_map(Mailbox::parse)
+                .collect(),
+            Some(serde_json::Value::String(joined)) if !joined.is_empty() => {
+                Mailbox::parse_list(joined)
+            }
+            _ => Vec::new(),
+        }
+    };
+
     let str_field = |key: &str| {
         obj.get(key)
             .and_then(|v| v.as_str())
             .filter(|v| !v.is_empty())
-            .map(str::to_string)
+            .and_then(Mailbox::parse)
     };
+
     SplitMimeHeaders {
-        mime_to: str_field("to"),
-        mime_cc: str_field("cc"),
+        mime_to: mailbox_field(obj.get("to")),
+        mime_cc: mailbox_field(obj.get("cc")),
         reply_to: str_field("reply_to"),
         custom: obj
             .get("custom")
@@ -2657,9 +2982,9 @@ fn split_mime_headers(headers: Option<&serde_json::Value>) -> SplitMimeHeaders {
 /// [`split_mime_headers`]).
 #[derive(Default)]
 struct SplitMimeHeaders {
-    mime_to: Option<String>,
-    mime_cc: Option<String>,
-    reply_to: Option<String>,
+    mime_to: Vec<Mailbox>,
+    mime_cc: Vec<Mailbox>,
+    reply_to: Option<Mailbox>,
     custom: Vec<(String, String)>,
 }
 
@@ -3490,6 +3815,7 @@ mod tests {
             headers: None,
             attachments: None,
             campaign_id: None,
+            message_category: "marketing".into(),
             tags: None,
             metadata: None,
             scheduled_at: None,
@@ -3556,6 +3882,7 @@ mod tests {
             base_url: "https://track.example.com".into(),
             open_pixel_path: "/o".into(),
             click_redirect_path: "/c".into(),
+            unsubscribe_path: "/u".into(),
             secret_key: None,
         })
         .await;
@@ -3595,6 +3922,7 @@ mod tests {
             headers: None,
             attachments: None,
             campaign_id: None,
+            message_category: "marketing".into(),
             tags: None,
             metadata: None,
             scheduled_at: None,
@@ -4410,17 +4738,23 @@ mod tests {
         );
     }
 
-    /// D/F25: the audit `messages` row must follow the COMPLETE recipient
-    /// set: 'partial' while siblings are owed, 'sent' + sent_at only when
-    /// every recipient row is terminal-sent, and never crouching terminal
-    /// states set by other paths (the WHERE clause only matches
-    /// queued/scheduled/processing/partial).
+    /// D/F25/F75: the audit `messages` row must follow the COMPLETE
+    /// recipient set: 'partial' while siblings are owed (and finally
+    /// partial on any terminal failure — the all-failed case), 'sent' when
+    /// every recipient row is terminal-sent but not yet confirmed
+    /// delivered, 'delivered' + messages.delivered_at when every recipient
+    /// copy is confirmed delivered, and never crouching terminal states
+    /// set by other paths.
     #[test]
     fn messages_progress_update_is_set_derived_and_scoped() {
         let sql = MESSAGES_PROGRESS_UPDATE_SQL;
         assert!(
-            sql.contains("ELSE 'sent'"),
-            "must set the terminal sent status when every recipient is sent"
+            sql.contains("THEN 'sent'"),
+            "provider acceptance for every recipient must derive 'sent' (F25)"
+        );
+        assert!(
+            sql.contains("ELSE 'delivered'"),
+            "every recipient confirmed delivered must derive 'delivered' (F75)"
         );
         assert!(
             sql.contains("THEN 'partial'"),
@@ -4733,36 +5067,186 @@ mod tests {
             MESSAGES_PROGRESS_UPDATE_SQL.contains("THEN 'partial'"),
             "siblings still owed a delivery must leave the parent partial (F25)"
         );
-        // 'sent' + sent_at only when EVERY recipient row is terminal-sent
-        // (the CASE's ELSE arm).
+        // 'processing' while NOTHING is terminal yet (mid-flight, still
+        // cancellable — a soft-bounce deferral must not strand the parent).
         assert!(
-            MESSAGES_PROGRESS_UPDATE_SQL.contains("ELSE 'sent'"),
-            "the all-delivered terminal state must exist (F25)"
+            MESSAGES_PROGRESS_UPDATE_SQL.contains("THEN 'processing'"),
+            "all-non-terminal parents must stay processing (F25)"
+        );
+        // Provider acceptance vs confirmed delivery are DISTINCT states.
+        assert!(
+            MESSAGES_PROGRESS_UPDATE_SQL.contains("q.delivered_at IS NULL"),
+            "recipient confirmed-delivery timestamps drive the aggregate (F25/F75)"
+        );
+        assert!(
+            MESSAGES_PROGRESS_UPDATE_SQL.contains("ELSE 'delivered'"),
+            "the all-confirmed-delivered terminal state must exist (F25/F75)"
         );
         assert!(
             MESSAGES_PROGRESS_UPDATE_SQL.contains("THEN NOW() ELSE m.sent_at"),
             "sent_at is stamped only on full completion (F25)"
         );
+        assert!(
+            MESSAGES_PROGRESS_UPDATE_SQL.contains("THEN NOW() ELSE m.delivered_at"),
+            "delivered_at is stamped once at its actual event (F75)"
+        );
         // Scheduled and processing parents are accepted (the scheduled →
         // processing / sent edges previously did not exist at all).
         assert!(
             MESSAGES_PROGRESS_UPDATE_SQL
-                .contains("IN ('queued', 'scheduled', 'processing', 'partial')"),
-            "scheduled/processing parents must be transitionable (F25)"
+                .contains("IN ('queued', 'scheduled', 'processing', 'partial', 'sent')"),
+            "scheduled/processing/sent parents must be transitionable (F25)"
         );
         // Recipient-level state is the email_queue set, not the single job.
         assert!(MESSAGES_PROGRESS_UPDATE_SQL.contains("FROM email_queue q"));
+        // A parent with no recipient rows is never aggregated.
+        assert!(
+            MESSAGES_PROGRESS_UPDATE_SQL
+                .contains("AND EXISTS (SELECT 1 FROM email_queue q WHERE q.message_id = m.id)"),
+            "childless parents must not be fabricated into a terminal state (F25)"
+        );
     }
 
     #[test]
-    fn claim_transitions_parents_to_processing_from_queued_or_scheduled() {
+    fn restart_reconciliation_sweep_targets_all_terminal_children() {
+        // F25: the sweep covers parents stuck in processing/partial whose
+        // children are ALL terminal (the crash-residue), including the
+        // all-failed case (bounced/failed/suppressed/cancelled) that used
+        // to stay 'processing' forever.
+        assert!(apexmail_lib::email_headers::RECONCILE_STUCK_PARENTS_SQL
+            .contains("m.status IN ('processing', 'partial')"));
+        assert!(apexmail_lib::email_headers::RECONCILE_STUCK_PARENTS_SQL
+            .contains("q.status NOT IN ('sent', 'bounced', 'failed', 'suppressed', 'cancelled')"));
+        assert!(apexmail_lib::email_headers::RECONCILE_STUCK_PARENTS_SQL.contains("THEN 'partial'"));
+    }
+
+    // ── F18: explicit tenant policy result ───────────────────────────
+
+    /// F55: the dispatch-time consent gate must EXIT dispatch on
+    /// `Deferred` — the old `Ok(None)` conflated "verification failed"
+    /// with "not suppressed" and let the job fall through into the
+    /// transport while its row was already requeued. Structural guard on
+    /// the gate block in `process_job_inner`.
+    #[test]
+    fn dispatch_consent_gate_exits_immediately_on_deferral() {
+        let source = include_str!("processor.rs");
+        let gate_start = source
+            .find("match self.dispatch_consent(job).await?")
+            .expect("dispatch_consent gate present");
+        let gate_end = source[gate_start..]
+            .find("ConsentDecision::Allowed => {}")
+            .expect("Allowed arm present")
+            + gate_start;
+        let gate = &source[gate_start..gate_end];
         assert!(
-            MESSAGES_CLAIMED_UPDATE_SQL.contains("status = 'processing'"),
-            "the worker must accept scheduled parents by moving them forward (F25)"
+            gate.contains("ConsentDecision::Suppressed(reason)"),
+            "suppressed arm present"
         );
         assert!(
-            MESSAGES_CLAIMED_UPDATE_SQL.contains("IN ('queued', 'scheduled')"),
-            "both queued and scheduled parents transition on claim (F25)"
+            gate.contains("ConsentDecision::Deferred(reason)"),
+            "deferred arm present"
+        );
+        // Both non-Allowed arms must return from process_job_inner BEFORE
+        // the gate block ends (no fall-through into transport).
+        let returns = gate.matches("return Ok(());").count();
+        assert!(
+            returns >= 2,
+            "both the Suppressed and Deferred arms must exit dispatch immediately (found {returns})"
+        );
+        assert!(
+            gate.contains("self.requeue_job(job, reason).await?;"),
+            "the deferred row is requeued before exiting"
+        );
+    }
+
+    /// F18: the tenant policy gate likewise exits on every non-Allowed
+    /// policy (never fails open into transport).
+    #[test]
+    fn tenant_policy_gate_exits_on_every_non_allowed_policy() {
+        let source = include_str!("processor.rs");
+        let gate_start = source
+            .find("match self.tenant_policy(&job.tenant_id).await {")
+            .expect("tenant_policy gate present");
+        let arm_start = gate_start
+            + source[gate_start..]
+                .find("policy => {")
+                .expect("non-Allowed arm present");
+        let arm = &source[arm_start..arm_start + 900];
+        assert!(
+            arm.contains("return Ok(());"),
+            "the non-Allowed arm must exit dispatch immediately"
+        );
+        assert!(
+            arm.contains("self.requeue_job(job, reason).await?;"),
+            "the restricted/unavailable row is deferred before exiting"
+        );
+    }
+
+    #[test]
+    fn tenant_policy_reasons_map_to_deferral_reasons() {
+        assert_eq!(TenantPolicy::Allowed.requeue_reason(), "allowed");
+        assert_eq!(
+            TenantPolicy::Restricted("tenant_suspended".into()).requeue_reason(),
+            "tenant_suspended"
+        );
+        assert_eq!(
+            TenantPolicy::Restricted("tenant_pending".into()).requeue_reason(),
+            "tenant_pending"
+        );
+        assert_eq!(
+            TenantPolicy::TemporarilyUnavailable.requeue_reason(),
+            "tenant_policy_unavailable"
+        );
+        // Only Allowed is a permission; everything else defers.
+        assert_ne!(TenantPolicy::Allowed, TenantPolicy::TemporarilyUnavailable);
+        assert_ne!(
+            TenantPolicy::Restricted("tenant_suspended".into()),
+            TenantPolicy::Allowed
+        );
+    }
+
+    // ── F55: explicit consent decision result ─────────────────────────
+
+    #[test]
+    fn consent_decisions_are_three_valued_not_option() {
+        // Deferred is DISTINCT from Allowed — a failed verification is
+        // never permission to send (the Option<String> conflation let the
+        // caller fall through into the transport).
+        assert_ne!(ConsentDecision::Allowed, ConsentDecision::Deferred("x"));
+        assert_ne!(
+            ConsentDecision::Allowed,
+            ConsentDecision::Suppressed("reason".into())
+        );
+        assert!(matches!(
+            ConsentDecision::Deferred("consent_check_deferred"),
+            ConsentDecision::Deferred(_)
+        ));
+        // The category exemptions used by dispatch_consent.
+        assert!(
+            apexmail_lib::email_headers::message_category::is_preference_exempt("transactional")
+        );
+        assert!(!apexmail_lib::email_headers::message_category::is_preference_exempt("marketing"));
+    }
+
+    #[test]
+    fn consent_queries_cover_both_dimensions() {
+        // The dispatch-time decision reads global suppression AND the
+        // category preference in one authoritative query.
+        assert!(DISPATCH_CONSENT_SQL.contains("FROM suppressions"));
+        assert!(DISPATCH_CONSENT_SQL.contains("FROM subscription_preferences"));
+        assert!(DISPATCH_CONSENT_SQL.contains("category = $3"));
+    }
+
+    #[test]
+    fn claim_time_suppression_caching_is_negative_only() {
+        // F55: positive suppression verdicts are never written to the
+        // cache — this source property is the regression guard for the
+        // stale-positive-terminalize defect (a resubscribed recipient
+        // could be suppressed from a primed cache entry).
+        let source = include_str!("processor.rs");
+        assert!(
+            source.contains("Collect positive results WITHOUT caching them (F55)"),
+            "the claim-time check must keep positives uncached"
         );
     }
 
@@ -4771,10 +5255,11 @@ mod tests {
     // ---------------------------------------------------------------------------
 
     #[test]
-    fn split_mime_headers_reads_server_shape() {
+    fn split_mime_headers_reads_structured_server_shape() {
+        // F26: current writer persists ARRAYS of mailbox strings.
         let headers = serde_json::json!({
-            "to": "a@example.com, b@example.com",
-            "cc": "c@example.com",
+            "to": ["a@example.com", "B <b@example.com>"],
+            "cc": ["c@example.com"],
             "reply_to": "reply@example.com",
             "custom": {"X-Campaign": "summer"}
         });
@@ -4784,12 +5269,71 @@ mod tests {
             reply_to,
             custom,
         } = split_mime_headers(Some(&headers));
-        assert_eq!(mime_to.as_deref(), Some("a@example.com, b@example.com"));
-        assert_eq!(mime_cc.as_deref(), Some("c@example.com"));
-        assert_eq!(reply_to.as_deref(), Some("reply@example.com"));
+        assert_eq!(
+            mime_to,
+            vec![
+                Mailbox {
+                    name: None,
+                    email: "a@example.com".into()
+                },
+                Mailbox {
+                    name: Some("B".into()),
+                    email: "b@example.com".into()
+                },
+            ]
+        );
+        assert_eq!(
+            mime_cc,
+            vec![Mailbox {
+                name: None,
+                email: "c@example.com".into()
+            }]
+        );
+        assert_eq!(
+            reply_to,
+            Some(Mailbox {
+                name: None,
+                email: "reply@example.com".into()
+            })
+        );
         assert_eq!(
             custom,
             vec![("X-Campaign".to_string(), "summer".to_string())]
+        );
+    }
+
+    #[test]
+    fn split_mime_headers_parses_legacy_comma_joined_strings() {
+        // F26: legacy rows persisted comma-joined strings — parsed
+        // explicitly into the structured list (backfill-by-parse).
+        let headers = serde_json::json!({
+            "to": "a@example.com, b@example.com",
+            "cc": "c@example.com",
+            "reply_to": "reply@example.com",
+            "custom": {"X-Campaign": "summer"}
+        });
+        let SplitMimeHeaders {
+            mime_to, mime_cc, ..
+        } = split_mime_headers(Some(&headers));
+        assert_eq!(
+            mime_to,
+            vec![
+                Mailbox {
+                    name: None,
+                    email: "a@example.com".into()
+                },
+                Mailbox {
+                    name: None,
+                    email: "b@example.com".into()
+                },
+            ]
+        );
+        assert_eq!(
+            mime_cc,
+            vec![Mailbox {
+                name: None,
+                email: "c@example.com".into()
+            }]
         );
     }
 
@@ -4802,8 +5346,8 @@ mod tests {
             reply_to,
             custom,
         } = split_mime_headers(Some(&headers));
-        assert!(mime_to.is_none());
-        assert!(mime_cc.is_none());
+        assert!(mime_to.is_empty());
+        assert!(mime_cc.is_empty());
         assert!(reply_to.is_none());
         assert_eq!(custom, vec![("X-Old".to_string(), "shape".to_string())]);
     }
@@ -4816,7 +5360,7 @@ mod tests {
             reply_to,
             custom,
         } = split_mime_headers(None);
-        assert!(mime_to.is_none() && mime_cc.is_none() && reply_to.is_none());
+        assert!(mime_to.is_empty() && mime_cc.is_empty() && reply_to.is_none());
         assert!(custom.is_empty());
     }
 
@@ -4842,9 +5386,199 @@ mod tests {
         assert!(logical_message_id(&bad).is_none());
     }
 
-    /// F26: prepare_email must carry the preserved MIME To/Cc onto the
-    /// prepared copy (the transports render them) while the envelope
-    /// destination stays the single recipient.
+    // ── F74: reserved namespace at the pre-transport boundary ──────────
+
+    /// Every spelling of the internal namespace is stripped from caller
+    /// custom headers, and the canonical identity headers are generated
+    /// from the persisted job context ONLY.
+    #[tokio::test]
+    async fn prepare_email_blocks_the_whole_reserved_namespace() {
+        let processor = make_processor_with_tracking(crate::common::TrackingConfig {
+            enabled: false,
+            ..crate::common::TrackingConfig::default()
+        })
+        .await;
+
+        let mut job = tracking_gate_job();
+        job.headers = Some(serde_json::json!({
+            "to": ["to@example.com"],
+            "cc": [],
+            "reply_to": "",
+            "custom": {
+                // Legacy alias spellings (case variants) must be blocked
+                // here — the API blocks them too, but the worker is the
+                // last boundary before transport.
+                "X-ApexMail-MessageId": "forged-message",
+                "x-apexmail-tenant-id": "forged-tenant",
+                "X-APExmail-CampaignId": "forged-campaign",
+                "X-ApexMail-Anything": "forged",
+                "X-Legit-Custom": "kept"
+            }
+        }));
+        let prepared = processor
+            .prepare_email(&job, &tracking_gate_domain())
+            .unwrap();
+
+        let header = |name: &str| {
+            prepared
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.clone())
+        };
+        // Canonical identity headers come from the JOB only.
+        assert_eq!(
+            header(apexmail_lib::email_headers::HEADER_MESSAGE_ID).as_deref(),
+            Some("msg-1")
+        );
+        assert_eq!(
+            header(apexmail_lib::email_headers::HEADER_TENANT_ID).as_deref(),
+            Some("tenant-1")
+        );
+        // No alias spelling survives with a forged value (exact-name
+        // matching: the alias spellings differ from the canonical ones).
+        let exact_header = |name: &str| {
+            prepared
+                .headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(exact_header("X-ApexMail-MessageId"), None);
+        assert_eq!(exact_header("X-APExmail-CampaignId"), None);
+        assert_eq!(exact_header("X-ApexMail-Anything"), None);
+        // The lowercase canonical spelling appears ONCE, from the job.
+        assert_eq!(
+            prepared
+                .headers
+                .iter()
+                .filter(
+                    |(k, _)| k.eq_ignore_ascii_case(apexmail_lib::email_headers::HEADER_TENANT_ID)
+                )
+                .count(),
+            1,
+            "exactly one tenant-id header, generated from the job"
+        );
+        assert_eq!(header("x-apexmail-tenant-id").as_deref(), Some("tenant-1"));
+        // Ordinary custom headers pass.
+        assert_eq!(header("X-Legit-Custom").as_deref(), Some("kept"));
+    }
+
+    // ── F13: server-owned unsubscribe link on outgoing mail ───────────
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn outgoing_mail_carries_a_v2_unsubscribe_link_with_message_identity() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let secret = "test-secret-key-32-bytes-minimum!!";
+        std::env::set_var("TRACKING_SECRET_KEY", secret);
+
+        let processor = make_processor_with_tracking(crate::common::TrackingConfig {
+            enabled: true,
+            base_url: "https://track.example.com".into(),
+            open_pixel_path: "/o".into(),
+            click_redirect_path: "/c".into(),
+            unsubscribe_path: "/u".into(),
+            secret_key: Some(zeroize::Zeroizing::new(secret.to_string())),
+        })
+        .await;
+
+        let mut job = tracking_gate_job();
+        job.message_id = "0e2d1c34-9a56-4f18-8f0a-3f4c5d6e7a89".into();
+        job.html = Some(
+            r#"<html><body><a href="https://example.com/x">x</a> <a href="{{unsubscribe_url}}">unsubscribe</a></body></html>"#
+                .into(),
+        );
+        job.text = Some("Unsubscribe: {{unsubscribe_url}}".into());
+        let prepared = processor
+            .prepare_email(&job, &tracking_gate_domain())
+            .unwrap();
+
+        // List-Unsubscribe header with the tracking URL.
+        let list_unsub = prepared
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("List-Unsubscribe"))
+            .map(|(_, v)| v.clone())
+            .expect("List-Unsubscribe header present");
+        assert!(list_unsub.starts_with("<https://track.example.com/u/"));
+
+        // RFC 8058 one-click is advertised (the tracking service serves
+        // the POST variant on the same route).
+        assert!(prepared
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("List-Unsubscribe-Post") && v == "Yes"));
+
+        // The placeholder in the visible body received the SAME URL.
+        let html = prepared.html.unwrap();
+        assert!(
+            !html.contains("{{unsubscribe_url}}"),
+            "placeholder replaced"
+        );
+        assert!(html.contains("https://track.example.com/u/"));
+        assert!(prepared
+            .text
+            .as_deref()
+            .unwrap()
+            .contains("https://track.example.com/u/"));
+
+        // The token decodes with the SHARED codec and names THIS message,
+        // tenant and recipient (deterministic attribution, F13).
+        let token = list_unsub
+            .trim_start_matches('<')
+            .trim_end_matches('>')
+            .rsplit('/')
+            .next()
+            .unwrap()
+            .to_string();
+        let codec = tracking_service::codec::TrackingCodec::new(secret);
+        let data = codec
+            .verify_unsubscribe_token(&token, None)
+            .expect("tracking-service must verify the outgoing token");
+        assert_eq!(data.tenant_id, "tenant-1");
+        assert_eq!(data.recipient, "recipient@example.com");
+        assert_eq!(
+            data.message_id.as_deref(),
+            Some("0e2d1c34-9a56-4f18-8f0a-3f4c5d6e7a89")
+        );
+
+        std::env::remove_var("TRACKING_SECRET_KEY");
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn missing_tracking_secret_leaves_mail_untouched() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("TRACKING_SECRET_KEY");
+
+        // No secret configured: no unsubscribe header, placeholder stays —
+        // the send proceeds (suppression never depends on attribution).
+        let processor = make_processor_with_tracking(crate::common::TrackingConfig {
+            enabled: true,
+            base_url: "https://track.example.com".into(),
+            open_pixel_path: "/o".into(),
+            click_redirect_path: "/c".into(),
+            unsubscribe_path: "/u".into(),
+            secret_key: None,
+        })
+        .await;
+        let mut job = tracking_gate_job();
+        job.html = Some("<html><body>hi {{unsubscribe_url}}</body></html>".into());
+        let prepared = processor
+            .prepare_email(&job, &tracking_gate_domain())
+            .unwrap();
+        assert!(!prepared
+            .headers
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("List-Unsubscribe")));
+        assert!(prepared
+            .html
+            .as_deref()
+            .unwrap()
+            .contains("{{unsubscribe_url}}"));
+    }
+
     #[tokio::test]
     async fn prepare_email_carries_preserved_mime_headers_per_copy() {
         let processor = make_processor_with_tracking(crate::common::TrackingConfig {
@@ -4855,8 +5589,8 @@ mod tests {
 
         let mut job = tracking_gate_job();
         job.headers = Some(serde_json::json!({
-            "to": "to@example.com, cc@example.com",
-            "cc": "cc@example.com",
+            "to": ["to@example.com", "cc@example.com"],
+            "cc": ["cc@example.com"],
             "reply_to": "reply@example.com",
             "custom": {"X-Custom": "v"}
         }));
@@ -4868,11 +5602,34 @@ mod tests {
             "envelope stays single-recipient"
         );
         assert_eq!(
-            prepared.mime_to.as_deref(),
-            Some("to@example.com, cc@example.com"),
-            "the visible To header keeps the full list (F26)"
+            prepared.mime_to,
+            vec![
+                Mailbox {
+                    name: None,
+                    email: "to@example.com".into()
+                },
+                Mailbox {
+                    name: None,
+                    email: "cc@example.com".into()
+                },
+            ],
+            "the visible To header keeps the full mailbox LIST (F26)"
         );
-        assert_eq!(prepared.mime_cc.as_deref(), Some("cc@example.com"));
+        assert_eq!(
+            prepared.mime_cc,
+            vec![Mailbox {
+                name: None,
+                email: "cc@example.com".into()
+            }]
+        );
+        // F26: Reply-To rides as a structured mailbox now, not a raw header.
+        assert_eq!(
+            prepared.reply_to,
+            Some(Mailbox {
+                name: None,
+                email: "reply@example.com".into()
+            })
+        );
         let header = |name: &str| {
             prepared
                 .headers
@@ -4880,7 +5637,10 @@ mod tests {
                 .find(|(k, _)| k.eq_ignore_ascii_case(name))
                 .map(|(_, v)| v.clone())
         };
-        assert_eq!(header("Reply-To").as_deref(), Some("reply@example.com"));
+        assert!(
+            header("Reply-To").is_none(),
+            "Reply-To is rendered by the transports from the structured field"
+        );
         assert_eq!(header("X-Custom").as_deref(), Some("v"));
         assert!(
             header("Message-ID").is_some_and(|v| v.contains("msg-1")),
@@ -4893,7 +5653,7 @@ mod tests {
         let prepared = processor
             .prepare_email(&legacy, &tracking_gate_domain())
             .unwrap();
-        assert!(prepared.mime_to.is_none() && prepared.mime_cc.is_none());
+        assert!(prepared.mime_to.is_empty() && prepared.mime_cc.is_empty());
     }
 
     // ---------------------------------------------------------------------------

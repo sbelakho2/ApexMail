@@ -27,6 +27,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::Router;
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use chrono::{DateTime, Utc};
 use rsa::pkcs1::DecodeRsaPublicKey;
 use rsa::pkcs1v15::{Signature as RsaSignature, VerifyingKey};
 use rsa::signature::Verifier;
@@ -211,62 +212,90 @@ async fn handle_sns_notification(
     let allowed_arns_raw = std::env::var("SNS_ALLOWED_TOPIC_ARNS").unwrap_or_default();
     validate_sns_message(&state.http_client, &sns_msg, &allowed_arns_raw).await?;
 
-    // PP-006: Deduplicate SNS notifications using Redis SET NX with TTL.
-    // `SET key value NX EX ttl` returns OK if the key was newly created
-    // (first time seeing this message_id), and nil if the key already exists
-    // (duplicate).  We map the response to `is_new` — only process if true.
+    // PP-006/L-07: Deduplicate SNS notifications with a Redis marker keyed
+    // by (SNS message id + notification type). F75: the marker is now
+    // claimed AFTER successful processing, not before — a processing
+    // failure returns 5xx, SNS retries, and the retry must find NO marker
+    // blocking the reprocessing (the pre-claim order permanently lost
+    // events whose processing failed after the marker was set). All state
+    // effects are idempotent under replay (deterministic event ids,
+    // guarded timestamps, ON CONFLICT upserts), so a retry after a lost
+    // marker is safe.
     //
-    // L-07: The dedup key is composite (message_id + notification_type) to
-    // prevent dedup collisions between different notification types for the
-    // same message (e.g., a delivery notification and a bounce notification
-    // for the same SES message). Previously the key used only message_id,
-    // which could cause a bounce to be incorrectly deduplicated if a delivery
-    // notification with the same SNS message_id arrived first.
-    //
-    // Audit G(3): a Redis error used to be coerced to `false` ("duplicate")
-    // which acknowledged the notification with 200 OK — permanently losing
-    // the event (SNS treats 200 as delivered and never retries). On Redis
-    // failure we now return 5xx so SNS retries the delivery.
+    // Audit G(3): a Redis error is never coerced to "duplicate" — it
+    // returns 5xx so SNS retries the delivery.
     let notification_type = sns_msg.message_type.as_str();
-    if let Some(msg_id) = &sns_msg.message_id {
-        let dedup_key = format!("apexmail:dedup:sns:{}:{}", msg_id, notification_type);
-        let ttl_secs = 300; // 5 minutes — SNS retries within a few minutes at most.
+    let dedup_key = sns_msg
+        .message_id
+        .as_deref()
+        .map(|msg_id| format!("apexmail:dedup:sns:{}:{}", msg_id, notification_type));
+    let Some(dedup_key) = dedup_key else {
+        warn!("SNS notification missing message_id — cannot deduplicate");
+        return Err(ApiError::Validation(vec![
+            "SNS notification missing MessageId".into(),
+        ]));
+    };
+    let ttl_secs = 300; // 5 minutes — SNS retries within a few minutes at most.
+
+    // Fast path: already processed within the dedup window?
+    {
         let mut conn = state.redis.get().await.map_err(|e| {
             warn!(error = %e, "Failed to acquire redis for SNS dedup");
             ApiError::ServiceUnavailable("Redis unavailable".into())
         })?;
-        let is_new: Option<String> = redis::cmd("SET")
+        let seen: Option<String> = redis::cmd("GET")
             .arg(&dedup_key)
-            .arg("1")
-            .arg("NX")
-            .arg("EX")
-            .arg(ttl_secs)
             .query_async(&mut *conn)
             .await
             .map_err(|e| {
-                warn!(error = %e, "Redis SET NX failed for SNS dedup — returning 5xx so SNS retries");
+                warn!(error = %e, "Redis GET failed for SNS dedup — returning 5xx so SNS retries");
                 ApiError::ServiceUnavailable("Redis unavailable".into())
             })?;
-        if is_new.is_none() {
-            info!(message_id = %msg_id, "Deduplicated duplicate SNS notification");
+        if seen.is_some() {
+            info!(dedup_key = %dedup_key, "Deduplicated duplicate SNS notification");
             return Ok(StatusCode::OK);
         }
-    } else {
-        warn!("SNS notification missing message_id — cannot deduplicate");
     }
 
-    match sns_msg.message_type.as_str() {
-        "SubscriptionConfirmation" => handle_subscription_confirmation(&state, &sns_msg).await,
+    // Process FIRST — every effect is durably committed before the SNS
+    // acknowledgement (F75).
+    let outcome: Result<(), ApiError> = match sns_msg.message_type.as_str() {
+        "SubscriptionConfirmation" => handle_subscription_confirmation(&state, &sns_msg)
+            .await
+            .map(|_| ()),
         "Notification" => handle_notification(&state, &sns_msg).await,
         "UnsubscribeConfirmation" => {
             info!(topic = ?sns_msg.topic_arn, "SNS unsubscribe confirmation received");
-            Ok(StatusCode::OK)
+            Ok(())
         }
         other => {
             warn!(message_type = %other, "Unknown SNS message type");
-            Ok(StatusCode::OK)
+            Ok(())
         }
-    }
+    };
+
+    // Claim the dedup marker only after the outcome is committed; a marker
+    // failure returns 5xx so SNS retries (the idempotent effects make the
+    // replay safe).
+    outcome?;
+    let mut conn = state.redis.get().await.map_err(|e| {
+        warn!(error = %e, "Failed to acquire redis for SNS dedup mark");
+        ApiError::ServiceUnavailable("Redis unavailable".into())
+    })?;
+    let _: Option<String> = redis::cmd("SET")
+        .arg(&dedup_key)
+        .arg("1")
+        .arg("NX")
+        .arg("EX")
+        .arg(ttl_secs)
+        .query_async(&mut *conn)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "Redis SET NX failed for SNS dedup — returning 5xx so SNS retries");
+            ApiError::ServiceUnavailable("Redis unavailable".into())
+        })?;
+
+    Ok(StatusCode::OK)
 }
 
 /// Auto-confirm SNS subscription by fetching the subscribe URL.
@@ -589,7 +618,7 @@ fn append_field(string_to_sign: &mut String, name: &str, value: &str) {
 }
 
 /// Process an SES event notification.
-async fn handle_notification(state: &AppState, msg: &SnsMessage) -> Result<StatusCode, ApiError> {
+async fn handle_notification(state: &AppState, msg: &SnsMessage) -> Result<(), ApiError> {
     let event_json = msg
         .message
         .as_deref()
@@ -600,12 +629,16 @@ async fn handle_notification(state: &AppState, msg: &SnsMessage) -> Result<Statu
         ApiError::Validation(vec![format!("Invalid SES event: {e}")])
     })?;
 
+    // The SNS notification id feeds the deterministic analytics-event ids
+    // (F75 replay dedup).
+    let sns_message_id = msg.message_id.as_deref().unwrap_or("sns-unknown");
+
     match event.event_type.as_str() {
-        "Bounce" => process_bounce(state, &event).await?,
-        "Complaint" => process_complaint(state, &event).await?,
-        "Delivery" => process_delivery(state, &event).await?,
-        "Open" => process_open(state, &event).await?,
-        "Click" => process_click(state, &event).await?,
+        "Bounce" => process_bounce(state, &event, sns_message_id).await?,
+        "Complaint" => process_complaint(state, &event, sns_message_id).await?,
+        "Delivery" => process_delivery(state, &event, sns_message_id).await?,
+        "Open" => process_open(state, &event, sns_message_id).await?,
+        "Click" => process_click(state, &event, sns_message_id).await?,
         "Send" => {
             debug!(ses_message_id = ?event.mail.as_ref().and_then(|m| m.message_id.as_ref()), "SES Send event");
         }
@@ -617,10 +650,145 @@ async fn handle_notification(state: &AppState, msg: &SnsMessage) -> Result<Statu
         }
     }
 
-    Ok(StatusCode::OK)
+    Ok(())
 }
 
-/// Extract our internal message_id from SES mail headers.
+// ─── F74: trusted attribution from the durable provider-message mapping ────
+//
+// SES bounce/complaint/delivery/open/click events used to trust the
+// X-ApexMail-* headers ECHOED BY SES for tenant/message authority. Those
+// headers originate from the submitted message — a caller could set the
+// legacy aliases (X-ApexMail-TenantId) through custom headers and have its
+// bounces attributed (and its complaints suppress) ANOTHER tenant. A valid
+// SNS provider signature proves the event came from SES, not that the
+// headers inside the message are platform-generated.
+//
+// The ONLY authority now is the durable provider-message mapping: the
+// worker persists the SES message id on the accepting queue row
+// (`email_queue.smtp_message_id`, migration 186 indexes it). Every event
+// resolves ses_message_id → stored queue row, verifies the callback
+// recipient matches that row's stored envelope recipient, and takes
+// tenant/message/recipient from the STORED record. Echoed identity headers
+// are parsed case-insensitively purely for diagnostic correlation, with
+// ambiguous duplicates rejected (logged) — never for authorization.
+
+/// The stored delivery record a provider event resolves to.
+struct SesAttribution {
+    queue_row_id: String,
+    message_id: String,
+    tenant_id: String,
+    /// The recipient as stored on the queue row (verified to match the
+    /// callback recipient, case-insensitively).
+    recipient: String,
+}
+
+/// F74: the provider-message → stored delivery record resolution. The
+/// tenant/message/recipient authority comes EXCLUSIVELY from the stored
+/// `email_queue` row that accepted the SES message id — never from the
+/// echoed X-ApexMail-* headers. The callback recipient must match the
+/// row's stored envelope (ownership verification).
+const SES_ATTRIBUTION_SQL: &str = r#"
+    SELECT q.id::text,
+           COALESCE(q.message_id::text, q.id::text),
+           q.tenant_id,
+           q."to"
+    FROM email_queue q
+    WHERE q.smtp_message_id = $1
+      AND q.tenant_id IS NOT NULL
+      AND (
+            LOWER(q."to") = LOWER($2)
+         OR LOWER($2) = ANY (SELECT LOWER(a) FROM unnest(COALESCE(q.to_addresses, ARRAY[q."to"])) AS a)
+      )
+    LIMIT 1
+"#;
+
+/// Resolve the authoritative tenant/message/recipient for one provider
+/// event: the queue row that accepted `ses_message_id`, additionally
+/// verified to own `callback_recipient` in its envelope. `Ok(None)` when no
+/// stored row matches — the caller surfaces that as an unattributed,
+/// retryable outcome (the acceptance mapping may still be committing).
+async fn resolve_ses_attribution(
+    db: &sqlx::PgPool,
+    ses_message_id: &str,
+    callback_recipient: &str,
+) -> Result<Option<SesAttribution>, sqlx::Error> {
+    let row: Option<(String, String, String, String)> = sqlx::query_as(SES_ATTRIBUTION_SQL)
+        .bind(ses_message_id)
+        .bind(callback_recipient)
+        .fetch_optional(db)
+        .await?;
+    Ok(row.map(
+        |(queue_row_id, message_id, tenant_id, recipient)| SesAttribution {
+            queue_row_id,
+            message_id,
+            tenant_id,
+            recipient,
+        },
+    ))
+}
+
+/// Deterministic analytics-event id for one (SNS notification, event,
+/// recipient) triple — SNS retries after a lost dedup marker re-INSERT the
+/// same id, and the ON CONFLICT DO NOTHING turns the replay into a no-op
+/// (F75 event deduplication). `evt_` + 32 hex chars fits events.id
+/// VARCHAR(64).
+fn ses_event_id(sns_message_id: &str, event_type: &str, recipient: &str) -> String {
+    use sha2::Digest;
+    let digest = sha2::Sha256::digest(format!("{sns_message_id}|{event_type}|{recipient}"));
+    format!("evt_{}", hex::encode(&digest[..16]))
+}
+
+/// Parse an SES event timestamp (RFC 3339) for the ACTUAL event time
+/// (F25/F75: timestamps record their actual events), falling back to NOW().
+fn ses_event_timestamp(raw: Option<&str>) -> DateTime<Utc> {
+    raw.and_then(|ts| DateTime::parse_from_rfc3339(ts).ok())
+        .map(|ts| ts.with_timezone(&Utc))
+        .unwrap_or_else(Utc::now)
+}
+
+/// Diagnostic-only parse of the echoed identity headers (F74): case
+/// insensitive canonical + alias spellings, ambiguous duplicates rejected.
+/// Never used for authorization.
+fn diagnostic_identity_headers(mail: &SesMail) -> (Option<String>, Option<String>) {
+    let headers = mail
+        .headers
+        .iter()
+        .flatten()
+        .map(|h| (h.name.as_str(), h.value.as_str()));
+    let message = match apexmail_lib::email_headers::find_identity_header(
+        headers,
+        apexmail_lib::email_headers::HEADER_MESSAGE_ID,
+        apexmail_lib::email_headers::HEADER_ALIASES_MESSAGE_ID,
+    ) {
+        apexmail_lib::email_headers::IdentityHeaderLookup::Found(v) => Some(v.to_string()),
+        apexmail_lib::email_headers::IdentityHeaderLookup::Ambiguous => {
+            warn!("SES event carried ambiguous duplicate X-ApexMail message-id headers");
+            None
+        }
+        apexmail_lib::email_headers::IdentityHeaderLookup::Missing => None,
+    };
+    let tenant = match apexmail_lib::email_headers::find_identity_header(
+        mail.headers
+            .iter()
+            .flatten()
+            .map(|h| (h.name.as_str(), h.value.as_str())),
+        apexmail_lib::email_headers::HEADER_TENANT_ID,
+        apexmail_lib::email_headers::HEADER_ALIASES_TENANT_ID,
+    ) {
+        apexmail_lib::email_headers::IdentityHeaderLookup::Found(v) => Some(v.to_string()),
+        apexmail_lib::email_headers::IdentityHeaderLookup::Ambiguous => {
+            warn!("SES event carried ambiguous duplicate X-ApexMail tenant-id headers");
+            None
+        }
+        apexmail_lib::email_headers::IdentityHeaderLookup::Missing => None,
+    };
+    (message, tenant)
+}
+
+/// Extract our internal message_id from SES mail headers. F74: retained
+/// TEST-ONLY — production code never reads identity authority from raw
+/// headers.
+#[cfg(test)]
 fn extract_apexmail_header(mail: &SesMail, header_name: &str) -> Option<String> {
     mail.headers
         .as_ref()?
@@ -629,21 +797,49 @@ fn extract_apexmail_header(mail: &SesMail, header_name: &str) -> Option<String> 
         .map(|h| h.value.clone())
 }
 
-/// Strip any "msg_" prefix from an X-ApexMail-MessageId header value so it
-/// can be matched against messages.id / events.message_id.
+/// Strip any "msg_" prefix from an X-ApexMail-MessageId header value.
+/// F74: retained TEST-ONLY — production attribution resolves through the
+/// stored provider-message mapping.
+#[cfg(test)]
 fn normalize_message_id(msg_id: &str) -> &str {
     msg_id.strip_prefix("msg_").unwrap_or(msg_id)
 }
 
-/// Insert an analytics `events` row for a terminal SES event. Mirrors the
-/// worker's event inserts (id `evt_<uuid>`, type 'delivered'/'complained'/
-/// 'opened'/'clicked') so the admin analytics surfaces bucketing on the
-/// events table see SES traffic. Best-effort: a failure is logged, never
-/// propagated (SNS must still receive 200 so the notification is not
-/// retried/duplicated).
+/// The unattributable-outcome error (F74): no stored provider-message
+/// mapping matched. Surfaced as 5xx so SNS retries (the acceptance mapping
+/// may still be committing), with a metric making the residue observable
+/// instead of silently misattributing the event to header values.
+fn unattributed_ses_event(ses_message_id: Option<&str>, recipient: &str) -> ApiError {
+    metrics::counter!("apexmail_ses_unattributed_events").increment(1);
+    warn!(
+        ses_message_id = ?ses_message_id,
+        recipient = %apexmail_lib::pii::redact_email(recipient),
+        "SES event cannot be attributed to a stored provider-message mapping — retrying"
+    );
+    ApiError::ServiceUnavailable(
+        "SES event attribution pending — notification will be retried".into(),
+    )
+}
+
+/// Map a database failure inside the SES callback path onto a retryable
+/// 5xx (F75): SNS must NOT be acknowledged before the callback state is
+/// durably committed, so the error propagates and SNS retries. The detail
+/// is logged; the response stays generic.
+fn ses_db_error(context: &str, error: sqlx::Error) -> ApiError {
+    metrics::counter!("apexmail_ses_callback_db_errors").increment(1);
+    error!(context = context, error = %error, "SES callback database failure");
+    ApiError::ServiceUnavailable("SES callback storage unavailable".into())
+}
+
+/// Insert an analytics `events` row for a terminal SES event with a
+/// DETERMINISTIC id (`ses_event_id`) and ON CONFLICT DO NOTHING so an SNS
+/// replay after a lost dedup marker cannot duplicate the effect (F75).
+/// Failures PROPAGATE: the caller must not acknowledge SNS before the
+/// event is durably recorded.
 #[expect(clippy::too_many_arguments)]
 async fn insert_analytics_event(
-    state: &AppState,
+    executor: impl sqlx::PgExecutor<'_>,
+    event_id: &str,
     tenant_id: &str,
     message_id: &str,
     event_type: &str,
@@ -651,29 +847,34 @@ async fn insert_analytics_event(
     link_url: Option<&str>,
     user_agent: Option<&str>,
     ip_address: Option<&str>,
-) {
-    if let Err(e) = sqlx::query(
+    at: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
         "INSERT INTO events (id, tenant_id, message_id, event_type, recipient, link_url, user_agent, ip_address, timestamp)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (id) DO NOTHING",
     )
-    .bind(format!("evt_{}", uuid::Uuid::new_v4()))
+    .bind(event_id)
     .bind(tenant_id)
-    .bind(normalize_message_id(message_id))
+    .bind(message_id)
     .bind(event_type)
     .bind(recipient)
     .bind(link_url)
     .bind(user_agent)
     .bind(ip_address)
-    .execute(&state.db)
+    .bind(at)
+    .execute(executor)
     .await
-    {
-        warn!(event_type = %event_type, message_id = %message_id, error = %e, "Failed to record SES analytics event");
-    }
+    .map(|_| ())
 }
 
 // ─── Bounce processing ────────────────────────────────────────
 
-async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiError> {
+async fn process_bounce(
+    state: &AppState,
+    event: &SesEvent,
+    sns_message_id: &str,
+) -> Result<(), ApiError> {
     let bounce = event
         .bounce
         .as_ref()
@@ -681,90 +882,167 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
 
     let mail = event.mail.as_ref();
     let ses_message_id = mail.and_then(|m| m.message_id.clone());
-    let apexmail_message_id = mail.and_then(|m| extract_apexmail_header(m, "X-ApexMail-MessageId"));
-    let tenant_id = mail.and_then(|m| extract_apexmail_header(m, "X-ApexMail-TenantId"));
+    let Some(ses_message_id) = ses_message_id.as_deref() else {
+        return Err(unattributed_ses_event(None, ""));
+    };
+    let (diagnostic_message_id, diagnostic_tenant_id) = match mail {
+        Some(mail) => diagnostic_identity_headers(mail),
+        None => (None, None),
+    };
 
     let is_permanent = bounce.bounce_type == "Permanent";
     let bounce_sub_type = bounce.bounce_sub_type.as_deref().unwrap_or("General");
+    let bounced_at = ses_event_timestamp(bounce.timestamp.as_deref());
 
     info!(
         bounce_type = %bounce.bounce_type,
         bounce_sub_type = %bounce_sub_type,
-        ses_message_id = ?ses_message_id,
-        apexmail_message_id = ?apexmail_message_id,
-        tenant_id = ?tenant_id,
+        ses_message_id = %ses_message_id,
         "Processing SES bounce"
     );
 
     if let Some(recipients) = &bounce.bounced_recipients {
         for recipient in recipients {
-            if let Some(email) = &recipient.email_address {
-                let reason = if is_permanent {
-                    format!("ses_hard_bounce:{bounce_sub_type}")
-                } else {
-                    format!("ses_soft_bounce:{bounce_sub_type}")
-                };
+            let Some(email) = recipient.email_address.as_deref() else {
+                continue;
+            };
 
-                // Auto-suppress hard bounces (canonical `suppressions` table).
-                // `tenant_id` is NOT NULL with an FK to tenants, so a bounce
-                // without the X-ApexMail-TenantId header cannot be suppressed.
-                if is_permanent {
-                    if let Some(tid) = tenant_id.as_deref() {
-                        let suppression_id = apexmail_lib::id::generate_id("sup", 22);
-                        if let Err(e) = sqlx::query(
-                            "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
-                             VALUES ($1, $2, $3, $4, $5, NOW())
-                             ON CONFLICT (tenant_id, email) DO NOTHING",
-                        )
-                        .bind(&suppression_id)
-                        .bind(tid)
-                        .bind(email)
-                        .bind(&reason)
-                        .bind("ses")
-                        .execute(&state.db)
-                        .await
-                        {
-                            warn!(email = %apexmail_lib::pii::redact_email(email), error = %e, "Failed to suppress bounced address");
-                        } else {
-                            info!(email = %apexmail_lib::pii::redact_email(email), reason = %reason, "Auto-suppressed hard-bounced address");
-                        }
-                    }
-                }
+            // F74: authority comes from the stored provider-message
+            // mapping, with the callback recipient verified against the
+            // row's envelope. Raw headers are diagnostics only.
+            let Some(attribution) = resolve_ses_attribution(&state.db, ses_message_id, email)
+                .await
+                .map_err(|e| {
+                    metrics::counter!("apexmail_ses_callback_db_errors").increment(1);
+                    error!(error = %e, "SES bounce attribution query failed");
+                    ApiError::ServiceUnavailable("SES callback storage unavailable".into())
+                })?
+            else {
+                // Unattributed — observable + retryable, never guessed from
+                // the echoed headers (which may carry another tenant's id).
+                debug!(
+                    diagnostic_header_message_id = ?diagnostic_message_id,
+                    diagnostic_header_tenant_id = ?diagnostic_tenant_id,
+                    "bounce without a stored mapping"
+                );
+                return Err(unattributed_ses_event(Some(ses_message_id), email));
+            };
 
-                // Update message status if we have the internal ID
-                if let (Some(ref msg_id), Some(ref tid)) = (&apexmail_message_id, &tenant_id) {
-                    let status = if is_permanent { "bounced" } else { "deferred" };
-                    // Strip any "msg_" prefix from the message ID before matching
-                    let db_id = msg_id.strip_prefix("msg_").unwrap_or(msg_id);
-                    if let Err(e) = sqlx::query(
-                        "UPDATE messages SET status = $1, updated_at = NOW()
-                         WHERE id = $2::uuid AND tenant_id = $3",
-                    )
-                    .bind(status)
-                    .bind(db_id)
-                    .bind(tid)
-                    .execute(&state.db)
-                    .await
-                    {
-                        warn!(message_id = %msg_id, error = %e, "Failed to update bounce status");
-                    }
-                }
+            let reason = if is_permanent {
+                format!("ses_hard_bounce:{bounce_sub_type}")
+            } else {
+                format!("ses_soft_bounce:{bounce_sub_type}")
+            };
 
-                // Queue webhook event for the tenant
-                if let Some(ref tid) = tenant_id {
-                    let payload = serde_json::json!({
-                        "event": "message.bounced",
-                        "type": bounce.bounce_type,
-                        "subType": bounce_sub_type,
-                        "recipient": email,
-                        "messageId": apexmail_message_id,
-                        "sesMessageId": ses_message_id,
-                        "diagnosticCode": recipient.diagnostic_code,
-                        "timestamp": bounce.timestamp,
-                    });
-                    queue_webhook_event(state, tid, "message.bounced", &payload).await;
-                }
+            // State mutations + the shared parent reconciliation run in ONE
+            // transaction, COMMITTED BEFORE the SNS acknowledgement (F75):
+            // a DB failure propagates as 5xx so SNS retries safely.
+            let mut tx = state
+                .db
+                .begin()
+                .await
+                .map_err(|e| ses_db_error("begin", e))?;
+
+            // Auto-suppress hard bounces (canonical `suppressions` table)
+            // using the STORED tenant. Idempotent under SNS replay.
+            if is_permanent {
+                let suppression_id = apexmail_lib::id::generate_id("sup", 22);
+                sqlx::query(
+                    "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
+                     VALUES ($1, $2, $3, $4, $5, NOW())
+                     ON CONFLICT (tenant_id, email) DO NOTHING",
+                )
+                .bind(&suppression_id)
+                .bind(&attribution.tenant_id)
+                .bind(&attribution.recipient)
+                .bind(&reason)
+                .bind("ses")
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| ses_db_error("failed to record suppression", e))?;
+                info!(email = %apexmail_lib::pii::redact_email(&attribution.recipient), reason = %reason, "Auto-suppressed hard-bounced address");
             }
+
+            // F25/F75: the bounce transitions the RECIPIENT delivery record
+            // (mirroring the worker's per-recipient HARD_BOUNCE semantics:
+            // the recipient leaves the pending set, the row terminalizes
+            // only when nothing remains owed), then the SHARED parent
+            // reconciliation derives the aggregate from all recipient rows.
+            if is_permanent {
+                sqlx::query(
+                    r#"
+                    UPDATE email_queue
+                    SET metadata = jsonb_set(
+                            CASE WHEN jsonb_typeof(metadata) = 'object' THEN metadata ELSE '{}'::jsonb END,
+                            '{pending_recipients}',
+                            COALESCE(
+                                metadata->'pending_recipients',
+                                CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                                     THEN to_jsonb(to_addresses) END,
+                                CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                                     THEN to_jsonb(ARRAY["to"]) END,
+                                '[]'::jsonb
+                            ) - $2::text
+                        ),
+                        status = CASE WHEN COALESCE(
+                                metadata->'pending_recipients',
+                                CASE WHEN jsonb_array_length(to_jsonb(to_addresses)) > 0
+                                     THEN to_jsonb(to_addresses) END,
+                                CASE WHEN "to" IS NOT NULL AND "to" <> ''
+                                     THEN to_jsonb(ARRAY["to"]) END,
+                                '[]'::jsonb
+                            ) - $2::text = '[]'::jsonb
+                            THEN 'bounced' ELSE status END,
+                        error_message = $3,
+                        updated_at = NOW()
+                    WHERE id = $1::uuid
+                    "#,
+                )
+                .bind(&attribution.queue_row_id)
+                .bind(&attribution.recipient)
+                .bind(&reason)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| ses_db_error("failed to record bounce", e))?;
+
+                sqlx::query(apexmail_lib::email_headers::RECONCILE_MESSAGE_PROGRESS_SQL)
+                    .bind(&attribution.message_id)
+                    .bind(&attribution.tenant_id)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| ses_db_error("reconcile message progress", e))?;
+            }
+
+            // Deterministic-id analytics event (replay-safe).
+            insert_analytics_event(
+                &mut *tx,
+                &ses_event_id(sns_message_id, "bounced", &attribution.recipient),
+                &attribution.tenant_id,
+                &attribution.message_id,
+                "bounced",
+                Some(&attribution.recipient),
+                None,
+                None,
+                None,
+                bounced_at,
+            )
+            .await
+            .map_err(|e| ses_db_error("failed to record bounce event", e))?;
+
+            tx.commit().await.map_err(|e| ses_db_error("storage", e))?;
+
+            // Queue webhook event for the tenant (post-commit; best-effort).
+            let payload = serde_json::json!({
+                "event": "message.bounced",
+                "type": bounce.bounce_type,
+                "subType": bounce_sub_type,
+                "recipient": attribution.recipient,
+                "messageId": attribution.message_id,
+                "sesMessageId": ses_message_id,
+                "diagnosticCode": recipient.diagnostic_code,
+                "timestamp": bounce.timestamp,
+            });
+            queue_webhook_event(state, &attribution.tenant_id, "message.bounced", &payload).await;
         }
     }
 
@@ -773,7 +1051,11 @@ async fn process_bounce(state: &AppState, event: &SesEvent) -> Result<(), ApiErr
 
 // ─── Complaint processing ──────────────────────────────────────
 
-async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), ApiError> {
+async fn process_complaint(
+    state: &AppState,
+    event: &SesEvent,
+    sns_message_id: &str,
+) -> Result<(), ApiError> {
     let complaint = event
         .complaint
         .as_ref()
@@ -781,95 +1063,96 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
 
     let mail = event.mail.as_ref();
     let ses_message_id = mail.and_then(|m| m.message_id.clone());
-    let apexmail_message_id = mail.and_then(|m| extract_apexmail_header(m, "X-ApexMail-MessageId"));
-    let tenant_id = mail.and_then(|m| extract_apexmail_header(m, "X-ApexMail-TenantId"));
+    let Some(ses_message_id) = ses_message_id.as_deref() else {
+        return Err(unattributed_ses_event(None, ""));
+    };
 
     let feedback_type = complaint
         .complaint_feedback_type
         .as_deref()
         .unwrap_or("abuse");
+    let complained_at = ses_event_timestamp(complaint.timestamp.as_deref());
 
     info!(
         feedback_type = %feedback_type,
-        ses_message_id = ?ses_message_id,
-        tenant_id = ?tenant_id,
+        ses_message_id = %ses_message_id,
         "Processing SES complaint"
     );
 
     if let Some(recipients) = &complaint.complained_recipients {
         for recipient in recipients {
-            if let Some(email) = &recipient.email_address {
-                let reason = format!("ses_complaint:{feedback_type}");
+            let Some(email) = recipient.email_address.as_deref() else {
+                continue;
+            };
 
-                // Always suppress — complaints are serious (canonical
-                // `suppressions` table; tenant_id is NOT NULL with an FK).
-                if let Some(tid) = tenant_id.as_deref() {
-                    let suppression_id = apexmail_lib::id::generate_id("sup", 22);
-                    if let Err(e) = sqlx::query(
-                        "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
-                         VALUES ($1, $2, $3, $4, $5, NOW())
-                         ON CONFLICT (tenant_id, email) DO NOTHING",
-                    )
-                    .bind(&suppression_id)
-                    .bind(tid)
-                    .bind(email)
-                    .bind(&reason)
-                    .bind("ses")
-                    .execute(&state.db)
-                    .await
-                    {
-                        warn!(email = %apexmail_lib::pii::redact_email(email), error = %e, "Failed to suppress complained address");
-                    } else {
-                        info!(email = %apexmail_lib::pii::redact_email(email), reason = %reason, "Auto-suppressed complained address");
-                    }
-                }
+            let Some(attribution) = resolve_ses_attribution(&state.db, ses_message_id, email)
+                .await
+                .map_err(|e| ses_db_error("storage", e))?
+            else {
+                return Err(unattributed_ses_event(Some(ses_message_id), email));
+            };
 
-                // Update message status
-                if let (Some(ref msg_id), Some(ref tid)) = (&apexmail_message_id, &tenant_id) {
-                    // Strip any "msg_" prefix from the message ID before matching
-                    let db_id = msg_id.strip_prefix("msg_").unwrap_or(msg_id);
-                    if let Err(e) = sqlx::query(
-                        "UPDATE messages SET status = 'complained', updated_at = NOW()
-                         WHERE id = $1::uuid AND tenant_id = $2",
-                    )
-                    .bind(db_id)
-                    .bind(tid)
-                    .execute(&state.db)
-                    .await
-                    {
-                        warn!(message_id = %msg_id, error = %e, "Failed to update complaint status");
-                    }
-                }
+            let reason = format!("ses_complaint:{feedback_type}");
 
-                // Analytics event — one 'complained' row per complained
-                // message (delivery_analytics' complaint rate reads these).
-                if let (Some(ref msg_id), Some(ref tid)) = (&apexmail_message_id, &tenant_id) {
-                    insert_analytics_event(
-                        state,
-                        tid,
-                        msg_id,
-                        "complained",
-                        Some(email),
-                        None,
-                        None,
-                        None,
-                    )
-                    .await;
-                }
+            // Always suppress — complaints are serious. STORED tenant id,
+            // committed before the SNS ack, idempotent under replay.
+            let mut tx = state
+                .db
+                .begin()
+                .await
+                .map_err(|e| ses_db_error("storage", e))?;
+            let suppression_id = apexmail_lib::id::generate_id("sup", 22);
+            sqlx::query(
+                "INSERT INTO suppressions (id, tenant_id, email, reason, source, created_at)
+                 VALUES ($1, $2, $3, $4, $5, NOW())
+                 ON CONFLICT (tenant_id, email) DO NOTHING",
+            )
+            .bind(&suppression_id)
+            .bind(&attribution.tenant_id)
+            .bind(&attribution.recipient)
+            .bind(&reason)
+            .bind("ses")
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ses_db_error("failed to record suppression", e))?;
+            info!(email = %apexmail_lib::pii::redact_email(&attribution.recipient), reason = %reason, "Auto-suppressed complained address");
 
-                // Queue webhook
-                if let Some(ref tid) = tenant_id {
-                    let payload = serde_json::json!({
-                        "event": "message.complained",
-                        "feedbackType": feedback_type,
-                        "recipient": email,
-                        "messageId": apexmail_message_id,
-                        "sesMessageId": ses_message_id,
-                        "timestamp": complaint.timestamp,
-                    });
-                    queue_webhook_event(state, tid, "message.complained", &payload).await;
-                }
-            }
+            // Analytics event — one 'complained' row per complained
+            // message (delivery_analytics' complaint rate reads these),
+            // deterministic id for replay dedup.
+            insert_analytics_event(
+                &mut *tx,
+                &ses_event_id(sns_message_id, "complained", &attribution.recipient),
+                &attribution.tenant_id,
+                &attribution.message_id,
+                "complained",
+                Some(&attribution.recipient),
+                None,
+                None,
+                None,
+                complained_at,
+            )
+            .await
+            .map_err(|e| ses_db_error("failed to record complaint event", e))?;
+
+            tx.commit().await.map_err(|e| ses_db_error("storage", e))?;
+
+            // Queue webhook
+            let payload = serde_json::json!({
+                "event": "message.complained",
+                "feedbackType": feedback_type,
+                "recipient": attribution.recipient,
+                "messageId": attribution.message_id,
+                "sesMessageId": ses_message_id,
+                "timestamp": complaint.timestamp,
+            });
+            queue_webhook_event(
+                state,
+                &attribution.tenant_id,
+                "message.complained",
+                &payload,
+            )
+            .await;
         }
     }
 
@@ -878,15 +1161,22 @@ async fn process_complaint(state: &AppState, event: &SesEvent) -> Result<(), Api
 
 // ─── Delivery processing ──────────────────────────────────────
 
-async fn process_delivery(state: &AppState, event: &SesEvent) -> Result<(), ApiError> {
+async fn process_delivery(
+    state: &AppState,
+    event: &SesEvent,
+    sns_message_id: &str,
+) -> Result<(), ApiError> {
     let delivery = event
         .delivery
         .as_ref()
         .ok_or_else(|| ApiError::Validation(vec!["Delivery event missing details".into()]))?;
 
     let mail = event.mail.as_ref();
-    let apexmail_message_id = mail.and_then(|m| extract_apexmail_header(m, "X-ApexMail-MessageId"));
-    let tenant_id = mail.and_then(|m| extract_apexmail_header(m, "X-ApexMail-TenantId"));
+    let ses_message_id = mail.and_then(|m| m.message_id.clone());
+    let Some(ses_message_id) = ses_message_id.as_deref() else {
+        return Err(unattributed_ses_event(None, ""));
+    };
+    let delivered_at = ses_event_timestamp(delivery.timestamp.as_deref());
 
     debug!(
         recipients = ?delivery.recipients,
@@ -894,45 +1184,76 @@ async fn process_delivery(state: &AppState, event: &SesEvent) -> Result<(), ApiE
         "SES delivery confirmed"
     );
 
-    // Update message status to 'delivered'
-    if let (Some(ref msg_id), Some(ref tid)) = (&apexmail_message_id, &tenant_id) {
-        // Strip any "msg_" prefix from the message ID before matching
-        let db_id = msg_id.strip_prefix("msg_").unwrap_or(msg_id);
-        if let Err(e) = sqlx::query(
-            "UPDATE messages SET status = 'delivered', delivered_at = NOW(), updated_at = NOW()
-             WHERE id = $1::uuid AND tenant_id = $2 AND status != 'delivered'",
+    // F75: persist the confirmation on the MATCHING RECIPIENT DELIVERY
+    // RECORD (`email_queue.delivered_at`, migration 186) — the previous
+    // handler wrote `messages.delivered_at`, a column that does not exist
+    // (SQLSTATE 42703), and set the whole parent delivered for ONE
+    // recipient. The parent aggregate is now derived by the shared F25
+    // reconciliation: messages.delivered_at is stamped only when EVERY
+    // recipient copy is confirmed delivered.
+    let recipients = delivery.recipients.iter().flatten();
+    for email in recipients {
+        let Some(attribution) = resolve_ses_attribution(&state.db, ses_message_id, email)
+            .await
+            .map_err(|e| ses_db_error("storage", e))?
+        else {
+            return Err(unattributed_ses_event(Some(ses_message_id), email));
+        };
+
+        let mut tx = state
+            .db
+            .begin()
+            .await
+            .map_err(|e| ses_db_error("storage", e))?;
+        sqlx::query(
+            // Idempotent: COALESCE keeps the FIRST confirmation time under
+            // an SNS replay.
+            "UPDATE email_queue
+             SET delivered_at = COALESCE(delivered_at, $2), updated_at = NOW()
+             WHERE id = $1::uuid",
         )
-        .bind(db_id)
-        .bind(tid)
-        .execute(&state.db)
+        .bind(&attribution.queue_row_id)
+        .bind(delivered_at)
+        .execute(&mut *tx)
         .await
-        {
-            warn!(message_id = %msg_id, error = %e, "Failed to update delivery status");
-        }
-    }
+        .map_err(|e| ses_db_error("failed to record delivery", e))?;
 
-    // Analytics event — one 'delivered' row per message so the events-table
-    // surfaces (admin analytics, engagement metrics) observe SES deliveries.
-    if let (Some(ref msg_id), Some(ref tid)) = (&apexmail_message_id, &tenant_id) {
-        let recipient = delivery
-            .recipients
-            .as_ref()
-            .and_then(|r| r.first())
-            .map(String::as_str);
-        insert_analytics_event(state, tid, msg_id, "delivered", recipient, None, None, None).await;
-    }
+        // F25/F75: the shared parent reconciliation after every confirmed
+        // recipient transition.
+        sqlx::query(apexmail_lib::email_headers::RECONCILE_MESSAGE_PROGRESS_SQL)
+            .bind(&attribution.message_id)
+            .bind(&attribution.tenant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ses_db_error("reconcile message progress", e))?;
 
-    // Queue webhook
-    if let Some(ref tid) = tenant_id {
+        insert_analytics_event(
+            &mut *tx,
+            &ses_event_id(sns_message_id, "delivered", &attribution.recipient),
+            &attribution.tenant_id,
+            &attribution.message_id,
+            "delivered",
+            Some(&attribution.recipient),
+            None,
+            None,
+            None,
+            delivered_at,
+        )
+        .await
+        .map_err(|e| ses_db_error("failed to record delivery event", e))?;
+
+        tx.commit().await.map_err(|e| ses_db_error("storage", e))?;
+
+        // Queue webhook (post-commit; best-effort)
         let payload = serde_json::json!({
             "event": "message.delivered",
-            "recipients": delivery.recipients,
-            "messageId": apexmail_message_id,
+            "recipients": [attribution.recipient],
+            "messageId": attribution.message_id,
             "processingTimeMs": delivery.processing_time_millis,
             "smtpResponse": delivery.smtp_response,
             "timestamp": delivery.timestamp,
         });
-        queue_webhook_event(state, tid, "message.delivered", &payload).await;
+        queue_webhook_event(state, &attribution.tenant_id, "message.delivered", &payload).await;
     }
 
     Ok(())
@@ -951,65 +1272,85 @@ fn ses_recipient(event: &SesEvent) -> Option<String> {
         .cloned()
 }
 
+/// Resolve the attribution for an Open/Click event: the tracking token's
+/// recipient when the rewrite captured one, otherwise the mail destination.
+async fn resolve_engagement_attribution(
+    state: &AppState,
+    event: &SesEvent,
+) -> Result<Option<SesAttribution>, ApiError> {
+    let Some(ses_message_id) = event.mail.as_ref().and_then(|m| m.message_id.clone()) else {
+        return Err(unattributed_ses_event(None, ""));
+    };
+    let Some(recipient) = ses_recipient(event) else {
+        return Err(unattributed_ses_event(Some(&ses_message_id), ""));
+    };
+    resolve_ses_attribution(&state.db, &ses_message_id, &recipient)
+        .await
+        .map_err(|e| ses_db_error("attribution", e))
+}
+
 /// Process an SES Open notification: record an 'opened' analytics event and
 /// increment the message's open counters — mirroring the tracking-service
-/// processor's messages update (open_count +1, first_opened_at backfill).
-async fn process_open(state: &AppState, event: &SesEvent) -> Result<(), ApiError> {
+/// processor.rs messages update (open_count +1, first_opened_at backfill).
+async fn process_open(
+    state: &AppState,
+    event: &SesEvent,
+    sns_message_id: &str,
+) -> Result<(), ApiError> {
     let open = event
         .open
         .as_ref()
         .ok_or_else(|| ApiError::Validation(vec!["Open event missing details".into()]))?;
 
-    let mail = event.mail.as_ref();
-    let apexmail_message_id = mail.and_then(|m| extract_apexmail_header(m, "X-ApexMail-MessageId"));
-    let tenant_id = mail.and_then(|m| extract_apexmail_header(m, "X-ApexMail-TenantId"));
+    let Some(attribution) = resolve_engagement_attribution(state, event).await? else {
+        let ses_message_id = event.mail.as_ref().and_then(|m| m.message_id.clone());
+        return Err(unattributed_ses_event(
+            ses_message_id.as_deref(),
+            ses_recipient(event).as_deref().unwrap_or(""),
+        ));
+    };
+    let opened_at = ses_event_timestamp(open.timestamp.as_deref());
 
-    debug!(
-        ses_message_id = ?mail.and_then(|m| m.message_id.as_ref()),
-        "SES open tracked"
-    );
+    // Mirror tracking-service processor.rs: open_count += 1,
+    // first_opened_at backfilled on the first open. Committed before the
+    // SNS ack.
+    sqlx::query(
+        "UPDATE messages SET
+            open_count = open_count + 1,
+            first_opened_at = COALESCE(first_opened_at, $3),
+            updated_at = NOW()
+         WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(&attribution.message_id)
+    .bind(&attribution.tenant_id)
+    .bind(opened_at)
+    .execute(&state.db)
+    .await
+    .map_err(|e| ses_db_error("storage", e))?;
 
-    if let (Some(ref msg_id), Some(ref tid)) = (&apexmail_message_id, &tenant_id) {
-        // Mirror tracking-service processor.rs: open_count += 1,
-        // first_opened_at backfilled on the first open.
-        if let Err(e) = sqlx::query(
-            "UPDATE messages SET
-                open_count = open_count + 1,
-                first_opened_at = COALESCE(first_opened_at, NOW()),
-                updated_at = NOW()
-             WHERE id = $1::uuid AND tenant_id = $2",
-        )
-        .bind(normalize_message_id(msg_id))
-        .bind(tid)
-        .execute(&state.db)
-        .await
-        {
-            warn!(message_id = %msg_id, error = %e, "Failed to update open stats");
-        }
-
-        insert_analytics_event(
-            state,
-            tid,
-            msg_id,
-            "opened",
-            ses_recipient(event).as_deref(),
-            None,
-            open.user_agent.as_deref(),
-            open.ip_address.as_deref(),
-        )
-        .await;
-    }
+    insert_analytics_event(
+        &state.db,
+        &ses_event_id(sns_message_id, "opened", &attribution.recipient),
+        &attribution.tenant_id,
+        &attribution.message_id,
+        "opened",
+        Some(&attribution.recipient),
+        None,
+        open.user_agent.as_deref(),
+        open.ip_address.as_deref(),
+        opened_at,
+    )
+    .await
+    .map_err(|e| ses_db_error("failed to record open event", e))?;
 
     // Queue webhook
-    if let Some(ref tid) = tenant_id {
-        let payload = serde_json::json!({
-            "event": "message.opened",
-            "messageId": apexmail_message_id,
-            "userAgent": open.user_agent,
-            "timestamp": open.timestamp,
-        });
-        queue_webhook_event(state, tid, "message.opened", &payload).await;
-    }
+    let payload = serde_json::json!({
+        "event": "message.opened",
+        "messageId": attribution.message_id,
+        "userAgent": open.user_agent,
+        "timestamp": open.timestamp,
+    });
+    queue_webhook_event(state, &attribution.tenant_id, "message.opened", &payload).await;
 
     Ok(())
 }
@@ -1017,62 +1358,63 @@ async fn process_open(state: &AppState, event: &SesEvent) -> Result<(), ApiError
 /// Process an SES Click notification: record a 'clicked' analytics event and
 /// increment the message's click counters (click_count +1, first_clicked_at
 /// backfill), mirroring the tracking-service processor.
-async fn process_click(state: &AppState, event: &SesEvent) -> Result<(), ApiError> {
+async fn process_click(
+    state: &AppState,
+    event: &SesEvent,
+    sns_message_id: &str,
+) -> Result<(), ApiError> {
     let click = event
         .click
         .as_ref()
         .ok_or_else(|| ApiError::Validation(vec!["Click event missing details".into()]))?;
 
-    let mail = event.mail.as_ref();
-    let apexmail_message_id = mail.and_then(|m| extract_apexmail_header(m, "X-ApexMail-MessageId"));
-    let tenant_id = mail.and_then(|m| extract_apexmail_header(m, "X-ApexMail-TenantId"));
+    let Some(attribution) = resolve_engagement_attribution(state, event).await? else {
+        let ses_message_id = event.mail.as_ref().and_then(|m| m.message_id.clone());
+        return Err(unattributed_ses_event(
+            ses_message_id.as_deref(),
+            ses_recipient(event).as_deref().unwrap_or(""),
+        ));
+    };
+    let clicked_at = ses_event_timestamp(click.timestamp.as_deref());
 
-    debug!(
-        ses_message_id = ?mail.and_then(|m| m.message_id.as_ref()),
-        link = ?click.link,
-        "SES click tracked"
-    );
+    sqlx::query(
+        "UPDATE messages SET
+            click_count = click_count + 1,
+            first_clicked_at = COALESCE(first_clicked_at, $3),
+            updated_at = NOW()
+         WHERE id = $1::uuid AND tenant_id = $2",
+    )
+    .bind(&attribution.message_id)
+    .bind(&attribution.tenant_id)
+    .bind(clicked_at)
+    .execute(&state.db)
+    .await
+    .map_err(|e| ses_db_error("storage", e))?;
 
-    if let (Some(ref msg_id), Some(ref tid)) = (&apexmail_message_id, &tenant_id) {
-        if let Err(e) = sqlx::query(
-            "UPDATE messages SET
-                click_count = click_count + 1,
-                first_clicked_at = COALESCE(first_clicked_at, NOW()),
-                updated_at = NOW()
-             WHERE id = $1::uuid AND tenant_id = $2",
-        )
-        .bind(normalize_message_id(msg_id))
-        .bind(tid)
-        .execute(&state.db)
-        .await
-        {
-            warn!(message_id = %msg_id, error = %e, "Failed to update click stats");
-        }
-
-        insert_analytics_event(
-            state,
-            tid,
-            msg_id,
-            "clicked",
-            ses_recipient(event).as_deref(),
-            click.link.as_deref(),
-            click.user_agent.as_deref(),
-            click.ip_address.as_deref(),
-        )
-        .await;
-    }
+    insert_analytics_event(
+        &state.db,
+        &ses_event_id(sns_message_id, "clicked", &attribution.recipient),
+        &attribution.tenant_id,
+        &attribution.message_id,
+        "clicked",
+        Some(&attribution.recipient),
+        click.link.as_deref(),
+        click.user_agent.as_deref(),
+        click.ip_address.as_deref(),
+        clicked_at,
+    )
+    .await
+    .map_err(|e| ses_db_error("failed to record click event", e))?;
 
     // Queue webhook
-    if let Some(ref tid) = tenant_id {
-        let payload = serde_json::json!({
-            "event": "message.clicked",
-            "messageId": apexmail_message_id,
-            "link": click.link,
-            "userAgent": click.user_agent,
-            "timestamp": click.timestamp,
-        });
-        queue_webhook_event(state, tid, "message.clicked", &payload).await;
-    }
+    let payload = serde_json::json!({
+        "event": "message.clicked",
+        "messageId": attribution.message_id,
+        "link": click.link,
+        "userAgent": click.user_agent,
+        "timestamp": click.timestamp,
+    });
+    queue_webhook_event(state, &attribution.tenant_id, "message.clicked", &payload).await;
 
     Ok(())
 }
@@ -1120,6 +1462,118 @@ mod tests {
     use rsa::pkcs1v15::SigningKey;
     use rsa::signature::{SignatureEncoding, Signer};
     use rsa::RsaPrivateKey;
+
+    // ── F74/F75: trusted attribution + delivery persistence ────────────
+
+    #[test]
+    fn attribution_resolves_through_the_stored_mapping_only() {
+        // F74: the resolution keys on the stored provider message id
+        // (smtp_message_id) and verifies the callback recipient against
+        // the row's envelope — no X-ApexMail-* header is consulted.
+        assert!(
+            SES_ATTRIBUTION_SQL.contains("q.smtp_message_id = $1"),
+            "resolution must key on the stored provider message id"
+        );
+        assert!(
+            SES_ATTRIBUTION_SQL.contains("LOWER(q.\"to\") = LOWER($2)")
+                || SES_ATTRIBUTION_SQL
+                    .contains("LOWER(q.\"to\") = LOWER($2)".replace("\\", "").as_str()),
+            "callback recipient must be verified against the stored envelope"
+        );
+        assert!(
+            !SES_ATTRIBUTION_SQL.to_lowercase().contains("apexmail"),
+            "raw identity headers must never participate in resolution"
+        );
+    }
+
+    #[test]
+    fn ses_event_ids_are_deterministic_and_bounded() {
+        let a = ses_event_id("sns-1", "delivered", "user@example.com");
+        let b = ses_event_id("sns-1", "delivered", "user@example.com");
+        assert_eq!(a, b, "same notification+recipient must dedupe");
+        assert_ne!(
+            ses_event_id("sns-1", "bounced", "user@example.com"),
+            ses_event_id("sns-1", "delivered", "user@example.com")
+        );
+        assert_ne!(
+            ses_event_id("sns-1", "delivered", "a@example.com"),
+            ses_event_id("sns-2", "delivered", "a@example.com")
+        );
+        assert!(
+            a.len() <= 64 && a.starts_with("evt_"),
+            "id must fit events.id VARCHAR(64): {a}"
+        );
+    }
+
+    #[test]
+    fn delivery_persistence_targets_the_recipient_record_not_a_missing_column() {
+        // F75: the exact 42703 regression — the delivery callback wrote
+        // messages.delivered_at (absent). The recipient-delivery write must
+        // go to email_queue.delivered_at (migration 186) and the parent
+        // aggregate must be derived by the shared reconciliation.
+        let source = include_str!("ses_notifications.rs");
+        assert!(
+            source.contains("SET delivered_at = COALESCE(delivered_at, $2)"),
+            "delivery confirmation must stamp the recipient delivery record idempotently"
+        );
+        // (Split literal so the assertion does not match its own source.)
+        let forbidden = format!(
+            "UPDATE messages SET status = {}",
+            "'delivered', delivered_at"
+        );
+        assert!(
+            !source.contains(&forbidden),
+            "the parent write must never target the absent messages.delivered_at column directly"
+        );
+        assert!(
+            source.contains("apexmail_lib::email_headers::RECONCILE_MESSAGE_PROGRESS_SQL"),
+            "the shared F25 reconciliation must run after confirmed transitions"
+        );
+    }
+
+    #[test]
+    fn ses_event_timestamps_use_the_actual_event_time() {
+        let ts = ses_event_timestamp(Some("2026-02-27T12:34:56Z"));
+        assert_eq!(ts.to_rfc3339(), "2026-02-27T12:34:56+00:00");
+        // Malformed/absent falls back to now, never to epoch.
+        let fallback = ses_event_timestamp(None);
+        assert!(fallback.timestamp() > 1_700_000_000);
+        let malformed = ses_event_timestamp(Some("not-a-date"));
+        assert!(malformed.timestamp() > 1_700_000_000);
+    }
+
+    #[test]
+    fn diagnostic_identity_lookup_matches_case_insensitive_aliases() {
+        // The exact-name lookup used before F74 missed the canonical
+        // spelling entirely; the diagnostic path now matches both.
+        let mail = SesMail {
+            message_id: Some("ses-1".into()),
+            source: None,
+            destination: None,
+            headers: Some(vec![SesHeader {
+                name: "X-ApexMail-Message-ID".into(),
+                value: "canonical-spelling".into(),
+            }]),
+            common_headers: None,
+        };
+        let (message, tenant) = diagnostic_identity_headers(&mail);
+        assert_eq!(message.as_deref(), Some("canonical-spelling"));
+        assert!(tenant.is_none());
+
+        let mail = SesMail {
+            message_id: Some("ses-1".into()),
+            source: None,
+            destination: None,
+            headers: Some(vec![SesHeader {
+                name: "X-ApexMail-TenantId".into(),
+                value: "legacy-alias".into(),
+            }]),
+            common_headers: None,
+        };
+        let (message, tenant) = diagnostic_identity_headers(&mail);
+        assert!(message.is_none());
+        assert_eq!(tenant.as_deref(), Some("legacy-alias"));
+    }
 
     #[test]
     fn test_parse_sns_subscription_confirmation() {
