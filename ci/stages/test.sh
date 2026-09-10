@@ -177,9 +177,22 @@ apply_test_schema() {
     _pg_port=$(docker port apexmail-ci-test-pg 5432/tcp 2>/dev/null | head -1 | sed 's/.*://')
     [ -n "$_pg_port" ] || { ci_err "could not resolve the ephemeral postgres port"; return "$CI_EXIT_FAIL"; }
     ci_info "applying the canonical chain (migrator) to the ephemeral DB on port $_pg_port"
-    (cd "$WS" && DATABASE_URL="postgres://apexmail:apexmail@127.0.0.1:$_pg_port/apexmail_test" \
-        ./target/debug/migrator) >>"$CI_STAGE_LOG" 2>&1 \
-        || { ci_err "migrator failed against the ephemeral DB — see $CI_STAGE_LOG"; return "$CI_EXIT_FAIL"; }
+    # Retry: alpine's entrypoint restarts postgres once after first-init
+    # (password setup) — pg_isready can pass against the bootstrap process
+    # and the next real connection resets. Three retries absorb it.
+    _mig_ok=0
+    _mig_try=1
+    while [ "$_mig_try" -le 3 ]; do
+        if (cd "$WS" && DATABASE_URL="postgres://apexmail:apexmail@127.0.0.1:$_pg_port/apexmail_test" \
+            ./target/debug/migrator) >>"$CI_STAGE_LOG" 2>&1; then
+            _mig_ok=1
+            break
+        fi
+        ci_warn "migrator attempt $_mig_try against the ephemeral DB failed (postgres may be mid-restart); retrying"
+        _mig_try=$((_mig_try + 1))
+        sleep 3
+    done
+    [ "$_mig_ok" = 1 ] || { ci_err "migrator failed against the ephemeral DB — see $CI_STAGE_LOG"; return "$CI_EXIT_FAIL"; }
 }
 
 # --- 7. PHP suites ---------------------------------------------------------------------
