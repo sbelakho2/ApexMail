@@ -3,7 +3,7 @@ name = "ids-engine"
 version = "0.1.0"
 edition = "2021"
 description = "Network-level Intrusion Detection/Prevention System: signature matching, anomaly detection, protocol analysis"
-license = "PROPRIETARY"
+license.workspace = true  # LicenseRef-PROPRIETARY via workspace (was literal "PROPRIETARY")
 
 [features]
 default = ["core"]

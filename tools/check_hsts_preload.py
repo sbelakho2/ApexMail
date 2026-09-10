@@ -44,7 +44,7 @@ def validate_header(header: str) -> list[str]:
 
 def fetch_header(url: str, timeout: int) -> str | None:
     request = urllib.request.Request(url, method="GET", headers={"User-Agent": "apexmail-hsts-preload-check/1.0"})
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with urllib.request.urlopen(request, timeout=timeout) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
         return response.headers.get("Strict-Transport-Security")
 
 

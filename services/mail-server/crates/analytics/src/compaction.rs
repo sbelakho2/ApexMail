@@ -519,11 +519,12 @@ mod tests {
     /// Drives the async wrapper so the blocking-pool path is exercised.
     #[tokio::test]
     async fn load_manifested_ids_finds_written_manifests() {
-        let root = std::env::temp_dir().join(format!(
-            "apexmail_compact_test_{}_{}",
-            std::process::id(),
-            uuid::Uuid::new_v4().simple()
-        ));
+        let root = std::env::temp_dir() // nosemgrep: rust.lang.security.temp-dir.temp-dir
+            .join(format!(
+                "apexmail_compact_test_{}_{}",
+                std::process::id(),
+                uuid::Uuid::new_v4().simple()
+            ));
         let dir = root.join("tenant_a/2026/08");
         std::fs::create_dir_all(&dir).unwrap();
 

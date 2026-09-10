@@ -1,4 +1,5 @@
 [package]
+license.workspace = true  # LicenseRef-PROPRIETARY via workspace
 name = "isolation"
 version = "0.1.0"
 edition = "2021"

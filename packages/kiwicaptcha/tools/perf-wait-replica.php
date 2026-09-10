@@ -271,7 +271,7 @@ function spawnRedisServer(array $extraArgs, string $name, string $dir, array &$p
         $extraArgs,
         ['--save', '', '--appendonly', 'no', '--logfile', $log],
     );
-    $proc = proc_open($args, [
+    $proc = proc_open($args, [ // nosemgrep: php.lang.security.exec-use.exec-use — dev perf tool spawning workers via argv-array proc_open — array form performs no shell interpolation
         0 => ['pipe', 'r'],
         1 => ['file', $log, 'a'],
         2 => ['file', $log, 'a'],
@@ -314,7 +314,7 @@ function removeDir(string $dir): void
         if (is_dir($path)) {
             removeDir($path);
         } else {
-            @unlink($path);
+            @unlink($path); // nosemgrep: php.lang.security.unlink-use.unlink-use — dev/test tool deleting its own temp artifacts
         }
     }
     @rmdir($dir);
@@ -460,17 +460,17 @@ $masterPid = (int) ($masterStatus['pid'] ?? 0);
 $replicaPid = (int) ($replicaStatus['pid'] ?? 0);
 
 $ok = waitFor(
-    static fn (): bool => str_contains((string) @shell_exec('redis-cli -p '.$masterPort.' ping 2>/dev/null'), 'PONG'),
+    static fn (): bool => str_contains((string) @shell_exec('redis-cli -p '.$masterPort.' ping 2>/dev/null'), 'PONG'), // nosemgrep: php.lang.security.exec-use.exec-use — dev perf tool spawning workers via argv-array proc_open — array form performs no shell interpolation
     BOOT_TIMEOUT_SECS,
     'the master to answer PONG',
 );
 $ok = $ok && waitFor(
-    static fn (): bool => str_contains((string) @shell_exec('redis-cli -p '.$replicaPort.' ping 2>/dev/null'), 'PONG'),
+    static fn (): bool => str_contains((string) @shell_exec('redis-cli -p '.$replicaPort.' ping 2>/dev/null'), 'PONG'), // nosemgrep: php.lang.security.exec-use.exec-use — dev perf tool spawning workers via argv-array proc_open — array form performs no shell interpolation
     BOOT_TIMEOUT_SECS,
     'the replica to answer PONG',
 );
 $ok = $ok && waitFor(
-    static fn (): bool => str_contains((string) @shell_exec('redis-cli -p '.$replicaPort.' info replication 2>/dev/null'), 'master_link_status:up'),
+    static fn (): bool => str_contains((string) @shell_exec('redis-cli -p '.$replicaPort.' info replication 2>/dev/null'), 'master_link_status:up'), // nosemgrep: php.lang.security.exec-use.exec-use — dev perf tool spawning workers via argv-array proc_open — array form performs no shell interpolation
     BOOT_TIMEOUT_SECS,
     'the replica to finish its initial sync',
 );

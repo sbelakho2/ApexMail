@@ -331,7 +331,7 @@ fn export_full_route_fixtures(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let out_dir = std::env::args()
+    let out_dir = std::env::args() // nosemgrep: rust.lang.security.args.args — reads argv for flag detection / passes constant tool-side paths — no shell, no user-input interpolation
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(|| {

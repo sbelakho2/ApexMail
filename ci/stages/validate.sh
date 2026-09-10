@@ -144,6 +144,28 @@ validate_repo_gates() {
         ci_warn "python3 missing — panic-path guardrails skipped"
     fi
 
+    # (c2) migration SQL lint (enterprise conventions — NEW 2026-09-10):
+    # tools/migration_lint.py enforces the chain's idempotency/transaction
+    # conventions (IF EXISTS/IF NOT EXISTS or existence guards, Migration N
+    # headers, no GRANT ALL/TRUNCATE/explicit COMMIT/CONCURRENTLY).
+    # Legacy files recorded in the production _sqlx_migrations ledger are
+    # checksum-frozen (editing even a comment breaks sqlx's VersionMismatch
+    # validation on the deploy host) — they are grandfathered inside the
+    # checker with justifications, NOT edited. CI_MIGRATION_LINT_CHECK
+    # downgrades to advisory for a triage window.
+    if command -v python3 >/dev/null 2>&1; then
+        _ml_rc=0
+        (cd "$REPO_ROOT" && ci_check "migration SQL lint (tools/migration_lint.py)" \
+            python3 tools/migration_lint.py) || _ml_rc=$?
+        if [ "$_ml_rc" -ne 0 ] && [ "${CI_MIGRATION_LINT_CHECK:-required}" = advisory ]; then
+            ci_warn "ADVISORY: migration SQL lint reported violations (CI_MIGRATION_LINT_CHECK=advisory)"
+        elif [ "$_ml_rc" -ne 0 ]; then
+            return "$CI_EXIT_FAIL"
+        fi
+    else
+        ci_warn "python3 missing — migration SQL lint skipped"
+    fi
+
     # (d) legal identity constants (legal-identity.yml rust-legal-entity job,
     #     release-gates.yml legal-identity job).
     legal_constants || return "$CI_EXIT_FAIL"

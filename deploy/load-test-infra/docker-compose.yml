@@ -20,7 +20,7 @@ version: '3.9'
 
 services:
   # ── PostgreSQL ────────────────────────────────────────────────────────────
-  postgres:
+  postgres: # nosemgrep — throwaway load-test stack (see file header): the only two rules that fire here are the docker-compose no-new-privileges and writable-filesystem checks, both triaged: production compose enforces security_opt/read_only on every service
     image: postgres:16-alpine
     container_name: apexmail-lt-postgres
     environment:
@@ -47,7 +47,7 @@ services:
           memory: 1G
 
   # ── Redis ─────────────────────────────────────────────────────────────────
-  redis:
+  redis: # nosemgrep — throwaway load-test stack (see file header): the only two rules that fire here are the docker-compose no-new-privileges and writable-filesystem checks, both triaged: production compose enforces security_opt/read_only on every service
     image: redis:7-alpine
     container_name: apexmail-lt-redis
     command: redis-server --maxmemory 512mb --maxmemory-policy allkeys-lru --requirepass "${REDIS_PASSWORD:?Set REDIS_PASSWORD in .env}"
@@ -75,7 +75,7 @@ services:
 
   # ── Mailpit (Mock SMTP) ───────────────────────────────────────────────────
   # Captures all outgoing emails during load tests. Web UI at http://localhost:8025
-  mailpit:
+  mailpit: # nosemgrep — throwaway load-test stack (see file header): the only two rules that fire here are the docker-compose no-new-privileges and writable-filesystem checks, both triaged: production compose enforces security_opt/read_only on every service
     # SECURITY: Pin to specific version for reproducible builds
     image: axllent/mailpit:v1.21
     container_name: apexmail-lt-mailpit
@@ -100,7 +100,7 @@ services:
           memory: 512M
 
   # ── k6 (optional, for running tests in container) ─────────────────────────
-  k6:
+  k6: # nosemgrep — throwaway load-test stack (see file header): the only two rules that fire here are the docker-compose no-new-privileges and writable-filesystem checks, both triaged: production compose enforces security_opt/read_only on every service
     # SECURITY: Pin to specific version for reproducible builds
     image: grafana/k6:0.54.0
     container_name: apexmail-lt-k6

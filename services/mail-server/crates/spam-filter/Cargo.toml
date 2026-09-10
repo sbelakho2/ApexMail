@@ -3,7 +3,7 @@ name = "spam-filter"
 version = "0.1.0"
 edition = "2021"
 description = "Multi-layer spam & phishing detection: Bayesian classifier, URL reputation, header analysis, content scoring"
-license = "PROPRIETARY"
+license.workspace = true  # LicenseRef-PROPRIETARY via workspace (was literal "PROPRIETARY")
 
 [features]
 default = ["full"]

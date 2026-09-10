@@ -17,9 +17,14 @@
 #   2. cargo fmt --check
 #   3. cargo clippy --workspace --all-targets -- -D warnings
 #   4. repo python gates (cycles / feature flags / audit coverage)
-#   5. cargo machete + cargo deny (required when installed; see README)
+#   5. cargo machete + cargo deny (advisories bans sources licenses) —
+#      REQUIRED via ci_have_tool (fail-closed on the deploy host, warn-skip
+#      on dev machines); licenses gate: inventory-driven deny.toml allow list
 #   6. ephemeral services per CI_TEST_DB / CI_TEST_REDIS, then
 #      cargo test --workspace
+#   6b. coverage ratchet: cargo llvm-cov nextest --workspace →
+#      $RUN_DIR/coverage.lcov; OVERALL line coverage compared against
+#      ci/coverage-baseline.txt (below = FAIL, CI_COVERAGE_CHECK)
 #   7. PHP: three phpunit suites (skip-warn when vendor/ is absent)
 #
 # DB/Redis policy: GitHub-parity by default (CI_TEST_DB=none, CI_TEST_REDIS=0)
@@ -50,18 +55,28 @@ ui-foundation cannot compile (install zola or build the site once)"
         || { ci_err "zola build failed"; return "$CI_EXIT_FAIL"; }
 }
 
-# --- 5. optional cargo tooling gates ------------------------------------------------
+# --- 5. required cargo tooling gates ------------------------------------------------
+# Enterprise coverage expansion (2026-09-10): machete + deny were plain
+# warn-skips when absent, which violated the fail-closed tool policy on the
+# deploy host (a host without cargo-deny silently shipped no advisory/ban/
+# source/license gate at all). Both lanes now go through ci_have_tool: die on
+# the deploy host when missing (fail closed), warn-and-skip on dev machines
+# (the framework's own missing-tool policy). The deny invocation is extended
+# to `licenses` — services/mail-server/deny.toml carries an inventory-driven
+# SPDX allow list (see the 2026-09-10 sweep comments there).
 cargo_tool_gates() {
-    if command -v cargo-machete >/dev/null 2>&1; then
-        (cd "$WS" && ci_check "cargo machete (unused deps)" cargo machete)
-    else
-        ci_warn "cargo-machete missing — unused-dependency gate skipped (rust-check.yml ran it)"
+    if ci_have_tool cargo-machete; then
+        (cd "$WS" && ci_check "cargo machete (unused deps)" cargo machete) \
+            || return "$CI_EXIT_FAIL"
     fi
-    if command -v cargo-deny >/dev/null 2>&1; then
-        (cd "$WS" && ci_check "cargo deny (advisories bans sources)" \
-            cargo deny check advisories bans sources)
-    else
-        ci_warn "cargo-deny missing — advisory/ban/source gate skipped (rust-check.yml ran it)"
+    if ci_have_tool cargo-deny; then
+        if [ ! -f "$WS/deny.toml" ]; then
+            ci_err "cargo-deny config missing: $WS/deny.toml — licenses lane cannot run (fail closed)"
+            return "$CI_EXIT_FAIL"
+        fi
+        (cd "$WS" && ci_check "cargo deny (advisories bans sources licenses)" \
+            cargo deny check advisories bans sources licenses) \
+            || return "$CI_EXIT_FAIL"
     fi
 }
 
@@ -73,8 +88,14 @@ cargo_tool_gates() {
 # whatever schema that DB holds and fail (README §9 F6). Default mode pins
 # those probes at an unreachable port so they soft-skip — the exact GitHub
 # behaviour, but deterministic on every host.
-run_cargo_tests() {
-    _test_env=''
+#
+# _provision_test_services (refactored 2026-09-10 out of run_cargo_tests so
+# the coverage gate can share the EXACT same hermetic env): starts the
+# ephemeral containers per CI_TEST_DB / CI_TEST_REDIS, applies the canonical
+# schema when a postgres is up, and leaves the env-assignment word list in
+# _TEST_ENV (VAR=val pairs, consumed via `env $_TEST_ENV ...`).
+_provision_test_services() {
+    _TEST_ENV=''
     if [ "${CI_TEST_DB:-none}" = ephemeral ] || [ "${CI_TEST_REDIS:-0}" = 1 ]; then
         ci_docker_ok || ci_die "ephemeral test services requested but docker is unavailable"
     fi
@@ -83,12 +104,12 @@ run_cargo_tests() {
         ci_ephem_postgres apexmail-ci-test-pg apexmail apexmail apexmail_test "$_pg_port" \
             || ci_die "ephemeral postgres failed to start"
         apply_test_schema
-        _test_env="TEST_DATABASE_URL=postgres://apexmail:apexmail@127.0.0.1:$_pg_port/apexmail_test"
-        _test_env="$_test_env SALES_TEST_DATABASE_URL=postgres://apexmail:apexmail@127.0.0.1:$_pg_port/apexmail_test"
-        _test_env="$_test_env ENTERPRISE_TEST_DATABASE_URL=postgres://apexmail:apexmail@127.0.0.1:$_pg_port/apexmail_test"
+        _TEST_ENV="TEST_DATABASE_URL=postgres://apexmail:apexmail@127.0.0.1:$_pg_port/apexmail_test"
+        _TEST_ENV="$_TEST_ENV SALES_TEST_DATABASE_URL=postgres://apexmail:apexmail@127.0.0.1:$_pg_port/apexmail_test"
+        _TEST_ENV="$_TEST_ENV ENTERPRISE_TEST_DATABASE_URL=postgres://apexmail:apexmail@127.0.0.1:$_pg_port/apexmail_test"
     else
-        _test_env="SALES_TEST_DATABASE_URL=postgres://127.0.0.1:1/apexmail_test"
-        _test_env="$_test_env ENTERPRISE_TEST_DATABASE_URL=postgres://127.0.0.1:1/apexmail_test"
+        _TEST_ENV="SALES_TEST_DATABASE_URL=postgres://127.0.0.1:1/apexmail_test"
+        _TEST_ENV="$_TEST_ENV ENTERPRISE_TEST_DATABASE_URL=postgres://127.0.0.1:1/apexmail_test"
         # NOTE: TEST_DATABASE_URL stays UNSET in default mode — the
         # functional-sales suite PANICS when it is set but unreachable.
     fi
@@ -96,9 +117,9 @@ run_cargo_tests() {
         _redis_port=$(ci_free_port)
         ci_ephem_redis apexmail-ci-test-redis "$_redis_port" \
             || ci_die "ephemeral redis failed to start"
-        _test_env="$_test_env TEST_REDIS_URL=redis://127.0.0.1:$_redis_port"
+        _TEST_ENV="$_TEST_ENV TEST_REDIS_URL=redis://127.0.0.1:$_redis_port"
     else
-        _test_env="$_test_env TEST_REDIS_URL=redis://127.0.0.1:1"
+        _TEST_ENV="$_TEST_ENV TEST_REDIS_URL=redis://127.0.0.1:1"
     fi
 
     # macOS (this dev host): rustls-native-certs reads the platform store
@@ -106,10 +127,14 @@ run_cargo_tests() {
     # the AWS SDK's TLS provider then panics ("no valid root certificates").
     # A portable PEM bundle (present on macOS and Linux) restores it.
     if [ -f /etc/ssl/cert.pem ] && [ -z "${SSL_CERT_FILE:-}" ]; then
-        _test_env="$_test_env SSL_CERT_FILE=/etc/ssl/cert.pem"
+        _TEST_ENV="$_TEST_ENV SSL_CERT_FILE=/etc/ssl/cert.pem"
     fi
+}
 
-    ci_info "running cargo tests --workspace ($(printf '%s' "$_test_env" | tr ' ' ','))"
+run_cargo_tests() {
+    _provision_test_services
+
+    ci_info "running cargo tests --workspace ($(printf '%s' "$_TEST_ENV" | tr ' ' ','))"
     # rust-check.yml ran `cargo nextest run --workspace --all-targets` —
     # nextest isolates every test in its own process, which matters here:
     # under `cargo test`'s threaded model, env-var-mutating tests race each
@@ -132,8 +157,8 @@ run_cargo_tests() {
                 _nx_args="$_nx_args --skip $_kft"
             fi
         done
-        # shellcheck disable=SC2086  # _test_env/_nx_args are intentional word lists
-        if ! (cd "$WS" && ci_run_logged env $_test_env CARGO_TERM_COLOR=never \
+        # shellcheck disable=SC2086  # _TEST_ENV/_nx_args are intentional word lists
+        if ! (cd "$WS" && ci_run_logged env $_TEST_ENV CARGO_TERM_COLOR=never \
                 cargo nextest run --workspace --all-targets $_nx_args); then
             ci_err "cargo nextest run FAILED — see the output above"
             return "$CI_EXIT_FAIL"
@@ -141,11 +166,93 @@ run_cargo_tests() {
     else
         ci_warn "cargo-nextest missing — falling back to cargo test (known env-race, §9 F10); install nextest via ci/install.sh"
         # shellcheck disable=SC2086
-        if ! (cd "$WS" && ci_run_logged env $_test_env CARGO_TERM_COLOR=never cargo test --workspace); then
+        if ! (cd "$WS" && ci_run_logged env $_TEST_ENV CARGO_TERM_COLOR=never cargo test --workspace); then
             ci_err "cargo test --workspace FAILED — see the output above"
             return "$CI_EXIT_FAIL"
         fi
     fi
+}
+
+# --- 6b. coverage ratchet gate --------------------------------------------------------
+# cargo-llvm-cov re-runs the workspace suite under llvm profiling
+# instrumentation and writes $RUN_DIR/coverage.lcov; the OVERALL line
+# coverage % parsed from that file is compared against ci/coverage-baseline.txt
+# (a single float). BELOW baseline = FAIL (a coverage ratchet: the number can
+# only go up); at-or-above = PASS, printing the measured value plus a hint
+# that raising the baseline in the same PR as the code that earned it is a
+# PR-positive action. The baseline ships as 0.0 — the first host run seeds
+# the real value (see the comment in ci/coverage-baseline.txt).
+# Requires: cargo-llvm-cov + the llvm-tools-preview rustup component +
+# cargo-nextest (ci/install.sh installs all three). Missing tooling fails
+# CLOSED on the deploy host via ci_have_tool and warns on dev machines.
+run_coverage_gate() {
+    ci_have_tool cargo-llvm-cov || return "$CI_EXIT_OK"
+    _cov_baseline=$CI_ROOT/coverage-baseline.txt
+    if [ ! -f "$_cov_baseline" ]; then
+        ci_err "coverage baseline missing: $_cov_baseline — the ratchet gate cannot run (fail closed)"
+        return "$CI_EXIT_FAIL"
+    fi
+    if ci_dry; then
+        ci_info "check (dry-run): cargo llvm-cov nextest --workspace"
+        return "$CI_EXIT_OK"
+    fi
+    if ! command -v cargo-nextest >/dev/null 2>&1; then
+        ci_err "cargo-nextest missing — the coverage gate requires nextest (install via ci/install.sh)"
+        return "$CI_EXIT_FAIL"
+    fi
+    # Same hermetic env as run_cargo_tests (refactored into
+    # _provision_test_services): fresh ephemeral postgres/redis per
+    # CI_TEST_DB/CI_TEST_REDIS, canonical schema applied, DB/Redis probes
+    # pinned when disabled. ci_ephem_postgres removes the previous container
+    # of the same name first, and the plain-test containers are finished by
+    # the time this lane runs.
+    _provision_test_services
+    _cov_lcov=$RUN_DIR/coverage.lcov
+    ci_info "running cargo llvm-cov nextest --workspace ($(printf '%s' "$_TEST_ENV" | tr ' ' ','))"
+    # --ignore-filename-regex keeps the measurement to WORKSPACE sources
+    # only (dependency/stdlib code lives under ~/.cargo and target/).
+    # shellcheck disable=SC2086  # _TEST_ENV is an intentional word list
+    if ! (cd "$WS" && ci_run_logged env $_TEST_ENV CARGO_TERM_COLOR=never \
+            cargo llvm-cov nextest --workspace \
+            --ignore-filename-regex '/(target|\.cargo|\.rustup)/' \
+            --lcov-path "$_cov_lcov"); then
+        if [ "${CI_COVERAGE_CHECK:-required}" = advisory ]; then
+            ci_warn "ADVISORY: instrumented test run FAILED (CI_COVERAGE_CHECK=advisory)"
+            return "$CI_EXIT_OK"
+        fi
+        ci_err "cargo llvm-cov nextest FAILED — see the output above (coverage gate)"
+        return "$CI_EXIT_FAIL"
+    fi
+    if [ ! -s "$_cov_lcov" ]; then
+        if [ "${CI_COVERAGE_CHECK:-required}" = advisory ]; then
+            ci_warn "ADVISORY: $_cov_lcov empty — coverage not measured"
+            return "$CI_EXIT_OK"
+        fi
+        ci_err "coverage gate produced no lcov output ($_cov_lcov)"
+        return "$CI_EXIT_FAIL"
+    fi
+    # OVERALL line coverage: lcov `DA:<line>,<hits>` records, hits > 0.
+    _cov_pct=$(awk -F: '/^DA:/ {
+        split(substr($0, 4), p, ",")
+        total++
+        if (p[2] + 0 > 0) hit++
+    } END { printf "%.4f", (total ? 100.0 * hit / total : 0.0) }' "$_cov_lcov")
+    _cov_base=$(sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' "$_cov_baseline" | head -n 1)
+    case $_cov_base in
+        ''|*[!0-9.]*) ci_err "invalid baseline '$_cov_base' in $_cov_baseline (expected a single float)"; return "$CI_EXIT_FAIL" ;;
+    esac
+    if awk -v a="$_cov_pct" -v b="$_cov_base" 'BEGIN { exit !(a + 0 >= b + 0) }'; then
+        ci_info "PASS: workspace line coverage $_cov_pct% (baseline $_cov_base%) — lcov artifact: $_cov_lcov"
+        ci_info "ratchet: if this is above the baseline, raise ci/coverage-baseline.txt to $_cov_pct in the SAME PR — that is a PR-positive action, not a concession"
+        return "$CI_EXIT_OK"
+    fi
+    if [ "${CI_COVERAGE_CHECK:-required}" = advisory ]; then
+        ci_warn "ADVISORY: line coverage $_cov_pct% fell below baseline $_cov_base% (CI_COVERAGE_CHECK=advisory)"
+        return "$CI_EXIT_OK"
+    fi
+    ci_err "FAIL: workspace line coverage $_cov_pct% is BELOW the baseline $_cov_base% \
+(ratchet) — add tests or lower the baseline deliberately in a reviewed PR"
+    return "$CI_EXIT_FAIL"
 }
 
 # Apply the CANONICAL MIGRATION CHAIN to the ephemeral test database.
@@ -383,6 +490,7 @@ stage_main() {
 
     cargo_tool_gates
     run_cargo_tests
+    run_coverage_gate
     run_php_tests
     run_contrast_gate
     run_layout_gates

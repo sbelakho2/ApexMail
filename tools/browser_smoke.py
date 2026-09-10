@@ -453,7 +453,7 @@ def dump_dom(
 ) -> str:
     request = build_fetch_request(base_url, check)
     try:
-        with urlopen(request, timeout=process_timeout_s) as response:
+        with urlopen(request, timeout=process_timeout_s) as response: # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected — internal tooling hitting a configured/constant endpoint, not a user-supplied URL
             body = response.read()
             charset = response.headers.get_content_charset() or "utf-8"
             return body.decode(charset, errors="replace")

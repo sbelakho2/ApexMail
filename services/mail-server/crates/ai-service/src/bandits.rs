@@ -389,7 +389,7 @@ mod tests {
     #[tokio::test]
     async fn test_persisted_state_survives_restart() {
         let state_path =
-            std::env::temp_dir().join(format!("apexmail-bandits-{}.json", uuid::Uuid::new_v4()));
+            std::env::temp_dir().join(format!("apexmail-bandits-{}.json", uuid::Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
 
         let optimizer = BanditOptimizer::with_state_path(0.0, &state_path, None).unwrap();
         let arm_id = optimizer.add_arm("persisted-variant").await.unwrap();
@@ -409,10 +409,11 @@ mod tests {
 
     #[test]
     fn test_invalid_persisted_state_fails_to_load() {
-        let state_path = std::env::temp_dir().join(format!(
-            "apexmail-bandits-invalid-{}.json",
-            uuid::Uuid::new_v4()
-        ));
+        let state_path = std::env::temp_dir() // nosemgrep: rust.lang.security.temp-dir.temp-dir
+            .join(format!(
+                "apexmail-bandits-invalid-{}.json",
+                uuid::Uuid::new_v4()
+            ));
         fs::write(&state_path, b"{not-json").unwrap();
 
         let error = BanditOptimizer::with_state_path(0.0, &state_path, None)
@@ -428,10 +429,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_encrypted_state_survives_restart() {
-        let state_path = std::env::temp_dir().join(format!(
-            "apexmail-bandits-enc-{}.json",
-            uuid::Uuid::new_v4()
-        ));
+        let state_path = std::env::temp_dir() // nosemgrep: rust.lang.security.temp-dir.temp-dir
+            .join(format!(
+                "apexmail-bandits-enc-{}.json",
+                uuid::Uuid::new_v4()
+            ));
         let key_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
         let optimizer = BanditOptimizer::with_state_path(0.0, &state_path, Some(key_hex)).unwrap();

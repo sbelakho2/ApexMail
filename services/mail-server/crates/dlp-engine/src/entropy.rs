@@ -384,7 +384,7 @@ mod tests {
 
     #[test]
     fn test_detect_env_style_secret_assignments() {
-        let text = "DATABASE_URL=postgres://user:sk_live_4eC39HqLyjWDarjtT1zdp7dc@host/db\nAPI_KEY=very_secret_key_12345";
+        let text = "DATABASE_URL=postgres://user:sk_live_4eC39HqLyjWDarjtT1zdp7dc@host/db\nAPI_KEY=very_secret_key_12345"; // nosemgrep: generic.secrets.security.detected-stripe-api-key.detected-stripe-api-key — Stripe's public documentation example key (sk_live_4eC39HqLyjWDarjtT1zdp7dc) used as DLP detection-test corpus — the code that FINDS such keys
         let result = scan_entropy(text, 4.5, 20);
         assert!(
             !result.findings.is_empty(),

@@ -4043,7 +4043,7 @@ mod tests {
 
     #[test]
     fn binding_tag_is_nonce_bound() {
-        let secret = "0123456789abcdef0123456789abcdef";
+        let secret = "0123456789abcdef0123456789abcdef"; // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret — named test constant / well-known example value in a unit test — no credential
         let a = binding_tag("nonce-a", "192.168.1.5", secret).unwrap();
         let b = binding_tag("nonce-b", "192.168.1.5", secret).unwrap();
         assert_ne!(a, b, "same IP, different nonce → different tag");
@@ -4060,7 +4060,7 @@ mod tests {
 
     #[test]
     fn binding_tag_canonicalizes_ipv4_mapped_and_parses_families() {
-        let secret = "0123456789abcdef0123456789abcdef";
+        let secret = "0123456789abcdef0123456789abcdef"; // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret — named test constant / well-known example value in a unit test — no credential
         // IPv4-mapped IPv6 normalizes to 4-byte IPv4.
         assert_eq!(
             binding_tag("n", "::ffff:192.168.1.5", secret).unwrap(),
@@ -5686,7 +5686,7 @@ mod tests {
     }
 
     // ── Shared fixture vectors (byte-exact; PHP mirrors these) ─────────
-    // secret = "0123456789abcdef0123456789abcdef"
+    // secret = "0123456789abcdef0123456789abcdef" // nosemgrep: generic.secrets.security.detected-generic-secret.detected-generic-secret — named test constant / well-known example value in a unit test — no credential
     // nonce  = base64("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdef")  (32 ASCII bytes)
     // salt   = base64("1234567890abcdef")  (16 ASCII bytes)
     // scope = "login"; issued_at = 1700000000; expires_at = 1700000120;

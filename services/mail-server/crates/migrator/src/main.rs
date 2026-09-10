@@ -70,7 +70,7 @@ async fn main() -> ExitCode {
         )
         .init();
 
-    let dry_run = std::env::args().any(|arg| arg == "--dry-run" || arg == "-n");
+    let dry_run = std::env::args().any(|arg| arg == "--dry-run" || arg == "-n"); // nosemgrep: rust.lang.security.args.args — reads argv for flag detection / passes constant tool-side paths — no shell, no user-input interpolation
 
     if dry_run {
         print_migrations();

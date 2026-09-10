@@ -22,11 +22,15 @@ independent.”* Everything here is POSIX sh + the tools already on the host
                     │
    ┌──────────────────────────────────────────────────────────────────┐
    │ 01 fetch      git fetch origin main (deploy key); refuse unpushed │
-   │ 02 validate   env-file, compose -q, pipeline sanity, repo gates   │
-   │ 03 test       fmt, clippy -D, cargo test --workspace (+ephemeral  │
-   │               DB/Redis opt-in), PHP suites                        │
+   │ 02 validate   env-file, compose -q, pipeline sanity, repo gates,  │
+   │               migration SQL lint (enterprise conventions)         │
+   │ 03 test       fmt, clippy -D, machete + deny (advisories/bans/    │
+   │               sources/licenses), cargo test --workspace           │
+   │               (+ephemeral DB/Redis), coverage ratchet             │
+   │               (llvm-cov → baseline), PHP suites                   │
    │ 04 security   gitleaks, cargo audit (+RUSTSEC ignores), cargo vet,│
-   │               fresh-DB migration validation, Trivy(+SBOM)         │
+   │               semgrep SAST (REQUIRED), fresh-DB migration         │
+   │               validation, Trivy images + Trivy fs (+SBOM)         │
    │ 05 images     deploy.sh --build-only + :sha pins + Trivy gate     │
    │ 06 migrate    _sqlx_migrations backup + migrator one-shot         │
    │ 07 deploy     TLS publish, compose up -d, nginx reload            │
@@ -80,7 +84,7 @@ build break, by design.
 
 | Workflow | Verdict | Replaced by / why |
 |---|---|---|
-| `rust-check.yml` | **REPLACED** | `test` stage: cargo fmt --check (`CI_FMT_CHECK`, see §9 F7), clippy `--workspace --all-targets -D warnings`, `cargo test --workspace`, dependency-cycle / security-feature-flag / audit-coverage python gates, cargo-machete + cargo-deny (when installed — GitHub installed them on the runner; `ci/install.sh` installs them on the host, elsewhere they degrade to a warning). Secret-scan job → `security` stage (gitleaks). Semgrep SAST job → **not replicated** (see §5). |
+| `rust-check.yml` | **REPLACED** | `test` stage: cargo fmt --check (`CI_FMT_CHECK`, see §9 F7), clippy `--workspace --all-targets -D warnings`, `cargo test --workspace`, dependency-cycle / security-feature-flag / audit-coverage python gates, cargo-machete + cargo-deny `check advisories bans sources licenses` — REQUIRED lanes via `ci_have_tool` since 2026-09-10 (fail-closed on the deploy host, warn-skip on dev machines; the licenses gate runs off the inventory-driven `services/mail-server/deny.toml` allow list). Secret-scan job → `security` stage (gitleaks). Semgrep SAST job → `security` stage, REQUIRED (see §5). |
 | `security-audit.yml` | **REPLACED** | `security` stage: `cargo audit --deny warnings` with the identical 15-entry RUSTSEC ignore list (keep both lists in lockstep — the justifications live in the old workflow and in `ci/pipeline.conf`). `outdated` job → advisory report only, as upstream (`continue-on-error`). Weekly cadence → the timer runs it on every poll; set `--stages security` for a standalone audit. |
 | `cargo-vet.yml` | **REPLACED** | `security` stage: runs `cargo vet --locked` **iff `services/mail-server/supply-chain/config.toml` exists** — it does not today, so vet skips with a note, exactly like the upstream job's `configured=false` path. |
 | `sqlx-migration-validation.yml` | **REPLACED** | `security` stage: `migrator --dry-run` (embedded set) + `sqlx migrate run` **twice** against a throwaway `postgres:16-alpine` (clean apply + idempotency — the same two assertions). Currently **red**: §9 F1, so the gate runs as `CI_MIGRATION_CHECK=advisory` until migration 109 is fixed. |
@@ -188,7 +192,7 @@ The substitutes, in enforcement order:
 | Branch protection rules | gone | same — plus the fetch stage's pushed-HEAD guarantee |
 | Dependabot + auto-merge | gone | manual `cargo update` → `check-pr.sh` full → push |
 | GHCR push + image provenance/SBOM attestation signatures | dropped (no registry by design) | local `:<sha>` tags + a SHA256SUMS digest manifest per run; the deploy stage refuses to bring up images whose digests do not match the manifest the images stage recorded (tamper/regression guard, SLSA-lite); Trivy SPDX SBOMs per run (unsigned — add cosign later if needed) |
-| Semgrep SAST (`p/default`, `p/rust`, …) | **replicated (advisory)** | `security` stage runs `semgrep scan --config p/default --config p/rust --error` when semgrep is installed; absent tooling degrades to a loud skip like every optional gate. gitleaks + cargo-audit + cargo-deny + Trivy run unconditionally. |
+| Semgrep SAST (`p/default`, `p/rust`, …) | **replicated (REQUIRED)** | `security` stage runs `semgrep scan --config p/default --config p/rust --error` fail-closed on the deploy host (`ci_have_tool`; warn-skip on dev machines) since 2026-09-10 — was advisory with a silent skip. Every finding is fixed or triaged with a targeted inline `# nosemgrep: <rule-id>` justification (2026-09-10 sweep: 103 findings → 0, all triaged in-tree; `.github/workflows-archive` is excluded as never-executed config). gitleaks + cargo-audit + cargo-deny + Trivy (images AND fs) run alongside. |
 | SARIF uploads to GitHub Security | gone | same reports as JSON/text in `ci/runs/<ts>/` |
 | GitHub runner isolation | inverted model | the pipeline runs on the deploy host as root bounded to repo code fetched over the deploy key; hardening in the unit (`PrivateTmp`, journald logging, socket-activation rate caps) |
 
@@ -253,8 +257,61 @@ poll to skip stages when HEAD is unchanged).
 
 On a dev machine (macOS): nothing to install — `ci/pipeline.sh selftest` and
 `ci/pipeline.sh run --skip-deploy,verify` work as-is (flock-less lock fallback,
-GNU-timeout-less watchdog). `zola`, `gitleaks`, `trivy`, `jq`, docker and
-cargo are expected on PATH; missing optional tools degrade with warnings.
+GNU-timeout-less watchdog). `zola`, `gitleaks`, `trivy`, `semgrep` (brew/pip),
+`jq`, docker and cargo are expected on PATH; the newer required-lane tools
+(cargo-deny, cargo-machete, cargo-llvm-cov) warn-and-skip on dev machines but
+FAIL CLOSED on the deploy host (`ci_have_tool`).
+
+---
+
+## 7b. The 2026-09-10 enterprise coverage expansion
+
+Lanes added / tightened; every one is REQUIRED with an `advisory` escape
+hatch for bounded triage windows (pipeline.conf):
+
+1. **cargo-deny licenses** (test stage, `cargo_tool_gates`) — the deny
+   invocation is now `check advisories bans sources licenses`. The allow
+   list in `services/mail-server/deny.toml` is INVENTORY-DRIVEN (the exact
+   SPDX set of the locked graph): permissive licenses allowed; weak
+   copyleft only as narrowly-scoped, justified exceptions (currently one:
+   `r-efi`, LGPL-2.1-or-later — a `cfg(all(target_os = "uefi",
+   getrandom_backend = "efi_rng"))`-gated getrandom dependency that is
+   never compiled into any shipped Linux/macOS binary; re-review before
+   ever adding a UEFI target). Workspace crates declare
+   `license = "LicenseRef-PROPRIETARY"` (valid SPDX, inherited via the
+   workspace root) so first-party code passes while any third-party
+   license outside the allow list fails closed. machete + deny are
+   `ci_have_tool` lanes: hard-fail on the deploy host, warn-skip on dev
+   machines.
+2. **Semgrep SAST** (security stage) — REQUIRED, fail-closed on the host.
+   Scan set excludes generated/vendored trees and the archived GitHub
+   workflows; every finding is triaged in-tree via targeted
+   `# nosemgrep: <rule-id>` comments with justifications (2026-09-10
+   sweep: 103 findings → 0). Bumping semgrep past 1.176.x may re-open
+   findings — re-triage then.
+3. **Trivy fs** (security stage) — source-tree vuln+secret scan,
+   CRITICAL/HIGH gated like the image lanes. Triage: `.trivyignore`
+   (vulnerability IDs) + `trivy-secret.yaml` (`allow-rules` for secret
+   values); every entry justified. The jackson entries (sdk-java example
+   POM) carry a follow-up: bump jackson to 2.18.8 and delete them.
+4. **Coverage ratchet** (test stage, `run_coverage_gate`) —
+   `cargo llvm-cov nextest --workspace` under the same ephemeral-DB env
+   as the plain test run, lcov artifact (`coverage.lcov`) in the run dir,
+   OVERALL line coverage compared against `ci/coverage-baseline.txt`
+   (single float). Below = FAIL; at-or-above = PASS + the measured value
+   + a nudge to raise the baseline in the same PR. The baseline ships as
+   `0.0` — the FIRST HOST RUN seeds the real value; commit it. Requires
+   cargo-llvm-cov + the `llvm-tools-preview` rustup component +
+   cargo-nextest (all installed by `ci/install.sh`).
+5. **Migration SQL lint** (validate stage, `tools/migration_lint.py`) —
+   enterprise conventions over the canonical chain: destructive ops
+   guarded, idempotent CREATE TABLE/INDEX, `-- Migration N:` headers, no
+   GRANT ALL/TRUNCATE, transaction-valid files (no explicit COMMIT / no
+   CONCURRENTLY). Legacy files recorded in the production
+   `_sqlx_migrations` ledger are CHECKSUM-FROZEN (sqlx validates SHA-384
+   checksums of applied migrations; even a comment edit makes the
+   production migrator abort with VersionMismatch) — they are grandfathered
+   inside the checker with justifications, never edited in place.
 
 ---
 

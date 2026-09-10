@@ -32,7 +32,7 @@
         </div>
       </div>
       <div class="w-full md:w-auto shrink-0">
-        <form method="POST" action="https://api.apexmail.ee/explorer/grade" class="flex flex-col sm:flex-row gap-2 sm:items-stretch">
+        <form method="POST" action="https://api.apexmail.ee/explorer/grade" class="flex flex-col sm:flex-row gap-2 sm:items-stretch"> {# nosemgrep: python.django.security.django-no-csrf-token.django-no-csrf-token — static Zola/Tera template, not Django; the cross-origin API endpoint owns its own CSRF handling #}
           {# Visually-hidden label: sr-only is the repo's established pattern
              (comparison captions, calculator radios). The previous inline
              1px-clip style rendered the label as 1x1 overflow:hidden text,

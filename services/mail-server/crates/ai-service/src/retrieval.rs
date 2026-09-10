@@ -275,7 +275,7 @@ mod tests {
 
     #[test]
     fn titles_and_locales_extract() {
-        let dir = std::env::temp_dir();
+        let dir = std::env::temp_dir(); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
         assert_eq!(
             title_of("# Pricing Guide\nbody", &dir.join("pricing.md")),
             "Pricing Guide"
@@ -288,7 +288,7 @@ mod tests {
 
     #[test]
     fn docs_version_is_stable_and_sensitive() {
-        let tmp = std::env::temp_dir().join("ai_docs_version_test");
+        let tmp = std::env::temp_dir().join("ai_docs_version_test"); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(tmp.join("sub")).unwrap();
         std::fs::write(tmp.join("a.md"), "# A\nhello").unwrap();

@@ -58,7 +58,12 @@ members = [
 version = "0.1.0"
 edition = "2021"
 authors = ["ApexMail Team <dev@apexmail.ee>"]
-license = "PROPRIETARY"
+# LicenseRef-PROPRIETARY (not the bare word "PROPRIETARY", which is not a
+# valid SPDX expression): cargo-deny's licenses gate can parse and allow-list
+# this id for the first-party workspace crates while fail-closing on any
+# third-party license absent from services/mail-server/deny.toml. Metadata
+# only — the licensing terms are unchanged (see the repo LICENSE file).
+license = "LicenseRef-PROPRIETARY"
 repository = "https://github.com/sbelakho2/ApexMail"
 
 [workspace.dependencies]

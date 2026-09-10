@@ -5,7 +5,7 @@ edition = "2021"
 description = "TLS and HTTP/2 fingerprinting for bot detection"
 # Proprietary — matches the root LICENSE (Bel Consulting OÜ) and the workspace
 # default (services/mail-server/Cargo.toml `license = "PROPRIETARY"`).
-license = "PROPRIETARY"
+license.workspace = true  # LicenseRef-PROPRIETARY via workspace (was literal "PROPRIETARY")
 
 [dependencies]
 sha2 = "0.10"

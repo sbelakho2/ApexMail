@@ -1448,7 +1448,7 @@ mod tests {
         test_runtime().block_on(async {
             let svc = BackupService::new(test_pool(), test_config())
                 .expect("test config should have valid encryption key");
-            let path = std::env::temp_dir().join(format!("apex-backup-{}", Uuid::new_v4()));
+            let path = std::env::temp_dir().join(format!("apex-backup-{}", Uuid::new_v4())); // nosemgrep: rust.lang.security.temp-dir.temp-dir — test fixture under a unique pid/uuid path — no predictable-name temp collision
             tokio::fs::write(&path, b"payload")
                 .await
                 .expect("write temp backup file");
