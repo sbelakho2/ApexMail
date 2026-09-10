@@ -129,7 +129,7 @@ ApexMail's MTA (Mail Transfer Agent) implements the full suite of modern email a
 ### SPF (Sender Policy Framework) — RFC 7208
 
 - ApexMail publishes its own SPF record authorizing its sending infrastructure.
-- When sending through the AWS SES transport, customer domains include Amazon SES in SPF (`include:amazonses.com`) — see [SPF setup](/domains/spf/) for the exact record the dashboard generates for your domain.
+- When sending through the AWS SES transport, customer domains include Amazon SES in SPF (`include:amazonses.com`) — see [SPF setup](/quickstart/#step-5-add-custom-mail-from-records) for the exact record the dashboard generates for your domain.
 - SPF validation is performed on the return-path (MAIL FROM) domain.
 - Custom return-path domains ensure SPF alignment for DMARC.
 

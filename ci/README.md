@@ -35,10 +35,11 @@ independent.”* Everything here is POSIX sh + the tools already on the host
    │               validation, Trivy images + Trivy fs (+SBOM)         │
    │ 05 images     deploy.sh --build-only + :sha pins + Trivy gate     │
    │ 06 migrate    _sqlx_migrations backup + migrator one-shot         │
-   │ 07 deploy     TLS publish, compose up -d, nginx reload            │
-   │ 08 verify     per-service health, HTTP probes, SMTP, TLS, cache   │
-   │ 09 notify     failure marker + journal + email via email_queue;   │
-   │               run-dir pruning                                     │
+│ 07 deploy     TLS publish, compose up -d, nginx reload            │
+│ 08 verify     per-service health, HTTP probes, SMTP, TLS, cache,  │
+│               CONTENT SMOKE (pages render, forms present, 404s)   │
+│ 09 notify     failure marker + journal + email via email_queue;   │
+│               run-dir pruning                                     │
    └──────────────────────────────────────────────────────────────────┘
         first hard failure stops the line; notify always runs
 ```
@@ -98,14 +99,46 @@ build break, by design.
 | `legal-identity.yml` | **REPLACED** | `validate`: all 18 legal constants in `compliance/src/legal_entity.rs`, forbidden patterns, and (zola present) `validate_legal_identity.py` over the built HTML. |
 | `pricing-drift.yml` | **REPLACED** | `validate`: zola build + `validate_pricing_drift.py` — **required** when zola is installed (it was a `deploy.yml` pr-gate required check); `CI_ZOLA_REQUIRED=1` makes a missing zola fatal. |
 | `kiwi-leak-check.yml` | **REPLACED** | `validate`: `tools/check-kiwi-marketing-isolation.sh` (required). |
-| `html-validation.yml` | **REPLACED** | `validate` (advisory): `deploy/tests/html-validate.sh` over the zola build. |
-| `accessibility-check.yml` | **REPLACED** | `validate` (advisory): `deploy/tests/contrast-check.sh` over the zola build. |
-| `seo-audit.yml` | **REPLACED** | `validate` (advisory): `deploy/tests/seo-validate.sh` over the zola build. |
+| `html-validation.yml` | **REPLACED** | `validate` (required, `CI_MARKETING_VALIDATION`): `deploy/tests/html-validate.sh` over the zola build. |
+| `accessibility-check.yml` | **REPLACED** | `validate` (required, `CI_MARKETING_VALIDATION`): `deploy/tests/contrast-check.sh` heuristic WCAG pass + the live CSS audit; the pixel-verified gate is `tools/contrast-audit/gate.sh` in `test` (required). |
+| `seo-audit.yml` | **REPLACED** | `validate` (required, `CI_MARKETING_VALIDATION`): `deploy/tests/seo-validate.sh` over the zola build. |
 | `claim-expiry-check.yml` | **REPLACED** | `validate` (advisory): `check_claim_expiry.py --warn-days 30`; the monthly stale-report job is unnecessary — the run dir keeps every check's output. |
-| `broken-link-check.yml` | **MOVED-TO-ARCHIVE** | External-URL crawler whose flakiness (third-party sites) would block deploys if wired into the gate. Manual/periodic substitute (identical check): `cd apps/marketing-zola && zola build && BUILD_DIR=public bash ../../deploy/tests/broken-links.sh` |
+| `broken-link-check.yml` | **REPLACED** | `validate` (required, `CI_MARKETING_VALIDATION`): `deploy/tests/broken-links.sh` — rewritten to resolve own-domain absolute links against the LOCAL build (canonical/og/hreflang alternates no longer hammer production), check each unique external URL once (429 = warn, not broken), and stream results to disk (the old in-memory string blew ARG_MAX). 7,370 links in ~70 s. |
+| `performance-budget.yml` | **REPLACED** | `validate` (required, `CI_MARKETING_VALIDATION`): `deploy/tests/performance-budget.sh` — now chromium-free (the site is zero-JS: raw HTML == rendered DOM, so curl-fetching the page yields the exact resource set), measuring TTFB, per-class byte budgets and third-party counts read-only against `BASE_URL` exactly like contrast-check. |
+
+#### 2a. Marketing validation gate (`CI_MARKETING_VALIDATION`)
+
+All `deploy/tests/` site-quality validators run in the validate stage after
+the zola build, in this order: `contrast-check`, `broken-links`,
+`html-validate`, `seo-validate`, `content-voice-check`,
+`font-optimization-check`, `image-optimization-check`,
+`performance-budget`, `cta-tracking-test`. Each writes a JSON report into
+`deploy/tests/.<name>-report.json`, preserved under the run dir; a missing
+report hard-fails regardless of the switch. Default `required` since
+2026-09-10 (previously advisory — the checker backlog is fixed: detection
+patterns corrected for the minified/unquoted markup the zola build emits,
+subshell-lost counters repaired in the font/image audits, and the real
+findings they surfaced — dead social/status links, locale 404s,
+`{{ lp }}`-prefixed English-only pages, vague-language copy — triaged in
+the templates). Set `CI_MARKETING_VALIDATION=advisory` only for a bounded
+triage window.
+
+`deploy/tests/signup-test.sh` is deliberately NOT wired into the gate: it
+exercises the REAL signup endpoint against `APP_URL`/`API_URL` (default
+production) — creating accounts, consuming rate-limit budget and CAPTCHA
+challenges — which no CI run may do unattended. It stays a manual
+pre-release checklist (`bash deploy/tests/signup-test.sh` against a staging
+`APP_URL`/`API_URL`). The verify stage's content smoke covers the read-only
+half (form presence/shape) instead.
+
+Tooling: the validators need only what `ci/install.sh` already installs
+(bash, curl, jq, bc, python3, GNU grep/awk/sed) plus the pinned zola
+0.22.1 — no headless browser (performance-budget is chromium-free; contrast
+uses CSS math, and the pixel-verified playwright gate lives in the test
+stage). On a dev machine, export the pinned zola first, e.g.
+`PATH=/path/to/zola-0.22.1-bin-dir:$PATH`.
 | `load-gate.yml` | **MOVED-TO-ARCHIVE** | k6 load/stress/spike suites + `deploy/load-test-infra/docker-compose.ci.yml` need a dedicated ~2h window and idle hardware; polling them into the deploy gate would starve production. Manual substitute: `docker compose --env-file <secrets> -f deploy/load-test-infra/docker-compose.ci.yml up -d --build postgres redis api-server`, then `k6 run load-tests/http/*.js`. k6 remains installed on the dev machine. |
 | `mobile-qa.yml` | **MOVED-TO-ARCHIVE** | Needs a real (headless) Chromium — a GUI-browser dependency CI hosts must not grow. Manual: `bash deploy/tests/mobile-test.sh`. |
-| `performance-budget.yml` | **MOVED-TO-ARCHIVE** | Same Chromium dependency (`deploy/tests/performance-budget.sh`). |
 | `mutation-testing.yml` | **MOVED-TO-ARCHIVE** | 3-hour cargo-mutants sweep, weekly by design. Manual: `cd services/mail-server && cargo mutants -p api-server … --output mutants-out`. |
 | `auto-merge.yml` | **MOVED-TO-ARCHIVE** | Dependabot + GitHub PR API + `gh pr merge` — meaningless without GitHub PRs. Dependency updates are now: `cargo update` → `ci/check-pr.sh` full → push (the timer deploys it only if green). |
 
@@ -115,7 +148,8 @@ Advisory checks log `ADVISORY failure — continuing` and never fail the stage.
 Everything else fails the run. Which checks are advisory mirrors upstream
 severity (e.g. claims scans warned; pricing drift was required). Move a check
 between buckets by editing `ci/stages/validate.sh` (`ci_check` ↔ 
-`ci_check_advisory`).
+`ci_check_advisory`); the marketing-validation family is switched as a group
+via `CI_MARKETING_VALIDATION` (§2a).
 
 ---
 
@@ -124,13 +158,38 @@ between buckets by editing `ci/stages/validate.sh` (`ci_check` ↔
 | # | Stage | Timeout (conf) | Measured on the dev machine (2026-08-21, warm caches) |
 |---|---|---|---|
 | 1 | fetch | 180 s | 2 s (HTTPS fetch + pushed-HEAD check) |
-| 2 | validate | 1800 s | 45–150 s (zola build + pricing/legal/a11y/seo gates dominate) |
-| 3 | test | 5400 s | **247 s** pre-extension (fmt+clippy ~25 s, nextest 5410 tests 200 s, 3 PHP suites ~35 s, WCAG contrast gate ~2.5 min); the SDK/satellite/static-lint lanes add ~30–60 s warm (mvn/java and the first-ever composer installs download deps on first run; see §8b) |
-| 4 | security | 2700 s | **172 s**: gitleaks ~10 s (full-history first scan ~3.5 min), cargo audit ~10 s, fresh-DB migration validation ~60 s |
+| 2 | validate | 1800 s | 45–150 s + ~3 min marketing validation (zola build, pricing/legal gates, then the 9 required site-quality validators; broken-links alone walks 7,370 links in ~70 s) |
+| 3 | test | 5400 s | **247 s** pre-extension (fmt+clippy ~25 s, nextest 5410 tests 200 s, 3 PHP suites ~35 s, WCAG contrast gate ~2.5 min); the SDK/satellite/static-lint lanes add ~30–60 s warm (mvn/java and first-ever composer installs download deps on first run; see §8b) || 4 | security | 2700 s | **172 s**: gitleaks ~10 s (full-history first scan ~3.5 min), cargo audit ~10 s, fresh-DB migration validation ~60 s |
 | 5 | images | 10800 s | host-only (Rust docker build; `deploy.sh --build-only` timing) |
 | 6 | migrate | 600 s | host-only (migrator one-shot, seconds) |
 | 7 | deploy | 1200 s | host-only (up -d + nginx reload, ~30 s) |
-| 8 | verify | 900 s | host-only; remote mode (CI_VERIFY_REMOTE=1) ~5 s |
+| 8 | verify | 900 s | host-only; remote mode (CI_VERIFY_REMOTE=1) ~5 s incl. the content smoke |
+
+#### 8a. Verify-stage content smoke (`verify_http_content`)
+
+Infrastructure probes answer "is it up"; the content smoke answers "do the
+deployed pages actually render". Wired into `stage_main` after
+`verify_cache_coherence` on the deploy host (and into the
+`CI_VERIFY_REMOTE=1` read-only production lane), each probe runs under
+`ci_check` with its own label and asserts status + Content-Type + in-body
+markers — strictly read-only GETs, never a form POST (no account creation
+on production):
+
+| Probe | URL | Asserts |
+|---|---|---|
+| app console `/login` | `https://app.apexmail.ee/login` | 200, text/html, `Welcome back`, `action="/web/auth/login"`, `data-kiwi-widget` (KiwiCaptcha widget injected) |
+| app console `/signup` | `https://app.apexmail.ee/signup` | 200, text/html, `id="signup-name"`, `id="signup-password"`, `data-kiwi-widget` |
+| app console `/forgot-password` | `https://app.apexmail.ee/forgot-password` | 200, text/html, `action="/web/auth/forgot-password"` |
+| app console `/dashboard` (anonymous) | `https://app.apexmail.ee/dashboard` | 302/303 redirecting to a Location starting `/login` |
+| api health body | `https://api.apexmail.ee/health` | 200, JSON, body contains `"status"` (the route `routes/health.rs` serves; `/health/live|ready|deep` also exist) |
+| marketing home | `https://apexmail.ee/` | 200, text/html, contains `ApexMail` |
+| marketing pricing | `https://apexmail.ee/pricing/` | 200, text/html, contains `pricing` |
+| marketing API docs | `https://apexmail.ee/docs/api/` | 200, text/html |
+| marketing unknown path | `https://apexmail.ee/ci_content_smoke_404` | 404, text/html (underscores deliberately bypass the edge vhost's trailing-slash 301 canonicalisation so the request reaches the marketing container's `try_files … =404`) |
+
+A failed content probe fails the verify stage and triggers the standard
+`CI_ROLLBACK_ON_VERIFY_FAIL` rollback path — a page that renders blank or
+garbage after a rollout is a bad rollout.
 | 9 | notify | 300 s | <1 s (prune + marker; email only on failure) |
 
 Off the deploy host, stages 5–8 exit `75` (skipped) — the pipeline on a dev

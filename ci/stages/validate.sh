@@ -382,22 +382,24 @@ zola_gates() {
             python3 tools/validate_legal_identity.py --build-dir apps/marketing-zola/public
     fi
 
-    # Site-quality validators (html-validation / accessibility / seo — F14).
+    # Site-quality validators (html-validation / accessibility / seo — F14,
+    # plus the broken-link, content-voice, font/image-optimization,
+    # performance-budget and cta-tracking checkers from deploy/tests/).
     # (They are not +x in the tree — the workflows chmod'ed them; use bash.)
     #
     # Gate wiring (F14): each script WRITES a JSON report next to itself
-    # (.contrast-check-report.json / .html-validation-report.json /
-    # .seo-validation-report.json) AND exits non-zero when it records
-    # critical violations — the enforcement exists at the script level. This
-    # stage additionally:
+    # (.contrast-check-report.json / .html-validation-report.json / …) AND
+    # exits non-zero when it records critical violations — the enforcement
+    # exists at the script level. This stage additionally:
     #   * HARD-FAILS when a validator ran but produced no report (the
     #     artifact contract) and preserves every report under $RUN_DIR;
     #   * enforces the scripts' exit codes (ci_check, non-zero exit on
-    #     violations) when CI_MARKETING_VALIDATION=required. Default is
-    #     `advisory`: these are heuristic grep/awk checkers with a known
-    #     false-positive backlog on the current marketing build, and the
-    #     AUTHORITATIVE pixel-verified a11y gate is
-    #     tools/contrast-audit/gate.sh (REQUIRED, ci/stages/test.sh).
+    #     violations) when CI_MARKETING_VALIDATION=required — the default
+    #     since the checker backlog was fixed (2026-09-10; see
+    #     ci/pipeline.conf). Advisory is a triage-window override.
+    # deploy/tests/signup-test.sh is deliberately NOT wired: it exercises
+    # the real signup endpoint against production (creates accounts) —
+    # manual-only, see ci/README.md §2a.
     BUILD_DIR=apps/marketing-zola/public
     _mv_gate() {
         _mvg_script=$1 _mvg_label=$2 _mvg_report=$3
@@ -418,8 +420,18 @@ zola_gates() {
         return "$_mvg_rc"
     }
     [ -f deploy/tests/contrast-check.sh ] && { _mv_gate contrast-check.sh "WCAG contrast (heuristic)" .contrast-check-report.json || return "$CI_EXIT_FAIL"; }
+    [ -f deploy/tests/broken-links.sh ] && { _mv_gate broken-links.sh "Broken links (internal vs build, external live)" .broken-links-report.json || return "$CI_EXIT_FAIL"; }
     [ -f deploy/tests/html-validate.sh ] && { _mv_gate html-validate.sh "HTML validation" .html-validation-report.json || return "$CI_EXIT_FAIL"; }
     [ -f deploy/tests/seo-validate.sh ] && { _mv_gate seo-validate.sh "SEO validation" .seo-validation-report.json || return "$CI_EXIT_FAIL"; }
+    [ -f deploy/tests/content-voice-check.sh ] && { _mv_gate content-voice-check.sh "Content voice (vague SaaS language)" .content-voice-report.json || return "$CI_EXIT_FAIL"; }
+    [ -f deploy/tests/font-optimization-check.sh ] && { _mv_gate font-optimization-check.sh "Font optimization" .font-optimization-report.json || return "$CI_EXIT_FAIL"; }
+    [ -f deploy/tests/image-optimization-check.sh ] && { _mv_gate image-optimization-check.sh "Image optimization" .image-optimization-report.json || return "$CI_EXIT_FAIL"; }
+    # performance-budget measures the LIVE site (BASE_URL=https://apexmail.ee,
+    # the same read-only production GETs contrast-check makes above): TTFB,
+    # per-class byte budgets and third-party counts from the page HTML —
+    # chromium-free since the marketing site is zero-JS (raw HTML == DOM).
+    [ -f deploy/tests/performance-budget.sh ] && { _mv_gate performance-budget.sh "Performance budget (live, read-only)" .performance-budget-report.json || return "$CI_EXIT_FAIL"; }
+    [ -f deploy/tests/cta-tracking-test.sh ] && { _mv_gate cta-tracking-test.sh "CTA tracking wiring" .cta-tracking-report.json || return "$CI_EXIT_FAIL"; }
     return "$CI_EXIT_OK"
 }
 

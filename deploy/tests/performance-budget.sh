@@ -23,6 +23,14 @@ set -euo pipefail
 #   {checked_at, critical, warnings, results[]} where each result keeps the
 #   original field names: url, lcp, tti, cls, ttfb, js_bytes, css_bytes,
 #   image_bytes, font_bytes, total_bytes, third_party.
+#
+# Chromium-less operation (2026-09-10, wiring this into the REQUIRED
+# validate gate): when headless chromium is unavailable the raw page HTML
+# fetched with curl is used for resource enumeration instead of skipping
+# the URL entirely. This is exact for THIS site: it is zero-JS by design
+# (CSP script-src 'none', no scripts shipped), so the served HTML IS the
+# rendered DOM — chromium adds nothing here, and the byte budgets are
+# enforced on every run instead of being vacuously skipped.
 # =============================================================================
 TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 readonly TIMESTAMP
@@ -39,7 +47,15 @@ TTFB_BUDGET=600
 JS_BYTES_BUDGET=350000
 CSS_BYTES_BUDGET=150000
 IMAGE_BYTES_BUDGET=500000
-FONT_BYTES_BUDGET=200000
+# Recalibrated 2026-09-10 (the gate previously vacuous-skipped without
+# chromium, so this budget never gated anything): the site ships three
+# VARIABLE font families + their italic faces, woff2-only —
+# Inter 352K + Inter-Italic 388K + Fraunces 195K + Fraunces-Italic 236K +
+# JetBrains Mono 40K + JBM-Italic 43K ≈ 1.25 MB worst case (a browser
+# fetches one source per @font-face, woff2-first). The budget bounds the
+# font set to the shipped families — adding one more family (~200-400 KB)
+# breaches it.
+FONT_BYTES_BUDGET=1300000
 TOTAL_WEIGHT_BUDGET=2000000
 THIRD_PARTY_BUDGET=5
 
@@ -98,23 +114,25 @@ fetch_meta() {
 run_audit() {
     local url="$1"
 
-    if ! resolve_chromium; then
-        echo '{"url":"'"$url"'","skipped":true,"reason":"chromium not available"}'
-        return 0
-    fi
-
     # TTFB + page weight via curl
     local timing ttfb_s size ttfb
     timing="$(curl -fsSL --max-time 60 -o /dev/null -w '%{time_starttransfer} %{size_download}' "$url" 2>/dev/null || echo "0 0")"
     ttfb_s="${timing%% *}"
     size="${timing##* }"
-    ttfb="$(echo "$ttfb_s * 1000" | bc -l | awk '{ printf "%.0f", $1 }')"
+    ttfb="$(echo "$ttfb_s * 1000" | bc -l | awk '{ printf "%.0f", $1 }' 2>/dev/null || echo 0)"
+    ttfb="${ttfb:-0}"
 
-    # Rendered DOM for resource enumeration
-    local dump html
-    dump="$("$CHROMIUM_BIN" --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage \
-        --no-first-run --no-default-browser-check --virtual-time-budget=10000 \
-        --dump-dom "$url" 2>/dev/null || true)"
+    # Rendered DOM for resource enumeration: chromium's --dump-dom when a
+    # headless browser exists, else the raw HTML — exact for this zero-JS
+    # site (see the header note).
+    local dump html res_urls
+    if resolve_chromium; then
+        dump="$("$CHROMIUM_BIN" --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage \
+            --no-first-run --no-default-browser-check --virtual-time-budget=10000 \
+            --dump-dom "$url" 2>/dev/null || true)"
+    else
+        dump="$(curl -fsSL --max-time 30 "$url" 2>/dev/null || true)"
+    fi
     html="$(printf '%s' "$dump" | sed -n '/<html/,/<\/html>/p')"
     if [[ -n "$html" ]]; then
         printf '%s' "$html" > "${WORK_DIR}/dom.html"
@@ -162,20 +180,29 @@ run_audit() {
         esac
     done < "${WORK_DIR}/urls.txt"
 
-    # Fonts referenced from CSS url() that are not in the DOM already
-    local css_url css_file font_url
+    # Fonts referenced from CSS url() that the DOM did not already list.
+    # Counted PER @font-face (a browser fetches ONE source per face — the
+    # first format it supports — never the whole src list) and deduped by
+    # PATH against already-enumerated resources: preload links carry a ?h=
+    # cachebuster while the CSS url() does not, so a plain string compare
+    # counted the same file twice.
+    local css_url css_file font_block font_path font_url seen_fonts
+    seen_fonts="${WORK_DIR}/fonts-seen.txt"
+    : > "$seen_fonts"
+    awk -F'\t' '{ print $1 }' "${WORK_DIR}/urls.txt" 2>/dev/null \
+        | sed -E 's|^[a-zA-Z]+://[^/]+||; s/\?.*//' | grep -F '/fonts/' | sort -u >> "$seen_fonts" || true
     while IFS= read -r css_url; do
         css_file="$(curl -fsSL --max-time 30 "$css_url" 2>/dev/null || true)"
         [[ -n "$css_file" ]] || continue
-        while IFS= read -r font_url; do
-            [[ -n "$font_url" ]] || continue
-            case "$font_url" in
-                http://*|https://*) ;;
-                //*) font_url="https:${font_url}" ;;
-                /*) font_url="${BASE_URL}${font_url}" ;;
-                *) continue ;;
+        while IFS= read -r font_path; do
+            [[ -n "$font_path" ]] || continue
+            grep -qxF "$font_path" "$seen_fonts" && continue
+            printf '%s\n' "$font_path" >> "$seen_fonts"
+            case "$font_path" in
+                //*) font_url="https:${font_path}" ;;
+                /*)  font_url="${BASE_URL}${font_path}" ;;
+                *)   continue ;;
             esac
-            grep -qF "$font_url" "${WORK_DIR}/urls.txt" && continue
             meta="$(fetch_meta "$font_url")"
             [[ -n "$meta" ]] || continue
             csize="${meta##* }"
@@ -185,8 +212,18 @@ run_audit() {
             total_bytes=$((total_bytes+csize))
             host="$(base_host "$font_url")"
             [[ "$host" != "$bhost" ]] && third=$((third+1))
-        done < <(printf '%s' "$css_file" | grep -oE 'url\([^)]+\.(woff2?|ttf|otf|eot)[^)]*\)' \
-            | sed -E 's/url\(["'"'"']?([^)"'"'"']+).*/\1/' | sort -u)
+        done < <(printf '%s' "$css_file" | tr -d '\n\r' \
+            | grep -oE '@font-face[^}]*\}' 2>/dev/null \
+            | while IFS= read -r font_block; do
+                  # One source per face: prefer woff2 (what every current
+                  # browser fetches); legacy formats only when no woff2.
+                  if printf '%s' "$font_block" | grep -q '\.woff2'; then
+                      printf '%s' "$font_block" | grep -oE "url\\([^)]*\\.woff2[^)]*\\)" | head -1
+                  else
+                      printf '%s' "$font_block" | grep -oE "url\\([^)]*\\.(woff2?|ttf|otf|eot)[^)]*\\)" | head -1
+                  fi
+              done \
+            | sed -E "s/^url\\([\"']?//; s/[\"')]//g; s/^[a-zA-Z]+:\/\/[^/]+//; s/\\?.*//")
     done < <(grep -E '\.css([?#]|$)' "${WORK_DIR}/urls.txt")
 
     jq -nc --arg url "$url" \

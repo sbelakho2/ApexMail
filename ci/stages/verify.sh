@@ -11,6 +11,13 @@
 #   4. ports 80/443/25/587/993 open (143 intentionally CLOSED — SSL-only IMAP)
 #   5. TLS cert present + issuer sanity (Let's Encrypt vs self-signed warn)
 #   6. cache-coherence: deploy/scripts/verify-deployment.sh over the legal pages
+#   7. CONTENT SMOKE (verify_http_content): the infra probes above answer
+#      "is it up"; these answer "do the deployed pages actually render" —
+#      the app console login/signup/forgot-password forms, the anonymous
+#      dashboard redirect, the api /health JSON body, and the marketing
+#      homepage/pricing/docs pages, each asserting status + content-type +
+#      in-body markers. Strictly read-only GETs: no form POSTs, no account
+#      creation on production, ever.
 #
 # Off-host: skipped (75) unless CI_VERIFY_REMOTE=1, which runs ONLY the
 # read-only public HTTP probes against production (a manual pre-merge check).
@@ -84,6 +91,123 @@ verify_http_local() {
     check_http "status page"       "https://status.apexmail.ee/status"                     "200" &&
     check_http "enterprise health" "https://enterprise.apexmail.ee/health"                 "200" &&
     check_http "sales-api served (400|404 not 502)" "https://api.apexmail.ee/sales-api/u/healthcheck-probe" "400|404"
+}
+
+# --- content smoke (post-deploy) -------------------------------------------------
+# Infrastructure probes answer "is it up"; these answer "does it render".
+# Same host/port style as verify_http_local: the app console
+# (app.apexmail.ee) is the api-server's SSR console behind the local nginx;
+# marketing (apexmail.ee) is the marketing container behind the same nginx.
+
+# content_probe <url> <expect_codes> <ctype_substring> [probe-string...]
+#   expect_codes: a single HTTP code ("200") or pipe alternation
+#   ("302|303"). ctype_substring: what the Content-Type must contain
+#   ("text/html"); "-" skips that check. Every remaining argument is a
+#   fixed string the response body must contain (case-insensitive, so the
+#   probe survives both dev and minified markup). Prints a diagnostic on
+#   failure; returns 1.
+content_probe() {
+    _cp_url=$1 _cp_expect=$2 _cp_ctype=$3
+    shift 3
+    _cp_tmp=$(mktemp "${TMPDIR:-/tmp}/apexmail-verify.XXXXXX")
+    _cp_meta=$(curl -k -s -o "$_cp_tmp" -w '%{http_code} %{content_type}' --max-time 10 "$_cp_url" 2>/dev/null || printf '000 ')
+    _cp_code=${_cp_meta%% *}
+    _cp_ct=${_cp_meta#* }
+    _cp_err=''
+    case "|$_cp_expect|" in
+        *"|$_cp_code|"*) ;;
+        *) _cp_err="HTTP $_cp_code (expected $_cp_expect)" ;;
+    esac
+    if [ -z "$_cp_err" ] && [ "$_cp_ctype" != "-" ]; then
+        case "$_cp_ct" in
+            *"$_cp_ctype"*) ;;
+            *) _cp_err="content-type '$_cp_ct' (expected to contain '$_cp_ctype')" ;;
+        esac
+    fi
+    if [ -z "$_cp_err" ]; then
+        for _cp_str in "$@"; do
+            if ! grep -qiF -- "$_cp_str" "$_cp_tmp" 2>/dev/null; then
+                _cp_err="body missing probe string: '$_cp_str'"
+                break
+            fi
+        done
+    fi
+    rm -f "$_cp_tmp"
+    if [ -n "$_cp_err" ]; then
+        printf 'content probe %s: %s\n' "$_cp_url" "$_cp_err" >&2
+        return "$CI_EXIT_FAIL"
+    fi
+    return "$CI_EXIT_OK"
+}
+
+# redirect_probe <url> <expect_codes> <location_prefix> — the UN-followed
+# response must redirect (302/303 by default) to a Location that starts
+# with the given prefix; proves the auth wall, not just a status code.
+# curl's %{redirect_url} resolves relative Locations to absolute
+# (Location: /login?next=… → https://app.apexmail.ee/login?next=…), so the
+# scheme+host are stripped before the prefix match.
+redirect_probe() {
+    _rp_url=$1 _rp_expect=$2 _rp_prefix=$3
+    _rp_meta=$(curl -k -s -o /dev/null -w '%{http_code} %{redirect_url}' --max-time 10 "$_rp_url" 2>/dev/null || printf '000 ')
+    _rp_code=${_rp_meta%% *}
+    _rp_loc=${_rp_meta#* }
+    _rp_loc=$(printf '%s' "$_rp_loc" | sed -E 's|^[a-zA-Z]+://[^/]+||')
+    _rp_err=''
+    case "|$_rp_expect|" in
+        *"|$_rp_code|"*) ;;
+        *) _rp_err="HTTP $_rp_code (expected $_rp_expect)" ;;
+    esac
+    if [ -z "$_rp_err" ]; then
+        case "$_rp_loc" in
+            "$_rp_prefix"*) ;;
+            *) _rp_err="redirects to '$_rp_loc' (expected to start with '$_rp_prefix')" ;;
+        esac
+    fi
+    if [ -n "$_rp_err" ]; then
+        printf 'redirect probe %s: %s\n' "$_rp_url" "$_rp_err" >&2
+        return "$CI_EXIT_FAIL"
+    fi
+    return "$CI_EXIT_OK"
+}
+
+verify_http_content() {
+    _vhc_fail=0
+
+    # App console (app.apexmail.ee → api-server SSR, via the local nginx —
+    # the same vhost verify_http_local already probes for other subdomains).
+    ci_check "content: app console /login renders" \
+        content_probe "https://app.apexmail.ee/login" "200" "text/html" \
+        "Welcome back" 'action="/web/auth/login"' "data-kiwi-widget" || _vhc_fail=1
+    ci_check "content: app console /signup renders" \
+        content_probe "https://app.apexmail.ee/signup" "200" "text/html" \
+        'id="signup-name"' 'id="signup-password"' "data-kiwi-widget" || _vhc_fail=1
+    ci_check "content: app console /forgot-password renders" \
+        content_probe "https://app.apexmail.ee/forgot-password" "200" "text/html" \
+        'action="/web/auth/forgot-password"' || _vhc_fail=1
+    ci_check "content: app console /dashboard redirects anonymous users to login" \
+        redirect_probe "https://app.apexmail.ee/dashboard" "302|303" "/login" || _vhc_fail=1
+
+    # API health body (the status probe above only checked the code).
+    ci_check "content: api /health returns status JSON" \
+        content_probe "https://api.apexmail.ee/health" "200" "json" "status" || _vhc_fail=1
+
+    # Marketing site (apexmail.ee → marketing container, via the same nginx).
+    ci_check "content: marketing / renders" \
+        content_probe "https://apexmail.ee/" "200" "text/html" "ApexMail" || _vhc_fail=1
+    ci_check "content: marketing /pricing/ renders" \
+        content_probe "https://apexmail.ee/pricing/" "200" "text/html" "pricing" || _vhc_fail=1
+    ci_check "content: marketing /docs/api/ renders" \
+        content_probe "https://apexmail.ee/docs/api/" "200" "text/html" "ApexMail" || _vhc_fail=1
+    # Unknown path: underscores deliberately do NOT match the edge vhost's
+    # trailing-slash canonicalisation regex ([a-z0-9-]+ only), so this falls
+    # through to the marketing container's try_files =404 and must come back
+    # as a real 404 (a 200 here would mean the SPA-style fallback regressed).
+    ci_check "content: marketing unknown path answers 404" \
+        content_probe "https://apexmail.ee/ci_content_smoke_404" "404" "text/html" || _vhc_fail=1
+
+    [ "$_vhc_fail" -eq 0 ] || return "$CI_EXIT_FAIL"
+    ci_info "verify: content smoke green — console, api and marketing pages render"
+    return "$CI_EXIT_OK"
 }
 
 verify_smtp() {
@@ -204,7 +328,9 @@ rollback_to_previous_sha() {
 stage_main() {
     if ! ci_on_deploy_host; then
         if [ "${CI_VERIFY_REMOTE:-0}" = 1 ]; then
-            verify_remote_only
+            # Read-only production probes (incl. the content smoke) for a
+            # manual pre-merge check from a dev machine.
+            verify_remote_only && verify_http_content
             return "$?"
         fi
         ci_skip_stage "verify runs on the deploy host; set CI_VERIFY_REMOTE=1 to probe production from here"
@@ -217,7 +343,8 @@ stage_main() {
         verify_smtp &&
         verify_ports &&
         verify_tls_cert &&
-        verify_cache_coherence
+        verify_cache_coherence &&
+        verify_http_content
     then
         :
     else
