@@ -193,7 +193,7 @@
 
   /* Brand gradient — applied to primary buttons, headings, and accent elements.
      Restored to the red brand scale (#DC2626 → #991B1B). */
-  --brand-gradient: linear-gradient(135deg, #dc2626, #991b1b);
+  --brand-gradient: linear-gradient(135deg, #b91c1c, #7f1d1d);
 
   /* Theme transition speed */
   --theme-transition-duration: 200ms;
@@ -1604,9 +1604,11 @@ header a[aria-current="page"] {
 @media (prefers-color-scheme: dark) {
   :root:not(.light) .k-receipt,
   :root:not(.light) .k-arc-label { color: rgb(var(--surface-600)); }
+  :root:not(.light) .k-receipt .ok { color: rgb(var(--brand-500)); }
 }
 html.dark .k-receipt,
 html.dark .k-arc-label { color: rgb(var(--surface-600)); }
+html.dark .k-receipt .ok { color: rgb(var(--brand-500)); }
 
 
 /* ── Spiral-Lock DNA v2 (2026-09-06) — the mark's geometry, platform-wide ── */
@@ -1701,7 +1703,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .term-bar b { font-weight: 600; letter-spacing: 0.1em; font-size: 10px; margin-left: 8px; }
 .term-dot { width: 9px; height: 9px; border-radius: 50%; background: #3f3f46; }
 .term-pre { padding: 18px; overflow-x: auto; margin: 0; white-space: pre; }
-.term-c { color: #5c5c66; } .term-k { color: #f87171; } .term-s { color: #34d399; }
+.term-c { color: #8b8b96; } .term-k { color: #f87171; } .term-s { color: #34d399; }
 
 /* The trace, made real: run row inside the terminal panel. */
 .term-run {
